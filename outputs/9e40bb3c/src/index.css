@@ -1,0 +1,50 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=DM+Sans:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 224 40% 10%;
+    --foreground: 210 40% 96%;
+
+    --card: 224 35% 14%;
+    --card-foreground: 210 40% 96%;
+
+    --popover: 224 35% 14%;
+    --popover-foreground: 210 40% 96%;
+
+    --primary: 38 95% 55%;
+    --primary-foreground: 224 40% 10%;
+
+    --secondary: 224 30% 20%;
+    --secondary-foreground: 210 40% 80%;
+
+    --muted: 224 30% 20%;
+    --muted-foreground: 215 20% 55%;
+
+    --accent: 38 95% 55%;
+    --accent-foreground: 224 40% 10%;
+
+    --destructive: 0 72% 58%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 224 30% 22%;
+    --input: 224 30% 22%;
+    --ring: 38 95% 55%;
+
+    --radius: 1rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'DM Sans', sans-serif;
+  }
+}

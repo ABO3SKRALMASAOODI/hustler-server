@@ -1,0 +1,71 @@
+FINAL REQUIREMENTS
+---
+Project Overview:
+Develop a high-end, production-ready e-commerce website for a women’s clothing merchant, featuring a modern aesthetic similar to Prada’s website. The website must provide a comprehensive online shopping experience with full-featured e-commerce functionalities, aligned with high luxury fashion site standards.
+
+Functional Requirements:
+
+1. Product Catalog:
+   - Ability to categorize products by type, collection, and other relevant attributes.
+   - Filters for size, color, price, and other applicable options.
+   - Product detail pages featuring multiple high-resolution images, zoom functionality, product descriptions, materials, care instructions, and availability status.
+   
+2. Shopping Cart and Checkout:
+   - Persistent shopping cart allowing users to add, remove, and modify product quantities.
+   - Secure checkout process supporting order summary, shipping options, billing information, and payment.
+   - Integration with Stripe for payment processing supporting credit and debit cards.
+   - Error handling and confirmation pages for successful or failed transactions.
+   
+3. User Accounts:
+   - User registration, login, password reset, and profile management.
+   - Order history, tracking information, and ability to manage saved addresses.
+   - Wishlist functionality allowing users to save products for later.
+   
+4. Content Management System (CMS):
+   - Admin interface to upload, edit, and delete products including images, descriptions, prices, categories, and inventory counts.
+   - Ability to manage website content such as homepage banners, promotional sections, and informational pages.
+   - Secure admin authentication and role-based access control.
+   
+5. Localization:
+   - Website content and UI available in English only.
+   - Currency display in relevant currency (assumed to be standard for your target market).
+   
+6. Design & UI/UX:
+   - Modern, minimalist, luxurious design inspired by Prada.
+   - Responsive design ensuring seamless experience across desktops, tablets, and mobile devices.
+   - Accessibility compliance (WCAG AA minimum).
+   - Smooth product image zoom and transitions.
+   
+7. Performance and SEO:
+   - Optimized page load times and responsiveness.
+   - SEO friendly URLs, meta tags, schema markup for products.
+   - Sitemap and robots.txt file.
+   
+8. Admin Inventory & Content Upload:
+   - Admins must be able to upload product images and other media assets via the CMS.
+   - Support common image formats, automatic image optimization, and secure storage.
+   
+Non-functional Requirements:
+
+- Secure coding best practices to protect user data and payment information.
+- HTTPS enforced site-wide.
+- Scalability to support expected traffic levels of a luxury retail website.
+- Robust error handling and user-friendly notifications.
+- Cross-browser compatibility with latest stable versions of major browsers (Chrome, Firefox, Safari, Edge).
+
+Technology Stack:
+- The technology stack can be selected by the developers but must support all above requirements, including Stripe integration and CMS capabilities.
+
+Deliverables:
+
+- Complete source code repository with documentation.
+- Deployment-ready codebase.
+- Admin user guide for product and content management.
+- User documentation for customers covering registration, shopping, and order tracking.
+
+Testing:
+
+- Comprehensive unit, integration, and end-to-end testing for all critical workflows including checkout and payment.
+- Responsive design testing across devices.
+- Security testing for user data and payments.
+

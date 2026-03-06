@@ -1,0 +1,124 @@
+## Original Lovable Toolset
+
+The following is the complete list of tools available in the Lovable AI editor environment.
+These tools provide comprehensive capabilities for file management, debugging, code intelligence,
+image/video generation, web search, browser automation, security scanning, cross-project access, and more.
+
+---
+
+### File Operations
+
+1. **lov-view** — Read file contents (with optional line ranges)
+2. **lov-write** — Create or overwrite a file (supports "// ... keep existing code" for partial writes)
+3. **lov-line-replace** — Line-based search and replace for surgical edits (preferred for modifications)
+4. **lov-delete** — Delete a file or folder
+5. **lov-rename** — Rename a file
+6. **lov-copy** — Copy a file or directory to a new location
+7. **lov-list-dir** — List files and directories in a specified directory
+8. **lov-search-files** — Regex-based code search with file filtering and context
+
+### Dependency Management
+
+9. **lov-add-dependency** — Add an npm package to the project
+10. **lov-remove-dependency** — Uninstall a package from the project
+
+### Debugging & Verification
+
+11. **lov-read-console-logs** — Read console logs from the user's preview iframe (snapshot)
+12. **lov-read-network-requests** — Read network requests from the user's preview iframe
+13. **lov-read-session-replay** — Complete recording of the user's session (critical for debugging)
+14. **lov-run-tests** — Run frontend tests using the project's test configuration
+
+### Code Intelligence (LSP)
+
+15. **lsp--code_intelligence** — Query language intelligence for TypeScript/JavaScript
+    - Operations: hover, definition, references
+    - Supports include_source for library files
+
+### Web Search & Download
+
+16. **websearch--web_search** — General web search with category filtering (news, GitHub, PDF, etc.)
+17. **websearch--web_code_search** — Specialized search for code examples and technical documentation
+18. **lov-fetch-website** — Fetch a website and save content (markdown, HTML, screenshot)
+19. **lov-download-to-repo** — Download a file from a URL and save to repository
+
+### Image & Video Generation
+
+20. **imagegen--generate_image** — Generate images from text prompts (flux.schnell, flux.dev, flux2.dev)
+21. **imagegen--edit_image** — Edit or merge existing images based on text prompts
+22. **videogen--generate_video** — Generate videos from text prompts (with optional starting frame)
+
+### Browser Automation
+
+23. **browser--navigate_to_sandbox** — Navigate to a route in the project's preview (with viewport control)
+24. **browser--screenshot** — Take a screenshot of the current page
+25. **browser--get_url** — Get the current URL of the browser
+26. **browser--act** — Perform a single action on the current page (click, type, fill, hover, etc.)
+27. **browser--observe** — Observe the current page and get a list of possible actions
+28. **browser--extract** — Extract structured data from the current page
+29. **browser--read-console-logs** — Read console logs from the agent's browser session
+30. **browser--browser-list-network-requests** — List network requests from the agent's browser session
+31. **browser--browser-get-network-request-details** — Get full details of specific network requests
+
+### Secrets Management
+
+32. **secrets--fetch_secrets** — List all configured secrets
+33. **secrets--add_secret** — Add new secrets (encrypted, requires user input)
+34. **secrets--update_secret** — Update existing secrets
+35. **secrets--delete_secret** — Delete user-created secrets
+
+### Backend & Integrations
+
+36. **supabase--enable** — Enable Lovable Cloud (Supabase-powered backend)
+37. **stripe--enable_stripe** — Enable Stripe integration
+38. **shopify--enable_shopify** — Enable Shopify integration
+39. **standard_connectors--connect** — Connect a connector to the project
+40. **standard_connectors--list_connections** — List all available connections
+41. **standard_connectors--get_connection_configuration** — Get connection configuration metadata
+42. **standard_connectors--reconnect** — Reconnect a connection (e.g., expired token)
+
+### Task Tracking
+
+43. **task_tracking--create_task** — Create a new task with title + description
+44. **task_tracking--set_task_status** — Move a task between todo, in_progress, done
+45. **task_tracking--get_task_list** — Display the current task tree
+46. **task_tracking--get_task** — Review a single task with details
+47. **task_tracking--update_task_title** — Update a task title
+48. **task_tracking--update_task_description** — Refine a task description
+49. **task_tracking--add_task_note** — Attach a note to a task
+
+### Security
+
+50. **security--get_security_scan_results** — Fetch security scan results
+51. **security--get_table_schema** — Get database table schema and security analysis
+52. **security--manage_security_finding** — Create, update, or delete security findings
+53. **security--run_security_scan** — Run comprehensive security scan
+
+### Cross-Project Access
+
+54. **cross_project--list-projects** — List projects in the workspace
+55. **cross_project--search-project** — Search for a project by name or ID
+56. **cross_project--read-project-file** — Read file contents from another project
+57. **cross_project--list-project-dir** — List files/directories in another project
+58. **cross_project--search-project-files** — Search for code patterns in another project
+59. **cross_project--read-project-messages** — Read chat history from another project
+60. **cross_project--list-project-assets** — List asset files from another project
+61. **cross_project--read-project-asset** — Read an asset from another project
+62. **cross_project--copy-project-asset** — Copy an asset from another project
+
+### User Interaction
+
+63. **questions--ask_questions** — Ask the user multiple-choice questions
+64. **document--parse_document** — Parse and extract content from documents (PDF, Word, etc.)
+
+### Project Info
+
+65. **project_urls--get-project-urls** — Get preview and published URLs
+66. **project_debug--sleep** — Wait for async operations to complete
+67. **analytics--read_project_analytics** — Read production analytics between dates
+
+### Documentation
+
+68. **lovable_docs_agent** — Query official Lovable documentation for accurate answers
+
+---

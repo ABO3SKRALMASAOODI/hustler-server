@@ -1,0 +1,4 @@
+E-commerce Product Page
+
+
+"Build an e-commerce product page with a dark background, red accent color, product image gallery, product title price and description, size selector, add to cart button, and related products section"

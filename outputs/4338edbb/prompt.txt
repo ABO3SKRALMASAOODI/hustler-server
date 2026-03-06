@@ -1,0 +1,1 @@
+Restaurant / Menu Page "Build a restaurant website with a dark background, red accent color, hero with restaurant name, menu section with categories and items with prices, about section, and reservation CTA"

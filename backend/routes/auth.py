@@ -1,0 +1,999 @@
+from flask import Blueprint, request, jsonify, current_app, send_from_directory
+import jwt
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from functools import wraps
+import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
+import random
+from routes.verify_email import send_code_to_email
+import uuid, subprocess, os
+import shutil, json, time
+from credits import (
+    check_and_reserve, deduct_credits, get_balance,
+    get_job_credits, refresh_daily_credits, tokens_to_credits
+)
+
+auth_bp = Blueprint('auth', __name__)
+
+# ------------------------------------------------------------------ #
+#  DB + Auth helpers                                                   #
+# ------------------------------------------------------------------ #
+
+def get_db():
+    return psycopg2.connect(current_app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
+
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            if auth_header.startswith('Bearer '):
+                token = auth_header[len('Bearer '):]
+        if not token:
+            return jsonify({'error': 'Token is missing!'}), 401
+        try:
+            data    = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
+            user_id = data['sub']
+        except Exception:
+            return jsonify({'error': 'Token is invalid!'}), 401
+        return f(user_id=user_id, *args, **kwargs)
+    return decorated
+
+
+# ------------------------------------------------------------------ #
+#  Path constants                                                      #
+# ------------------------------------------------------------------ #
+
+PROJECT_ROOT      = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+OUTPUTS_DIR       = os.path.join(PROJECT_ROOT, "outputs")
+ENGINE_SCRIPT     = os.path.join(PROJECT_ROOT, "engine", "AA.py")
+TEMPLATE_SCAFFOLD = os.path.join(PROJECT_ROOT, "engine", "templates", "vite-react")
+
+
+# ------------------------------------------------------------------ #
+#  Template definitions                                                #
+# ------------------------------------------------------------------ #
+
+TEMPLATE_JOB_IDS = {
+    "6a1def90": "SaaS Landing Page",
+    "ea5cb482": "Developer Portfolio",
+    "70d042cf": "E-commerce Product Page",
+    "515567f6": "Analytics Dashboard",
+    "0fa66551": "Waitlist / Coming Soon",
+    "4338edbb": "Restaurant / Menu",
+}
+
+
+# ------------------------------------------------------------------ #
+#  Preview URL helper                                                  #
+# ------------------------------------------------------------------ #
+
+def _get_preview_url(job_id, job_folder):
+    """
+    Return an ABSOLUTE preview URL for a job if a built dist/ folder exists.
+
+    Must be absolute so the Studio iframe src bypasses React Router entirely.
+    A relative path like /auth/preview/... gets intercepted by React Router
+    in the parent app, which has no matching route and renders a black screen.
+
+    Also cleans up any stale preview_port.txt left by old builds.
+    """
+    from flask import request as flask_request
+
+    # Clean up any legacy port file so old jobs stop returning dead URLs
+    port_file = os.path.join(job_folder, "preview_port.txt")
+    if os.path.exists(port_file):
+        try:
+            os.remove(port_file)
+        except OSError:
+            pass
+
+    dist_dir = os.path.join(job_folder, "dist")
+    if os.path.isdir(dist_dir):
+        # Build absolute URL from the current request's host
+        # e.g. http://127.0.0.1:5000/auth/preview/019a36e9/
+        base = flask_request.host_url.rstrip("/")
+        return f"{base}/auth/preview/{job_id}/"
+
+    return None
+
+
+# ------------------------------------------------------------------ #
+#  Credits endpoints                                                   #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/credits', methods=['GET'])
+@token_required
+def get_user_credits(user_id):
+    """Return current credits balance for the logged-in user."""
+    conn = get_db()
+    try:
+        info = get_balance(conn, int(user_id))
+        return jsonify(info), 200
+    finally:
+        conn.close()
+
+
+@auth_bp.route('/job/<job_id>/credits', methods=['GET'])
+@token_required
+def get_job_credit_breakdown(user_id, job_id):
+    """Return per-turn credit usage for a job (used by the ··· tooltip)."""
+    conn = get_db()
+    try:
+        turns = get_job_credits(conn, job_id)
+        return jsonify({"turns": turns}), 200
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ #
+#  Subscription                                                        #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/status/subscription', methods=['GET'])
+@token_required
+def check_subscription(user_id):
+    conn   = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_subscribed, subscription_id FROM users WHERE id = %s", (user_id,))
+    row    = cursor.fetchone()
+    cursor.close(); conn.close()
+    return jsonify({
+        'is_subscribed':   bool(row['is_subscribed']) if row else False,
+        'subscription_id': row['subscription_id']     if row else None,
+    })
+
+
+# ------------------------------------------------------------------ #
+#  Register                                                            #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/register', methods=['POST'])
+def register():
+    data     = request.get_json()
+    email    = data.get('email')
+    password = data.get('password')
+    if not email or not password:
+        return jsonify({'error': 'Email and password required'}), 400
+
+    conn   = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM users
+        WHERE email = %s AND is_verified = 0 AND created_at < NOW() - INTERVAL '5 minute'
+    """, (email,))
+    conn.commit()
+
+    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+    user      = cursor.fetchone()
+    hashed_pw = generate_password_hash(password)
+
+    if user:
+        if user['is_verified'] == 0:
+            cursor.execute("UPDATE users SET password = %s WHERE email = %s", (hashed_pw, email))
+            conn.commit()
+            code = str(random.randint(100000, 999999))
+            cursor.execute("""
+                INSERT INTO email_codes (email, code)
+                VALUES (%s, %s)
+                ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code
+            """, (email, code))
+            conn.commit()
+            send_code_to_email(email, code)
+            cursor.close(); conn.close()
+            return jsonify({'message': 'Verification code re-sent. Please verify your email.'}), 200
+        else:
+            cursor.close(); conn.close()
+            return jsonify({'error': 'User already exists'}), 409
+
+    cursor.execute("INSERT INTO users (email, password) VALUES (%s, %s)", (email, hashed_pw))
+    conn.commit()
+    code = str(random.randint(100000, 999999))
+    cursor.execute("""
+        INSERT INTO email_codes (email, code)
+        VALUES (%s, %s)
+        ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code
+    """, (email, code))
+    conn.commit()
+    send_code_to_email(email, code)
+    cursor.close(); conn.close()
+    return jsonify({'message': 'User registered. Verification code sent.'}), 201
+
+
+# ------------------------------------------------------------------ #
+#  Login                                                               #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/login', methods=['POST'])
+def login():
+    data     = request.get_json()
+    email    = data.get('email')
+    password = data.get('password')
+
+    conn   = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+    user = cursor.fetchone()
+    cursor.close(); conn.close()
+
+    if not user or user['is_verified'] == 0:
+        return jsonify({'error': 'User not found. Please register.'}), 404
+    if not check_password_hash(user['password'], password):
+        return jsonify({'error': 'Incorrect password'}), 401
+
+    token = jwt.encode({
+        'sub': str(user['id']),
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=7)
+    }, current_app.config['SECRET_KEY'], algorithm='HS256')
+    return jsonify({'token': token}), 200
+
+
+# ------------------------------------------------------------------ #
+#  Password reset                                                      #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/send-reset-code', methods=['POST'])
+def send_reset_code():
+    data  = request.get_json()
+    email = data.get('email')
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+    conn   = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE email = %s AND is_verified = 1", (email,))
+    if not cursor.fetchone():
+        cursor.close(); conn.close()
+        return jsonify({'error': 'User not found or not verified'}), 404
+    code       = str(random.randint(100000, 999999))
+    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(minutes=10)).isoformat()
+    cursor.execute("""
+        INSERT INTO password_reset_codes (email, code, expires_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, expires_at = EXCLUDED.expires_at
+    """, (email, code, expires_at))
+    conn.commit()
+    cursor.close(); conn.close()
+    send_code_to_email(email, code)
+    return jsonify({'message': 'Reset code sent to your email'}), 200
+
+
+@auth_bp.route('/verify-reset-code', methods=['POST'])
+def verify_reset_code():
+    data  = request.get_json()
+    email = data.get('email')
+    code  = data.get('code')
+    if not email or not code:
+        return jsonify({'error': 'Email and code are required'}), 400
+    conn   = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT code, expires_at FROM password_reset_codes WHERE email = %s", (email,))
+    row = cursor.fetchone()
+    cursor.close(); conn.close()
+    if not row:
+        return jsonify({'error': 'No code found'}), 404
+    if str(row['code']).strip() != str(code).strip():
+        return jsonify({'error': 'Incorrect code'}), 400
+    if datetime.datetime.fromisoformat(row['expires_at']) < datetime.datetime.utcnow():
+        return jsonify({'error': 'Code expired'}), 400
+    return jsonify({'message': 'Code verified'}), 200
+
+
+@auth_bp.route('/reset-password', methods=['POST'])
+def reset_password():
+    data         = request.get_json()
+    email        = data.get('email')
+    new_password = data.get('password')
+    if not email or not new_password:
+        return jsonify({'error': 'Email and new password are required'}), 400
+    hashed_pw = generate_password_hash(new_password)
+    conn      = get_db()
+    cursor    = conn.cursor()
+    cursor.execute("UPDATE users SET password = %s WHERE email = %s", (hashed_pw, email))
+    cursor.execute("DELETE FROM password_reset_codes WHERE email = %s", (email,))
+    conn.commit()
+    cursor.close(); conn.close()
+    return jsonify({'message': 'Password updated successfully'}), 200
+
+
+# ------------------------------------------------------------------ #
+#  Internal helper — deduct credits after job completes               #
+# ------------------------------------------------------------------ #
+
+def _process_credits_deduction(job_id, job_folder, user_id):
+    """
+    Reads deduct_credits.json written by AA.py and deducts from DB.
+    Passes full token breakdown for cost-based pricing.
+    Also marks the job as completed in the jobs table.
+    Called after the job state becomes completed.
+    """
+    deduct_file = os.path.join(job_folder, "deduct_credits.json")
+    if not os.path.exists(deduct_file):
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET state = 'completed', updated_at = NOW() WHERE job_id = %s",
+                    (job_id,)
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return
+
+    with open(deduct_file) as f:
+        entries = json.load(f)
+
+    if not entries:
+        return
+
+    conn = get_db()
+    try:
+        for i, entry in enumerate(entries):
+            deduct_credits(
+                conn,
+                user_id            = int(user_id),
+                job_id             = job_id,
+                turn               = i + 1,
+                tokens_used        = int(entry.get("tokens_used", 0)),
+                input_tokens       = int(entry.get("input_tokens", 0)),
+                output_tokens      = int(entry.get("output_tokens", 0)),
+                cache_write_tokens = int(entry.get("cache_write_tokens", 0)),
+                cache_read_tokens  = int(entry.get("cache_read_tokens", 0)),
+            )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET state = 'completed', updated_at = NOW() WHERE job_id = %s",
+                (job_id,)
+            )
+            conn.commit()
+
+        os.remove(deduct_file)
+    finally:
+        conn.close()
+
+
+@auth_bp.route('/job/<job_id>/title', methods=['PATCH'])
+@token_required
+def update_job_title(user_id, job_id):
+    """Update the title of a job after smart title generation."""
+    data  = request.get_json() or {}
+    title = data.get("title", "").strip()
+    if not title:
+        return jsonify({"error": "title required"}), 400
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET title = %s, updated_at = NOW() WHERE job_id = %s AND user_id = %s",
+                (title[:50], job_id, int(user_id))
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"ok": True}), 200
+
+
+# ------------------------------------------------------------------ #
+#  Smart project title generation                                      #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/job/title', methods=['POST'])
+@token_required
+def generate_job_title(user_id):
+    import anthropic as _anthropic
+    data   = request.get_json() or {}
+    prompt = data.get("prompt", "").strip()
+    if not prompt:
+        return jsonify({"title": "New Project"}), 200
+
+    try:
+        client = _anthropic.Anthropic()
+        resp   = client.messages.create(
+            model      = "claude-haiku-4-5-20251001",
+            max_tokens = 30,
+            messages   = [{
+                "role":    "user",
+                "content": (
+                    f"Give a short 3-5 word project title for this app idea. "
+                    f"Return ONLY the title, no punctuation, no quotes, no explanation.\n\n"
+                    f"App idea: {prompt[:300]}"
+                ),
+            }],
+        )
+        title = resp.content[0].text.strip().strip('"').strip("'")
+        title = title[:50] if title else prompt[:40]
+    except Exception:
+        title = prompt[:40]
+
+    return jsonify({"title": title}), 200
+
+
+@auth_bp.route('/generate', methods=['POST'])
+@token_required
+def generate(user_id):
+    data   = request.get_json() or {}
+    prompt = data.get("prompt")
+    title  = data.get("title", "").strip() or prompt[:40] if prompt else "New Project"
+    if not prompt:
+        return jsonify({"error": "Prompt required"}), 400
+
+    conn = get_db()
+    try:
+        if not check_and_reserve(conn, int(user_id)):
+            return jsonify({"error": "Not enough credits. Please subscribe or wait for your daily refresh."}), 402
+    finally:
+        conn.close()
+
+    job_id     = str(uuid.uuid4())[:8]
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+
+    while os.path.exists(job_folder):
+        job_id     = str(uuid.uuid4())[:8]
+        job_folder = os.path.join(OUTPUTS_DIR, job_id)
+
+    os.makedirs(job_folder, exist_ok=True)
+
+    shutil.copytree(
+        TEMPLATE_SCAFFOLD, job_folder,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns('node_modules', '.git')
+    )
+
+    with open(os.path.join(job_folder, "prompt.txt"), "w", encoding="utf-8") as f:
+        f.write(prompt)
+
+    with open(os.path.join(job_folder, "meta.json"), "w") as f:
+        json.dump({"user_id": user_id}, f)
+
+    with open(os.path.join(job_folder, "state.json"), "w", encoding="utf-8") as f:
+        json.dump({"state": "running", "created_at": time.time()}, f)
+
+    subprocess.Popen(
+        ["python3", ENGINE_SCRIPT, "--workspace", job_folder],
+        cwd=job_folder
+    )
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO jobs (job_id, user_id, title, state)
+                VALUES (%s, %s, %s, 'running')
+                ON CONFLICT (job_id) DO NOTHING
+                """,
+                (job_id, int(user_id), title)
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    return jsonify({"job_id": job_id}), 200
+
+
+# ------------------------------------------------------------------ #
+#  Generation — follow-up turns                                        #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/job/<job_id>/message', methods=['POST'])
+@token_required
+def job_message(user_id, job_id):
+    data    = request.get_json() or {}
+    message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "message required"}), 400
+
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+
+    conn = get_db()
+    try:
+        if not check_and_reserve(conn, int(user_id)):
+            return jsonify({"error": "Not enough credits. Please subscribe or wait for your daily refresh."}), 402
+    finally:
+        conn.close()
+
+    state_path = os.path.join(job_folder, "state.json")
+    if os.path.exists(state_path):
+        with open(state_path) as f:
+            state_data = json.load(f)
+        if state_data.get("state") == "running":
+            return jsonify({"error": "Job is still running"}), 409
+
+    with open(state_path, "w") as f:
+        json.dump({"state": "running", "updated_at": time.time()}, f)
+
+    subprocess.Popen(
+        ["python3", ENGINE_SCRIPT, "--workspace", job_folder, "--message", message],
+        cwd=job_folder
+    )
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET state = 'running', updated_at = NOW() WHERE job_id = %s",
+                (job_id,)
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    return jsonify({"status": "running"}), 200
+
+
+# ------------------------------------------------------------------ #
+#  Job status + messages                                               #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/job/<job_id>/status', methods=['GET'])
+@token_required
+def job_status(user_id, job_id):
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+
+    state_path = os.path.join(job_folder, "state.json")
+    state_data = {}
+    if os.path.exists(state_path):
+        with open(state_path) as f:
+            state_data = json.load(f)
+
+    if state_data.get("state") == "completed":
+        _process_credits_deduction(job_id, job_folder, user_id)
+
+    messages      = []
+    messages_path = os.path.join(job_folder, "messages.jsonl")
+    if os.path.exists(messages_path):
+        with open(messages_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+
+    # Always derive preview URL from Flask route — never from http.server ports.
+    # _get_preview_url also cleans up any stale preview_port.txt files.
+    preview_url = _get_preview_url(job_id, job_folder)
+
+    if preview_url:
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET preview_url = %s, updated_at = NOW() WHERE job_id = %s",
+                    (preview_url, job_id)
+                )
+                conn.commit()
+        finally:
+            conn.close()
+
+    conn = get_db()
+    try:
+        credits_info = get_balance(conn, int(user_id))
+    finally:
+        conn.close()
+
+    # Read progress entries for real-time build updates
+    progress = []
+    progress_path = os.path.join(job_folder, "progress.json")
+    if os.path.exists(progress_path):
+        try:
+            with open(progress_path) as f:
+                progress = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            progress = []
+
+    return jsonify({
+        "job_id":          job_id,
+        "state":           state_data.get("state", "unknown"),
+        "build_ok":        state_data.get("build_ok", False),
+        "code_changed":    state_data.get("code_changed", False),
+        "error":           state_data.get("error"),
+        "messages":        messages,
+        "preview_url":     preview_url,
+        "credits_balance": credits_info["balance"],
+        "progress":        progress,
+    }), 200
+
+
+# ------------------------------------------------------------------ #
+#  Jobs list                                                           #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/jobs', methods=['GET'])
+@token_required
+def list_jobs(user_id):
+    """Return all jobs for the logged-in user, newest first."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT job_id, title, state, preview_url, created_at
+                FROM jobs
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 50
+                """,
+                (int(user_id),)
+            )
+            rows = cur.fetchall()
+        return jsonify({"jobs": [dict(r) for r in rows]}), 200
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ #
+#  Template cloning                                                    #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/template/clone', methods=['POST'])
+@token_required
+def clone_template(user_id):
+    """
+    Clone a template project into the user's account.
+    Copies the output folder, creates a new DB row, serves preview via Flask.
+    """
+    data = request.get_json() or {}
+    template_id = data.get("template_id", "").strip()
+
+    if template_id not in TEMPLATE_JOB_IDS:
+        return jsonify({"error": "Invalid template"}), 400
+
+    template_folder = os.path.join(OUTPUTS_DIR, template_id)
+    if not os.path.isdir(template_folder):
+        return jsonify({"error": "Template not found on disk"}), 404
+
+    # Generate new job ID
+    new_job_id = str(uuid.uuid4())[:8]
+    new_folder = os.path.join(OUTPUTS_DIR, new_job_id)
+    while os.path.exists(new_folder):
+        new_job_id = str(uuid.uuid4())[:8]
+        new_folder = os.path.join(OUTPUTS_DIR, new_job_id)
+
+    # Copy template folder (exclude node_modules, keep dist for instant preview)
+    shutil.copytree(
+        template_folder, new_folder,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns('node_modules', '.git', '__pycache__',
+                                       'deduct_credits.json', 'meta.json',
+                                       'preview_port.txt')  # never copy stale port files
+    )
+
+    # Write fresh meta for the new owner
+    with open(os.path.join(new_folder, "meta.json"), "w") as f:
+        json.dump({"user_id": user_id, "cloned_from": template_id}, f)
+
+    # Mark as completed
+    with open(os.path.join(new_folder, "state.json"), "w") as f:
+        json.dump({"state": "completed", "cloned_from": template_id, "updated_at": time.time()}, f)
+
+    # Clear old messages — fresh start for the clone
+    messages_path = os.path.join(new_folder, "messages.jsonl")
+    if os.path.exists(messages_path):
+        os.remove(messages_path)
+
+    # Always use Flask route — no http.server subprocess needed
+    dist_dir    = os.path.join(new_folder, "dist")
+    preview_url = f"/auth/preview/{new_job_id}/" if os.path.isdir(dist_dir) else None
+
+    title = TEMPLATE_JOB_IDS[template_id]
+
+    # Insert job row
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO jobs (job_id, user_id, title, state, preview_url)
+                VALUES (%s, %s, %s, 'completed', %s)
+                ON CONFLICT (job_id) DO NOTHING
+                """,
+                (new_job_id, int(user_id), title, preview_url)
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    return jsonify({
+        "job_id":      new_job_id,
+        "title":       title,
+        "preview_url": preview_url,
+        "state":       "completed",
+    }), 200
+
+
+@auth_bp.route('/templates', methods=['GET'])
+def list_templates():
+    """
+    Return available templates with preview URLs.
+    No auth required — powers the landing page.
+    """
+    templates = []
+    for job_id, title in TEMPLATE_JOB_IDS.items():
+        templates.append({
+            "job_id": job_id,
+            "title": title,
+            "preview_url": f"/auth/preview/{job_id}/",
+        })
+    return jsonify({"templates": templates}), 200
+
+
+# ------------------------------------------------------------------ #
+#  Source files — for the code viewer                                  #
+# ------------------------------------------------------------------ #
+
+INTERNAL_FILES = {
+    "state.json", "messages.jsonl", "meta.json", "prompt.txt",
+    "preview_port.txt", "deduct_credits.json", "Files_list.txt",
+    "progress.json",
+}
+
+SKIP_DIRS = {"node_modules", "dist", ".git", "__pycache__"}
+
+DIR_ORDER = {"src": 0, "public": 1}
+
+
+def _collect_project_files(job_folder):
+    files = []
+    seen  = set()
+
+    def _add(abs_path, rel_path):
+        if rel_path in seen:
+            return
+        seen.add(rel_path)
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            files.append({"path": rel_path, "content": content})
+        except Exception:
+            pass
+
+    for root, dirs, filenames in os.walk(job_folder):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+
+        for filename in filenames:
+            if filename in INTERNAL_FILES:
+                continue
+            abs_path = os.path.join(root, filename)
+            rel_path = os.path.relpath(abs_path, job_folder)
+
+            parts = rel_path.replace("\\", "/").split("/")
+            if len(parts) == 1:
+                allowed_root = {
+                    "package.json", "package-lock.json",
+                    "vite.config.ts", "vite.config.js",
+                    "tailwind.config.ts", "tailwind.config.js",
+                    "tsconfig.json", "tsconfig.app.json", "tsconfig.node.json",
+                    "postcss.config.js", "postcss.config.cjs",
+                    "eslint.config.js", "eslint.config.ts",
+                    ".eslintrc", ".eslintrc.js", ".eslintrc.json",
+                    ".prettierrc", ".prettierrc.js", ".prettierrc.json",
+                    ".env.example", "index.html", "README.md",
+                }
+                if filename not in allowed_root:
+                    continue
+
+            _add(abs_path, rel_path)
+
+    def _sort_key(f):
+        p = f["path"].replace("\\", "/")
+        top = p.split("/")[0]
+        return (DIR_ORDER.get(top, 2), p)
+
+    files.sort(key=_sort_key)
+    return files
+
+
+@auth_bp.route('/job/<job_id>/files', methods=['GET'])
+@token_required
+def get_job_files(user_id, job_id):
+    """Return all user-facing source files for the code viewer."""
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+
+    files = _collect_project_files(job_folder)
+    return jsonify({"files": files}), 200
+
+
+# ------------------------------------------------------------------ #
+#  ZIP download                                                        #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/job/<job_id>/download', methods=['GET'])
+@token_required
+def download_job_zip(user_id, job_id):
+    import io
+    import zipfile
+    from flask import Response
+
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT title FROM jobs WHERE job_id = %s AND user_id = %s",
+                        (job_id, int(user_id)))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    project_title = (row["title"] if row else job_id).strip()
+    safe_title    = "".join(c if c.isalnum() or c in "-_ " else "" for c in project_title)
+    safe_title    = safe_title.strip().replace(" ", "-") or job_id
+    zip_filename  = f"{safe_title}.zip"
+
+    files = _collect_project_files(job_folder)
+
+    has_readme = any(f["path"].lower() == "readme.md" for f in files)
+    readme_content = None
+    if not has_readme:
+        readme_content = f"""# {project_title}
+
+Generated by [Immediately](https://immediately.dev) — AI-powered app builder.
+
+## Getting Started
+
+### Prerequisites
+- [Node.js](https://nodejs.org/) v18 or higher
+- npm (comes with Node.js)
+
+### Setup
+
+```bash
+# 1. Install dependencies
+npm install
+
+# 2. Start the development server
+npm run dev
+```
+
+Then open [http://localhost:5173](http://localhost:5173) in your browser.
+
+### Build for production
+
+```bash
+npm run build
+```
+
+The production build will be in the `dist/` folder.
+
+---
+*Built with React + Vite + Tailwind CSS*
+"""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in files:
+            zf.writestr(f"{safe_title}/{file['path']}", file["content"])
+        if readme_content:
+            zf.writestr(f"{safe_title}/README.md", readme_content)
+
+    buf.seek(0)
+
+    return Response(
+        buf.getvalue(),
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_filename}"',
+            "Content-Length": str(len(buf.getvalue())),
+        }
+    )
+
+
+# ------------------------------------------------------------------ #
+#  Preview serving                                                     #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/preview/<job_id>/', defaults={'filename': ''})
+@auth_bp.route('/preview/<job_id>/<path:filename>')
+def serve_preview(job_id, filename):
+    """
+    Serve built project files from the dist folder.
+
+    For the root path (no filename / index.html), we serve a tiny wrapper
+    page that embeds the real app inside an iframe pointed at /preview-raw/.
+    The inner iframe serves at the root path, so React Router sees "/" and
+    works correctly.  Assets are served directly from dist.
+    """
+    from flask import make_response
+
+    dist_dir = os.path.join(OUTPUTS_DIR, job_id, "dist")
+    if not os.path.isdir(dist_dir):
+        return jsonify({"error": "Preview not ready yet"}), 404
+
+    # Serve actual asset files directly
+    if filename:
+        file_path = os.path.join(dist_dir, filename)
+        if os.path.isfile(file_path):
+            return send_from_directory(dist_dir, filename)
+
+    # Serve a wrapper page that iframes the raw app.
+    # Use absolute URL for the inner iframe so React Router in the parent
+    # app cannot intercept it.
+    from flask import request as flask_request
+    base = flask_request.host_url.rstrip("/")
+    wrapper = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Preview</title>
+<style>
+  * {{ margin: 0; padding: 0; }}
+  html, body {{ width: 100%; height: 100%; overflow: hidden; }}
+  iframe {{ width: 100%; height: 100%; border: none; }}
+</style>
+</head><body>
+<iframe src="{base}/auth/preview-raw/{job_id}/" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+</body></html>"""
+
+    resp = make_response(wrapper)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers.pop("X-Frame-Options", None)
+    return resp
+
+
+@auth_bp.route('/preview-raw/<job_id>/', defaults={'filename': 'index.html'})
+@auth_bp.route('/preview-raw/<job_id>/<path:filename>')
+def serve_preview_raw(job_id, filename):
+    """
+    Serve the raw built app files. Loaded inside an iframe from serve_preview.
+    Rewrites asset paths and fixes React Router's pathname before boot.
+    """
+    from flask import make_response
+
+    dist_dir = os.path.join(OUTPUTS_DIR, job_id, "dist")
+    if not os.path.isdir(dist_dir):
+        return jsonify({"error": "Preview not ready yet"}), 404
+
+    if filename and filename != "index.html":
+        file_path = os.path.join(dist_dir, filename)
+        if os.path.isfile(file_path):
+            return send_from_directory(dist_dir, filename)
+
+    index_path = os.path.join(dist_dir, "index.html")
+    if not os.path.isfile(index_path):
+        return jsonify({"error": "Preview not ready yet"}), 404
+
+    with open(index_path, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    asset_base = f"/auth/preview/{job_id}/"
+    html = html.replace('src="./assets/', f'src="{asset_base}assets/')
+    html = html.replace("src='./assets/", f"src='{asset_base}assets/")
+    html = html.replace('href="./assets/', f'href="{asset_base}assets/')
+    html = html.replace("href='./assets/", f"href='{asset_base}assets/")
+    html = html.replace('href="./favicon', f'href="{asset_base}favicon')
+    html = html.replace('href="./placeholder', f'href="{asset_base}placeholder')
+
+    boot_fix = """<script>
+// Preview SPA fix: set location to "/" before React Router reads it.
+history.replaceState(null, '', '/');
+</script>
+"""
+    html = html.replace("<head>", "<head>\n" + boot_fix, 1)
+
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers.pop("X-Frame-Options", None)
+    return resp
+
+
+# ------------------------------------------------------------------ #
+#  Health check                                                        #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/generate-test', methods=['GET'])
+def generate_test():
+    return jsonify({"message": "Backend is ready for generation"})

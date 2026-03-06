@@ -1,0 +1,98 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 20% 7%;
+    --foreground: 210 20% 92%;
+
+    --card: 222 18% 10%;
+    --card-foreground: 210 20% 92%;
+
+    --popover: 222 18% 10%;
+    --popover-foreground: 210 20% 92%;
+
+    --primary: 0 78% 57%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 222 15% 14%;
+    --secondary-foreground: 210 20% 80%;
+
+    --muted: 222 15% 14%;
+    --muted-foreground: 215 12% 50%;
+
+    --accent: 0 78% 57%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 222 15% 16%;
+    --input: 222 15% 16%;
+    --ring: 0 78% 57%;
+
+    --radius: 0.625rem;
+
+    --sidebar-background: 222 22% 6%;
+    --sidebar-foreground: 210 15% 70%;
+    --sidebar-primary: 0 78% 57%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 222 15% 12%;
+    --sidebar-accent-foreground: 210 20% 90%;
+    --sidebar-border: 222 15% 12%;
+    --sidebar-ring: 0 78% 57%;
+
+    /* Custom dashboard tokens */
+    --dash-red: 0 78% 57%;
+    --dash-red-dim: 0 78% 40%;
+    --dash-surface: 222 18% 10%;
+    --dash-surface-elevated: 222 15% 13%;
+    --dash-grid: 222 15% 14%;
+    --dash-text-primary: 210 20% 92%;
+    --dash-text-secondary: 215 12% 55%;
+    --dash-green: 152 69% 45%;
+    --dash-amber: 38 95% 52%;
+    --dash-blue: 214 89% 60%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Space Grotesk', sans-serif;
+  }
+
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: hsl(var(--background));
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 2px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground));
+  }
+}
