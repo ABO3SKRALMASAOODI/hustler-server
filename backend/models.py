@@ -22,20 +22,20 @@ def upgrade_user_to_premium(user_id, expiry_date=None):
     cursor.close()
 
 
-def update_user_subscription_status(user_id, is_subscribed, expiry_date=None, subscription_id=None):
+def update_user_subscription_status(user_id, is_subscribed, expiry_date=None, subscription_id=None, plan='free', monthly_credits=0):
     """Update user's subscription status, expiry, and ID."""
     conn = get_db()
     cursor = conn.cursor()
     if is_subscribed:
         cursor.execute('''
             UPDATE users
-            SET is_subscribed = 1, subscription_expiry = %s, subscription_id = %s
+            SET is_subscribed = 1, subscription_expiry = %s, subscription_id = %s, plan = %s, credits_monthly_limit = %s
             WHERE id = %s
-        ''', (expiry_date, subscription_id, user_id))
+        ''', (expiry_date, subscription_id, plan, monthly_credits, user_id))
     else:
         cursor.execute('''
             UPDATE users
-            SET is_subscribed = 0, subscription_expiry = NULL, subscription_id = NULL
+            SET is_subscribed = 0, subscription_expiry = NULL, subscription_id = NULL, plan = 'free', credits_monthly_limit = 0
             WHERE id = %s
         ''', (user_id,))
     conn.commit()
@@ -67,9 +67,13 @@ def init_db(app):
                 subscription_expiry TIMESTAMP,
                 subscription_id TEXT,
                 is_verified INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                plan VARCHAR(20) DEFAULT 'free',
+                credits_monthly_limit INTEGER DEFAULT 0
             )
         ''')
+        cursor.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(20) DEFAULT \'free\'')
+        cursor.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS credits_monthly_limit INTEGER DEFAULT 0')
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS password_reset_codes (

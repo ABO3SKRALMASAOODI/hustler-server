@@ -17,15 +17,24 @@ def create_app():
     app = Flask(__name__)
 
     # ✅ Explicitly allow your frontend domain
-    CORS(app,
-     resources={
-         r"/api/*": {"origins": "*"},
-         r"/auth/*": {"origins": "*"},
-         r"/chat/*": {"origins": "*"},
-     },
-     supports_credentials=False,
-     allow_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"])
+    CORS(app, origins="*", allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"])
+
+    @app.before_request
+    def handle_options():
+        from flask import request, Response
+        if request.method == "OPTIONS":
+            r = Response()
+            r.headers["Access-Control-Allow-Origin"] = "*"
+            r.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            r.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+            return r
+
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+        return response
 
     app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "supersecretkey")
     app.config['DATABASE_URL'] = os.getenv("DATABASE_URL")
