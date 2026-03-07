@@ -54,7 +54,7 @@ def build_project(workspace):
     """
     try:
         install = subprocess.run(
-            ["npm", "install", "--legacy-peer-deps"],
+            ["npm", "install", "--include=dev", "--legacy-peer-deps"],
             cwd=workspace, capture_output=True, text=True, timeout=300
         )
         print(f"[build] npm install returncode={install.returncode}")
