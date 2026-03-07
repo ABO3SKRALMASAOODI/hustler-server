@@ -1,6 +1,8 @@
 import argparse, os, json, time, traceback, subprocess
 from Agent5 import create_generator
 from File_state import FileState
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 load_dotenv()
 
