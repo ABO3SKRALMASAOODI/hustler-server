@@ -16,13 +16,13 @@ import datetime
 import math
 
 # ── Pricing ──────────────────────────────────────────────────────────────────
-
 INPUT_COST_PER_M        = 3.00
 OUTPUT_COST_PER_M       = 15.00
 CACHE_WRITE_COST_PER_M  = 3.75
 CACHE_READ_COST_PER_M   = 0.30
 
-DOLLARS_PER_CREDIT  = 0.01   # 1 credit = $0.01
+DOLLARS_PER_CREDIT  = 0.01
+MARKUP              = 2.0    # ← added: charge user 2x API cost = 50% margin
 FREE_DAILY_CREDITS  = 20
 SUB_DAILY_CREDITS   = 20
 
@@ -30,16 +30,14 @@ SUB_DAILY_CREDITS   = 20
 # ── Core conversion ──────────────────────────────────────────────────────────
 
 def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens):
-    """
-    Convert token counts to credits using real Anthropic pricing.
-    Cache reads are 90% cheaper than input — this rewards users fairly.
-    """
     cost_dollars = (
         (input_tokens       * INPUT_COST_PER_M)       +
         (output_tokens      * OUTPUT_COST_PER_M)      +
         (cache_write_tokens * CACHE_WRITE_COST_PER_M) +
         (cache_read_tokens  * CACHE_READ_COST_PER_M)
     ) / 1_000_000
+
+    cost_dollars *= MARKUP   # ← added: apply markup before converting to credits
 
     credits = cost_dollars / DOLLARS_PER_CREDIT
     return round(credits, 2)
