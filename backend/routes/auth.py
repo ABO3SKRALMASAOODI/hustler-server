@@ -138,12 +138,13 @@ def get_job_credit_breakdown(user_id, job_id):
 def check_subscription(user_id):
     conn   = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT is_subscribed, subscription_id FROM users WHERE id = %s", (user_id,))
+    cursor.execute("SELECT is_subscribed, subscription_id, plan FROM users WHERE id = %s", (user_id,))
     row    = cursor.fetchone()
     cursor.close(); conn.close()
     return jsonify({
         'is_subscribed':   bool(row['is_subscribed']) if row else False,
         'subscription_id': row['subscription_id']     if row else None,
+        'plan':            row['plan'] if row else 'free',
     })
 
 
