@@ -5,11 +5,20 @@ import jwt
 
 paddle_bp = Blueprint('paddle', __name__)
 
-PLANS = {
+PLANS_LIVE = {
     'plus':  {'price_id': 'pri_01jxj6smtjkfsf22hdr4swyr9j', 'monthly_credits': 1000},
     'pro':   {'price_id': 'pri_01kk4k4y8c3ygxd620vcxg6ph1', 'monthly_credits': 2400},
     'ultra': {'price_id': 'pri_01kk4k83cwpmf1jsctgdvhm0n6', 'monthly_credits': 5000},
 }
+
+PLANS_SANDBOX = {
+    'plus':  {'price_id': 'pri_01jw8722trngfyz12kq158vrz7', 'monthly_credits': 1000},
+    'pro':   {'price_id': 'pri_01kk4wvnbxb7nbh426bnk62xa2', 'monthly_credits': 2400},
+    'ultra': {'price_id': 'pri_01kk4wwr07ce0xp8x4kvdgt8kg', 'monthly_credits': 5000},
+}
+
+import os as _os
+PLANS = PLANS_SANDBOX if _os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_LIVE
 
 def get_paddle_base():
     is_sandbox = os.environ.get('PADDLE_MODE') == 'sandbox'
