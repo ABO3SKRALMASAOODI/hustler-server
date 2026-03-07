@@ -54,7 +54,7 @@ def build_project(workspace):
     """
     try:
         install = subprocess.run(
-            ["npm", "install", "--cache", os.path.expanduser("~/.npm-cache"), "--prefer-offline"],
+            ["npm", "install"],
             cwd=workspace, capture_output=True, text=True, timeout=300
         )
         if install.returncode != 0:
