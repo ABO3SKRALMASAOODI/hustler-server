@@ -25,7 +25,7 @@ def create_app():
      },
      supports_credentials=False,
      allow_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"])
+     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"])
 
     app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "supersecretkey")
     app.config['DATABASE_URL'] = os.getenv("DATABASE_URL")
