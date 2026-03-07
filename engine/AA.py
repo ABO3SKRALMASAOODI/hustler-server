@@ -54,11 +54,14 @@ def build_project(workspace):
     """
     try:
         install = subprocess.run(
-            ["npm", "install"],
+            ["npm", "install", "--legacy-peer-deps"],
             cwd=workspace, capture_output=True, text=True, timeout=300
         )
+        print(f"[build] npm install returncode={install.returncode}")
+        print(f"[build] npm install stdout={install.stdout[-500:] if install.stdout else ''}")
+        print(f"[build] npm install stderr={install.stderr[-500:] if install.stderr else ''}")
         if install.returncode != 0:
-            print(f"[build] npm install failed:\n{install.stderr}")
+            print(f"[build] npm install failed")
             return False
 
         result = subprocess.run(
