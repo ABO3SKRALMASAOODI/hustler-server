@@ -62,7 +62,7 @@ def build_project(workspace):
             return False
 
         result = subprocess.run(
-            ["npm", "run", "build"], cwd=workspace,
+            ["npx", "vite", "build"], cwd=workspace,
             capture_output=True, text=True, timeout=120
         )
         if result.returncode != 0:
