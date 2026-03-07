@@ -29,8 +29,9 @@ def update_user_subscription_status(user_id, is_subscribed, expiry_date=None, su
     if is_subscribed:
         cursor.execute('''
             UPDATE users
-            SET is_subscribed = 1, subscription_expiry = %s, subscription_id = %s, plan = %s, credits_monthly_limit = %s,
-                credits_balance = %s, credits_monthly = %s
+            SET is_subscribed = 1, subscription_expiry = %s, subscription_id = %s, plan = %s,
+                credits_monthly_limit = %s, credits_monthly = %s,
+                credits_daily = 20, credits_balance = 20 + %s
             WHERE id = %s
         ''', (expiry_date, subscription_id, plan, monthly_credits, monthly_credits, monthly_credits, user_id))
     else:
@@ -75,6 +76,7 @@ def init_db(app):
         ''')
         cursor.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(20) DEFAULT \'free\'')
         cursor.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS credits_monthly_limit INTEGER DEFAULT 0')
+        cursor.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS credits_daily INTEGER DEFAULT 20')
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS password_reset_codes (
