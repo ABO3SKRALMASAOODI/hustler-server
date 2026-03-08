@@ -1,10 +1,28 @@
 import argparse, os, json, time, traceback, subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Also add the backend directory so we can import credits.py
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 from Agent5 import create_generator
 from File_state import FileState
 from dotenv import load_dotenv
 load_dotenv()
+
+# Import the SAME function that credits.py uses for deduction,
+# so the tooltip number matches exactly what gets deducted.
+try:
+    from credits import tokens_to_credits
+except ImportError:
+    # Fallback if import path doesn't resolve — replicate the exact formula
+    def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens):
+        cost_dollars = (
+            (input_tokens       * 3.00) +
+            (output_tokens      * 15.00) +
+            (cache_write_tokens * 3.75) +
+            (cache_read_tokens  * 0.30)
+        ) / 1_000_000
+        cost_dollars *= 2.0  # MARKUP
+        return round(cost_dollars / 0.01, 2)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -44,14 +62,6 @@ def load_history(workspace):
 
 
 def build_project(workspace):
-    """
-    Build the project using npm.
-    Returns True if build succeeded, False otherwise.
-
-    NOTE: We no longer spin up a python http.server subprocess.
-    The dist/ folder is served directly by Flask via /auth/preview/<job_id>/
-    which is persistent across restarts unlike a random-port http.server process.
-    """
     try:
         install = subprocess.run(
             ["npm", "install", "--include=dev", "--legacy-peer-deps"],
@@ -72,8 +82,6 @@ def build_project(workspace):
             print(f"[build] npm build failed:\n{result.stderr}")
             return False
 
-        # Remove the old preview_port.txt if it exists — no longer used.
-        # Flask serves dist/ via /auth/preview/<job_id>/ which always works.
         port_file = os.path.join(workspace, "preview_port.txt")
         if os.path.exists(port_file):
             os.remove(port_file)
@@ -163,10 +171,7 @@ def make_hooks(workspace):
     file_count = {"written": 0, "read": 0}
 
     def on_thinking(turn, detail):
-        write_progress(workspace, {
-            "action": "thinking",
-            "detail": detail,
-        })
+        write_progress(workspace, {"action": "thinking", "detail": detail})
 
     def on_tool_start(name, args):
         action = TOOL_ACTIONS.get(name, "processing")
@@ -183,7 +188,6 @@ def make_hooks(workspace):
         else:
             entry["detail"] = f"{action.capitalize()} project files..."
 
-        # Include file content for live code view
         if name == "write_file" and isinstance(args, dict):
             content = args.get("content", "")
             lines = content.split("\n")
@@ -219,16 +223,10 @@ def make_hooks(workspace):
         if len(cleaned) < 8:
             return
         snippet = cleaned[:150] + ("..." if len(cleaned) > 150 else "")
-        write_progress(workspace, {
-            "action": "planning",
-            "detail": snippet,
-        })
+        write_progress(workspace, {"action": "planning", "detail": snippet})
 
     def on_rate_limit(attempt, delay):
-        write_progress(workspace, {
-            "action": "waiting",
-            "detail": f"Rate limited, retrying in {delay}s...",
-        })
+        write_progress(workspace, {"action": "waiting", "detail": f"Rate limited, retrying in {delay}s..."})
 
     return {
         "on_thinking":   on_thinking,
@@ -267,7 +265,6 @@ def main():
             "detail": "Reading project structure...",
         })
 
-        # Replay conversation history
         history = load_history(WORKSPACE)
         for entry in history:
             role = entry.get("role")
@@ -275,7 +272,6 @@ def main():
             if role in ("user", "assistant") and text:
                 generator.messages.append({"role": role, "content": text})
 
-        # Get user message
         if args.message:
             user_message = args.message.strip()
         else:
@@ -295,7 +291,6 @@ def main():
             "detail": "Planning your application...",
         })
 
-        # Attach hooks to the agent
         hooks = make_hooks(WORKSPACE)
         generator.on_thinking   = hooks["on_thinking"]
         generator.on_tool_start = hooks["on_tool_start"]
@@ -307,16 +302,18 @@ def main():
 
         print(f"[build] code_changed={code_changed} — {'will build' if code_changed else 'skipping build (text-only reply)'}")
 
-        cost_dollars = (
-            token_breakdown["input"]       * 3.00 +
-            token_breakdown["output"]      * 15.00 +
-            token_breakdown["cache_write"] * 3.75 +
-            token_breakdown["cache_read"]  * 0.30
-        ) / 1_000_000
+        # ── FIX Problem 10 ────────────────────────────────────────────────
+        # Use tokens_to_credits (imported from credits.py) which includes
+        # the 2x MARKUP. Previously AA.py did raw math without markup, so
+        # the tooltip showed ~half the real deducted amount.
+        credits_used = tokens_to_credits(
+            input_tokens       = token_breakdown["input"],
+            output_tokens      = token_breakdown["output"],
+            cache_write_tokens = token_breakdown["cache_write"],
+            cache_read_tokens  = token_breakdown["cache_read"],
+        )
 
-        credits_used = round(cost_dollars / 0.01, 2)
-
-        print(f"[credits] breakdown={token_breakdown} → {credits_used} credits (cost-based)")
+        print(f"[credits] breakdown={token_breakdown} → {credits_used} credits (via tokens_to_credits with markup)")
 
         append_message(WORKSPACE, "assistant", output,
                        token_breakdown=token_breakdown, credits=credits_used)

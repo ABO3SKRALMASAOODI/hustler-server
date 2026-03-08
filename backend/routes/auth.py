@@ -268,21 +268,35 @@ def verify_reset_code():
     data  = request.get_json()
     email = data.get('email')
     code  = data.get('code')
+
     if not email or not code:
         return jsonify({'error': 'Email and code are required'}), 400
+
     conn   = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT code, expires_at FROM password_reset_codes WHERE email = %s", (email,))
+    cursor.execute(
+        "SELECT code, expires_at FROM password_reset_codes WHERE email = %s",
+        (email,)
+    )
     row = cursor.fetchone()
-    cursor.close(); conn.close()
+    cursor.close()
+    conn.close()
+
     if not row:
         return jsonify({'error': 'No code found'}), 404
+
     if str(row['code']).strip() != str(code).strip():
         return jsonify({'error': 'Incorrect code'}), 400
-    if datetime.datetime.fromisoformat(row['expires_at']) < datetime.datetime.utcnow():
-        return jsonify({'error': 'Code expired'}), 400
-    return jsonify({'message': 'Code verified'}), 200
 
+    # ✅ Fixed expiration check
+    expires_at = row['expires_at']
+    if isinstance(expires_at, str):
+        expires_at = datetime.datetime.fromisoformat(expires_at)
+
+    if expires_at < datetime.datetime.utcnow():
+        return jsonify({'error': 'Code expired'}), 400
+
+    return jsonify({'message': 'Code verified'}), 200
 
 @auth_bp.route('/reset-password', methods=['POST'])
 def reset_password():
