@@ -10,7 +10,7 @@ from routes.paypal import paypal_bp
 from routes.paddle import paddle_bp as paddle_checkout_bp
 from routes.paddle_webhook import paddle_webhook
 from routes.agents import agents_bp
-
+from routes.admin import admin_bp
 load_dotenv()
 
 def create_app():
@@ -54,7 +54,7 @@ def create_app():
     app.register_blueprint(paddle_checkout_bp)
     app.register_blueprint(paddle_webhook)
     app.register_blueprint(agents_bp, url_prefix="/api/agents")
-
+    app.register_blueprint(admin_bp, url_prefix='/admin')
     return app
 
 
