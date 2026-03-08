@@ -79,6 +79,11 @@ def build_project(workspace):
             os.remove(port_file)
 
         print(f"[build] success — preview served via Flask /auth/preview/ route")
+        import shutil
+        node_modules = os.path.join(workspace, "node_modules")
+        if os.path.isdir(node_modules):
+            shutil.rmtree(node_modules, ignore_errors=True)
+            print(f"[build] node_modules cleaned up")
         return True
     except Exception as e:
         print(f"[build] exception: {e}")
