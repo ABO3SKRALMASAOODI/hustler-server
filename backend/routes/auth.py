@@ -1002,18 +1002,14 @@ def generate_test():
     return jsonify({"message": "Backend is ready for generation"})
 
 @auth_bp.route('/job/<job_id>/cancel', methods=['POST'])
-
-
-@auth_bp.route('/job/<job_id>/cancel', methods=['POST'])
-@jwt_required
-def cancel_job(user_id):
-    job_id = request.view_args.get('job_id') or (request.json or {}).get('job_id')
+@token_required
+def cancel_job(user_id, job_id):
     try:
-        conn = get_db_connection()
+        conn = get_db()
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE jobs SET state = 'failed' WHERE job_id = %s AND user_id = %s AND state = 'running'",
-                (job_id, user_id)
+                (job_id, int(user_id))
             )
             conn.commit()
         conn.close()
