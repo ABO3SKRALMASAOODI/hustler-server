@@ -7,7 +7,7 @@ import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 import random
 from routes.verify_email import send_code_to_email
-import uuid, subprocess, os
+import uuid, subprocess, os, signal
 import shutil, json, time
 from credits import (
     check_and_reserve, deduct_credits, get_balance,
@@ -74,16 +74,9 @@ TEMPLATE_JOB_IDS = {
 def _get_preview_url(job_id, job_folder):
     """
     Return an ABSOLUTE preview URL for a job if a built dist/ folder exists.
-
-    Must be absolute so the Studio iframe src bypasses React Router entirely.
-    A relative path like /auth/preview/... gets intercepted by React Router
-    in the parent app, which has no matching route and renders a black screen.
-
-    Also cleans up any stale preview_port.txt left by old builds.
     """
     from flask import request as flask_request
 
-    # Clean up any legacy port file so old jobs stop returning dead URLs
     port_file = os.path.join(job_folder, "preview_port.txt")
     if os.path.exists(port_file):
         try:
@@ -93,12 +86,47 @@ def _get_preview_url(job_id, job_folder):
 
     dist_dir = os.path.join(job_folder, "dist")
     if os.path.isdir(dist_dir):
-        # Build absolute URL from the current request's host
-        # e.g. http://127.0.0.1:5000/auth/preview/019a36e9/
         base = flask_request.host_url.rstrip("/")
         return f"{base}/auth/preview/{job_id}/"
 
     return None
+
+
+# ------------------------------------------------------------------ #
+#  Subprocess kill helper (FIX Issue 2)                                #
+# ------------------------------------------------------------------ #
+
+def _kill_job_process(job_folder):
+    """
+    Kill the AA.py subprocess for a job by reading its PID from state.json.
+    Sends SIGTERM to the process group so child processes (npm, vite) also die.
+    """
+    state_path = os.path.join(job_folder, "state.json")
+    if not os.path.exists(state_path):
+        return
+
+    try:
+        with open(state_path) as f:
+            state_data = json.load(f)
+        pid = state_data.get("pid")
+        if not pid:
+            return
+
+        # Kill the entire process group so npm/vite children also die
+        try:
+            os.killpg(os.getpgid(int(pid)), signal.SIGTERM)
+            print(f"[cancel] Killed process group for PID {pid}")
+        except ProcessLookupError:
+            print(f"[cancel] PID {pid} already dead")
+        except PermissionError:
+            # Fallback: try killing just the process
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+                print(f"[cancel] Killed PID {pid} directly")
+            except ProcessLookupError:
+                print(f"[cancel] PID {pid} already dead")
+    except Exception as e:
+        print(f"[cancel] Error killing process: {e}")
 
 
 # ------------------------------------------------------------------ #
@@ -108,7 +136,6 @@ def _get_preview_url(job_id, job_folder):
 @auth_bp.route('/credits', methods=['GET'])
 @token_required
 def get_user_credits(user_id):
-    """Return current credits balance for the logged-in user."""
     conn = get_db()
     try:
         info = get_balance(conn, int(user_id))
@@ -120,7 +147,6 @@ def get_user_credits(user_id):
 @auth_bp.route('/job/<job_id>/credits', methods=['GET'])
 @token_required
 def get_job_credit_breakdown(user_id, job_id):
-    """Return per-turn credit usage for a job (used by the ··· tooltip)."""
     conn = get_db()
     try:
         turns = get_job_credits(conn, job_id)
@@ -288,7 +314,6 @@ def verify_reset_code():
     if str(row['code']).strip() != str(code).strip():
         return jsonify({'error': 'Incorrect code'}), 400
 
-    # ✅ Fixed expiration check
     expires_at = row['expires_at']
     if isinstance(expires_at, str):
         expires_at = datetime.datetime.fromisoformat(expires_at)
@@ -320,12 +345,6 @@ def reset_password():
 # ------------------------------------------------------------------ #
 
 def _process_credits_deduction(job_id, job_folder, user_id):
-    """
-    Reads deduct_credits.json written by AA.py and deducts from DB.
-    Passes full token breakdown for cost-based pricing.
-    Also marks the job as completed in the jobs table.
-    Called after the job state becomes completed.
-    """
     deduct_file = os.path.join(job_folder, "deduct_credits.json")
     if not os.path.exists(deduct_file):
         conn = get_db()
@@ -376,7 +395,6 @@ def _process_credits_deduction(job_id, job_folder, user_id):
 @auth_bp.route('/job/<job_id>/title', methods=['PATCH'])
 @token_required
 def update_job_title(user_id, job_id):
-    """Update the title of a job after smart title generation."""
     data  = request.get_json() or {}
     title = data.get("title", "").strip()
     if not title:
@@ -469,10 +487,16 @@ def generate(user_id):
     with open(os.path.join(job_folder, "state.json"), "w", encoding="utf-8") as f:
         json.dump({"state": "running", "created_at": time.time()}, f)
 
-    subprocess.Popen(
+    # ── FIX Issue 2: Start subprocess in its own process group and store PID ──
+    proc = subprocess.Popen(
         ["python3", ENGINE_SCRIPT, "--workspace", job_folder],
-        cwd=job_folder
+        cwd=job_folder,
+        preexec_fn=os.setsid  # Create new process group so we can kill all children
     )
+
+    # Store PID in state.json so cancel endpoint can kill it
+    with open(os.path.join(job_folder, "state.json"), "w", encoding="utf-8") as f:
+        json.dump({"state": "running", "created_at": time.time(), "pid": proc.pid}, f)
 
     conn = get_db()
     try:
@@ -522,13 +546,15 @@ def job_message(user_id, job_id):
         if state_data.get("state") == "running":
             return jsonify({"error": "Job is still running"}), 409
 
-    with open(state_path, "w") as f:
-        json.dump({"state": "running", "updated_at": time.time()}, f)
-
-    subprocess.Popen(
+    # ── FIX Issue 2: Store PID for follow-up turns too ──
+    proc = subprocess.Popen(
         ["python3", ENGINE_SCRIPT, "--workspace", job_folder, "--message", message],
-        cwd=job_folder
+        cwd=job_folder,
+        preexec_fn=os.setsid
     )
+
+    with open(state_path, "w") as f:
+        json.dump({"state": "running", "updated_at": time.time(), "pid": proc.pid}, f)
 
     conn = get_db()
     try:
@@ -576,8 +602,6 @@ def job_status(user_id, job_id):
                     except json.JSONDecodeError:
                         pass
 
-    # Always derive preview URL from Flask route — never from http.server ports.
-    # _get_preview_url also cleans up any stale preview_port.txt files.
     preview_url = _get_preview_url(job_id, job_folder)
 
     if preview_url:
@@ -598,7 +622,6 @@ def job_status(user_id, job_id):
     finally:
         conn.close()
 
-    # Read progress entries for real-time build updates
     progress = []
     progress_path = os.path.join(job_folder, "progress.json")
     if os.path.exists(progress_path):
@@ -628,7 +651,6 @@ def job_status(user_id, job_id):
 @auth_bp.route('/jobs', methods=['GET'])
 @token_required
 def list_jobs(user_id):
-    """Return all jobs for the logged-in user, newest first."""
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -655,10 +677,6 @@ def list_jobs(user_id):
 @auth_bp.route('/template/clone', methods=['POST'])
 @token_required
 def clone_template(user_id):
-    """
-    Clone a template project into the user's account.
-    Copies the output folder, creates a new DB row, serves preview via Flask.
-    """
     data = request.get_json() or {}
     template_id = data.get("template_id", "").strip()
 
@@ -669,42 +687,35 @@ def clone_template(user_id):
     if not os.path.isdir(template_folder):
         return jsonify({"error": "Template not found on disk"}), 404
 
-    # Generate new job ID
     new_job_id = str(uuid.uuid4())[:8]
     new_folder = os.path.join(OUTPUTS_DIR, new_job_id)
     while os.path.exists(new_folder):
         new_job_id = str(uuid.uuid4())[:8]
         new_folder = os.path.join(OUTPUTS_DIR, new_job_id)
 
-    # Copy template folder (exclude node_modules, keep dist for instant preview)
     shutil.copytree(
         template_folder, new_folder,
         dirs_exist_ok=True,
         ignore=shutil.ignore_patterns('node_modules', '.git', '__pycache__',
                                        'deduct_credits.json', 'meta.json',
-                                       'preview_port.txt')  # never copy stale port files
+                                       'preview_port.txt')
     )
 
-    # Write fresh meta for the new owner
     with open(os.path.join(new_folder, "meta.json"), "w") as f:
         json.dump({"user_id": user_id, "cloned_from": template_id}, f)
 
-    # Mark as completed
     with open(os.path.join(new_folder, "state.json"), "w") as f:
         json.dump({"state": "completed", "cloned_from": template_id, "updated_at": time.time()}, f)
 
-    # Clear old messages — fresh start for the clone
     messages_path = os.path.join(new_folder, "messages.jsonl")
     if os.path.exists(messages_path):
         os.remove(messages_path)
 
-    # Always use Flask route — no http.server subprocess needed
     dist_dir    = os.path.join(new_folder, "dist")
     preview_url = f"/auth/preview/{new_job_id}/" if os.path.isdir(dist_dir) else None
 
     title = TEMPLATE_JOB_IDS[template_id]
 
-    # Insert job row
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -730,10 +741,6 @@ def clone_template(user_id):
 
 @auth_bp.route('/templates', methods=['GET'])
 def list_templates():
-    """
-    Return available templates with preview URLs.
-    No auth required — powers the landing page.
-    """
     templates = []
     for job_id, title in TEMPLATE_JOB_IDS.items():
         templates.append({
@@ -813,7 +820,6 @@ def _collect_project_files(job_folder):
 @auth_bp.route('/job/<job_id>/files', methods=['GET'])
 @token_required
 def get_job_files(user_id, job_id):
-    """Return all user-facing source files for the code viewer."""
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
@@ -916,29 +922,17 @@ The production build will be in the `dist/` folder.
 @auth_bp.route('/preview/<job_id>/', defaults={'filename': ''})
 @auth_bp.route('/preview/<job_id>/<path:filename>')
 def serve_preview(job_id, filename):
-    """
-    Serve built project files from the dist folder.
-
-    For the root path (no filename / index.html), we serve a tiny wrapper
-    page that embeds the real app inside an iframe pointed at /preview-raw/.
-    The inner iframe serves at the root path, so React Router sees "/" and
-    works correctly.  Assets are served directly from dist.
-    """
     from flask import make_response
 
     dist_dir = os.path.join(OUTPUTS_DIR, job_id, "dist")
     if not os.path.isdir(dist_dir):
         return jsonify({"error": "Preview not ready yet"}), 404
 
-    # Serve actual asset files directly
     if filename:
         file_path = os.path.join(dist_dir, filename)
         if os.path.isfile(file_path):
             return send_from_directory(dist_dir, filename)
 
-    # Serve a wrapper page that iframes the raw app.
-    # Use absolute URL for the inner iframe so React Router in the parent
-    # app cannot intercept it.
     from flask import request as flask_request
     base = flask_request.host_url.rstrip("/")
     wrapper = f"""<!DOCTYPE html>
@@ -964,10 +958,6 @@ def serve_preview(job_id, filename):
 @auth_bp.route('/preview-raw/<job_id>/', defaults={'filename': 'index.html'})
 @auth_bp.route('/preview-raw/<job_id>/<path:filename>')
 def serve_preview_raw(job_id, filename):
-    """
-    Serve the raw built app files. Loaded inside an iframe from serve_preview.
-    Rewrites asset paths and fixes React Router's pathname before boot.
-    """
     from flask import make_response
 
     dist_dir = os.path.join(OUTPUTS_DIR, job_id, "dist")
@@ -1015,10 +1005,36 @@ history.replaceState(null, '', '/');
 def generate_test():
     return jsonify({"message": "Backend is ready for generation"})
 
+
+# ------------------------------------------------------------------ #
+#  Cancel job — FIX Issue 2: Actually kill the subprocess              #
+# ------------------------------------------------------------------ #
+
 @auth_bp.route('/job/<job_id>/cancel', methods=['POST'])
 @token_required
 def cancel_job(user_id, job_id):
     try:
+        job_folder = os.path.join(OUTPUTS_DIR, job_id)
+
+        # Kill the AA.py subprocess and its children
+        if os.path.isdir(job_folder):
+            _kill_job_process(job_folder)
+
+            # Update state.json to failed so polling picks it up
+            state_path = os.path.join(job_folder, "state.json")
+            with open(state_path, "w") as f:
+                json.dump({
+                    "state": "failed",
+                    "error": "Cancelled by user",
+                    "updated_at": time.time()
+                }, f)
+
+            # Clean up progress file
+            progress_path = os.path.join(job_folder, "progress.json")
+            if os.path.exists(progress_path):
+                os.remove(progress_path)
+
+        # Update DB
         conn = get_db()
         with conn.cursor() as cur:
             cur.execute(
@@ -1027,6 +1043,7 @@ def cancel_job(user_id, job_id):
             )
             conn.commit()
         conn.close()
+
         return jsonify({"status": "cancelled"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
