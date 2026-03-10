@@ -5,6 +5,7 @@ from routes.verify_email import verify_bp
 from routes.paddle import paddle_bp as paddle_checkout_bp
 from routes.paddle_webhook import paddle_webhook
 from routes.admin import admin_bp
+from routes.google_auth import google_auth_bp
 from models import init_db
 import os
 from dotenv import load_dotenv
@@ -51,6 +52,7 @@ def create_app():
     app.register_blueprint(paddle_checkout_bp)
     app.register_blueprint(paddle_webhook)
     app.register_blueprint(admin_bp,            url_prefix='/admin')
+    app.register_blueprint(google_auth_bp,       url_prefix='/auth')
 
     return app
 
