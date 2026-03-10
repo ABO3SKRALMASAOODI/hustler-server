@@ -10,6 +10,7 @@ from routes.verify_email import send_code_to_email
 import uuid, subprocess, os, signal
 import shutil, json, time
 from credits import (
+    count_running_jobs,
     check_and_reserve, deduct_credits, get_balance,
     get_job_credits, refresh_daily_credits, tokens_to_credits
 )
@@ -460,6 +461,9 @@ def generate(user_id):
     try:
         if not check_and_reserve(conn, int(user_id)):
             return jsonify({"error": "Not enough credits. Please subscribe or wait for your daily refresh."}), 402
+        running = count_running_jobs(conn, int(user_id))
+        if running >= 3:
+            return jsonify({"error": "You already have 3 projects building. Wait for one to finish before starting another."}), 429
     finally:
         conn.close()
 
@@ -536,8 +540,18 @@ def job_message(user_id, job_id):
     try:
         if not check_and_reserve(conn, int(user_id)):
             return jsonify({"error": "Not enough credits. Please subscribe or wait for your daily refresh."}), 402
+        running = count_running_jobs(conn, int(user_id))
+        if running >= 3:
+            return jsonify({"error": "You already have 3 projects building. Wait for one to finish before starting another."}), 429
     finally:
         conn.close()
+
+    # Cancel pending node_modules cleanup — user is actively editing this job
+    try:
+        from cleanup_manager import cancel_cleanup
+        cancel_cleanup(job_id)
+    except ImportError:
+        pass
 
     state_path = os.path.join(job_folder, "state.json")
     if os.path.exists(state_path):

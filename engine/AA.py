@@ -1,19 +1,15 @@
 import argparse, os, json, time, traceback, subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# Also add the backend directory so we can import credits.py
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 from Agent5 import create_generator
 from File_state import FileState
 from dotenv import load_dotenv
 load_dotenv()
 
-# Import the SAME function that credits.py uses for deduction,
-# so the tooltip number matches exactly what gets deducted.
 try:
     from credits import tokens_to_credits
 except ImportError:
-    # Fallback if import path doesn't resolve — replicate the exact formula
     def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens):
         cost_dollars = (
             (input_tokens       * 3.00) +
@@ -21,7 +17,7 @@ except ImportError:
             (cache_write_tokens * 3.75) +
             (cache_read_tokens  * 0.30)
         ) / 1_000_000
-        cost_dollars *= 2.0  # MARKUP
+        # No markup — match credits.py MARKUP=1.0
         return round(cost_dollars / 0.01, 2)
 
 
@@ -62,6 +58,11 @@ def load_history(workspace):
 
 
 def build_project(workspace):
+    """
+    Run npm install + vite build.
+    node_modules is NOT deleted here — cleanup_manager handles deletion
+    30 minutes after the last build, so follow-up edits stay fast.
+    """
     try:
         install = subprocess.run(
             ["npm", "install", "--include=dev", "--legacy-peer-deps"],
@@ -79,7 +80,7 @@ def build_project(workspace):
             capture_output=True, text=True, timeout=120
         )
         if result.returncode != 0:
-            print(f"[build] npm build failed:\n{result.stderr}")
+            print(f"[build] vite build failed:\n{result.stderr}")
             return False
 
         port_file = os.path.join(workspace, "preview_port.txt")
@@ -87,11 +88,8 @@ def build_project(workspace):
             os.remove(port_file)
 
         print(f"[build] success — preview served via Flask /auth/preview/ route")
-        import shutil
-        node_modules = os.path.join(workspace, "node_modules")
-        if os.path.isdir(node_modules):
-            shutil.rmtree(node_modules, ignore_errors=True)
-            print(f"[build] node_modules cleaned up")
+        # ── node_modules cleanup is deferred to cleanup_manager (30 min timer) ──
+        # Do NOT delete node_modules here anymore.
         return True
     except Exception as e:
         print(f"[build] exception: {e}")
@@ -300,12 +298,8 @@ def main():
 
         output, token_breakdown, code_changed = generator.chat(user_message)
 
-        print(f"[build] code_changed={code_changed} — {'will build' if code_changed else 'skipping build (text-only reply)'}")
+        print(f"[AA] code_changed={code_changed} — {'will build' if code_changed else 'skipping build (text-only reply)'}")
 
-        # ── FIX Problem 10 ────────────────────────────────────────────────
-        # Use tokens_to_credits (imported from credits.py) which includes
-        # the 2x MARKUP. Previously AA.py did raw math without markup, so
-        # the tooltip showed ~half the real deducted amount.
         credits_used = tokens_to_credits(
             input_tokens       = token_breakdown["input"],
             output_tokens      = token_breakdown["output"],
@@ -313,7 +307,7 @@ def main():
             cache_read_tokens  = token_breakdown["cache_read"],
         )
 
-        print(f"[credits] breakdown={token_breakdown} → {credits_used} credits (via tokens_to_credits with markup)")
+        print(f"[credits] breakdown={token_breakdown} → {credits_used} credits")
 
         append_message(WORKSPACE, "assistant", output,
                        token_breakdown=token_breakdown, credits=credits_used)
@@ -327,6 +321,17 @@ def main():
                 "detail": "Installing dependencies & compiling...",
             })
             build_ok = build_project(WORKSPACE)
+
+            # ── Schedule node_modules cleanup 30 min after build ──
+            # Import here so AA.py can run standalone without cleanup_manager
+            # being in the Python path (it falls back gracefully).
+            if build_ok:
+                try:
+                    from cleanup_manager import schedule_cleanup
+                    job_id = os.path.basename(WORKSPACE)
+                    schedule_cleanup(WORKSPACE, job_id)
+                except ImportError:
+                    print("[AA] cleanup_manager not found — skipping deferred cleanup")
 
         clear_progress(WORKSPACE)
 
