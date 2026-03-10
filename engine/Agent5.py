@@ -526,6 +526,7 @@ def create_generator(files_list,reviewer=None):
     model = 'claude-sonnet-4-20250514'
     model='claude-sonnet-4-5-20250929'
     model='claude-sonnet-4-6'
+    model = 'claude-haiku-4-5-20251001'
     
     agent6 = BaseAgent(client=client,model=model,system_prompt=FRONTEND_AGENT_SYSTEM_PROMPT,tools=anthropic_tools,temperature=1)
 
