@@ -59,9 +59,7 @@ def load_history(workspace):
 
 def build_project(workspace):
     """
-    Run npm install + vite build.
-    node_modules is NOT deleted here — cleanup_manager handles deletion
-    30 minutes after the last build, so follow-up edits stay fast.
+    Run npm install + vite build, then delete node_modules to save disk.
     """
     try:
         install = subprocess.run(
@@ -88,8 +86,14 @@ def build_project(workspace):
             os.remove(port_file)
 
         print(f"[build] success — preview served via Flask /auth/preview/ route")
-        # ── node_modules cleanup is deferred to cleanup_manager (30 min timer) ──
-        # Do NOT delete node_modules here anymore.
+
+        # ── Delete node_modules immediately to save disk (~200MB per job) ──
+        nm_path = os.path.join(workspace, "node_modules")
+        if os.path.isdir(nm_path):
+            import shutil
+            shutil.rmtree(nm_path, ignore_errors=True)
+            print(f"[build] node_modules deleted to save disk")
+
         return True
     except Exception as e:
         print(f"[build] exception: {e}")
@@ -321,17 +325,7 @@ def main():
                 "detail": "Installing dependencies & compiling...",
             })
             build_ok = build_project(WORKSPACE)
-
-            # ── Schedule node_modules cleanup 30 min after build ──
-            # Import here so AA.py can run standalone without cleanup_manager
-            # being in the Python path (it falls back gracefully).
-            if build_ok:
-                try:
-                    from cleanup_manager import schedule_cleanup
-                    job_id = os.path.basename(WORKSPACE)
-                    schedule_cleanup(WORKSPACE, job_id)
-                except ImportError:
-                    print("[AA] cleanup_manager not found — skipping deferred cleanup")
+            # node_modules already deleted inside build_project()
 
         clear_progress(WORKSPACE)
 
