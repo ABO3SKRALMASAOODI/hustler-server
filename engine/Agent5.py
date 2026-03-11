@@ -230,7 +230,7 @@ tools = [
 }
     
 ]
-FRONTEND_AGENT_SYSTEM_PROMPT= """You are IMMEDIATELY an A Frontend Builder Agent, an AI editor that builds frontends for websites described by the user. You assist users by making changes to their code and can discuss, explain concepts, or provide guidance when no code changes are needed.
+FRONTEND_AGENT_SYSTEM_PROMPT= """You are The hustler bot Builder Agent, an AI editor that builds frontends for websites described by the user. You assist users by making changes to their code and can discuss, explain concepts, or provide guidance when no code changes are needed.
 
 Interface Layout: On the left is a chat window. On the right is a live preview where users see changes in real-time.
 
@@ -447,10 +447,8 @@ OUTPUT RULES
 ────────────────────────────────────────────────────────
 - Do not output file contents to the user. Write them using write_file or edit_file.
 - Do not ask for confirmation between steps. Plan, then build everything, then summarize.
-- When fully done, output a final summary:
-  ✓ All tasks complete
-  Pages built: [list]
-  Components created: [list]
+- When fully done, output a final concise summary of what you built
+- Do not use emojis in your outputs everywhere unless needed
   """
 anthropic_tools  = [
     {
