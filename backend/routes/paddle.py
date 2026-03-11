@@ -9,7 +9,7 @@ paddle_bp = Blueprint('paddle', __name__)
 # ── Plan definitions ──────────────────────────────────────────────────────────
 
 PLANS_LIVE = {
-    'plus':  {'price_id': 'pri_01jxj6smtjkfsf22hdr4swyr9j', 'yearly_price_id': 'pri_01kkekq1hcvzvyhh3ffk3nk291', 'monthly_credits': 1000},
+    'plus':  {'price_id': 'pri_01jxj6smtjkfsf22hdr4swyr9j', 'yearly_price_id': 'pri_01kkekq1hcvzvyhh3ffk3nk291', 'monthly_credits': 800},
     'pro':   {'price_id': 'pri_01kk4k4y8c3ygxd620vcxg6ph1', 'yearly_price_id': 'pri_01kkeksjv9pf2nc1gphj67m8ae', 'monthly_credits': 2400},
     'ultra': {'price_id': 'pri_01kk4k83cwpmf1jsctgdvhm0n6', 'yearly_price_id': 'pri_01kkektygjg89gywskyj1dycx2', 'monthly_credits': 5000},
     'titan': {'price_id': 'pri_01kkekbegh2q5x3kxn28afbw5d', 'yearly_price_id': 'pri_01kkekf5ksjq5dqbfpxakf1g23', 'monthly_credits': 10000},
@@ -17,7 +17,7 @@ PLANS_LIVE = {
 }
 
 PLANS_SANDBOX = {
-    'plus':  {'price_id': 'pri_01jw8722trngfyz12kq158vrz7', 'yearly_price_id': 'SANDBOX_PLUS_YEARLY_TODO',  'monthly_credits': 1000},
+    'plus':  {'price_id': 'pri_01jw8722trngfyz12kq158vrz7', 'yearly_price_id': 'SANDBOX_PLUS_YEARLY_TODO',  'monthly_credits': 800},
     'pro':   {'price_id': 'pri_01kk4wvnbxb7nbh426bnk62xa2', 'yearly_price_id': 'SANDBOX_PRO_YEARLY_TODO',   'monthly_credits': 2400},
     'ultra': {'price_id': 'pri_01kk4wwr07ce0xp8x4kvdgt8kg', 'yearly_price_id': 'SANDBOX_ULTRA_YEARLY_TODO', 'monthly_credits': 5000},
     'titan': {'price_id': 'SANDBOX_TITAN_MONTHLY_TODO',      'yearly_price_id': 'SANDBOX_TITAN_YEARLY_TODO', 'monthly_credits': 10000},
