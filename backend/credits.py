@@ -1,11 +1,16 @@
 """
-Credits logic — cost-based pricing.
+Credits logic — per-model cost-based pricing.
 
-Anthropic Claude Sonnet pricing (per million tokens):
-  Input:        $3.00
-  Output:       $15.00
-  Cache write:  $3.75
-  Cache read:   $0.30
+Model tiers:
+  HB-6      = Claude Haiku 4.5    (Free+ plans)
+  HB-6 Pro  = Claude Sonnet 4.6   (Plus/Pro+ plans)
+  HB-7      = Claude Opus 4.6     (Ultra/Titan/Ace plans)
+
+Anthropic pricing (per million tokens):
+                    Input   Output  Cache Write  Cache Read
+  Haiku 4.5         $1.00   $5.00   $1.25        $0.10
+  Sonnet 4.6        $3.00   $15.00  $3.75        $0.30
+  Opus 4.6          $5.00   $25.00  $6.25        $0.50
 
 1 credit = $0.01
 
@@ -21,29 +26,82 @@ Monthly pool : wiped and refreshed on each billing cycle (handled by webhook)
 import datetime
 import math
 
-# ── Pricing ───────────────────────────────────────────────────────────────────
-INPUT_COST_PER_M        = 3.00
-OUTPUT_COST_PER_M       = 15.00
-CACHE_WRITE_COST_PER_M  = 3.75
-CACHE_READ_COST_PER_M   = 0.30
+# ── Per-model pricing (per million tokens) ────────────────────────────────────
+
+MODEL_PRICING = {
+    "hb-6": {
+        "anthropic_model": "claude-haiku-4-5-20251001",
+        "input":       1.00,
+        "output":      5.00,
+        "cache_write": 1.25,
+        "cache_read":  0.10,
+    },
+    "hb-6-pro": {
+        "anthropic_model": "claude-sonnet-4-6",
+        "input":       3.00,
+        "output":      15.00,
+        "cache_write": 3.75,
+        "cache_read":  0.30,
+    },
+    "hb-7": {
+        "anthropic_model": "claude-opus-4-6",
+        "input":       5.00,
+        "output":      25.00,
+        "cache_write": 6.25,
+        "cache_read":  0.50,
+    },
+}
+
+# Fallback to Sonnet pricing if model not recognized
+DEFAULT_MODEL = "hb-6-pro"
+
+# ── Plan → allowed models ─────────────────────────────────────────────────────
+
+PLAN_MODELS = {
+    "free":  ["hb-6"],
+    "plus":  ["hb-6", "hb-6-pro"],
+    "pro":   ["hb-6", "hb-6-pro"],
+    "ultra": ["hb-6", "hb-6-pro", "hb-7"],
+    "titan": ["hb-6", "hb-6-pro", "hb-7"],
+    "ace":   ["hb-6", "hb-6-pro", "hb-7"],
+}
 
 DOLLARS_PER_CREDIT  = 0.01
 MARKUP              = 1.0   # No markup — margin comes from bundle pricing
 FREE_DAILY_CREDITS  = 20
 SUB_DAILY_CREDITS   = 20
 
-# ── Core conversion ───────────────────────────────────────────────────────────
-def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens):
+# ── Core conversion (model-aware) ─────────────────────────────────────────────
+
+def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="hb-6-pro"):
+    """Convert token usage to credits based on the model's pricing."""
+    pricing = MODEL_PRICING.get(model, MODEL_PRICING[DEFAULT_MODEL])
+
     cost_dollars = (
-        (input_tokens       * INPUT_COST_PER_M)       +
-        (output_tokens      * OUTPUT_COST_PER_M)      +
-        (cache_write_tokens * CACHE_WRITE_COST_PER_M) +
-        (cache_read_tokens  * CACHE_READ_COST_PER_M)
+        (input_tokens       * pricing["input"])       +
+        (output_tokens      * pricing["output"])      +
+        (cache_write_tokens * pricing["cache_write"]) +
+        (cache_read_tokens  * pricing["cache_read"])
     ) / 1_000_000
+
     cost_dollars *= MARKUP
     return round(cost_dollars / DOLLARS_PER_CREDIT, 2)
 
+
+def get_anthropic_model(hb_model):
+    """Convert HB model name to Anthropic API model string."""
+    pricing = MODEL_PRICING.get(hb_model, MODEL_PRICING[DEFAULT_MODEL])
+    return pricing["anthropic_model"]
+
+
+def is_model_allowed(plan, hb_model):
+    """Check if a plan allows access to a given model."""
+    allowed = PLAN_MODELS.get(plan, PLAN_MODELS["free"])
+    return hb_model in allowed
+
+
 # ── Daily refresh ─────────────────────────────────────────────────────────────
+
 def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
     """
     Every day: reset daily_credits to 20 (never accumulates).
@@ -73,7 +131,6 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
             reset_date = datetime.date.fromisoformat(reset_date)
 
         if reset_date is None or reset_date < today:
-            # Reset daily to full — never accumulate
             daily = SUB_DAILY_CREDITS if is_subscribed else FREE_DAILY_CREDITS
             cur.execute(
                 """UPDATE users
@@ -85,7 +142,6 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
             )
             conn.commit()
         else:
-            # Keep credits_balance in sync without a write lock
             cur.execute(
                 "UPDATE users SET credits_balance = %s + credits_monthly WHERE id = %s",
                 (daily, user_id)
@@ -97,27 +153,34 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
         row = cur.fetchone()
     return row["credits_balance"] if row else 0
 
+
 # ── Get balance ───────────────────────────────────────────────────────────────
+
 def get_balance(conn, user_id: int) -> dict:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT credits_balance, is_subscribed FROM users WHERE id = %s",
+            "SELECT credits_balance, is_subscribed, plan FROM users WHERE id = %s",
             (user_id,)
         )
         row = cur.fetchone()
         if not row:
-            return {"balance": 0, "is_subscribed": False}
+            return {"balance": 0, "is_subscribed": False, "plan": "free"}
 
     is_subscribed = bool(row["is_subscribed"])
+    plan = row.get("plan") or "free"
     balance = refresh_daily_credits(conn, user_id, is_subscribed)
-    return {"balance": balance, "is_subscribed": is_subscribed}
+    return {"balance": balance, "is_subscribed": is_subscribed, "plan": plan}
+
 
 # ── Check before job ──────────────────────────────────────────────────────────
+
 def check_and_reserve(conn, user_id: int, min_credits: float = 1.0) -> bool:
     info = get_balance(conn, int(user_id))
     return info["balance"] >= min_credits
 
+
 # ── Concurrency check ─────────────────────────────────────────────────────────
+
 def count_running_jobs(conn, user_id: int) -> int:
     """Return how many jobs this user currently has in 'running' state."""
     with conn.cursor() as cur:
@@ -128,14 +191,19 @@ def count_running_jobs(conn, user_id: int) -> int:
         row = cur.fetchone()
     return row["cnt"] if row else 0
 
+
 # ── Deduct after job ──────────────────────────────────────────────────────────
+
 def deduct_credits(conn, user_id: int, job_id: str, turn: int, tokens_used: int,
                    input_tokens: int = 0, output_tokens: int = 0,
-                   cache_write_tokens: int = 0, cache_read_tokens: int = 0):
+                   cache_write_tokens: int = 0, cache_read_tokens: int = 0,
+                   model: str = "hb-6-pro"):
     if input_tokens or output_tokens or cache_write_tokens or cache_read_tokens:
-        credits_used = tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens)
+        credits_used = tokens_to_credits(input_tokens, output_tokens,
+                                         cache_write_tokens, cache_read_tokens,
+                                         model=model)
     else:
-        credits_used = tokens_to_credits(tokens_used, 0, 0, 0)
+        credits_used = tokens_to_credits(tokens_used, 0, 0, 0, model=model)
 
     with conn.cursor() as cur:
         # Deduct from daily first, then monthly
@@ -173,7 +241,9 @@ def deduct_credits(conn, user_id: int, job_id: str, turn: int, tokens_used: int,
 
     return credits_used
 
+
 # ── Per-job breakdown ─────────────────────────────────────────────────────────
+
 def get_job_credits(conn, job_id: str) -> list:
     with conn.cursor() as cur:
         cur.execute(

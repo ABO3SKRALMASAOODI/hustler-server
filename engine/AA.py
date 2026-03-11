@@ -10,15 +10,29 @@ load_dotenv()
 try:
     from credits import tokens_to_credits
 except ImportError:
-    def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens):
+    def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="hb-6-pro"):
+        # Fallback pricing table
+        pricing = {
+            "hb-6":     {"input": 1.00, "output": 5.00,  "cache_write": 1.25, "cache_read": 0.10},
+            "hb-6-pro": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+            "hb-7":     {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+        }
+        p = pricing.get(model, pricing["hb-6-pro"])
         cost_dollars = (
-            (input_tokens       * 3.00) +
-            (output_tokens      * 15.00) +
-            (cache_write_tokens * 3.75) +
-            (cache_read_tokens  * 0.30)
+            (input_tokens       * p["input"]) +
+            (output_tokens      * p["output"]) +
+            (cache_write_tokens * p["cache_write"]) +
+            (cache_read_tokens  * p["cache_read"])
         ) / 1_000_000
-        # No markup — match credits.py MARKUP=1.0
         return round(cost_dollars / 0.01, 2)
+
+
+# Map Anthropic model strings back to HB model names for credit calculation
+ANTHROPIC_TO_HB = {
+    "claude-haiku-4-5-20251001": "hb-6",
+    "claude-sonnet-4-6":        "hb-6-pro",
+    "claude-opus-4-6":          "hb-7",
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -87,7 +101,6 @@ def build_project(workspace):
 
         print(f"[build] success — preview served via Flask /auth/preview/ route")
 
-        # ── Delete node_modules immediately to save disk (~200MB per job) ──
         nm_path = os.path.join(workspace, "node_modules")
         if os.path.isdir(nm_path):
             import shutil
@@ -245,10 +258,39 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--message",   default=None)
+    parser.add_argument("--model",     default=None,
+                        help="Anthropic model string, e.g. claude-haiku-4-5-20251001")
     args = parser.parse_args()
 
     WORKSPACE = args.workspace
     os.chdir(WORKSPACE)
+
+    # Determine the model to use
+    anthropic_model = args.model
+    if not anthropic_model:
+        # Fall back to meta.json
+        meta_path = os.path.join(WORKSPACE, "meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                hb_model = meta.get("model", "hb-6")
+                # Convert HB name to Anthropic model string
+                model_map = {
+                    "hb-6":     "claude-haiku-4-5-20251001",
+                    "hb-6-pro": "claude-sonnet-4-6",
+                    "hb-7":     "claude-opus-4-6",
+                }
+                anthropic_model = model_map.get(hb_model, "claude-haiku-4-5-20251001")
+            except Exception:
+                anthropic_model = "claude-haiku-4-5-20251001"
+        else:
+            anthropic_model = "claude-haiku-4-5-20251001"
+
+    # Determine HB model name for credit calculation
+    hb_model = ANTHROPIC_TO_HB.get(anthropic_model, "hb-6-pro")
+
+    print(f"[AA] Using model: {anthropic_model} (HB: {hb_model})")
 
     try:
         write_state(WORKSPACE, "running")
@@ -260,7 +302,7 @@ def main():
         })
 
         files_list = FileState(False)
-        generator  = create_generator(files_list=files_list)
+        generator  = create_generator(files_list=files_list, model=anthropic_model)
 
         write_progress(WORKSPACE, {
             "action": "thinking",
@@ -309,9 +351,10 @@ def main():
             output_tokens      = token_breakdown["output"],
             cache_write_tokens = token_breakdown["cache_write"],
             cache_read_tokens  = token_breakdown["cache_read"],
+            model              = hb_model,
         )
 
-        print(f"[credits] breakdown={token_breakdown} → {credits_used} credits")
+        print(f"[credits] model={hb_model} breakdown={token_breakdown} → {credits_used} credits")
 
         append_message(WORKSPACE, "assistant", output,
                        token_breakdown=token_breakdown, credits=credits_used)
@@ -325,7 +368,6 @@ def main():
                 "detail": "Installing dependencies & compiling...",
             })
             build_ok = build_project(WORKSPACE)
-            # node_modules already deleted inside build_project()
 
         clear_progress(WORKSPACE)
 

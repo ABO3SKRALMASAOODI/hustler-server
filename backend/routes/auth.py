@@ -12,7 +12,8 @@ import shutil, json, time
 from credits import (
     count_running_jobs,
     check_and_reserve, deduct_credits, get_balance,
-    get_job_credits, refresh_daily_credits, tokens_to_credits
+    get_job_credits, refresh_daily_credits, tokens_to_credits,
+    is_model_allowed, get_anthropic_model, PLAN_MODELS
 )
 
 auth_bp = Blueprint('auth', __name__)
@@ -73,9 +74,6 @@ TEMPLATE_JOB_IDS = {
 # ------------------------------------------------------------------ #
 
 def _get_preview_url(job_id, job_folder):
-    """
-    Return an ABSOLUTE preview URL for a job if a built dist/ folder exists.
-    """
     from flask import request as flask_request
 
     port_file = os.path.join(job_folder, "preview_port.txt")
@@ -94,14 +92,10 @@ def _get_preview_url(job_id, job_folder):
 
 
 # ------------------------------------------------------------------ #
-#  Subprocess kill helper (FIX Issue 2)                                #
+#  Subprocess kill helper                                              #
 # ------------------------------------------------------------------ #
 
 def _kill_job_process(job_folder):
-    """
-    Kill the AA.py subprocess for a job by reading its PID from state.json.
-    Sends SIGTERM to the process group so child processes (npm, vite) also die.
-    """
     state_path = os.path.join(job_folder, "state.json")
     if not os.path.exists(state_path):
         return
@@ -113,14 +107,12 @@ def _kill_job_process(job_folder):
         if not pid:
             return
 
-        # Kill the entire process group so npm/vite children also die
         try:
             os.killpg(os.getpgid(int(pid)), signal.SIGTERM)
             print(f"[cancel] Killed process group for PID {pid}")
         except ProcessLookupError:
             print(f"[cancel] PID {pid} already dead")
         except PermissionError:
-            # Fallback: try killing just the process
             try:
                 os.kill(int(pid), signal.SIGTERM)
                 print(f"[cancel] Killed PID {pid} directly")
@@ -128,6 +120,21 @@ def _kill_job_process(job_folder):
                 print(f"[cancel] PID {pid} already dead")
     except Exception as e:
         print(f"[cancel] Error killing process: {e}")
+
+
+# ------------------------------------------------------------------ #
+#  Helper: get user plan from DB                                       #
+# ------------------------------------------------------------------ #
+
+def _get_user_plan(user_id):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT plan FROM users WHERE id = %s", (int(user_id),))
+            row = cur.fetchone()
+        return (row.get("plan") or "free") if row else "free"
+    finally:
+        conn.close()
 
 
 # ------------------------------------------------------------------ #
@@ -154,6 +161,47 @@ def get_job_credit_breakdown(user_id, job_id):
         return jsonify({"turns": turns}), 200
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------------ #
+#  Model access info                                                   #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/models', methods=['GET'])
+@token_required
+def get_available_models(user_id):
+    """Return the list of models and which ones the user can access."""
+    plan = _get_user_plan(user_id)
+    allowed = PLAN_MODELS.get(plan, PLAN_MODELS["free"])
+
+    models = [
+        {
+            "id": "hb-6",
+            "name": "HB-6",
+            "description": "Fast & efficient for everyday tasks",
+            "engine": "claude-haiku-4-5-20251001",
+            "locked": "hb-6" not in allowed,
+            "min_plan": "free",
+        },
+        {
+            "id": "hb-6-pro",
+            "name": "HB-6 Pro",
+            "description": "Powerful for complex apps, uses more credits",
+            "engine": "claude-sonnet-4-6",
+            "locked": "hb-6-pro" not in allowed,
+            "min_plan": "plus",
+        },
+        {
+            "id": "hb-7",
+            "name": "HB-7",
+            "description": "Advanced reasoning for complex tasks, highest credit usage",
+            "engine": "claude-opus-4-6",
+            "locked": "hb-7" not in allowed,
+            "min_plan": "ultra",
+        },
+    ]
+
+    return jsonify({"models": models, "plan": plan}), 200
 
 
 # ------------------------------------------------------------------ #
@@ -324,6 +372,7 @@ def verify_reset_code():
 
     return jsonify({'message': 'Code verified'}), 200
 
+
 @auth_bp.route('/reset-password', methods=['POST'])
 def reset_password():
     data         = request.get_json()
@@ -366,6 +415,17 @@ def _process_credits_deduction(job_id, job_folder, user_id):
     if not entries:
         return
 
+    # Read model from meta.json
+    meta_path = os.path.join(job_folder, "meta.json")
+    model = "hb-6-pro"
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            model = meta.get("model", "hb-6-pro")
+        except Exception:
+            pass
+
     conn = get_db()
     try:
         for i, entry in enumerate(entries):
@@ -379,6 +439,7 @@ def _process_credits_deduction(job_id, job_folder, user_id):
                 output_tokens      = int(entry.get("output_tokens", 0)),
                 cache_write_tokens = int(entry.get("cache_write_tokens", 0)),
                 cache_read_tokens  = int(entry.get("cache_read_tokens", 0)),
+                model              = model,
             )
 
         with conn.cursor() as cur:
@@ -454,8 +515,14 @@ def generate(user_id):
     data   = request.get_json() or {}
     prompt = data.get("prompt")
     title  = data.get("title", "").strip() or prompt[:40] if prompt else "New Project"
+    model  = data.get("model", "hb-6")  # Default to HB-6 (Haiku) for new projects
     if not prompt:
         return jsonify({"error": "Prompt required"}), 400
+
+    # Validate model access
+    plan = _get_user_plan(user_id)
+    if not is_model_allowed(plan, model):
+        return jsonify({"error": f"Your {plan} plan doesn't include access to this model. Please upgrade."}), 403
 
     conn = get_db()
     try:
@@ -486,19 +553,20 @@ def generate(user_id):
         f.write(prompt)
 
     with open(os.path.join(job_folder, "meta.json"), "w") as f:
-        json.dump({"user_id": user_id}, f)
+        json.dump({"user_id": user_id, "model": model}, f)
 
     with open(os.path.join(job_folder, "state.json"), "w", encoding="utf-8") as f:
         json.dump({"state": "running", "created_at": time.time()}, f)
 
-    # ── FIX Issue 2: Start subprocess in its own process group and store PID ──
+    # Resolve the Anthropic model string from HB model name
+    anthropic_model = get_anthropic_model(model)
+
     proc = subprocess.Popen(
-        ["python3", ENGINE_SCRIPT, "--workspace", job_folder],
+        ["python3", ENGINE_SCRIPT, "--workspace", job_folder, "--model", anthropic_model],
         cwd=job_folder,
-        preexec_fn=os.setsid  # Create new process group so we can kill all children
+        preexec_fn=os.setsid
     )
 
-    # Store PID in state.json so cancel endpoint can kill it
     with open(os.path.join(job_folder, "state.json"), "w", encoding="utf-8") as f:
         json.dump({"state": "running", "created_at": time.time(), "pid": proc.pid}, f)
 
@@ -529,12 +597,42 @@ def generate(user_id):
 def job_message(user_id, job_id):
     data    = request.get_json() or {}
     message = data.get("message", "").strip()
+    model   = data.get("model", None)  # Optional: switch model mid-conversation
     if not message:
         return jsonify({"error": "message required"}), 400
 
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
+
+    # Read current model from meta.json, allow override
+    meta_path = os.path.join(job_folder, "meta.json")
+    current_model = "hb-6"
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            current_model = meta.get("model", "hb-6")
+        except Exception:
+            pass
+
+    if model:
+        # Validate model access
+        plan = _get_user_plan(user_id)
+        if not is_model_allowed(plan, model):
+            return jsonify({"error": f"Your {plan} plan doesn't include access to this model. Please upgrade."}), 403
+        # Update meta.json with new model
+        try:
+            meta = {}
+            if os.path.exists(meta_path):
+                with open(meta_path) as f:
+                    meta = json.load(f)
+            meta["model"] = model
+            with open(meta_path, "w") as f:
+                json.dump(meta, f)
+            current_model = model
+        except Exception:
+            pass
 
     conn = get_db()
     try:
@@ -546,7 +644,6 @@ def job_message(user_id, job_id):
     finally:
         conn.close()
 
-    # Cancel pending node_modules cleanup — user is actively editing this job
     try:
         from cleanup_manager import cancel_cleanup
         cancel_cleanup(job_id)
@@ -560,9 +657,11 @@ def job_message(user_id, job_id):
         if state_data.get("state") == "running":
             return jsonify({"error": "Job is still running"}), 409
 
-    # ── FIX Issue 2: Store PID for follow-up turns too ──
+    anthropic_model = get_anthropic_model(current_model)
+
     proc = subprocess.Popen(
-        ["python3", ENGINE_SCRIPT, "--workspace", job_folder, "--message", message],
+        ["python3", ENGINE_SCRIPT, "--workspace", job_folder,
+         "--message", message, "--model", anthropic_model],
         cwd=job_folder,
         preexec_fn=os.setsid
     )
@@ -645,6 +744,17 @@ def job_status(user_id, job_id):
         except (json.JSONDecodeError, IOError):
             progress = []
 
+    # Read model from meta
+    meta_path = os.path.join(job_folder, "meta.json")
+    job_model = "hb-6"
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            job_model = meta.get("model", "hb-6")
+        except Exception:
+            pass
+
     return jsonify({
         "job_id":          job_id,
         "state":           state_data.get("state", "unknown"),
@@ -655,6 +765,8 @@ def job_status(user_id, job_id):
         "preview_url":     preview_url,
         "credits_balance": credits_info["balance"],
         "progress":        progress,
+        "model":           job_model,
+        "plan":            credits_info.get("plan", "free"),
     }), 200
 
 
@@ -716,7 +828,7 @@ def clone_template(user_id):
     )
 
     with open(os.path.join(new_folder, "meta.json"), "w") as f:
-        json.dump({"user_id": user_id, "cloned_from": template_id}, f)
+        json.dump({"user_id": user_id, "cloned_from": template_id, "model": "hb-6"}, f)
 
     with open(os.path.join(new_folder, "state.json"), "w") as f:
         json.dump({"state": "completed", "cloned_from": template_id, "updated_at": time.time()}, f)
@@ -878,7 +990,7 @@ def download_job_zip(user_id, job_id):
     if not has_readme:
         readme_content = f"""# {project_title}
 
-Generated by [Immediately](https://immediately.dev) — AI-powered app builder.
+Generated by [The Hustler Bot](https://thehustlerbot.com) — AI-powered app builder.
 
 ## Getting Started
 
@@ -1021,7 +1133,7 @@ def generate_test():
 
 
 # ------------------------------------------------------------------ #
-#  Cancel job — FIX Issue 2: Actually kill the subprocess              #
+#  Cancel job                                                          #
 # ------------------------------------------------------------------ #
 
 @auth_bp.route('/job/<job_id>/cancel', methods=['POST'])
@@ -1030,11 +1142,9 @@ def cancel_job(user_id, job_id):
     try:
         job_folder = os.path.join(OUTPUTS_DIR, job_id)
 
-        # Kill the AA.py subprocess and its children
         if os.path.isdir(job_folder):
             _kill_job_process(job_folder)
 
-            # Update state.json to failed so polling picks it up
             state_path = os.path.join(job_folder, "state.json")
             with open(state_path, "w") as f:
                 json.dump({
@@ -1043,12 +1153,10 @@ def cancel_job(user_id, job_id):
                     "updated_at": time.time()
                 }, f)
 
-            # Clean up progress file
             progress_path = os.path.join(job_folder, "progress.json")
             if os.path.exists(progress_path):
                 os.remove(progress_path)
 
-        # Update DB
         conn = get_db()
         with conn.cursor() as cur:
             cur.execute(

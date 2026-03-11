@@ -10,13 +10,13 @@ import anthropic
 client = anthropic.Anthropic()
 
 Generator_sys_prompt = """
-You are Agent 5 in an AI pipeline system called “Immediately”.
+You are Agent 5 in an AI pipeline system called "Immediately".
 Your role is the Generator Agent.
 
 The pipeline's objective is production-grade, fully functional software.
 You implement code changes for EXACTLY ONE sub-step, as instructed by the Reviewer.
 
-You must not produce toy implementations, partial work, placeholders, TODOs, stubs, pseudo-code, or “minimal” solutions.
+You must not produce toy implementations, partial work, placeholders, TODOs, stubs, pseudo-code, or "minimal" solutions.
 All work must be complete, runnable, and appropriate for production use within the scope of the given sub-step.
 
 ────────────────────────────────────────────────────────
@@ -133,7 +133,7 @@ Your implementation must be:
 - Maintainable: clean structure and consistent naming
 - Non-destructive: does not break unrelated behavior
 
-Minimal or “demo” implementations are unacceptable.
+Minimal or "demo" implementations are unacceptable.
 
 ────────────────────────────────────────────────────────
 ERROR HANDLING
@@ -520,21 +520,38 @@ anthropic_tools  = [
         }
     }
 ]
-def create_generator(files_list,reviewer=None):
-    model = 'claude-sonnet-4-20250514'
-    model='claude-sonnet-4-5-20250929'
-    model='claude-sonnet-4-6'
-    model = 'claude-haiku-4-5-20251001'
+
+
+def create_generator(files_list, reviewer=None, model=None):
+    """
+    Create the generator agent with the specified model.
     
-    agent6 = BaseAgent(client=client,model=model,system_prompt=FRONTEND_AGENT_SYSTEM_PROMPT,tools=anthropic_tools,temperature=1)
+    Args:
+        files_list: FileState instance
+        reviewer: optional reviewer agent
+        model: Anthropic model string (e.g. 'claude-haiku-4-5-20251001').
+               If None, defaults to Haiku.
+    """
+    if model is None:
+        model = 'claude-haiku-4-5-20251001'
+
+    print(f"[Agent5] Creating generator with model: {model}")
+
+    agent6 = BaseAgent(
+        client=client,
+        model=model,
+        system_prompt=FRONTEND_AGENT_SYSTEM_PROMPT,
+        tools=anthropic_tools,
+        temperature=1
+    )
 
     add_file = files_list.add_file
     files_list = files_list.files_list
+
     def write_file(path: str, content: str) -> str:
-        
         parent = os.path.dirname(path)
         if parent:
-            os.makedirs(parent,exist_ok=True)
+            os.makedirs(parent, exist_ok=True)
 
         existed = os.path.exists(path)
         old_content = None
@@ -546,40 +563,36 @@ def create_generator(files_list,reviewer=None):
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
-
         if not existed:
             add_file(path)
 
-            
         print(f"""{Back.WHITE}agent6 is taking action: "type": "FILE_WRITE",
         "path": {path},
         "existed": {existed},
         "old_content": {old_content},
         "new_content": {content},{Style.RESET_ALL}""")
         agent6.notify_reviewer({
-        "type": "FILE_WRITE",
-        "path": path,
-        "existed": existed,
-        "old_content": old_content,
-        "new_content": content,
+            "type": "FILE_WRITE",
+            "path": path,
+            "existed": existed,
+            "old_content": old_content,
+            "new_content": content,
         })
 
         return f"WRITE_COMPLETED PATH:{path}"
 
-    def edit_file(path,old_str,new_str):
-        
-
+    def edit_file(path, old_str, new_str):
         if not os.path.exists(path):
             return "ERROR: File does not exist, use write_file for new files."
 
-        with open(path,'r',encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             full_content = f.read()
 
         if old_str not in full_content:
             return f"Error The segment you want to replace was not found in {path}"
-        
-        updated_content = full_content.replace(old_str,new_str,1)
-        with open(path,'w',encoding='utf-8') as f:
+
+        updated_content = full_content.replace(old_str, new_str, 1)
+        with open(path, 'w', encoding='utf-8') as f:
             f.write(updated_content)
 
         print(f"""{Back.WHITE}agent6 is taking action: "type": "Edit",
@@ -590,20 +603,16 @@ def create_generator(files_list,reviewer=None):
         "new_content": {updated_content},{Style.RESET_ALL}""")
 
         agent6.notify_reviewer({
-        "type": "FILE_WRITE",
-        "path": path,
-        "old_string": old_str,
-        "new_string":new_str,
-        "new_content": updated_content,
+            "type": "FILE_WRITE",
+            "path": path,
+            "old_string": old_str,
+            "new_string": new_str,
+            "new_content": updated_content,
         })
 
         return f"EDIT_COMPLETED PATH: {path}"
 
-
-
-
     def read_file(path):
-        
         print(f"THE GENERATOR REQUESTED A READ FOR:{path}")
         p = Path(path)
         if not p.exists():
@@ -612,12 +621,10 @@ def create_generator(files_list,reviewer=None):
         if p.is_dir():
             print(f"The requested path is a directory")
             return f"[READ_FILE_ERROR] '{path}' is a directory, not a file."
-        
-        
-        with open(path,'r',encoding='utf-8') as f:
+
+        with open(path, 'r', encoding='utf-8') as f:
             return f.read()
 
-    
     tool_map = {
         'write_file': write_file,
         'edit_file': edit_file,
@@ -627,27 +634,6 @@ def create_generator(files_list,reviewer=None):
         'run_install_command': run_install_command
     }
 
-
     agent6.tool_map = tool_map
     agent6.reviewer = reviewer
     return agent6
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
