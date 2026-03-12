@@ -50,7 +50,7 @@ def track_visit():
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO page_visits (page, ip, user_agent) VALUES (%s, %s, %s)",
-                (page, request.remote_addr, request.headers.get('User-Agent', '')[:300])
+                (page, request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip(), request.headers.get('User-Agent', '')[:300])
             )
             conn.commit()
     finally:
