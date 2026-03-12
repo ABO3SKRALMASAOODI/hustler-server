@@ -215,14 +215,14 @@ def overview():
             success_rate = round((jobs_completed_total / max(1, jobs_completed_total + jobs_failed_total)) * 100, 1)
 
             # ── Visits ──
-            cur.execute("SELECT COUNT(*) AS total FROM page_visits WHERE visited_at::date = CURRENT_DATE")
-            visits_today = cur.fetchone()['total']
+            cur.execute("SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_total FROM page_visits WHERE visited_at::date = CURRENT_DATE")
+            _r = cur.fetchone(); visits_today = _r['total']; unique_today = _r['unique_total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '7 days'")
-            visits_week = cur.fetchone()['total']
+            cur.execute("SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '7 days'")
+            _r = cur.fetchone(); visits_week = _r['total']; unique_week = _r['unique_total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
-            visits_month = cur.fetchone()['total']
+            cur.execute("SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
+            _r = cur.fetchone(); visits_month = _r['total']; unique_month = _r['unique_total']
 
             # Previous week visits for trend
             cur.execute("SELECT COUNT(*) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '14 days' AND visited_at < NOW() - INTERVAL '7 days'")
@@ -287,8 +287,11 @@ def overview():
             },
             'visits': {
                 'today': visits_today,
+                'unique_today': unique_today,
                 'week': visits_week,
+                'unique_week': unique_week,
                 'month': visits_month,
+                'unique_month': unique_month,
                 'trend_week': visits_trend,
             },
             'credits': {
@@ -378,10 +381,13 @@ def chart_visits():
             cur.execute("""
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
-                    COALESCE(v.count, 0) AS count
+                    COALESCE(v.total, 0) AS count,
+                    COALESCE(v.unique_visitors, 0) AS unique_visitors
                 FROM generate_series(NOW() - INTERVAL '30 days', NOW(), '1 day') AS d
                 LEFT JOIN (
-                    SELECT visited_at::date AS dt, COUNT(*) AS count
+                    SELECT visited_at::date AS dt,
+                        COUNT(*) AS total,
+                        COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_visitors
                     FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
                     GROUP BY visited_at::date
                 ) v ON v.dt = d::date
@@ -838,7 +844,9 @@ def page_analytics():
         with conn.cursor() as cur:
             # Top pages (last 30 days)
             cur.execute("""
-                SELECT page, COUNT(*) AS views
+                SELECT page,
+                    COUNT(*) AS views,
+                    COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_visitors
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                 GROUP BY page
@@ -1144,12 +1152,14 @@ def country_stats():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT country, COUNT(*) as visits
+                SELECT country,
+                    COUNT(*) as visits,
+                    COUNT(DISTINCT COALESCE(device_id, ip)) as unique_visitors
                 FROM page_visits
                 WHERE country IS NOT NULL AND country != 'Unknown'
                   AND visited_at >= NOW() - INTERVAL '30 days'
                 GROUP BY country
-                ORDER BY visits DESC
+                ORDER BY unique_visitors DESC
                 LIMIT 20
             """)
             rows = cur.fetchall()
