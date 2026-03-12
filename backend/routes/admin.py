@@ -9,6 +9,13 @@ admin_bp = Blueprint('admin', __name__)
 
 ADMIN_EMAIL = "thehustlerbot@gmail.com"
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  The single SQL expression for "unique visitor".
+#  Uses device_id when available, falls back to ip.
+#  NULLIF ensures empty strings don't count as a valid device_id.
+# ─────────────────────────────────────────────────────────────────────────────
+UNIQUE_VISITOR = "COALESCE(NULLIF(device_id, ''), ip)"
+
 
 def get_db():
     return psycopg2.connect(current_app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
@@ -38,19 +45,33 @@ def admin_required(f):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  TRACK PAGE VISIT (unchanged — public endpoint)
+#  TRACK PAGE VISIT
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/track', methods=['POST'])
 def track_visit():
-    data = request.get_json() or {}
+    # Handle both application/json AND text/plain (sendBeacon fallback)
+    data = request.get_json(silent=True)
+    if not data:
+        try:
+            import json
+            data = json.loads(request.get_data(as_text=True))
+        except Exception:
+            data = {}
+
     page = data.get('page', '/')
     referrer = data.get('referrer', '')[:500]
     session_id = data.get('session_id', '')[:64]
     time_on_page = int(data.get('time_on_page', 0))
-    device_id = data.get('device_id', '')[:64]
+    device_id = (data.get('device_id', '') or '')[:64]
     ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
     user_agent = request.headers.get('User-Agent', '')[:300]
+
+    # Normalize: empty string → None so DB stores NULL
+    if not device_id.strip():
+        device_id = None
+    if not session_id.strip():
+        session_id = None
 
     def _parse_referrer(ref):
         if not ref or ref == '':
@@ -143,7 +164,7 @@ def track_visit():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  OVERVIEW KPIs — Enhanced with more metrics
+#  OVERVIEW KPIs
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/overview', methods=['GET'])
@@ -165,18 +186,13 @@ def overview():
             cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '30 days'")
             new_users_month = cur.fetchone()['total']
 
-            # Previous period comparisons for trends
             cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days'")
             prev_week_users = cur.fetchone()['total']
-
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '60 days' AND created_at < NOW() - INTERVAL '30 days'")
-            prev_month_users = cur.fetchone()['total']
 
             # ── Subscriptions ──
             cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1")
             total_subscribed = cur.fetchone()['total']
 
-            # Plan breakdown
             cur.execute("""
                 SELECT plan, COUNT(*) AS count FROM users
                 WHERE is_verified = 1
@@ -186,8 +202,6 @@ def overview():
 
             plan_prices = {'plus': 20, 'pro': 50, 'ultra': 100}
             mrr = sum(plan_prices.get(p, 0) * c for p, c in plan_breakdown.items())
-
-            # Conversion rate: subscribed / total verified
             conversion_rate = round((total_subscribed / max(1, total_users)) * 100, 1)
 
             # ── Jobs ──
@@ -214,17 +228,28 @@ def overview():
 
             success_rate = round((jobs_completed_total / max(1, jobs_completed_total + jobs_failed_total)) * 100, 1)
 
-            # ── Visits ──
-            cur.execute("SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_total FROM page_visits WHERE visited_at::date = CURRENT_DATE")
+            # ── Visits (consistent unique = device_id, fallback ip) ──
+            cur.execute(f"""
+                SELECT COUNT(*) AS total,
+                       COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
+                FROM page_visits WHERE visited_at::date = CURRENT_DATE
+            """)
             _r = cur.fetchone(); visits_today = _r['total']; unique_today = _r['unique_total']
 
-            cur.execute("SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '7 days'")
+            cur.execute(f"""
+                SELECT COUNT(*) AS total,
+                       COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
+                FROM page_visits WHERE visited_at >= NOW() - INTERVAL '7 days'
+            """)
             _r = cur.fetchone(); visits_week = _r['total']; unique_week = _r['unique_total']
 
-            cur.execute("SELECT COUNT(*) AS total, COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
+            cur.execute(f"""
+                SELECT COUNT(*) AS total,
+                       COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_total
+                FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
+            """)
             _r = cur.fetchone(); visits_month = _r['total']; unique_month = _r['unique_total']
 
-            # Previous week visits for trend
             cur.execute("SELECT COUNT(*) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '14 days' AND visited_at < NOW() - INTERVAL '7 days'")
             prev_week_visits = cur.fetchone()['total']
 
@@ -241,7 +266,6 @@ def overview():
             cur.execute("SELECT COALESCE(SUM(tokens_used), 0) AS total FROM job_credits WHERE created_at::date = CURRENT_DATE")
             tokens_today = int(cur.fetchone()['total'])
 
-            # Avg credits per job
             cur.execute("""
                 SELECT COALESCE(AVG(total_cred), 0) AS avg_credits
                 FROM (
@@ -252,7 +276,7 @@ def overview():
             """)
             avg_credits_per_job = round(float(cur.fetchone()['avg_credits']), 2)
 
-            # ── Compute trends (percentage change vs previous period) ──
+            # ── Trends ──
             def trend(current, previous):
                 if previous == 0:
                     return 100 if current > 0 else 0
@@ -378,7 +402,7 @@ def chart_visits():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
                     COALESCE(v.total, 0) AS count,
@@ -387,7 +411,7 @@ def chart_visits():
                 LEFT JOIN (
                     SELECT visited_at::date AS dt,
                         COUNT(*) AS total,
-                        COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_visitors
+                        COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors
                     FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
                     GROUP BY visited_at::date
                 ) v ON v.dt = d::date
@@ -438,11 +462,6 @@ def chart_credits():
 @admin_bp.route('/charts/mrr', methods=['GET'])
 @admin_required
 def chart_mrr():
-    """
-    Approximate MRR over the last 30 days by counting active subscribers per day.
-    Uses subscription_expiry to determine if a user was subscribed on a given day.
-    """
-    plan_prices = {'plus': 20, 'pro': 50, 'ultra': 100}
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -480,28 +499,20 @@ def revenue_analytics():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            # Current MRR
             cur.execute("SELECT plan, COUNT(*) AS count FROM users WHERE is_subscribed = 1 GROUP BY plan")
             plan_counts = {r['plan']: r['count'] for r in cur.fetchall()}
             mrr = sum(plan_prices.get(p, 0) * c for p, c in plan_counts.items())
-
-            # ARR
             arr = mrr * 12
 
-            # Average revenue per user (all verified)
             cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1")
             total_verified = cur.fetchone()['total']
             arpu = round(mrr / max(1, total_verified), 2)
 
-            # Average revenue per paying user
             total_paying = sum(plan_counts.get(p, 0) for p in ['plus', 'pro', 'ultra'])
             arppu = round(mrr / max(1, total_paying), 2)
-
-            # LTV estimate (assume 6 month avg retention)
             ltv = round(arppu * 6, 2)
 
-            # Conversion funnel: visitors -> registered -> subscribed
-            cur.execute("SELECT COUNT(DISTINCT ip) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
+            cur.execute(f"SELECT COUNT(DISTINCT ip) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
             unique_visitors_30d = cur.fetchone()['total']
 
             cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '30 days'")
@@ -510,7 +521,6 @@ def revenue_analytics():
             cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND created_at >= NOW() - INTERVAL '30 days'")
             subscribed_30d = cur.fetchone()['total']
 
-            # Revenue by plan
             revenue_by_plan = {}
             for plan, count in plan_counts.items():
                 price = plan_prices.get(plan, 0)
@@ -551,7 +561,6 @@ def engine_stats():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            # Average tokens per job
             cur.execute("""
                 SELECT
                     COALESCE(AVG(total_tokens), 0) AS avg_tokens,
@@ -568,7 +577,6 @@ def engine_stats():
             """)
             token_stats = cur.fetchone()
 
-            # Token breakdown by type (input vs output vs cache)
             cur.execute("""
                 SELECT
                     COALESCE(SUM(input_tokens), 0) AS total_input,
@@ -580,7 +588,6 @@ def engine_stats():
             """)
             token_breakdown = cur.fetchone()
 
-            # Jobs by hour of day (last 30 days)
             cur.execute("""
                 SELECT
                     EXTRACT(HOUR FROM created_at) AS hour,
@@ -592,7 +599,6 @@ def engine_stats():
             """)
             hourly = [{'hour': int(r['hour']), 'count': r['count']} for r in cur.fetchall()]
 
-            # Success rate over last 7 days (daily)
             cur.execute("""
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
@@ -616,7 +622,6 @@ def engine_stats():
             """)
             daily_success = [dict(r) for r in cur.fetchall()]
 
-            # Average turns per job (number of credit entries)
             cur.execute("""
                 SELECT COALESCE(AVG(turns), 0) AS avg_turns
                 FROM (
@@ -627,7 +632,6 @@ def engine_stats():
             """)
             avg_turns = round(float(cur.fetchone()['avg_turns']), 1)
 
-            # Token cost trend (last 30 days)
             cur.execute("""
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
@@ -678,10 +682,6 @@ def engine_stats():
 @admin_bp.route('/retention', methods=['GET'])
 @admin_required
 def retention_cohorts():
-    """
-    Weekly cohort retention: for users who registered in each week,
-    what % created a job in subsequent weeks.
-    """
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -747,7 +747,6 @@ def engagement():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            # Users by engagement level (jobs in last 7 days)
             cur.execute("""
                 SELECT
                     CASE
@@ -769,31 +768,17 @@ def engagement():
             """)
             segments = {r['segment']: r['user_count'] for r in cur.fetchall()}
 
-            # DAU (distinct users who created a job today)
-            cur.execute("""
-                SELECT COUNT(DISTINCT user_id) AS dau
-                FROM jobs WHERE created_at::date = CURRENT_DATE
-            """)
+            cur.execute("SELECT COUNT(DISTINCT user_id) AS dau FROM jobs WHERE created_at::date = CURRENT_DATE")
             dau = cur.fetchone()['dau']
 
-            # WAU
-            cur.execute("""
-                SELECT COUNT(DISTINCT user_id) AS wau
-                FROM jobs WHERE created_at >= NOW() - INTERVAL '7 days'
-            """)
+            cur.execute("SELECT COUNT(DISTINCT user_id) AS wau FROM jobs WHERE created_at >= NOW() - INTERVAL '7 days'")
             wau = cur.fetchone()['wau']
 
-            # MAU
-            cur.execute("""
-                SELECT COUNT(DISTINCT user_id) AS mau
-                FROM jobs WHERE created_at >= NOW() - INTERVAL '30 days'
-            """)
+            cur.execute("SELECT COUNT(DISTINCT user_id) AS mau FROM jobs WHERE created_at >= NOW() - INTERVAL '30 days'")
             mau = cur.fetchone()['mau']
 
-            # DAU/MAU ratio (stickiness)
             stickiness = round((dau / max(1, mau)) * 100, 1)
 
-            # Average jobs per active user (last 7 days)
             cur.execute("""
                 SELECT COALESCE(AVG(cnt), 0) AS avg_jobs
                 FROM (
@@ -804,7 +789,6 @@ def engagement():
             """)
             avg_jobs_per_user = round(float(cur.fetchone()['avg_jobs']), 1)
 
-            # DAU over last 14 days
             cur.execute("""
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
@@ -833,7 +817,7 @@ def engagement():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PAGE ANALYTICS — which pages are most visited
+#  PAGE ANALYTICS
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/page-analytics', methods=['GET'])
@@ -842,11 +826,10 @@ def page_analytics():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            # Top pages (last 30 days)
-            cur.execute("""
+            cur.execute(f"""
                 SELECT page,
                     COUNT(*) AS views,
-                    COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_visitors
+                    COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                 GROUP BY page
@@ -855,8 +838,7 @@ def page_analytics():
             """)
             top_pages = [dict(r) for r in cur.fetchall()]
 
-            # Unique visitors by day
-            cur.execute("""
+            cur.execute(f"""
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
                     COALESCE(v.unique_visitors, 0) AS unique_visitors,
@@ -865,7 +847,7 @@ def page_analytics():
                 LEFT JOIN (
                     SELECT
                         visited_at::date AS dt,
-                        COUNT(DISTINCT ip) AS unique_visitors,
+                        COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors,
                         COUNT(*) AS total_views
                     FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'
                     GROUP BY visited_at::date
@@ -874,7 +856,6 @@ def page_analytics():
             """)
             visitor_trend = [dict(r) for r in cur.fetchall()]
 
-            # Hourly visit pattern
             cur.execute("""
                 SELECT
                     EXTRACT(HOUR FROM visited_at) AS hour,
@@ -896,7 +877,7 @@ def page_analytics():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  REAL-TIME — Currently active sessions (approximation)
+#  REAL-TIME
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/realtime', methods=['GET'])
@@ -905,23 +886,20 @@ def realtime():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            # Active visitors in last 5 minutes
-            cur.execute("""
-                SELECT COUNT(DISTINCT ip) AS active_now
+            cur.execute(f"""
+                SELECT COUNT(DISTINCT {UNIQUE_VISITOR}) AS active_now
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '5 minutes'
             """)
             active_now = cur.fetchone()['active_now']
 
-            # Active visitors in last 15 minutes
-            cur.execute("""
-                SELECT COUNT(DISTINCT ip) AS active_15m
+            cur.execute(f"""
+                SELECT COUNT(DISTINCT {UNIQUE_VISITOR}) AS active_15m
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '15 minutes'
             """)
             active_15m = cur.fetchone()['active_15m']
 
-            # Currently running jobs with user info
             cur.execute("""
                 SELECT j.job_id, j.title, j.created_at,
                        u.email AS user_email, u.plan
@@ -932,9 +910,8 @@ def realtime():
             """)
             running_jobs = [dict(r) for r in cur.fetchall()]
 
-            # Recent page hits (last 2 minutes, for live feed)
             cur.execute("""
-                SELECT page, ip, visited_at, user_agent
+                SELECT page, ip, visited_at, user_agent, country
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '2 minutes'
                 ORDER BY visited_at DESC
@@ -953,7 +930,7 @@ def realtime():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  USERS TABLE (enhanced)
+#  USERS TABLE
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/users', methods=['GET'])
@@ -1017,7 +994,7 @@ def list_users():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  JOBS TABLE (enhanced)
+#  JOBS TABLE
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/jobs', methods=['GET'])
@@ -1068,7 +1045,7 @@ def list_jobs():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  TOP USERS (enhanced)
+#  TOP USERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/top-users', methods=['GET'])
@@ -1099,7 +1076,7 @@ def top_users():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ACTIVITY FEED (enhanced)
+#  ACTIVITY FEED
 # ─────────────────────────────────────────────────────────────────────────────
 
 @admin_bp.route('/activity', methods=['GET'])
@@ -1146,15 +1123,20 @@ def recent_activity():
         conn.close()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  COUNTRY STATS
+# ─────────────────────────────────────────────────────────────────────────────
+
 @admin_bp.route('/country-stats', methods=['GET'])
+@admin_required
 def country_stats():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT country,
                     COUNT(*) as visits,
-                    COUNT(DISTINCT COALESCE(device_id, ip)) as unique_visitors
+                    COUNT(DISTINCT {UNIQUE_VISITOR}) as unique_visitors
                 FROM page_visits
                 WHERE country IS NOT NULL AND country != 'Unknown'
                   AND visited_at >= NOW() - INTERVAL '30 days'
@@ -1178,11 +1160,10 @@ def session_stats():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            # Referrer source breakdown
-            cur.execute("""
+            cur.execute(f"""
                 SELECT referrer_source,
                     COUNT(*) AS visits,
-                    COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_visitors
+                    COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND referrer_source IS NOT NULL
@@ -1191,10 +1172,9 @@ def session_stats():
             """)
             referrer_breakdown = [dict(r) for r in cur.fetchall()]
 
-            # Device type breakdown — unique devices only
-            cur.execute("""
+            cur.execute(f"""
                 SELECT device_type,
-                    COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_devices
+                    COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_devices
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND device_type IS NOT NULL
@@ -1203,11 +1183,10 @@ def session_stats():
             """)
             device_breakdown = [dict(r) for r in cur.fetchall()]
 
-            # Browser breakdown
-            cur.execute("""
+            cur.execute(f"""
                 SELECT browser,
                     COUNT(*) AS visits,
-                    COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_visitors
+                    COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_visitors
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND browser IS NOT NULL
@@ -1216,7 +1195,6 @@ def session_stats():
             """)
             browser_breakdown = [dict(r) for r in cur.fetchall()]
 
-            # Average session duration (seconds)
             cur.execute("""
                 SELECT COALESCE(AVG(duration), 0) AS avg_duration,
                        COALESCE(AVG(pages), 0) AS avg_pages
@@ -1225,7 +1203,7 @@ def session_stats():
                         EXTRACT(EPOCH FROM (MAX(visited_at) - MIN(visited_at))) AS duration,
                         COUNT(*) AS pages
                     FROM page_visits
-                    WHERE session_id IS NOT NULL
+                    WHERE session_id IS NOT NULL AND session_id != ''
                       AND visited_at >= NOW() - INTERVAL '30 days'
                     GROUP BY session_id
                     HAVING COUNT(*) > 1
@@ -1233,7 +1211,6 @@ def session_stats():
             """)
             session_row = cur.fetchone()
 
-            # Average time on page (excluding 0s entries which are entry pings)
             cur.execute("""
                 SELECT page, ROUND(AVG(time_on_page)) AS avg_time, COUNT(*) AS visits
                 FROM page_visits
