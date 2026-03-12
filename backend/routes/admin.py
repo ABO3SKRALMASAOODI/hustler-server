@@ -45,26 +45,39 @@ def admin_required(f):
 def track_visit():
     data = request.get_json() or {}
     page = data.get('page', '/')
-    conn = get_db()
-    try:
-        ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
+    user_agent = request.headers.get('User-Agent', '')[:300]
+
+    def _save(app, page, ip, user_agent):
         country = 'Unknown'
         try:
             import urllib.request as _ur
-            with _ur.urlopen(f'http://ip-api.com/json/{ip}?fields=country', timeout=2) as r:
-                import json as _json
+            import json as _json
+            with _ur.urlopen(
+                f'http://ip-api.com/json/{ip}?fields=status,country',
+                timeout=2
+            ) as r:
                 geo = _json.loads(r.read())
-                country = geo.get('country', 'Unknown')
+                if geo.get('status') == 'success':
+                    country = geo.get('country', 'Unknown')
         except Exception:
             pass
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO page_visits (page, ip, user_agent, country) VALUES (%s, %s, %s, %s)",
-                (page, ip, request.headers.get('User-Agent', '')[:300], country)
-            )
-            conn.commit()
-    finally:
-        conn.close()
+        with app.app_context():
+            conn = psycopg2.connect(app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO page_visits (page, ip, user_agent, country) VALUES (%s, %s, %s, %s)",
+                        (page, ip, user_agent, country)
+                    )
+                    conn.commit()
+            finally:
+                conn.close()
+
+    import threading
+    app = current_app._get_current_object()
+    threading.Thread(target=_save, args=(app, page, ip, user_agent), daemon=True).start()
+
     return jsonify({'ok': True}), 200
 
 
@@ -1060,5 +1073,25 @@ def recent_activity():
         all_events.sort(key=lambda x: str(x.get('ts', '')), reverse=True)
 
         return jsonify({'events': all_events[:40]}), 200
+    finally:
+        conn.close()
+
+
+@admin_bp.route('/country-stats', methods=['GET'])
+def country_stats():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT country, COUNT(*) as visits
+                FROM page_visits
+                WHERE country IS NOT NULL AND country != 'Unknown'
+                  AND visited_at >= NOW() - INTERVAL '30 days'
+                GROUP BY country
+                ORDER BY visits DESC
+                LIMIT 20
+            """)
+            rows = cur.fetchall()
+        return jsonify({"countries": [dict(r) for r in rows]}), 200
     finally:
         conn.close()
