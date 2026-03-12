@@ -49,6 +49,17 @@ def track_visit():
     user_agent = request.headers.get('User-Agent', '')[:300]
 
     def _save(app, page, ip, user_agent):
+        # Filter out bots and crawlers
+        bot_signatures = [
+            'vercel-screenshot', 'googlebot', 'bingbot', 'slurp', 'duckduckbot',
+            'baiduspider', 'yandexbot', 'sogou', 'exabot', 'facebot',
+            'ia_archiver', 'semrushbot', 'ahrefsbot', 'mj12bot', 'dotbot',
+            'petalbot', 'bytespider', 'gptbot', 'claudebot', 'ccbot',
+        ]
+        ua_lower = user_agent.lower()
+        if any(bot in ua_lower for bot in bot_signatures):
+            return
+
         country = 'Unknown'
         try:
             import urllib.request as _ur
