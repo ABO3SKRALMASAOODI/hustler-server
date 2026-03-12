@@ -1194,13 +1194,12 @@ def session_stats():
             # Device type breakdown — unique devices only
             cur.execute("""
                 SELECT device_type,
-                    COUNT(*) AS visits,
                     COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_devices
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND device_type IS NOT NULL
                 GROUP BY device_type
-                ORDER BY visits DESC
+                ORDER BY unique_devices DESC
             """)
             device_breakdown = [dict(r) for r in cur.fetchall()]
 
