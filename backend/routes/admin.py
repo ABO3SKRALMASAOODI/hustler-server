@@ -1180,12 +1180,14 @@ def session_stats():
         with conn.cursor() as cur:
             # Referrer source breakdown
             cur.execute("""
-                SELECT referrer_source, COUNT(*) AS visits
+                SELECT referrer_source,
+                    COUNT(*) AS visits,
+                    COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_visitors
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND referrer_source IS NOT NULL
                 GROUP BY referrer_source
-                ORDER BY visits DESC
+                ORDER BY unique_visitors DESC
             """)
             referrer_breakdown = [dict(r) for r in cur.fetchall()]
 
@@ -1204,12 +1206,14 @@ def session_stats():
 
             # Browser breakdown
             cur.execute("""
-                SELECT browser, COUNT(*) AS visits
+                SELECT browser,
+                    COUNT(*) AS visits,
+                    COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_visitors
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND browser IS NOT NULL
                 GROUP BY browser
-                ORDER BY visits DESC
+                ORDER BY unique_visitors DESC
             """)
             browser_breakdown = [dict(r) for r in cur.fetchall()]
 
