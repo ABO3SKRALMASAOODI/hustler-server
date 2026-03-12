@@ -45,11 +45,47 @@ def admin_required(f):
 def track_visit():
     data = request.get_json() or {}
     page = data.get('page', '/')
+    referrer = data.get('referrer', '')[:500]
+    session_id = data.get('session_id', '')[:64]
+    time_on_page = int(data.get('time_on_page', 0))
     ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
     user_agent = request.headers.get('User-Agent', '')[:300]
 
-    def _save(app, page, ip, user_agent):
-        # Filter out bots and crawlers
+    def _parse_referrer(ref):
+        if not ref or ref == '':
+            return 'direct'
+        ref_lower = ref.lower()
+        if any(x in ref_lower for x in ['google.', 'bing.', 'yahoo.', 'duckduckgo.', 'baidu.']):
+            return 'search'
+        if any(x in ref_lower for x in ['facebook.', 'twitter.', 'x.com', 'instagram.', 'linkedin.', 'tiktok.', 'reddit.', 'youtube.']):
+            return 'social'
+        if 'thehustlerbot.com' in ref_lower:
+            return 'internal'
+        return 'referral'
+
+    def _parse_device(ua):
+        ua_lower = ua.lower()
+        if any(x in ua_lower for x in ['iphone', 'android', 'mobile', 'blackberry', 'windows phone']):
+            return 'mobile'
+        if any(x in ua_lower for x in ['ipad', 'tablet']):
+            return 'tablet'
+        return 'desktop'
+
+    def _parse_browser(ua):
+        ua_lower = ua.lower()
+        if 'edg/' in ua_lower or 'edge/' in ua_lower:
+            return 'Edge'
+        if 'opr/' in ua_lower or 'opera' in ua_lower:
+            return 'Opera'
+        if 'chrome/' in ua_lower and 'chromium' not in ua_lower:
+            return 'Chrome'
+        if 'firefox/' in ua_lower:
+            return 'Firefox'
+        if 'safari/' in ua_lower and 'chrome' not in ua_lower:
+            return 'Safari'
+        return 'Other'
+
+    def _save(app, page, ip, user_agent, referrer, session_id, time_on_page):
         bot_signatures = [
             'vercel-screenshot', 'googlebot', 'bingbot', 'slurp', 'duckduckbot',
             'baiduspider', 'yandexbot', 'sogou', 'exabot', 'facebot',
@@ -73,13 +109,22 @@ def track_visit():
                     country = geo.get('country', 'Unknown')
         except Exception:
             pass
+
+        referrer_source = _parse_referrer(referrer)
+        device_type = _parse_device(user_agent)
+        browser = _parse_browser(user_agent)
+
         with app.app_context():
             conn = psycopg2.connect(app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO page_visits (page, ip, user_agent, country) VALUES (%s, %s, %s, %s)",
-                        (page, ip, user_agent, country)
+                        """INSERT INTO page_visits
+                           (page, ip, user_agent, country, referrer, referrer_source,
+                            session_id, device_type, browser, time_on_page)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (page, ip, user_agent, country, referrer, referrer_source,
+                         session_id, device_type, browser, time_on_page)
                     )
                     conn.commit()
             finally:
@@ -87,7 +132,11 @@ def track_visit():
 
     import threading
     app = current_app._get_current_object()
-    threading.Thread(target=_save, args=(app, page, ip, user_agent), daemon=True).start()
+    threading.Thread(
+        target=_save,
+        args=(app, page, ip, user_agent, referrer, session_id, time_on_page),
+        daemon=True
+    ).start()
 
     return jsonify({'ok': True}), 200
 
