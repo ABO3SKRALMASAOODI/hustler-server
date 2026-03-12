@@ -1155,3 +1155,87 @@ def country_stats():
         return jsonify({"countries": [dict(r) for r in rows]}), 200
     finally:
         conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SESSION & DEVICE ANALYTICS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route('/session-stats', methods=['GET'])
+@admin_required
+def session_stats():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            # Referrer source breakdown
+            cur.execute("""
+                SELECT referrer_source, COUNT(*) AS visits
+                FROM page_visits
+                WHERE visited_at >= NOW() - INTERVAL '30 days'
+                  AND referrer_source IS NOT NULL
+                GROUP BY referrer_source
+                ORDER BY visits DESC
+            """)
+            referrer_breakdown = [dict(r) for r in cur.fetchall()]
+
+            # Device type breakdown
+            cur.execute("""
+                SELECT device_type, COUNT(*) AS visits
+                FROM page_visits
+                WHERE visited_at >= NOW() - INTERVAL '30 days'
+                  AND device_type IS NOT NULL
+                GROUP BY device_type
+                ORDER BY visits DESC
+            """)
+            device_breakdown = [dict(r) for r in cur.fetchall()]
+
+            # Browser breakdown
+            cur.execute("""
+                SELECT browser, COUNT(*) AS visits
+                FROM page_visits
+                WHERE visited_at >= NOW() - INTERVAL '30 days'
+                  AND browser IS NOT NULL
+                GROUP BY browser
+                ORDER BY visits DESC
+            """)
+            browser_breakdown = [dict(r) for r in cur.fetchall()]
+
+            # Average session duration (seconds)
+            cur.execute("""
+                SELECT COALESCE(AVG(duration), 0) AS avg_duration,
+                       COALESCE(AVG(pages), 0) AS avg_pages
+                FROM (
+                    SELECT session_id,
+                        EXTRACT(EPOCH FROM (MAX(visited_at) - MIN(visited_at))) AS duration,
+                        COUNT(*) AS pages
+                    FROM page_visits
+                    WHERE session_id IS NOT NULL
+                      AND visited_at >= NOW() - INTERVAL '30 days'
+                    GROUP BY session_id
+                    HAVING COUNT(*) > 1
+                ) sub
+            """)
+            session_row = cur.fetchone()
+
+            # Average time on page (excluding 0s entries which are entry pings)
+            cur.execute("""
+                SELECT page, ROUND(AVG(time_on_page)) AS avg_time, COUNT(*) AS visits
+                FROM page_visits
+                WHERE time_on_page > 2
+                  AND visited_at >= NOW() - INTERVAL '30 days'
+                GROUP BY page
+                ORDER BY visits DESC
+                LIMIT 10
+            """)
+            page_times = [dict(r) for r in cur.fetchall()]
+
+        return jsonify({
+            'referrer_breakdown': referrer_breakdown,
+            'device_breakdown': device_breakdown,
+            'browser_breakdown': browser_breakdown,
+            'avg_session_duration': round(float(session_row['avg_duration']), 0),
+            'avg_pages_per_session': round(float(session_row['avg_pages']), 1),
+            'page_times': page_times,
+        }), 200
+    finally:
+        conn.close()
