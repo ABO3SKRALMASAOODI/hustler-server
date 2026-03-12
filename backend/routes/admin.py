@@ -48,6 +48,7 @@ def track_visit():
     referrer = data.get('referrer', '')[:500]
     session_id = data.get('session_id', '')[:64]
     time_on_page = int(data.get('time_on_page', 0))
+    device_id = data.get('device_id', '')[:64]
     ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
     user_agent = request.headers.get('User-Agent', '')[:300]
 
@@ -85,7 +86,7 @@ def track_visit():
             return 'Safari'
         return 'Other'
 
-    def _save(app, page, ip, user_agent, referrer, session_id, time_on_page):
+    def _save(app, page, ip, user_agent, referrer, session_id, time_on_page, device_id):
         bot_signatures = [
             'vercel-screenshot', 'googlebot', 'bingbot', 'slurp', 'duckduckbot',
             'baiduspider', 'yandexbot', 'sogou', 'exabot', 'facebot',
@@ -121,10 +122,10 @@ def track_visit():
                     cur.execute(
                         """INSERT INTO page_visits
                            (page, ip, user_agent, country, referrer, referrer_source,
-                            session_id, device_type, browser, time_on_page)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                            session_id, device_type, browser, time_on_page, device_id)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         (page, ip, user_agent, country, referrer, referrer_source,
-                         session_id, device_type, browser, time_on_page)
+                         session_id, device_type, browser, time_on_page, device_id)
                     )
                     conn.commit()
             finally:
@@ -134,7 +135,7 @@ def track_visit():
     app = current_app._get_current_object()
     threading.Thread(
         target=_save,
-        args=(app, page, ip, user_agent, referrer, session_id, time_on_page),
+        args=(app, page, ip, user_agent, referrer, session_id, time_on_page, device_id),
         daemon=True
     ).start()
 
@@ -1178,9 +1179,11 @@ def session_stats():
             """)
             referrer_breakdown = [dict(r) for r in cur.fetchall()]
 
-            # Device type breakdown
+            # Device type breakdown — unique devices only
             cur.execute("""
-                SELECT device_type, COUNT(*) AS visits
+                SELECT device_type,
+                    COUNT(*) AS visits,
+                    COUNT(DISTINCT COALESCE(device_id, ip)) AS unique_devices
                 FROM page_visits
                 WHERE visited_at >= NOW() - INTERVAL '30 days'
                   AND device_type IS NOT NULL
