@@ -47,10 +47,20 @@ def track_visit():
     page = data.get('page', '/')
     conn = get_db()
     try:
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
+        country = 'Unknown'
+        try:
+            import urllib.request as _ur
+            with _ur.urlopen(f'http://ip-api.com/json/{ip}?fields=country', timeout=2) as r:
+                import json as _json
+                geo = _json.loads(r.read())
+                country = geo.get('country', 'Unknown')
+        except Exception:
+            pass
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO page_visits (page, ip, user_agent) VALUES (%s, %s, %s)",
-                (page, request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip(), request.headers.get('User-Agent', '')[:300])
+                "INSERT INTO page_visits (page, ip, user_agent, country) VALUES (%s, %s, %s, %s)",
+                (page, ip, request.headers.get('User-Agent', '')[:300], country)
             )
             conn.commit()
     finally:
