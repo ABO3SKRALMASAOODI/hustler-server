@@ -119,8 +119,8 @@ class BaseAgent:
     #  Main chat loop (with hooks)                                         #
     # ------------------------------------------------------------------ #
 
-    # Tools that indicate code was actually modified
-    CODE_WRITING_TOOLS = {"write_file", "edit_file"}
+    # Tools that indicate code/assets were actually modified
+    CODE_WRITING_TOOLS = {"write_file", "edit_file", "generate_image"}
 
     def chat(self, user_msg: str):
         """
@@ -128,7 +128,7 @@ class BaseAgent:
         Returns (text, token_totals, code_changed) where:
           - text: the final assistant text response
           - token_totals: dict with input/output/cache_write/cache_read
-          - code_changed: True if write_file or edit_file was called
+          - code_changed: True if write_file, edit_file, or generate_image was called
         """
         if self.pending_notices:
             user_msg = f"{self.pending_notices}\n\n{user_msg}"

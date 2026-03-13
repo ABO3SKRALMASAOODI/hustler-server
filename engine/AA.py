@@ -170,6 +170,7 @@ TOOL_ACTIONS = {
     "read_file":           "reading",
     "files_list":          "scanning",
     "run_install_command": "installing",
+    "generate_image":      "generating image",
 }
 
 def _guess_lang(path):
@@ -198,6 +199,11 @@ def make_hooks(workspace):
 
         if name == "run_install_command":
             entry["detail"] = args.get("command", "")[:80]
+        elif name == "generate_image":
+            prompt_preview = args.get("prompt", "")[:60]
+            filename = args.get("filename", "image")
+            entry["detail"] = f"Generating image: {filename} — {prompt_preview}..."
+            entry["file"] = f"public/images/{filename}"
         elif file_path:
             entry["detail"] = f"{action.capitalize()} {file_path}"
         else:

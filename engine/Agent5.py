@@ -7,6 +7,9 @@ load_dotenv()
 from pathlib import Path
 import os
 import anthropic
+import requests
+import replicate
+
 client = anthropic.Anthropic()
 
 Generator_sys_prompt = """
@@ -62,6 +65,7 @@ Available tools include:
 - write_file: writes full contents to a file path (creates or overwrites)
 - edit_file: Edits the file, you should pass an old segment with the new replaced one, if you want to add to the file by using the edit you can pass the last string and continue from there, you can utilise it when you want to add to a long file and dont want to rewrite everything from scratch
 - run_install_command: used for downloading required dependencies and solving error's that may require because of dependencies
+- generate_image: generates an AI image from a text prompt and saves it to a specified path in the project
 
 
 Tool usage rules:
@@ -83,6 +87,7 @@ Tool usage rules:
 8) Do not expose tool outputs in your response.
 9) You should be tide and put every logic in its own folder or create a file with the folder you want if it doesnt exist
 10) If any kind of documentation or planning were requested you must use the write file tool to document it in the project also
+11) When you need images for the project (hero images, backgrounds, product photos, illustrations, icons, etc.), use the generate_image tool with a descriptive prompt. Always save images to public/images/ with descriptive filenames. Reference them in code as /images/filename.
 
 ────────────────────────────────────────────────────────
 WORKFLOW (STRICT; SINGLE SUB-STEP)
@@ -322,8 +327,20 @@ WHAT YOU MUST BUILD
 4) STYLING — Complete, professional visual styling using the scaffold's system (Tailwind, CSS modules, plain CSS). Do not mix systems unless both are already configured.
 5) RESPONSIVENESS — Every page and component must work on mobile, tablet, and desktop.
 6) INTERACTIVITY — All interactive elements (forms, modals, dropdowns, tabs, carousels, toggles) must be fully functional, not visual shells.
-7) ASSETS — Use https://placehold.co for missing images and icon libraries already in the scaffold. Never leave broken image tags or missing icon references.
+7) ASSETS — When the project needs images (hero banners, product photos, backgrounds, illustrations, team photos, etc.), use the generate_image tool to create them with AI. Save all generated images to public/images/ and reference them in code as /images/filename. Only fall back to https://placehold.co if image generation is not appropriate (e.g., for simple colored rectangles or sizing placeholders). Never leave broken image tags.
 8) DATA — Create realistic hardcoded data matching the user's domain. No Lorem Ipsum unless it genuinely fits.
+
+────────────────────────────────────────────────────────
+IMAGE GENERATION GUIDELINES
+────────────────────────────────────────────────────────
+When using generate_image:
+- Write detailed, descriptive prompts that specify style, mood, colors, and content.
+- Use descriptive filenames: "hero-coffee-shop.webp" not "image1.webp".
+- Generate images in parallel when multiple are needed (batch your generate_image calls).
+- Good prompt example: "Modern minimalist coffee shop interior with warm lighting, wooden tables, and green plants, professional photography style, 16:9 aspect ratio"
+- Bad prompt example: "coffee shop"
+- Always reference generated images as /images/filename in your code (Vite serves public/ at root).
+- Choose appropriate aspect ratios: use "16:9" for hero/banner images, "1:1" for avatars/thumbnails, "4:3" for cards.
 
 ────────────────────────────────────────────────────────
 DESIGN PHILOSOPHY
@@ -372,6 +389,13 @@ write_file
 edit_file
 - Use for targeted changes to large existing files where a full rewrite is wasteful.
 - old_str must be an exact match to content in the file. If unsure, read the file first.
+
+generate_image
+- Use when the project needs visual assets: hero images, backgrounds, product photos, team photos, illustrations, icons, etc.
+- Provide a detailed prompt describing the desired image.
+- Specify a descriptive filename (saved to public/images/ automatically).
+- Can be called in parallel with other tool calls.
+- Reference generated images in code as /images/filename.
 
 run_install_command
 - Use when a required dependency is not already installed.
@@ -519,6 +543,28 @@ anthropic_tools  = [
             },
             "required": ["command"]
         }
+    },
+    {
+        "name": "generate_image",
+        "description": "Generate an AI image using Flux model and save it to the project. Use this for hero images, backgrounds, product photos, illustrations, team photos, and any visual assets the project needs. Images are saved to public/images/ automatically. Reference them in code as /images/filename.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed description of the image to generate. Be specific about style, mood, colors, composition, and content. Example: 'Modern minimalist coffee shop interior with warm lighting, wooden tables, and green plants, professional photography style'"
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Filename for the image including extension (e.g., 'hero-banner.webp', 'team-photo.webp'). Will be saved to public/images/."
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "description": "Aspect ratio of the image. Use '16:9' for hero/banner images, '1:1' for avatars/thumbnails, '4:3' for cards, '9:16' for mobile/portrait. Defaults to '16:9'."
+                }
+            },
+            "required": ["prompt", "filename"]
+        }
     }
 ]
 
@@ -626,13 +672,79 @@ def create_generator(files_list, reviewer=None, model=None):
         with open(path, 'r', encoding='utf-8') as f:
             return f.read()
 
+    def generate_image(prompt: str, filename: str, aspect_ratio: str = "16:9") -> str:
+        """Generate an image using Replicate's Flux model and save it to public/images/."""
+        try:
+            print(f"[image_gen] Generating: {filename} — prompt: {prompt[:80]}...")
+
+            # Ensure output directory exists
+            images_dir = os.path.join("public", "images")
+            os.makedirs(images_dir, exist_ok=True)
+
+            output_path = os.path.join(images_dir, filename)
+
+            # Call Replicate Flux model
+            output = replicate.run(
+                "black-forest-labs/flux-schnell",
+                input={
+                    "prompt": prompt,
+                    "aspect_ratio": aspect_ratio,
+                    "output_format": "webp",
+                    "output_quality": 85,
+                    "num_outputs": 1,
+                    "go_fast": True,
+                }
+            )
+
+            # output is a list of FileOutput URLs
+            image_url = None
+            if isinstance(output, list) and len(output) > 0:
+                image_url = str(output[0])
+            elif hasattr(output, '__iter__'):
+                for item in output:
+                    image_url = str(item)
+                    break
+
+            if not image_url:
+                print(f"[image_gen] ERROR: No output URL from Replicate")
+                return f"IMAGE_GENERATION_FAILED: No output received from model"
+
+            # Download the image
+            print(f"[image_gen] Downloading from: {image_url[:80]}...")
+            response = requests.get(image_url, timeout=30)
+            if response.status_code != 200:
+                print(f"[image_gen] ERROR: Download failed with status {response.status_code}")
+                return f"IMAGE_GENERATION_FAILED: Download failed (status {response.status_code})"
+
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+
+            file_size_kb = len(response.content) / 1024
+            print(f"[image_gen] Saved: {output_path} ({file_size_kb:.1f} KB)")
+
+            add_file(output_path)
+
+            agent6.notify_reviewer({
+                "type": "IMAGE_GENERATED",
+                "path": output_path,
+                "prompt": prompt,
+                "aspect_ratio": aspect_ratio,
+            })
+
+            return f"IMAGE_GENERATED PATH:{output_path} — Reference in code as /images/{filename}"
+
+        except Exception as e:
+            print(f"[image_gen] ERROR: {e}")
+            return f"IMAGE_GENERATION_FAILED: {str(e)}"
+
     tool_map = {
         'write_file': write_file,
         'edit_file': edit_file,
         'read_file': read_file,
         'add_file': add_file,
         'files_list': files_list,
-        'run_install_command': run_install_command
+        'run_install_command': run_install_command,
+        'generate_image': generate_image,
     }
 
     agent6.tool_map = tool_map
