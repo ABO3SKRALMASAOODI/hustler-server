@@ -327,7 +327,7 @@ WHAT YOU MUST BUILD
 4) STYLING — Complete, professional visual styling using the scaffold's system (Tailwind, CSS modules, plain CSS). Do not mix systems unless both are already configured.
 5) RESPONSIVENESS — Every page and component must work on mobile, tablet, and desktop.
 6) INTERACTIVITY — All interactive elements (forms, modals, dropdowns, tabs, carousels, toggles) must be fully functional, not visual shells.
-7) ASSETS — When the project needs images (hero banners, product photos, backgrounds, illustrations, team photos, etc.), use the generate_image tool to create them with AI. Save all generated images to public/images/ and reference them in code as /images/filename. Only fall back to https://placehold.co if image generation is not appropriate (e.g., for simple colored rectangles or sizing placeholders). Never leave broken image tags.
+7) ASSETS — When the project needs images (hero banners, product photos, backgrounds, illustrations, team photos, etc.), use the generate_image tool to create them with AI. Save images to src/assets/ and import them as ES6 modules (e.g., `import hero from '../assets/hero.jpg'`), or save to public/images/ and reference as /images/filename for static assets. Prefer src/assets/ for images used in components (Vite optimizes these). Only fall back to https://placehold.co if image generation is not appropriate (e.g., for simple colored rectangles or sizing placeholders). Never leave broken image tags.
 8) DATA — Create realistic hardcoded data matching the user's domain. No Lorem Ipsum unless it genuinely fits.
 
 ────────────────────────────────────────────────────────
@@ -335,12 +335,27 @@ IMAGE GENERATION GUIDELINES
 ────────────────────────────────────────────────────────
 When using generate_image:
 - Write detailed, descriptive prompts that specify style, mood, colors, and content.
-- Use descriptive filenames: "hero-coffee-shop.webp" not "image1.webp".
+- Use descriptive paths: "src/assets/hero-coffee-shop.jpg" not "src/assets/image1.jpg".
 - Generate images in parallel when multiple are needed (batch your generate_image calls).
-- Good prompt example: "Modern minimalist coffee shop interior with warm lighting, wooden tables, and green plants, professional photography style, 16:9 aspect ratio"
+- Good prompt example: "Modern minimalist coffee shop interior with warm lighting, wooden tables, and green plants, professional photography style"
 - Bad prompt example: "coffee shop"
-- Always reference generated images as /images/filename in your code (Vite serves public/ at root).
-- Choose appropriate aspect ratios: use "16:9" for hero/banner images, "1:1" for avatars/thumbnails, "4:3" for cards.
+
+Models:
+- flux.schnell: fastest, good for smaller images. Use by default.
+- flux2.dev: fast + high quality, but only supports 1024x1024 and 1920x1080.
+- flux.dev: highest quality, supports any resolution, but slower.
+
+Image placement:
+- For images used in components: save to src/assets/ and use ES6 imports:
+  `import heroImg from '../assets/hero.jpg'` then `<img src={heroImg} />`
+- For static assets (favicons, OG images): save to public/images/ and reference as /images/filename.
+- Prefer src/assets/ — Vite processes these (cache-busting, optimization).
+
+Sizes:
+- Hero/banner: 1920x1080 (use flux2.dev or flux.dev)
+- Card images: 640x480 or 800x600 (flux.schnell is fine)
+- Avatars/thumbnails: 512x512 (flux.schnell)
+- Dimensions must be multiples of 32, min 512, max 1920.
 
 ────────────────────────────────────────────────────────
 DESIGN PHILOSOPHY
@@ -391,11 +406,12 @@ edit_file
 - old_str must be an exact match to content in the file. If unsure, read the file first.
 
 generate_image
-- Use when the project needs visual assets: hero images, backgrounds, product photos, team photos, illustrations, icons, etc.
+- Use when the project needs visual assets: hero images, backgrounds, product photos, team photos, illustrations, etc.
 - Provide a detailed prompt describing the desired image.
-- Specify a descriptive filename (saved to public/images/ automatically).
+- Specify target_path — prefer src/assets/ for component images, public/images/ for static assets.
+- Optionally set width, height (multiples of 32, 512-1920) and model (flux.schnell, flux.dev, flux2.dev).
 - Can be called in parallel with other tool calls.
-- Reference generated images in code as /images/filename.
+- After generating to src/assets/, use ES6 imports in your code.
 
 run_install_command
 - Use when a required dependency is not already installed.
@@ -546,24 +562,32 @@ anthropic_tools  = [
     },
     {
         "name": "generate_image",
-        "description": "Generate an AI image using Flux model and save it to the project. Use this for hero images, backgrounds, product photos, illustrations, team photos, and any visual assets the project needs. Images are saved to public/images/ automatically. Reference them in code as /images/filename.",
+        "description": "Generates an AI image based on a text prompt and saves it to the specified file path.\n\nModels:\n- flux.schnell: fastest, good for small images (<1000px). Default.\n- flux2.dev: fast high-quality, only supports 1024x1024 and 1920x1080\n- flux.dev: high quality, supports all resolutions, slower\n\nMax resolution: 1920x1920. Dimensions must be multiples of 32.\nOnce generated, import images as ES6 imports.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "Detailed description of the image to generate. Be specific about style, mood, colors, composition, and content. Example: 'Modern minimalist coffee shop interior with warm lighting, wooden tables, and green plants, professional photography style'"
+                    "description": "Detailed description of the image to generate. Be specific about style, mood, colors, composition, and content."
                 },
-                "filename": {
+                "target_path": {
                     "type": "string",
-                    "description": "Filename for the image including extension (e.g., 'hero-banner.webp', 'team-photo.webp'). Will be saved to public/images/."
+                    "description": "File path where the image will be saved (e.g., 'src/assets/hero.jpg', 'public/images/banner.webp'). Directories are created automatically."
                 },
-                "aspect_ratio": {
+                "width": {
+                    "type": "number",
+                    "description": "Image width in pixels (min 512, max 1920, must be multiple of 32). Defaults to 1024."
+                },
+                "height": {
+                    "type": "number",
+                    "description": "Image height in pixels (min 512, max 1920, must be multiple of 32). Defaults to 768."
+                },
+                "model": {
                     "type": "string",
-                    "description": "Aspect ratio of the image. Use '16:9' for hero/banner images, '1:1' for avatars/thumbnails, '4:3' for cards, '9:16' for mobile/portrait. Defaults to '16:9'."
+                    "description": "flux.schnell (fast, default) | flux.dev (high quality, slower) | flux2.dev (fast HQ, fixed sizes only: 1024x1024 or 1920x1080)"
                 }
             },
-            "required": ["prompt", "filename"]
+            "required": ["prompt", "target_path"]
         }
     }
 ]
@@ -672,29 +696,50 @@ def create_generator(files_list, reviewer=None, model=None):
         with open(path, 'r', encoding='utf-8') as f:
             return f.read()
 
-    def generate_image(prompt: str, filename: str, aspect_ratio: str = "16:9") -> str:
-        """Generate an image using Replicate's Flux model and save it to public/images/."""
+    def generate_image(prompt: str, target_path: str, width: int = 1024, height: int = 768, model: str = "flux.schnell") -> str:
+        """Generate an image using Replicate's Flux model and save it to the specified path."""
         try:
-            print(f"[image_gen] Generating: {filename} — prompt: {prompt[:80]}...")
+            print(f"[image_gen] Generating: {target_path} ({width}x{height}, {model}) — prompt: {prompt[:80]}...")
+
+            # Clamp and align dimensions to multiples of 32
+            width = max(512, min(1920, int(width)))
+            height = max(512, min(1920, int(height)))
+            width = (width // 32) * 32
+            height = (height // 32) * 32
 
             # Ensure output directory exists
-            images_dir = os.path.join("public", "images")
-            os.makedirs(images_dir, exist_ok=True)
+            parent = os.path.dirname(target_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
 
-            output_path = os.path.join(images_dir, filename)
+            # Map model names to Replicate model identifiers
+            model_map = {
+                "flux.schnell": "black-forest-labs/flux-schnell",
+                "flux.dev":     "black-forest-labs/flux-dev",
+                "flux2.dev":    "black-forest-labs/flux1.1-pro",
+            }
+            replicate_model = model_map.get(model, model_map["flux.schnell"])
 
-            # Call Replicate Flux model
-            output = replicate.run(
-                "black-forest-labs/flux-schnell",
-                input={
-                    "prompt": prompt,
-                    "aspect_ratio": aspect_ratio,
-                    "output_format": "webp",
-                    "output_quality": 85,
-                    "num_outputs": 1,
-                    "go_fast": True,
-                }
-            )
+            # Determine output format from file extension
+            ext = target_path.rsplit(".", 1)[-1].lower() if "." in target_path else "webp"
+            format_map = {"jpg": "jpg", "jpeg": "jpg", "png": "png", "webp": "webp"}
+            output_format = format_map.get(ext, "webp")
+
+            # Build input params
+            replicate_input = {
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "output_format": output_format,
+                "output_quality": 90,
+                "num_outputs": 1,
+            }
+
+            # flux.schnell supports go_fast
+            if model == "flux.schnell":
+                replicate_input["go_fast"] = True
+
+            output = replicate.run(replicate_model, input=replicate_input)
 
             # output is a list of FileOutput URLs
             image_url = None
@@ -711,27 +756,35 @@ def create_generator(files_list, reviewer=None, model=None):
 
             # Download the image
             print(f"[image_gen] Downloading from: {image_url[:80]}...")
-            response = requests.get(image_url, timeout=30)
+            response = requests.get(image_url, timeout=60)
             if response.status_code != 200:
                 print(f"[image_gen] ERROR: Download failed with status {response.status_code}")
                 return f"IMAGE_GENERATION_FAILED: Download failed (status {response.status_code})"
 
-            with open(output_path, "wb") as f:
+            with open(target_path, "wb") as f:
                 f.write(response.content)
 
             file_size_kb = len(response.content) / 1024
-            print(f"[image_gen] Saved: {output_path} ({file_size_kb:.1f} KB)")
+            print(f"[image_gen] Saved: {target_path} ({file_size_kb:.1f} KB, {width}x{height})")
 
-            add_file(output_path)
+            add_file(target_path)
 
             agent6.notify_reviewer({
                 "type": "IMAGE_GENERATED",
-                "path": output_path,
+                "path": target_path,
                 "prompt": prompt,
-                "aspect_ratio": aspect_ratio,
+                "width": width,
+                "height": height,
+                "model": model,
             })
 
-            return f"IMAGE_GENERATED PATH:{output_path} — Reference in code as /images/{filename}"
+            # Return appropriate usage hint based on path
+            if target_path.startswith("src/"):
+                return f"IMAGE_GENERATED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
+            else:
+                # public/ folder — reference from root
+                public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
+                return f"IMAGE_GENERATED PATH:{target_path} — Reference in code as {public_ref}"
 
         except Exception as e:
             print(f"[image_gen] ERROR: {e}")

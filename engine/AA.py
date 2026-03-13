@@ -201,9 +201,12 @@ def make_hooks(workspace):
             entry["detail"] = args.get("command", "")[:80]
         elif name == "generate_image":
             prompt_preview = args.get("prompt", "")[:60]
-            filename = args.get("filename", "image")
-            entry["detail"] = f"Generating image: {filename} — {prompt_preview}..."
-            entry["file"] = f"public/images/{filename}"
+            target_path = args.get("target_path", "image")
+            model_name = args.get("model", "flux.schnell")
+            w = args.get("width", 1024)
+            h = args.get("height", 768)
+            entry["detail"] = f"Generating image: {target_path} ({w}x{h}, {model_name})"
+            entry["file"] = target_path
         elif file_path:
             entry["detail"] = f"{action.capitalize()} {file_path}"
         else:
