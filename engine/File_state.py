@@ -1,16 +1,13 @@
 import os
 from colorama import Style, Fore
-
 class FileState:
     def __init__(self, from_scratch=True):
         self.files = []
-
         if not from_scratch:
             # Try reading the tracked list first
             if os.path.exists("Files_list.txt"):
                 with open("Files_list.txt", "r", encoding="utf-8") as f:
                     self.files = [line.strip() for line in f if line.strip()]
-
             # If the list is empty or missing, scan the workspace as fallback
             # This handles old projects or cases where Files_list.txt was lost
             if not self.files:
@@ -34,6 +31,20 @@ class FileState:
         print(f"{Fore.MAGENTA} Adding: {path} to the file list")
         if path not in self.files:
             self.files.append(path)
+            self._save()
+
+    def remove_file(self, path):
+        print(f"{Fore.MAGENTA} Removing: {path} from the file list")
+        normalized = os.path.normpath(path)
+        self.files = [f for f in self.files if os.path.normpath(f) != normalized]
+        self._save()
+
+    def rename_file(self, old_path, new_path):
+        print(f"{Fore.MAGENTA} Renaming: {old_path} → {new_path} in the file list")
+        normalized_old = os.path.normpath(old_path)
+        self.files = [new_path if os.path.normpath(f) == normalized_old else f for f in self.files]
+        if new_path not in self.files:
+            self.files.append(new_path)
         self._save()
 
     def files_list(self):

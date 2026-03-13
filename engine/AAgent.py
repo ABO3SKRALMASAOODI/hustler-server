@@ -120,7 +120,7 @@ class BaseAgent:
     # ------------------------------------------------------------------ #
 
     # Tools that indicate code/assets were actually modified
-    CODE_WRITING_TOOLS = {"write_file", "edit_file", "generate_image"}
+    CODE_WRITING_TOOLS = {"write_file", "edit_file", "generate_image", "edit_image", "delete_file", "rename_file"}
 
     def chat(self, user_msg: str):
         """

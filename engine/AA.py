@@ -171,6 +171,10 @@ TOOL_ACTIONS = {
     "files_list":          "scanning",
     "run_install_command": "installing",
     "generate_image":      "generating image",
+    "edit_image":          "editing image",
+    "delete_file":         "deleting",
+    "rename_file":         "renaming",
+    "search_files":        "searching",
 }
 
 def _guess_lang(path):
@@ -207,6 +211,24 @@ def make_hooks(workspace):
             h = args.get("height", 768)
             entry["detail"] = f"Generating image: {target_path} ({w}x{h}, {model_name})"
             entry["file"] = target_path
+        elif name == "edit_image":
+            prompt_preview = args.get("prompt", "")[:60]
+            target_path = args.get("target_path", "image")
+            entry["detail"] = f"Editing image → {target_path}: {prompt_preview}..."
+            entry["file"] = target_path
+        elif name == "delete_file":
+            del_path = args.get("path", "")
+            entry["detail"] = f"Deleting {del_path}"
+            entry["file"] = del_path
+        elif name == "rename_file":
+            orig = args.get("original_path", "")
+            new = args.get("new_path", "")
+            entry["detail"] = f"Renaming {orig} → {new}"
+            entry["file"] = new
+        elif name == "search_files":
+            query = args.get("query", "")[:60]
+            search_dir = args.get("search_dir", "src")
+            entry["detail"] = f"Searching for '{query}' in {search_dir}"
         elif file_path:
             entry["detail"] = f"{action.capitalize()} {file_path}"
         else:
@@ -311,7 +333,7 @@ def main():
         })
 
         files_list = FileState(False)
-        generator  = create_generator(files_list=files_list, model=anthropic_model)
+        generator  = create_generator(files_list_state=files_list, model=anthropic_model)
 
         write_progress(WORKSPACE, {
             "action": "thinking",

@@ -6,6 +6,8 @@ from deployer import run_install_command
 load_dotenv()
 from pathlib import Path
 import os
+import subprocess
+import shutil
 import anthropic
 import requests
 import replicate
@@ -64,8 +66,12 @@ Available tools include:
 - read_file: returns the contents of a specific file path
 - write_file: writes full contents to a file path (creates or overwrites)
 - edit_file: Edits the file, you should pass an old segment with the new replaced one, if you want to add to the file by using the edit you can pass the last string and continue from there, you can utilise it when you want to add to a long file and dont want to rewrite everything from scratch
+- delete_file: deletes a file or folder from the project
+- rename_file: renames/moves a file from one path to another
+- search_files: regex search across project files to find code patterns, imports, or usage
 - run_install_command: used for downloading required dependencies and solving error's that may require because of dependencies
 - generate_image: generates an AI image from a text prompt and saves it to a specified path in the project
+- edit_image: edits or merges existing images based on a text prompt
 
 
 Tool usage rules:
@@ -87,7 +93,10 @@ Tool usage rules:
 8) Do not expose tool outputs in your response.
 9) You should be tide and put every logic in its own folder or create a file with the folder you want if it doesnt exist
 10) If any kind of documentation or planning were requested you must use the write file tool to document it in the project also
-11) When you need images for the project (hero images, backgrounds, product photos, illustrations, icons, etc.), use the generate_image tool with a descriptive prompt. Always save images to public/images/ with descriptive filenames. Reference them in code as /images/filename.
+11) When you need images for the project (hero images, backgrounds, product photos, illustrations, icons, etc.), use the generate_image tool with a descriptive prompt. Save images to src/assets/ or public/images/ with descriptive filenames.
+12) Use search_files to find where a component, function, or variable is used across the project before renaming or modifying it.
+13) Use delete_file to remove files that are no longer needed. Always clean up old files when restructuring.
+14) Use rename_file instead of creating a new file and deleting the old one.
 
 ────────────────────────────────────────────────────────
 WORKFLOW (STRICT; SINGLE SUB-STEP)
@@ -357,6 +366,11 @@ Sizes:
 - Avatars/thumbnails: 512x512 (flux.schnell)
 - Dimensions must be multiples of 32, min 512, max 1920.
 
+Image editing:
+- Use edit_image to modify existing images (adjust colors, add effects, change mood).
+- Use edit_image to merge/combine multiple images into one composite.
+- Always provide the source image path(s) and a clear editing instruction.
+
 ────────────────────────────────────────────────────────
 DESIGN PHILOSOPHY
 ────────────────────────────────────────────────────────
@@ -405,6 +419,21 @@ edit_file
 - Use for targeted changes to large existing files where a full rewrite is wasteful.
 - old_str must be an exact match to content in the file. If unsure, read the file first.
 
+delete_file
+- Use to remove files or folders that are no longer needed.
+- Always clean up old files when restructuring or removing features.
+- Can delete both files and entire directories.
+
+rename_file
+- Use to rename or move a file. Always use this instead of creating a new file and deleting the old one.
+- Updates the file tracking automatically.
+
+search_files
+- Use to find where a component, function, variable, or pattern is used across the project.
+- Supports regex patterns. Use before renaming or refactoring to find all usages.
+- Much more efficient than reading every file — saves tokens and time.
+- Example: search for "import.*Header" to find all files that import a Header component.
+
 generate_image
 - Use when the project needs visual assets: hero images, backgrounds, product photos, team photos, illustrations, etc.
 - Provide a detailed prompt describing the desired image.
@@ -412,6 +441,11 @@ generate_image
 - Optionally set width, height (multiples of 32, 512-1920) and model (flux.schnell, flux.dev, flux2.dev).
 - Can be called in parallel with other tool calls.
 - After generating to src/assets/, use ES6 imports in your code.
+
+edit_image
+- Use to modify existing images: adjust colors, mood, style, or combine multiple images.
+- Provide source image path(s), a text prompt describing the edit, and a target path for the result.
+- Supports merging multiple images into one composite.
 
 run_install_command
 - Use when a required dependency is not already installed.
@@ -535,6 +569,64 @@ anthropic_tools  = [
         }
     },
     {
+        "name": "delete_file",
+        "description": "Delete a file or folder from the project. When deleting a folder, all files within it will be removed. Use this to clean up files that are no longer needed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file or folder to delete, relative to project root."
+                }
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "rename_file",
+        "description": "Rename or move a file to a new path. Always use this instead of creating a new file and deleting the old one. Updates file tracking automatically.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "original_path": {
+                    "type": "string",
+                    "description": "Current file path, relative to project root."
+                },
+                "new_path": {
+                    "type": "string",
+                    "description": "New file path, relative to project root."
+                }
+            },
+            "required": ["original_path", "new_path"]
+        }
+    },
+    {
+        "name": "search_files",
+        "description": "Regex-based code search across project files. Use this to find where components, functions, variables, or patterns are used. Much more efficient than reading every file.\n\nExamples:\n- Find all imports of a component: search for 'import.*Header'\n- Find all useState calls: search for 'useState\\('\n- Find all files using a CSS class: search for 'className.*bg-primary'",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Regex pattern to search for across project files."
+                },
+                "search_dir": {
+                    "type": "string",
+                    "description": "Directory to search in, relative to project root. Defaults to 'src'."
+                },
+                "include_patterns": {
+                    "type": "string",
+                    "description": "Comma-separated glob patterns for files to include (e.g., '*.ts,*.tsx,*.js,*.jsx'). Defaults to all text files."
+                },
+                "case_sensitive": {
+                    "type": "boolean",
+                    "description": "Whether search is case-sensitive. Defaults to false."
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
         "name": "files_list",
         "description": "Get the list of the current existing file names.",
         "input_schema": {
@@ -589,16 +681,43 @@ anthropic_tools  = [
             },
             "required": ["prompt", "target_path"]
         }
+    },
+    {
+        "name": "edit_image",
+        "description": "Edit or merge existing images based on a text prompt. Single image: apply AI-powered edits. Multiple images: merge/combine according to prompt.\n\nAspect ratio options: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "image_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Paths to source images to edit or merge."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Description of the edit to apply (e.g., 'Make it darker', 'Add a warm sunset glow', 'Combine these into a collage')."
+                },
+                "target_path": {
+                    "type": "string",
+                    "description": "Where to save the edited image."
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "description": "Output aspect ratio: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, or 21:9. Defaults to source image ratio."
+                }
+            },
+            "required": ["image_paths", "prompt", "target_path"]
+        }
     }
 ]
 
 
-def create_generator(files_list, reviewer=None, model=None):
+def create_generator(files_list_state, reviewer=None, model=None):
     """
     Create the generator agent with the specified model.
     
     Args:
-        files_list: FileState instance
+        files_list_state: FileState instance
         reviewer: optional reviewer agent
         model: Anthropic model string (e.g. 'claude-haiku-4-5-20251001').
                If None, defaults to Haiku.
@@ -616,8 +735,10 @@ def create_generator(files_list, reviewer=None, model=None):
         temperature=1
     )
 
-    add_file = files_list.add_file
-    files_list = files_list.files_list
+    add_file = files_list_state.add_file
+    remove_file = files_list_state.remove_file
+    rename_file_state = files_list_state.rename_file
+    files_list = files_list_state.files_list
 
     def write_file(path: str, content: str) -> str:
         parent = os.path.dirname(path)
@@ -695,6 +816,108 @@ def create_generator(files_list, reviewer=None, model=None):
 
         with open(path, 'r', encoding='utf-8') as f:
             return f.read()
+
+    def delete_file(path: str) -> str:
+        """Delete a file or folder from the project."""
+        try:
+            p = Path(path)
+            if not p.exists():
+                return f"DELETE_ERROR: Path not found: {path}"
+
+            if p.is_dir():
+                # Remove all tracked files within this directory
+                dir_prefix = os.path.normpath(path)
+                for f in list(files_list_state.files):
+                    if os.path.normpath(f).startswith(dir_prefix):
+                        remove_file(f)
+                shutil.rmtree(path)
+                print(f"[delete] Removed directory: {path}")
+            else:
+                os.remove(path)
+                remove_file(path)
+                print(f"[delete] Removed file: {path}")
+
+            agent6.notify_reviewer({
+                "type": "FILE_DELETE",
+                "path": path,
+            })
+
+            return f"DELETE_COMPLETED PATH:{path}"
+        except Exception as e:
+            print(f"[delete] ERROR: {e}")
+            return f"DELETE_ERROR: {str(e)}"
+
+    def rename_file(original_path: str, new_path: str) -> str:
+        """Rename or move a file."""
+        try:
+            if not os.path.exists(original_path):
+                return f"RENAME_ERROR: Source not found: {original_path}"
+
+            # Ensure destination directory exists
+            parent = os.path.dirname(new_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+            os.rename(original_path, new_path)
+            rename_file_state(original_path, new_path)
+
+            print(f"[rename] {original_path} → {new_path}")
+
+            agent6.notify_reviewer({
+                "type": "FILE_RENAME",
+                "old_path": original_path,
+                "new_path": new_path,
+            })
+
+            return f"RENAME_COMPLETED: {original_path} → {new_path}"
+        except Exception as e:
+            print(f"[rename] ERROR: {e}")
+            return f"RENAME_ERROR: {str(e)}"
+
+    def search_files(query: str, search_dir: str = "src", include_patterns: str = "", case_sensitive: bool = False) -> str:
+        """Regex search across project files using grep."""
+        try:
+            cmd = ["grep", "-r", "-n", "--include=*.ts", "--include=*.tsx",
+                   "--include=*.js", "--include=*.jsx", "--include=*.css",
+                   "--include=*.html", "--include=*.json", "--include=*.md"]
+
+            # Add custom include patterns
+            if include_patterns:
+                cmd = ["grep", "-r", "-n"]
+                for pattern in include_patterns.split(","):
+                    pattern = pattern.strip()
+                    if pattern:
+                        cmd.append(f"--include={pattern}")
+
+            if not case_sensitive:
+                cmd.append("-i")
+
+            # Exclude heavy directories
+            cmd.extend(["--exclude-dir=node_modules", "--exclude-dir=dist",
+                        "--exclude-dir=.git", "--exclude-dir=__pycache__"])
+
+            cmd.append(query)
+            cmd.append(search_dir if os.path.isdir(search_dir) else ".")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
+            output = result.stdout.strip()
+            if not output:
+                return f"SEARCH_NO_RESULTS: No matches found for '{query}' in {search_dir}"
+
+            # Limit output to prevent token explosion
+            lines = output.split("\n")
+            if len(lines) > 50:
+                output = "\n".join(lines[:50]) + f"\n... and {len(lines) - 50} more matches"
+
+            print(f"[search] Found {len(lines)} matches for '{query}' in {search_dir}")
+            return output
+
+        except subprocess.TimeoutExpired:
+            return "SEARCH_ERROR: Search timed out"
+        except Exception as e:
+            print(f"[search] ERROR: {e}")
+            return f"SEARCH_ERROR: {str(e)}"
 
     def generate_image(prompt: str, target_path: str, width: int = 1024, height: int = 768, model: str = "flux.schnell") -> str:
         """Generate an image using Replicate's Flux model and save it to the specified path."""
@@ -782,7 +1005,6 @@ def create_generator(files_list, reviewer=None, model=None):
             if target_path.startswith("src/"):
                 return f"IMAGE_GENERATED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
             else:
-                # public/ folder — reference from root
                 public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
                 return f"IMAGE_GENERATED PATH:{target_path} — Reference in code as {public_ref}"
 
@@ -790,14 +1012,105 @@ def create_generator(files_list, reviewer=None, model=None):
             print(f"[image_gen] ERROR: {e}")
             return f"IMAGE_GENERATION_FAILED: {str(e)}"
 
+    def edit_image(image_paths: list, prompt: str, target_path: str, aspect_ratio: str = "16:9") -> str:
+        """Edit or merge existing images using Replicate."""
+        try:
+            print(f"[image_edit] Editing {len(image_paths)} image(s) → {target_path} — prompt: {prompt[:80]}...")
+
+            # Ensure output directory exists
+            parent = os.path.dirname(target_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+            # Read source images and convert to base64 data URIs
+            import base64
+            image_uris = []
+            for img_path in image_paths:
+                if img_path.startswith("http"):
+                    image_uris.append(img_path)
+                elif os.path.exists(img_path):
+                    with open(img_path, "rb") as f:
+                        data = f.read()
+                    ext = img_path.rsplit(".", 1)[-1].lower()
+                    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+                    uri = f"data:{mime};base64,{base64.b64encode(data).decode()}"
+                    image_uris.append(uri)
+                else:
+                    return f"IMAGE_EDIT_FAILED: Source image not found: {img_path}"
+
+            if not image_uris:
+                return "IMAGE_EDIT_FAILED: No valid source images provided"
+
+            # Use Replicate's flux-kontext for image editing
+            replicate_input = {
+                "prompt": prompt,
+                "input_image": image_uris[0],
+                "aspect_ratio": aspect_ratio,
+                "output_format": "webp",
+                "output_quality": 90,
+            }
+
+            output = replicate.run(
+                "black-forest-labs/flux-kontext",
+                input=replicate_input
+            )
+
+            # Get the output URL
+            image_url = None
+            if isinstance(output, list) and len(output) > 0:
+                image_url = str(output[0])
+            elif hasattr(output, '__iter__'):
+                for item in output:
+                    image_url = str(item)
+                    break
+            elif output:
+                image_url = str(output)
+
+            if not image_url:
+                return "IMAGE_EDIT_FAILED: No output received from model"
+
+            # Download the result
+            response = requests.get(image_url, timeout=60)
+            if response.status_code != 200:
+                return f"IMAGE_EDIT_FAILED: Download failed (status {response.status_code})"
+
+            with open(target_path, "wb") as f:
+                f.write(response.content)
+
+            file_size_kb = len(response.content) / 1024
+            print(f"[image_edit] Saved: {target_path} ({file_size_kb:.1f} KB)")
+
+            add_file(target_path)
+
+            agent6.notify_reviewer({
+                "type": "IMAGE_EDITED",
+                "source_paths": image_paths,
+                "target_path": target_path,
+                "prompt": prompt,
+            })
+
+            if target_path.startswith("src/"):
+                return f"IMAGE_EDITED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
+            else:
+                public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
+                return f"IMAGE_EDITED PATH:{target_path} — Reference in code as {public_ref}"
+
+        except Exception as e:
+            print(f"[image_edit] ERROR: {e}")
+            return f"IMAGE_EDIT_FAILED: {str(e)}"
+
     tool_map = {
         'write_file': write_file,
         'edit_file': edit_file,
         'read_file': read_file,
+        'delete_file': delete_file,
+        'rename_file': rename_file,
+        'search_files': search_files,
         'add_file': add_file,
         'files_list': files_list,
         'run_install_command': run_install_command,
         'generate_image': generate_image,
+        'edit_image': edit_image,
     }
 
     agent6.tool_map = tool_map
