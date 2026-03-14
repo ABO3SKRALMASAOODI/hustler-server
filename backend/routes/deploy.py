@@ -273,42 +273,36 @@ def publish_project(user_id, job_id):
                     "details": stderr[-300:]
                 }), 500
 
-        # Extract the actual project name and live URL from wrangler output
-        # Wrangler prints: "✨ Deployment complete! Take a peek over at https://abc123.projectname.pages.dev"
-        # The production URL is: https://projectname.pages.dev
+        # Extract the pages.dev URL from wrangler output (for fallback only)
+        # Wrangler prints: "✨ Deployment complete! Take a peek over at https://abc123.projectname-xyz.pages.dev"
+        # NOTE: The pages.dev URL may have a suffix (e.g., counter-cq0) but the actual
+        # Cloudflare project name is what we passed to wrangler (e.g., counter).
+        # Do NOT update cf_project_name from the URL.
         import re
         live_url = None
-        actual_cf_project = cf_project_name  # May differ if Cloudflare added a suffix
-
         combined_output = stdout + stderr
 
-        # ONLY look at the "Deployment complete" line — not the "create" output
+        # Get the pages.dev URL from deployment complete line
         for line in combined_output.split("\n"):
             if "deployment complete" in line.lower() or "take a peek" in line.lower():
-                # Format: https://<deploy-hash>.<actual-project-name>.pages.dev
-                deploy_match = re.findall(r'https://([a-zA-Z0-9]+)\.([a-zA-Z0-9\-]+)\.pages\.dev', line)
+                deploy_match = re.findall(r'https://[a-zA-Z0-9\-]+\.pages\.dev', line)
                 if deploy_match:
-                    actual_cf_project = deploy_match[-1][1]
-                    live_url = f"https://{actual_cf_project}.pages.dev"
-                    print(f"[deploy] Actual Cloudflare project name: {actual_cf_project}")
+                    live_url = deploy_match[-1]
                     break
 
+        # Fallback: try the "available at" line
         if not live_url:
-            # Fallback: try the "available at" line from project create
             for line in combined_output.split("\n"):
                 if "available at" in line.lower():
-                    available_match = re.findall(r'https://([a-zA-Z0-9\-]+)\.pages\.dev', line)
-                    if available_match:
-                        actual_cf_project = available_match[-1]
-                        live_url = f"https://{actual_cf_project}.pages.dev"
+                    avail_match = re.findall(r'https://[a-zA-Z0-9\-]+\.pages\.dev', line)
+                    if avail_match:
+                        live_url = avail_match[-1]
                         break
 
         if not live_url:
             live_url = f"https://{cf_project_name}.pages.dev"
 
-        # Update cf_project_name to the actual name Cloudflare used
-        cf_project_name = actual_cf_project
-
+        # cf_project_name stays as-is (what we passed to wrangler)
         print(f"[deploy] Published successfully: {live_url} (project: {cf_project_name})")
 
         # ── Add custom domain: name.thehustlerbot.com ────────────────
