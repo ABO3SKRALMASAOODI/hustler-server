@@ -115,8 +115,31 @@ def publish_project(user_id, job_id):
     if not _ensure_wrangler():
         return jsonify({"error": "Deployment tool not available. Try again later."}), 500
 
-    # Project name on Cloudflare Pages: hb-<job_id>
-    cf_project_name = f"hb-{job_id}"
+    # Use custom name from request if provided, otherwise generate from title
+    import re
+    data = request.get_json(silent=True) or {}
+    custom_name = (data.get("name", "") or "").strip().lower()
+
+    if custom_name:
+        # Sanitize user-provided name
+        custom_name = re.sub(r'[^a-z0-9-]', '', custom_name)
+        custom_name = re.sub(r'-+', '-', custom_name).strip('-')
+        if len(custom_name) >= 3:
+            cf_project_name = custom_name
+        else:
+            cf_project_name = None
+    else:
+        cf_project_name = None
+
+    # Fallback: generate from project title
+    if not cf_project_name:
+        slug = project_title.lower().strip()
+        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+        slug = re.sub(r'[\s]+', '-', slug)
+        slug = re.sub(r'-+', '-', slug).strip('-')
+        slug = slug[:40]
+        short_id = job_id[:4]
+        cf_project_name = f"{slug}-{short_id}" if slug else f"hb-{job_id}"
 
     env = os.environ.copy()
     env["CLOUDFLARE_ACCOUNT_ID"] = CF_ACCOUNT_ID
