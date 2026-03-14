@@ -323,11 +323,54 @@ def publish_project(user_id, job_id):
         custom_domain = f"{chosen_name}.thehustlerbot.com"
         branded_url = f"https://{custom_domain}"
 
+        # Get the pages.dev host for this project (for CNAME target)
+        pages_dev_host = live_url.replace("https://", "") if live_url else f"{cf_project_name}.pages.dev"
+
         try:
-            # Add custom domain to the Cloudflare Pages project
+            # Step 1: Create CNAME DNS record so the subdomain resolves
+            zone_resp = _requests.get(
+                f"https://api.cloudflare.com/client/v4/zones?name=thehustlerbot.com",
+                headers=cf_headers, timeout=15,
+            )
+            zone_id = None
+            if zone_resp.status_code == 200:
+                zones = zone_resp.json().get("result", [])
+                if zones:
+                    zone_id = zones[0]["id"]
+
+            if zone_id:
+                # Check if CNAME already exists
+                dns_check = _requests.get(
+                    f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=CNAME&name={custom_domain}",
+                    headers=cf_headers, timeout=15,
+                )
+                existing_cnames = dns_check.json().get("result", []) if dns_check.status_code == 200 else []
+
+                if not existing_cnames:
+                    cname_resp = _requests.post(
+                        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                        headers=cf_headers,
+                        json={
+                            "type": "CNAME",
+                            "name": chosen_name,
+                            "content": pages_dev_host,
+                            "ttl": 1,
+                            "proxied": False,
+                        },
+                        timeout=15,
+                    )
+                    if cname_resp.status_code in (200, 201):
+                        print(f"[deploy] DNS CNAME created: {chosen_name} → {pages_dev_host}")
+                    else:
+                        print(f"[deploy] DNS CNAME failed: {cname_resp.status_code} {cname_resp.text[:200]}")
+                else:
+                    print(f"[deploy] DNS CNAME already exists for {custom_domain}")
+            else:
+                print(f"[deploy] Could not find zone ID for thehustlerbot.com")
+
+            # Step 2: Add custom domain to the Cloudflare Pages project
             cf_api_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/pages/projects/{cf_project_name}/domains"
 
-            # Check if domain already added
             check_resp = _requests.get(cf_api_url, headers=cf_headers, timeout=15)
             existing_domains = []
             if check_resp.status_code == 200:
@@ -344,7 +387,6 @@ def publish_project(user_id, job_id):
                     print(f"[deploy] Custom domain added: {custom_domain}")
                 else:
                     print(f"[deploy] Custom domain failed: {add_resp.status_code} {add_resp.text[:200]}")
-                    # Fall back to pages.dev URL if custom domain fails
                     branded_url = live_url
             else:
                 print(f"[deploy] Custom domain already exists: {custom_domain}")
