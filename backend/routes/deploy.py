@@ -101,13 +101,15 @@ def publish_project(user_id, job_id):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT user_id, title FROM jobs WHERE job_id = %s",
+                "SELECT user_id, title, publish_name, cf_project_name FROM jobs WHERE job_id = %s",
                 (job_id,)
             )
             row = cur.fetchone()
             if not row or str(row['user_id']) != str(user_id):
                 return jsonify({"error": "Not authorized"}), 403
             project_title = row.get('title', job_id)
+            existing_publish_name = row.get('publish_name')
+            existing_cf_project = row.get('cf_project_name')
     finally:
         conn.close()
 
@@ -122,25 +124,42 @@ def publish_project(user_id, job_id):
     custom_name = (data.get("name", "") or "").strip().lower()
 
     if custom_name:
-        # Sanitize user-provided name
         custom_name = re.sub(r'[^a-z0-9-]', '', custom_name)
         custom_name = re.sub(r'-+', '-', custom_name).strip('-')
         if len(custom_name) >= 3:
-            cf_project_name = custom_name
+            chosen_subdomain = custom_name
         else:
-            cf_project_name = None
+            chosen_subdomain = None
     else:
-        cf_project_name = None
+        chosen_subdomain = None
 
-    # Fallback: generate from project title
-    if not cf_project_name:
+    if not chosen_subdomain:
         slug = project_title.lower().strip()
         slug = re.sub(r'[^a-z0-9\s-]', '', slug)
         slug = re.sub(r'[\s]+', '-', slug)
         slug = re.sub(r'-+', '-', slug).strip('-')
-        slug = slug[:40]
-        short_id = job_id[:4]
-        cf_project_name = f"{slug}-{short_id}" if slug else f"app-{job_id}"
+        chosen_subdomain = slug[:40] if slug else f"app-{job_id[:8]}"
+
+    # Check subdomain uniqueness — allow if it's the same job re-publishing
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT job_id FROM jobs WHERE publish_name = %s AND job_id != %s",
+                (chosen_subdomain, job_id)
+            )
+            conflict = cur.fetchone()
+            if conflict:
+                return jsonify({"error": f"The name '{chosen_subdomain}' is already taken. Choose a different name."}), 409
+    finally:
+        conn.close()
+
+    # If re-publishing, reuse the existing Cloudflare project name
+    if existing_cf_project:
+        cf_project_name = existing_cf_project
+        print(f"[deploy] Re-publishing to existing project: {cf_project_name}")
+    else:
+        cf_project_name = chosen_subdomain
 
     # Check if this project name is already ours (from a previous publish of this job)
     # or if it's taken by someone else — if so, append a suffix
@@ -337,15 +356,15 @@ def publish_project(user_id, job_id):
         # Use the branded URL as the primary URL
         final_url = branded_url
 
-        # Store the published URL in the database
+        # Store the published URL, publish name, and CF project name in the database
         conn = get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     """UPDATE jobs
-                       SET published_url = %s, updated_at = NOW()
+                       SET published_url = %s, publish_name = %s, cf_project_name = %s, updated_at = NOW()
                        WHERE job_id = %s""",
-                    (final_url, job_id)
+                    (final_url, chosen_subdomain, cf_project_name, job_id)
                 )
                 conn.commit()
         finally:

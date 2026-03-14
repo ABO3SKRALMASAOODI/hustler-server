@@ -880,6 +880,18 @@ def job_status(user_id, job_id):
         except Exception:
             pass
 
+    # Read published_url from DB
+    published_url = None
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT published_url FROM jobs WHERE job_id = %s", (job_id,))
+            pub_row = cur.fetchone()
+            if pub_row:
+                published_url = pub_row.get("published_url")
+    finally:
+        conn.close()
+
     return jsonify({
         "job_id":          job_id,
         "state":           state_data.get("state", "unknown"),
@@ -892,6 +904,7 @@ def job_status(user_id, job_id):
         "progress":        progress,
         "model":           job_model,
         "plan":            credits_info.get("plan", "free"),
+        "published_url":   published_url,
     }), 200
 
 
