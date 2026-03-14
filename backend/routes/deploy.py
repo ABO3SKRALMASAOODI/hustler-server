@@ -125,7 +125,7 @@ def publish_project(user_id, job_id):
         custom_name = re.sub(r'[^a-z0-9-]', '', custom_name)
         custom_name = re.sub(r'-+', '-', custom_name).strip('-')
         if len(custom_name) >= 3:
-            cf_project_name = custom_name
+            cf_project_name = f"hb-{custom_name}"
         else:
             cf_project_name = None
     else:
@@ -139,7 +139,7 @@ def publish_project(user_id, job_id):
         slug = re.sub(r'-+', '-', slug).strip('-')
         slug = slug[:40]
         short_id = job_id[:4]
-        cf_project_name = f"{slug}-{short_id}" if slug else f"hb-{job_id}"
+        cf_project_name = f"hb-{slug}-{short_id}" if slug else f"hb-{job_id}"
 
     env = os.environ.copy()
     env["CLOUDFLARE_ACCOUNT_ID"] = CF_ACCOUNT_ID
