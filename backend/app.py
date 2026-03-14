@@ -10,7 +10,7 @@ from models import init_db
 import os
 from dotenv import load_dotenv
 from routes.github import github_bp
-
+from routes.deploy import deploy_bp
 load_dotenv()
 
 
@@ -55,6 +55,7 @@ def create_app():
     app.register_blueprint(admin_bp,            url_prefix='/admin')
     app.register_blueprint(google_auth_bp,       url_prefix='/auth')
     app.register_blueprint(github_bp, url_prefix='/auth')
+    app.register_blueprint(deploy_bp)
     return app
 
 
