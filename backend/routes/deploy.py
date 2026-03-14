@@ -254,22 +254,43 @@ def publish_project(user_id, job_id):
                     "details": stderr[-300:]
                 }), 500
 
-        # Extract the live URL from wrangler output
-        # Wrangler prints something like: "✨ Deployment complete! Take a peek over at https://xxx.hb-xxxx.pages.dev"
+        # Extract the actual project name and live URL from wrangler output
+        # Wrangler prints: "✨ Deployment complete! Take a peek over at https://abc123.projectname.pages.dev"
+        # The production URL is: https://projectname.pages.dev
+        import re
         live_url = None
-        for line in (stdout + stderr).split("\n"):
-            if "pages.dev" in line:
-                import re
-                urls = re.findall(r'https://[a-zA-Z0-9\-]+\.pages\.dev', line)
-                if urls:
-                    live_url = urls[-1]  # Take the last one (production URL)
+        actual_cf_project = cf_project_name  # May differ if Cloudflare added a suffix
+
+        combined_output = stdout + stderr
+
+        # ONLY look at the "Deployment complete" line — not the "create" output
+        for line in combined_output.split("\n"):
+            if "deployment complete" in line.lower() or "take a peek" in line.lower():
+                # Format: https://<deploy-hash>.<actual-project-name>.pages.dev
+                deploy_match = re.findall(r'https://([a-zA-Z0-9]+)\.([a-zA-Z0-9\-]+)\.pages\.dev', line)
+                if deploy_match:
+                    actual_cf_project = deploy_match[-1][1]
+                    live_url = f"https://{actual_cf_project}.pages.dev"
+                    print(f"[deploy] Actual Cloudflare project name: {actual_cf_project}")
                     break
 
         if not live_url:
-            # Fallback: construct the URL
+            # Fallback: try the "available at" line from project create
+            for line in combined_output.split("\n"):
+                if "available at" in line.lower():
+                    available_match = re.findall(r'https://([a-zA-Z0-9\-]+)\.pages\.dev', line)
+                    if available_match:
+                        actual_cf_project = available_match[-1]
+                        live_url = f"https://{actual_cf_project}.pages.dev"
+                        break
+
+        if not live_url:
             live_url = f"https://{cf_project_name}.pages.dev"
 
-        print(f"[deploy] Published successfully: {live_url}")
+        # Update cf_project_name to the actual name Cloudflare used
+        cf_project_name = actual_cf_project
+
+        print(f"[deploy] Published successfully: {live_url} (project: {cf_project_name})")
 
         # ── Add custom domain: name.thehustlerbot.com ────────────────
         # Use the user's original chosen name (before any collision suffix)
