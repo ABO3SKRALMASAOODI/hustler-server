@@ -117,6 +117,7 @@ def publish_project(user_id, job_id):
 
     # Use custom name from request if provided, otherwise generate from title
     import re
+    import requests as _requests
     data = request.get_json(silent=True) or {}
     custom_name = (data.get("name", "") or "").strip().lower()
 
@@ -125,7 +126,7 @@ def publish_project(user_id, job_id):
         custom_name = re.sub(r'[^a-z0-9-]', '', custom_name)
         custom_name = re.sub(r'-+', '-', custom_name).strip('-')
         if len(custom_name) >= 3:
-            cf_project_name = f"hb-{custom_name}"
+            cf_project_name = custom_name
         else:
             cf_project_name = None
     else:
@@ -139,74 +140,79 @@ def publish_project(user_id, job_id):
         slug = re.sub(r'-+', '-', slug).strip('-')
         slug = slug[:40]
         short_id = job_id[:4]
-        cf_project_name = f"hb-{slug}-{short_id}" if slug else f"hb-{job_id}"
+        cf_project_name = f"{slug}-{short_id}" if slug else f"app-{job_id}"
+
+    # Check if this project name is already ours (from a previous publish of this job)
+    # or if it's taken by someone else — if so, append a suffix
+    cf_headers = {
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    def _project_exists_and_is_ours(name):
+        """Check if a Cloudflare Pages project exists and belongs to our account."""
+        resp = _requests.get(
+            f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/pages/projects/{name}",
+            headers=cf_headers, timeout=10,
+        )
+        if resp.status_code == 200:
+            return True  # Exists in our account — safe to redeploy
+        return False  # Doesn't exist or error
+
+    def _try_deploy_name(name):
+        """Try to deploy with this name. Returns True if wrangler succeeds or project exists in our account."""
+        if _project_exists_and_is_ours(name):
+            return True
+        # Name not in our account — it might be globally taken. We'll try and see.
+        return None  # Unknown, let wrangler try
+
+    # If the name already exists in our account, use it directly
+    # Otherwise try the name, and if wrangler fails due to collision, add suffix
+    if not _project_exists_and_is_ours(cf_project_name):
+        # Might be a new name or a collision — we'll handle after wrangler attempt
+        pass
 
     env = os.environ.copy()
     env["CLOUDFLARE_ACCOUNT_ID"] = CF_ACCOUNT_ID
     env["CLOUDFLARE_API_TOKEN"] = CF_API_TOKEN
 
-    try:
-        # Deploy using wrangler — it auto-creates the project if it doesn't exist
-        print(f"[deploy] Publishing {job_id} to Cloudflare Pages as {cf_project_name}...")
-
-        result = subprocess.run(
+    def _wrangler_deploy(project_name):
+        """Run wrangler deploy and return (success, stdout, stderr)."""
+        r = subprocess.run(
             [
                 "npx", "wrangler", "pages", "deploy", dist_dir,
-                "--project-name", cf_project_name,
+                "--project-name", project_name,
                 "--branch", "main",
                 "--commit-dirty=true",
             ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-            cwd=job_folder,
+            capture_output=True, text=True, timeout=120,
+            env=env, cwd=job_folder,
         )
+        return r.returncode == 0, r.stdout, r.stderr
 
-        stdout = result.stdout
-        stderr = result.stderr
+    try:
+        print(f"[deploy] Publishing {job_id} to Cloudflare Pages as {cf_project_name}...")
+
+        success, stdout, stderr = _wrangler_deploy(cf_project_name)
         print(f"[deploy] wrangler stdout: {stdout[-500:]}")
         print(f"[deploy] wrangler stderr: {stderr[-500:]}")
 
-        if result.returncode != 0:
-            # Check if it's a "project doesn't exist" error — create it first
-            if "could not find" in stderr.lower() or "not found" in stderr.lower():
-                print(f"[deploy] Project doesn't exist, creating {cf_project_name}...")
-                create_result = subprocess.run(
-                    [
-                        "npx", "wrangler", "pages", "project", "create",
-                        cf_project_name, "--production-branch", "main",
-                    ],
-                    capture_output=True, text=True, timeout=60,
-                    env=env, cwd=job_folder,
-                    input="",  # Avoid interactive prompts
-                )
-                print(f"[deploy] Create stdout: {create_result.stdout[-300:]}")
-                print(f"[deploy] Create stderr: {create_result.stderr[-300:]}")
+        # If failed, might be a name collision or project needs creating
+        if not success:
+            error_text = (stdout + stderr).lower()
 
-                # Retry deploy
-                result = subprocess.run(
-                    [
-                        "npx", "wrangler", "pages", "deploy", dist_dir,
-                        "--project-name", cf_project_name,
-                        "--branch", "main",
-                        "--commit-dirty=true",
-                    ],
-                    capture_output=True, text=True, timeout=120,
-                    env=env, cwd=job_folder,
-                )
-                stdout = result.stdout
-                stderr = result.stderr
+            # Name collision: Cloudflare says project exists but not in our account
+            if "already exists" in error_text or "not authorized" in error_text or "could not find" in error_text:
+                # Try with a short suffix to avoid collision
+                original_name = cf_project_name
+                cf_project_name = f"{cf_project_name}-{job_id[:4]}"
+                print(f"[deploy] Name collision on '{original_name}', retrying as '{cf_project_name}'...")
+
+                success, stdout, stderr = _wrangler_deploy(cf_project_name)
                 print(f"[deploy] Retry stdout: {stdout[-500:]}")
                 print(f"[deploy] Retry stderr: {stderr[-500:]}")
 
-                if result.returncode != 0:
-                    return jsonify({
-                        "error": "Deployment failed",
-                        "details": stderr[-300:]
-                    }), 500
-
-            else:
+            if not success:
                 return jsonify({
                     "error": "Deployment failed",
                     "details": stderr[-300:]
@@ -229,6 +235,51 @@ def publish_project(user_id, job_id):
 
         print(f"[deploy] Published successfully: {live_url}")
 
+        # ── Add custom domain: name.thehustlerbot.com ────────────────
+        # Use the user's original chosen name (before any collision suffix)
+        chosen_name = (data.get("name", "") or "").strip().lower()
+        chosen_name = re.sub(r'[^a-z0-9-]', '', chosen_name)
+        chosen_name = re.sub(r'-+', '-', chosen_name).strip('-')
+        if len(chosen_name) < 3:
+            # Fallback to project name
+            chosen_name = cf_project_name
+
+        custom_domain = f"{chosen_name}.thehustlerbot.com"
+        branded_url = f"https://{custom_domain}"
+
+        try:
+            # Add custom domain to the Cloudflare Pages project
+            cf_api_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/pages/projects/{cf_project_name}/domains"
+
+            # Check if domain already added
+            check_resp = _requests.get(cf_api_url, headers=cf_headers, timeout=15)
+            existing_domains = []
+            if check_resp.status_code == 200:
+                existing_domains = [d.get("name", "") for d in check_resp.json().get("result", [])]
+
+            if custom_domain not in existing_domains:
+                add_resp = _requests.post(
+                    cf_api_url,
+                    headers=cf_headers,
+                    json={"name": custom_domain},
+                    timeout=15,
+                )
+                if add_resp.status_code in (200, 201):
+                    print(f"[deploy] Custom domain added: {custom_domain}")
+                else:
+                    print(f"[deploy] Custom domain failed: {add_resp.status_code} {add_resp.text[:200]}")
+                    # Fall back to pages.dev URL if custom domain fails
+                    branded_url = live_url
+            else:
+                print(f"[deploy] Custom domain already exists: {custom_domain}")
+
+        except Exception as e:
+            print(f"[deploy] Custom domain error: {e}")
+            branded_url = live_url
+
+        # Use the branded URL as the primary URL
+        final_url = branded_url
+
         # Store the published URL in the database
         conn = get_db()
         try:
@@ -237,14 +288,15 @@ def publish_project(user_id, job_id):
                     """UPDATE jobs
                        SET published_url = %s, updated_at = NOW()
                        WHERE job_id = %s""",
-                    (live_url, job_id)
+                    (final_url, job_id)
                 )
                 conn.commit()
         finally:
             conn.close()
 
         return jsonify({
-            "url": live_url,
+            "url": final_url,
+            "pages_dev_url": live_url,
             "project_name": cf_project_name,
         }), 200
 
