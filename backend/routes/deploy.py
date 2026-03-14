@@ -177,7 +177,7 @@ def publish_project(user_id, job_id):
     env["CLOUDFLARE_API_TOKEN"] = CF_API_TOKEN
 
     def _wrangler_deploy(project_name):
-        """Run wrangler deploy and return (success, stdout, stderr)."""
+        """Run wrangler deploy. Auto-creates project if needed. Returns (success, stdout, stderr)."""
         r = subprocess.run(
             [
                 "npx", "wrangler", "pages", "deploy", dist_dir,
@@ -188,7 +188,46 @@ def publish_project(user_id, job_id):
             capture_output=True, text=True, timeout=120,
             env=env, cwd=job_folder,
         )
-        return r.returncode == 0, r.stdout, r.stderr
+
+        if r.returncode == 0:
+            return True, r.stdout, r.stderr
+
+        error_text = (r.stdout + r.stderr).lower()
+
+        # Project doesn't exist in our account — create it and retry
+        if "not found" in error_text or "8000007" in error_text:
+            print(f"[deploy] Project '{project_name}' not found, creating...")
+            create = subprocess.run(
+                [
+                    "npx", "wrangler", "pages", "project", "create",
+                    project_name, "--production-branch", "main",
+                ],
+                capture_output=True, text=True, timeout=60,
+                env=env, cwd=job_folder, input="",
+            )
+            print(f"[deploy] Create: {create.stdout[-200:]}{create.stderr[-200:]}")
+
+            if create.returncode != 0:
+                create_err = (create.stdout + create.stderr).lower()
+                # If create fails because name is globally taken, signal collision
+                if "already being used" in create_err or "already exists" in create_err:
+                    return False, r.stdout, "COLLISION:" + create.stderr
+                return False, r.stdout, create.stderr
+
+            # Retry deploy after creating
+            r2 = subprocess.run(
+                [
+                    "npx", "wrangler", "pages", "deploy", dist_dir,
+                    "--project-name", project_name,
+                    "--branch", "main",
+                    "--commit-dirty=true",
+                ],
+                capture_output=True, text=True, timeout=120,
+                env=env, cwd=job_folder,
+            )
+            return r2.returncode == 0, r2.stdout, r2.stderr
+
+        return False, r.stdout, r.stderr
 
     try:
         print(f"[deploy] Publishing {job_id} to Cloudflare Pages as {cf_project_name}...")
@@ -197,13 +236,10 @@ def publish_project(user_id, job_id):
         print(f"[deploy] wrangler stdout: {stdout[-500:]}")
         print(f"[deploy] wrangler stderr: {stderr[-500:]}")
 
-        # If failed, might be a name collision or project needs creating
+        # If failed due to name collision, retry with suffix
         if not success:
             error_text = (stdout + stderr).lower()
-
-            # Name collision: Cloudflare says project exists but not in our account
-            if "already exists" in error_text or "not authorized" in error_text or "could not find" in error_text:
-                # Try with a short suffix to avoid collision
+            if "collision" in error_text or "already" in error_text:
                 original_name = cf_project_name
                 cf_project_name = f"{cf_project_name}-{job_id[:4]}"
                 print(f"[deploy] Name collision on '{original_name}', retrying as '{cf_project_name}'...")
