@@ -274,4 +274,4 @@ def get_deploy_status(user_id, job_id):
                 "is_published": bool(row.get("published_url")),
             }), 200
     finally:
-        conn.close()
+        conn.close(
