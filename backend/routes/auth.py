@@ -95,7 +95,8 @@ def _get_preview_url(job_id, job_folder):
     dist_dir = os.path.join(job_folder, "dist")
     if os.path.isdir(dist_dir):
         base = flask_request.host_url.rstrip("/")
-        return f"{base}/auth/preview/{job_id}/"
+        # Point directly to -raw — no iframe wrapper needed for new jobs
+        return f"{base}/auth/preview-raw/{job_id}/"
 
     return None
 
@@ -725,7 +726,6 @@ def job_message(user_id, job_id):
     attachments = []
     if uploaded_files:
         attachments = _save_uploads_to_job(job_folder, uploaded_files)
-        # Write attachments manifest for this turn
         if attachments:
             with open(os.path.join(job_folder, "attachments.json"), "w") as f:
                 json.dump(attachments, f)
@@ -742,11 +742,9 @@ def job_message(user_id, job_id):
             pass
 
     if model:
-        # Validate model access
         plan = _get_user_plan(user_id)
         if not is_model_allowed(plan, model):
             return jsonify({"error": f"Your {plan} plan doesn't include access to this model. Please upgrade."}), 403
-        # Update meta.json with new model
         try:
             meta = {}
             if os.path.exists(meta_path):
@@ -976,7 +974,7 @@ def clone_template(user_id):
         os.remove(messages_path)
 
     dist_dir    = os.path.join(new_folder, "dist")
-    preview_url = f"/auth/preview/{new_job_id}/" if os.path.isdir(dist_dir) else None
+    preview_url = f"/auth/preview-raw/{new_job_id}/" if os.path.isdir(dist_dir) else None
 
     title = TEMPLATE_JOB_IDS[template_id]
 
@@ -1010,7 +1008,7 @@ def list_templates():
         templates.append({
             "job_id": job_id,
             "title": title,
-            "preview_url": f"/auth/preview/{job_id}/",
+            "preview_url": f"/auth/preview-raw/{job_id}/",
         })
     return jsonify({"templates": templates}), 200
 
@@ -1183,40 +1181,15 @@ The production build will be in the `dist/` folder.
 #  Preview serving                                                     #
 # ------------------------------------------------------------------ #
 
+# Safe redirect for old jobs whose preview_url still points to /auth/preview/
+# New jobs go directly to /auth/preview-raw/ via _get_preview_url()
 @auth_bp.route('/preview/<job_id>/', defaults={'filename': ''})
 @auth_bp.route('/preview/<job_id>/<path:filename>')
 def serve_preview(job_id, filename):
-    from flask import make_response
-
-    dist_dir = os.path.join(OUTPUTS_DIR, job_id, "dist")
-    if not os.path.isdir(dist_dir):
-        return jsonify({"error": "Preview not ready yet"}), 404
-
+    from flask import redirect
     if filename:
-        file_path = os.path.join(dist_dir, filename)
-        if os.path.isfile(file_path):
-            return send_from_directory(dist_dir, filename)
-
-    from flask import request as flask_request
-    base = flask_request.host_url.rstrip("/")
-    wrapper = f"""<!DOCTYPE html>
-<html><head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Preview</title>
-<style>
-  * {{ margin: 0; padding: 0; }}
-  html, body {{ width: 100%; height: 100%; overflow: hidden; }}
-  iframe {{ width: 100%; height: 100%; border: none; }}
-</style>
-</head><body>
-<iframe src="{base}/auth/preview-raw/{job_id}/" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
-</body></html>"""
-
-    resp = make_response(wrapper)
-    resp.headers["Content-Type"] = "text/html; charset=utf-8"
-    resp.headers.pop("X-Frame-Options", None)
-    return resp
+        return redirect(f"/auth/preview-raw/{job_id}/{filename}")
+    return redirect(f"/auth/preview-raw/{job_id}/")
 
 
 @auth_bp.route('/preview-raw/<job_id>/', defaults={'filename': 'index.html'})
@@ -1240,7 +1213,7 @@ def serve_preview_raw(job_id, filename):
     with open(index_path, "r", encoding="utf-8") as f:
         html = f.read()
 
-    asset_base = f"/auth/preview/{job_id}/"
+    asset_base = f"/auth/preview-raw/{job_id}/"
     html = html.replace('src="./assets/', f'src="{asset_base}assets/')
     html = html.replace("src='./assets/", f"src='{asset_base}assets/")
     html = html.replace('href="./assets/', f'href="{asset_base}assets/')
