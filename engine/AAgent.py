@@ -122,16 +122,22 @@ class BaseAgent:
     # Tools that indicate code/assets were actually modified
     CODE_WRITING_TOOLS = {"write_file", "edit_file", "generate_image", "edit_image", "delete_file", "rename_file"}
 
-    def chat(self, user_msg: str):
+    def chat(self, user_msg):
         """
         Run the agentic loop.
+        user_msg can be a string OR a list of content blocks (for multimodal input).
         Returns (text, token_totals, code_changed) where:
           - text: the final assistant text response
           - token_totals: dict with input/output/cache_write/cache_read
           - code_changed: True if write_file, edit_file, or generate_image was called
         """
         if self.pending_notices:
-            user_msg = f"{self.pending_notices}\n\n{user_msg}"
+            notice_text = str(self.pending_notices)
+            if isinstance(user_msg, str):
+                user_msg = f"{notice_text}\n\n{user_msg}"
+            elif isinstance(user_msg, list):
+                # Prepend notices as a text block
+                user_msg = [{"type": "text", "text": notice_text}] + user_msg
             self.pending_notices.clear()
 
         self.messages.append({"role": "user", "content": user_msg})

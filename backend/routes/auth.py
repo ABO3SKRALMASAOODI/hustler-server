@@ -8,7 +8,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import random
 from routes.verify_email import send_code_to_email
 import uuid, subprocess, os, signal
-import shutil, json, time
+import shutil, json, time, base64
 from credits import (
     count_running_jobs,
     check_and_reserve, deduct_credits, get_balance,
@@ -53,6 +53,15 @@ PROJECT_ROOT      = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."
 OUTPUTS_DIR       = os.path.join(PROJECT_ROOT, "outputs")
 ENGINE_SCRIPT     = os.path.join(PROJECT_ROOT, "engine", "AA.py")
 TEMPLATE_SCAFFOLD = os.path.join(PROJECT_ROOT, "engine", "templates", "vite-react")
+
+# Max upload: 10MB per file, max 5 files per message
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+MAX_UPLOAD_FILES = 5
+ALLOWED_UPLOAD_EXTENSIONS = {
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',  # images
+    'pdf',                                          # documents
+    'txt', 'md', 'csv',                             # text
+}
 
 
 # ------------------------------------------------------------------ #
@@ -135,6 +144,59 @@ def _get_user_plan(user_id):
         return (row.get("plan") or "free") if row else "free"
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------------ #
+#  Upload helper — save files to job folder                            #
+# ------------------------------------------------------------------ #
+
+def _save_uploads_to_job(job_folder, files):
+    """
+    Save uploaded files to <job_folder>/uploads/ and return a manifest list.
+    Each entry: {"filename": "logo.png", "path": "uploads/logo.png", "media_type": "image/png"}
+    """
+    uploads_dir = os.path.join(job_folder, "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+
+    manifest = []
+    for f in files:
+        if not f or not f.filename:
+            continue
+
+        # Validate extension
+        ext = f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else ''
+        if ext not in ALLOWED_UPLOAD_EXTENSIONS:
+            continue
+
+        # Validate size
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(0)
+        if size > MAX_UPLOAD_SIZE:
+            continue
+
+        # Generate safe filename
+        safe_name = f"{uuid.uuid4().hex[:8]}_{f.filename}"
+        save_path = os.path.join(uploads_dir, safe_name)
+        f.save(save_path)
+
+        # Determine media type
+        mime_map = {
+            'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+            'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
+            'pdf': 'application/pdf',
+            'txt': 'text/plain', 'md': 'text/plain', 'csv': 'text/csv',
+        }
+        media_type = mime_map.get(ext, 'application/octet-stream')
+
+        manifest.append({
+            "filename": f.filename,
+            "path": os.path.join("uploads", safe_name),
+            "media_type": media_type,
+            "size": size,
+        })
+
+    return manifest
 
 
 # ------------------------------------------------------------------ #
@@ -509,13 +571,49 @@ def generate_job_title(user_id):
     return jsonify({"title": title}), 200
 
 
+# ------------------------------------------------------------------ #
+#  File upload endpoint                                                #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/job/<job_id>/upload', methods=['POST'])
+@token_required
+def upload_files(user_id, job_id):
+    """Upload files to a job folder. Returns manifest of saved files."""
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "No files provided"}), 400
+
+    if len(files) > MAX_UPLOAD_FILES:
+        return jsonify({"error": f"Maximum {MAX_UPLOAD_FILES} files per upload"}), 400
+
+    manifest = _save_uploads_to_job(job_folder, files)
+
+    if not manifest:
+        return jsonify({"error": "No valid files uploaded"}), 400
+
+    return jsonify({"files": manifest}), 200
+
+
 @auth_bp.route('/generate', methods=['POST'])
 @token_required
 def generate(user_id):
-    data   = request.get_json() or {}
-    prompt = data.get("prompt")
-    title  = data.get("title", "").strip() or prompt[:40] if prompt else "New Project"
-    model  = data.get("model", "hb-6")  # Default to HB-6 (Haiku) for new projects
+    # Support both JSON and multipart/form-data (when files are attached)
+    if request.content_type and 'multipart/form-data' in request.content_type:
+        prompt = request.form.get("prompt", "")
+        title = request.form.get("title", "").strip() or (prompt[:40] if prompt else "New Project")
+        model = request.form.get("model", "hb-6")
+        uploaded_files = request.files.getlist("files")
+    else:
+        data = request.get_json() or {}
+        prompt = data.get("prompt")
+        title = data.get("title", "").strip() or (prompt[:40] if prompt else "New Project")
+        model = data.get("model", "hb-6")
+        uploaded_files = []
+
     if not prompt:
         return jsonify({"error": "Prompt required"}), 400
 
@@ -552,8 +650,18 @@ def generate(user_id):
     with open(os.path.join(job_folder, "prompt.txt"), "w", encoding="utf-8") as f:
         f.write(prompt)
 
+    # Save uploaded files if any
+    attachments = []
+    if uploaded_files:
+        attachments = _save_uploads_to_job(job_folder, uploaded_files)
+
     with open(os.path.join(job_folder, "meta.json"), "w") as f:
         json.dump({"user_id": user_id, "model": model}, f)
+
+    # Write attachments manifest so AA.py can find them
+    if attachments:
+        with open(os.path.join(job_folder, "attachments.json"), "w") as f:
+            json.dump(attachments, f)
 
     with open(os.path.join(job_folder, "state.json"), "w", encoding="utf-8") as f:
         json.dump({"state": "running", "created_at": time.time()}, f)
@@ -595,15 +703,32 @@ def generate(user_id):
 @auth_bp.route('/job/<job_id>/message', methods=['POST'])
 @token_required
 def job_message(user_id, job_id):
-    data    = request.get_json() or {}
-    message = data.get("message", "").strip()
-    model   = data.get("model", None)  # Optional: switch model mid-conversation
+    # Support both JSON and multipart/form-data (when files are attached)
+    if request.content_type and 'multipart/form-data' in request.content_type:
+        message = (request.form.get("message", "") or "").strip()
+        model = request.form.get("model", None)
+        uploaded_files = request.files.getlist("files")
+    else:
+        data = request.get_json() or {}
+        message = data.get("message", "").strip()
+        model = data.get("model", None)
+        uploaded_files = []
+
     if not message:
         return jsonify({"error": "message required"}), 400
 
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
+
+    # Save uploaded files if any
+    attachments = []
+    if uploaded_files:
+        attachments = _save_uploads_to_job(job_folder, uploaded_files)
+        # Write attachments manifest for this turn
+        if attachments:
+            with open(os.path.join(job_folder, "attachments.json"), "w") as f:
+                json.dump(attachments, f)
 
     # Read current model from meta.json, allow override
     meta_path = os.path.join(job_folder, "meta.json")
@@ -884,10 +1009,10 @@ def list_templates():
 INTERNAL_FILES = {
     "state.json", "messages.jsonl", "meta.json", "prompt.txt",
     "preview_port.txt", "deduct_credits.json", "Files_list.txt",
-    "progress.json",
+    "progress.json", "attachments.json",
 }
 
-SKIP_DIRS = {"node_modules", "dist", ".git", "__pycache__"}
+SKIP_DIRS = {"node_modules", "dist", ".git", "__pycache__", "uploads"}
 
 DIR_ORDER = {"src": 0, "public": 1}
 

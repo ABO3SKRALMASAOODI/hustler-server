@@ -359,6 +359,84 @@ def main():
         if not user_message:
             raise Exception("Empty user message")
 
+        # ── Load attachments (images/files uploaded by the user) ──────
+        attachments_path = os.path.join(WORKSPACE, "attachments.json")
+        attachments = []
+        if os.path.exists(attachments_path):
+            try:
+                with open(attachments_path) as f:
+                    attachments = json.load(f)
+                # Remove the manifest so it's only used once
+                os.remove(attachments_path)
+                print(f"[AA] Found {len(attachments)} attachment(s)")
+            except Exception as e:
+                print(f"[AA] Error reading attachments: {e}")
+                attachments = []
+
+        # Build the user message — multimodal if attachments exist
+        if attachments:
+            import base64
+            content_blocks = []
+
+            for att in attachments:
+                att_path = os.path.join(WORKSPACE, att["path"])
+                media_type = att.get("media_type", "")
+
+                if media_type.startswith("image/") and media_type != "image/svg+xml":
+                    # Image attachment — send as base64 image block
+                    try:
+                        with open(att_path, "rb") as img_f:
+                            img_data = base64.b64encode(img_f.read()).decode("utf-8")
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": img_data,
+                            }
+                        })
+                        print(f"[AA] Attached image: {att['filename']} ({media_type})")
+                    except Exception as e:
+                        print(f"[AA] Failed to read image {att_path}: {e}")
+
+                elif media_type == "application/pdf":
+                    # PDF attachment — send as document block
+                    try:
+                        with open(att_path, "rb") as pdf_f:
+                            pdf_data = base64.b64encode(pdf_f.read()).decode("utf-8")
+                        content_blocks.append({
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_data,
+                            }
+                        })
+                        print(f"[AA] Attached PDF: {att['filename']}")
+                    except Exception as e:
+                        print(f"[AA] Failed to read PDF {att_path}: {e}")
+
+                else:
+                    # Text/other files — read as text and inline
+                    try:
+                        with open(att_path, "r", encoding="utf-8") as txt_f:
+                            text_content = txt_f.read()
+                        content_blocks.append({
+                            "type": "text",
+                            "text": f"[Attached file: {att['filename']}]\n{text_content}"
+                        })
+                        print(f"[AA] Attached text file: {att['filename']}")
+                    except Exception as e:
+                        print(f"[AA] Failed to read text file {att_path}: {e}")
+
+            # Add the user's text message last
+            content_blocks.append({"type": "text", "text": user_message})
+
+            # For the chat() call, we pass a structured content list
+            chat_input = content_blocks
+        else:
+            chat_input = user_message
+
         append_message(WORKSPACE, "user", user_message)
 
         write_progress(WORKSPACE, {
@@ -373,7 +451,7 @@ def main():
         generator.on_text       = hooks["on_text"]
         generator.on_rate_limit = hooks["on_rate_limit"]
 
-        output, token_breakdown, code_changed = generator.chat(user_message)
+        output, token_breakdown, code_changed = generator.chat(chat_input)
 
         print(f"[AA] code_changed={code_changed} — {'will build' if code_changed else 'skipping build (text-only reply)'}")
 
