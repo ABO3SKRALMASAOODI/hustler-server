@@ -51,6 +51,11 @@ OUTPUTS_DIR  = os.path.join(PROJECT_ROOT, "outputs")
 CF_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
 CF_API_TOKEN  = os.environ.get("CLOUDFLARE_API_TOKEN", "")
 
+CF_HEADERS = lambda: {
+    "Authorization": f"Bearer {CF_API_TOKEN}",
+    "Content-Type": "application/json",
+}
+
 
 def _ensure_wrangler():
     """Make sure wrangler is installed globally. Only runs once."""
@@ -64,7 +69,6 @@ def _ensure_wrangler():
     except Exception:
         pass
 
-    # Install wrangler globally
     try:
         subprocess.run(
             ["npm", "install", "-g", "wrangler"],
@@ -76,19 +80,162 @@ def _ensure_wrangler():
         return False
 
 
+def _get_zone_id():
+    """Fetch the Cloudflare zone ID for thehustlerbot.com."""
+    import requests as _requests
+    resp = _requests.get(
+        "https://api.cloudflare.com/client/v4/zones?name=thehustlerbot.com",
+        headers=CF_HEADERS(), timeout=15,
+    )
+    if resp.status_code == 200:
+        zones = resp.json().get("result", [])
+        if zones:
+            return zones[0]["id"]
+    return None
+
+
+def _delete_custom_domain(cf_project_name, custom_domain, zone_id=None):
+    """
+    Remove a custom domain from:
+      1. The Cloudflare Pages project (domains list)
+      2. The DNS zone (CNAME record)
+    Returns (success, error_message)
+    """
+    import requests as _requests
+
+    if not CF_ACCOUNT_ID or not CF_API_TOKEN:
+        return False, "Cloudflare credentials not configured"
+
+    errors = []
+
+    # ── Step 1: Remove from Pages project domains ──────────────────────────
+    if cf_project_name:
+        try:
+            # List domains on the project
+            list_resp = _requests.get(
+                f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/pages/projects/{cf_project_name}/domains",
+                headers=CF_HEADERS(), timeout=15,
+            )
+            if list_resp.status_code == 200:
+                domains = list_resp.json().get("result", [])
+                for d in domains:
+                    if d.get("name") == custom_domain:
+                        domain_id = d.get("id")
+                        if domain_id:
+                            del_resp = _requests.delete(
+                                f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/pages/projects/{cf_project_name}/domains/{domain_id}",
+                                headers=CF_HEADERS(), timeout=15,
+                            )
+                            if del_resp.status_code not in (200, 204):
+                                errors.append(f"Pages domain delete failed: {del_resp.status_code}")
+                            else:
+                                print(f"[deploy] Removed {custom_domain} from Pages project {cf_project_name}")
+                        break
+        except Exception as e:
+            errors.append(f"Pages domain removal error: {e}")
+
+    # ── Step 2: Remove CNAME from DNS zone ────────────────────────────────
+    try:
+        if not zone_id:
+            zone_id = _get_zone_id()
+
+        if zone_id:
+            # Extract subdomain name (e.g. "myapp" from "myapp.thehustlerbot.com")
+            subdomain_name = custom_domain.replace(".thehustlerbot.com", "")
+
+            dns_resp = _requests.get(
+                f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=CNAME&name={custom_domain}",
+                headers=CF_HEADERS(), timeout=15,
+            )
+            if dns_resp.status_code == 200:
+                records = dns_resp.json().get("result", [])
+                for record in records:
+                    rec_id = record.get("id")
+                    if rec_id:
+                        del_resp = _requests.delete(
+                            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rec_id}",
+                            headers=CF_HEADERS(), timeout=15,
+                        )
+                        if del_resp.status_code not in (200, 204):
+                            errors.append(f"DNS CNAME delete failed: {del_resp.status_code}")
+                        else:
+                            print(f"[deploy] Removed DNS CNAME for {custom_domain}")
+    except Exception as e:
+        errors.append(f"DNS removal error: {e}")
+
+    if errors:
+        print(f"[deploy] Domain cleanup warnings: {errors}")
+
+    return True, None  # Best-effort — don't fail the whole deploy over cleanup
+
+
+# ── DELETE /deploy/<job_id>/domain ─────────────────────────────────────────────
+@deploy_bp.route('/deploy/<job_id>/domain', methods=['DELETE'])
+@token_required
+def delete_domain(user_id, job_id):
+    """
+    Release the custom domain for a job:
+    - Removes CNAME from Cloudflare DNS
+    - Removes custom domain from Pages project
+    - Clears publish_name and published_url from DB
+    """
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, publish_name, cf_project_name, published_url FROM jobs WHERE job_id = %s",
+                (job_id,)
+            )
+            row = cur.fetchone()
+            if not row or str(row['user_id']) != str(user_id):
+                return jsonify({"error": "Not authorized"}), 403
+
+            publish_name   = row.get('publish_name')
+            cf_project_name = row.get('cf_project_name')
+
+            if not publish_name:
+                return jsonify({"error": "No domain to release"}), 400
+
+            custom_domain = f"{publish_name}.thehustlerbot.com"
+
+    finally:
+        conn.close()
+
+    # Delete from Cloudflare
+    _delete_custom_domain(cf_project_name, custom_domain)
+
+    # Clear from DB
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE jobs
+                   SET published_url = NULL, publish_name = NULL, updated_at = NOW()
+                   WHERE job_id = %s""",
+                (job_id,)
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    return jsonify({"ok": True}), 200
+
+
 @deploy_bp.route('/deploy/<job_id>', methods=['POST'])
 @token_required
 def publish_project(user_id, job_id):
     """
     Publish a project's dist/ folder to Cloudflare Pages.
     Creates the Pages project if it doesn't exist, then deploys.
+    If the job already has a different domain (publish_name), the old one is
+    deleted from Cloudflare DNS + Pages before the new one is created.
     Returns the live URL.
     """
     if not CF_ACCOUNT_ID or not CF_API_TOKEN:
         return jsonify({"error": "Deployment not configured. Contact support."}), 500
 
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
-    dist_dir = os.path.join(job_folder, "dist")
+    dist_dir   = os.path.join(job_folder, "dist")
 
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
@@ -107,29 +254,30 @@ def publish_project(user_id, job_id):
             row = cur.fetchone()
             if not row or str(row['user_id']) != str(user_id):
                 return jsonify({"error": "Not authorized"}), 403
-            project_title = row.get('title', job_id)
+            project_title       = row.get('title', job_id)
             existing_publish_name = row.get('publish_name')
-            existing_cf_project = row.get('cf_project_name')
+            existing_cf_project  = row.get('cf_project_name')
     finally:
         conn.close()
 
-    # Ensure wrangler is available
     if not _ensure_wrangler():
         return jsonify({"error": "Deployment tool not available. Try again later."}), 500
 
-    # Use custom name from request if provided, otherwise generate from title
     import re
     import requests as _requests
-    data = request.get_json(silent=True) or {}
-    custom_name = (data.get("name", "") or "").strip().lower()
 
-    if custom_name:
+    data        = request.get_json(silent=True) or {}
+    custom_name = (data.get("name", "") or "").strip().lower()
+    update_only = data.get("update_only", False)   # True = redeploy same domain, no name change
+
+    # ── Resolve chosen subdomain ──────────────────────────────────────────
+    if update_only and existing_publish_name:
+        # Just redeploy — keep existing domain
+        chosen_subdomain = existing_publish_name
+    elif custom_name:
         custom_name = re.sub(r'[^a-z0-9-]', '', custom_name)
         custom_name = re.sub(r'-+', '-', custom_name).strip('-')
-        if len(custom_name) >= 3:
-            chosen_subdomain = custom_name
-        else:
-            chosen_subdomain = None
+        chosen_subdomain = custom_name if len(custom_name) >= 3 else None
     else:
         chosen_subdomain = None
 
@@ -140,7 +288,32 @@ def publish_project(user_id, job_id):
         slug = re.sub(r'-+', '-', slug).strip('-')
         chosen_subdomain = slug[:40] if slug else f"app-{job_id[:8]}"
 
-    # Check subdomain uniqueness — allow if it's the same job re-publishing
+    # ── Domain-change flow: clean up old domain first ─────────────────────
+    domain_changed = (
+        existing_publish_name
+        and chosen_subdomain != existing_publish_name
+        and not update_only
+    )
+
+    if domain_changed:
+        old_domain = f"{existing_publish_name}.thehustlerbot.com"
+        print(f"[deploy] Domain change: {existing_publish_name} → {chosen_subdomain}. Cleaning up old domain...")
+        zone_id = _get_zone_id()
+        _delete_custom_domain(existing_cf_project, old_domain, zone_id)
+
+        # Clear old publish_name in DB immediately so it's freed
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET publish_name = NULL, published_url = NULL, updated_at = NOW() WHERE job_id = %s",
+                    (job_id,)
+                )
+                conn.commit()
+        finally:
+            conn.close()
+
+    # ── Check subdomain uniqueness ────────────────────────────────────────
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -154,49 +327,26 @@ def publish_project(user_id, job_id):
     finally:
         conn.close()
 
-    # If re-publishing, reuse the existing Cloudflare project name
-    if existing_cf_project:
+    # Reuse existing CF project if same domain / update_only
+    if existing_cf_project and not domain_changed:
         cf_project_name = existing_cf_project
         print(f"[deploy] Re-publishing to existing project: {cf_project_name}")
     else:
         cf_project_name = chosen_subdomain
 
-    # Check if this project name is already ours (from a previous publish of this job)
-    # or if it's taken by someone else — if so, append a suffix
-    cf_headers = {
-        "Authorization": f"Bearer {CF_API_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
+    # ── Check if project exists in our CF account ─────────────────────────
     def _project_exists_and_is_ours(name):
-        """Check if a Cloudflare Pages project exists and belongs to our account."""
         resp = _requests.get(
             f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/pages/projects/{name}",
-            headers=cf_headers, timeout=10,
+            headers=CF_HEADERS(), timeout=10,
         )
-        if resp.status_code == 200:
-            return True  # Exists in our account — safe to redeploy
-        return False  # Doesn't exist or error
-
-    def _try_deploy_name(name):
-        """Try to deploy with this name. Returns True if wrangler succeeds or project exists in our account."""
-        if _project_exists_and_is_ours(name):
-            return True
-        # Name not in our account — it might be globally taken. We'll try and see.
-        return None  # Unknown, let wrangler try
-
-    # If the name already exists in our account, use it directly
-    # Otherwise try the name, and if wrangler fails due to collision, add suffix
-    if not _project_exists_and_is_ours(cf_project_name):
-        # Might be a new name or a collision — we'll handle after wrangler attempt
-        pass
+        return resp.status_code == 200
 
     env = os.environ.copy()
     env["CLOUDFLARE_ACCOUNT_ID"] = CF_ACCOUNT_ID
-    env["CLOUDFLARE_API_TOKEN"] = CF_API_TOKEN
+    env["CLOUDFLARE_API_TOKEN"]  = CF_API_TOKEN
 
     def _wrangler_deploy(project_name):
-        """Run wrangler deploy. Auto-creates project if needed. Returns (success, stdout, stderr)."""
         r = subprocess.run(
             [
                 "npx", "wrangler", "pages", "deploy", dist_dir,
@@ -213,7 +363,6 @@ def publish_project(user_id, job_id):
 
         error_text = (r.stdout + r.stderr).lower()
 
-        # Project doesn't exist in our account — create it and retry
         if "not found" in error_text or "8000007" in error_text:
             print(f"[deploy] Project '{project_name}' not found, creating...")
             create = subprocess.run(
@@ -228,12 +377,10 @@ def publish_project(user_id, job_id):
 
             if create.returncode != 0:
                 create_err = (create.stdout + create.stderr).lower()
-                # If create fails because name is globally taken, signal collision
                 if "already being used" in create_err or "already exists" in create_err:
                     return False, r.stdout, "COLLISION:" + create.stderr
                 return False, r.stdout, create.stderr
 
-            # Retry deploy after creating
             r2 = subprocess.run(
                 [
                     "npx", "wrangler", "pages", "deploy", dist_dir,
@@ -255,14 +402,12 @@ def publish_project(user_id, job_id):
         print(f"[deploy] wrangler stdout: {stdout[-500:]}")
         print(f"[deploy] wrangler stderr: {stderr[-500:]}")
 
-        # If failed due to name collision, retry with suffix
         if not success:
             error_text = (stdout + stderr).lower()
             if "collision" in error_text or "already" in error_text:
-                original_name = cf_project_name
+                original_name   = cf_project_name
                 cf_project_name = f"{cf_project_name}-{job_id[:4]}"
                 print(f"[deploy] Name collision on '{original_name}', retrying as '{cf_project_name}'...")
-
                 success, stdout, stderr = _wrangler_deploy(cf_project_name)
                 print(f"[deploy] Retry stdout: {stdout[-500:]}")
                 print(f"[deploy] Retry stderr: {stderr[-500:]}")
@@ -273,16 +418,10 @@ def publish_project(user_id, job_id):
                     "details": stderr[-300:]
                 }), 500
 
-        # Extract the pages.dev URL from wrangler output (for fallback only)
-        # Wrangler prints: "✨ Deployment complete! Take a peek over at https://abc123.projectname-xyz.pages.dev"
-        # NOTE: The pages.dev URL may have a suffix (e.g., counter-cq0) but the actual
-        # Cloudflare project name is what we passed to wrangler (e.g., counter).
-        # Do NOT update cf_project_name from the URL.
-        import re
-        live_url = None
+        # Extract the pages.dev URL from wrangler output
+        live_url       = None
         combined_output = stdout + stderr
 
-        # Get the pages.dev URL from deployment complete line
         for line in combined_output.split("\n"):
             if "deployment complete" in line.lower() or "take a peek" in line.lower():
                 deploy_match = re.findall(r'https://[a-zA-Z0-9\-]+\.pages\.dev', line)
@@ -290,7 +429,6 @@ def publish_project(user_id, job_id):
                     live_url = deploy_match[-1]
                     break
 
-        # Fallback: try the "available at" line
         if not live_url:
             for line in combined_output.split("\n"):
                 if "available at" in line.lower():
@@ -302,48 +440,29 @@ def publish_project(user_id, job_id):
         if not live_url:
             live_url = f"https://{cf_project_name}.pages.dev"
 
-        # cf_project_name stays as-is (what we passed to wrangler)
         print(f"[deploy] Published successfully: {live_url} (project: {cf_project_name})")
 
-        # ── Add custom domain: name.thehustlerbot.com ────────────────
-        # Use the user's original chosen name (before any collision suffix)
-        chosen_name = (data.get("name", "") or "").strip().lower()
-        chosen_name = re.sub(r'[^a-z0-9-]', '', chosen_name)
-        chosen_name = re.sub(r'-+', '-', chosen_name).strip('-')
-        if len(chosen_name) < 3:
-            # Fallback to project name
-            chosen_name = cf_project_name
-
+        # ── Add custom domain ─────────────────────────────────────────────
+        chosen_name   = chosen_subdomain
         custom_domain = f"{chosen_name}.thehustlerbot.com"
-        branded_url = f"https://{custom_domain}"
-
-        # Get the pages.dev host for this project (for CNAME target)
+        branded_url   = f"https://{custom_domain}"
         pages_dev_host = live_url.replace("https://", "") if live_url else f"{cf_project_name}.pages.dev"
 
         try:
-            # Step 1: Create CNAME DNS record so the subdomain resolves
-            zone_resp = _requests.get(
-                f"https://api.cloudflare.com/client/v4/zones?name=thehustlerbot.com",
-                headers=cf_headers, timeout=15,
-            )
-            zone_id = None
-            if zone_resp.status_code == 200:
-                zones = zone_resp.json().get("result", [])
-                if zones:
-                    zone_id = zones[0]["id"]
+            zone_id = _get_zone_id()
 
             if zone_id:
-                # Check if CNAME already exists
+                # Check if CNAME already exists for this name
                 dns_check = _requests.get(
                     f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=CNAME&name={custom_domain}",
-                    headers=cf_headers, timeout=15,
+                    headers=CF_HEADERS(), timeout=15,
                 )
                 existing_cnames = dns_check.json().get("result", []) if dns_check.status_code == 200 else []
 
                 if not existing_cnames:
                     cname_resp = _requests.post(
                         f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-                        headers=cf_headers,
+                        headers=CF_HEADERS(),
                         json={
                             "type": "CNAME",
                             "name": chosen_name,
@@ -360,12 +479,12 @@ def publish_project(user_id, job_id):
                 else:
                     print(f"[deploy] DNS CNAME already exists for {custom_domain}")
             else:
-                print(f"[deploy] Could not find zone ID for thehustlerbot.com")
+                print("[deploy] Could not find zone ID for thehustlerbot.com")
 
-            # Step 2: Add custom domain to the Cloudflare Pages project
+            # Add custom domain to Pages project
             cf_api_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/pages/projects/{cf_project_name}/domains"
 
-            check_resp = _requests.get(cf_api_url, headers=cf_headers, timeout=15)
+            check_resp       = _requests.get(cf_api_url, headers=CF_HEADERS(), timeout=15)
             existing_domains = []
             if check_resp.status_code == 200:
                 existing_domains = [d.get("name", "") for d in check_resp.json().get("result", [])]
@@ -373,7 +492,7 @@ def publish_project(user_id, job_id):
             if custom_domain not in existing_domains:
                 add_resp = _requests.post(
                     cf_api_url,
-                    headers=cf_headers,
+                    headers=CF_HEADERS(),
                     json={"name": custom_domain},
                     timeout=15,
                 )
@@ -389,10 +508,9 @@ def publish_project(user_id, job_id):
             print(f"[deploy] Custom domain error: {e}")
             branded_url = live_url
 
-        # Use the branded URL as the primary URL
         final_url = branded_url
 
-        # Store the published URL, publish name, and CF project name in the database
+        # Store in DB
         conn = get_db()
         try:
             with conn.cursor() as cur:
@@ -407,7 +525,7 @@ def publish_project(user_id, job_id):
             conn.close()
 
         return jsonify({
-            "url": final_url,
+            "url":          final_url,
             "pages_dev_url": live_url,
             "project_name": cf_project_name,
         }), 200
@@ -427,7 +545,7 @@ def get_deploy_status(user_id, job_id):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT published_url FROM jobs WHERE job_id = %s AND user_id = %s",
+                "SELECT published_url, publish_name FROM jobs WHERE job_id = %s AND user_id = %s",
                 (job_id, int(user_id))
             )
             row = cur.fetchone()
@@ -435,7 +553,8 @@ def get_deploy_status(user_id, job_id):
                 return jsonify({"error": "Job not found"}), 404
             return jsonify({
                 "published_url": row.get("published_url"),
-                "is_published": bool(row.get("published_url")),
+                "publish_name":  row.get("publish_name"),
+                "is_published":  bool(row.get("published_url")),
             }), 200
     finally:
         conn.close()
