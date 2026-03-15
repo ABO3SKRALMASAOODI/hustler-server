@@ -142,29 +142,18 @@ def backend_status(user_id, job_id):
 @supabase_bp.route('/job/<job_id>/sql', methods=['POST'])
 @token_required
 def execute_sql(user_id, job_id):
-    """
-    Execute SQL on the Supabase project.
-    Used by the AI agent's tools to create tables, set up RLS, etc.
-    The service_role key is used server-side — never exposed to the frontend.
-    """
     data = request.get_json() or {}
     sql  = data.get("sql", "").strip()
 
     if not sql:
         return jsonify({"error": "SQL query required"}), 400
 
-    # Safety: block destructive operations on system tables
     sql_lower = sql.lower().strip()
     blocked = ["drop database", "drop schema public", "pg_terminate_backend"]
     for b in blocked:
         if b in sql_lower:
             return jsonify({"error": f"Blocked operation: {b}"}), 403
 
-    config = _get_supabase_config()
-    if not config["url"] or not config["service_role_key"]:
-        return jsonify({"error": "Supabase not configured"}), 500
-
-    # Verify job belongs to user
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -180,83 +169,56 @@ def execute_sql(user_id, job_id):
     finally:
         conn.close()
 
-    # Execute via Supabase REST SQL endpoint
+    access_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
+    project_ref = os.getenv("SUPABASE_PROJECT_REF", "")
+
+    if not access_token or not project_ref:
+        return jsonify({"error": "Supabase Management API not configured"}), 500
+
     try:
         resp = http_requests.post(
-            f"{config['url']}/rest/v1/rpc",
-            headers=_supabase_headers(),
+            f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
             json={"query": sql},
             timeout=30,
         )
-
-        # If rpc endpoint doesn't work, use the pg-meta or direct SQL approach
-        # Supabase exposes SQL execution via the management API or pg endpoint
-        # For Phase 1, we use the PostgREST interface for table operations
-        # and fall back to the SQL endpoint for DDL
-
-        if resp.status_code >= 400:
-            # Try the Supabase SQL query endpoint (available on all projects)
-            resp2 = http_requests.post(
-                f"{config['url']}/pg/query",
-                headers={
-                    "apikey":        config["service_role_key"],
-                    "Authorization": f"Bearer {config['service_role_key']}",
-                    "Content-Type":  "application/json",
-                },
-                json={"query": sql},
-                timeout=30,
-            )
-            if resp2.status_code < 400:
-                return jsonify({"result": resp2.json()}), 200
-            else:
-                return jsonify({
-                    "error": "SQL execution failed",
-                    "detail": resp2.text[:500],
-                }), resp2.status_code
-
-        return jsonify({"result": resp.json()}), 200
-
+        if resp.status_code < 400:
+            return jsonify({"result": resp.json()}), 200
+        else:
+            return jsonify({"error": "SQL execution failed", "detail": resp.text[:500]}), resp.status_code
     except Exception as e:
         return jsonify({"error": f"SQL execution error: {str(e)}"}), 500
-
-
 # ── List tables in the Supabase project ──────────────────────────────────────
-
 @supabase_bp.route('/job/<job_id>/tables', methods=['GET'])
 @token_required
 def list_tables(user_id, job_id):
-    """List all user-created tables in the Supabase project."""
-    config = _get_supabase_config()
-    if not config["url"]:
+    access_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
+    project_ref = os.getenv("SUPABASE_PROJECT_REF", "")
+
+    if not access_token or not project_ref:
         return jsonify({"error": "Supabase not configured"}), 500
 
     try:
-        # Query information_schema for user tables
         sql = """
-            SELECT table_name, 
-                   (SELECT count(*) FROM information_schema.columns c 
-                    WHERE c.table_name = t.table_name 
-                    AND c.table_schema = 'public') as column_count
-            FROM information_schema.tables t
-            WHERE table_schema = 'public' 
-            AND table_type = 'BASE TABLE'
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
             ORDER BY table_name;
         """
         resp = http_requests.post(
-            f"{config['url']}/pg/query",
+            f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
             headers={
-                "apikey":        config["service_role_key"],
-                "Authorization": f"Bearer {config['service_role_key']}",
-                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
             },
             json={"query": sql},
             timeout=15,
         )
-
         if resp.status_code < 400:
             return jsonify({"tables": resp.json()}), 200
         else:
             return jsonify({"tables": [], "note": "Could not fetch tables"}), 200
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500

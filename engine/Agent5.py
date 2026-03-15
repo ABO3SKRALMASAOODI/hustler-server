@@ -39,25 +39,27 @@ class SupabaseTools:
         }
 
     def _execute_sql(self, sql: str) -> dict:
-        """Execute raw SQL against the Supabase project."""
+        """Execute raw SQL via the Supabase Management API."""
         try:
+            access_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
+            project_ref = os.getenv("SUPABASE_PROJECT_REF", "")
+
+            if not access_token or not project_ref:
+                return {"success": False, "error": "SUPABASE_ACCESS_TOKEN or SUPABASE_PROJECT_REF not set"}
+
             resp = requests.post(
-                f"{self.url}/pg/query",
-                headers=self._headers(),
+                f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
                 json={"query": sql},
                 timeout=30,
             )
+
             if resp.status_code < 400:
                 return {"success": True, "data": resp.json()}
             else:
-                resp2 = requests.post(
-                    f"{self.url}/rest/v1/rpc/exec_sql",
-                    headers=self._headers(),
-                    json={"sql": sql},
-                    timeout=30,
-                )
-                if resp2.status_code < 400:
-                    return {"success": True, "data": resp2.json()}
                 return {"success": False, "error": resp.text[:500]}
         except Exception as e:
             return {"success": False, "error": str(e)}
