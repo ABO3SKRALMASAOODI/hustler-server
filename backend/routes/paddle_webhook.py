@@ -5,7 +5,7 @@ from datetime import datetime
 paddle_webhook = Blueprint('paddle_webhook', __name__)
 
 PLAN_CREDITS = {
-    'plus':  1000,
+    'plus':  800,
     'pro':   2400,
     'ultra': 5000,
     'titan': 10000,

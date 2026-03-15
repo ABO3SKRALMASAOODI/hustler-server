@@ -333,7 +333,27 @@ def main():
         })
 
         files_list = FileState(False)
-        generator  = create_generator(files_list_state=files_list, model=anthropic_model)
+        supabase_config = None
+        meta_path_sb = os.path.join(WORKSPACE, "meta.json")
+        if os.path.exists(meta_path_sb):
+            try:
+                with open(meta_path_sb) as f:
+                    meta_sb = json.load(f)
+                if meta_sb.get("supabase_enabled"):
+                    supabase_config = {
+                        "url":              meta_sb.get("supabase_url", ""),
+                        "anon_key":         meta_sb.get("supabase_anon_key", ""),
+                        "service_role_key": os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
+                    }
+                    print(f"[AA] Supabase enabled for this job")
+            except Exception as e:
+                print(f"[AA] Error reading Supabase config: {e}")
+ 
+        generator = create_generator(
+            files_list_state=files_list,
+            model=anthropic_model,
+            supabase_config=supabase_config,
+        )
 
         write_progress(WORKSPACE, {
             "action": "thinking",

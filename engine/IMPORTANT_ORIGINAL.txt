@@ -1850,6 +1850,31 @@ The following are the exact JSON schemas for all available tools as provided by 
 }
 ```
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ---
 
 ## Dynamic Context (injected per-message)

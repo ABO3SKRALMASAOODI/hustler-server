@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 from routes.github import github_bp
 from routes.deploy import deploy_bp
+from routes.supabase_mgmt import supabase_bp
 load_dotenv()
 
 
@@ -56,6 +57,7 @@ def create_app():
     app.register_blueprint(google_auth_bp,       url_prefix='/auth')
     app.register_blueprint(github_bp, url_prefix='/auth')
     app.register_blueprint(deploy_bp)
+    app.register_blueprint(supabase_bp, url_prefix='/supabase')
     return app
 
 

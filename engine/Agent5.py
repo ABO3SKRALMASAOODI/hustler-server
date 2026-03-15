@@ -1,6 +1,6 @@
 from openai import OpenAI
 from dotenv import load_dotenv
-from colorama import Fore,Style,Back
+from colorama import Fore, Style, Back
 from AAgent import BaseAgent
 from deployer import run_install_command
 load_dotenv()
@@ -8,243 +8,370 @@ from pathlib import Path
 import os
 import subprocess
 import shutil
+import json
 import anthropic
 import requests
 import replicate
 
 client = anthropic.Anthropic()
 
-Generator_sys_prompt = """
-You are Agent 5 in an AI pipeline system called "Immediately".
-Your role is the Generator Agent.
 
-The pipeline's objective is production-grade, fully functional software.
-You implement code changes for EXACTLY ONE sub-step, as instructed by the Reviewer.
+# ══════════════════════════════════════════════════════════════════════════════
+#  SUPABASE TOOLS CLASS
+# ══════════════════════════════════════════════════════════════════════════════
 
-You must not produce toy implementations, partial work, placeholders, TODOs, stubs, pseudo-code, or "minimal" solutions.
-All work must be complete, runnable, and appropriate for production use within the scope of the given sub-step.
+class SupabaseTools:
+    """
+    Provides tool functions for the AI agent to interact with Supabase.
+    Initialized with the project's Supabase credentials.
+    """
 
-────────────────────────────────────────────────────────
-ROLE BOUNDARIES
-────────────────────────────────────────────────────────
-1) You implement code. You do NOT:
-   - plan the roadmap
-   - evaluate correctness
-   - decide acceptance
-   - mark any step or sub-step as accomplished or rejected
+    def __init__(self, supabase_url: str, anon_key: str, service_role_key: str):
+        self.url              = supabase_url.rstrip("/")
+        self.anon_key         = anon_key
+        self.service_role_key = service_role_key
 
-2) You act ONLY on:
-   - the project idea
-   - the current high-level step (context only)
-   - the single active sub-step
-   - the explicit instructions provided by the Reviewer
+    def _headers(self):
+        return {
+            "apikey":        self.service_role_key,
+            "Authorization": f"Bearer {self.service_role_key}",
+            "Content-Type":  "application/json",
+        }
 
-3) You must not introduce functionality, refactors, or behavior that are not required by the active sub-step.
+    def _execute_sql(self, sql: str) -> dict:
+        """Execute raw SQL against the Supabase project."""
+        try:
+            resp = requests.post(
+                f"{self.url}/pg/query",
+                headers=self._headers(),
+                json={"query": sql},
+                timeout=30,
+            )
+            if resp.status_code < 400:
+                return {"success": True, "data": resp.json()}
+            else:
+                resp2 = requests.post(
+                    f"{self.url}/rest/v1/rpc/exec_sql",
+                    headers=self._headers(),
+                    json={"sql": sql},
+                    timeout=30,
+                )
+                if resp2.status_code < 400:
+                    return {"success": True, "data": resp2.json()}
+                return {"success": False, "error": resp.text[:500]}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
-────────────────────────────────────────────────────────
-INPUTS YOU WILL RECEIVE (FROM REVIEWER)
-────────────────────────────────────────────────────────
-You will receive the following from the reviewer agent:
-1) Project idea (high-level description)
-2) One high-level step identifier (context only)
-3) One active sub-step identifier (the ONLY unit of work)
-4) Explicit instructions defining what must be implemented for this sub-step
-5) Tool access (e.g., files_list, read, write,edit,run_install_command)
+    def create_table(self, table_name: str, columns: str, enable_rls: bool = True) -> str:
+        sql = f"CREATE TABLE IF NOT EXISTS public.{table_name} ({columns});"
+        if enable_rls:
+            sql += f" ALTER TABLE public.{table_name} ENABLE ROW LEVEL SECURITY;"
 
-You must treat the active sub-step as the only task that exists.
+        result = self._execute_sql(sql)
+        if result["success"]:
+            msg = f"TABLE_CREATED: {table_name}"
+            if enable_rls:
+                msg += " (RLS enabled — add policies to control access)"
+            print(f"[supabase] Created table: {table_name}")
+            return msg
+        else:
+            print(f"[supabase] Failed to create table {table_name}: {result['error']}")
+            return f"TABLE_CREATE_ERROR: {result['error']}"
 
-If required information is missing, ambiguous, or contradictory:
-- Stop immediately
-- Request clarification from the Reviewer
-- Do NOT guess frameworks, conventions, file structure, or APIs
+    def add_rls_policy(self, table_name: str, policy_name: str, operation: str,
+                       using_expression: str, check_expression: str = "") -> str:
+        self._execute_sql(f'DROP POLICY IF EXISTS "{policy_name}" ON public.{table_name};')
 
-────────────────────────────────────────────────────────
-AVAILABLE TOOLS AND USAGE RULES
-────────────────────────────────────────────────────────
-Available tools include:
-- files_list: returns the list of files in the repository
-- read_file: returns the contents of a specific file path
-- write_file: writes full contents to a file path (creates or overwrites)
-- edit_file: Edits the file, you should pass an old segment with the new replaced one, if you want to add to the file by using the edit you can pass the last string and continue from there, you can utilise it when you want to add to a long file and dont want to rewrite everything from scratch
-- delete_file: deletes a file or folder from the project
-- rename_file: renames/moves a file from one path to another
-- search_files: regex search across project files to find code patterns, imports, or usage
-- run_install_command: used for downloading required dependencies and solving error's that may require because of dependencies
-- generate_image: generates an AI image from a text prompt and saves it to a specified path in the project
-- edit_image: edits or merges existing images based on a text prompt
+        sql = f"""CREATE POLICY "{policy_name}" ON public.{table_name}
+            FOR {operation} TO authenticated USING ({using_expression})"""
+        if check_expression:
+            sql += f" WITH CHECK ({check_expression})"
+        sql += ";"
+
+        result = self._execute_sql(sql)
+        if result["success"]:
+            print(f"[supabase] Added RLS policy '{policy_name}' on {table_name}")
+            return f"RLS_POLICY_CREATED: '{policy_name}' on {table_name} for {operation}"
+        else:
+            print(f"[supabase] Failed to add RLS policy: {result['error']}")
+            return f"RLS_POLICY_ERROR: {result['error']}"
+
+    def enable_auth(self) -> str:
+        config = {
+            "supabase_url": self.url,
+            "anon_key":     self.anon_key,
+            "auth_methods": [
+                "email/password (built-in, no config needed)",
+                "magic link (built-in, no config needed)",
+            ],
+            "usage": {
+                "sign_up":   "await supabase.auth.signUp({ email, password })",
+                "sign_in":   "await supabase.auth.signInWithPassword({ email, password })",
+                "sign_out":  "await supabase.auth.signOut()",
+                "get_user":  "const { data: { user } } = await supabase.auth.getUser()",
+                "on_change": "supabase.auth.onAuthStateChange((event, session) => { ... })",
+            },
+            "notes": [
+                "Auth is already enabled — just use the supabase client.",
+                "For user-specific data, add a user_id column referencing auth.users(id).",
+                "Use auth.uid() in RLS policies to restrict access to the user's own rows.",
+            ]
+        }
+        return f"AUTH_ENABLED: Supabase Auth is ready.\n\nConfiguration:\n{json.dumps(config, indent=2)}"
+
+    def list_tables(self) -> str:
+        sql = """
+            SELECT t.table_name,
+                   json_agg(json_build_object(
+                       'column_name', c.column_name,
+                       'data_type', c.data_type,
+                       'is_nullable', c.is_nullable,
+                       'column_default', c.column_default
+                   ) ORDER BY c.ordinal_position) as columns
+            FROM information_schema.tables t
+            JOIN information_schema.columns c
+                ON c.table_name = t.table_name AND c.table_schema = t.table_schema
+            WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+            GROUP BY t.table_name ORDER BY t.table_name;
+        """
+        result = self._execute_sql(sql)
+        if result["success"]:
+            data = result["data"]
+            if not data:
+                return "NO_TABLES: The database has no tables yet. Use create_table to create one."
+            output = "DATABASE_TABLES:\n"
+            for table in data:
+                name = table.get("table_name", "unknown")
+                cols = table.get("columns", [])
+                output += f"\n  {name}:\n"
+                for col in cols:
+                    nullable = "nullable" if col.get("is_nullable") == "YES" else "not null"
+                    default  = f" default={col['column_default']}" if col.get("column_default") else ""
+                    output += f"    - {col['column_name']}: {col['data_type']} ({nullable}{default})\n"
+            return output
+        else:
+            return f"LIST_TABLES_ERROR: {result['error']}"
+
+    def run_sql(self, sql: str) -> str:
+        sql_lower = sql.lower().strip()
+        blocked = ["drop database", "drop schema public", "pg_terminate_backend", "drop owned", "reassign owned"]
+        for b in blocked:
+            if b in sql_lower:
+                return f"SQL_BLOCKED: Operation '{b}' is not allowed."
+        result = self._execute_sql(sql)
+        if result["success"]:
+            return f"SQL_EXECUTED_SUCCESSFULLY\n{json.dumps(result['data'], indent=2)[:2000]}"
+        else:
+            return f"SQL_ERROR: {result['error']}"
+
+    def get_supabase_config(self) -> str:
+        return json.dumps({
+            "supabase_url": self.url,
+            "anon_key":     self.anon_key,
+            "usage": (
+                "Create a file src/lib/supabase.ts with:\n"
+                "  import { createClient } from '@supabase/supabase-js'\n"
+                f"  export const supabase = createClient('{self.url}', '{self.anon_key}')\n"
+                "\nThen import {{ supabase }} from '@/lib/supabase' wherever needed."
+            ),
+        })
 
 
-Tool usage rules:
-1) Use files_list whenever you do not already have a reliable view of the repository. (there are no other file other than the one returned by this list so if you dont find what you want create it via the write)
-2) Use read before modifying any file whose contents affect:
-   - imports
-   - APIs
-   - configuration
-   - runtime wiring
-   - tests
-   - integrations
-3) Never claim you inspected a file unless you actually called read.
-4) Never hallucinate files or paths. If unsure, inspect.
-5) When using write_files:
-   - Always write the FULL file contents (no patches).
-   - Creating a file via write is sufficient; the system will track it.
-6) when using edit_file: Specify a reference string within the file to act as an insertion point. The tool will replace the content starting from that string with the provided continuation.
-7) If you get reported an error of a missing library or package you can call the run_install_command with the command to install the package
-8) Do not expose tool outputs in your response.
-9) You should be tide and put every logic in its own folder or create a file with the folder you want if it doesnt exist
-10) If any kind of documentation or planning were requested you must use the write file tool to document it in the project also
-11) When you need images for the project (hero images, backgrounds, product photos, illustrations, icons, etc.), use the generate_image tool with a descriptive prompt. Save images to src/assets/ or public/images/ with descriptive filenames.
-12) Use search_files to find where a component, function, or variable is used across the project before renaming or modifying it.
-13) Use delete_file to remove files that are no longer needed. Always clean up old files when restructuring.
-14) Use rename_file instead of creating a new file and deleting the old one.
+# ══════════════════════════════════════════════════════════════════════════════
+#  SUPABASE TOOL DEFINITIONS (Anthropic format)
+# ══════════════════════════════════════════════════════════════════════════════
 
-────────────────────────────────────────────────────────
-WORKFLOW (STRICT; SINGLE SUB-STEP)
-────────────────────────────────────────────────────────
-For the active sub-step, follow this exact workflow:
-
-1) Establish context
-   - Confirm you have the project idea, active sub-step, and explicit instructions.
-   - Ensure you have an accurate file list (provided or obtained via files_list).
-
-2) Determine required inspection
-   - Identify which existing files must be read to implement safely.
-   - Read only what is necessary, but do not risk guessing.
-
-3) Implement changes
-   - Implement ONLY what is required to satisfy the sub-step.
-   - Keep changes tightly scoped.
-   - Do not refactor or clean up unrelated code.
-
-4) Write outputs
-   - For every modified file: write full updated contents.
-   - For every new file: write complete contents.
-   - Include all required companion changes (imports, wiring, config, tests) if they are necessary for the sub-step to function correctly.
-
-5) Silent self-check
-   - Implementation is runnable within the sub-step's scope.
-   - No TODOs, placeholders, dummy logic, or omitted behavior.
-   - No hidden assumptions about frameworks or structure.
-   - No unrelated or speculative changes.
-
-────────────────────────────────────────────────────────
-OUTPUT RULES (STRICT)
-────────────────────────────────────────────────────────
-1) Do not output the file change's to the reviewer, it will see the chnage's without you showing it.
-2) Once you finish the request you can output what you did as a small summary but never show file changes to the reviewer agent, because it can see without you providing it.
-3) Do not mark steps or sub-steps as accomplished or rejected.
-4) Do not output tool responses.
-5) You will be given this message as a first message then you will interact with the generator, upon sending the instruction's to the generator it may ask question's for clarifying you need to answer it's question so the you dont both get stuck in a loop because of an ambiguity.
-
-
-────────────────────────────────────────────────────────
-QUALITY BAR
-────────────────────────────────────────────────────────
-Your implementation must be:
-- Complete: end-to-end for the sub-step
-- Correct: exactly matches Reviewer instructions
-- Robust: handles realistic edge cases within scope
-- Maintainable: clean structure and consistent naming
-- Non-destructive: does not break unrelated behavior
-
-Minimal or "demo" implementations are unacceptable.
-
-────────────────────────────────────────────────────────
-ERROR HANDLING
-────────────────────────────────────────────────────────
-If you cannot proceed:
-1) State exactly what is missing or unclear.
-2) Ask the Reviewer for the specific information required.
-3) Do NOT implement speculative or placeholder code.
-4) If your implementation requires specific environment variables to run, you MUST create or update a .env file in the project root containing mock values for those variables before submitting your code for verification.
-Begin only when the Reviewer provides instructions for the active sub-step.
-5) CRITICAL: When generating installation commands, ALWAYS include non-interactive flags (e.g., '-y', '--yes', '--no-input') to prevent execution hangs.
-6) If an error that is not related to the current substep appears you should still correct it to pass the substep.
-"""
-tools = [
-     {
-        "type": "function",
-        "name": "read_file",
-        "description": "Read the content of an existing file from the disk.",
-        "parameters": {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-    },
+SUPABASE_TOOL_DEFINITIONS = [
     {
-        "type": "function",
-        "name": "write_file",
-        "description": "Create, Write or overwrite a file. May be used to create a new file with its content if required'.",
-        "parameters": {
+        "name": "create_table",
+        "description": (
+            "Create a new database table in Supabase. Row Level Security (RLS) is enabled by default.\n\n"
+            "After creating a table, you MUST add RLS policies using add_rls_policy, otherwise "
+            "the table will be inaccessible from the frontend.\n\n"
+            "Common column patterns:\n"
+            "- Primary key: 'id uuid default gen_random_uuid() primary key'\n"
+            "- User reference: 'user_id uuid references auth.users(id) on delete cascade not null'\n"
+            "- Timestamps: 'created_at timestamptz default now()'\n"
+            "- Text: 'title text not null'\n"
+            "- Boolean: 'done boolean default false'\n"
+            "- Number: 'price numeric(10,2)'\n"
+            "- JSON: 'metadata jsonb default ''{}''::jsonb'"
+        ),
+        "input_schema": {
             "type": "object",
             "properties": {
-            "path": {"type": "string"},
-            "content": {"type": "string", "description": "The full source code"}
+                "table_name": {"type": "string", "description": "Table name (lowercase, underscores)"},
+                "columns": {"type": "string", "description": "SQL column definitions, comma-separated."},
+                "enable_rls": {"type": "boolean", "description": "Enable Row Level Security. Default true."}
             },
-                "required": ["path", "content"],
-                "additionalProperties": False,
-            }
-        
-    },
-    {
-    "type": "function",
-    "name": "edit_file",
-    "description": "Surgically edit an existing file by replacing a specific string segment with a new one. Useful for large files where full rewrites are inefficient. To append, provide the last line of the file as 'old_str' and the last line plus your additions as 'new_str'.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-            },
-            "old_str": {
-                "type": "string", 
-                "description": "The exact block of text or line to be replaced. Must exist in the file."
-            },
-            "new_str": {
-                "type": "string",
-                "description": "The new content to insert in place of 'old_str'."
-            }
-        },
-        "required": ["path", "old_str", "new_str"],
-        "additionalProperties": False
-    }
-},
-    {
-        "type": "function",
-        "name": "files_list",
-        "description": "get the list of the current existing file names.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-
-            "additionalProperties": False,
+            "required": ["table_name", "columns"]
         }
     },
     {
-  "type": "function",
-  "name": "run_install_command",
-  "description": "Run a terminal command to install dependencies. You can specify the subdirectory (e.g., 'frontend' or 'backend') relative to the project root.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "command": {
-        "type": "string", 
-        "description": "The full terminal command (e.g., 'npm install')."
-      },
-      "directory": {
-        "type": "string",
-        "description": "The relative path from the project root where the command should run. Defaults to project root if omitted."
-      }
+        "name": "add_rls_policy",
+        "description": (
+            "Add a Row Level Security policy to a table.\n\n"
+            "Common patterns:\n"
+            "- Users read own data: operation='SELECT', using='auth.uid() = user_id'\n"
+            "- Users insert own data: operation='INSERT', using='true', check='auth.uid() = user_id'\n"
+            "- Users update own data: operation='UPDATE', using='auth.uid() = user_id', check='auth.uid() = user_id'\n"
+            "- Users delete own data: operation='DELETE', using='auth.uid() = user_id'\n\n"
+            "IMPORTANT: A table with RLS enabled but NO policies will block ALL access."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "table_name": {"type": "string"},
+                "policy_name": {"type": "string", "description": "Descriptive name (e.g., 'Users can read own todos')"},
+                "operation": {"type": "string", "description": "SELECT, INSERT, UPDATE, DELETE, or ALL"},
+                "using_expression": {"type": "string", "description": "SQL boolean for USING clause"},
+                "check_expression": {"type": "string", "description": "Optional WITH CHECK for INSERT/UPDATE"}
+            },
+            "required": ["table_name", "policy_name", "operation", "using_expression"]
+        }
     },
-    "required": ["command"],
-    "additionalProperties": False
-  }
-}
-    
+    {
+        "name": "enable_auth",
+        "description": "Get authentication configuration. Returns exact code patterns for sign up, sign in, sign out, and session management.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "list_tables",
+        "description": "List all tables in the database with their columns, types, and constraints.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "run_sql",
+        "description": (
+            "Execute arbitrary SQL. Use for creating indexes, inserting seed data, altering tables, "
+            "creating functions/triggers, etc. Cannot drop databases or schemas."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"sql": {"type": "string", "description": "The SQL query to execute"}},
+            "required": ["sql"]
+        }
+    },
+    {
+        "name": "get_supabase_config",
+        "description": "Get the Supabase project URL and anon key for the generated frontend code.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
 ]
-FRONTEND_AGENT_SYSTEM_PROMPT= """You are "The hustler bot" Builder Agent, an AI editor that builds frontends for websites described by the user. You assist users by making changes to their code and can discuss, explain concepts, or provide guidance when no code changes are needed.
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SUPABASE SYSTEM PROMPT ADDITION
+# ══════════════════════════════════════════════════════════════════════════════
+
+SUPABASE_PROMPT_ADDITION = """
+
+────────────────────────────────────────────────────────
+BACKEND / DATABASE (SUPABASE)
+────────────────────────────────────────────────────────
+This project has a Supabase backend enabled. You have full access to create database tables,
+set up authentication, and configure Row Level Security.
+
+IMPORTANT: You MUST install @supabase/supabase-js if not already in package.json:
+  run_install_command: "npm install @supabase/supabase-js -y"
+
+── SETUP (do this first if not already done) ──
+
+1) Call get_supabase_config to get the project URL and anon key.
+2) Create src/lib/supabase.ts with the client.
+3) Install the dependency if needed.
+
+── DATABASE ──
+
+Use create_table to create tables. Always include:
+- A uuid primary key: `id uuid default gen_random_uuid() primary key`
+- A user_id for user-owned data: `user_id uuid references auth.users(id) on delete cascade not null`
+- Timestamps: `created_at timestamptz default now()`
+
+After creating a table, ALWAYS add RLS policies using add_rls_policy.
+A table with RLS enabled but no policies will block ALL access from the frontend.
+
+Standard RLS pattern for user-owned data (call these 4 policies for each table):
+- SELECT: using_expression = "auth.uid() = user_id"
+- INSERT: using_expression = "true", check_expression = "auth.uid() = user_id"
+- UPDATE: using_expression = "auth.uid() = user_id", check_expression = "auth.uid() = user_id"
+- DELETE: using_expression = "auth.uid() = user_id"
+
+── AUTHENTICATION ──
+
+Call enable_auth to get the configuration. Supabase Auth supports email/password out of the box.
+
+Auth patterns in generated code:
+
+```typescript
+// Sign up
+const { data, error } = await supabase.auth.signUp({ email, password })
+
+// Sign in
+const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+
+// Sign out
+await supabase.auth.signOut()
+
+// Get current user
+const { data: { user } } = await supabase.auth.getUser()
+
+// Listen for auth changes
+supabase.auth.onAuthStateChange((event, session) => {
+  setUser(session?.user ?? null)
+})
+```
+
+── QUERYING DATA ──
+
+```typescript
+// Read
+const { data, error } = await supabase.from('todos').select('*').order('created_at', { ascending: false })
+
+// Insert
+const { data, error } = await supabase.from('todos').insert({ title: 'New', user_id: user.id }).select()
+
+// Update
+const { data, error } = await supabase.from('todos').update({ done: true }).eq('id', todoId).select()
+
+// Delete
+const { error } = await supabase.from('todos').delete().eq('id', todoId)
+```
+
+── RECOMMENDED AUTH ARCHITECTURE ──
+
+When the app needs authentication, always build:
+1) src/lib/supabase.ts — Supabase client
+2) src/contexts/AuthContext.tsx — Auth provider with user state, signIn, signUp, signOut
+3) src/components/ProtectedRoute.tsx — Route wrapper that redirects to login
+4) src/pages/Login.tsx — Login page
+5) src/pages/Register.tsx — Registration page
+
+── WORKFLOW ──
+
+When the user asks for an app that needs a backend:
+1) Call get_supabase_config → create src/lib/supabase.ts
+2) Install @supabase/supabase-js if not in package.json
+3) Call create_table for each table needed
+4) Call add_rls_policy for EVERY table (NEVER skip)
+5) If auth is needed, call enable_auth and build the auth components
+6) Build the frontend pages that use supabase for data operations
+
+── CRITICAL RULES ──
+
+- ALWAYS add RLS policies after creating tables. Without policies, tables are locked.
+- NEVER put the service_role key in frontend code. Only the anon key.
+- ALWAYS use auth.uid() in RLS policies for user-owned data.
+- When auth is needed, ALWAYS create a proper AuthContext — don't scatter auth calls.
+- Use the Supabase JS client for all data operations — never raw fetch.
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN SYSTEM PROMPT
+# ══════════════════════════════════════════════════════════════════════════════
+
+FRONTEND_AGENT_SYSTEM_PROMPT = """You are "The hustler bot" Builder Agent, an AI editor that builds frontends for websites described by the user. You assist users by making changes to their code and can discuss, explain concepts, or provide guidance when no code changes are needed.
 
 Interface Layout: On the left is a chat window. On the right is a live preview where users see changes in real-time.
 
@@ -306,7 +433,7 @@ TASK EXECUTION
 - Never skip a task. Never leave a task half-done.
 - If you discover a task needs to be split or a new task is required, add it to the list and note it.
 - After all tasks are complete, run the self-check before finishing.
-- Never do sequential call's if the call's can be combined e.g (several read's, several unrelated writes, several unrelated edit's) this is extremely important making thing's sequential when they could be made parallel can exhaust our token per minute allowance
+- Never do sequential calls if the calls can be combined e.g (several reads, several unrelated writes, several unrelated edits) this is extremely important making things sequential when they could be made parallel can exhaust our token per minute allowance
 
 ────────────────────────────────────────────────────────
 CORE GUIDELINES
@@ -463,7 +590,7 @@ CODE QUALITY RULES
 5) Keep logic and presentation separated. Business logic does not belong inline in JSX.
 6) All new files must be TypeScript with correct types. Do not use `any` unless genuinely unavoidable.
 7) Code must conform to any linter config present (eslint, prettier).
-8) Unless other thing requested by the user always tend to create very appealing and modern design's that will make the user appealed and attracted this is extremely important also because it increases the chance of a new user to stay and keep using our product
+8) Unless other thing requested by the user always tend to create very appealing and modern designs that will make the user appealed and attracted this is extremely important also because it increases the chance of a new user to stay and keep using our product
 
 ────────────────────────────────────────────────────────
 FILE ORGANIZATION
@@ -475,6 +602,8 @@ Follow the scaffold's structure exactly:
 - src/utils/ → utility functions
 - src/styles/ → stylesheets
 - src/assets/ → static assets
+- src/lib/ → library configs (supabase client, etc.)
+- src/contexts/ → React context providers
 
 write_file creates directories automatically — just write to the path.
 
@@ -482,12 +611,13 @@ write_file creates directories automatically — just write to the path.
 EXECUTION ORDER
 ────────────────────────────────────────────────────────
 1) Configuration — routing config, app entry point, global styles.
-2) Shared utilities & hooks — anything used by multiple components.
-3) Layout components — header, footer, sidebar, navigation.
-4) Page components — one page at a time, fully completed before moving to the next.
-5) Feature components — modals, forms, carousels, etc., wired into their pages.
-6) Final wiring — all routes, imports, and exports connected.
-7) Install missing dependencies last, after you know exactly what is needed.
+2) Backend setup — if Supabase is enabled: get config, create tables, add RLS, set up auth.
+3) Shared utilities & hooks — anything used by multiple components.
+4) Layout components — header, footer, sidebar, navigation.
+5) Page components — one page at a time, fully completed before moving to the next.
+6) Feature components — modals, forms, carousels, etc., wired into their pages.
+7) Final wiring — all routes, imports, and exports connected.
+8) Install missing dependencies last, after you know exactly what is needed.
 
 ────────────────────────────────────────────────────────
 SELF-CHECK BEFORE FINISHING
@@ -524,16 +654,20 @@ OUTPUT RULES
 - Do not ask for confirmation between steps. Plan, then build everything, then summarize.
 - When fully done, output a final concise summary of what you built
 - Do not use emojis in your outputs everywhere unless needed
-  """
-anthropic_tools  = [
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ANTHROPIC TOOL DEFINITIONS (base tools — always available)
+# ══════════════════════════════════════════════════════════════════════════════
+
+anthropic_tools = [
     {
         "name": "read_file",
         "description": "Read the content of an existing file from the disk.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "path": {"type": "string"}
-            },
+            "properties": {"path": {"type": "string"}},
             "required": ["path"]
         }
     },
@@ -556,72 +690,43 @@ anthropic_tools  = [
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "old_str": {
-                    "type": "string",
-                    "description": "The exact block of text or line to be replaced. Must exist in the file."
-                },
-                "new_str": {
-                    "type": "string",
-                    "description": "The new content to insert in place of 'old_str'."
-                }
+                "old_str": {"type": "string", "description": "The exact block of text to be replaced. Must exist in the file."},
+                "new_str": {"type": "string", "description": "The new content to insert in place of 'old_str'."}
             },
             "required": ["path", "old_str", "new_str"]
         }
     },
     {
         "name": "delete_file",
-        "description": "Delete a file or folder from the project. When deleting a folder, all files within it will be removed. Use this to clean up files that are no longer needed.",
+        "description": "Delete a file or folder from the project. When deleting a folder, all files within it will be removed.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file or folder to delete, relative to project root."
-                }
-            },
+            "properties": {"path": {"type": "string", "description": "Path to the file or folder to delete."}},
             "required": ["path"]
         }
     },
     {
         "name": "rename_file",
-        "description": "Rename or move a file to a new path. Always use this instead of creating a new file and deleting the old one. Updates file tracking automatically.",
+        "description": "Rename or move a file to a new path. Always use this instead of creating a new file and deleting the old one.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "original_path": {
-                    "type": "string",
-                    "description": "Current file path, relative to project root."
-                },
-                "new_path": {
-                    "type": "string",
-                    "description": "New file path, relative to project root."
-                }
+                "original_path": {"type": "string"},
+                "new_path": {"type": "string"}
             },
             "required": ["original_path", "new_path"]
         }
     },
     {
         "name": "search_files",
-        "description": "Regex-based code search across project files. Use this to find where components, functions, variables, or patterns are used. Much more efficient than reading every file.\n\nExamples:\n- Find all imports of a component: search for 'import.*Header'\n- Find all useState calls: search for 'useState\\('\n- Find all files using a CSS class: search for 'className.*bg-primary'",
+        "description": "Regex-based code search across project files. Use to find where components, functions, or patterns are used.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Regex pattern to search for across project files."
-                },
-                "search_dir": {
-                    "type": "string",
-                    "description": "Directory to search in, relative to project root. Defaults to 'src'."
-                },
-                "include_patterns": {
-                    "type": "string",
-                    "description": "Comma-separated glob patterns for files to include (e.g., '*.ts,*.tsx,*.js,*.jsx'). Defaults to all text files."
-                },
-                "case_sensitive": {
-                    "type": "boolean",
-                    "description": "Whether search is case-sensitive. Defaults to false."
-                }
+                "query": {"type": "string", "description": "Regex pattern to search for."},
+                "search_dir": {"type": "string", "description": "Directory to search in. Defaults to 'src'."},
+                "include_patterns": {"type": "string", "description": "Comma-separated glob patterns for files to include."},
+                "case_sensitive": {"type": "boolean", "description": "Case-sensitive search. Defaults to false."}
             },
             "required": ["query"]
         }
@@ -629,82 +734,45 @@ anthropic_tools  = [
     {
         "name": "files_list",
         "description": "Get the list of the current existing file names.",
-        "input_schema": {
-            "type": "object",
-            "properties": {}
-        }
+        "input_schema": {"type": "object", "properties": {}}
     },
     {
         "name": "run_install_command",
-        "description": "Run a terminal command to install dependencies. You can specify the subdirectory (e.g., 'frontend' or 'backend') relative to the project root.",
+        "description": "Run a terminal command to install dependencies.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The full terminal command (e.g., 'npm install')."
-                },
-                "directory": {
-                    "type": "string",
-                    "description": "The relative path from the project root where the command should run. Defaults to project root if omitted."
-                }
+                "command": {"type": "string", "description": "The full terminal command (e.g., 'npm install')."},
+                "directory": {"type": "string", "description": "Relative path from project root where the command should run."}
             },
             "required": ["command"]
         }
     },
     {
         "name": "generate_image",
-        "description": "Generates an AI image based on a text prompt and saves it to the specified file path.\n\nModels:\n- flux.schnell: fastest, good for small images (<1000px). Default.\n- flux2.dev: fast high-quality, only supports 1024x1024 and 1920x1080\n- flux.dev: high quality, supports all resolutions, slower\n\nMax resolution: 1920x1920. Dimensions must be multiples of 32.\nOnce generated, import images as ES6 imports.",
+        "description": "Generates an AI image based on a text prompt and saves it to the specified file path.\n\nModels:\n- flux.schnell: fastest, good for small images (<1000px). Default.\n- flux2.dev: fast high-quality, only supports 1024x1024 and 1920x1080\n- flux.dev: high quality, supports all resolutions, slower\n\nMax resolution: 1920x1920. Dimensions must be multiples of 32.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "Detailed description of the image to generate. Be specific about style, mood, colors, composition, and content."
-                },
-                "target_path": {
-                    "type": "string",
-                    "description": "File path where the image will be saved (e.g., 'src/assets/hero.jpg', 'public/images/banner.webp'). Directories are created automatically."
-                },
-                "width": {
-                    "type": "number",
-                    "description": "Image width in pixels (min 512, max 1920, must be multiple of 32). Defaults to 1024."
-                },
-                "height": {
-                    "type": "number",
-                    "description": "Image height in pixels (min 512, max 1920, must be multiple of 32). Defaults to 768."
-                },
-                "model": {
-                    "type": "string",
-                    "description": "flux.schnell (fast, default) | flux.dev (high quality, slower) | flux2.dev (fast HQ, fixed sizes only: 1024x1024 or 1920x1080)"
-                }
+                "prompt": {"type": "string", "description": "Detailed description of the image to generate."},
+                "target_path": {"type": "string", "description": "File path where the image will be saved."},
+                "width": {"type": "number", "description": "Image width (min 512, max 1920, multiple of 32). Defaults to 1024."},
+                "height": {"type": "number", "description": "Image height (min 512, max 1920, multiple of 32). Defaults to 768."},
+                "model": {"type": "string", "description": "flux.schnell | flux.dev | flux2.dev"}
             },
             "required": ["prompt", "target_path"]
         }
     },
     {
         "name": "edit_image",
-        "description": "Edit or merge existing images based on a text prompt. Single image: apply AI-powered edits. Multiple images: merge/combine according to prompt.\n\nAspect ratio options: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9.",
+        "description": "Edit or merge existing images based on a text prompt.\n\nAspect ratio options: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "image_paths": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Paths to source images to edit or merge."
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Description of the edit to apply (e.g., 'Make it darker', 'Add a warm sunset glow', 'Combine these into a collage')."
-                },
-                "target_path": {
-                    "type": "string",
-                    "description": "Where to save the edited image."
-                },
-                "aspect_ratio": {
-                    "type": "string",
-                    "description": "Output aspect ratio: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, or 21:9. Defaults to source image ratio."
-                }
+                "image_paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to source images."},
+                "prompt": {"type": "string", "description": "Description of the edit to apply."},
+                "target_path": {"type": "string", "description": "Where to save the edited image."},
+                "aspect_ratio": {"type": "string", "description": "Output aspect ratio. Defaults to source ratio."}
             },
             "required": ["image_paths", "prompt", "target_path"]
         }
@@ -712,26 +780,41 @@ anthropic_tools  = [
 ]
 
 
-def create_generator(files_list_state, reviewer=None, model=None):
+# ══════════════════════════════════════════════════════════════════════════════
+#  CREATE GENERATOR — main factory function
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_generator(files_list_state, reviewer=None, model=None, supabase_config=None):
     """
     Create the generator agent with the specified model.
-    
+
     Args:
         files_list_state: FileState instance
         reviewer: optional reviewer agent
         model: Anthropic model string (e.g. 'claude-haiku-4-5-20251001').
-               If None, defaults to Haiku.
+        supabase_config: dict with 'url', 'anon_key', 'service_role_key' or None
     """
     if model is None:
         model = 'claude-haiku-4-5-20251001'
 
     print(f"[Agent5] Creating generator with model: {model}")
 
+    # ── Build system prompt (with optional Supabase addition) ────────────
+    system_prompt = FRONTEND_AGENT_SYSTEM_PROMPT
+    if supabase_config:
+        system_prompt += SUPABASE_PROMPT_ADDITION
+        print(f"[Agent5] Supabase enabled — added backend tools and prompt")
+
+    # ── Build tool list (with optional Supabase tools) ───────────────────
+    all_tools = list(anthropic_tools)
+    if supabase_config:
+        all_tools.extend(SUPABASE_TOOL_DEFINITIONS)
+
     agent6 = BaseAgent(
         client=client,
         model=model,
-        system_prompt=FRONTEND_AGENT_SYSTEM_PROMPT,
-        tools=anthropic_tools,
+        system_prompt=system_prompt,
+        tools=all_tools,
         temperature=1
     )
 
@@ -818,14 +901,12 @@ def create_generator(files_list_state, reviewer=None, model=None):
             return f.read()
 
     def delete_file(path: str) -> str:
-        """Delete a file or folder from the project."""
         try:
             p = Path(path)
             if not p.exists():
                 return f"DELETE_ERROR: Path not found: {path}"
 
             if p.is_dir():
-                # Remove all tracked files within this directory
                 dir_prefix = os.path.normpath(path)
                 for f in list(files_list_state.files):
                     if os.path.normpath(f).startswith(dir_prefix):
@@ -837,23 +918,17 @@ def create_generator(files_list_state, reviewer=None, model=None):
                 remove_file(path)
                 print(f"[delete] Removed file: {path}")
 
-            agent6.notify_reviewer({
-                "type": "FILE_DELETE",
-                "path": path,
-            })
-
+            agent6.notify_reviewer({"type": "FILE_DELETE", "path": path})
             return f"DELETE_COMPLETED PATH:{path}"
         except Exception as e:
             print(f"[delete] ERROR: {e}")
             return f"DELETE_ERROR: {str(e)}"
 
     def rename_file(original_path: str, new_path: str) -> str:
-        """Rename or move a file."""
         try:
             if not os.path.exists(original_path):
                 return f"RENAME_ERROR: Source not found: {original_path}"
 
-            # Ensure destination directory exists
             parent = os.path.dirname(new_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
@@ -862,26 +937,18 @@ def create_generator(files_list_state, reviewer=None, model=None):
             rename_file_state(original_path, new_path)
 
             print(f"[rename] {original_path} → {new_path}")
-
-            agent6.notify_reviewer({
-                "type": "FILE_RENAME",
-                "old_path": original_path,
-                "new_path": new_path,
-            })
-
+            agent6.notify_reviewer({"type": "FILE_RENAME", "old_path": original_path, "new_path": new_path})
             return f"RENAME_COMPLETED: {original_path} → {new_path}"
         except Exception as e:
             print(f"[rename] ERROR: {e}")
             return f"RENAME_ERROR: {str(e)}"
 
     def search_files(query: str, search_dir: str = "src", include_patterns: str = "", case_sensitive: bool = False) -> str:
-        """Regex search across project files using grep."""
         try:
             cmd = ["grep", "-r", "-n", "--include=*.ts", "--include=*.tsx",
                    "--include=*.js", "--include=*.jsx", "--include=*.css",
                    "--include=*.html", "--include=*.json", "--include=*.md"]
 
-            # Add custom include patterns
             if include_patterns:
                 cmd = ["grep", "-r", "-n"]
                 for pattern in include_patterns.split(","):
@@ -892,27 +959,22 @@ def create_generator(files_list_state, reviewer=None, model=None):
             if not case_sensitive:
                 cmd.append("-i")
 
-            # Exclude heavy directories
             cmd.extend(["--exclude-dir=node_modules", "--exclude-dir=dist",
                         "--exclude-dir=.git", "--exclude-dir=__pycache__"])
-
             cmd.append(query)
             cmd.append(search_dir if os.path.isdir(search_dir) else ".")
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-
             output = result.stdout.strip()
             if not output:
                 return f"SEARCH_NO_RESULTS: No matches found for '{query}' in {search_dir}"
 
-            # Limit output to prevent token explosion
             lines = output.split("\n")
             if len(lines) > 50:
                 output = "\n".join(lines[:50]) + f"\n... and {len(lines) - 50} more matches"
 
             print(f"[search] Found {len(lines)} matches for '{query}' in {search_dir}")
             return output
-
         except subprocess.TimeoutExpired:
             return "SEARCH_ERROR: Search timed out"
         except Exception as e:
@@ -920,22 +982,18 @@ def create_generator(files_list_state, reviewer=None, model=None):
             return f"SEARCH_ERROR: {str(e)}"
 
     def generate_image(prompt: str, target_path: str, width: int = 1024, height: int = 768, model: str = "flux.schnell") -> str:
-        """Generate an image using Replicate's Flux model and save it to the specified path."""
         try:
             print(f"[image_gen] Generating: {target_path} ({width}x{height}, {model}) — prompt: {prompt[:80]}...")
 
-            # Clamp and align dimensions to multiples of 32
             width = max(512, min(1920, int(width)))
             height = max(512, min(1920, int(height)))
             width = (width // 32) * 32
             height = (height // 32) * 32
 
-            # Ensure output directory exists
             parent = os.path.dirname(target_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
 
-            # Map model names to Replicate model identifiers
             model_map = {
                 "flux.schnell": "black-forest-labs/flux-schnell",
                 "flux.dev":     "black-forest-labs/flux-dev",
@@ -943,12 +1001,10 @@ def create_generator(files_list_state, reviewer=None, model=None):
             }
             replicate_model = model_map.get(model, model_map["flux.schnell"])
 
-            # Determine output format from file extension
             ext = target_path.rsplit(".", 1)[-1].lower() if "." in target_path else "webp"
             format_map = {"jpg": "jpg", "jpeg": "jpg", "png": "png", "webp": "webp"}
             output_format = format_map.get(ext, "webp")
 
-            # Build input params
             replicate_input = {
                 "prompt": prompt,
                 "width": width,
@@ -958,13 +1014,11 @@ def create_generator(files_list_state, reviewer=None, model=None):
                 "num_outputs": 1,
             }
 
-            # flux.schnell supports go_fast
             if model == "flux.schnell":
                 replicate_input["go_fast"] = True
 
             output = replicate.run(replicate_model, input=replicate_input)
 
-            # output is a list of FileOutput URLs
             image_url = None
             if isinstance(output, list) and len(output) > 0:
                 image_url = str(output[0])
@@ -974,14 +1028,10 @@ def create_generator(files_list_state, reviewer=None, model=None):
                     break
 
             if not image_url:
-                print(f"[image_gen] ERROR: No output URL from Replicate")
                 return f"IMAGE_GENERATION_FAILED: No output received from model"
 
-            # Download the image
-            print(f"[image_gen] Downloading from: {image_url[:80]}...")
             response = requests.get(image_url, timeout=60)
             if response.status_code != 200:
-                print(f"[image_gen] ERROR: Download failed with status {response.status_code}")
                 return f"IMAGE_GENERATION_FAILED: Download failed (status {response.status_code})"
 
             with open(target_path, "wb") as f:
@@ -991,38 +1041,25 @@ def create_generator(files_list_state, reviewer=None, model=None):
             print(f"[image_gen] Saved: {target_path} ({file_size_kb:.1f} KB, {width}x{height})")
 
             add_file(target_path)
+            agent6.notify_reviewer({"type": "IMAGE_GENERATED", "path": target_path, "prompt": prompt, "width": width, "height": height, "model": model})
 
-            agent6.notify_reviewer({
-                "type": "IMAGE_GENERATED",
-                "path": target_path,
-                "prompt": prompt,
-                "width": width,
-                "height": height,
-                "model": model,
-            })
-
-            # Return appropriate usage hint based on path
             if target_path.startswith("src/"):
                 return f"IMAGE_GENERATED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
             else:
                 public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
                 return f"IMAGE_GENERATED PATH:{target_path} — Reference in code as {public_ref}"
-
         except Exception as e:
             print(f"[image_gen] ERROR: {e}")
             return f"IMAGE_GENERATION_FAILED: {str(e)}"
 
     def edit_image(image_paths: list, prompt: str, target_path: str, aspect_ratio: str = "16:9") -> str:
-        """Edit or merge existing images using Replicate."""
         try:
             print(f"[image_edit] Editing {len(image_paths)} image(s) → {target_path} — prompt: {prompt[:80]}...")
 
-            # Ensure output directory exists
             parent = os.path.dirname(target_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
 
-            # Read source images and convert to base64 data URIs
             import base64
             image_uris = []
             for img_path in image_paths:
@@ -1041,7 +1078,6 @@ def create_generator(files_list_state, reviewer=None, model=None):
             if not image_uris:
                 return "IMAGE_EDIT_FAILED: No valid source images provided"
 
-            # Use Replicate's flux-kontext for image editing
             replicate_input = {
                 "prompt": prompt,
                 "input_image": image_uris[0],
@@ -1050,12 +1086,8 @@ def create_generator(files_list_state, reviewer=None, model=None):
                 "output_quality": 90,
             }
 
-            output = replicate.run(
-                "black-forest-labs/flux-kontext",
-                input=replicate_input
-            )
+            output = replicate.run("black-forest-labs/flux-kontext", input=replicate_input)
 
-            # Get the output URL
             image_url = None
             if isinstance(output, list) and len(output) > 0:
                 image_url = str(output[0])
@@ -1069,7 +1101,6 @@ def create_generator(files_list_state, reviewer=None, model=None):
             if not image_url:
                 return "IMAGE_EDIT_FAILED: No output received from model"
 
-            # Download the result
             response = requests.get(image_url, timeout=60)
             if response.status_code != 200:
                 return f"IMAGE_EDIT_FAILED: Download failed (status {response.status_code})"
@@ -1081,37 +1112,46 @@ def create_generator(files_list_state, reviewer=None, model=None):
             print(f"[image_edit] Saved: {target_path} ({file_size_kb:.1f} KB)")
 
             add_file(target_path)
-
-            agent6.notify_reviewer({
-                "type": "IMAGE_EDITED",
-                "source_paths": image_paths,
-                "target_path": target_path,
-                "prompt": prompt,
-            })
+            agent6.notify_reviewer({"type": "IMAGE_EDITED", "source_paths": image_paths, "target_path": target_path, "prompt": prompt})
 
             if target_path.startswith("src/"):
                 return f"IMAGE_EDITED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
             else:
                 public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
                 return f"IMAGE_EDITED PATH:{target_path} — Reference in code as {public_ref}"
-
         except Exception as e:
             print(f"[image_edit] ERROR: {e}")
             return f"IMAGE_EDIT_FAILED: {str(e)}"
 
+    # ── Build the tool map ───────────────────────────────────────────────
     tool_map = {
-        'write_file': write_file,
-        'edit_file': edit_file,
-        'read_file': read_file,
-        'delete_file': delete_file,
-        'rename_file': rename_file,
-        'search_files': search_files,
-        'add_file': add_file,
-        'files_list': files_list,
+        'write_file':          write_file,
+        'edit_file':           edit_file,
+        'read_file':           read_file,
+        'delete_file':         delete_file,
+        'rename_file':         rename_file,
+        'search_files':        search_files,
+        'add_file':            add_file,
+        'files_list':          files_list,
         'run_install_command': run_install_command,
-        'generate_image': generate_image,
-        'edit_image': edit_image,
+        'generate_image':      generate_image,
+        'edit_image':          edit_image,
     }
+
+    # ── Supabase tools (only if backend is enabled) ──────────────────────
+    if supabase_config:
+        sb = SupabaseTools(
+            supabase_url=supabase_config["url"],
+            anon_key=supabase_config["anon_key"],
+            service_role_key=supabase_config["service_role_key"],
+        )
+        tool_map["create_table"]        = sb.create_table
+        tool_map["add_rls_policy"]      = sb.add_rls_policy
+        tool_map["enable_auth"]         = sb.enable_auth
+        tool_map["list_tables"]         = sb.list_tables
+        tool_map["run_sql"]             = sb.run_sql
+        tool_map["get_supabase_config"] = sb.get_supabase_config
+        print(f"[Agent5] Registered 6 Supabase tools")
 
     agent6.tool_map = tool_map
     agent6.reviewer = reviewer
