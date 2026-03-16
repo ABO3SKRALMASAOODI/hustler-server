@@ -311,7 +311,13 @@ Standard RLS pattern for user-owned data (call these 4 policies for each table):
 
 Call enable_auth to get the configuration. Supabase Auth supports email/password out of the box.
 
-IMPORTANT: Email confirmation is DISABLED. Users can sign up and immediately sign in — no confirmation step needed. Do NOT add email confirmation workarounds, "check your email" messages, or localStorage fallbacks. The flow is: sign up → auto sign in → redirect to app.
+IMPORTANT: Email confirmation is ENABLED. After sign up, users receive a verification email with a link. The app MUST handle this properly:
+- After signUp(), show a message like "Check your email for a verification link"
+- Do NOT auto-redirect to the dashboard after sign up
+- Do NOT try to sign in immediately after sign up — it will fail until email is confirmed
+- The Register page should show a success state: "We sent a verification link to your email. Click it to activate your account, then come back and sign in."
+- Only the Login page should redirect to the dashboard after successful sign in
+- NEVER add localStorage fallbacks or workarounds for email confirmation
 
 Auth patterns in generated code:
 
