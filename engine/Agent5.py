@@ -293,7 +293,7 @@ IMPORTANT: You MUST install @supabase/supabase-js if not already in package.json
 ── SETUP (do this first if not already done) ──
 
 1) Call get_supabase_config to get the project URL and anon key.
-2) Create src/lib/supabase.ts with the client and REDIRECT_URL.
+2) Create src/lib/supabase.ts with the client.
 3) Install the dependency if needed.
 
 ── DATABASE ──
@@ -306,9 +306,7 @@ Use create_table to create tables. Always include:
 After creating a table, ALWAYS add RLS policies using add_rls_policy.
 A table with RLS enabled but no policies will block ALL access from the frontend.
 
-CRITICAL: The column names in your TypeScript interfaces MUST exactly match the database column names
-you created. If you create a column called 'done', use 'done' in your TypeScript — NOT 'completed'
-or any other alias. Mismatched names will cause silent failures.
+CRITICAL: The column names in your TypeScript interfaces MUST exactly match the database column names you created. If you create a column called 'done', use 'done' in your TypeScript — NOT 'completed' or any other alias. Mismatched names will cause silent failures.
 
 Standard RLS pattern for user-owned data (call these 4 policies for each table):
 - SELECT: using_expression = "auth.uid() = user_id"
@@ -320,91 +318,26 @@ Standard RLS pattern for user-owned data (call these 4 policies for each table):
 
 Call enable_auth to get the configuration. Supabase Auth supports email/password out of the box.
 
-IMPORTANT: Email confirmation is ENABLED. After the user clicks the verification link in their
-email, Supabase redirects them back to the app with auth tokens in the URL fragment.
-You MUST create a dedicated AuthCallback page to handle this redirect — without it, users
-land on a broken URL and cannot access the app after verifying their email.
-
-── AUTH CALLBACK PAGE (MANDATORY) ──
-
-ALWAYS create src/pages/AuthCallback.tsx and wire it to /auth/callback in App.tsx.
-This is non-negotiable whenever authentication is used.
-
-src/pages/AuthCallback.tsx must contain exactly:
-```tsx
-import { useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { supabase } from '@/lib/supabase'
-
-export default function AuthCallback() {
-  const navigate = useNavigate()
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) {
-        navigate('/', { replace: true })
-      } else {
-        navigate('/login', { replace: true })
-      }
-    })
-  }, [navigate])
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-      <p>Verifying your account...</p>
-    </div>
-  )
-}
+IMPORTANT: Email confirmation is ENABLED. After sign up, users receive a verification email with a confirmation link. The app MUST handle this:
+- When calling signUp(), ALWAYS pass emailRedirectTo so the user returns to the app after confirming:
 ```
-
-Wire it in App.tsx:
-```tsx
-import AuthCallback from './pages/AuthCallback'
-// inside your router:
-<Route path="/auth/callback" element={<AuthCallback />} />
+  const { data, error } = await supabase.auth.signUp({
+    email, password,
+    options: { emailRedirectTo: REDIRECT_URL }
+  })
 ```
+- After signUp(), show a success message: "We sent a verification link to your email. Click it to verify, then come back and sign in."
+- Do NOT auto-redirect to the dashboard after sign up
+- Do NOT try to sign in immediately after sign up — it will fail until email is confirmed
+- Only the Login page should redirect to the dashboard after successful sign in
+- NEVER add localStorage fallbacks or workarounds for email confirmation
+- Import REDIRECT_URL from '@/lib/supabase' and use it in every signUp call
 
-── SUPABASE CLIENT (src/lib/supabase.ts) ──
 
-Always define REDIRECT_URL using window.location.origin so it works on any domain:
-```ts
-import { createClient } from '@supabase/supabase-js'
-
-const supabaseUrl = 'YOUR_SUPABASE_URL'
-const supabaseAnonKey = 'YOUR_ANON_KEY'
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
-export const REDIRECT_URL = window.location.origin + '/auth/callback'
-```
-
-Never hardcode a domain in REDIRECT_URL. Always use window.location.origin + '/auth/callback'.
-
-── SIGN UP FLOW ──
-
-In every signUp call, always pass emailRedirectTo:
-```ts
-const { data, error } = await supabase.auth.signUp({
-  email,
-  password,
-  options: { emailRedirectTo: REDIRECT_URL }
-})
-```
-
-After signUp() succeeds, show the message:
-"We sent a verification link to your email. Click it to verify your account."
-
-- Do NOT auto-redirect to the dashboard after sign up.
-- Do NOT try to sign in immediately after sign up — it will fail until email is confirmed.
-- Only the Login page should redirect to the dashboard after a successful sign in.
-- NEVER add localStorage fallbacks or workarounds for email confirmation.
-
-── AUTH PATTERNS ──
+Auth patterns in generated code:
 ```typescript
 // Sign up
-const { data, error } = await supabase.auth.signUp({
-  email, password,
-  options: { emailRedirectTo: REDIRECT_URL }
-})
+const { data, error } = await supabase.auth.signUp({ email, password })
 
 // Sign in
 const { data, error } = await supabase.auth.signInWithPassword({ email, password })
@@ -438,36 +371,31 @@ const { error } = await supabase.from('todos').delete().eq('id', todoId)
 
 ── RECOMMENDED AUTH ARCHITECTURE ──
 
-When the app needs authentication, always build these files in this order:
-1) src/lib/supabase.ts — Supabase client + REDIRECT_URL = window.location.origin + '/auth/callback'
-2) src/pages/AuthCallback.tsx — Handles email verification redirect (MANDATORY, always create this)
-3) src/contexts/AuthContext.tsx — Auth provider with user state, signIn, signUp, signOut
-4) src/components/ProtectedRoute.tsx — Route wrapper that redirects to /login if not authenticated
-5) src/pages/Login.tsx — Login page, redirects to / on success
-6) src/pages/Register.tsx — Registration page, shows verify-email message on success
+When the app needs authentication, always build:
+1) src/lib/supabase.ts — Supabase client
+2) src/contexts/AuthContext.tsx — Auth provider with user state, signIn, signUp, signOut
+3) src/components/ProtectedRoute.tsx — Route wrapper that redirects to login
+4) src/pages/Login.tsx — Login page
+5) src/pages/Register.tsx — Registration page
 
 ── WORKFLOW ──
 
 When the user asks for an app that needs a backend:
-1) Call get_supabase_config → create src/lib/supabase.ts with REDIRECT_URL
+1) Call get_supabase_config → create src/lib/supabase.ts
 2) Install @supabase/supabase-js if not in package.json
-3) Create src/pages/AuthCallback.tsx and wire /auth/callback in App.tsx immediately
-4) Call create_table for each table needed
-5) Call add_rls_policy for EVERY table (NEVER skip this)
-6) Call enable_auth and build the full auth architecture
-7) Build the frontend pages that use supabase for data operations
+3) Call create_table for each table needed
+4) Call add_rls_policy for EVERY table (NEVER skip)
+5) If auth is needed, call enable_auth and build the auth components
+6) Build the frontend pages that use supabase for data operations
 
 ── CRITICAL RULES ──
 
-- ALWAYS create AuthCallback.tsx and wire /auth/callback. This is non-negotiable.
-- REDIRECT_URL must always be window.location.origin + '/auth/callback'. Never hardcode a domain.
 - ALWAYS add RLS policies after creating tables. Without policies, tables are locked.
-- NEVER put the service_role key in frontend code. Only use the anon key.
+- NEVER put the service_role key in frontend code. Only the anon key.
 - ALWAYS use auth.uid() in RLS policies for user-owned data.
-- When auth is needed, ALWAYS create a proper AuthContext — never scatter auth calls across pages.
-- Use the Supabase JS client for all data operations — never raw fetch to the REST API.
+- When auth is needed, ALWAYS create a proper AuthContext — don't scatter auth calls.
+- Use the Supabase JS client for all data operations — never raw fetch.
 """
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
