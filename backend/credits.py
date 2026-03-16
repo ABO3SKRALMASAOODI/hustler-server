@@ -181,16 +181,33 @@ def check_and_reserve(conn, user_id: int, min_credits: float = 1.0) -> bool:
 
 # ── Concurrency check ─────────────────────────────────────────────────────────
 
-def count_running_jobs(conn, user_id: int) -> int:
-    """Return how many jobs this user currently has in 'running' state."""
+def count_running_jobs(conn, user_id: int, stale_minutes: int = 15) -> int:
+    """
+    Return how many jobs this user currently has in 'running' state.
+    Auto-expires jobs that have been stuck in 'running' for longer than
+    stale_minutes (default 15) — handles crashes, API failures, etc.
+    """
     with conn.cursor() as cur:
+        # First: mark any stale running jobs as failed
+        cur.execute(
+            """
+            UPDATE jobs
+            SET state = 'failed'
+            WHERE user_id = %s
+              AND state = 'running'
+              AND updated_at < NOW() - INTERVAL '%s minutes'
+            """,
+            (user_id, stale_minutes)
+        )
+        conn.commit()
+
+        # Then count what's genuinely still running
         cur.execute(
             "SELECT COUNT(*) as cnt FROM jobs WHERE user_id = %s AND state = 'running'",
             (user_id,)
         )
         row = cur.fetchone()
-    return row["cnt"] if row else 0
-
+        return row["cnt"] if row else 0
 
 # ── Deduct after job ──────────────────────────────────────────────────────────
 

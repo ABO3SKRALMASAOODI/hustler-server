@@ -135,7 +135,36 @@ def save_deduction(workspace, token_breakdown, credits_used):
 
 
 # ── Progress tracking ─────────────────────────────────────────────────────────
-
+def _heartbeat_db(workspace):
+    """
+    Update jobs.updated_at so the stale-job detector in count_running_jobs
+    knows this job is still alive. Silently swallows all errors.
+    """
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        meta_path = os.path.join(workspace, "meta.json")
+        if not os.path.exists(meta_path):
+            return
+        with open(meta_path) as f:
+            meta = json.load(f)
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return
+        job_id = os.path.basename(workspace)
+        conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET updated_at = NOW() WHERE job_id = %s",
+                (job_id,)
+            )
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Never crash AA.py over a heartbeat failure
+    
 def write_progress(workspace, entry):
     path = os.path.join(workspace, "progress.json")
     existing = []
@@ -154,6 +183,8 @@ def write_progress(workspace, entry):
 
     with open(path, "w") as f:
         json.dump(existing, f)
+    
+    _heartbeat_db(workspace)
 
 
 def clear_progress(workspace):
