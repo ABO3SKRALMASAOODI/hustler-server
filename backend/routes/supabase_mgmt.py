@@ -92,9 +92,8 @@ def enable_backend(user_id, job_id):
         with conn.cursor() as cur:
             cur.execute("SELECT title FROM jobs WHERE job_id = %s", (job_id,))
             title_row = cur.fetchone()
-            project_name = (title_row.get("title", "") if title_row else "") or f"app-{job_id}"
-            # Clean the name
-            project_name = project_name[:40].strip() or f"app-{job_id}"
+            title = (title_row.get("title", "") if title_row else "") or "app"
+            project_name = f"{title[:30].strip()}-{job_id}"
     finally:
         conn.close()
 
