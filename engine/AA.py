@@ -340,10 +340,12 @@ def main():
                 with open(meta_path_sb) as f:
                     meta_sb = json.load(f)
                 if meta_sb.get("supabase_enabled"):
+                    job_id = os.path.basename(WORKSPACE)
                     supabase_config = {
                         "url":              meta_sb.get("supabase_url", ""),
                         "anon_key":         meta_sb.get("supabase_anon_key", ""),
                         "service_role_key": os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
+                        "preview_url":      f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{job_id}/",
                     }
                     print(f"[AA] Supabase enabled for this job")
             except Exception as e:

@@ -26,10 +26,11 @@ class SupabaseTools:
     Initialized with the project's Supabase credentials.
     """
 
-    def __init__(self, supabase_url: str, anon_key: str, service_role_key: str):
+    def __init__(self, supabase_url: str, anon_key: str, service_role_key: str, preview_url: str = ""):
         self.url              = supabase_url.rstrip("/")
         self.anon_key         = anon_key
         self.service_role_key = service_role_key
+        self.preview_url      = preview_url
 
     def _headers(self):
         return {
@@ -178,11 +179,13 @@ class SupabaseTools:
         return json.dumps({
             "supabase_url": self.url,
             "anon_key":     self.anon_key,
+            "preview_url":  self.preview_url,
             "usage": (
                 "Create a file src/lib/supabase.ts with:\n"
                 "  import { createClient } from '@supabase/supabase-js'\n"
                 f"  export const supabase = createClient('{self.url}', '{self.anon_key}')\n"
-                "\nThen import {{ supabase }} from '@/lib/supabase' wherever needed."
+                f"  export const REDIRECT_URL = '{self.preview_url}'\n"
+                "\nThen import {{ supabase, REDIRECT_URL }} from '@/lib/supabase' wherever needed."
             ),
         })
 
@@ -311,13 +314,21 @@ Standard RLS pattern for user-owned data (call these 4 policies for each table):
 
 Call enable_auth to get the configuration. Supabase Auth supports email/password out of the box.
 
-IMPORTANT: Email confirmation is ENABLED. After sign up, users receive a verification email with a link. The app MUST handle this properly:
-- After signUp(), show a message like "Check your email for a verification link"
+IMPORTANT: Email confirmation is ENABLED. After sign up, users receive a verification email with a confirmation link. The app MUST handle this:
+- When calling signUp(), ALWAYS pass emailRedirectTo so the user returns to the app after confirming:
+```
+  const { data, error } = await supabase.auth.signUp({
+    email, password,
+    options: { emailRedirectTo: REDIRECT_URL }
+  })
+```
+- After signUp(), show a success message: "We sent a verification link to your email. Click it to verify, then come back and sign in."
 - Do NOT auto-redirect to the dashboard after sign up
 - Do NOT try to sign in immediately after sign up — it will fail until email is confirmed
-- The Register page should show a success state: "We sent a verification link to your email. Click it to activate your account, then come back and sign in."
 - Only the Login page should redirect to the dashboard after successful sign in
 - NEVER add localStorage fallbacks or workarounds for email confirmation
+- Import REDIRECT_URL from '@/lib/supabase' and use it in every signUp call
+
 
 Auth patterns in generated code:
 
@@ -1162,6 +1173,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             supabase_url=supabase_config["url"],
             anon_key=supabase_config["anon_key"],
             service_role_key=supabase_config["service_role_key"],
+            preview_url=supabase_config.get("preview_url", ""),
         )
         tool_map["create_table"]        = sb.create_table
         tool_map["add_rls_policy"]      = sb.add_rls_policy
