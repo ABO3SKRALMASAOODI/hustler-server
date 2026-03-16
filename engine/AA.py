@@ -344,10 +344,11 @@ def main():
                     supabase_config = {
                         "url":              meta_sb.get("supabase_url", ""),
                         "anon_key":         meta_sb.get("supabase_anon_key", ""),
-                        "service_role_key": os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
+                        "service_role_key": meta_sb.get("supabase_service_role", os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")),
+                        "project_ref":      meta_sb.get("supabase_project_ref", os.getenv("SUPABASE_PROJECT_REF", "")),
                         "preview_url":      f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{job_id}/",
                     }
-                    print(f"[AA] Supabase enabled for this job")
+                    print(f"[AA] Supabase enabled — project ref: {supabase_config['project_ref']}")
             except Exception as e:
                 print(f"[AA] Error reading Supabase config: {e}")
  

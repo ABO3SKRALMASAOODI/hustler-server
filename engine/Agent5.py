@@ -26,11 +26,12 @@ class SupabaseTools:
     Initialized with the project's Supabase credentials.
     """
 
-    def __init__(self, supabase_url: str, anon_key: str, service_role_key: str, preview_url: str = ""):
+    def __init__(self, supabase_url: str, anon_key: str, service_role_key: str, preview_url: str = "", project_ref: str = ""):
         self.url              = supabase_url.rstrip("/")
         self.anon_key         = anon_key
         self.service_role_key = service_role_key
         self.preview_url      = preview_url
+        self.project_ref      = project_ref
 
     def _headers(self):
         return {
@@ -40,14 +41,14 @@ class SupabaseTools:
         }
 
     def _execute_sql(self, sql: str) -> dict:
-        """Execute raw SQL via the Supabase Management API."""
+        """Execute raw SQL via the Supabase Management API against this project."""
         try:
             access_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
-            project_ref = os.getenv("SUPABASE_PROJECT_REF", "")
-
+            project_ref = self.project_ref or os.getenv("SUPABASE_PROJECT_REF", "")
+ 
             if not access_token or not project_ref:
-                return {"success": False, "error": "SUPABASE_ACCESS_TOKEN or SUPABASE_PROJECT_REF not set"}
-
+                return {"success": False, "error": "SUPABASE_ACCESS_TOKEN or project_ref not available"}
+ 
             resp = requests.post(
                 f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
                 headers={
@@ -57,13 +58,14 @@ class SupabaseTools:
                 json={"query": sql},
                 timeout=30,
             )
-
+ 
             if resp.status_code < 400:
                 return {"success": True, "data": resp.json()}
             else:
                 return {"success": False, "error": resp.text[:500]}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        
 
     def create_table(self, table_name: str, columns: str, enable_rls: bool = True) -> str:
         sql = f"CREATE TABLE IF NOT EXISTS public.{table_name} ({columns});"
@@ -1172,10 +1174,11 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     # ── Supabase tools (only if backend is enabled) ──────────────────────
     if supabase_config:
         sb = SupabaseTools(
-            supabase_url=supabase_config["url"],
-            anon_key=supabase_config["anon_key"],
-            service_role_key=supabase_config["service_role_key"],
-            preview_url=supabase_config.get("preview_url", ""),
+             supabase_url=supabase_config["url"],
+             anon_key=supabase_config["anon_key"],
+             service_role_key=supabase_config.get("service_role_key", ""),
+             preview_url=supabase_config.get("preview_url", ""),
+             project_ref=supabase_config.get("project_ref", ""),
         )
         tool_map["create_table"]        = sb.create_table
         tool_map["add_rls_policy"]      = sb.add_rls_policy
