@@ -84,20 +84,28 @@ class SupabaseTools:
                        using_expression: str, check_expression: str = "") -> str:
         self._execute_sql(f'DROP POLICY IF EXISTS "{policy_name}" ON public.{table_name};')
 
-        sql = f"""CREATE POLICY "{policy_name}" ON public.{table_name}
-            FOR {operation} TO authenticated USING ({using_expression})"""
-        if check_expression:
-            sql += f" WITH CHECK ({check_expression})"
-        sql += ";"
+        op = operation.upper()
+
+        if op == "INSERT":
+            # INSERT policies only support WITH CHECK, not USING
+            check_expr = check_expression if check_expression else using_expression
+            sql = f"""CREATE POLICY "{policy_name}" ON public.{table_name}
+                FOR INSERT TO authenticated WITH CHECK ({check_expr});"""
+        else:
+            sql = f"""CREATE POLICY "{policy_name}" ON public.{table_name}
+                FOR {op} TO authenticated USING ({using_expression})"""
+            if check_expression:
+                sql += f" WITH CHECK ({check_expression})"
+            sql += ";"
 
         result = self._execute_sql(sql)
         if result["success"]:
             print(f"[supabase] Added RLS policy '{policy_name}' on {table_name}")
-            return f"RLS_POLICY_CREATED: '{policy_name}' on {table_name} for {operation}"
+            return f"RLS_POLICY_CREATED: '{policy_name}' on {table_name} for {op}"
         else:
             print(f"[supabase] Failed to add RLS policy: {result['error']}")
             return f"RLS_POLICY_ERROR: {result['error']}"
-
+        
     def enable_auth(self) -> str:
         config = {
             "supabase_url": self.url,
