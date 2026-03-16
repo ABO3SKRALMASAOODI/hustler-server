@@ -311,6 +311,8 @@ Standard RLS pattern for user-owned data (call these 4 policies for each table):
 
 Call enable_auth to get the configuration. Supabase Auth supports email/password out of the box.
 
+IMPORTANT: Email confirmation is DISABLED. Users can sign up and immediately sign in — no confirmation step needed. Do NOT add email confirmation workarounds, "check your email" messages, or localStorage fallbacks. The flow is: sign up → auto sign in → redirect to app.
+
 Auth patterns in generated code:
 
 ```typescript
