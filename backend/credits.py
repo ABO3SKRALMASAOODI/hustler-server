@@ -66,6 +66,17 @@ PLAN_MODELS = {
     "ace":   ["hb-6", "hb-6-pro", "hb-7"],
 }
 
+# ── Plan → monthly credit limits ──────────────────────────────────────────────
+
+PLAN_MONTHLY_LIMITS = {
+    "free":  0,
+    "plus":  1000,
+    "pro":   2400,
+    "ultra": 5000,
+    "titan": 10000,
+    "ace":   25000,
+}
+
 DOLLARS_PER_CREDIT  = 0.01
 MARKUP              = 1.0   # No markup — margin comes from bundle pricing
 FREE_DAILY_CREDITS  = 20
@@ -164,12 +175,23 @@ def get_balance(conn, user_id: int) -> dict:
         )
         row = cur.fetchone()
         if not row:
-            return {"balance": 0, "is_subscribed": False, "plan": "free"}
+            return {"balance": 0, "is_subscribed": False, "plan": "free", "plan_limit": 20}
 
     is_subscribed = bool(row["is_subscribed"])
     plan = row.get("plan") or "free"
     balance = refresh_daily_credits(conn, user_id, is_subscribed)
-    return {"balance": balance, "is_subscribed": is_subscribed, "plan": plan}
+
+    # Total plan limit = daily credits + monthly pool
+    monthly = PLAN_MONTHLY_LIMITS.get(plan, 0)
+    daily = SUB_DAILY_CREDITS if is_subscribed else FREE_DAILY_CREDITS
+    plan_limit = daily + monthly
+
+    return {
+        "balance": balance,
+        "is_subscribed": is_subscribed,
+        "plan": plan,
+        "plan_limit": plan_limit,
+    }
 
 
 # ── Check before job ──────────────────────────────────────────────────────────

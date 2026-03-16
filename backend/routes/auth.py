@@ -457,8 +457,22 @@ def reset_password():
 # ------------------------------------------------------------------ #
 
 def _process_credits_deduction(job_id, job_folder, user_id):
-    deduct_file = os.path.join(job_folder, "deduct_credits.json")
-    if not os.path.exists(deduct_file):
+    """
+    Process credit deduction from either:
+    1. deduct_credits.json (normal completion — written by AA.py at end)
+    2. partial_deduction.json (cancellation/crash — written by AAgent after each API turn)
+    """
+    deduct_file  = os.path.join(job_folder, "deduct_credits.json")
+    partial_file = os.path.join(job_folder, "partial_deduction.json")
+ 
+    # Prefer the full deduction file (normal completion)
+    target_file = None
+    if os.path.exists(deduct_file):
+        target_file = deduct_file
+    elif os.path.exists(partial_file):
+        target_file = partial_file
+ 
+    if not target_file:
         conn = get_db()
         try:
             with conn.cursor() as cur:
@@ -470,13 +484,13 @@ def _process_credits_deduction(job_id, job_folder, user_id):
         finally:
             conn.close()
         return
-
-    with open(deduct_file) as f:
+ 
+    with open(target_file) as f:
         entries = json.load(f)
-
+ 
     if not entries:
         return
-
+ 
     # Read model from meta.json
     meta_path = os.path.join(job_folder, "meta.json")
     model = "hb-6-pro"
@@ -487,10 +501,11 @@ def _process_credits_deduction(job_id, job_folder, user_id):
             model = meta.get("model", "hb-6-pro")
         except Exception:
             pass
-
+ 
     conn = get_db()
     try:
         for i, entry in enumerate(entries):
+            entry_model = entry.get("model", model)
             deduct_credits(
                 conn,
                 user_id            = int(user_id),
@@ -501,17 +516,20 @@ def _process_credits_deduction(job_id, job_folder, user_id):
                 output_tokens      = int(entry.get("output_tokens", 0)),
                 cache_write_tokens = int(entry.get("cache_write_tokens", 0)),
                 cache_read_tokens  = int(entry.get("cache_read_tokens", 0)),
-                model              = model,
+                model              = entry_model,
             )
-
+ 
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE jobs SET state = 'completed', updated_at = NOW() WHERE job_id = %s",
                 (job_id,)
             )
             conn.commit()
-
-        os.remove(deduct_file)
+ 
+        # Clean up both files
+        for f_path in [deduct_file, partial_file]:
+            if os.path.exists(f_path):
+                os.remove(f_path)
     finally:
         conn.close()
 
@@ -811,23 +829,22 @@ def job_message(user_id, job_id):
 # ------------------------------------------------------------------ #
 #  Job status + messages                                               #
 # ------------------------------------------------------------------ #
-
 @auth_bp.route('/job/<job_id>/status', methods=['GET'])
 @token_required
 def job_status(user_id, job_id):
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
-
+ 
     state_path = os.path.join(job_folder, "state.json")
     state_data = {}
     if os.path.exists(state_path):
         with open(state_path) as f:
             state_data = json.load(f)
-
+ 
     if state_data.get("state") == "completed":
         _process_credits_deduction(job_id, job_folder, user_id)
-
+ 
     messages      = []
     messages_path = os.path.join(job_folder, "messages.jsonl")
     if os.path.exists(messages_path):
@@ -839,9 +856,9 @@ def job_status(user_id, job_id):
                         messages.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-
+ 
     preview_url = _get_preview_url(job_id, job_folder)
-
+ 
     if preview_url:
         conn = get_db()
         try:
@@ -853,13 +870,13 @@ def job_status(user_id, job_id):
                 conn.commit()
         finally:
             conn.close()
-
+ 
     conn = get_db()
     try:
         credits_info = get_balance(conn, int(user_id))
     finally:
         conn.close()
-
+ 
     progress = []
     progress_path = os.path.join(job_folder, "progress.json")
     if os.path.exists(progress_path):
@@ -868,7 +885,7 @@ def job_status(user_id, job_id):
                 progress = json.load(f)
         except (json.JSONDecodeError, IOError):
             progress = []
-
+ 
     # Read model from meta
     meta_path = os.path.join(job_folder, "meta.json")
     job_model = "hb-6"
@@ -879,7 +896,7 @@ def job_status(user_id, job_id):
             job_model = meta.get("model", "hb-6")
         except Exception:
             pass
-
+ 
     # Read published_url from DB
     published_url = None
     conn = get_db()
@@ -891,20 +908,27 @@ def job_status(user_id, job_id):
                 published_url = pub_row.get("published_url")
     finally:
         conn.close()
-
+ 
+    # Check if agent has requested backend (Issue 2)
+    backend_requested = False
+    backend_req_path = os.path.join(job_folder, "backend_requested.json")
+    if os.path.exists(backend_req_path):
+        backend_requested = True
+ 
     return jsonify({
-        "job_id":          job_id,
-        "state":           state_data.get("state", "unknown"),
-        "build_ok":        state_data.get("build_ok", False),
-        "code_changed":    state_data.get("code_changed", False),
-        "error":           state_data.get("error"),
-        "messages":        messages,
-        "preview_url":     preview_url,
-        "credits_balance": credits_info["balance"],
-        "progress":        progress,
-        "model":           job_model,
-        "plan":            credits_info.get("plan", "free"),
-        "published_url":   published_url,
+        "job_id":            job_id,
+        "state":             state_data.get("state", "unknown"),
+        "build_ok":          state_data.get("build_ok", False),
+        "code_changed":      state_data.get("code_changed", False),
+        "error":             state_data.get("error"),
+        "messages":          messages,
+        "preview_url":       preview_url,
+        "credits_balance":   credits_info["balance"],
+        "progress":          progress,
+        "model":             job_model,
+        "plan":              credits_info.get("plan", "free"),
+        "published_url":     published_url,
+        "backend_requested": backend_requested,
     }), 200
 
 
@@ -1261,6 +1285,96 @@ history.replaceState(null, '', '/');
     return resp
 
 
+ 
+# ── Issue 1: Supabase email confirmation callback ──
+ 
+@auth_bp.route('/supabase-callback/<job_id>')
+def supabase_auth_callback(job_id):
+    """
+    Handle Supabase email confirmation redirects.
+    The hash fragment (#access_token=...) is only visible client-side,
+    so we serve a small page that extracts it and redirects to the preview.
+    """
+    from flask import make_response
+ 
+    preview_url = f"/auth/preview-raw/{job_id}/"
+ 
+    html = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<title>Confirming...</title>
+<style>
+  body {{
+    margin: 0; padding: 0;
+    background: #000; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    height: 100vh; text-align: center;
+  }}
+  .spinner {{
+    width: 32px; height: 32px;
+    border: 3px solid #1a1a1a; border-top: 3px solid #cc0000;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 16px;
+  }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+</style>
+</head><body>
+<div>
+  <div class="spinner"></div>
+  <p style="font-size: 14px; color: #888;">Email confirmed! Redirecting...</p>
+</div>
+<script>
+  var hash = window.location.hash;
+  var url = "{preview_url}" + (hash || "");
+  setTimeout(function() {{ window.location.href = url; }}, 1000);
+</script>
+</body></html>"""
+ 
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    return resp
+ 
+ 
+# ── Issue 2: Backend ready/denied signals ──
+ 
+@auth_bp.route('/job/<job_id>/backend-ready', methods=['POST'])
+@token_required
+def backend_ready_signal(user_id, job_id):
+    """Frontend calls this after user approves backend."""
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+ 
+    req_path = os.path.join(job_folder, "backend_requested.json")
+    if os.path.exists(req_path):
+        os.remove(req_path)
+ 
+    approved_path = os.path.join(job_folder, "backend_approved.json")
+    with open(approved_path, "w") as f:
+        json.dump({"approved": True, "ts": time.time()}, f)
+ 
+    return jsonify({"ok": True}), 200
+ 
+ 
+@auth_bp.route('/job/<job_id>/backend-denied', methods=['POST'])
+@token_required
+def backend_denied_signal(user_id, job_id):
+    """Frontend calls this if user denies backend."""
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+ 
+    req_path = os.path.join(job_folder, "backend_requested.json")
+    if os.path.exists(req_path):
+        os.remove(req_path)
+ 
+    denied_path = os.path.join(job_folder, "backend_denied.json")
+    with open(denied_path, "w") as f:
+        json.dump({"denied": True, "ts": time.time()}, f)
+ 
+    return jsonify({"ok": True}), 200
 # ------------------------------------------------------------------ #
 #  Health check                                                        #
 # ------------------------------------------------------------------ #
@@ -1279,10 +1393,50 @@ def generate_test():
 def cancel_job(user_id, job_id):
     try:
         job_folder = os.path.join(OUTPUTS_DIR, job_id)
-
+ 
         if os.path.isdir(job_folder):
             _kill_job_process(job_folder)
-
+ 
+            # ── Deduct partial credits before marking as failed ──
+            partial_file = os.path.join(job_folder, "partial_deduction.json")
+            if os.path.exists(partial_file):
+                try:
+                    with open(partial_file) as f:
+                        entries = json.load(f)
+ 
+                    meta_path = os.path.join(job_folder, "meta.json")
+                    model = "hb-6-pro"
+                    if os.path.exists(meta_path):
+                        try:
+                            with open(meta_path) as f:
+                                meta = json.load(f)
+                            model = meta.get("model", "hb-6-pro")
+                        except Exception:
+                            pass
+ 
+                    conn = get_db()
+                    try:
+                        for i, entry in enumerate(entries):
+                            entry_model = entry.get("model", model)
+                            deduct_credits(
+                                conn,
+                                user_id            = int(user_id),
+                                job_id             = job_id,
+                                turn               = i + 1,
+                                tokens_used        = int(entry.get("tokens_used", 0)),
+                                input_tokens       = int(entry.get("input_tokens", 0)),
+                                output_tokens      = int(entry.get("output_tokens", 0)),
+                                cache_write_tokens = int(entry.get("cache_write_tokens", 0)),
+                                cache_read_tokens  = int(entry.get("cache_read_tokens", 0)),
+                                model              = entry_model,
+                            )
+                    finally:
+                        conn.close()
+ 
+                    os.remove(partial_file)
+                except Exception as e:
+                    print(f"[cancel] partial deduction error: {e}")
+ 
             state_path = os.path.join(job_folder, "state.json")
             with open(state_path, "w") as f:
                 json.dump({
@@ -1290,11 +1444,11 @@ def cancel_job(user_id, job_id):
                     "error": "Cancelled by user",
                     "updated_at": time.time()
                 }, f)
-
+ 
             progress_path = os.path.join(job_folder, "progress.json")
             if os.path.exists(progress_path):
                 os.remove(progress_path)
-
+ 
         conn = get_db()
         with conn.cursor() as cur:
             cur.execute(
@@ -1303,7 +1457,8 @@ def cancel_job(user_id, job_id):
             )
             conn.commit()
         conn.close()
-
+ 
         return jsonify({"status": "cancelled"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+ 

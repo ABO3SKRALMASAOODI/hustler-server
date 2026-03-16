@@ -206,6 +206,7 @@ TOOL_ACTIONS = {
     "delete_file":         "deleting",
     "rename_file":         "renaming",
     "search_files":        "searching",
+    "request_backend":     "requesting backend",
 }
 
 def _guess_lang(path):
@@ -232,7 +233,10 @@ def make_hooks(workspace):
         if file_path:
             entry["file"] = file_path
 
-        if name == "run_install_command":
+        if name == "request_backend":
+            reason = args.get("reason", "") if isinstance(args, dict) else ""
+            entry["detail"] = f"Requesting backend: {reason[:80]}"
+        elif name == "run_install_command":
             entry["detail"] = args.get("command", "")[:80]
         elif name == "generate_image":
             prompt_preview = args.get("prompt", "")[:60]
@@ -387,6 +391,7 @@ def main():
             files_list_state=files_list,
             model=anthropic_model,
             supabase_config=supabase_config,
+            workspace=WORKSPACE,
         )
 
         write_progress(WORKSPACE, {
@@ -523,6 +528,11 @@ def main():
                        token_breakdown=token_breakdown, credits=credits_used)
 
         save_deduction(WORKSPACE, token_breakdown, credits_used)
+
+        # Clean up partial deduction — the full one takes precedence
+        partial_path = os.path.join(WORKSPACE, "partial_deduction.json")
+        if os.path.exists(partial_path):
+            os.remove(partial_path)
 
         build_ok = False
         if code_changed:

@@ -170,10 +170,12 @@ def enable_backend(user_id, job_id):
     # ── Step 4: Configure auth, SMTP, and redirects in one call ──────────
     brevo_smtp_key = os.getenv("BREVO_SMTP_KEY", "")
     preview_url = f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{job_id}/"
+    # Use dedicated callback route for email confirmation redirect
+    callback_url = f"https://entrepreneur-bot-backend.onrender.com/auth/supabase-callback/{job_id}"
 
     auth_config = {
         "mailer_autoconfirm": False,
-        "site_url": preview_url,
+        "site_url": callback_url,
         "mailer_urlpaths_confirmation": "/",
         "uri_allow_list": "https://entrepreneur-bot-backend.onrender.com/**,https://thehustlerbot.com/**",
         "mailer_subjects_confirmation": "Verify your email",

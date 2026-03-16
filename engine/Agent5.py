@@ -412,9 +412,9 @@ STARTUP SEQUENCE (MANDATORY — do this before anything else)
 1) Call files_list to inspect the full scaffold structure.
 2) Read every configuration file present (package.json, vite.config.*, tsconfig.*, tailwind.config.*, index.html).
 3) Identify the framework, styling system, and entry points from what you read.
-4) Produce a PLAN (see Planning section below).
-5) Only then begin executing. Never assume the stack — always confirm it from files.
-
+4) If the user's request involves user accounts, login, signup, database, or any data persistence beyond simple UI: call request_backend immediately. This asks the user for permission to enable a database + auth system. Wait for the result before planning your architecture.
+5) Produce a PLAN (see Planning section below).
+6) Only then begin executing. Never assume the stack — always confirm it from files.
 ────────────────────────────────────────────────────────
 PLANNING
 ────────────────────────────────────────────────────────
@@ -603,6 +603,13 @@ edit_image
 - Provide source image path(s), a text prompt describing the edit, and a target path for the result.
 - Supports merging multiple images into one composite.
 
+request_backend
+- Call when the user's app needs user accounts, login/signup, data persistence, or any server-side functionality.
+- ALWAYS call this BEFORE writing any authentication or database code.
+- If approved: you get Supabase tools (create_table, add_rls_policy, etc.)
+- If denied or timeout: build frontend-only with localStorage. Never import Supabase.
+- If the backend is already enabled, this returns immediately with credentials.
+
 run_install_command
 - Use when a required dependency is not already installed.
 - Always include non-interactive flags: -y for npm.
@@ -689,7 +696,31 @@ OUTPUT RULES
 # ══════════════════════════════════════════════════════════════════════════════
 #  ANTHROPIC TOOL DEFINITIONS (base tools — always available)
 # ══════════════════════════════════════════════════════════════════════════════
-
+REQUEST_BACKEND_TOOL = {
+    "name": "request_backend",
+    "description": (
+        "Request a backend (database + authentication) for this project. "
+        "Call this when the user's app needs: user accounts, login/signup, "
+        "data persistence, database tables, or any server-side functionality.\n\n"
+        "This will ask the user for permission to enable a Supabase backend. "
+        "The tool will wait for the user's response and return whether "
+        "the backend was approved or denied.\n\n"
+        "IMPORTANT: Call this EARLY in your startup sequence — before writing any auth or database code. "
+        "If approved, you'll get access to Supabase tools (create_table, add_rls_policy, etc.). "
+        "If denied, build a frontend-only version using localStorage."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "Brief explanation of why the app needs a backend."
+            }
+        },
+        "required": ["reason"]
+    }
+}
+ 
 anthropic_tools = [
     {
         "name": "read_file",
@@ -813,7 +844,7 @@ anthropic_tools = [
 #  CREATE GENERATOR — main factory function
 # ══════════════════════════════════════════════════════════════════════════════
 
-def create_generator(files_list_state, reviewer=None, model=None, supabase_config=None):
+def create_generator(files_list_state, reviewer=None, model=None, supabase_config=None, workspace=None):
     """
     Create the generator agent with the specified model.
 
@@ -1151,7 +1182,115 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         except Exception as e:
             print(f"[image_edit] ERROR: {e}")
             return f"IMAGE_EDIT_FAILED: {str(e)}"
-
+    def request_backend(reason: str = "") -> str:
+        """Request backend — writes signal file, polls for user approval."""
+        import time as _time
+        _workspace = workspace
+        if not _workspace:
+            return "BACKEND_ERROR: No workspace configured"
+ 
+        # Check if already enabled
+        meta_path = os.path.join(_workspace, "meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                if meta.get("supabase_enabled"):
+                    return "BACKEND_ALREADY_ENABLED: Supabase is already active. Use get_supabase_config to get credentials."
+            except Exception:
+                pass
+ 
+        print(f"[Agent5] Backend requested — reason: {reason}")
+ 
+        # Write the request signal
+        req_path = os.path.join(_workspace, "backend_requested.json")
+        with open(req_path, "w") as f:
+            json.dump({"reason": reason, "ts": _time.time()}, f)
+ 
+        # Poll for response (max 120 seconds)
+        approved_path = os.path.join(_workspace, "backend_approved.json")
+        denied_path   = os.path.join(_workspace, "backend_denied.json")
+        max_wait = 120
+        elapsed  = 0
+ 
+        while elapsed < max_wait:
+            _time.sleep(3)
+            elapsed += 3
+ 
+            if os.path.exists(approved_path):
+                try: os.remove(approved_path)
+                except: pass
+                try: os.remove(req_path)
+                except: pass
+ 
+                # Reload meta.json to get Supabase credentials
+                supabase_url = ""
+                anon_key = ""
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                    supabase_url = meta.get("supabase_url", "")
+                    anon_key = meta.get("supabase_anon_key", "")
+                except: pass
+ 
+                # Dynamically add Supabase tools to the agent
+                if supabase_url and anon_key:
+                    sb = SupabaseTools(
+                        supabase_url=supabase_url,
+                        anon_key=anon_key,
+                        service_role_key=meta.get("supabase_service_role", ""),
+                        preview_url=f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{os.path.basename(_workspace)}/",
+                        project_ref=meta.get("supabase_project_ref", ""),
+                    )
+                    agent6.tool_map["create_table"]        = sb.create_table
+                    agent6.tool_map["add_rls_policy"]      = sb.add_rls_policy
+                    agent6.tool_map["enable_auth"]         = sb.enable_auth
+                    agent6.tool_map["list_tables"]         = sb.list_tables
+                    agent6.tool_map["run_sql"]             = sb.run_sql
+                    agent6.tool_map["get_supabase_config"] = sb.get_supabase_config
+ 
+                    for tool_def in SUPABASE_TOOL_DEFINITIONS:
+                        if not any(t["name"] == tool_def["name"] for t in agent6.tools):
+                            agent6.tools.append(tool_def)
+ 
+                    if "BACKEND / DATABASE (SUPABASE)" not in agent6.system_prompt:
+                        agent6.system_prompt += SUPABASE_PROMPT_ADDITION
+ 
+                    print(f"[Agent5] Backend approved — Supabase tools activated")
+ 
+                return (
+                    f"BACKEND_APPROVED: Supabase is now active!\n"
+                    f"URL: {supabase_url}\nAnon Key: {anon_key}\n\n"
+                    f"You now have access to: create_table, add_rls_policy, enable_auth, "
+                    f"list_tables, run_sql, get_supabase_config.\n\n"
+                    f"NEXT STEPS:\n"
+                    f"1. Call get_supabase_config to get the client setup code\n"
+                    f"2. Create src/lib/supabase.ts with the client\n"
+                    f"3. Install @supabase/supabase-js\n"
+                    f"4. Create tables and RLS policies as needed"
+                )
+ 
+            if os.path.exists(denied_path):
+                try: os.remove(denied_path)
+                except: pass
+                try: os.remove(req_path)
+                except: pass
+                print(f"[Agent5] Backend denied by user")
+                return (
+                    "BACKEND_DENIED: User declined the backend. "
+                    "Build a frontend-only version using localStorage for data persistence. "
+                    "Do NOT use any Supabase tools or imports."
+                )
+ 
+        # Timeout
+        try: os.remove(req_path)
+        except: pass
+        print(f"[Agent5] Backend request timed out")
+        return (
+            "BACKEND_TIMEOUT: No response from user within 2 minutes. "
+            "Build a frontend-only version using localStorage for data persistence."
+        )
+    
     # ── Build the tool map ───────────────────────────────────────────────
     tool_map = {
         'write_file':          write_file,
@@ -1165,6 +1304,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         'run_install_command': run_install_command,
         'generate_image':      generate_image,
         'edit_image':          edit_image,
+        'request_backend':     request_backend,
     }
 
     # ── Supabase tools (only if backend is enabled) ──────────────────────

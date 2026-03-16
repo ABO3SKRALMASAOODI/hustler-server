@@ -29,6 +29,7 @@ class BaseAgent:
         reviewer=None,
         temperature=1,
         max_tokens=64000,
+        workspace: Optional[str] = None,
     ):
         self.pending_notices: List[str] = []
         self.client = client
@@ -40,6 +41,7 @@ class BaseAgent:
         self.reviewer = reviewer
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.workspace = workspace
 
         # ── Callback hooks (set by caller for progress tracking) ─────────
         # on_thinking(turn: int, detail: str)
@@ -52,6 +54,38 @@ class BaseAgent:
         self.on_text: Optional[Callable] = None
         # on_rate_limit(attempt: int, delay: int)
         self.on_rate_limit: Optional[Callable] = None
+
+    # ------------------------------------------------------------------ #
+    #  Partial deduction — write token usage after every API turn          #
+    #  so credits are charged even if the process is killed mid-build     #
+    # ------------------------------------------------------------------ #
+
+    def _save_partial_deduction(self, totals):
+        """Write cumulative token usage so credits are charged even if process is killed."""
+        if not self.workspace:
+            return
+        try:
+            import os as _os, json as _json
+            anthropic_to_hb = {
+                "claude-haiku-4-5-20251001": "hb-6",
+                "claude-sonnet-4-6":         "hb-6-pro",
+                "claude-opus-4-6":           "hb-7",
+            }
+            hb_model = anthropic_to_hb.get(self.model, "hb-6-pro")
+            path = _os.path.join(self.workspace, "partial_deduction.json")
+            data = [{
+                "input_tokens":       totals.get("input", 0),
+                "output_tokens":      totals.get("output", 0),
+                "cache_write_tokens": totals.get("cache_write", 0),
+                "cache_read_tokens":  totals.get("cache_read", 0),
+                "tokens_used":        sum(totals.values()),
+                "partial":            True,
+                "model":              hb_model,
+            }]
+            with open(path, "w") as f:
+                _json.dump(data, f)
+        except Exception:
+            pass  # Never crash the agent over bookkeeping
 
     # ------------------------------------------------------------------ #
     #  Caching helpers                                                     #
@@ -199,6 +233,9 @@ class BaseAgent:
                 f"cache_write={turn_cache_write} | cache_read={turn_cache_read} | "
                 f"running_totals={totals}"
             )
+
+            # Write partial deduction so credits are charged even if process is killed
+            self._save_partial_deduction(totals)
 
             self.messages.append({
                 "role": "assistant",
