@@ -167,66 +167,40 @@ def enable_backend(user_id, job_id):
     else:
         print(f"[supabase] Failed to get API keys: {keys_resp.text[:300]}")
 
-    # ── Step 4: Configure auth (disable email confirmation) ──────────────
-    try:
-        auth_config_resp = http_requests.patch(
-            f"{SUPABASE_API}/projects/{project_ref}/config/auth",
-            headers=_mgmt_headers(),
-            json={
-                "MAILER_AUTOCONFIRM": True,
-            },
-            timeout=15,
-        )
-        if auth_config_resp.status_code < 400:
-            print(f"[supabase] Email confirmation disabled for {project_ref}")
-        else:
-            print(f"[supabase] Warning: couldn't disable email confirmation: {auth_config_resp.text[:200]}")
-    except Exception as e:
-        print(f"[supabase] Warning: auth config error: {e}")
-
-    # ── Step 5: Configure SMTP (Brevo) ───────────────────────────────────
+    
+    # ── Step 4: Configure auth, SMTP, and redirects in one call ──────────
     brevo_smtp_key = os.getenv("BREVO_SMTP_KEY", "")
-    if brevo_smtp_key:
-        try:
-            smtp_resp = http_requests.patch(
-                f"{SUPABASE_API}/projects/{project_ref}/config/auth",
-                headers=_mgmt_headers(),
-                json={
-                    "SMTP_ADMIN_EMAIL":  "support@thehustlerbot.com",
-                    "SMTP_HOST":         "smtp-relay.brevo.com",
-                    "SMTP_PORT":         "587",
-                    "SMTP_USER":         "8dc5e6001@smtp-brevo.com",
-                    "SMTP_PASS":         brevo_smtp_key,
-                    "SMTP_SENDER_NAME":  "The Hustler Bot",
-                    "MAILER_URLPATHS_CONFIRMATION": "/auth/v1/verify",
-                },
-                timeout=15,
-            )
-            if smtp_resp.status_code < 400:
-                print(f"[supabase] SMTP configured for {project_ref}")
-            else:
-                print(f"[supabase] Warning: SMTP config failed: {smtp_resp.text[:200]}")
-        except Exception as e:
-            print(f"[supabase] Warning: SMTP config error: {e}")
-
-    # ── Step 6: Configure redirect URL ───────────────────────────────────
     preview_url = f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{job_id}/"
+
+    auth_config = {
+        "mailer_autoconfirm": True,
+        "site_url": preview_url,
+        "uri_allow_list": "https://entrepreneur-bot-backend.onrender.com/**,https://thehustlerbot.com/**",
+    }
+
+    if brevo_smtp_key:
+        auth_config.update({
+            "smtp_admin_email": "support@thehustlerbot.com",
+            "smtp_host": "smtp-relay.brevo.com",
+            "smtp_port": "587",
+            "smtp_user": "8dc5e6001@smtp-brevo.com",
+            "smtp_pass": brevo_smtp_key,
+            "smtp_sender_name": "The Hustler Bot",
+        })
+
     try:
-        redirect_resp = http_requests.patch(
+        config_resp = http_requests.patch(
             f"{SUPABASE_API}/projects/{project_ref}/config/auth",
             headers=_mgmt_headers(),
-            json={
-                "SITE_URL":           preview_url,
-                "URI_ALLOW_LIST":     f"https://entrepreneur-bot-backend.onrender.com/**,https://thehustlerbot.com/**",
-            },
+            json=auth_config,
             timeout=15,
         )
-        if redirect_resp.status_code < 400:
-            print(f"[supabase] Redirect URLs configured for {project_ref}")
+        if config_resp.status_code < 400:
+            print(f"[supabase] Auth + SMTP + redirects configured for {project_ref}")
         else:
-            print(f"[supabase] Warning: redirect config failed: {redirect_resp.text[:200]}")
+            print(f"[supabase] Warning: config failed: {config_resp.text[:200]}")
     except Exception as e:
-        print(f"[supabase] Warning: redirect config error: {e}")
+        print(f"[supabase] Warning: config error: {e}")
 
     # ── Step 7: Store credentials in DB and meta.json ────────────────────
     conn = get_db()
