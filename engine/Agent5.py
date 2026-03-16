@@ -304,6 +304,8 @@ Use create_table to create tables. Always include:
 After creating a table, ALWAYS add RLS policies using add_rls_policy.
 A table with RLS enabled but no policies will block ALL access from the frontend.
 
+CRITICAL: The column names in your TypeScript interfaces MUST exactly match the database column names you created. If you create a column called 'done', use 'done' in your TypeScript — NOT 'completed' or any other alias. Mismatched names will cause silent failures.
+
 Standard RLS pattern for user-owned data (call these 4 policies for each table):
 - SELECT: using_expression = "auth.uid() = user_id"
 - INSERT: using_expression = "true", check_expression = "auth.uid() = user_id"
