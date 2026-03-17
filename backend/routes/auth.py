@@ -101,10 +101,11 @@ def _get_preview_url(job_id, job_folder):
 
 
 # ------------------------------------------------------------------ #
-#  Subprocess kill helper                                              #
+#  Subprocess kill helper — improved with SIGKILL fallback             #
 # ------------------------------------------------------------------ #
 
 def _kill_job_process(job_folder):
+    """Kill the AA.py subprocess. Uses SIGTERM then SIGKILL fallback."""
     state_path = os.path.join(job_folder, "state.json")
     if not os.path.exists(state_path):
         return
@@ -116,17 +117,36 @@ def _kill_job_process(job_folder):
         if not pid:
             return
 
+        pid = int(pid)
+
+        # Try SIGTERM on process group first
         try:
-            os.killpg(os.getpgid(int(pid)), signal.SIGTERM)
-            print(f"[cancel] Killed process group for PID {pid}")
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            print(f"[cancel] Sent SIGTERM to process group for PID {pid}")
         except ProcessLookupError:
             print(f"[cancel] PID {pid} already dead")
+            return
         except PermissionError:
             try:
-                os.kill(int(pid), signal.SIGTERM)
-                print(f"[cancel] Killed PID {pid} directly")
+                os.kill(pid, signal.SIGTERM)
+                print(f"[cancel] Sent SIGTERM to PID {pid} directly")
             except ProcessLookupError:
                 print(f"[cancel] PID {pid} already dead")
+                return
+
+        # Wait briefly, then SIGKILL if still alive
+        import time as _time
+        _time.sleep(2)
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            print(f"[cancel] Sent SIGKILL to process group for PID {pid}")
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     except Exception as e:
         print(f"[cancel] Error killing process: {e}")
 
@@ -461,36 +481,56 @@ def _process_credits_deduction(job_id, job_folder, user_id):
     Process credit deduction from either:
     1. deduct_credits.json (normal completion — written by AA.py at end)
     2. partial_deduction.json (cancellation/crash — written by AAgent after each API turn)
+
+    Uses a lock file to prevent double-deduction from concurrent polls.
     """
+    lock_path = os.path.join(job_folder, "credits_processed.lock")
+
+    # If already processed, skip entirely
+    if os.path.exists(lock_path):
+        return
+
     deduct_file  = os.path.join(job_folder, "deduct_credits.json")
     partial_file = os.path.join(job_folder, "partial_deduction.json")
- 
+
     # Prefer the full deduction file (normal completion)
     target_file = None
     if os.path.exists(deduct_file):
         target_file = deduct_file
     elif os.path.exists(partial_file):
         target_file = partial_file
- 
+
     if not target_file:
+        # No deduction files — just update DB state
         conn = get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE jobs SET state = 'completed', updated_at = NOW() WHERE job_id = %s",
+                    "UPDATE jobs SET state = 'completed', updated_at = NOW() WHERE job_id = %s AND state = 'running'",
                     (job_id,)
                 )
                 conn.commit()
         finally:
             conn.close()
+        # Write lock so we don't re-enter
+        try:
+            with open(lock_path, "w") as f:
+                json.dump({"processed_at": time.time(), "source": "none"}, f)
+        except Exception:
+            pass
         return
- 
+
     with open(target_file) as f:
         entries = json.load(f)
- 
+
     if not entries:
+        try:
+            with open(lock_path, "w") as f:
+                json.dump({"processed_at": time.time(), "source": "empty"}, f)
+        except Exception:
+            pass
         return
- 
+
     # Read model from meta.json
     meta_path = os.path.join(job_folder, "meta.json")
     model = "hb-6-pro"
@@ -501,7 +541,7 @@ def _process_credits_deduction(job_id, job_folder, user_id):
             model = meta.get("model", "hb-6-pro")
         except Exception:
             pass
- 
+
     conn = get_db()
     try:
         for i, entry in enumerate(entries):
@@ -518,18 +558,29 @@ def _process_credits_deduction(job_id, job_folder, user_id):
                 cache_read_tokens  = int(entry.get("cache_read_tokens", 0)),
                 model              = entry_model,
             )
- 
+
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE jobs SET state = 'completed', updated_at = NOW() WHERE job_id = %s",
                 (job_id,)
             )
             conn.commit()
- 
-        # Clean up both files
+
+        # Clean up deduction files
         for f_path in [deduct_file, partial_file]:
             if os.path.exists(f_path):
-                os.remove(f_path)
+                try:
+                    os.remove(f_path)
+                except Exception:
+                    pass
+
+        # Write lock file to prevent double deduction
+        try:
+            with open(lock_path, "w") as f:
+                json.dump({"processed_at": time.time(), "source": os.path.basename(target_file)}, f)
+        except Exception:
+            pass
+
     finally:
         conn.close()
 
@@ -800,6 +851,14 @@ def job_message(user_id, job_id):
         if state_data.get("state") == "running":
             return jsonify({"error": "Job is still running"}), 409
 
+    # Remove the credits_processed lock for the new turn
+    lock_path = os.path.join(job_folder, "credits_processed.lock")
+    if os.path.exists(lock_path):
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
+
     anthropic_model = get_anthropic_model(current_model)
 
     proc = subprocess.Popen(
@@ -835,16 +894,22 @@ def job_status(user_id, job_id):
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
- 
+
     state_path = os.path.join(job_folder, "state.json")
     state_data = {}
     if os.path.exists(state_path):
         with open(state_path) as f:
             state_data = json.load(f)
- 
+
+    # Check if this job was cancelled — respect the cancelled state
+    # and don't let it resurrect to "completed"
+    cancelled_path = os.path.join(job_folder, "cancelled.lock")
+    if os.path.exists(cancelled_path):
+        state_data["state"] = "failed"
+
     if state_data.get("state") == "completed":
         _process_credits_deduction(job_id, job_folder, user_id)
- 
+
     messages      = []
     messages_path = os.path.join(job_folder, "messages.jsonl")
     if os.path.exists(messages_path):
@@ -856,9 +921,9 @@ def job_status(user_id, job_id):
                         messages.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
- 
+
     preview_url = _get_preview_url(job_id, job_folder)
- 
+
     if preview_url:
         conn = get_db()
         try:
@@ -870,13 +935,13 @@ def job_status(user_id, job_id):
                 conn.commit()
         finally:
             conn.close()
- 
+
     conn = get_db()
     try:
         credits_info = get_balance(conn, int(user_id))
     finally:
         conn.close()
- 
+
     progress = []
     progress_path = os.path.join(job_folder, "progress.json")
     if os.path.exists(progress_path):
@@ -885,7 +950,7 @@ def job_status(user_id, job_id):
                 progress = json.load(f)
         except (json.JSONDecodeError, IOError):
             progress = []
- 
+
     # Read model from meta
     meta_path = os.path.join(job_folder, "meta.json")
     job_model = "hb-6"
@@ -896,7 +961,7 @@ def job_status(user_id, job_id):
             job_model = meta.get("model", "hb-6")
         except Exception:
             pass
- 
+
     # Read published_url from DB
     published_url = None
     conn = get_db()
@@ -908,13 +973,13 @@ def job_status(user_id, job_id):
                 published_url = pub_row.get("published_url")
     finally:
         conn.close()
- 
-    # Check if agent has requested backend (Issue 2)
+
+    # Check if agent has requested backend
     backend_requested = False
     backend_req_path = os.path.join(job_folder, "backend_requested.json")
     if os.path.exists(backend_req_path):
         backend_requested = True
- 
+
     return jsonify({
         "job_id":            job_id,
         "state":             state_data.get("state", "unknown"),
@@ -1046,7 +1111,9 @@ def list_templates():
 INTERNAL_FILES = {
     "state.json", "messages.jsonl", "meta.json", "prompt.txt",
     "preview_port.txt", "deduct_credits.json", "Files_list.txt",
-    "progress.json", "attachments.json",
+    "progress.json", "attachments.json", "credits_processed.lock",
+    "cancelled.lock", "backend_requested.json", "backend_approved.json",
+    "backend_denied.json", "partial_deduction.json",
 }
 
 SKIP_DIRS = {"node_modules", "dist", ".git", "__pycache__", "uploads"}
@@ -1285,9 +1352,8 @@ history.replaceState(null, '', '/');
     return resp
 
 
- 
 # ── Issue 1: Supabase email confirmation callback ──
- 
+
 @auth_bp.route('/supabase-callback/<job_id>')
 def supabase_auth_callback(job_id):
     from flask import make_response
@@ -1362,10 +1428,10 @@ def supabase_auth_callback(job_id):
     resp = make_response(html)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     return resp
- 
- 
-# ── Issue 2: Backend ready/denied signals ──
- 
+
+
+# ── Backend ready/denied signals ──
+
 @auth_bp.route('/job/<job_id>/backend-ready', methods=['POST'])
 @token_required
 def backend_ready_signal(user_id, job_id):
@@ -1373,18 +1439,18 @@ def backend_ready_signal(user_id, job_id):
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
- 
+
     req_path = os.path.join(job_folder, "backend_requested.json")
     if os.path.exists(req_path):
         os.remove(req_path)
- 
+
     approved_path = os.path.join(job_folder, "backend_approved.json")
     with open(approved_path, "w") as f:
         json.dump({"approved": True, "ts": time.time()}, f)
- 
+
     return jsonify({"ok": True}), 200
- 
- 
+
+
 @auth_bp.route('/job/<job_id>/backend-denied', methods=['POST'])
 @token_required
 def backend_denied_signal(user_id, job_id):
@@ -1392,16 +1458,18 @@ def backend_denied_signal(user_id, job_id):
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
- 
+
     req_path = os.path.join(job_folder, "backend_requested.json")
     if os.path.exists(req_path):
         os.remove(req_path)
- 
+
     denied_path = os.path.join(job_folder, "backend_denied.json")
     with open(denied_path, "w") as f:
         json.dump({"denied": True, "ts": time.time()}, f)
- 
+
     return jsonify({"ok": True}), 200
+
+
 # ------------------------------------------------------------------ #
 #  Health check                                                        #
 # ------------------------------------------------------------------ #
@@ -1412,7 +1480,7 @@ def generate_test():
 
 
 # ------------------------------------------------------------------ #
-#  Cancel job                                                          #
+#  Cancel job — ROBUST: guaranteed credit deduction + no resurrection  #
 # ------------------------------------------------------------------ #
 
 @auth_bp.route('/job/<job_id>/cancel', methods=['POST'])
@@ -1420,17 +1488,35 @@ def generate_test():
 def cancel_job(user_id, job_id):
     try:
         job_folder = os.path.join(OUTPUTS_DIR, job_id)
- 
+
         if os.path.isdir(job_folder):
+            # Step 1: Write cancelled lock FIRST — prevents job_status from
+            # resurrecting the job if AA.py finishes between now and kill
+            cancelled_path = os.path.join(job_folder, "cancelled.lock")
+            with open(cancelled_path, "w") as f:
+                json.dump({"cancelled_at": time.time(), "user_id": user_id}, f)
+
+            # Step 2: Kill the process
             _kill_job_process(job_folder)
- 
-            # ── Deduct partial credits before marking as failed ──
+
+            # Step 3: Deduct credits from partial_deduction.json
+            # (written by AAgent after each API turn)
             partial_file = os.path.join(job_folder, "partial_deduction.json")
-            if os.path.exists(partial_file):
+            deduct_file  = os.path.join(job_folder, "deduct_credits.json")
+
+            # Use whichever exists — prefer full deduction if AA.py
+            # already completed before the kill landed
+            target_file = None
+            if os.path.exists(deduct_file):
+                target_file = deduct_file
+            elif os.path.exists(partial_file):
+                target_file = partial_file
+
+            if target_file:
                 try:
-                    with open(partial_file) as f:
+                    with open(target_file) as f:
                         entries = json.load(f)
- 
+
                     meta_path = os.path.join(job_folder, "meta.json")
                     model = "hb-6-pro"
                     if os.path.exists(meta_path):
@@ -1440,7 +1526,7 @@ def cancel_job(user_id, job_id):
                             model = meta.get("model", "hb-6-pro")
                         except Exception:
                             pass
- 
+
                     conn = get_db()
                     try:
                         for i, entry in enumerate(entries):
@@ -1459,11 +1545,27 @@ def cancel_job(user_id, job_id):
                             )
                     finally:
                         conn.close()
- 
-                    os.remove(partial_file)
+
+                    # Clean up deduction files
+                    for f_path in [deduct_file, partial_file]:
+                        if os.path.exists(f_path):
+                            try:
+                                os.remove(f_path)
+                            except Exception:
+                                pass
+
+                    # Write lock to prevent double-deduction
+                    lock_path = os.path.join(job_folder, "credits_processed.lock")
+                    try:
+                        with open(lock_path, "w") as f:
+                            json.dump({"processed_at": time.time(), "source": "cancel"}, f)
+                    except Exception:
+                        pass
+
                 except Exception as e:
                     print(f"[cancel] partial deduction error: {e}")
- 
+
+            # Step 4: Update state.json to failed
             state_path = os.path.join(job_folder, "state.json")
             with open(state_path, "w") as f:
                 json.dump({
@@ -1471,21 +1573,29 @@ def cancel_job(user_id, job_id):
                     "error": "Cancelled by user",
                     "updated_at": time.time()
                 }, f)
- 
+
+            # Step 5: Clean up progress
             progress_path = os.path.join(job_folder, "progress.json")
             if os.path.exists(progress_path):
-                os.remove(progress_path)
- 
+                try:
+                    os.remove(progress_path)
+                except Exception:
+                    pass
+
+        # Step 6: Update DB — use unconditional update (no AND state = 'running')
+        # because the state may have already changed
         conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE jobs SET state = 'failed' WHERE job_id = %s AND user_id = %s AND state = 'running'",
-                (job_id, int(user_id))
-            )
-            conn.commit()
-        conn.close()
- 
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET state = 'failed', updated_at = NOW() WHERE job_id = %s AND user_id = %s",
+                    (job_id, int(user_id))
+                )
+                conn.commit()
+        finally:
+            conn.close()
+
         return jsonify({"status": "cancelled"})
     except Exception as e:
+        print(f"[cancel] Error: {e}")
         return jsonify({"error": str(e)}), 500
- 
