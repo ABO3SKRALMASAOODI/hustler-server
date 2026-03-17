@@ -332,7 +332,7 @@ def publish_project(user_id, job_id):
         cf_project_name = existing_cf_project
         print(f"[deploy] Re-publishing to existing project: {cf_project_name}")
     else:
-        cf_project_name = chosen_subdomain
+        cf_project_name = f"hb-{chosen_subdomain}"
 
     # ── Check if project exists in our CF account ─────────────────────────
     def _project_exists_and_is_ours(name):
