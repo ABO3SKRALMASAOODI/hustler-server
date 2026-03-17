@@ -187,7 +187,9 @@ class BaseAgent:
             # ── Hook: thinking ────────────────────────────────────────
             if self.on_thinking:
                 self.on_thinking(turn_count, f"Generating code (step {turn_count})...")
-
+                # Write partial deduction BEFORE the API call so credits are
+            # captured even if the process is killed mid-stream
+            self._save_partial_deduction(totals)
             kwargs = dict(
                 model=self.model,
                 system=self._build_system(),

@@ -105,7 +105,7 @@ def _get_preview_url(job_id, job_folder):
 # ------------------------------------------------------------------ #
 
 def _kill_job_process(job_folder):
-    """Kill the AA.py subprocess. Tries multiple strategies for Render compatibility."""
+    """Kill the AA.py subprocess. Uses pkill as primary strategy (most reliable on Render)."""
     state_path = os.path.join(job_folder, "state.json")
     if not os.path.exists(state_path):
         return
@@ -114,57 +114,33 @@ def _kill_job_process(job_folder):
         with open(state_path) as f:
             state_data = json.load(f)
         pid = state_data.get("pid")
+
+        # Strategy 1 (PRIMARY): pkill by workspace path — most reliable on Render
+        try:
+            result = subprocess.run(
+                ["pkill", "-9", "-f", f"--workspace {job_folder}"],
+                capture_output=True, text=True, timeout=10
+            )
+            print(f"[cancel] pkill by workspace: returncode={result.returncode}")
+        except Exception as e:
+            print(f"[cancel] pkill by workspace failed: {e}")
+
         if not pid:
-            print(f"[cancel] No PID in state.json")
+            print(f"[cancel] No PID in state.json, relying on pkill")
             return
 
         pid = int(pid)
-        print(f"[cancel] Attempting to kill PID {pid}")
 
-        # Strategy 1: Direct SIGTERM
+        # Strategy 2: Direct SIGKILL on the PID (backup)
         try:
-            os.kill(pid, signal.SIGTERM)
-            print(f"[cancel] Sent SIGTERM to PID {pid}")
-        except ProcessLookupError:
-            print(f"[cancel] PID {pid} already dead")
-            return
-        except PermissionError as e:
-            print(f"[cancel] Permission denied killing {pid}: {e}")
-
-        # Strategy 2: Process group SIGTERM
-        try:
-            pgid = os.getpgid(pid)
-            if pgid != os.getpgid(os.getpid()):  # Don't kill our own group
-                os.killpg(pgid, signal.SIGTERM)
-                print(f"[cancel] Sent SIGTERM to process group {pgid}")
-        except (ProcessLookupError, PermissionError, OSError) as e:
-            print(f"[cancel] Process group kill failed: {e}")
-
-        # Wait briefly for graceful shutdown
-        import time as _time
-        _time.sleep(2)
-
-        # Strategy 3: SIGKILL if still alive
-        try:
-            os.kill(pid, 0)  # Check if alive
             os.kill(pid, signal.SIGKILL)
             print(f"[cancel] Sent SIGKILL to PID {pid}")
         except ProcessLookupError:
-            print(f"[cancel] PID {pid} is dead after SIGTERM")
-            return
-        except PermissionError:
-            pass
-
-        # Strategy 4: Kill all child processes too
-        try:
-            import subprocess as _sp
-            result = _sp.run(
-                ["pkill", "-9", "-f", f"--workspace {job_folder}"],
-                capture_output=True, text=True, timeout=5
-            )
-            print(f"[cancel] pkill result: {result.returncode}")
-        except Exception as e:
-            print(f"[cancel] pkill fallback failed: {e}")
+            print(f"[cancel] PID {pid} already dead")
+        except PermissionError as e:
+            print(f"[cancel] Permission denied on PID {pid}: {e}")
+        except OSError as e:
+            print(f"[cancel] OSError killing PID {pid}: {e}")
 
     except Exception as e:
         print(f"[cancel] Error killing process: {e}")
@@ -1525,18 +1501,10 @@ def cancel_job(user_id, job_id):
             with open(cancelled_path, "w") as f:
                 json.dump({"cancelled_at": time.time(), "user_id": user_id}, f)
 
-            # Step 3: Kill the process (uses PID from state.json which we read above)
+            # Step 3: Kill the process (pkill is primary, os.kill as backup)
             _kill_job_process(job_folder)
 
-            # Step 4: Also try pkill with the workspace path as a safety net
-            if saved_pid:
-                try:
-                    os.kill(int(saved_pid), signal.SIGKILL)
-                    print(f"[cancel] Direct SIGKILL to saved PID {saved_pid}")
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
-
-            # Step 5: Wait a moment for AA.py to flush partial_deduction on death
+            # Step 4: Wait a moment for AA.py to flush partial_deduction on death
             time.sleep(1)
 
             # Step 6: Deduct credits from whatever deduction file exists
