@@ -951,7 +951,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
 
         return f"EDIT_COMPLETED PATH: {path}"
 
-    def read_file(path):
+    def read_file(path, **kwargs):
         print(f"THE GENERATOR REQUESTED A READ FOR:{path}")
         p = Path(path)
         if not p.exists():
