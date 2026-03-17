@@ -105,7 +105,7 @@ def _get_preview_url(job_id, job_folder):
 # ------------------------------------------------------------------ #
 
 def _kill_job_process(job_folder):
-    """Kill the AA.py subprocess. Uses SIGTERM then SIGKILL fallback."""
+    """Kill the AA.py subprocess. Tries multiple strategies for Render compatibility."""
     state_path = os.path.join(job_folder, "state.json")
     if not os.path.exists(state_path):
         return
@@ -115,37 +115,56 @@ def _kill_job_process(job_folder):
             state_data = json.load(f)
         pid = state_data.get("pid")
         if not pid:
+            print(f"[cancel] No PID in state.json")
             return
 
         pid = int(pid)
+        print(f"[cancel] Attempting to kill PID {pid}")
 
-        # Try SIGTERM on process group first
+        # Strategy 1: Direct SIGTERM
         try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-            print(f"[cancel] Sent SIGTERM to process group for PID {pid}")
+            os.kill(pid, signal.SIGTERM)
+            print(f"[cancel] Sent SIGTERM to PID {pid}")
         except ProcessLookupError:
             print(f"[cancel] PID {pid} already dead")
             return
-        except PermissionError:
-            try:
-                os.kill(pid, signal.SIGTERM)
-                print(f"[cancel] Sent SIGTERM to PID {pid} directly")
-            except ProcessLookupError:
-                print(f"[cancel] PID {pid} already dead")
-                return
+        except PermissionError as e:
+            print(f"[cancel] Permission denied killing {pid}: {e}")
 
-        # Wait briefly, then SIGKILL if still alive
+        # Strategy 2: Process group SIGTERM
+        try:
+            pgid = os.getpgid(pid)
+            if pgid != os.getpgid(os.getpid()):  # Don't kill our own group
+                os.killpg(pgid, signal.SIGTERM)
+                print(f"[cancel] Sent SIGTERM to process group {pgid}")
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            print(f"[cancel] Process group kill failed: {e}")
+
+        # Wait briefly for graceful shutdown
         import time as _time
         _time.sleep(2)
+
+        # Strategy 3: SIGKILL if still alive
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-            print(f"[cancel] Sent SIGKILL to process group for PID {pid}")
-        except (ProcessLookupError, PermissionError):
-            pass
-        try:
+            os.kill(pid, 0)  # Check if alive
             os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+            print(f"[cancel] Sent SIGKILL to PID {pid}")
+        except ProcessLookupError:
+            print(f"[cancel] PID {pid} is dead after SIGTERM")
+            return
+        except PermissionError:
             pass
+
+        # Strategy 4: Kill all child processes too
+        try:
+            import subprocess as _sp
+            result = _sp.run(
+                ["pkill", "-9", "-f", f"--workspace {job_folder}"],
+                capture_output=True, text=True, timeout=5
+            )
+            print(f"[cancel] pkill result: {result.returncode}")
+        except Exception as e:
+            print(f"[cancel] pkill fallback failed: {e}")
 
     except Exception as e:
         print(f"[cancel] Error killing process: {e}")
@@ -1490,22 +1509,40 @@ def cancel_job(user_id, job_id):
         job_folder = os.path.join(OUTPUTS_DIR, job_id)
 
         if os.path.isdir(job_folder):
-            # Step 1: Write cancelled lock FIRST — prevents job_status from
-            # resurrecting the job if AA.py finishes between now and kill
+            # Step 1: Read the PID from state.json BEFORE we overwrite anything
+            state_path = os.path.join(job_folder, "state.json")
+            saved_pid = None
+            if os.path.exists(state_path):
+                try:
+                    with open(state_path) as f:
+                        old_state = json.load(f)
+                    saved_pid = old_state.get("pid")
+                except Exception:
+                    pass
+
+            # Step 2: Write cancelled lock — prevents job_status from resurrecting
             cancelled_path = os.path.join(job_folder, "cancelled.lock")
             with open(cancelled_path, "w") as f:
                 json.dump({"cancelled_at": time.time(), "user_id": user_id}, f)
 
-            # Step 2: Kill the process
+            # Step 3: Kill the process (uses PID from state.json which we read above)
             _kill_job_process(job_folder)
 
-            # Step 3: Deduct credits from partial_deduction.json
-            # (written by AAgent after each API turn)
+            # Step 4: Also try pkill with the workspace path as a safety net
+            if saved_pid:
+                try:
+                    os.kill(int(saved_pid), signal.SIGKILL)
+                    print(f"[cancel] Direct SIGKILL to saved PID {saved_pid}")
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+
+            # Step 5: Wait a moment for AA.py to flush partial_deduction on death
+            time.sleep(1)
+
+            # Step 6: Deduct credits from whatever deduction file exists
             partial_file = os.path.join(job_folder, "partial_deduction.json")
             deduct_file  = os.path.join(job_folder, "deduct_credits.json")
 
-            # Use whichever exists — prefer full deduction if AA.py
-            # already completed before the kill landed
             target_file = None
             if os.path.exists(deduct_file):
                 target_file = deduct_file
@@ -1546,7 +1583,6 @@ def cancel_job(user_id, job_id):
                     finally:
                         conn.close()
 
-                    # Clean up deduction files
                     for f_path in [deduct_file, partial_file]:
                         if os.path.exists(f_path):
                             try:
@@ -1554,7 +1590,6 @@ def cancel_job(user_id, job_id):
                             except Exception:
                                 pass
 
-                    # Write lock to prevent double-deduction
                     lock_path = os.path.join(job_folder, "credits_processed.lock")
                     try:
                         with open(lock_path, "w") as f:
@@ -1565,8 +1600,7 @@ def cancel_job(user_id, job_id):
                 except Exception as e:
                     print(f"[cancel] partial deduction error: {e}")
 
-            # Step 4: Update state.json to failed
-            state_path = os.path.join(job_folder, "state.json")
+            # Step 7: NOW overwrite state.json (after kill is done)
             with open(state_path, "w") as f:
                 json.dump({
                     "state": "failed",
@@ -1574,7 +1608,7 @@ def cancel_job(user_id, job_id):
                     "updated_at": time.time()
                 }, f)
 
-            # Step 5: Clean up progress
+            # Step 8: Clean up progress
             progress_path = os.path.join(job_folder, "progress.json")
             if os.path.exists(progress_path):
                 try:
@@ -1582,8 +1616,7 @@ def cancel_job(user_id, job_id):
                 except Exception:
                     pass
 
-        # Step 6: Update DB — use unconditional update (no AND state = 'running')
-        # because the state may have already changed
+        # Step 9: Update DB
         conn = get_db()
         try:
             with conn.cursor() as cur:
