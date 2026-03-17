@@ -186,8 +186,10 @@ class SupabaseTools:
                 "Create a file src/lib/supabase.ts with:\n"
                 "  import { createClient } from '@supabase/supabase-js'\n"
                 f"  export const supabase = createClient('{self.url}', '{self.anon_key}')\n"
-                f"  export const REDIRECT_URL = '{self.preview_url}'\n"
-                "\nThen import {{ supabase, REDIRECT_URL }} from '@/lib/supabase' wherever needed."
+                f"  export const REDIRECT_URL = '{self.preview_url}'  // MUST be this exact hardcoded string\n"
+                "\nThen import {{ supabase, REDIRECT_URL }} from '@/lib/supabase' wherever needed.\n"
+                "CRITICAL: REDIRECT_URL must always be this exact hardcoded string. NEVER use window.location.origin or any dynamic value."
+
             ),
         })
 
@@ -332,6 +334,8 @@ IMPORTANT: Email confirmation is ENABLED. After sign up, users receive a verific
 - Only the Login page should redirect to the dashboard after successful sign in
 - NEVER add localStorage fallbacks or workarounds for email confirmation
 - Import REDIRECT_URL from '@/lib/supabase' and use it in every signUp call
+- REDIRECT_URL must always be the hardcoded preview URL string from get_supabase_config — NEVER set it to window.location.origin, window.location.href, or any dynamic value
+- In src/lib/supabase.ts, REDIRECT_URL must be written exactly as: export const REDIRECT_URL = 'https://...' with the full hardcoded URL
 
 
 Auth patterns in generated code:
