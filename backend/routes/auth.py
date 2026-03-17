@@ -856,6 +856,44 @@ def job_message(user_id, job_id):
         except Exception:
             pass
 
+    # Remove cancelled lock so job_status doesn't force 'failed' state
+    cancelled_path = os.path.join(job_folder, "cancelled.lock")
+    if os.path.exists(cancelled_path):
+        try:
+            os.remove(cancelled_path)
+        except Exception:
+            pass
+
+    # Clean up messages.jsonl — if the last message is from assistant
+    # (partial/incomplete from a cancelled turn), remove it so the agent
+    # doesn't get confused by stale context
+    messages_path = os.path.join(job_folder, "messages.jsonl")
+    if os.path.exists(messages_path):
+        try:
+            lines = []
+            with open(messages_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        lines.append(line)
+            # Check if last message is assistant — if so, it may be incomplete
+            if lines:
+                try:
+                    last_msg = json.loads(lines[-1])
+                    if last_msg.get("role") == "assistant":
+                        # Check if this was from a cancelled turn by looking at
+                        # whether state.json says failed/cancelled
+                        if state_data.get("state") == "failed" and state_data.get("error") == "Cancelled by user":
+                            lines.pop()  # Remove the incomplete assistant message
+                            with open(messages_path, "w", encoding="utf-8") as f:
+                                for line in lines:
+                                    f.write(line + "\n")
+                            print(f"[job_message] Removed stale assistant message after cancel for {job_id}")
+                except json.JSONDecodeError:
+                    pass
+        except Exception as e:
+            print(f"[job_message] Error cleaning messages: {e}")
+
     anthropic_model = get_anthropic_model(current_model)
 
     proc = subprocess.Popen(
