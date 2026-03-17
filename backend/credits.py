@@ -134,7 +134,7 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
         if not row:
             return 0
 
-        daily      = row["credits_daily"] if row.get("credits_daily") is not None else 20
+        daily      = float(row["credits_daily"]) if row.get("credits_daily") is not None else 20.0
         reset_date = row["credits_daily_reset"]
         monthly    = row["credits_monthly"] or 0
 
@@ -251,8 +251,8 @@ def deduct_credits(conn, user_id: int, job_id: str, turn: int, tokens_used: int,
             (user_id,)
         )
         row = cur.fetchone()
-        daily   = row["credits_daily"] or 0
-        monthly = row["credits_monthly"] or 0
+        daily   = float(row["credits_daily"] or 0)
+        monthly = float(row["credits_monthly"] or 0)
 
         remaining = credits_used
         if daily >= remaining:
