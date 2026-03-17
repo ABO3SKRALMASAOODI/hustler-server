@@ -875,11 +875,12 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         all_tools.extend(SUPABASE_TOOL_DEFINITIONS)
 
     agent6 = BaseAgent(
-        client=client,
-        model=model,
-        system_prompt=system_prompt,
-        tools=all_tools,
-        temperature=1
+    client=client,
+    model=model,
+    system_prompt=system_prompt,
+    tools=all_tools,
+    temperature=1,
+    workspace=workspace,
     )
 
     add_file = files_list_state.add_file
