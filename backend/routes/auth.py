@@ -1290,48 +1290,75 @@ history.replaceState(null, '', '/');
  
 @auth_bp.route('/supabase-callback/<job_id>')
 def supabase_auth_callback(job_id):
-    """
-    Handle Supabase email confirmation redirects.
-    The hash fragment (#access_token=...) is only visible client-side,
-    so we serve a small page that extracts it and redirects to the preview.
-    """
     from flask import make_response
- 
-    preview_url = f"/auth/preview-raw/{job_id}/"
- 
-    html = f"""<!DOCTYPE html>
-<html><head>
+
+    html = """<!DOCTYPE html>
+<html lang="en"><head>
 <meta charset="UTF-8">
-<title>Confirming...</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Email Verified</title>
 <style>
-  body {{
-    margin: 0; padding: 0;
-    background: #000; color: #fff;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 24px;
+  }
+  .card {
+    max-width: 400px;
+    width: 100%;
+    background: #ffffff;
+    border: 1px solid #e5e5e5;
+    border-radius: 16px;
+    padding: 48px 40px 40px;
+    text-align: center;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  }
+  .icon-wrap {
+    width: 64px; height: 64px; border-radius: 50%;
+    background: #f0fdf4; border: 1px solid #bbf7d0;
     display: flex; align-items: center; justify-content: center;
-    height: 100vh; text-align: center;
-  }}
-  .spinner {{
-    width: 32px; height: 32px;
-    border: 3px solid #1a1a1a; border-top: 3px solid #cc0000;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    margin: 0 auto 16px;
-  }}
-  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+    margin: 0 auto 24px;
+  }
+  .checkmark {
+    width: 28px; height: 28px; stroke: #16a34a;
+    stroke-width: 2.5; fill: none;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  h1 { font-size: 1.375rem; font-weight: 700; color: #111111; margin-bottom: 10px; }
+  p { font-size: 0.9rem; color: #666666; line-height: 1.6; margin-bottom: 32px; }
+  .btn {
+    display: inline-block; padding: 12px 28px;
+    background: #111111; color: #ffffff;
+    font-size: 0.875rem; font-weight: 600;
+    text-decoration: none; border-radius: 8px;
+    transition: background 0.15s ease;
+  }
+  .btn:hover { background: #333333; }
+  .divider { width: 40px; height: 2px; background: #e5e5e5; margin: 28px auto 0; border-radius: 2px; }
+  .footer { margin-top: 20px; font-size: 0.75rem; color: #aaaaaa; }
 </style>
-</head><body>
-<div>
-  <div class="spinner"></div>
-  <p style="font-size: 14px; color: #888;">Email confirmed! Redirecting...</p>
-</div>
-<script>
-  var hash = window.location.hash;
-  var url = "{preview_url}" + (hash || "");
-  setTimeout(function() {{ window.location.href = url; }}, 1000);
-</script>
-</body></html>"""
- 
+</head>
+<body>
+  <div class="card">
+    <div class="icon-wrap">
+      <svg class="checkmark" viewBox="0 0 24 24">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>
+    </div>
+    <h1>Email Verified</h1>
+    <p>Your email address has been confirmed.<br>You can now sign in to your account.</p>
+    <a href="https://thehustlerbot.com/login" class="btn">Go to Sign In</a>
+    <div class="divider"></div>
+    <p class="footer">The Hustler Bot &nbsp;·&nbsp; You can close this tab after signing in.</p>
+  </div>
+</body>
+</html>"""
+
     resp = make_response(html)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     return resp

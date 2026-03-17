@@ -182,30 +182,45 @@ def enable_backend(user_id, job_id):
         "mailer_templates_confirmation_content": '<div style="max-width:520px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e5e5;"><div style="padding:32px 32px 24px;text-align:center;border-bottom:1px solid #f0f0f0;"><h1 style="margin:0 0 8px;font-size:22px;font-weight:700;color:#111111;">Verify Your Email</h1><p style="margin:0;font-size:14px;color:#888888;">Please confirm your email to continue</p></div><div style="padding:32px;"><p style="font-size:15px;color:#444444;line-height:1.6;margin:0 0 24px;">Thanks for signing up! Click the button below to verify your email address and activate your account.</p><div style="text-align:center;margin:28px 0;"><a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:14px 36px;background:#111111;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">Verify Email Address</a></div><p style="font-size:13px;color:#999999;line-height:1.5;margin:24px 0 0;text-align:center;">If you didn\'t create this account, you can safely ignore this email.</p></div><div style="padding:16px 32px;background:#fafafa;border-top:1px solid #f0f0f0;text-align:center;"><p style="margin:0;font-size:11px;color:#bbbbbb;">This is an automated message. Please do not reply.</p></div></div>',
     }
 
-    if brevo_smtp_key:
-        auth_config.update({
-            "smtp_admin_email": "support@thehustlerbot.com",
-            "smtp_host": "smtp-relay.brevo.com",
-            "smtp_port": "587",
-            "smtp_user": "8dc5e6001@smtp-brevo.com",
-            "smtp_pass": brevo_smtp_key,
-            "smtp_sender_name": "The Hustler Bot",
-        })
+    
 
+    # PATCH 1 — site_url and redirect allowlist
     try:
-        config_resp = http_requests.patch(
+        url_resp = http_requests.patch(
             f"{SUPABASE_API}/projects/{project_ref}/config/auth",
             headers=_mgmt_headers(),
-            json=auth_config,
+            json={
+                "site_url": callback_url,
+                "uri_allow_list": f"{callback_url},https://entrepreneur-bot-backend.onrender.com/**,https://thehustlerbot.com/**",
+                "mailer_autoconfirm": False,
+            },
             timeout=15,
         )
-        if config_resp.status_code < 400:
-            print(f"[supabase] Auth + SMTP + redirects configured for {project_ref}")
-        else:
-            print(f"[supabase] Warning: config failed: {config_resp.text[:200]}")
+        print(f"[supabase] URL config — status {url_resp.status_code} — {url_resp.text[:300]}")
     except Exception as e:
-        print(f"[supabase] Warning: config error: {e}")
+        print(f"[supabase] URL config error: {e}")
 
+    # PATCH 2 — SMTP and email template
+    if brevo_smtp_key:
+        try:
+            smtp_resp = http_requests.patch(
+                f"{SUPABASE_API}/projects/{project_ref}/config/auth",
+                headers=_mgmt_headers(),
+                json={
+                    "smtp_admin_email": "support@thehustlerbot.com",
+                    "smtp_host": "smtp-relay.brevo.com",
+                    "smtp_port": "587",
+                    "smtp_user": "8dc5e6001@smtp-brevo.com",
+                    "smtp_pass": brevo_smtp_key,
+                    "smtp_sender_name": "The Hustler Bot",
+                    "mailer_subjects_confirmation": "Verify your email",
+                    "mailer_templates_confirmation_content": auth_config.get("mailer_templates_confirmation_content", ""),
+                },
+                timeout=15,
+            )
+            print(f"[supabase] SMTP config — status {smtp_resp.status_code} — {smtp_resp.text[:300]}")
+        except Exception as e:
+            print(f"[supabase] SMTP config error: {e}")
     # ── Step 7: Store credentials in DB and meta.json ────────────────────
     conn = get_db()
     try:
