@@ -116,12 +116,14 @@ def _kill_job_process(job_folder):
         pid = state_data.get("pid")
 
         # Strategy 1 (PRIMARY): pkill by workspace path — most reliable on Render
+        # NOTE: "--" separates pkill options from the pattern, otherwise
+        # "--workspace" gets parsed as a pkill flag
         try:
             result = subprocess.run(
-                ["pkill", "-9", "-f", f"--workspace {job_folder}"],
+                ["pkill", "-9", "-f", "--", f"--workspace {job_folder}"],
                 capture_output=True, text=True, timeout=10
             )
-            print(f"[cancel] pkill by workspace: returncode={result.returncode}")
+            print(f"[cancel] pkill by workspace: returncode={result.returncode} stderr={result.stderr.strip()}")
         except Exception as e:
             print(f"[cancel] pkill by workspace failed: {e}")
 
