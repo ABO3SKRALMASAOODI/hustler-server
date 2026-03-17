@@ -1214,7 +1214,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         # Poll for response (max 120 seconds)
         approved_path = os.path.join(_workspace, "backend_approved.json")
         denied_path   = os.path.join(_workspace, "backend_denied.json")
-        max_wait = 120
+        max_wait = 300
         elapsed  = 0
  
         while elapsed < max_wait:
@@ -1291,7 +1291,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         except: pass
         print(f"[Agent5] Backend request timed out")
         return (
-            "BACKEND_TIMEOUT: No response from user within 2 minutes. "
+            "BACKEND_TIMEOUT: No response from user within 5 minutes. "
             "Build a frontend-only version using localStorage for data persistence."
         )
     
