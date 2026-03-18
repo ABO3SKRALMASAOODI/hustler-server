@@ -1494,6 +1494,24 @@ def backend_denied_signal(user_id, job_id):
 #  Console log receiver — captures runtime errors from preview iframe  #
 # ------------------------------------------------------------------ #
 
+# Patterns that indicate noise from the host app infrastructure,
+# not from the user's generated code.
+_CONSOLE_NOISE_PATTERNS = [
+    "failed to load resource",
+    "/auth/token",
+    "/auth/credits",
+    "/auth/jobs",
+    "/auth/job/",
+    "favicon",
+    "hustler-robot.riv",
+    "api-backend",
+]
+
+def _is_console_noise(msg: str) -> bool:
+    m = msg.lower()
+    return any(p in m for p in _CONSOLE_NOISE_PATTERNS)
+
+
 @auth_bp.route('/preview/<job_id>/console-log', methods=['POST'])
 def preview_console_log(job_id):
     """Receives runtime console errors POSTed from the previewed app."""
@@ -1507,6 +1525,11 @@ def preview_console_log(job_id):
         if not logs:
             return '', 204
 
+        # Filter out noise from the Studio infrastructure
+        logs = [l for l in logs if not _is_console_noise(l.get("msg", ""))]
+        if not logs:
+            return '', 204
+
         log_path = os.path.join(job_folder, "console_logs.json")
         existing = []
         if os.path.exists(log_path):
@@ -1517,7 +1540,7 @@ def preview_console_log(job_id):
                 existing = []
 
         existing.extend(logs)
-        existing = existing[-100:]   # Keep last 100 entries only
+        existing = existing[-100:]
 
         with open(log_path, "w") as f:
             json.dump(existing, f)
