@@ -1232,3 +1232,161 @@ def session_stats():
         }), 200
     finally:
         conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  BUILDS LIST (admin — all jobs with user info, paginated)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route('/builds', methods=['GET'])
+@admin_required
+def list_builds():
+    page     = int(request.args.get('page', 1))
+    per_page = int(request.args.get('per_page', 30))
+    state    = request.args.get('state', '').strip()
+    search   = request.args.get('search', '').strip()
+    offset   = (page - 1) * per_page
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            where_parts = []
+            params = []
+            if state:
+                where_parts.append("j.state = %s")
+                params.append(state)
+            if search:
+                where_parts.append("(u.email ILIKE %s OR j.title ILIKE %s)")
+                params.extend([f"%{search}%", f"%{search}%"])
+            where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+            cur.execute(f"SELECT COUNT(*) AS total FROM jobs j LEFT JOIN users u ON u.id = j.user_id {where}", params)
+            total = cur.fetchone()["total"]
+
+            cur.execute(f"""
+                SELECT j.job_id, j.title, j.state, j.created_at,
+                       u.email AS user_email, u.plan,
+                       COALESCE(SUM(jc.credits_used), 0) AS credits_used,
+                       COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
+                       COUNT(jc.id) AS turns
+                FROM jobs j
+                LEFT JOIN users u ON u.id = j.user_id
+                LEFT JOIN job_credits jc ON jc.job_id = j.job_id
+                {where}
+                GROUP BY j.job_id, j.title, j.state, j.created_at, u.email, u.plan
+                ORDER BY j.created_at DESC
+                LIMIT %s OFFSET %s
+            """, params + [per_page, offset])
+            rows = cur.fetchall()
+
+        return jsonify({
+            "builds": [dict(r) for r in rows],
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        }), 200
+    finally:
+        conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  JOB CONVERSATION VIEWER
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route('/job/<job_id>/conversation', methods=['GET'])
+@admin_required
+def job_conversation(job_id):
+    """Returns messages + metadata for a specific job for admin viewing."""
+    import json as _json
+
+    OUTPUTS_DIR = os.path.join(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
+        "outputs"
+    )
+
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+
+    messages = []
+    messages_path = os.path.join(job_folder, "messages.jsonl")
+    if os.path.exists(messages_path):
+        with open(messages_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        messages.append(_json.loads(line))
+                    except Exception:
+                        pass
+
+    state_data = {}
+    state_path = os.path.join(job_folder, "state.json")
+    if os.path.exists(state_path):
+        try:
+            with open(state_path) as f:
+                state_data = _json.load(f)
+        except Exception:
+            pass
+
+    meta = {}
+    meta_path = os.path.join(job_folder, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = _json.load(f)
+        except Exception:
+            pass
+
+    prompt_text = ""
+    prompt_path = os.path.join(job_folder, "prompt.txt")
+    if os.path.exists(prompt_path):
+        try:
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                prompt_text = f.read()
+        except Exception:
+            pass
+
+    dist_dir = os.path.join(job_folder, "dist")
+    has_preview = os.path.isdir(dist_dir)
+    preview_url = f"/auth/preview/{job_id}/" if has_preview else None
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT j.title, j.state, j.created_at, j.updated_at,
+                       u.email AS user_email, u.plan,
+                       COALESCE(SUM(jc.credits_used), 0) AS credits_used,
+                       COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
+                       COUNT(jc.id) AS turns
+                FROM jobs j
+                LEFT JOIN users u ON u.id = j.user_id
+                LEFT JOIN job_credits jc ON jc.job_id = j.job_id
+                WHERE j.job_id = %s
+                GROUP BY j.job_id, j.title, j.state, j.created_at, j.updated_at, u.email, u.plan
+            """, (job_id,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return jsonify({"error": "Job not in database"}), 404
+
+    return jsonify({
+        "job_id": job_id,
+        "title": row["title"],
+        "state": row["state"],
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]) if row["updated_at"] else None,
+        "user_email": row["user_email"],
+        "plan": row["plan"],
+        "credits_used": float(row["credits_used"]),
+        "tokens_used": int(row["tokens_used"]),
+        "turns": int(row["turns"]),
+        "model": meta.get("model", "unknown"),
+        "prompt": prompt_text,
+        "messages": messages,
+        "preview_url": preview_url,
+        "has_preview": has_preview,
+    }), 200
