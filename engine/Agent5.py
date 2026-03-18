@@ -1071,7 +1071,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             if model == "flux.schnell":
                 replicate_input["go_fast"] = True
 
-            output = replicate.run(replicate_model, input=replicate_input)
+            output = replicate.run(replicate_model, input=replicate_input,wait=300)
 
             image_url = None
             if isinstance(output, list) and len(output) > 0:
