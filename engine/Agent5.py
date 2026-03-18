@@ -410,17 +410,9 @@ Always parallel:
 Sequential is only acceptable when the output of call A is required as input to call B.
 
 ────────────────────────────────────────────────────────
-BUILD VERIFICATION LOOP
+RUNTIME ISSUE DEBUGGING
 ────────────────────────────────────────────────────────
-After EVERY build (new project or follow-up that changed code):
-
-1. Call read_build_output — if it shows BUILD_FAILED, read the errors and fix them immediately.
-2. TypeScript errors → read the relevant files, fix the types, trigger a rebuild.
-3. Module not found → call read_package_json, run run_install_command if needed, rebuild.
-4. Do NOT report success to the user until read_build_output confirms BUILD_SUCCESS.
-5. After confirming BUILD_SUCCESS, call check_preview_health to verify dist/ is live.
-
-For runtime issues reported by the user:
+When a user reports their app is broken, blank, or not working:
 1. Call read_console_logs first — always. Do not guess at the cause.
 2. Read the relevant source files based on what the errors tell you.
 3. Fix the root cause. Do not add workarounds or try/catch to hide errors.
@@ -584,9 +576,7 @@ delete_file          → Remove files and directories no longer needed.
 rename_file          → Always use this instead of create + delete.
 search_files         → Find usages before renaming or refactoring. Far cheaper than reading everything.
 read_package_json    → ALWAYS call before run_install_command.
-read_build_output    → ALWAYS call after a build. Fix errors before reporting success.
 read_console_logs    → ALWAYS call first when user reports a broken or blank app.
-check_preview_health → Call after a successful build to confirm dist/ is live.
 generate_image       → For visual assets. Call in parallel when multiple images are needed.
 run_install_command  → After confirming with read_package_json. Always include -y flag.
 request_backend      → Before ANY auth or database code. Call early in the startup sequence.
@@ -603,7 +593,6 @@ EXECUTION ORDER
 7. Feature components — modals, forms, carousels — wired into their pages
 8. Animations — framer-motion passes after structure is solid
 9. Install any missing dependencies discovered during build
-10. Verify — read_build_output → fix any errors → check_preview_health
 
 ────────────────────────────────────────────────────────
 SELF-CHECK BEFORE FINISHING
@@ -612,8 +601,6 @@ Before considering the work complete:
 □ Every described page exists and is fully implemented
 □ Every route in App.tsx points to a component that exists
 □ Every import resolves to a real file
-□ read_build_output confirms BUILD_SUCCESS
-□ check_preview_health confirms dist/ is live
 □ No TODOs, stubs, or placeholder content anywhere
 □ Animations and hover states are present
 □ Mobile layout works at 320px
@@ -794,20 +781,7 @@ anthropic_tools = [
             "required": ["image_paths", "prompt", "target_path"]
         }
     },
-    # ── New diagnostic tools ──────────────────────────────────────────────────
-    {
-        "name": "read_build_output",
-        "description": (
-            "Read the output from the last build (npm install + vite build).\n\n"
-            "ALWAYS call this after triggering a build to check if it succeeded.\n"
-            "Use this when:\n"
-            "- A build may have failed and you need to understand why\n"
-            "- You want to verify BUILD_SUCCESS before reporting completion to the user\n"
-            "- You need to see TypeScript or Vite errors to fix them\n\n"
-            "Returns: build success/failure, stderr with errors, stdout, and which phase failed."
-        ),
-        "input_schema": {"type": "object", "properties": {}}
-    },
+    # ── Diagnostic tools ──────────────────────────────────────────────────
     {
         "name": "read_console_logs",
         "description": (
@@ -827,17 +801,6 @@ anthropic_tools = [
             "Read the current package.json to check what dependencies are already installed.\n\n"
             "ALWAYS call this before run_install_command to avoid redundant installs.\n"
             "Returns the full package.json content including dependencies and devDependencies."
-        ),
-        "input_schema": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "check_preview_health",
-        "description": (
-            "Check if the built preview is ready and serving correctly.\n\n"
-            "Call this after a successful build to confirm dist/ is live.\n"
-            "Returns: whether dist/ exists, whether index.html is present, file count, and total size.\n"
-            "PREVIEW_HEALTHY = the app is live and accessible.\n"
-            "PREVIEW_NOT_READY or PREVIEW_BROKEN = build did not complete correctly."
         ),
         "input_schema": {"type": "object", "properties": {}}
     },
@@ -1071,7 +1034,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             if model == "flux.schnell":
                 replicate_input["go_fast"] = True
 
-            output = replicate.run(replicate_model, input=replicate_input,wait=300)
+            output = replicate.run(replicate_model, input=replicate_input)
 
             image_url = None
             if isinstance(output, list) and len(output) > 0:
@@ -1170,56 +1133,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         except Exception as e:
             return f"IMAGE_EDIT_FAILED: {str(e)}"
 
-    # ── New diagnostic tool implementations ──────────────────────────────
-
-    def read_build_output() -> str:
-        """Read the last build result from state.json or build_output.json."""
-        _ws = workspace
-        if not _ws:
-            return "BUILD_OUTPUT_ERROR: No workspace configured."
-
-        # Prefer the dedicated build_output.json (written by AA.py)
-        build_path = os.path.join(_ws, "build_output.json")
-        state_path = os.path.join(_ws, "state.json")
-
-        data = None
-        if os.path.exists(build_path):
-            try:
-                with open(build_path) as f:
-                    data = json.load(f)
-            except Exception as e:
-                return f"BUILD_OUTPUT_READ_ERROR: {str(e)}"
-        elif os.path.exists(state_path):
-            # Fall back to reading build fields from state.json
-            try:
-                with open(state_path) as f:
-                    state = json.load(f)
-                if "build_success" in state:
-                    data = {
-                        "build_success": state.get("build_success"),
-                        "build_phase":   state.get("build_phase", "unknown"),
-                        "build_stdout":  state.get("build_stdout", ""),
-                        "build_stderr":  state.get("build_stderr", ""),
-                    }
-            except Exception as e:
-                return f"BUILD_OUTPUT_READ_ERROR: {str(e)}"
-
-        if data is None:
-            return "BUILD_OUTPUT_NOT_FOUND: No build has been run yet for this project."
-
-        success = data.get("build_success", False)
-        phase   = data.get("build_phase", "unknown")
-        stdout  = data.get("build_stdout", "")
-        stderr  = data.get("build_stderr", "")
-        status  = "BUILD_SUCCESS" if success else "BUILD_FAILED"
-
-        output = f"{status} (phase: {phase})\n"
-        if stderr:
-            output += f"\nSTDERR:\n{stderr}\n"
-        if stdout and not success:
-            # Only show stdout on failure — on success it's usually noisy
-            output += f"\nSTDOUT:\n{stdout}\n"
-        return output.strip()
+    # ── Diagnostic tool implementations ──────────────────────────────────
 
     def read_console_logs() -> str:
         """Read runtime console errors captured from the preview iframe."""
@@ -1262,39 +1176,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 return f.read()
         except Exception as e:
             return f"PACKAGE_JSON_READ_ERROR: {str(e)}"
-
-    def check_preview_health() -> str:
-        """Check if the built preview dist/ folder exists and is healthy."""
-        _ws = workspace
-        if not _ws:
-            return "PREVIEW_HEALTH_ERROR: No workspace configured."
-
-        dist_dir   = os.path.join(_ws, "dist")
-        index_path = os.path.join(dist_dir, "index.html")
-
-        if not os.path.isdir(dist_dir):
-            return (
-                "PREVIEW_NOT_READY: dist/ folder does not exist. "
-                "The build has not run yet or failed before producing output."
-            )
-        if not os.path.exists(index_path):
-            return (
-                "PREVIEW_BROKEN: dist/ exists but index.html is missing. "
-                "The build likely failed partway through. Check read_build_output for errors."
-            )
-
-        file_count = sum(len(files) for _, _, files in os.walk(dist_dir))
-        size_bytes = sum(
-            os.path.getsize(os.path.join(root, f))
-            for root, _, files in os.walk(dist_dir)
-            for f in files
-        )
-        size_kb = size_bytes // 1024
-
-        return (
-            f"PREVIEW_HEALTHY: dist/ exists with {file_count} files ({size_kb} KB total). "
-            f"index.html is present. The preview is live and accessible."
-        )
 
     def request_backend(reason: str = "") -> str:
         """Request backend — writes signal file, polls for user approval."""
@@ -1399,23 +1280,20 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
 
     # ── Build the tool map ───────────────────────────────────────────────
     tool_map = {
-        'write_file':           write_file,
-        'edit_file':            edit_file,
-        'read_file':            read_file,
-        'delete_file':          delete_file,
-        'rename_file':          rename_file,
-        'search_files':         search_files,
-        'add_file':             add_file,
-        'files_list':           files_list,
-        'run_install_command':  run_install_command,
-        'generate_image':       generate_image,
-        'edit_image':           edit_image,
-        'request_backend':      request_backend,
-        # New diagnostic tools
-        'read_build_output':    read_build_output,
-        'read_console_logs':    read_console_logs,
-        'read_package_json':    read_package_json,
-        'check_preview_health': check_preview_health,
+        'write_file':          write_file,
+        'edit_file':           edit_file,
+        'read_file':           read_file,
+        'delete_file':         delete_file,
+        'rename_file':         rename_file,
+        'search_files':        search_files,
+        'add_file':            add_file,
+        'files_list':          files_list,
+        'run_install_command': run_install_command,
+        'generate_image':      generate_image,
+        'edit_image':          edit_image,
+        'request_backend':     request_backend,
+        'read_console_logs':   read_console_logs,
+        'read_package_json':   read_package_json,
     }
 
     # ── Supabase tools (only if backend is already enabled) ──────────────

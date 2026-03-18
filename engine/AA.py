@@ -236,21 +236,19 @@ def clear_progress(workspace):
 # ── Hook factories ────────────────────────────────────────────────────────────
 
 TOOL_ACTIONS = {
-    "write_file":           "writing",
-    "edit_file":            "editing",
-    "read_file":            "reading",
-    "files_list":           "scanning",
-    "run_install_command":  "installing",
-    "generate_image":       "generating image",
-    "edit_image":           "editing image",
-    "delete_file":          "deleting",
-    "rename_file":          "renaming",
-    "search_files":         "searching",
-    "request_backend":      "requesting backend",
-    "read_build_output":    "checking build",
-    "read_console_logs":    "reading console logs",
-    "read_package_json":    "checking dependencies",
-    "check_preview_health": "checking preview",
+    "write_file":          "writing",
+    "edit_file":           "editing",
+    "read_file":           "reading",
+    "files_list":          "scanning",
+    "run_install_command": "installing",
+    "generate_image":      "generating image",
+    "edit_image":          "editing image",
+    "delete_file":         "deleting",
+    "rename_file":         "renaming",
+    "search_files":        "searching",
+    "request_backend":     "requesting backend",
+    "read_console_logs":   "reading console logs",
+    "read_package_json":   "checking dependencies",
 }
 
 
@@ -308,14 +306,10 @@ def make_hooks(workspace):
             query      = args.get("query", "")[:60]
             search_dir = args.get("search_dir", "src")
             entry["detail"] = f"Searching for '{query}' in {search_dir}"
-        elif name == "read_build_output":
-            entry["detail"] = "Checking build output for errors..."
         elif name == "read_console_logs":
             entry["detail"] = "Reading runtime console logs..."
         elif name == "read_package_json":
             entry["detail"] = "Checking installed dependencies..."
-        elif name == "check_preview_health":
-            entry["detail"] = "Verifying preview is live..."
         elif file_path:
             entry["detail"] = f"{action.capitalize()} {file_path}"
         else:
