@@ -11,7 +11,6 @@ try:
     from credits import tokens_to_credits
 except ImportError:
     def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="hb-6-pro"):
-        # Fallback pricing table
         pricing = {
             "hb-6":     {"input": 1.00, "output": 5.00,  "cache_write": 1.25, "cache_read": 0.10},
             "hb-6-pro": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
@@ -71,9 +70,43 @@ def load_history(workspace):
     return messages
 
 
+def _save_build_output(workspace, success, stdout, stderr, phase):
+    """
+    Write build result into state.json as extra fields so the agent
+    can read them via read_build_output tool without a separate file.
+    Also write a dedicated build_output.json for easy agent access.
+    """
+    data = {
+        "build_success": success,
+        "build_phase":   phase,
+        "build_stdout":  (stdout or "")[-3000:],
+        "build_stderr":  (stderr or "")[-3000:],
+        "build_ts":      time.time(),
+    }
+
+    # Merge into existing state.json
+    state_path = os.path.join(workspace, "state.json")
+    existing = {}
+    if os.path.exists(state_path):
+        try:
+            with open(state_path) as f:
+                existing = json.load(f)
+        except Exception:
+            pass
+    existing.update(data)
+    with open(state_path, "w") as f:
+        json.dump(existing, f)
+
+    # Also write standalone file for the agent tool
+    build_output_path = os.path.join(workspace, "build_output.json")
+    with open(build_output_path, "w") as f:
+        json.dump(data, f)
+
+
 def build_project(workspace):
     """
     Run npm install + vite build, then delete node_modules to save disk.
+    Build results are written into state.json and build_output.json.
     """
     try:
         install = subprocess.run(
@@ -84,6 +117,7 @@ def build_project(workspace):
         print(f"[build] npm install stdout={install.stdout[-500:] if install.stdout else ''}")
         print(f"[build] npm install stderr={install.stderr[-500:] if install.stderr else ''}")
         if install.returncode != 0:
+            _save_build_output(workspace, False, install.stdout, install.stderr, "npm_install")
             print(f"[build] npm install failed")
             return False
 
@@ -92,8 +126,11 @@ def build_project(workspace):
             capture_output=True, text=True, timeout=120
         )
         if result.returncode != 0:
+            _save_build_output(workspace, False, result.stdout, result.stderr, "vite_build")
             print(f"[build] vite build failed:\n{result.stderr}")
             return False
+
+        _save_build_output(workspace, True, result.stdout, result.stderr, "vite_build")
 
         port_file = os.path.join(workspace, "preview_port.txt")
         if os.path.exists(port_file):
@@ -109,6 +146,7 @@ def build_project(workspace):
 
         return True
     except Exception as e:
+        _save_build_output(workspace, False, "", str(e), "exception")
         print(f"[build] exception: {e}")
         return False
 
@@ -135,10 +173,11 @@ def save_deduction(workspace, token_breakdown, credits_used):
 
 
 # ── Progress tracking ─────────────────────────────────────────────────────────
+
 def _heartbeat_db(workspace):
     """
-    Update jobs.updated_at so the stale-job detector in count_running_jobs
-    knows this job is still alive. Silently swallows all errors.
+    Update jobs.updated_at so the stale-job detector knows this job is still alive.
+    Silently swallows all errors.
     """
     try:
         import sys
@@ -163,8 +202,9 @@ def _heartbeat_db(workspace):
             conn.commit()
         conn.close()
     except Exception:
-        pass  # Never crash AA.py over a heartbeat failure
-    
+        pass
+
+
 def write_progress(workspace, entry):
     path = os.path.join(workspace, "progress.json")
     existing = []
@@ -183,7 +223,7 @@ def write_progress(workspace, entry):
 
     with open(path, "w") as f:
         json.dump(existing, f)
-    
+
     _heartbeat_db(workspace)
 
 
@@ -196,18 +236,23 @@ def clear_progress(workspace):
 # ── Hook factories ────────────────────────────────────────────────────────────
 
 TOOL_ACTIONS = {
-    "write_file":          "writing",
-    "edit_file":           "editing",
-    "read_file":           "reading",
-    "files_list":          "scanning",
-    "run_install_command": "installing",
-    "generate_image":      "generating image",
-    "edit_image":          "editing image",
-    "delete_file":         "deleting",
-    "rename_file":         "renaming",
-    "search_files":        "searching",
-    "request_backend":     "requesting backend",
+    "write_file":           "writing",
+    "edit_file":            "editing",
+    "read_file":            "reading",
+    "files_list":           "scanning",
+    "run_install_command":  "installing",
+    "generate_image":       "generating image",
+    "edit_image":           "editing image",
+    "delete_file":          "deleting",
+    "rename_file":          "renaming",
+    "search_files":         "searching",
+    "request_backend":      "requesting backend",
+    "read_build_output":    "checking build",
+    "read_console_logs":    "reading console logs",
+    "read_package_json":    "checking dependencies",
+    "check_preview_health": "checking preview",
 }
+
 
 def _guess_lang(path):
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
@@ -239,31 +284,38 @@ def make_hooks(workspace):
         elif name == "run_install_command":
             entry["detail"] = args.get("command", "")[:80]
         elif name == "generate_image":
-            prompt_preview = args.get("prompt", "")[:60]
             target_path = args.get("target_path", "image")
-            model_name = args.get("model", "flux.schnell")
+            model_name  = args.get("model", "flux.schnell")
             w = args.get("width", 1024)
             h = args.get("height", 768)
             entry["detail"] = f"Generating image: {target_path} ({w}x{h}, {model_name})"
-            entry["file"] = target_path
+            entry["file"]   = target_path
         elif name == "edit_image":
-            prompt_preview = args.get("prompt", "")[:60]
             target_path = args.get("target_path", "image")
+            prompt_preview = args.get("prompt", "")[:60]
             entry["detail"] = f"Editing image → {target_path}: {prompt_preview}..."
-            entry["file"] = target_path
+            entry["file"]   = target_path
         elif name == "delete_file":
             del_path = args.get("path", "")
             entry["detail"] = f"Deleting {del_path}"
-            entry["file"] = del_path
+            entry["file"]   = del_path
         elif name == "rename_file":
             orig = args.get("original_path", "")
-            new = args.get("new_path", "")
+            new  = args.get("new_path", "")
             entry["detail"] = f"Renaming {orig} → {new}"
-            entry["file"] = new
+            entry["file"]   = new
         elif name == "search_files":
-            query = args.get("query", "")[:60]
+            query      = args.get("query", "")[:60]
             search_dir = args.get("search_dir", "src")
             entry["detail"] = f"Searching for '{query}' in {search_dir}"
+        elif name == "read_build_output":
+            entry["detail"] = "Checking build output for errors..."
+        elif name == "read_console_logs":
+            entry["detail"] = "Reading runtime console logs..."
+        elif name == "read_package_json":
+            entry["detail"] = "Checking installed dependencies..."
+        elif name == "check_preview_health":
+            entry["detail"] = "Verifying preview is live..."
         elif file_path:
             entry["detail"] = f"{action.capitalize()} {file_path}"
         else:
@@ -271,19 +323,19 @@ def make_hooks(workspace):
 
         if name == "write_file" and isinstance(args, dict):
             content = args.get("content", "")
-            lines = content.split("\n")
+            lines   = content.split("\n")
             if len(lines) > 60:
                 lines = lines[-60:]
-            entry["code"] = "\n".join(lines)
-            entry["lang"] = _guess_lang(file_path or "")
+            entry["code"]  = "\n".join(lines)
+            entry["lang"]  = _guess_lang(file_path or "")
             file_count["written"] += 1
         elif name == "edit_file" and isinstance(args, dict):
             new_str = args.get("new_str", "")
-            lines = new_str.split("\n")
+            lines   = new_str.split("\n")
             if len(lines) > 60:
                 lines = lines[-60:]
-            entry["code"] = "\n".join(lines)
-            entry["lang"] = _guess_lang(file_path or "")
+            entry["code"]  = "\n".join(lines)
+            entry["lang"]  = _guess_lang(file_path or "")
             file_count["written"] += 1
 
         entry["files_written"] = file_count["written"]
@@ -334,14 +386,12 @@ def main():
     # Determine the model to use
     anthropic_model = args.model
     if not anthropic_model:
-        # Fall back to meta.json
         meta_path = os.path.join(WORKSPACE, "meta.json")
         if os.path.exists(meta_path):
             try:
                 with open(meta_path) as f:
                     meta = json.load(f)
                 hb_model = meta.get("model", "hb-6")
-                # Convert HB name to Anthropic model string
                 model_map = {
                     "hb-6":     "claude-haiku-4-5-20251001",
                     "hb-6-pro": "claude-sonnet-4-6",
@@ -353,9 +403,7 @@ def main():
         else:
             anthropic_model = "claude-haiku-4-5-20251001"
 
-    # Determine HB model name for credit calculation
     hb_model = ANTHROPIC_TO_HB.get(anthropic_model, "hb-6-pro")
-
     print(f"[AA] Using model: {anthropic_model} (HB: {hb_model})")
 
     try:
@@ -367,9 +415,9 @@ def main():
             "detail": "Setting up your project...",
         })
 
-        files_list = FileState(False)
+        files_list    = FileState(False)
         supabase_config = None
-        meta_path_sb = os.path.join(WORKSPACE, "meta.json")
+        meta_path_sb  = os.path.join(WORKSPACE, "meta.json")
         if os.path.exists(meta_path_sb):
             try:
                 with open(meta_path_sb) as f:
@@ -386,7 +434,7 @@ def main():
                     print(f"[AA] Supabase enabled — project ref: {supabase_config['project_ref']}")
             except Exception as e:
                 print(f"[AA] Error reading Supabase config: {e}")
- 
+
         generator = create_generator(
             files_list_state=files_list,
             model=anthropic_model,
@@ -418,14 +466,13 @@ def main():
         if not user_message:
             raise Exception("Empty user message")
 
-        # ── Load attachments (images/files uploaded by the user) ──────
+        # ── Load attachments ──────────────────────────────────────────────
         attachments_path = os.path.join(WORKSPACE, "attachments.json")
         attachments = []
         if os.path.exists(attachments_path):
             try:
                 with open(attachments_path) as f:
                     attachments = json.load(f)
-                # Remove the manifest so it's only used once
                 os.remove(attachments_path)
                 print(f"[AA] Found {len(attachments)} attachment(s)")
             except Exception as e:
@@ -438,20 +485,19 @@ def main():
             content_blocks = []
 
             for att in attachments:
-                att_path = os.path.join(WORKSPACE, att["path"])
+                att_path   = os.path.join(WORKSPACE, att["path"])
                 media_type = att.get("media_type", "")
 
                 if media_type.startswith("image/") and media_type != "image/svg+xml":
-                    # Image attachment — send as base64 image block
                     try:
                         with open(att_path, "rb") as img_f:
                             img_data = base64.b64encode(img_f.read()).decode("utf-8")
                         content_blocks.append({
                             "type": "image",
                             "source": {
-                                "type": "base64",
+                                "type":       "base64",
                                 "media_type": media_type,
-                                "data": img_data,
+                                "data":       img_data,
                             }
                         })
                         print(f"[AA] Attached image: {att['filename']} ({media_type})")
@@ -459,16 +505,15 @@ def main():
                         print(f"[AA] Failed to read image {att_path}: {e}")
 
                 elif media_type == "application/pdf":
-                    # PDF attachment — send as document block
                     try:
                         with open(att_path, "rb") as pdf_f:
                             pdf_data = base64.b64encode(pdf_f.read()).decode("utf-8")
                         content_blocks.append({
                             "type": "document",
                             "source": {
-                                "type": "base64",
+                                "type":       "base64",
                                 "media_type": "application/pdf",
-                                "data": pdf_data,
+                                "data":       pdf_data,
                             }
                         })
                         print(f"[AA] Attached PDF: {att['filename']}")
@@ -476,7 +521,6 @@ def main():
                         print(f"[AA] Failed to read PDF {att_path}: {e}")
 
                 else:
-                    # Text/other files — read as text and inline
                     try:
                         with open(att_path, "r", encoding="utf-8") as txt_f:
                             text_content = txt_f.read()
@@ -488,10 +532,7 @@ def main():
                     except Exception as e:
                         print(f"[AA] Failed to read text file {att_path}: {e}")
 
-            # Add the user's text message last
             content_blocks.append({"type": "text", "text": user_message})
-
-            # For the chat() call, we pass a structured content list
             chat_input = content_blocks
         else:
             chat_input = user_message

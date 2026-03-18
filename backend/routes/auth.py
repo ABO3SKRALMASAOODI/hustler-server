@@ -55,12 +55,12 @@ ENGINE_SCRIPT     = os.path.join(PROJECT_ROOT, "engine", "AA.py")
 TEMPLATE_SCAFFOLD = os.path.join(PROJECT_ROOT, "engine", "templates", "vite-react")
 
 # Max upload: 10MB per file, max 5 files per message
-MAX_UPLOAD_SIZE = 10 * 1024 * 1024
-MAX_UPLOAD_FILES = 5
+MAX_UPLOAD_SIZE       = 10 * 1024 * 1024
+MAX_UPLOAD_FILES      = 5
 ALLOWED_UPLOAD_EXTENSIONS = {
-    'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',  # images
-    'pdf',                                          # documents
-    'txt', 'md', 'csv',                             # text
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',
+    'pdf',
+    'txt', 'md', 'csv',
 }
 
 
@@ -101,11 +101,11 @@ def _get_preview_url(job_id, job_folder):
 
 
 # ------------------------------------------------------------------ #
-#  Subprocess kill helper — improved with SIGKILL fallback             #
+#  Subprocess kill helper                                              #
 # ------------------------------------------------------------------ #
 
 def _kill_job_process(job_folder):
-    """Kill the AA.py subprocess. Uses pkill as primary strategy (most reliable on Render)."""
+    """Kill the AA.py subprocess. Uses pkill as primary strategy."""
     state_path = os.path.join(job_folder, "state.json")
     if not os.path.exists(state_path):
         return
@@ -115,9 +115,6 @@ def _kill_job_process(job_folder):
             state_data = json.load(f)
         pid = state_data.get("pid")
 
-        # Strategy 1 (PRIMARY): pkill by workspace path — most reliable on Render
-        # NOTE: "--" separates pkill options from the pattern, otherwise
-        # "--workspace" gets parsed as a pkill flag
         try:
             result = subprocess.run(
                 ["pkill", "-9", "-f", "--", f"--workspace {job_folder}"],
@@ -133,7 +130,6 @@ def _kill_job_process(job_folder):
 
         pid = int(pid)
 
-        # Strategy 2: Direct SIGKILL on the PID (backup)
         try:
             os.kill(pid, signal.SIGKILL)
             print(f"[cancel] Sent SIGKILL to PID {pid}")
@@ -164,14 +160,10 @@ def _get_user_plan(user_id):
 
 
 # ------------------------------------------------------------------ #
-#  Upload helper — save files to job folder                            #
+#  Upload helper                                                       #
 # ------------------------------------------------------------------ #
 
 def _save_uploads_to_job(job_folder, files):
-    """
-    Save uploaded files to <job_folder>/uploads/ and return a manifest list.
-    Each entry: {"filename": "logo.png", "path": "uploads/logo.png", "media_type": "image/png"}
-    """
     uploads_dir = os.path.join(job_folder, "uploads")
     os.makedirs(uploads_dir, exist_ok=True)
 
@@ -180,24 +172,20 @@ def _save_uploads_to_job(job_folder, files):
         if not f or not f.filename:
             continue
 
-        # Validate extension
         ext = f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else ''
         if ext not in ALLOWED_UPLOAD_EXTENSIONS:
             continue
 
-        # Validate size
         f.seek(0, 2)
         size = f.tell()
         f.seek(0)
         if size > MAX_UPLOAD_SIZE:
             continue
 
-        # Generate safe filename
         safe_name = f"{uuid.uuid4().hex[:8]}_{f.filename}"
         save_path = os.path.join(uploads_dir, safe_name)
         f.save(save_path)
 
-        # Determine media type
         mime_map = {
             'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
             'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
@@ -207,10 +195,10 @@ def _save_uploads_to_job(job_folder, files):
         media_type = mime_map.get(ext, 'application/octet-stream')
 
         manifest.append({
-            "filename": f.filename,
-            "path": os.path.join("uploads", safe_name),
+            "filename":   f.filename,
+            "path":       os.path.join("uploads", safe_name),
             "media_type": media_type,
-            "size": size,
+            "size":       size,
         })
 
     return manifest
@@ -249,34 +237,33 @@ def get_job_credit_breakdown(user_id, job_id):
 @auth_bp.route('/models', methods=['GET'])
 @token_required
 def get_available_models(user_id):
-    """Return the list of models and which ones the user can access."""
-    plan = _get_user_plan(user_id)
+    plan    = _get_user_plan(user_id)
     allowed = PLAN_MODELS.get(plan, PLAN_MODELS["free"])
 
     models = [
         {
-            "id": "hb-6",
-            "name": "HB-6",
+            "id":          "hb-6",
+            "name":        "HB-6",
             "description": "Fast & efficient for everyday tasks",
-            "engine": "claude-haiku-4-5-20251001",
-            "locked": "hb-6" not in allowed,
-            "min_plan": "free",
+            "engine":      "claude-haiku-4-5-20251001",
+            "locked":      "hb-6" not in allowed,
+            "min_plan":    "free",
         },
         {
-            "id": "hb-6-pro",
-            "name": "HB-6 Pro",
+            "id":          "hb-6-pro",
+            "name":        "HB-6 Pro",
             "description": "Powerful for complex apps, uses more credits",
-            "engine": "claude-sonnet-4-6",
-            "locked": "hb-6-pro" not in allowed,
-            "min_plan": "plus",
+            "engine":      "claude-sonnet-4-6",
+            "locked":      "hb-6-pro" not in allowed,
+            "min_plan":    "plus",
         },
         {
-            "id": "hb-7",
-            "name": "HB-7",
+            "id":          "hb-7",
+            "name":        "HB-7",
             "description": "Advanced reasoning for complex tasks, highest credit usage",
-            "engine": "claude-opus-4-6",
-            "locked": "hb-7" not in allowed,
-            "min_plan": "ultra",
+            "engine":      "claude-opus-4-6",
+            "locked":      "hb-7" not in allowed,
+            "min_plan":    "ultra",
         },
     ]
 
@@ -380,9 +367,9 @@ def login():
         return jsonify({'error': 'Incorrect password'}), 401
 
     token = jwt.encode({
-        'sub': str(user['id']),
+        'sub':   str(user['id']),
         'email': user['email'],
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=7)
+        'exp':   datetime.datetime.utcnow() + datetime.timedelta(days=7)
     }, current_app.config['SECRET_KEY'], algorithm='HS256')
     plan = user.get('plan', 'free') or 'free'
     return jsonify({'token': token, 'plan': plan}), 200
@@ -474,23 +461,14 @@ def reset_password():
 # ------------------------------------------------------------------ #
 
 def _process_credits_deduction(job_id, job_folder, user_id):
-    """
-    Process credit deduction from either:
-    1. deduct_credits.json (normal completion — written by AA.py at end)
-    2. partial_deduction.json (cancellation/crash — written by AAgent after each API turn)
-
-    Uses a lock file to prevent double-deduction from concurrent polls.
-    """
     lock_path = os.path.join(job_folder, "credits_processed.lock")
 
-    # If already processed, skip entirely
     if os.path.exists(lock_path):
         return
 
     deduct_file  = os.path.join(job_folder, "deduct_credits.json")
     partial_file = os.path.join(job_folder, "partial_deduction.json")
 
-    # Prefer the full deduction file (normal completion)
     target_file = None
     if os.path.exists(deduct_file):
         target_file = deduct_file
@@ -498,7 +476,6 @@ def _process_credits_deduction(job_id, job_folder, user_id):
         target_file = partial_file
 
     if not target_file:
-        # No deduction files — just update DB state
         conn = get_db()
         try:
             with conn.cursor() as cur:
@@ -509,7 +486,6 @@ def _process_credits_deduction(job_id, job_folder, user_id):
                 conn.commit()
         finally:
             conn.close()
-        # Write lock so we don't re-enter
         try:
             with open(lock_path, "w") as f:
                 json.dump({"processed_at": time.time(), "source": "none"}, f)
@@ -528,9 +504,8 @@ def _process_credits_deduction(job_id, job_folder, user_id):
             pass
         return
 
-    # Read model from meta.json
     meta_path = os.path.join(job_folder, "meta.json")
-    model = "hb-6-pro"
+    model     = "hb-6-pro"
     if os.path.exists(meta_path):
         try:
             with open(meta_path) as f:
@@ -563,7 +538,6 @@ def _process_credits_deduction(job_id, job_folder, user_id):
             )
             conn.commit()
 
-        # Clean up deduction files
         for f_path in [deduct_file, partial_file]:
             if os.path.exists(f_path):
                 try:
@@ -571,7 +545,6 @@ def _process_credits_deduction(job_id, job_folder, user_id):
                 except Exception:
                     pass
 
-        # Write lock file to prevent double deduction
         try:
             with open(lock_path, "w") as f:
                 json.dump({"processed_at": time.time(), "source": os.path.basename(target_file)}, f)
@@ -644,7 +617,6 @@ def generate_job_title(user_id):
 @auth_bp.route('/job/<job_id>/upload', methods=['POST'])
 @token_required
 def upload_files(user_id, job_id):
-    """Upload files to a job folder. Returns manifest of saved files."""
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
@@ -664,26 +636,28 @@ def upload_files(user_id, job_id):
     return jsonify({"files": manifest}), 200
 
 
+# ------------------------------------------------------------------ #
+#  Generate — initial project                                          #
+# ------------------------------------------------------------------ #
+
 @auth_bp.route('/generate', methods=['POST'])
 @token_required
 def generate(user_id):
-    # Support both JSON and multipart/form-data (when files are attached)
     if request.content_type and 'multipart/form-data' in request.content_type:
-        prompt = request.form.get("prompt", "")
-        title = request.form.get("title", "").strip() or (prompt[:40] if prompt else "New Project")
-        model = request.form.get("model", "hb-6")
+        prompt         = request.form.get("prompt", "")
+        title          = request.form.get("title", "").strip() or (prompt[:40] if prompt else "New Project")
+        model          = request.form.get("model", "hb-6")
         uploaded_files = request.files.getlist("files")
     else:
-        data = request.get_json() or {}
-        prompt = data.get("prompt")
-        title = data.get("title", "").strip() or (prompt[:40] if prompt else "New Project")
-        model = data.get("model", "hb-6")
+        data           = request.get_json() or {}
+        prompt         = data.get("prompt")
+        title          = data.get("title", "").strip() or (prompt[:40] if prompt else "New Project")
+        model          = data.get("model", "hb-6")
         uploaded_files = []
 
     if not prompt:
         return jsonify({"error": "Prompt required"}), 400
 
-    # Validate model access
     plan = _get_user_plan(user_id)
     if not is_model_allowed(plan, model):
         return jsonify({"error": f"Your {plan} plan doesn't include access to this model. Please upgrade."}), 403
@@ -716,7 +690,6 @@ def generate(user_id):
     with open(os.path.join(job_folder, "prompt.txt"), "w", encoding="utf-8") as f:
         f.write(prompt)
 
-    # Save uploaded files if any
     attachments = []
     if uploaded_files:
         attachments = _save_uploads_to_job(job_folder, uploaded_files)
@@ -724,7 +697,6 @@ def generate(user_id):
     with open(os.path.join(job_folder, "meta.json"), "w") as f:
         json.dump({"user_id": user_id, "model": model}, f)
 
-    # Write attachments manifest so AA.py can find them
     if attachments:
         with open(os.path.join(job_folder, "attachments.json"), "w") as f:
             json.dump(attachments, f)
@@ -732,7 +704,6 @@ def generate(user_id):
     with open(os.path.join(job_folder, "state.json"), "w", encoding="utf-8") as f:
         json.dump({"state": "running", "created_at": time.time()}, f)
 
-    # Resolve the Anthropic model string from HB model name
     anthropic_model = get_anthropic_model(model)
 
     proc = subprocess.Popen(
@@ -769,15 +740,14 @@ def generate(user_id):
 @auth_bp.route('/job/<job_id>/message', methods=['POST'])
 @token_required
 def job_message(user_id, job_id):
-    # Support both JSON and multipart/form-data (when files are attached)
     if request.content_type and 'multipart/form-data' in request.content_type:
-        message = (request.form.get("message", "") or "").strip()
-        model = request.form.get("model", None)
+        message        = (request.form.get("message", "") or "").strip()
+        model          = request.form.get("model", None)
         uploaded_files = request.files.getlist("files")
     else:
-        data = request.get_json() or {}
-        message = data.get("message", "").strip()
-        model = data.get("model", None)
+        data           = request.get_json() or {}
+        message        = data.get("message", "").strip()
+        model          = data.get("model", None)
         uploaded_files = []
 
     if not message:
@@ -787,17 +757,14 @@ def job_message(user_id, job_id):
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
 
-    # Save uploaded files if any
     attachments = []
     if uploaded_files:
         attachments = _save_uploads_to_job(job_folder, uploaded_files)
-        # Write attachments manifest for this turn
         if attachments:
             with open(os.path.join(job_folder, "attachments.json"), "w") as f:
                 json.dump(attachments, f)
 
-    # Read current model from meta.json, allow override
-    meta_path = os.path.join(job_folder, "meta.json")
+    meta_path     = os.path.join(job_folder, "meta.json")
     current_model = "hb-6"
     if os.path.exists(meta_path):
         try:
@@ -808,11 +775,9 @@ def job_message(user_id, job_id):
             pass
 
     if model:
-        # Validate model access
         plan = _get_user_plan(user_id)
         if not is_model_allowed(plan, model):
             return jsonify({"error": f"Your {plan} plan doesn't include access to this model. Please upgrade."}), 403
-        # Update meta.json with new model
         try:
             meta = {}
             if os.path.exists(meta_path):
@@ -848,7 +813,6 @@ def job_message(user_id, job_id):
         if state_data.get("state") == "running":
             return jsonify({"error": "Job is still running"}), 409
 
-    # Remove the credits_processed lock for the new turn
     lock_path = os.path.join(job_folder, "credits_processed.lock")
     if os.path.exists(lock_path):
         try:
@@ -856,7 +820,6 @@ def job_message(user_id, job_id):
         except Exception:
             pass
 
-    # Remove cancelled lock so job_status doesn't force 'failed' state
     cancelled_path = os.path.join(job_folder, "cancelled.lock")
     if os.path.exists(cancelled_path):
         try:
@@ -864,9 +827,6 @@ def job_message(user_id, job_id):
         except Exception:
             pass
 
-    # Clean up messages.jsonl — if the last message is from assistant
-    # (partial/incomplete from a cancelled turn), remove it so the agent
-    # doesn't get confused by stale context
     messages_path = os.path.join(job_folder, "messages.jsonl")
     if os.path.exists(messages_path):
         try:
@@ -876,15 +836,12 @@ def job_message(user_id, job_id):
                     line = line.strip()
                     if line:
                         lines.append(line)
-            # Check if last message is assistant — if so, it may be incomplete
             if lines:
                 try:
                     last_msg = json.loads(lines[-1])
                     if last_msg.get("role") == "assistant":
-                        # Check if this was from a cancelled turn by looking at
-                        # whether state.json says failed/cancelled
                         if state_data.get("state") == "failed" and state_data.get("error") == "Cancelled by user":
-                            lines.pop()  # Remove the incomplete assistant message
+                            lines.pop()
                             with open(messages_path, "w", encoding="utf-8") as f:
                                 for line in lines:
                                     f.write(line + "\n")
@@ -923,6 +880,7 @@ def job_message(user_id, job_id):
 # ------------------------------------------------------------------ #
 #  Job status + messages                                               #
 # ------------------------------------------------------------------ #
+
 @auth_bp.route('/job/<job_id>/status', methods=['GET'])
 @token_required
 def job_status(user_id, job_id):
@@ -936,8 +894,6 @@ def job_status(user_id, job_id):
         with open(state_path) as f:
             state_data = json.load(f)
 
-    # Check if this job was cancelled — respect the cancelled state
-    # and don't let it resurrect to "completed"
     cancelled_path = os.path.join(job_folder, "cancelled.lock")
     if os.path.exists(cancelled_path):
         state_data["state"] = "failed"
@@ -977,7 +933,7 @@ def job_status(user_id, job_id):
     finally:
         conn.close()
 
-    progress = []
+    progress      = []
     progress_path = os.path.join(job_folder, "progress.json")
     if os.path.exists(progress_path):
         try:
@@ -986,7 +942,6 @@ def job_status(user_id, job_id):
         except (json.JSONDecodeError, IOError):
             progress = []
 
-    # Read model from meta
     meta_path = os.path.join(job_folder, "meta.json")
     job_model = "hb-6"
     if os.path.exists(meta_path):
@@ -997,7 +952,6 @@ def job_status(user_id, job_id):
         except Exception:
             pass
 
-    # Read published_url from DB
     published_url = None
     conn = get_db()
     try:
@@ -1009,9 +963,8 @@ def job_status(user_id, job_id):
     finally:
         conn.close()
 
-    # Check if agent has requested backend
-    backend_requested = False
-    backend_req_path = os.path.join(job_folder, "backend_requested.json")
+    backend_requested  = False
+    backend_req_path   = os.path.join(job_folder, "backend_requested.json")
     if os.path.exists(backend_req_path):
         backend_requested = True
 
@@ -1065,7 +1018,7 @@ def list_jobs(user_id):
 @auth_bp.route('/template/clone', methods=['POST'])
 @token_required
 def clone_template(user_id):
-    data = request.get_json() or {}
+    data        = request.get_json() or {}
     template_id = data.get("template_id", "").strip()
 
     if template_id not in TEMPLATE_JOB_IDS:
@@ -1101,8 +1054,7 @@ def clone_template(user_id):
 
     dist_dir    = os.path.join(new_folder, "dist")
     preview_url = f"/auth/preview/{new_job_id}/" if os.path.isdir(dist_dir) else None
-
-    title = TEMPLATE_JOB_IDS[template_id]
+    title       = TEMPLATE_JOB_IDS[template_id]
 
     conn = get_db()
     try:
@@ -1132,8 +1084,8 @@ def list_templates():
     templates = []
     for job_id, title in TEMPLATE_JOB_IDS.items():
         templates.append({
-            "job_id": job_id,
-            "title": title,
+            "job_id":      job_id,
+            "title":       title,
             "preview_url": f"/auth/preview/{job_id}/",
         })
     return jsonify({"templates": templates}), 200
@@ -1149,6 +1101,7 @@ INTERNAL_FILES = {
     "progress.json", "attachments.json", "credits_processed.lock",
     "cancelled.lock", "backend_requested.json", "backend_approved.json",
     "backend_denied.json", "partial_deduction.json",
+    "console_logs.json", "build_output.json",   # diagnostic files
 }
 
 SKIP_DIRS = {"node_modules", "dist", ".git", "__pycache__", "uploads"}
@@ -1199,7 +1152,7 @@ def _collect_project_files(job_folder):
             _add(abs_path, rel_path)
 
     def _sort_key(f):
-        p = f["path"].replace("\\", "/")
+        p   = f["path"].replace("\\", "/")
         top = p.split("/")[0]
         return (DIR_ORDER.get(top, 2), p)
 
@@ -1249,7 +1202,7 @@ def download_job_zip(user_id, job_id):
 
     files = _collect_project_files(job_folder)
 
-    has_readme = any(f["path"].lower() == "readme.md" for f in files)
+    has_readme     = any(f["path"].lower() == "readme.md" for f in files)
     readme_content = None
     if not has_readme:
         readme_content = f"""# {project_title}
@@ -1300,7 +1253,7 @@ The production build will be in the `dist/` folder.
         mimetype="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{zip_filename}"',
-            "Content-Length": str(len(buf.getvalue())),
+            "Content-Length":      str(len(buf.getvalue())),
         }
     )
 
@@ -1324,7 +1277,7 @@ def serve_preview(job_id, filename):
             return send_from_directory(dist_dir, filename)
 
     from flask import request as flask_request
-    base = flask_request.host_url.rstrip("/")
+    base    = flask_request.host_url.rstrip("/")
     wrapper = f"""<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
@@ -1367,16 +1320,46 @@ def serve_preview_raw(job_id, filename):
         html = f.read()
 
     asset_base = f"/auth/preview/{job_id}/"
-    html = html.replace('src="./assets/', f'src="{asset_base}assets/')
-    html = html.replace("src='./assets/", f"src='{asset_base}assets/")
-    html = html.replace('href="./assets/', f'href="{asset_base}assets/')
-    html = html.replace("href='./assets/", f"href='{asset_base}assets/")
-    html = html.replace('href="./favicon', f'href="{asset_base}favicon')
+    html = html.replace('src="./assets/',    f'src="{asset_base}assets/')
+    html = html.replace("src='./assets/",    f"src='{asset_base}assets/")
+    html = html.replace('href="./assets/',   f'href="{asset_base}assets/')
+    html = html.replace("href='./assets/",   f"href='{asset_base}assets/")
+    html = html.replace('href="./favicon',   f'href="{asset_base}favicon')
     html = html.replace('href="./placeholder', f'href="{asset_base}placeholder')
 
-    boot_fix = """<script>
-// Preview SPA fix: set location to "/" before React Router reads it.
+    from flask import request as flask_request
+    base     = flask_request.host_url.rstrip("/")
+    boot_fix = f"""<script>
 history.replaceState(null, '', '/');
+(function() {{
+  var _endpoint = "{base}/auth/preview/{job_id}/console-log";
+  var _buf = [];
+  var _flush = function() {{
+    if (!_buf.length) return;
+    var logs = _buf.splice(0);
+    try {{ fetch(_endpoint, {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{logs:logs}}), keepalive:true}}); }} catch(e) {{}}
+  }};
+  var _capture = function(level) {{
+    return function() {{
+      var msg = Array.from(arguments).map(function(a) {{
+        try {{ return typeof a === "object" ? JSON.stringify(a) : String(a); }} catch(e) {{ return String(a); }}
+      }}).join(" ");
+      _buf.push({{level:level, msg:msg, ts:Date.now()}});
+      if (_buf.length >= 5) _flush();
+    }};
+  }};
+  console.error = _capture("error");
+  console.warn  = _capture("warn");
+  window.addEventListener("error", function(e) {{
+    _buf.push({{level:"error", msg: e.message + " (" + e.filename + ":" + e.lineno + ")", ts:Date.now()}});
+    _flush();
+  }});
+  window.addEventListener("unhandledrejection", function(e) {{
+    _buf.push({{level:"error", msg:"Unhandled promise rejection: " + String(e.reason), ts:Date.now()}});
+    _flush();
+  }});
+  setInterval(_flush, 3000);
+}})();
 </script>
 """
     html = html.replace("<head>", "<head>\n" + boot_fix, 1)
@@ -1387,7 +1370,9 @@ history.replaceState(null, '', '/');
     return resp
 
 
-# ── Issue 1: Supabase email confirmation callback ──
+# ------------------------------------------------------------------ #
+#  Supabase email confirmation callback                                #
+# ------------------------------------------------------------------ #
 
 @auth_bp.route('/supabase-callback/<job_id>')
 def supabase_auth_callback(job_id):
@@ -1465,12 +1450,13 @@ def supabase_auth_callback(job_id):
     return resp
 
 
-# ── Backend ready/denied signals ──
+# ------------------------------------------------------------------ #
+#  Backend ready / denied signals                                      #
+# ------------------------------------------------------------------ #
 
 @auth_bp.route('/job/<job_id>/backend-ready', methods=['POST'])
 @token_required
 def backend_ready_signal(user_id, job_id):
-    """Frontend calls this after user approves backend."""
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
@@ -1489,7 +1475,6 @@ def backend_ready_signal(user_id, job_id):
 @auth_bp.route('/job/<job_id>/backend-denied', methods=['POST'])
 @token_required
 def backend_denied_signal(user_id, job_id):
-    """Frontend calls this if user denies backend."""
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
@@ -1506,6 +1491,43 @@ def backend_denied_signal(user_id, job_id):
 
 
 # ------------------------------------------------------------------ #
+#  Console log receiver — captures runtime errors from preview iframe  #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/preview/<job_id>/console-log', methods=['POST'])
+def preview_console_log(job_id):
+    """Receives runtime console errors POSTed from the previewed app."""
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return '', 204
+
+    try:
+        data = request.get_json(silent=True) or {}
+        logs = data.get("logs", [])
+        if not logs:
+            return '', 204
+
+        log_path = os.path.join(job_folder, "console_logs.json")
+        existing = []
+        if os.path.exists(log_path):
+            try:
+                with open(log_path) as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = []
+
+        existing.extend(logs)
+        existing = existing[-100:]   # Keep last 100 entries only
+
+        with open(log_path, "w") as f:
+            json.dump(existing, f)
+    except Exception:
+        pass
+
+    return '', 204
+
+
+# ------------------------------------------------------------------ #
 #  Health check                                                        #
 # ------------------------------------------------------------------ #
 
@@ -1515,7 +1537,7 @@ def generate_test():
 
 
 # ------------------------------------------------------------------ #
-#  Cancel job — ROBUST: guaranteed credit deduction + no resurrection  #
+#  Cancel job                                                          #
 # ------------------------------------------------------------------ #
 
 @auth_bp.route('/job/<job_id>/cancel', methods=['POST'])
@@ -1525,9 +1547,8 @@ def cancel_job(user_id, job_id):
         job_folder = os.path.join(OUTPUTS_DIR, job_id)
 
         if os.path.isdir(job_folder):
-            # Step 1: Read the PID from state.json BEFORE we overwrite anything
             state_path = os.path.join(job_folder, "state.json")
-            saved_pid = None
+            saved_pid  = None
             if os.path.exists(state_path):
                 try:
                     with open(state_path) as f:
@@ -1536,18 +1557,14 @@ def cancel_job(user_id, job_id):
                 except Exception:
                     pass
 
-            # Step 2: Write cancelled lock — prevents job_status from resurrecting
             cancelled_path = os.path.join(job_folder, "cancelled.lock")
             with open(cancelled_path, "w") as f:
                 json.dump({"cancelled_at": time.time(), "user_id": user_id}, f)
 
-            # Step 3: Kill the process (pkill is primary, os.kill as backup)
             _kill_job_process(job_folder)
 
-            # Step 4: Wait a moment for AA.py to flush partial_deduction on death
             time.sleep(1)
 
-            # Step 6: Deduct credits from whatever deduction file exists
             partial_file = os.path.join(job_folder, "partial_deduction.json")
             deduct_file  = os.path.join(job_folder, "deduct_credits.json")
 
@@ -1563,7 +1580,7 @@ def cancel_job(user_id, job_id):
                         entries = json.load(f)
 
                     meta_path = os.path.join(job_folder, "meta.json")
-                    model = "hb-6-pro"
+                    model     = "hb-6-pro"
                     if os.path.exists(meta_path):
                         try:
                             with open(meta_path) as f:
@@ -1608,15 +1625,13 @@ def cancel_job(user_id, job_id):
                 except Exception as e:
                     print(f"[cancel] partial deduction error: {e}")
 
-            # Step 7: NOW overwrite state.json (after kill is done)
             with open(state_path, "w") as f:
                 json.dump({
-                    "state": "failed",
-                    "error": "Cancelled by user",
+                    "state":      "failed",
+                    "error":      "Cancelled by user",
                     "updated_at": time.time()
                 }, f)
 
-            # Step 8: Clean up progress
             progress_path = os.path.join(job_folder, "progress.json")
             if os.path.exists(progress_path):
                 try:
@@ -1624,7 +1639,6 @@ def cancel_job(user_id, job_id):
                 except Exception:
                     pass
 
-        # Step 9: Update DB
         conn = get_db()
         try:
             with conn.cursor() as cur:
