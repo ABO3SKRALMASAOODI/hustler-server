@@ -785,8 +785,9 @@ It must show a real scene, person, or product — not a color block or gradient.
 A hero section with no image is not acceptable for any commerce or lifestyle app.
 
 Models:
-- flux2.dev at 1920x1080 for hero banners — always use this for the main hero
-- flux.schnell for product cards and category images
+- flux.schnell: product cards, thumbnails — default for most images, fastest
+- flux.dev: complex shots where quality is critical, slower
+- flux2.dev: hero banners — high quality, use for the main hero image only
 
 Write detailed prompts. Include subject, audience, style, lighting, background.
 Weak prompt: "women's clothing"
@@ -1257,7 +1258,11 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             parent = os.path.dirname(target_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            model_map = {"flux.schnell": "black-forest-labs/flux-schnell", "flux.dev": "black-forest-labs/flux-dev", "flux2.dev": "black-forest-labs/flux1.1-pro"}
+            model_map = {
+                "flux.schnell": "black-forest-labs/flux-schnell",
+                "flux.dev":     "black-forest-labs/flux-dev",
+                "flux2.dev":    "black-forest-labs/flux-2-pro",  # fast, 5s, high quality
+            }
             replicate_model = model_map.get(model, model_map["flux.schnell"])
             ext           = target_path.rsplit(".", 1)[-1].lower() if "." in target_path else "webp"
             format_map    = {"jpg": "jpg", "jpeg": "jpg", "png": "png", "webp": "webp"}
