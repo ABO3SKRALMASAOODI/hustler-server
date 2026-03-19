@@ -767,30 +767,39 @@ WHAT YOU MUST BUILD
 ────────────────────────────────────────────────────────
 IMAGE GENERATION
 ────────────────────────────────────────────────────────
-Generate images in parallel when multiple are needed.
-Use descriptive file names: src/assets/hero-trench-coat.jpg not src/assets/image1.jpg.
+Images are not optional. Every e-commerce store, landing page, or content site
+must have real generated images. CSS placeholders are a last resort only when
+generation explicitly fails — never a first choice.
+
+MANDATORY images for every commerce project:
+- One large hero image (1920x1080) — a strong editorial or lifestyle shot
+- One image per product (minimum 6 products)
+- One image per category section
+
+Generate all images in parallel in a single batch before writing any page components.
+Do not write Home.tsx, Shop.tsx, or ProductCard.tsx before the images exist —
+the components must import real images, not reference placeholder divs.
+
+The hero image must be large and dominant — full width, at least 500px tall.
+It must show a real scene, person, or product — not a color block or gradient.
+A hero section with no image is not acceptable for any commerce or lifestyle app.
 
 Models:
-- flux.schnell: product cards, thumbnails — default for most images
-- flux2.dev: hero banners at 1920x1080 only
-- flux.dev: complex editorial shots where quality is critical
+- flux2.dev at 1920x1080 for hero banners — always use this for the main hero
+- flux.schnell for product cards and category images
 
-Write detailed prompts. Include subject, audience, style, lighting, and background.
-A weak prompt produces wrong or generic results. A strong prompt is specific and visual.
+Write detailed prompts. Include subject, audience, style, lighting, background.
+Weak prompt: "women's clothing"
+Strong prompt: "editorial fashion photograph of a woman in a flowing cream linen dress
+walking through a sunlit European market, natural light, film grain, wide angle,
+warm tones, high fashion magazine style"
 
-After generating, always import as an ES6 module — never use string paths:
+After generating, always import as ES6 modules:
   import heroImg from '../assets/hero.jpg'
   <img src={heroImg} />
 
-Never write:
-  <img src="src/assets/hero.jpg" />
-  <img src="/assets/hero.jpg" />
-Both will always produce broken images in the Vite build.
-
-If image generation fails, replace immediately with a CSS gradient placeholder:
-  <div style={{ background: 'linear-gradient(135deg, #f5f0eb, #e8ddd0)', aspectRatio: '3/4' }} />
-Never leave a broken img tag or a visible placeholder indicator in the output.
-
+Never use string paths in JSX — they always produce broken images in Vite.
+If generation fails, use a CSS gradient — never a flat color block with just text on it.
 ────────────────────────────────────────────────────────
 BROKEN IMAGE PREVENTION
 ────────────────────────────────────────────────────────
