@@ -1,9 +1,9 @@
-from flask import Blueprint, request, jsonify
-from routes.auth import token_required, get_db
-from credits import tokens_to_credits, get_balance
+from flask import Blueprint, request, jsonify, current_app
 import os, json, time
 import anthropic
 import jwt as pyjwt
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 ai_proxy_bp = Blueprint('ai_proxy', __name__)
 
@@ -11,6 +11,23 @@ PROXY_MODEL     = "claude-haiku-4-5-20251001"
 PROXY_HB_MODEL  = "hb-6"
 MAX_TOKENS      = 1000
 APP_TOKEN_SCOPE = "ai_proxy"
+
+
+def _get_db():
+    return psycopg2.connect(current_app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
+
+
+def _tokens_to_credits(input_tokens, output_tokens):
+    """Haiku pricing: $1.00 input / $5.00 output per million tokens. 1 credit = $0.01."""
+    cost = (input_tokens * 1.00 + output_tokens * 5.00) / 1_000_000
+    return round(cost / 0.01, 2)
+
+
+def _get_balance(conn, user_id: int) -> float:
+    with conn.cursor() as cur:
+        cur.execute("SELECT credits_balance FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+    return float(row["credits_balance"] or 0) if row else 0.0
 
 
 def _deduct_proxy_credits(conn, user_id: int, credits_used: float):
@@ -49,21 +66,18 @@ def _deduct_proxy_credits(conn, user_id: int, credits_used: float):
 def _resolve_user_from_token(token: str, secret_key: str):
     """
     Accepts two token types:
-    1. Full user JWT (scope = normal login) — direct user access
+    1. Full user JWT — direct user access
     2. App token (scope = ai_proxy) — scoped to a job, charges job owner
-
     Returns user_id or None.
     """
     try:
         data = pyjwt.decode(token, secret_key, algorithms=["HS256"])
 
-        # App token — scoped to ai_proxy only
         if data.get("scope") == APP_TOKEN_SCOPE:
             job_id = data.get("job_id")
             if not job_id:
                 return None
-            # Look up job owner
-            conn = get_db()
+            conn = _get_db()
             try:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -73,14 +87,12 @@ def _resolve_user_from_token(token: str, secret_key: str):
                     row = cur.fetchone()
                     if not row:
                         return None
-                    # Verify the token matches what we stored
                     if row["app_token"] != token:
                         return None
                     return int(row["user_id"])
             finally:
                 conn.close()
 
-        # Normal user JWT
         return int(data["sub"])
 
     except Exception:
@@ -93,9 +105,6 @@ def ai_proxy():
     Accepts both full user JWTs and scoped app tokens.
     Credits always charged to the job owner.
     """
-    from flask import current_app
-
-    # ── Extract token ─────────────────────────────────────────────────
     token = None
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -111,10 +120,10 @@ def ai_proxy():
         return jsonify({"error": "Invalid or expired token"}), 401
 
     # ── Check balance ─────────────────────────────────────────────────
-    conn = get_db()
+    conn = _get_db()
     try:
-        info = get_balance(conn, user_id)
-        if info["balance"] < 0.01:
+        balance = _get_balance(conn, user_id)
+        if balance < 0.01:
             return jsonify({"error": "Not enough credits"}), 402
     finally:
         conn.close()
@@ -156,15 +165,9 @@ def ai_proxy():
 
         input_tokens  = resp.usage.input_tokens
         output_tokens = resp.usage.output_tokens
-        credits_used  = tokens_to_credits(
-            input_tokens       = input_tokens,
-            output_tokens      = output_tokens,
-            cache_write_tokens = 0,
-            cache_read_tokens  = 0,
-            model              = PROXY_HB_MODEL,
-        )
+        credits_used  = _tokens_to_credits(input_tokens, output_tokens)
 
-        conn = get_db()
+        conn = _get_db()
         try:
             _deduct_proxy_credits(conn, user_id, credits_used)
         finally:
