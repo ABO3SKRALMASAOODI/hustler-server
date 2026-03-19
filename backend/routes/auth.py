@@ -880,7 +880,56 @@ def job_message(user_id, job_id):
 # ------------------------------------------------------------------ #
 #  Job status + messages                                               #
 # ------------------------------------------------------------------ #
+@auth_bp.route('/job/<job_id>/app-token', methods=['GET'])
+@token_required
+def get_app_token(user_id, job_id):
+    """
+    Returns a scoped app token for this job.
+    Used by generated apps to call /auth/ai/proxy safely —
+    does not grant full account access.
+    """
+    import jwt as pyjwt
 
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+    if not os.path.isdir(job_folder):
+        return jsonify({"error": "Job not found"}), 404
+
+    # Verify ownership
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, app_token FROM jobs WHERE job_id = %s",
+                (job_id,)
+            )
+            row = cur.fetchone()
+            if not row or int(row["user_id"]) != int(user_id):
+                return jsonify({"error": "Unauthorized"}), 403
+
+            # Return existing token if already generated
+            if row["app_token"]:
+                return jsonify({"app_token": row["app_token"]}), 200
+
+            # Generate new scoped token — no expiry, scoped to ai_proxy only
+            token = pyjwt.encode(
+                {
+                    "scope":  "ai_proxy",
+                    "job_id": job_id,
+                    "sub":    str(user_id),
+                },
+                current_app.config["SECRET_KEY"],
+                algorithm="HS256"
+            )
+
+            cur.execute(
+                "UPDATE jobs SET app_token = %s WHERE job_id = %s",
+                (token, job_id)
+            )
+            conn.commit()
+
+            return jsonify({"app_token": token}), 200
+    finally:
+        conn.close()
 @auth_bp.route('/job/<job_id>/status', methods=['GET'])
 @token_required
 def job_status(user_id, job_id):
@@ -968,6 +1017,11 @@ def job_status(user_id, job_id):
     if os.path.exists(backend_req_path):
         backend_requested = True
 
+    stripe_requested = False
+    stripe_req_path  = os.path.join(job_folder, "stripe_requested.json")
+    if os.path.exists(stripe_req_path):
+        stripe_requested = True
+
     return jsonify({
         "job_id":            job_id,
         "state":             state_data.get("state", "unknown"),
@@ -982,6 +1036,7 @@ def job_status(user_id, job_id):
         "plan":              credits_info.get("plan", "free"),
         "published_url":     published_url,
         "backend_requested": backend_requested,
+        "stripe_requested":  stripe_requested,
     }), 200
 
 
