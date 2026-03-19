@@ -26,15 +26,12 @@ except ImportError:
         return round(cost_dollars / 0.01, 2)
 
 
-# Map Anthropic model strings back to HB model names for credit calculation
 ANTHROPIC_TO_HB = {
     "claude-haiku-4-5-20251001": "hb-6",
     "claude-sonnet-4-6":        "hb-6-pro",
     "claude-opus-4-6":          "hb-7",
 }
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def write_state(workspace, state, extra=None):
     data = {"state": state, "updated_at": time.time()}
@@ -71,11 +68,6 @@ def load_history(workspace):
 
 
 def _save_build_output(workspace, success, stdout, stderr, phase):
-    """
-    Write build result into state.json as extra fields so the agent
-    can read them via read_build_output tool without a separate file.
-    Also write a dedicated build_output.json for easy agent access.
-    """
     data = {
         "build_success": success,
         "build_phase":   phase,
@@ -83,8 +75,6 @@ def _save_build_output(workspace, success, stdout, stderr, phase):
         "build_stderr":  (stderr or "")[-3000:],
         "build_ts":      time.time(),
     }
-
-    # Merge into existing state.json
     state_path = os.path.join(workspace, "state.json")
     existing = {}
     if os.path.exists(state_path):
@@ -97,17 +87,12 @@ def _save_build_output(workspace, success, stdout, stderr, phase):
     with open(state_path, "w") as f:
         json.dump(existing, f)
 
-    # Also write standalone file for the agent tool
     build_output_path = os.path.join(workspace, "build_output.json")
     with open(build_output_path, "w") as f:
         json.dump(data, f)
 
 
 def build_project(workspace):
-    """
-    Run npm install + vite build, then delete node_modules to save disk.
-    Build results are written into state.json and build_output.json.
-    """
     try:
         install = subprocess.run(
             ["npm", "install", "--include=dev", "--legacy-peer-deps"],
@@ -172,23 +157,13 @@ def save_deduction(workspace, token_breakdown, credits_used):
         json.dump(existing, f)
 
 
-# ── Progress tracking ─────────────────────────────────────────────────────────
-
 def _heartbeat_db(workspace):
-    """
-    Update jobs.updated_at so the stale-job detector knows this job is still alive.
-    Silently swallows all errors.
-    """
     try:
-        import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
         import psycopg2
         from psycopg2.extras import RealDictCursor
         meta_path = os.path.join(workspace, "meta.json")
         if not os.path.exists(meta_path):
             return
-        with open(meta_path) as f:
-            meta = json.load(f)
         db_url = os.getenv("DATABASE_URL")
         if not db_url:
             return
@@ -233,8 +208,6 @@ def clear_progress(workspace):
         os.remove(path)
 
 
-# ── Hook factories ────────────────────────────────────────────────────────────
-
 TOOL_ACTIONS = {
     "write_file":          "writing",
     "edit_file":           "editing",
@@ -247,6 +220,8 @@ TOOL_ACTIONS = {
     "rename_file":         "renaming",
     "search_files":        "searching",
     "request_backend":     "requesting backend",
+    "request_stripe":      "requesting stripe",
+    "request_ai":          "requesting ai",
     "read_console_logs":   "reading console logs",
     "read_package_json":   "checking dependencies",
 }
@@ -269,7 +244,7 @@ def make_hooks(workspace):
         write_progress(workspace, {"action": "thinking", "detail": detail})
 
     def on_tool_start(name, args):
-        action = TOOL_ACTIONS.get(name, "processing")
+        action    = TOOL_ACTIONS.get(name, "processing")
         file_path = args.get("path", None) if isinstance(args, dict) else None
 
         entry = {"action": action}
@@ -279,6 +254,12 @@ def make_hooks(workspace):
         if name == "request_backend":
             reason = args.get("reason", "") if isinstance(args, dict) else ""
             entry["detail"] = f"Requesting backend: {reason[:80]}"
+        elif name == "request_stripe":
+            reason = args.get("reason", "") if isinstance(args, dict) else ""
+            entry["detail"] = f"Requesting Stripe: {reason[:80]}"
+        elif name == "request_ai":
+            reason = args.get("reason", "") if isinstance(args, dict) else ""
+            entry["detail"] = f"Setting up AI integration: {reason[:80]}"
         elif name == "run_install_command":
             entry["detail"] = args.get("command", "")[:80]
         elif name == "generate_image":
@@ -289,7 +270,7 @@ def make_hooks(workspace):
             entry["detail"] = f"Generating image: {target_path} ({w}x{h}, {model_name})"
             entry["file"]   = target_path
         elif name == "edit_image":
-            target_path = args.get("target_path", "image")
+            target_path    = args.get("target_path", "image")
             prompt_preview = args.get("prompt", "")[:60]
             entry["detail"] = f"Editing image → {target_path}: {prompt_preview}..."
             entry["file"]   = target_path
@@ -364,20 +345,16 @@ def make_hooks(workspace):
     }
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--message",   default=None)
-    parser.add_argument("--model",     default=None,
-                        help="Anthropic model string, e.g. claude-haiku-4-5-20251001")
+    parser.add_argument("--model",     default=None)
     args = parser.parse_args()
 
     WORKSPACE = args.workspace
     os.chdir(WORKSPACE)
 
-    # Determine the model to use
     anthropic_model = args.model
     if not anthropic_model:
         meta_path = os.path.join(WORKSPACE, "meta.json")
@@ -409,13 +386,18 @@ def main():
             "detail": "Setting up your project...",
         })
 
-        files_list    = FileState(False)
+        files_list      = FileState(False)
         supabase_config = None
-        meta_path_sb  = os.path.join(WORKSPACE, "meta.json")
+        stripe_config   = None
+        ai_config       = None
+
+        meta_path_sb = os.path.join(WORKSPACE, "meta.json")
         if os.path.exists(meta_path_sb):
             try:
                 with open(meta_path_sb) as f:
                     meta_sb = json.load(f)
+
+                # ── Supabase ──────────────────────────────────────────
                 if meta_sb.get("supabase_enabled"):
                     job_id = os.path.basename(WORKSPACE)
                     supabase_config = {
@@ -426,14 +408,77 @@ def main():
                         "preview_url":      f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{job_id}/",
                     }
                     print(f"[AA] Supabase enabled — project ref: {supabase_config['project_ref']}")
+
+                # ── Stripe ────────────────────────────────────────────
+                if meta_sb.get("stripe_enabled"):
+                    job_id_str = os.path.basename(WORKSPACE)
+                    stripe_config = {
+                        "publishable_key": meta_sb.get("stripe_publishable_key", ""),
+                        "proxy_url":       f"https://entrepreneur-bot-backend.onrender.com/stripe/job/{job_id_str}",
+                    }
+                    print(f"[AA] Stripe enabled — publishable key present: {bool(stripe_config['publishable_key'])}")
+
             except Exception as e:
-                print(f"[AA] Error reading Supabase config: {e}")
+                print(f"[AA] Error reading meta.json: {e}")
+
+        # ── AI proxy — always available ───────────────────────────────
+        app_token    = ""
+        job_id_str   = os.path.basename(WORKSPACE)
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            import jwt as pyjwt
+
+            db_url = os.getenv("DATABASE_URL")
+            if db_url:
+                db_conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+                with db_conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT user_id, app_token FROM jobs WHERE job_id = %s",
+                        (job_id_str,)
+                    )
+                    job_row = cur.fetchone()
+
+                if job_row:
+                    if job_row["app_token"]:
+                        app_token = job_row["app_token"]
+                        print(f"[AA] Reusing existing app token for job {job_id_str}")
+                    else:
+                        secret_key = os.getenv("SECRET_KEY", "supersecretkey")
+                        app_token  = pyjwt.encode(
+                            {
+                                "scope":  "ai_proxy",
+                                "job_id": job_id_str,
+                                "sub":    str(job_row["user_id"]),
+                            },
+                            secret_key,
+                            algorithm="HS256"
+                        )
+                        with db_conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE jobs SET app_token = %s WHERE job_id = %s",
+                                (app_token, job_id_str)
+                            )
+                        db_conn.commit()
+                        print(f"[AA] Generated new app token for job {job_id_str}")
+
+                db_conn.close()
+        except Exception as e:
+            print(f"[AA] Warning: could not generate app token: {e}")
+
+        ai_config = {
+            "proxy_url": "https://entrepreneur-bot-backend.onrender.com/auth/ai/proxy",
+            "app_token": app_token,
+        }
+        print(f"[AA] AI proxy always available — app token present: {bool(app_token)}")
 
         generator = create_generator(
-            files_list_state=files_list,
-            model=anthropic_model,
-            supabase_config=supabase_config,
-            workspace=WORKSPACE,
+            files_list_state = files_list,
+            model            = anthropic_model,
+            supabase_config  = supabase_config,
+            workspace        = WORKSPACE,
+            stripe_config    = stripe_config,
+            ai_config        = ai_config,
         )
 
         write_progress(WORKSPACE, {
@@ -460,7 +505,7 @@ def main():
         if not user_message:
             raise Exception("Empty user message")
 
-        # ── Load attachments ──────────────────────────────────────────────
+        # ── Load attachments ──────────────────────────────────────────
         attachments_path = os.path.join(WORKSPACE, "attachments.json")
         attachments = []
         if os.path.exists(attachments_path):
@@ -473,7 +518,6 @@ def main():
                 print(f"[AA] Error reading attachments: {e}")
                 attachments = []
 
-        # Build the user message — multimodal if attachments exist
         if attachments:
             import base64
             content_blocks = []
@@ -564,7 +608,6 @@ def main():
 
         save_deduction(WORKSPACE, token_breakdown, credits_used)
 
-        # Clean up partial deduction — the full one takes precedence
         partial_path = os.path.join(WORKSPACE, "partial_deduction.json")
         if os.path.exists(partial_path):
             os.remove(partial_path)

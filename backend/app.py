@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 from routes.github import github_bp
 from routes.deploy import deploy_bp
 from routes.supabase_mgmt import supabase_bp
+from routes.stripe_mgmt import stripe_bp
+from routes.ai_proxy import ai_proxy_bp
 load_dotenv()
 
 
@@ -57,7 +59,9 @@ def create_app():
     app.register_blueprint(google_auth_bp,       url_prefix='/auth')
     app.register_blueprint(github_bp, url_prefix='/auth')
     app.register_blueprint(deploy_bp)
-    app.register_blueprint(supabase_bp, url_prefix='/supabase')
+    app.register_blueprint(supabase_bp,  url_prefix='/supabase')
+    app.register_blueprint(stripe_bp,    url_prefix='/stripe')
+    app.register_blueprint(ai_proxy_bp)
     return app
 
 

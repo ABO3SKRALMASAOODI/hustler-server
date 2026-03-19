@@ -354,6 +354,148 @@ const { error } = await supabase.from('todos').delete().eq('id', todoId)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  STRIPE SYSTEM PROMPT ADDITION
+# ══════════════════════════════════════════════════════════════════════════════
+
+STRIPE_PROMPT_ADDITION = """
+
+────────────────────────────────────────────────────────
+STRIPE PAYMENTS
+────────────────────────────────────────────────────────
+This project has Stripe enabled. Use the proxy endpoints below — NEVER put the secret key in frontend code.
+
+INSTALL: run_install_command: "npm install @stripe/stripe-js @stripe/react-stripe-js -y"
+
+Publishable key (safe for frontend): {STRIPE_PUBLISHABLE_KEY}
+
+── PROXY ENDPOINTS ──
+
+One-time payment (PaymentIntent):
+  POST {STRIPE_PROXY_URL}/create-payment-intent
+  Body: { "amount": 2999, "currency": "usd" }
+  Returns: { "client_secret": "pi_xxx_secret_xxx" }
+
+Checkout redirect (recommended — simplest):
+  POST {STRIPE_PROXY_URL}/create-checkout-session
+  Body: {
+    "line_items": [{"price_data": {"currency": "usd", "product_data": {"name": "Product"}, "unit_amount": 2999}, "quantity": 1}],
+    "mode": "payment",
+    "success_url": "https://yourapp.com/success",
+    "cancel_url": "https://yourapp.com/cancel"
+  }
+  Returns: { "url": "https://checkout.stripe.com/..." }
+  Then: window.location.href = data.url
+
+── DEFAULT PATTERN (use this unless user requests otherwise) ──
+
+const handleCheckout = async () => {
+  const res = await fetch("{STRIPE_PROXY_URL}/create-checkout-session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      line_items: [{ price_data: { currency: "usd", product_data: { name: "Product" }, unit_amount: 2999 }, quantity: 1 }],
+      mode: "payment",
+      success_url: window.location.origin + "/success",
+      cancel_url: window.location.origin + "/cancel",
+    }),
+  });
+  const data = await res.json();
+  if (data.url) window.location.href = data.url;
+};
+
+── RULES ──
+- NEVER put sk_xxx in frontend code
+- Use mode: "subscription" for recurring billing
+- Test card: 4242 4242 4242 4242, any future date, any CVC
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AI PROXY SYSTEM PROMPT ADDITION
+# ══════════════════════════════════════════════════════════════════════════════
+
+AI_PROMPT_ADDITION = """
+
+────────────────────────────────────────────────────────
+AI / CLAUDE INTEGRATION
+────────────────────────────────────────────────────────
+This project has Claude AI enabled via a secure proxy. NEVER put API keys in frontend code.
+
+Proxy endpoint: {AI_PROXY_URL}
+App token (hardcoded — safe to embed, scoped to AI calls only): {APP_TOKEN}
+
+── REQUEST FORMAT ──
+POST {AI_PROXY_URL}
+Headers: { "Content-Type": "application/json", "Authorization": "Bearer {APP_TOKEN}" }
+Body: {
+  "messages": [{"role": "user", "content": "Hello"}],
+  "system": "You are a helpful assistant.",
+  "max_tokens": 1000
+}
+Returns: { "content": "response text" }
+
+── useAI HOOK (create this at src/hooks/useAI.ts) ──
+
+import { useState } from 'react';
+
+const APP_TOKEN = '{APP_TOKEN}';
+const AI_PROXY  = '{AI_PROXY_URL}';
+
+export const useAI = () => {
+  const [loading, setLoading] = useState(false);
+
+  const ask = async (
+    messages: Array<{role: string; content: string}>,
+    system?: string
+  ): Promise<string> => {
+    setLoading(true);
+    try {
+      const res = await fetch(AI_PROXY, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${APP_TOKEN}`,
+        },
+        body: JSON.stringify({ messages, system, max_tokens: 1000 }),
+      });
+      if (res.status === 402) {
+        throw new Error('AI features are temporarily unavailable.');
+      }
+      if (!res.ok) {
+        throw new Error('Something went wrong. Please try again.');
+      }
+      const data = await res.json();
+      return data.content as string;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return { ask, loading };
+};
+
+── CHATBOT USAGE ──
+
+const [messages, setMessages] = useState<Array<{role:string;content:string}>>([]);
+const { ask, loading } = useAI();
+
+const sendMessage = async (text: string) => {
+  const updated = [...messages, { role: 'user', content: text }];
+  setMessages(updated);
+  const reply = await ask(updated, 'You are a helpful assistant.');
+  setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+};
+
+── RULES ──
+- APP_TOKEN is already hardcoded above — never ask the user to provide a token
+- max_tokens capped at 1000 by proxy
+- Credits deducted from the app owner's account per call automatically
+- On 402: show "AI features are temporarily unavailable." to end users
+- Never show raw error messages or mention credits to end users of the published app
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MAIN SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -368,8 +510,10 @@ On EVERY new project, execute these steps — batch parallel calls where possibl
 2. Read all config files in one parallel batch: vite.config.*, tsconfig.*, tailwind.config.*, index.html.
 3. Determine the stack from what you actually read — never assume.
 4. If the request needs auth, a database, or any data persistence: call request_backend IMMEDIATELY. Do not write a single line of auth/db code before getting a response.
-5. Output your PLAN (see Planning section).
-6. Execute immediately. No waiting for user approval after the plan.
+5. If the request needs payments, checkout, or subscriptions: call request_stripe IMMEDIATELY. Do not write any Stripe code before getting a response.
+6. If the request needs AI features, a chatbot, or text generation: call request_ai IMMEDIATELY. Do not write any AI code before getting a response.
+7. Output your PLAN (see Planning section).
+8. Execute immediately. No waiting for user approval after the plan.
 
 For FOLLOW-UP EDITS (conversation already has history):
 - Do NOT re-run the startup sequence.
@@ -580,6 +724,8 @@ read_console_logs    → ALWAYS call first when user reports a broken or blank a
 generate_image       → For visual assets. Call in parallel when multiple images are needed.
 run_install_command  → After confirming with read_package_json. Always include -y flag.
 request_backend      → Before ANY auth or database code. Call early in the startup sequence.
+request_stripe       → Before ANY payment or checkout code. Call early in the startup sequence.
+request_ai           → Before ANY AI or chatbot code. Call early in the startup sequence.
 
 ────────────────────────────────────────────────────────
 EXECUTION ORDER
@@ -781,7 +927,6 @@ anthropic_tools = [
             "required": ["image_paths", "prompt", "target_path"]
         }
     },
-    # ── Diagnostic tools ──────────────────────────────────────────────────
     {
         "name": "read_console_logs",
         "description": (
@@ -805,6 +950,48 @@ anthropic_tools = [
         "input_schema": {"type": "object", "properties": {}}
     },
     REQUEST_BACKEND_TOOL,
+    {
+        "name": "request_stripe",
+        "description": (
+            "Request Stripe payment integration for this project. "
+            "Call this when the user wants: payments, checkout, subscriptions, pricing pages, "
+            "buy buttons, or any e-commerce functionality.\n\n"
+            "IMPORTANT: Call this EARLY — before writing any Stripe code. "
+            "If approved, you'll get the publishable key and backend proxy URLs. "
+            "If denied, build a UI-only mockup with 'Coming soon' buttons."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Brief explanation of what payment feature is needed."
+                }
+            },
+            "required": ["reason"]
+        }
+    },
+    {
+        "name": "request_ai",
+        "description": (
+            "Request AI/Claude integration for this project. "
+            "Call this when the user wants: a chatbot, AI responses, text generation, "
+            "summarization, translation, content generation, or any AI-powered feature.\n\n"
+            "IMPORTANT: Call this EARLY — before writing any AI code. "
+            "If approved, you'll get a proxy URL and app token to call Claude API safely. "
+            "If not configured, build a UI mockup with placeholder AI responses."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Brief explanation of what AI feature is needed."
+                }
+            },
+            "required": ["reason"]
+        }
+    },
 ]
 
 
@@ -812,29 +999,33 @@ anthropic_tools = [
 #  CREATE GENERATOR — main factory function
 # ══════════════════════════════════════════════════════════════════════════════
 
-def create_generator(files_list_state, reviewer=None, model=None, supabase_config=None, workspace=None):
-    """
-    Create the generator agent with the specified model.
-
-    Args:
-        files_list_state: FileState instance
-        reviewer: optional reviewer agent
-        model: Anthropic model string (e.g. 'claude-haiku-4-5-20251001').
-        supabase_config: dict with 'url', 'anon_key', 'service_role_key' or None
-        workspace: path to the job folder on disk
-    """
+def create_generator(files_list_state, reviewer=None, model=None, supabase_config=None, workspace=None, stripe_config=None, ai_config=None):
     if model is None:
         model = 'claude-haiku-4-5-20251001'
 
     print(f"[Agent5] Creating generator with model: {model}")
 
-    # ── Build system prompt (with optional Supabase addition) ────────────
     system_prompt = FRONTEND_AGENT_SYSTEM_PROMPT
     if supabase_config:
         system_prompt += SUPABASE_PROMPT_ADDITION
         print(f"[Agent5] Supabase enabled — added backend tools and prompt")
+    if stripe_config:
+        prompt_with_keys = STRIPE_PROMPT_ADDITION.replace(
+            "{STRIPE_PUBLISHABLE_KEY}", stripe_config.get("publishable_key", "")
+        ).replace(
+            "{STRIPE_PROXY_URL}", stripe_config.get("proxy_url", "")
+        )
+        system_prompt += prompt_with_keys
+        print(f"[Agent5] Stripe enabled — added payment tools and prompt")
+    if ai_config:
+        prompt_with_url = AI_PROMPT_ADDITION.replace(
+            "{AI_PROXY_URL}", ai_config.get("proxy_url", "")
+        ).replace(
+            "{APP_TOKEN}", ai_config.get("app_token", "")
+        )
+        system_prompt += prompt_with_url
+        print(f"[Agent5] AI proxy enabled — added AI tools and prompt")
 
-    # ── Build tool list (with optional Supabase tools) ───────────────────
     all_tools = list(anthropic_tools)
     if supabase_config:
         all_tools.extend(SUPABASE_TOOL_DEFINITIONS)
@@ -853,64 +1044,35 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     rename_file_state = files_list_state.rename_file
     files_list        = files_list_state.files_list
 
-    # ── File operation implementations ───────────────────────────────────
-
     def write_file(path: str, content: str) -> str:
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-
         existed     = os.path.exists(path)
         old_content = None
-
         if existed:
             with open(path, "r", encoding="utf-8") as f:
                 old_content = f.read()
-
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
-
         if not existed:
             add_file(path)
-
-        print(f"""{Back.WHITE}agent6 is taking action: "type": "FILE_WRITE",
-        "path": {path},
-        "existed": {existed}{Style.RESET_ALL}""")
-        agent6.notify_reviewer({
-            "type":        "FILE_WRITE",
-            "path":        path,
-            "existed":     existed,
-            "old_content": old_content,
-            "new_content": content,
-        })
-
+        print(f"""{Back.WHITE}agent6 is taking action: "type": "FILE_WRITE", "path": {path}, "existed": {existed}{Style.RESET_ALL}""")
+        agent6.notify_reviewer({"type": "FILE_WRITE", "path": path, "existed": existed, "old_content": old_content, "new_content": content})
         return f"WRITE_COMPLETED PATH:{path}"
 
     def edit_file(path, old_str, new_str):
         if not os.path.exists(path):
             return "ERROR: File does not exist, use write_file for new files."
-
         with open(path, 'r', encoding='utf-8') as f:
             full_content = f.read()
-
         if old_str not in full_content:
             return f"ERROR: The segment you want to replace was not found in {path}"
-
         updated_content = full_content.replace(old_str, new_str, 1)
         with open(path, 'w', encoding='utf-8') as f:
             f.write(updated_content)
-
-        print(f"""{Back.WHITE}agent6 is taking action: "type": "EDIT",
-        "path": {path}{Style.RESET_ALL}""")
-
-        agent6.notify_reviewer({
-            "type":        "FILE_WRITE",
-            "path":        path,
-            "old_string":  old_str,
-            "new_string":  new_str,
-            "new_content": updated_content,
-        })
-
+        print(f"""{Back.WHITE}agent6 is taking action: "type": "EDIT", "path": {path}{Style.RESET_ALL}""")
+        agent6.notify_reviewer({"type": "FILE_WRITE", "path": path, "old_string": old_str, "new_string": new_str, "new_content": updated_content})
         return f"EDIT_COMPLETED PATH: {path}"
 
     def read_file(path, **kwargs):
@@ -928,7 +1090,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             p = Path(path)
             if not p.exists():
                 return f"DELETE_ERROR: Path not found: {path}"
-
             if p.is_dir():
                 dir_prefix = os.path.normpath(path)
                 for f in list(files_list_state.files):
@@ -940,7 +1101,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 os.remove(path)
                 remove_file(path)
                 print(f"[delete] Removed file: {path}")
-
             agent6.notify_reviewer({"type": "FILE_DELETE", "path": path})
             return f"DELETE_COMPLETED PATH:{path}"
         except Exception as e:
@@ -950,14 +1110,11 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         try:
             if not os.path.exists(original_path):
                 return f"RENAME_ERROR: Source not found: {original_path}"
-
             parent = os.path.dirname(new_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-
             os.rename(original_path, new_path)
             rename_file_state(original_path, new_path)
-
             agent6.notify_reviewer({"type": "FILE_RENAME", "old_path": original_path, "new_path": new_path})
             return f"RENAME_COMPLETED: {original_path} → {new_path}"
         except Exception as e:
@@ -965,34 +1122,25 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
 
     def search_files(query: str, search_dir: str = "src", include_patterns: str = "", case_sensitive: bool = False) -> str:
         try:
-            cmd = ["grep", "-r", "-n", "--include=*.ts", "--include=*.tsx",
-                   "--include=*.js", "--include=*.jsx", "--include=*.css",
-                   "--include=*.html", "--include=*.json", "--include=*.md"]
-
+            cmd = ["grep", "-r", "-n", "--include=*.ts", "--include=*.tsx", "--include=*.js", "--include=*.jsx", "--include=*.css", "--include=*.html", "--include=*.json", "--include=*.md"]
             if include_patterns:
                 cmd = ["grep", "-r", "-n"]
                 for pattern in include_patterns.split(","):
                     pattern = pattern.strip()
                     if pattern:
                         cmd.append(f"--include={pattern}")
-
             if not case_sensitive:
                 cmd.append("-i")
-
-            cmd.extend(["--exclude-dir=node_modules", "--exclude-dir=dist",
-                        "--exclude-dir=.git", "--exclude-dir=__pycache__"])
+            cmd.extend(["--exclude-dir=node_modules", "--exclude-dir=dist", "--exclude-dir=.git", "--exclude-dir=__pycache__"])
             cmd.append(query)
             cmd.append(search_dir if os.path.isdir(search_dir) else ".")
-
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
             output = result.stdout.strip()
             if not output:
                 return f"SEARCH_NO_RESULTS: No matches found for '{query}' in {search_dir}"
-
             lines = output.split("\n")
             if len(lines) > 50:
                 output = "\n".join(lines[:50]) + f"\n... and {len(lines) - 50} more matches"
-
             return output
         except subprocess.TimeoutExpired:
             return "SEARCH_ERROR: Search timed out"
@@ -1002,40 +1150,22 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     def generate_image(prompt: str, target_path: str, width: int = 1024, height: int = 768, model: str = "flux.schnell") -> str:
         try:
             print(f"[image_gen] Generating: {target_path} ({width}x{height}, {model})")
-
             width  = max(512, min(1920, int(width)))
             height = max(512, min(1920, int(height)))
             width  = (width  // 32) * 32
             height = (height // 32) * 32
-
             parent = os.path.dirname(target_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-
-            model_map = {
-                "flux.schnell": "black-forest-labs/flux-schnell",
-                "flux.dev":     "black-forest-labs/flux-dev",
-                "flux2.dev":    "black-forest-labs/flux1.1-pro",
-            }
+            model_map = {"flux.schnell": "black-forest-labs/flux-schnell", "flux.dev": "black-forest-labs/flux-dev", "flux2.dev": "black-forest-labs/flux1.1-pro"}
             replicate_model = model_map.get(model, model_map["flux.schnell"])
-
             ext           = target_path.rsplit(".", 1)[-1].lower() if "." in target_path else "webp"
             format_map    = {"jpg": "jpg", "jpeg": "jpg", "png": "png", "webp": "webp"}
             output_format = format_map.get(ext, "webp")
-
-            replicate_input = {
-                "prompt":        prompt,
-                "width":         width,
-                "height":        height,
-                "output_format": output_format,
-                "output_quality":90,
-                "num_outputs":   1,
-            }
+            replicate_input = {"prompt": prompt, "width": width, "height": height, "output_format": output_format, "output_quality": 90, "num_outputs": 1}
             if model == "flux.schnell":
                 replicate_input["go_fast"] = True
-
             output = replicate.run(replicate_model, input=replicate_input)
-
             image_url = None
             if isinstance(output, list) and len(output) > 0:
                 image_url = str(output[0])
@@ -1043,23 +1173,17 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 for item in output:
                     image_url = str(item)
                     break
-
             if not image_url:
                 return "IMAGE_GENERATION_FAILED: No output received from model"
-
             response = requests.get(image_url, timeout=60)
             if response.status_code != 200:
                 return f"IMAGE_GENERATION_FAILED: Download failed (status {response.status_code})"
-
             with open(target_path, "wb") as f:
                 f.write(response.content)
-
             file_size_kb = len(response.content) / 1024
             print(f"[image_gen] Saved: {target_path} ({file_size_kb:.1f} KB)")
-
             add_file(target_path)
             agent6.notify_reviewer({"type": "IMAGE_GENERATED", "path": target_path, "prompt": prompt})
-
             if target_path.startswith("src/"):
                 return f"IMAGE_GENERATED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
             else:
@@ -1073,7 +1197,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             parent = os.path.dirname(target_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-
             import base64
             image_uris = []
             for img_path in image_paths:
@@ -1088,20 +1211,10 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                     image_uris.append(uri)
                 else:
                     return f"IMAGE_EDIT_FAILED: Source image not found: {img_path}"
-
             if not image_uris:
                 return "IMAGE_EDIT_FAILED: No valid source images provided"
-
-            replicate_input = {
-                "prompt":         prompt,
-                "input_image":    image_uris[0],
-                "aspect_ratio":   aspect_ratio,
-                "output_format":  "webp",
-                "output_quality": 90,
-            }
-
+            replicate_input = {"prompt": prompt, "input_image": image_uris[0], "aspect_ratio": aspect_ratio, "output_format": "webp", "output_quality": 90}
             output = replicate.run("black-forest-labs/flux-kontext", input=replicate_input)
-
             image_url = None
             if isinstance(output, list) and len(output) > 0:
                 image_url = str(output[0])
@@ -1111,20 +1224,15 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                     break
             elif output:
                 image_url = str(output)
-
             if not image_url:
                 return "IMAGE_EDIT_FAILED: No output received from model"
-
             response = requests.get(image_url, timeout=60)
             if response.status_code != 200:
                 return f"IMAGE_EDIT_FAILED: Download failed (status {response.status_code})"
-
             with open(target_path, "wb") as f:
                 f.write(response.content)
-
             add_file(target_path)
             agent6.notify_reviewer({"type": "IMAGE_EDITED", "source_paths": image_paths, "target_path": target_path})
-
             if target_path.startswith("src/"):
                 return f"IMAGE_EDITED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
             else:
@@ -1133,26 +1241,18 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         except Exception as e:
             return f"IMAGE_EDIT_FAILED: {str(e)}"
 
-    # ── Diagnostic tool implementations ──────────────────────────────────
-
     def read_console_logs() -> str:
-        """Read runtime console errors captured from the preview iframe."""
         _ws = workspace
         if not _ws:
             return "CONSOLE_LOGS_ERROR: No workspace configured."
-
         log_path = os.path.join(_ws, "console_logs.json")
         if not os.path.exists(log_path):
-            return (
-                "CONSOLE_LOGS_EMPTY: No runtime errors captured yet. "
-                "The app may not have been opened in a browser, or there are no errors."
-            )
+            return "CONSOLE_LOGS_EMPTY: No runtime errors captured yet."
         try:
             with open(log_path) as f:
                 logs = json.load(f)
             if not logs:
                 return "CONSOLE_LOGS_EMPTY: No errors or warnings captured — app appears clean."
-
             output = f"CONSOLE_LOGS ({len(logs)} entries, showing last 30):\n"
             for entry in logs[-30:]:
                 level = entry.get("level", "log").upper()
@@ -1163,11 +1263,9 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             return f"CONSOLE_LOGS_READ_ERROR: {str(e)}"
 
     def read_package_json() -> str:
-        """Read the current package.json to check installed dependencies."""
         _ws = workspace
         if not _ws:
             return "PACKAGE_JSON_ERROR: No workspace configured."
-
         path = os.path.join(_ws, "package.json")
         if not os.path.exists(path):
             return "PACKAGE_JSON_NOT_FOUND: No package.json exists yet in this project."
@@ -1178,12 +1276,10 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             return f"PACKAGE_JSON_READ_ERROR: {str(e)}"
 
     def request_backend(reason: str = "") -> str:
-        """Request backend — writes signal file, polls for user approval."""
         import time as _time
         _workspace = workspace
         if not _workspace:
             return "BACKEND_ERROR: No workspace configured"
-
         meta_path = os.path.join(_workspace, "meta.json")
         if os.path.exists(meta_path):
             try:
@@ -1193,28 +1289,22 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                     return "BACKEND_ALREADY_ENABLED: Supabase is already active. Use get_supabase_config to get credentials."
             except Exception:
                 pass
-
         print(f"[Agent5] Backend requested — reason: {reason}")
-
         req_path = os.path.join(_workspace, "backend_requested.json")
         with open(req_path, "w") as f:
             json.dump({"reason": reason, "ts": _time.time()}, f)
-
         approved_path = os.path.join(_workspace, "backend_approved.json")
         denied_path   = os.path.join(_workspace, "backend_denied.json")
         max_wait      = 300
         elapsed       = 0
-
         while elapsed < max_wait:
             _time.sleep(3)
             elapsed += 3
-
             if os.path.exists(approved_path):
                 try: os.remove(approved_path)
                 except: pass
                 try: os.remove(req_path)
                 except: pass
-
                 supabase_url = ""
                 anon_key     = ""
                 try:
@@ -1223,7 +1313,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                     supabase_url = meta.get("supabase_url", "")
                     anon_key     = meta.get("supabase_anon_key", "")
                 except: pass
-
                 if supabase_url and anon_key:
                     sb = SupabaseTools(
                         supabase_url      = supabase_url,
@@ -1238,47 +1327,127 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                     agent6.tool_map["list_tables"]         = sb.list_tables
                     agent6.tool_map["run_sql"]             = sb.run_sql
                     agent6.tool_map["get_supabase_config"] = sb.get_supabase_config
-
                     for tool_def in SUPABASE_TOOL_DEFINITIONS:
                         if not any(t["name"] == tool_def["name"] for t in agent6.tools):
                             agent6.tools.append(tool_def)
-
                     if "BACKEND / DATABASE (SUPABASE)" not in agent6.system_prompt:
                         agent6.system_prompt += SUPABASE_PROMPT_ADDITION
-
                     print(f"[Agent5] Backend approved — Supabase tools activated")
-
                 return (
                     f"BACKEND_APPROVED: Supabase is now active!\n"
                     f"URL: {supabase_url}\nAnon Key: {anon_key}\n\n"
-                    f"You now have access to: create_table, add_rls_policy, enable_auth, "
-                    f"list_tables, run_sql, get_supabase_config.\n\n"
+                    f"You now have access to: create_table, add_rls_policy, enable_auth, list_tables, run_sql, get_supabase_config.\n\n"
                     f"NEXT STEPS:\n"
                     f"1. Call get_supabase_config to get the client setup code\n"
                     f"2. Create src/lib/supabase.ts with the client\n"
                     f"3. Install @supabase/supabase-js\n"
                     f"4. Create tables and RLS policies as needed"
                 )
-
             if os.path.exists(denied_path):
                 try: os.remove(denied_path)
                 except: pass
                 try: os.remove(req_path)
                 except: pass
-                return (
-                    "BACKEND_DENIED: User declined the backend. "
-                    "Build a frontend-only version using localStorage for data persistence. "
-                    "Do NOT use any Supabase tools or imports."
-                )
-
+                return "BACKEND_DENIED: User declined the backend. Build a frontend-only version using localStorage for data persistence. Do NOT use any Supabase tools or imports."
         try: os.remove(req_path)
         except: pass
+        return "BACKEND_TIMEOUT: No response from user within 5 minutes. Build a frontend-only version using localStorage for data persistence."
+
+    def request_stripe(reason: str = "") -> str:
+        import time as _time
+        _workspace = workspace
+        if not _workspace:
+            return "STRIPE_ERROR: No workspace configured"
+        meta_path = os.path.join(_workspace, "meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                if meta.get("stripe_enabled"):
+                    pk  = meta.get("stripe_publishable_key", "")
+                    job = os.path.basename(_workspace)
+                    return (
+                        f"STRIPE_ALREADY_ENABLED: Stripe is active.\n"
+                        f"Publishable key: {pk}\n"
+                        f"Proxy URL: https://entrepreneur-bot-backend.onrender.com/stripe/job/{job}"
+                    )
+            except Exception:
+                pass
+        print(f"[Agent5] Stripe requested — reason: {reason}")
+        req_path = os.path.join(_workspace, "stripe_requested.json")
+        with open(req_path, "w") as f:
+            json.dump({"reason": reason, "ts": _time.time()}, f)
+        approved_path = os.path.join(_workspace, "stripe_approved.json")
+        denied_path   = os.path.join(_workspace, "stripe_denied.json")
+        max_wait      = 300
+        elapsed       = 0
+        while elapsed < max_wait:
+            _time.sleep(3)
+            elapsed += 3
+            if os.path.exists(approved_path):
+                try: os.remove(approved_path)
+                except: pass
+                try: os.remove(req_path)
+                except: pass
+                pk  = ""
+                job = os.path.basename(_workspace)
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                    pk = meta.get("stripe_publishable_key", "")
+                except Exception:
+                    pass
+                proxy_url = f"https://entrepreneur-bot-backend.onrender.com/stripe/job/{job}"
+                if "STRIPE PAYMENTS" not in agent6.system_prompt:
+                    prompt_with_keys = STRIPE_PROMPT_ADDITION.replace(
+                        "{STRIPE_PUBLISHABLE_KEY}", pk
+                    ).replace(
+                        "{STRIPE_PROXY_URL}", proxy_url
+                    )
+                    agent6.system_prompt += prompt_with_keys
+                return (
+                    f"STRIPE_APPROVED: Stripe is now active!\n"
+                    f"Publishable key: {pk}\n"
+                    f"Proxy URL: {proxy_url}\n\n"
+                    f"NEXT STEPS:\n"
+                    f"1. Install: npm install @stripe/stripe-js @stripe/react-stripe-js -y\n"
+                    f"2. Use create-checkout-session proxy for payments (never put sk_ in frontend)\n"
+                    f"3. Use publishable key only for Stripe.js initialization"
+                )
+            if os.path.exists(denied_path):
+                try: os.remove(denied_path)
+                except: pass
+                try: os.remove(req_path)
+                except: pass
+                return "STRIPE_DENIED: User declined Stripe. Build a payment UI mockup without real processing. Show realistic checkout forms but make buttons display a 'Coming soon' message."
+        try: os.remove(req_path)
+        except: pass
+        return "STRIPE_TIMEOUT: No response within 5 minutes. Build a payment UI mockup without real Stripe integration."
+
+    def request_ai(reason: str = "") -> str:
+        _workspace = workspace
+        if not _workspace:
+            return "AI_ERROR: No workspace configured"
+        proxy_url = "https://entrepreneur-bot-backend.onrender.com/auth/ai/proxy"
+        app_token = ai_config.get("app_token", "") if ai_config else ""
+        if "AI / CLAUDE INTEGRATION" not in agent6.system_prompt:
+            prompt_with_url = AI_PROMPT_ADDITION.replace(
+                "{AI_PROXY_URL}", proxy_url
+            ).replace(
+                "{APP_TOKEN}", app_token
+            )
+            agent6.system_prompt += prompt_with_url
         return (
-            "BACKEND_TIMEOUT: No response from user within 5 minutes. "
-            "Build a frontend-only version using localStorage for data persistence."
+            f"AI_APPROVED: Claude AI proxy is ready.\n"
+            f"Proxy URL: {proxy_url}\n"
+            f"App Token: {app_token}\n\n"
+            f"IMPORTANT: Use APP_TOKEN hardcoded in useAI.ts — safe to embed, scoped to AI calls only.\n"
+            f"Credits are charged to the app owner's account automatically.\n\n"
+            f"NEXT STEPS:\n"
+            f"1. Create src/hooks/useAI.ts with the hook from the AI integration guide\n"
+            f"2. Import and use useAI() in your components"
         )
 
-    # ── Build the tool map ───────────────────────────────────────────────
     tool_map = {
         'write_file':          write_file,
         'edit_file':           edit_file,
@@ -1292,11 +1461,12 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         'generate_image':      generate_image,
         'edit_image':          edit_image,
         'request_backend':     request_backend,
+        'request_stripe':      request_stripe,
+        'request_ai':          request_ai,
         'read_console_logs':   read_console_logs,
         'read_package_json':   read_package_json,
     }
 
-    # ── Supabase tools (only if backend is already enabled) ──────────────
     if supabase_config:
         sb = SupabaseTools(
             supabase_url      = supabase_config["url"],
