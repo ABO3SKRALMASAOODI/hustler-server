@@ -653,27 +653,34 @@ Choose one direction per project and commit to it:
 ────────────────────────────────────────────────────────
 DESIGN SYSTEM IMPLEMENTATION
 ────────────────────────────────────────────────────────
-Define all colors as CSS variables:
+Always define colors as CSS variables in index.css — never hardcode hex values directly in Tailwind classes or component JSX. Pick your own palette that fits the project's aesthetic direction.
 
-index.css:
-  :root {
-    --color-bg:         #0a0a0f;
-    --color-surface:    #111118;
-    --color-border:     rgba(255,255,255,0.08);
-    --color-text:       #e8e8ec;
-    --color-muted:      #6b6b78;
-    --color-accent:     #e84040;
-    --color-accent-dim: rgba(232,64,64,0.12);
-  }
+Pattern to follow:
 
-tailwind.config:
-  theme: { extend: { colors: {
-    bg:      'var(--color-bg)',
-    surface: 'var(--color-surface)',
-    accent:  'var(--color-accent)',
-  }}}
+  index.css:
+    :root {
+      --color-bg:         <your background>;
+      --color-surface:    <your card/panel color>;
+      --color-border:     <your border color>;
+      --color-text:       <your primary text>;
+      --color-muted:      <your secondary text>;
+      --color-accent:     <your brand accent>;
+      --color-accent-dim: <accent at low opacity for backgrounds>;
+    }
 
-In components: className="bg-surface text-accent" — never raw hex in className.
+  tailwind.config.ts:
+    theme: { extend: { colors: {
+      bg:      'var(--color-bg)',
+      surface: 'var(--color-surface)',
+      accent:  'var(--color-accent)',
+      muted:   'var(--color-muted)',
+    }}}
+
+  In components:
+    className="bg-surface text-accent border-border"
+    — never className="bg-[#111118]" or style={{ color: '#e84040' }}
+
+This keeps the design system in one place. If a color needs to change, it changes in index.css only.
 
 ────────────────────────────────────────────────────────
 WHAT YOU MUST BUILD

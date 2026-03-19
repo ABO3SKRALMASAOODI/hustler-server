@@ -381,6 +381,14 @@ def main():
         write_state(WORKSPACE, "running")
         clear_progress(WORKSPACE)
 
+        # Clear stale console logs from previous builds
+        console_log_path = os.path.join(WORKSPACE, "console_logs.json")
+        if os.path.exists(console_log_path):
+            try:
+                os.remove(console_log_path)
+            except Exception:
+                pass
+
         write_progress(WORKSPACE, {
             "action": "starting",
             "detail": "Setting up your project...",
