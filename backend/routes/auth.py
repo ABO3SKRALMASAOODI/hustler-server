@@ -1557,8 +1557,6 @@ _CONSOLE_NOISE_PATTERNS = [
     "/auth/credits",
     "/auth/jobs",
     "/auth/job/",
-    "/auth/ai/proxy",         
-    "402",                     
     "favicon",
     "hustler-robot.riv",
     "api-backend",
