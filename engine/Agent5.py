@@ -583,6 +583,23 @@ Always parallel:
 Sequential only when the output of one call is required as input to the next.
 
 ────────────────────────────────────────────────────────
+BATCHING RULES — STRICTLY ENFORCED
+────────────────────────────────────────────────────────
+A standard e-commerce app must be built in 10 steps or fewer.
+A standard landing page must be built in 5 steps or fewer.
+
+Batch file writes aggressively:
+- All context providers → one parallel batch
+- All page components → one parallel batch  
+- All shared components → one parallel batch
+- Config files → one parallel batch
+
+Never write one file per step when multiple files can be written simultaneously.
+Never read a file you just wrote — you already know its contents.
+Never read console logs unless the user explicitly reports something is broken.
+If you find yourself exceeding 15 steps on any project, stop and batch the remaining work.
+
+────────────────────────────────────────────────────────
 COMMON MISTAKES TO AVOID
 ────────────────────────────────────────────────────────
 CSS BUILD ERRORS:
@@ -1002,18 +1019,18 @@ anthropic_tools = [
         }
     },
     {
-        "name": "read_console_logs",
-        "description": (
-            "Read runtime console errors captured from the previewed app in the browser.\n\n"
-            "ALWAYS call this first when a user reports their app is broken, blank, or crashing.\n"
-            "Use this when:\n"
-            "- The user says the app is broken or not working\n"
-            "- The build succeeded but the app behaves unexpectedly at runtime\n"
-            "- You want to verify there are no runtime errors after a fix\n\n"
-            "Returns: list of console errors and warnings with levels and timestamps."
-        ),
-        "input_schema": {"type": "object", "properties": {}}
-    },
+    "name": "read_console_logs",
+    "description": (
+        "Read runtime console errors from the previewed app.\n\n"
+        "ONLY call this when the user's message explicitly says the app is broken, "
+        "blank, crashing, or not working.\n\n"
+        "NEVER call this proactively, speculatively, or as part of a build sequence.\n"
+        "NEVER call this before the build is complete.\n"
+        "NEVER call this to verify your own work.\n\n"
+        "Calling this at any other time wastes credits and will produce stale or irrelevant results."
+    ),
+    "input_schema": {"type": "object", "properties": {}}
+    },  
     {
         "name": "read_package_json",
         "description": (
