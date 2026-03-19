@@ -1329,7 +1329,7 @@ def serve_preview(job_id, filename):
     if filename:
         file_path = os.path.join(dist_dir, filename)
         if os.path.isfile(file_path):
-            return send_from_directory(dist_dir, filename)
+            return send_from_directory(dist_dir, filename,conditional=False)
 
     from flask import request as flask_request
     base    = flask_request.host_url.rstrip("/")
@@ -1365,7 +1365,7 @@ def serve_preview_raw(job_id, filename):
     if filename and filename != "index.html":
         file_path = os.path.join(dist_dir, filename)
         if os.path.isfile(file_path):
-            return send_from_directory(dist_dir, filename)
+            return send_from_directory(dist_dir, filename,conditional=False)
 
     index_path = os.path.join(dist_dir, "index.html")
     if not os.path.isfile(index_path):
