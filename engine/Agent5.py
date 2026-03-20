@@ -662,6 +662,8 @@ Before writing a single line of code, identify the core domain from the user's r
 
 When generating images, always include the domain and audience context in the prompt so the generated content matches what was requested. A prompt must describe subject, style, lighting, and background — never just the object name alone.
 
+CRITICAL — AUDIENCE CONSISTENCY IN IMAGE PROMPTS:
+If the app is for women's clothing, EVERY product image prompt must explicitly say "women's" — e.g. "women's running shorts" not just "running shorts." If the app is for men, say "men's." If unisex, say "unisex." Never leave the audience ambiguous in an image prompt, because the image model will default to the wrong gender, style, or audience. This applies to every single product image, not just the hero.
 ────────────────────────────────────────────────────────
 DESIGN PHILOSOPHY
 ────────────────────────────────────────────────────────
