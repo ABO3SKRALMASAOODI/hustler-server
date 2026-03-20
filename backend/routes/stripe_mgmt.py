@@ -6,6 +6,69 @@ stripe_bp = Blueprint('stripe', __name__)
 
 OUTPUTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "outputs"))
 
+# ── Base URL for preview routes ───────────────────────────────────────────────
+BACKEND_BASE = os.getenv("BACKEND_BASE_URL", "https://entrepreneur-bot-backend.onrender.com")
+
+
+def _get_redirect_base(job_id):
+    """
+    Determine the correct base URL for Stripe success/cancel redirects.
+    If the project is published, use the published domain.
+    Otherwise, use the preview-raw URL so it works in the iframe new-tab flow.
+    """
+    # Check if published
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT published_url FROM jobs WHERE job_id = %s", (job_id,))
+            row = cur.fetchone()
+        conn.close()
+        if row and row.get("published_url"):
+            return row["published_url"].rstrip("/")
+    except Exception:
+        pass
+
+    # Fall back to preview-raw URL (serves the actual app HTML, not the wrapper)
+    return f"{BACKEND_BASE}/auth/preview-raw/{job_id}"
+
+
+def _rewrite_redirect_url(url, job_id):
+    """
+    Rewrite a success/cancel URL to point to the correct base.
+    Handles cases like:
+      - window.location.origin + "/success"  → https://backend/auth/preview-raw/<job_id>/success
+      - https://myapp.thehustlerbot.com/success → kept as-is (published domain)
+      - /success → rewritten to full URL
+    """
+    if not url:
+        return url
+
+    redirect_base = _get_redirect_base(job_id)
+
+    # If URL is already pointing to a published domain, leave it alone
+    if url.startswith("https://") and "thehustlerbot.com" in url and "entrepreneur-bot" not in url:
+        return url
+
+    # Extract the path portion
+    # Handle full URLs like https://entrepreneur-bot-backend.onrender.com/success
+    if url.startswith("http"):
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path = parsed.path.lstrip("/")
+    else:
+        path = url.lstrip("/")
+
+    # Strip any existing preview path prefix if present
+    # e.g. "auth/preview-raw/abc123/success" → "success"
+    preview_prefix = f"auth/preview-raw/{job_id}/"
+    if path.startswith(preview_prefix):
+        path = path[len(preview_prefix):]
+    preview_prefix2 = f"auth/preview/{job_id}/"
+    if path.startswith(preview_prefix2):
+        path = path[len(preview_prefix2):]
+
+    return f"{redirect_base}/{path}"
+
 
 @stripe_bp.route('/job/<job_id>/enable-stripe', methods=['POST'])
 @token_required
@@ -142,6 +205,7 @@ def create_checkout_session(job_id):
     """
     Creates a Stripe Checkout Session for one-time or subscription payments.
     Called by generated apps — secret key stays server-side.
+    Rewrites success/cancel URLs to route back to the correct preview or published URL.
     """
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
@@ -166,6 +230,10 @@ def create_checkout_session(job_id):
 
     if not line_items or not success_url or not cancel_url:
         return jsonify({"error": "line_items, success_url, cancel_url are required"}), 400
+
+    # ── Rewrite redirect URLs to point to correct preview/published base ──
+    success_url = _rewrite_redirect_url(success_url, job_id)
+    cancel_url  = _rewrite_redirect_url(cancel_url, job_id)
 
     try:
         import stripe as stripe_lib
