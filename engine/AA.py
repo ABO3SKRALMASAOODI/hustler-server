@@ -332,15 +332,15 @@ def make_hooks(workspace):
 
         if name == "request_backend":
             reason = args.get("reason", "") if isinstance(args, dict) else ""
-            entry["detail"] = f"Requesting backend: {reason[:80]}"
+            entry["detail"] = f"Requesting backend: {reason[:200]}"
         elif name == "request_stripe":
             reason = args.get("reason", "") if isinstance(args, dict) else ""
-            entry["detail"] = f"Requesting Stripe: {reason[:80]}"
+            entry["detail"] = f"Requesting Stripe: {reason[:200]}"
         elif name == "request_ai":
             reason = args.get("reason", "") if isinstance(args, dict) else ""
-            entry["detail"] = f"Setting up AI integration: {reason[:80]}"
+            entry["detail"] = f"Setting up AI integration: {reason[:200]}"
         elif name == "run_install_command":
-            entry["detail"] = args.get("command", "")[:80]
+            entry["detail"] = args.get("command", "")[:200]
         elif name == "generate_image":
             target_path = args.get("target_path", "image")
             model_name  = args.get("model", "flux.schnell")
@@ -350,7 +350,7 @@ def make_hooks(workspace):
             entry["file"]   = target_path
         elif name == "edit_image":
             target_path    = args.get("target_path", "image")
-            prompt_preview = args.get("prompt", "")[:60]
+            prompt_preview = args.get("prompt", "")[:160]
             entry["detail"] = f"Editing image → {target_path}: {prompt_preview}..."
             entry["file"]   = target_path
         elif name == "delete_file":
@@ -363,7 +363,7 @@ def make_hooks(workspace):
             entry["detail"] = f"Renaming {orig} → {new}"
             entry["file"]   = new
         elif name == "search_files":
-            query      = args.get("query", "")[:60]
+            query      = args.get("query", "")[:160]
             search_dir = args.get("search_dir", "src")
             entry["detail"] = f"Searching for '{query}' in {search_dir}"
         elif name == "read_console_logs":
@@ -409,7 +409,7 @@ def make_hooks(workspace):
         cleaned = re.sub(r'\n{2,}', '\n', cleaned).strip()
         if len(cleaned) < 8:
             return
-        snippet = cleaned[:150] + ("..." if len(cleaned) > 150 else "")
+        snippet = cleaned[:300] + ("..." if len(cleaned) > 150 else "")
         write_progress(workspace, {"action": "planning", "detail": snippet})
 
     def on_rate_limit(attempt, delay):
