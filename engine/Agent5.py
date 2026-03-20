@@ -395,6 +395,10 @@ Checkout redirect (recommended — simplest):
 
 ── DEFAULT PATTERN (use this unless user requests otherwise) ──
 
+CRITICAL: The preview runs inside an iframe. Stripe Checkout blocks iframes.
+You MUST use window.open(url, '_blank') — NEVER window.location.href for Stripe redirects.
+This applies to ALL Stripe checkout URLs, payment links, and redirect flows.
+
 const handleCheckout = async () => {
   const res = await fetch("{STRIPE_PROXY_URL}/create-checkout-session", {
     method: "POST",
@@ -407,11 +411,12 @@ const handleCheckout = async () => {
     }),
   });
   const data = await res.json();
-  if (data.url) window.location.href = data.url;
+  if (data.url) window.open(data.url, '_blank');
 };
 
 ── RULES ──
 - NEVER put sk_xxx in frontend code
+- NEVER use window.location.href for Stripe checkout URLs — always use window.open(url, '_blank') because the preview runs in an iframe and Stripe blocks iframe redirects
 - Use mode: "subscription" for recurring billing
 - Test card: 4242 4242 4242 4242, any future date, any CVC
 """
