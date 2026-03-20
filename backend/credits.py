@@ -17,10 +17,11 @@ Anthropic pricing (per million tokens):
 Margin comes entirely from selling credit bundles at a premium price.
 No markup is applied here — credits reflect actual API cost.
 
-Free users   : 20 credits / day (resets daily, never accumulates)
-Subscribed   : 20 credits / day (resets daily) + monthly pool from plan
-Spend order  : daily first, then monthly pool
+Free users   : 20 credits / day (resets daily, never accumulates) + 80 one-time bonus
+Subscribed   : 20 credits / day (resets daily) + monthly pool from plan + remaining bonus
+Spend order  : daily first → bonus → monthly pool
 Monthly pool : wiped and refreshed on each billing cycle (handled by webhook)
+Bonus pool   : one-time 80 credits on registration, never refills
 """
 
 import datetime
@@ -81,6 +82,7 @@ DOLLARS_PER_CREDIT  = 0.01
 MARKUP              = 1.0   # No markup — margin comes from bundle pricing
 FREE_DAILY_CREDITS  = 20
 SUB_DAILY_CREDITS   = 20
+INITIAL_BONUS       = 80    # One-time bonus on registration
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 
@@ -117,7 +119,8 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
     """
     Every day: reset daily_credits to 20 (never accumulates).
     Monthly pool is untouched here — managed by webhook only.
-    Combined balance shown to user = daily_credits + monthly_pool.
+    Bonus pool is untouched — one-time only.
+    Combined balance shown to user = daily + bonus + monthly.
 
     Only hits the DB with a write when the date has actually changed,
     avoiding unnecessary FOR UPDATE locks on every status poll.
@@ -126,7 +129,7 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
 
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT credits_daily, credits_daily_reset, credits_monthly
+            """SELECT credits_daily, credits_daily_reset, credits_monthly, credits_bonus
                FROM users WHERE id = %s""",
             (user_id,)
         )
@@ -136,7 +139,8 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
 
         daily      = float(row["credits_daily"]) if row.get("credits_daily") is not None else 20.0
         reset_date = row["credits_daily_reset"]
-        monthly    = row["credits_monthly"] or 0
+        monthly    = float(row["credits_monthly"] or 0)
+        bonus      = float(row.get("credits_bonus") or 0)
 
         if isinstance(reset_date, str):
             reset_date = datetime.date.fromisoformat(reset_date)
@@ -147,14 +151,14 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
                 """UPDATE users
                    SET credits_daily = %s,
                        credits_daily_reset = %s,
-                       credits_balance = %s + credits_monthly
+                       credits_balance = %s + credits_bonus + credits_monthly
                    WHERE id = %s""",
                 (daily, today, daily, user_id)
             )
             conn.commit()
         else:
             cur.execute(
-                "UPDATE users SET credits_balance = %s + credits_monthly WHERE id = %s",
+                "UPDATE users SET credits_balance = %s + credits_bonus + credits_monthly WHERE id = %s",
                 (daily, user_id)
             )
             conn.commit()
@@ -181,10 +185,10 @@ def get_balance(conn, user_id: int) -> dict:
     plan = row.get("plan") or "free"
     balance = refresh_daily_credits(conn, user_id, is_subscribed)
 
-    # Total plan limit = daily credits + monthly pool
+    # Total plan limit = daily credits + bonus + monthly pool
     monthly = PLAN_MONTHLY_LIMITS.get(plan, 0)
     daily = SUB_DAILY_CREDITS if is_subscribed else FREE_DAILY_CREDITS
-    plan_limit = daily + monthly
+    plan_limit = daily + INITIAL_BONUS + monthly
 
     return {
         "balance": balance,
@@ -245,31 +249,47 @@ def deduct_credits(conn, user_id: int, job_id: str, turn: int, tokens_used: int,
         credits_used = tokens_to_credits(tokens_used, 0, 0, 0, model=model)
 
     with conn.cursor() as cur:
-        # Deduct from daily first, then monthly
+        # Deduct in order: daily → bonus → monthly
         cur.execute(
-            "SELECT credits_daily, credits_monthly FROM users WHERE id = %s FOR UPDATE",
+            "SELECT credits_daily, credits_bonus, credits_monthly FROM users WHERE id = %s FOR UPDATE",
             (user_id,)
         )
         row = cur.fetchone()
         daily   = float(row["credits_daily"] or 0)
+        bonus   = float(row.get("credits_bonus") or 0)
         monthly = float(row["credits_monthly"] or 0)
 
         remaining = credits_used
+
+        # 1. Deduct from daily first
         if daily >= remaining:
             daily -= remaining
             remaining = 0
         else:
             remaining -= daily
             daily = 0
+
+        # 2. Then from bonus
+        if remaining > 0:
+            if bonus >= remaining:
+                bonus -= remaining
+                remaining = 0
+            else:
+                remaining -= bonus
+                bonus = 0
+
+        # 3. Then from monthly
+        if remaining > 0:
             monthly = max(0, monthly - remaining)
 
         cur.execute(
             """UPDATE users
                SET credits_daily = %s,
+                   credits_bonus = %s,
                    credits_monthly = %s,
-                   credits_balance = %s + %s
+                   credits_balance = %s + %s + %s
                WHERE id = %s""",
-            (daily, monthly, daily, monthly, user_id)
+            (daily, bonus, monthly, daily, bonus, monthly, user_id)
         )
         cur.execute(
             """INSERT INTO job_credits (job_id, user_id, turn, tokens_used, credits_used)
