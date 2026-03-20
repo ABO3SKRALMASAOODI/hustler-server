@@ -274,11 +274,12 @@ class BaseAgent:
                     "content":     result if isinstance(result, str) else json.dumps(result),
                 })
 
-            # ── Execute image generation in parallel threads ───────────
-            # Images are independent of each other and take 15-30s each.
-            # Running them in parallel cuts generation time from N*30s to ~30s.
+            # ── Execute image generation in batched parallel threads ──
+            # Images are independent but Replicate rate limits at 5 burst.
+            # Process in batches of 4 with a stagger delay between batches.
             if image_blocks:
                 code_changed = True
+                BATCH_SIZE = 4
 
                 def _run_image(block):
                     name    = _get(block, "name")
@@ -295,31 +296,40 @@ class BaseAgent:
                     try:
                         result = self.tool_map[name](**args)
                     except Exception as e:
-                        result = f"IMAGE_GENERATION_FAILED: {str(e)[:120]} — use CSS gradient placeholder instead"
+                        result = f"IMAGE_GENERATION_FAILED: {str(e)[:120]} — use CSS gradient placeholder instead. Do NOT import this path."
 
                     if self.on_tool_end:
                         self.on_tool_end(name, args, result)
 
                     return call_id, result
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = {
-                        executor.submit(_run_image, block): block
-                        for block in image_blocks
-                    }
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            call_id, result = future.result()
-                        except Exception as e:
-                            block   = futures[future]
-                            call_id = _get(block, "id")
-                            result  = f"IMAGE_GENERATION_FAILED: {str(e)[:120]} — use CSS gradient placeholder instead"
+                # Split into batches of BATCH_SIZE
+                for batch_idx in range(0, len(image_blocks), BATCH_SIZE):
+                    batch = image_blocks[batch_idx:batch_idx + BATCH_SIZE]
 
-                        tool_results.append({
-                            "type":        "tool_result",
-                            "tool_use_id": call_id,
-                            "content":     result if isinstance(result, str) else json.dumps(result),
-                        })
+                    if batch_idx > 0:
+                        # Wait between batches to avoid rate limits
+                        print(f"[images] Waiting 3s before batch {batch_idx // BATCH_SIZE + 1}...")
+                        time.sleep(3)
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_SIZE) as executor:
+                        futures = {
+                            executor.submit(_run_image, block): block
+                            for block in batch
+                        }
+                        for future in concurrent.futures.as_completed(futures):
+                            try:
+                                call_id, result = future.result()
+                            except Exception as e:
+                                block   = futures[future]
+                                call_id = _get(block, "id")
+                                result  = f"IMAGE_GENERATION_FAILED: {str(e)[:120]} — use CSS gradient placeholder instead. Do NOT import this path."
+
+                            tool_results.append({
+                                "type":        "tool_result",
+                                "tool_use_id": call_id,
+                                "content":     result if isinstance(result, str) else json.dumps(result),
+                            })
 
             self.messages.append({"role": "user", "content": tool_results})
             self._apply_history_cache()

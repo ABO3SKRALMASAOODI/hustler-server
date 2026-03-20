@@ -1,4 +1,4 @@
-import argparse, os, json, time, traceback, subprocess
+import argparse, os, json, time, traceback, subprocess, re
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
@@ -92,8 +92,87 @@ def _save_build_output(workspace, success, stdout, stderr, phase):
         json.dump(data, f)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  PRE-BUILD: Verify image imports exist on disk
+# ══════════════════════════════════════════════════════════════════════════════
+
+def verify_image_imports(workspace):
+    """
+    Scan all .tsx/.jsx/.ts/.js files for image imports.
+    If an imported image file doesn't exist on disk, replace the import
+    with a comment and set the variable to undefined.
+    Returns a list of files that were patched.
+    """
+    src_dir = os.path.join(workspace, "src")
+    if not os.path.isdir(src_dir):
+        return []
+
+    patched_files = []
+
+    # Pattern matches: import someName from '../assets/something.jpg'
+    import_pattern = re.compile(
+        r"""^(import\s+(\w+)\s+from\s+['"])(\.\.?/[^'"]*\.(jpg|jpeg|png|webp|gif|svg))(['"];?\s*)$""",
+        re.MULTILINE
+    )
+
+    for root, dirs, filenames in os.walk(src_dir):
+        dirs[:] = [d for d in dirs if d not in {"node_modules", "dist", ".git"}]
+        for fname in filenames:
+            if not fname.endswith(('.tsx', '.jsx', '.ts', '.js')):
+                continue
+
+            filepath = os.path.join(root, fname)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            original = content
+            imports_to_remove = []
+
+            for match in import_pattern.finditer(content):
+                var_name = match.group(2)
+                rel_path = match.group(3)
+
+                # Resolve to absolute path
+                file_dir = os.path.dirname(filepath)
+                abs_image_path = os.path.normpath(os.path.join(file_dir, rel_path))
+
+                if not os.path.isfile(abs_image_path):
+                    print(f"[verify_images] MISSING: {rel_path} (imported in {fname} as '{var_name}')")
+                    imports_to_remove.append({
+                        "full_match": match.group(0),
+                        "var_name": var_name,
+                        "rel_path": rel_path,
+                    })
+
+            if not imports_to_remove:
+                continue
+
+            for imp in imports_to_remove:
+                content = content.replace(
+                    imp["full_match"],
+                    f"// [auto-removed] missing image: {imp['rel_path']}\n"
+                    f"const {imp['var_name']} = undefined;\n"
+                )
+
+            if content != original:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                patched_files.append(fname)
+                print(f"[verify_images] Patched {fname}: removed {len(imports_to_remove)} broken image import(s)")
+
+    return patched_files
+
+
 def build_project(workspace):
     try:
+        # ── Pre-build: patch any broken image imports ─────────────────
+        patched = verify_image_imports(workspace)
+        if patched:
+            print(f"[build] Pre-build: patched {len(patched)} file(s) with missing image imports")
+
         install = subprocess.run(
             ["npm", "install", "--include=dev", "--legacy-peer-deps"],
             cwd=workspace, capture_output=True, text=True, timeout=300
@@ -108,7 +187,7 @@ def build_project(workspace):
 
         result = subprocess.run(
             ["./node_modules/.bin/vite", "build"], cwd=workspace,
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=300
         )
         if result.returncode != 0:
             _save_build_output(workspace, False, result.stdout, result.stderr, "vite_build")

@@ -1168,10 +1168,33 @@ def _collect_project_files(job_folder):
     files = []
     seen  = set()
 
+    IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico'}
+ 
     def _add(abs_path, rel_path):
         if rel_path in seen:
             return
         seen.add(rel_path)
+ 
+        ext = os.path.splitext(abs_path)[1].lower()
+ 
+        if ext in IMAGE_EXTENSIONS:
+            # Show image files as metadata entries (can't display binary in code viewer)
+            try:
+                size_bytes = os.path.getsize(abs_path)
+                if size_bytes < 1024:
+                    size_str = f"{size_bytes} B"
+                elif size_bytes < 1024 * 1024:
+                    size_str = f"{size_bytes / 1024:.1f} KB"
+                else:
+                    size_str = f"{size_bytes / (1024*1024):.1f} MB"
+                files.append({
+                    "path": rel_path,
+                    "content": f"[Image file: {ext.upper().strip('.')} — {size_str}]"
+                })
+            except Exception:
+                pass
+            return
+ 
         try:
             with open(abs_path, "r", encoding="utf-8") as f:
                 content = f.read()

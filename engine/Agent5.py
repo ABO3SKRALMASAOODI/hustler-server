@@ -12,6 +12,7 @@ import json
 import anthropic
 import requests
 import replicate
+import time
 
 client = anthropic.Anthropic()
 
@@ -577,7 +578,7 @@ Never make sequential tool calls when they can be parallel.
 Always parallel:
 - Reading multiple unrelated files
 - Creating multiple components
-- Generating multiple images
+- Generating multiple images (max 4 at a time)
 - Creating a file and updating its import
 
 Sequential only when the output of one call is required as input to the next.
@@ -776,6 +777,9 @@ MANDATORY images for every commerce project:
 - One image per product (minimum 6 products)
 - One image per category section
 
+IMPORTANT: Generate images in batches of no more than 4 at a time.
+If you need 8 images, do two batches of 4.
+
 Generate all images in parallel in a single batch before writing any page components.
 Do not write Home.tsx, Shop.tsx, or ProductCard.tsx before the images exist —
 the components must import real images, not reference placeholder divs.
@@ -795,22 +799,28 @@ Strong prompt: "editorial fashion photograph of a woman in a flowing cream linen
 walking through a sunlit European market, natural light, film grain, wide angle,
 warm tones, high fashion magazine style"
 
+CRITICAL: Every image prompt must be UNIQUE and SPECIFIC to the individual product.
+Never use the same prompt template for different products — vary the subject,
+color, composition, angle, and background for each one.
+
 After generating, always import as ES6 modules:
   import heroImg from '../assets/hero.jpg'
   <img src={heroImg} />
 
 Never use string paths in JSX — they always produce broken images in Vite.
-If generation fails, use a CSS gradient — never a flat color block with just text on it.
+If generate_image returns IMAGE_GENERATION_FAILED, do NOT import that path.
+Instead use a CSS gradient — never a flat color block with just text on it.
 ────────────────────────────────────────────────────────
 BROKEN IMAGE PREVENTION
 ────────────────────────────────────────────────────────
 Before finishing, verify every image in the project:
-- Was generate_image called and confirmed successful?
+- Was generate_image called and confirmed successful (returned IMAGE_GENERATED, not IMAGE_GENERATION_FAILED)?
 - Is it imported as an ES6 module at the top of the file that uses it?
 - Is the import path correct relative to the file?
 - Is the imported variable used in JSX, not the string path?
 
 If any check fails — replace with a CSS gradient placeholder immediately.
+Do NOT import a path that returned IMAGE_GENERATION_FAILED.
 
 ────────────────────────────────────────────────────────
 CODE QUALITY
@@ -842,7 +852,7 @@ write_file           — new files or complete rewrites only, always write full 
 edit_file            — default for changes to existing files, old_str must be exact
 read_package_json    — always call before run_install_command
 read_console_logs    — only call when the user explicitly reports something is broken, do not call proactively
-generate_image       — call in parallel when generating multiple images
+generate_image       — call in parallel, MAX 4 at a time. If you need more, do multiple batches.
 request_backend      — call before any auth or database code
 request_stripe       — call before any payment or checkout code
 request_ai           — call before any AI or chatbot code
@@ -856,7 +866,8 @@ Before writing your summary, verify:
 - Every import resolves to a real file
 - index.css starts with the three Tailwind directives
 - No TODOs, stubs, or placeholder content anywhere
-- All images are imported as ES6 modules and confirmed generated
+- All images that returned IMAGE_GENERATED are imported as ES6 modules
+- All images that returned IMAGE_GENERATION_FAILED are NOT imported — use CSS gradients instead
 - Animations and hover states are present
 - The design has a clear committed aesthetic direction
 - The summary contains no instructions for the user, no emojis, no bullet points
@@ -1000,12 +1011,13 @@ anthropic_tools = [
             "- flux.dev: highest quality, any resolution, slower. Use for complex product shots.\n\n"
             "Max resolution: 1920x1920. Dimensions must be multiples of 32, min 512.\n"
             "Write detailed prompts — style, mood, lighting, content, photography style.\n"
-            "Call in parallel when generating multiple images."
+            "IMPORTANT: Generate max 4 images at a time. If you need more, do multiple batches.\n"
+            "If this returns IMAGE_GENERATION_FAILED, do NOT import that path — use a CSS gradient instead."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt":      {"type": "string", "description": "Detailed description of the image to generate."},
+                "prompt":      {"type": "string", "description": "Detailed description of the image to generate. Must be unique per image."},
                 "target_path": {"type": "string", "description": "File path where the image will be saved (prefer src/assets/)."},
                 "width":       {"type": "number", "description": "Image width (min 512, max 1920, multiple of 32). Defaults to 1024."},
                 "height":      {"type": "number", "description": "Image height (min 512, max 1920, multiple of 32). Defaults to 768."},
@@ -1248,6 +1260,9 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         except Exception as e:
             return f"SEARCH_ERROR: {str(e)}"
 
+    # ══════════════════════════════════════════════════════════════════════
+    #  FIXED: generate_image with retry, backoff, and validation
+    # ══════════════════════════════════════════════════════════════════════
     def generate_image(prompt: str, target_path: str, width: int = 1024, height: int = 768, model: str = "flux.schnell") -> str:
         try:
             print(f"[image_gen] Generating: {target_path} ({width}x{height}, {model})")
@@ -1255,22 +1270,52 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             height = max(512, min(1920, int(height)))
             width  = (width  // 32) * 32
             height = (height // 32) * 32
+
             parent = os.path.dirname(target_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
+
             model_map = {
                 "flux.schnell": "black-forest-labs/flux-schnell",
                 "flux.dev":     "black-forest-labs/flux-dev",
-                "flux2.dev":    "black-forest-labs/flux-2-pro",  # fast, 5s, high quality
+                "flux2.dev":    "black-forest-labs/flux-2-pro",
             }
             replicate_model = model_map.get(model, model_map["flux.schnell"])
+
             ext           = target_path.rsplit(".", 1)[-1].lower() if "." in target_path else "webp"
             format_map    = {"jpg": "jpg", "jpeg": "jpg", "png": "png", "webp": "webp"}
             output_format = format_map.get(ext, "webp")
-            replicate_input = {"prompt": prompt, "width": width, "height": height, "output_format": output_format, "output_quality": 90, "num_outputs": 1}
+
+            replicate_input = {
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "output_format": output_format,
+                "output_quality": 90,
+                "num_outputs": 1,
+            }
             if model == "flux.schnell":
                 replicate_input["go_fast"] = True
-            output = replicate.run(replicate_model, input=replicate_input)
+
+            # ── Retry with exponential backoff for rate limits ────────
+            max_retries = 3
+            output = None
+            for attempt in range(max_retries):
+                try:
+                    output = replicate.run(replicate_model, input=replicate_input)
+                    break
+                except Exception as e:
+                    err_str = str(e).lower()
+                    is_rate_limit = "429" in err_str or "rate limit" in err_str or "throttl" in err_str
+                    if is_rate_limit and attempt < max_retries - 1:
+                        delay = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                        print(f"[image_gen] Rate limited on attempt {attempt+1}, retrying in {delay}s...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"[image_gen] Failed after {attempt+1} attempts: {e}")
+                        return f"IMAGE_GENERATION_FAILED: {str(e)[:200]} — use a CSS gradient placeholder instead. Do NOT import this path."
+
             image_url = None
             if isinstance(output, list) and len(output) > 0:
                 image_url = str(output[0])
@@ -1278,24 +1323,51 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 for item in output:
                     image_url = str(item)
                     break
+
             if not image_url:
-                return "IMAGE_GENERATION_FAILED: No output received from model"
-            response = requests.get(image_url, timeout=60)
-            if response.status_code != 200:
-                return f"IMAGE_GENERATION_FAILED: Download failed (status {response.status_code})"
+                return "IMAGE_GENERATION_FAILED: No output received from model — use a CSS gradient placeholder instead. Do NOT import this path."
+
+            # ── Download with retry ───────────────────────────────────
+            image_data = None
+            for dl_attempt in range(2):
+                try:
+                    response = requests.get(image_url, timeout=60)
+                    if response.status_code == 200:
+                        image_data = response.content
+                        break
+                    else:
+                        print(f"[image_gen] Download attempt {dl_attempt+1} failed: status {response.status_code}")
+                except Exception as dl_err:
+                    print(f"[image_gen] Download attempt {dl_attempt+1} error: {dl_err}")
+                if dl_attempt < 1:
+                    time.sleep(2)
+
+            if not image_data:
+                return f"IMAGE_GENERATION_FAILED: Download failed after retries — use a CSS gradient placeholder instead. Do NOT import this path."
+
+            # ── Verify file is a real image (not an error page) ───────
+            if len(image_data) < 1024:
+                print(f"[image_gen] WARNING: Downloaded file suspiciously small ({len(image_data)} bytes)")
+                return "IMAGE_GENERATION_FAILED: Generated file too small, likely an error — use a CSS gradient placeholder instead. Do NOT import this path."
+
             with open(target_path, "wb") as f:
-                f.write(response.content)
-            file_size_kb = len(response.content) / 1024
+                f.write(image_data)
+
+            file_size_kb = len(image_data) / 1024
             print(f"[image_gen] Saved: {target_path} ({file_size_kb:.1f} KB)")
+
             add_file(target_path)
             agent6.notify_reviewer({"type": "IMAGE_GENERATED", "path": target_path, "prompt": prompt})
+
             if target_path.startswith("src/"):
-                return f"IMAGE_GENERATED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
+                return f"IMAGE_GENERATED PATH:{target_path} SIZE:{file_size_kb:.1f}KB — Import as ES6 module: import img from './{target_path}'"
             else:
                 public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
-                return f"IMAGE_GENERATED PATH:{target_path} — Reference in code as {public_ref}"
+                return f"IMAGE_GENERATED PATH:{target_path} SIZE:{file_size_kb:.1f}KB — Reference in code as {public_ref}"
+
         except Exception as e:
-            return f"IMAGE_GENERATION_FAILED: {str(e)}"
+            print(f"[image_gen] Exception: {e}")
+            return f"IMAGE_GENERATION_FAILED: {str(e)[:200]} — use a CSS gradient placeholder instead. Do NOT import this path."
 
     def edit_image(image_paths: list, prompt: str, target_path: str, aspect_ratio: str = "16:9") -> str:
         try:
