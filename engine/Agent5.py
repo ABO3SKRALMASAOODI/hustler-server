@@ -308,6 +308,12 @@ A table with RLS enabled but no policies will block ALL access from the frontend
 
 CRITICAL: The column names in your TypeScript interfaces MUST exactly match the database column names you created.
 
+CRITICAL: When mapping images to database records (e.g. productImages[product.name]),
+the mapping keys MUST exactly match the values stored in the database.
+After seeding data with specific names like "Elevate Sports Bra", the image mapping
+must use that exact string — not a shortened version like "Sports Bra".
+Always call list_tables or run_sql to verify the actual data before writing image mappings.
+
 Standard RLS pattern for user-owned data (call these 4 policies for each table):
 - SELECT: using_expression = "auth.uid() = user_id"
 - INSERT: using_expression = "true", check_expression = "auth.uid() = user_id"
@@ -677,6 +683,7 @@ REQUIRED for every project:
 - At least one framer-motion entrance animation on the hero or first section
 - Hover states on every interactive element
 - Realistic domain-appropriate content throughout
+-All button's are functional and working no dead button leftover
 
 ────────────────────────────────────────────────────────
 AESTHETIC DIRECTIONS
