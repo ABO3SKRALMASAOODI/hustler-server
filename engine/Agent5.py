@@ -561,11 +561,19 @@ On every new project, execute these steps — batch parallel calls where possibl
 7. Output your plan.
 8. Execute immediately.
 
+CRITICAL — SCAFFOLD ENTRY POINT:
+The scaffold template has src/pages/Index.tsx as the home page (route "/") in App.tsx.
+It shows a default "Welcome to Your Blank App" placeholder.
+You MUST overwrite src/pages/Index.tsx (or replace the "/" route in App.tsx) with the
+actual app content on EVERY new project. If you create a component at a different route
+like "/counter", users will still see the placeholder at "/".
+ALWAYS make sure the root route "/" renders your main app content, not the scaffold default.
+Either rewrite Index.tsx directly, or update App.tsx to point "/" at your new component.
+
 For follow-up edits:
 - Do not re-run the startup sequence.
 - Read only the files directly relevant to the change.
 - Use edit_file by default. Use write_file only for new files or full rewrites.
-
 ────────────────────────────────────────────────────────
 PLANNING (NEW PROJECTS ONLY)
 ────────────────────────────────────────────────────────
