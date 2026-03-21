@@ -41,8 +41,10 @@ def write_state(workspace, state, extra=None):
         json.dump(data, f)
 
 
-def append_message(workspace, role, text, token_breakdown=None, credits=None):
+def append_message(workspace, role, text, token_breakdown=None, credits=None, attachments=None):
     entry = {"role": role, "text": text, "ts": time.time()}
+    if attachments:
+        entry["attachments"] = attachments
     if token_breakdown:
         entry["token_breakdown"] = token_breakdown
         entry["tokens_used"]     = sum(token_breakdown.values())
@@ -662,7 +664,10 @@ def main():
         else:
             chat_input = user_message
 
-        append_message(WORKSPACE, "user", user_message)
+        user_attachments = None
+        if attachments:
+            user_attachments = [{"name": a["filename"], "type": a["media_type"]} for a in attachments]
+        append_message(WORKSPACE, "user", user_message, attachments=user_attachments)
 
         write_progress(WORKSPACE, {
             "action": "thinking",
