@@ -677,16 +677,10 @@ def main():
             ]
         append_message(WORKSPACE, "user", user_message, attachments=user_attachments)
 
-        # Inject batching reminder for the agent only (not saved to messages.jsonl)
-        agent_suffix = "\n\n[SYSTEM: Batch parallel tool calls aggressively. Never sequential when parallel is possible. Max 4 images per batch.]"
-        if isinstance(chat_input, list):
-            # Attachments mode — append to the last text block
-            for block in reversed(chat_input):
-                if block.get("type") == "text":
-                    block["text"] += agent_suffix
-                    break
-        else:
-            chat_input = chat_input + agent_suffix
+        # Temp: inject batching reminder as separate exchange before current turn
+        generator.messages.append({"role": "user", "content": "[SYSTEM: Batch parallel tool calls aggressively. Never sequential when parallel is possible. Max 4 images per batch. Replace Index.tsx with your main app content.]"})
+        generator.messages.append({"role": "assistant", "content": "Understood."})
+
         write_progress(WORKSPACE, {
             "action": "thinking",
             "detail": "Planning your application...",
