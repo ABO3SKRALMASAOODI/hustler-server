@@ -61,6 +61,8 @@ ALLOWED_UPLOAD_EXTENSIONS = {
     'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',
     'pdf',
     'txt', 'md', 'csv',
+    'json', 'py', 'js', 'ts', 'jsx', 'tsx', 'css', 'html',
+    'env', 'yaml', 'yml', 'xml', 'sql', 'sh', 'toml',
 }
 
 
