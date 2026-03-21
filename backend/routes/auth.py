@@ -81,6 +81,14 @@ TEMPLATE_JOB_IDS = {
 # ------------------------------------------------------------------ #
 #  Preview URL helper                                                  #
 # ------------------------------------------------------------------ #
+@auth_bp.route('/job/<job_id>/upload/<filename>')
+@token_required
+def serve_upload(user_id, job_id, filename):
+    """Serve an uploaded file back to the user (for attachment previews)."""
+    uploads_dir = os.path.join(OUTPUTS_DIR, job_id, "uploads")
+    if not os.path.isdir(uploads_dir):
+        return jsonify({"error": "Not found"}), 404
+    return send_from_directory(uploads_dir, filename)
 
 def _get_preview_url(job_id, job_folder):
     from flask import request as flask_request

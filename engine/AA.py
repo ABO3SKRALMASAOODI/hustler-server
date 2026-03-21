@@ -666,7 +666,15 @@ def main():
 
         user_attachments = None
         if attachments:
-            user_attachments = [{"name": a["filename"], "type": a["media_type"]} for a in attachments]
+            job_id_str = os.path.basename(WORKSPACE)
+            user_attachments = [
+                {
+                    "name": a["filename"],
+                    "type": a["media_type"],
+                    "url": f"/api-backend/auth/job/{job_id_str}/upload/{os.path.basename(a['path'])}",
+                }
+                for a in attachments
+            ]
         append_message(WORKSPACE, "user", user_message, attachments=user_attachments)
 
         write_progress(WORKSPACE, {
