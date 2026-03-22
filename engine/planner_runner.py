@@ -80,6 +80,13 @@ def write_planner_state(workspace, state, extra=None):
     with open(os.path.join(workspace, "planner_state.json"), "w") as f:
         json.dump(data, f)
 
+def append_main_message(workspace, role, text, extra=None):
+    """Also write planner messages to the main messages.jsonl so they persist."""
+    entry = {"role": role, "text": text, "ts": time.time(), "source": "planner"}
+    if extra:
+        entry.update(extra)
+    with open(os.path.join(workspace, "messages.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 def append_planner_message(workspace, role, text, extra=None):
     entry = {"role": role, "text": text, "ts": time.time()}
@@ -404,6 +411,11 @@ def make_tool_handlers(workspace):
             "context": context,
             "questions": questions,
         }))
+        append_main_message(workspace, "assistant", json.dumps({
+            "type": "questions",
+            "context": context,
+            "questions": questions,
+        }))
 
         print(f"[planner] Asking {len(questions)} questions, waiting for user...")
 
@@ -411,6 +423,7 @@ def make_tool_handlers(workspace):
         answer_text = answer_data.get("answer", "")
 
         append_planner_message(workspace, "user", answer_text)
+        append_main_message(workspace, "user", answer_text)
         print(f"[planner] Got answer: {answer_text[:100]}...")
 
         write_planner_state(workspace, "thinking")
@@ -433,7 +446,10 @@ def make_tool_handlers(workspace):
             "spec": spec,
             "summary": summary,
         }))
-
+        append_main_message(workspace, "assistant", json.dumps({
+            "type": "spec",
+            "summary": summary,
+        }))
         print(f"[planner] Spec proposed, waiting for user decision...")
 
         answer_data = wait_for_answer(workspace)
@@ -441,12 +457,18 @@ def make_tool_handlers(workspace):
         detail = answer_data.get("detail", "")
 
         append_planner_message(workspace, "user", f"[{decision}] {detail}")
+        append_main_message(workspace, "user", f"[{decision}] {detail}")
 
         if decision == "approve":
             print(f"[planner] Spec approved!")
             spec_path = os.path.join(workspace, "planner_spec.json")
             with open(spec_path, "w") as f:
                 json.dump({"spec": spec, "summary": summary}, f, indent=2)
+            # Write transition marker
+            append_main_message(workspace, "system", json.dumps({
+                "type": "planner_complete",
+                "summary": summary,
+            }))
             return StopAgent(
                 data={"spec": spec, "summary": summary},
                 reason="APPROVED"
@@ -490,7 +512,10 @@ def make_tool_handlers(workspace):
             "summary": current_summary,
             "edits": [{"path": e["path"], "reason": e.get("reason", "")} for e in edits],
         }))
-
+        append_main_message(workspace, "assistant", json.dumps({
+            "type": "spec_edit",
+            "summary": current_summary,
+        }))
         print(f"[planner] Edits applied, waiting for decision...")
 
         answer_data = wait_for_answer(workspace)
@@ -498,12 +523,18 @@ def make_tool_handlers(workspace):
         detail = answer_data.get("detail", "")
 
         append_planner_message(workspace, "user", f"[{decision}] {detail}")
+        append_main_message(workspace, "user", f"[{decision}] {detail}")
 
         if decision == "approve":
             print(f"[planner] Spec approved after edits!")
             spec_path = os.path.join(workspace, "planner_spec.json")
             with open(spec_path, "w") as f:
                 json.dump({"spec": dict(current_spec), "summary": current_summary}, f, indent=2)
+            # Write transition marker
+            append_main_message(workspace, "system", json.dumps({
+                "type": "planner_complete",
+                "summary": summary,
+            }))
             return StopAgent(
                 data={"spec": dict(current_spec), "summary": current_summary},
                 reason="APPROVED"
@@ -615,6 +646,7 @@ def run_planner(workspace, message, model_override=None):
 
         user_message = message.strip()
         append_planner_message(workspace, "user", user_message)
+        append_main_message(workspace, "user", user_message)
 
         print(f"[planner] Starting with message: {user_message[:100]}...")
 
@@ -645,6 +677,7 @@ def run_planner(workspace, message, model_override=None):
         elif text:
             # Text-only response (no tool calls) — e.g. response to "hi"
             append_planner_message(workspace, "planner", text)
+            append_main_message(workspace, "assistant", text)
             write_planner_state(workspace, "waiting_reply", {
                 "message": text,
                 "credits_used": credits_used,
