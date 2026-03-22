@@ -63,7 +63,11 @@ def load_history(workspace):
             line = line.strip()
             if line:
                 try:
-                    messages.append(json.loads(line))
+                    entry = json.loads(line)
+                    # Skip planner messages and system markers — builder only sees its own conversation
+                    if entry.get("source") == "planner" or entry.get("role") == "system":
+                        continue
+                    messages.append(entry)
                 except json.JSONDecodeError:
                     continue
     return messages
