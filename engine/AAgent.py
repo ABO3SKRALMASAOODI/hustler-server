@@ -20,6 +20,23 @@ def _serialize_content_block(block) -> dict:
     return {k: v for k, v in d.items() if k in allowed and v is not None}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  STOP SENTINEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+class StopAgent:
+    """
+    Return this from any tool handler to stop the agent loop immediately.
+    The tool result is still appended to messages cleanly before exit.
+
+    BaseAgent.chat() returns (text, totals, code_changed, stop.data)
+    when a StopAgent is returned, or (text, totals, code_changed, None) normally.
+    """
+    def __init__(self, data: Any = None, reason: str = ""):
+        self.data = data
+        self.reason = reason
+
+
 class BaseAgent:
     def __init__(
         self,
@@ -148,6 +165,15 @@ class BaseAgent:
     }
 
     def chat(self, user_msg):
+        """
+        Run the agentic loop.
+
+        Returns (text, token_totals, code_changed, stop_data) where:
+          - text:         the final assistant text response
+          - token_totals: dict with input/output/cache_write/cache_read
+          - code_changed: True if any code-writing tool was called
+          - stop_data:    the data payload from StopAgent if a tool returned one, else None
+        """
         if self.pending_notices:
             notice_text = str(self.pending_notices)
             if isinstance(user_msg, str):
@@ -230,7 +256,7 @@ class BaseAgent:
                     for b in resp.content
                     if _get(b, "type") == "text"
                 )
-                return text, totals, code_changed
+                return text, totals, code_changed, None
 
             thinking_text = "".join(
                 _get(b, "text", "") for b in resp.content if _get(b, "type") == "text"
@@ -244,9 +270,9 @@ class BaseAgent:
             other_blocks  = [b for b in tool_uses if _get(b, "name") != "generate_image"]
 
             tool_results = []
+            stop_sentinel = None
 
             # ── Execute non-image tools sequentially ──────────────────
-            # File writes must stay sequential to avoid race conditions
             for block in other_blocks:
                 name    = _get(block, "name")
                 call_id = _get(block, "id")
@@ -265,18 +291,23 @@ class BaseAgent:
 
                 result = self.tool_map[name](**args)
 
+                # ── StopAgent check ───────────────────────────────────
+                if isinstance(result, StopAgent):
+                    stop_sentinel = result
+                    result_content = result.reason if result.reason else "APPROVED"
+                else:
+                    result_content = result if isinstance(result, str) else json.dumps(result)
+
                 if self.on_tool_end:
-                    self.on_tool_end(name, args, result)
+                    self.on_tool_end(name, args, result_content)
 
                 tool_results.append({
                     "type":        "tool_result",
                     "tool_use_id": call_id,
-                    "content":     result if isinstance(result, str) else json.dumps(result),
+                    "content":     result_content,
                 })
 
             # ── Execute image generation in batched parallel threads ──
-            # Images are independent but Replicate rate limits at 5 burst.
-            # Process in batches of 4 with a stagger delay between batches.
             if image_blocks:
                 code_changed = True
                 BATCH_SIZE = 4
@@ -303,12 +334,10 @@ class BaseAgent:
 
                     return call_id, result
 
-                # Split into batches of BATCH_SIZE
                 for batch_idx in range(0, len(image_blocks), BATCH_SIZE):
                     batch = image_blocks[batch_idx:batch_idx + BATCH_SIZE]
 
                     if batch_idx > 0:
-                        # Wait between batches to avoid rate limits
                         print(f"[images] Waiting 3s before batch {batch_idx // BATCH_SIZE + 1}...")
                         time.sleep(3)
 
@@ -333,3 +362,7 @@ class BaseAgent:
 
             self.messages.append({"role": "user", "content": tool_results})
             self._apply_history_cache()
+
+            # ── Exit cleanly if any tool signalled stop ────────────────
+            if stop_sentinel is not None:
+                return "", totals, code_changed, stop_sentinel.data

@@ -1,0 +1,659 @@
+"""
+planner_runner.py — Background runner for the Requirements Gatherer (Planner) agent.
+
+Similar to AA.py but for the planner phase. Runs in a background thread,
+communicates with the frontend via file-based signaling in the job workspace.
+
+Files used:
+  planner_state.json   — current planner status (waiting_questions, waiting_spec, waiting_edit, completed, rejected, error)
+  planner_messages.jsonl — planner conversation log (separate from execution agent messages)
+  planner_answer.json  — frontend writes user answers here, runner picks them up
+  planner_spec.json    — the final approved spec (read by frontend to pass to execution agent)
+
+Usage:
+  python planner_runner.py --workspace /path/to/job --message "Build me a pet store"
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import traceback
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
+
+import anthropic
+from dotenv import load_dotenv
+load_dotenv()
+
+from AAgent import BaseAgent, StopAgent
+
+try:
+    from credits import tokens_to_credits
+except ImportError:
+    def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="hb-6-pro"):
+        pricing = {
+            "hb-6":     {"input": 1.00, "output": 5.00,  "cache_write": 1.25, "cache_read": 0.10},
+            "hb-6-pro": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+            "hb-7":     {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+        }
+        p = pricing.get(model, pricing["hb-6-pro"])
+        cost_dollars = (
+            (input_tokens       * p["input"]) +
+            (output_tokens      * p["output"]) +
+            (cache_write_tokens * p["cache_write"]) +
+            (cache_read_tokens  * p["cache_read"])
+        ) / 1_000_000
+        return round(cost_dollars / 0.01, 2)
+
+
+ANTHROPIC_TO_HB = {
+    "claude-haiku-4-5-20251001": "hb-6",
+    "claude-sonnet-4-6":         "hb-6-pro",
+    "claude-opus-4-6":           "hb-7",
+}
+
+client = anthropic.Anthropic()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FILE I/O HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def write_planner_state(workspace, state, extra=None):
+    data = {"state": state, "updated_at": time.time()}
+    if extra:
+        data.update(extra)
+    with open(os.path.join(workspace, "planner_state.json"), "w") as f:
+        json.dump(data, f)
+
+
+def append_planner_message(workspace, role, text, extra=None):
+    entry = {"role": role, "text": text, "ts": time.time()}
+    if extra:
+        entry.update(extra)
+    with open(os.path.join(workspace, "planner_messages.jsonl"), "a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def wait_for_answer(workspace, timeout=600):
+    """Block until planner_answer.json appears or timeout. Returns parsed content."""
+    answer_path = os.path.join(workspace, "planner_answer.json")
+    quit_path = os.path.join(workspace, "planner_quit.json")
+    elapsed = 0
+    while elapsed < timeout:
+        if os.path.exists(quit_path):
+            try:
+                os.remove(quit_path)
+            except Exception:
+                pass
+            raise PlannerQuit()
+        if os.path.exists(answer_path):
+            try:
+                with open(answer_path) as f:
+                    data = json.load(f)
+                os.remove(answer_path)
+                return data
+            except Exception:
+                pass
+        time.sleep(2)
+        elapsed += 2
+    raise TimeoutError("No answer from user within timeout")
+
+
+class PlannerQuit(Exception):
+    """User clicked Quit Planner."""
+    pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SYSTEM PROMPT (same as your research, adapted for web)
+# ══════════════════════════════════════════════════════════════════════════════
+
+REQUIREMENTS_AGENT_SYSTEM_PROMPT = """You are the Requirements Gatherer — the first agent in a multi-agent web development pipeline.
+
+Your ONLY job is to extract a complete, unambiguous specification from the user's request before handing it off to the Builder agent. The Builder works autonomously with zero user interaction, so every gap you leave becomes a wrong assumption baked into the final product.
+
+────────────────────────────────────────────────────────
+YOUR THREE TOOLS
+────────────────────────────────────────────────────────
+1. ask_user     — Present a numbered list of questions to the user. Use whenever critical information is missing.
+2. propose_spec — Submit the completed specification for user review.
+3. edit_spec    — Apply targeted patches when the user requests changes after propose_spec.
+
+FLOW:
+  ask_user (loop until complete) -> propose_spec ->
+    approved : stop (tool returns APPROVED via StopAgent)
+    rejected : continue gathering with rejection feedback
+    edit     : call edit_spec with patches ->
+                 approved : stop (tool returns APPROVED)
+                 rejected : continue with rejection feedback
+                 more edits : tool returns "EDIT REQUEST: ..." — call edit_spec again
+
+IMPORTANT:
+- After propose_spec returns an edit request, ALWAYS call edit_spec. Never call propose_spec again.
+- After any tool returns APPROVED, stop immediately — do not say anything.
+- After rejection, you get the rejection feedback — use it to ask better questions or revise.
+- Never reconstruct the full spec from memory. edit_spec patches the live spec.
+
+────────────────────────────────────────────────────────
+THE STACK (MANDATORY — Builder uses this exact stack)
+────────────────────────────────────────────────────────
+- Framework: React + Vite + TypeScript
+- Styling: Tailwind CSS with CSS variable design tokens in index.css
+- Animation: Framer Motion
+- Routing: React Router
+- Backend (optional): Supabase (auth + postgres database + RLS)
+- Payments (optional): Stripe via hosted proxy
+- AI (optional): Claude via hosted proxy
+- Fonts: Google Fonts (display font for headings, sans for body)
+- Images: AI-generated via Replicate and saved to src/assets/
+- Components: one primary component per file, src/pages/ for pages, src/components/ for reusable UI
+
+────────────────────────────────────────────────────────
+WHAT YOU MUST ALWAYS CLARIFY
+────────────────────────────────────────────────────────
+Before calling propose_spec, you must know:
+
+PRODUCT — core purpose, target user, key features (ranked), pages/screens
+DESIGN — aesthetic direction, color preferences, font style, motion style
+DATA & AUTH — user accounts needed?, what data to save, real backend or localStorage
+CONTENT — real content to appear, image descriptions
+SCOPE — what is out of scope, third-party APIs needed
+
+────────────────────────────────────────────────────────
+HOW TO ASK QUESTIONS
+────────────────────────────────────────────────────────
+Call ask_user with a numbered list. Group related questions. Be direct.
+Batch ALL questions for a given round into one call.
+Do NOT ask more than 8 questions per round.
+The user is on a web interface — keep it scannable.
+
+────────────────────────────────────────────────────────
+SPEC QUALITY RULES
+────────────────────────────────────────────────────────
+- Every page gets its own full object — no page may be skipped.
+- Use specific hex values, font names, and motion descriptions.
+- Every action must state exactly what happens.
+- Image descriptions must be detailed enough for AI generation.
+- Never infer or assume values not explicitly given — ask instead.
+
+────────────────────────────────────────────────────────
+TONE
+────────────────────────────────────────────────────────
+Professional, direct, efficient. No filler phrases. No emojis."""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TOOL DEFINITIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+REQUIREMENTS_AGENT_TOOLS = [
+    {
+        "name": "ask_user",
+        "description": (
+            "Present a numbered list of questions to the user to fill gaps in the requirements. "
+            "Batch ALL questions for this round into one call. Max 8 questions per round."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of specific, answerable questions."
+                },
+                "context": {
+                    "type": "string",
+                    "description": "One sentence shown above the questions explaining what they unlock."
+                }
+            },
+            "required": ["questions", "context"]
+        }
+    },
+    {
+        "name": "propose_spec",
+        "description": (
+            "Submit the completed requirements spec for user review. "
+            "Returns APPROVED (stop), REJECTED with feedback, or EDIT REQUEST with instructions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "3-5 sentence summary of what will be built."
+                },
+                "spec": {
+                    "type": "object",
+                    "description": "The full structured specification.",
+                    "properties": {
+                        "project": {
+                            "type": "object",
+                            "properties": {
+                                "name":        {"type": "string"},
+                                "purpose":     {"type": "string"},
+                                "target_user": {"type": "string"}
+                            },
+                            "required": ["name", "purpose", "target_user"]
+                        },
+                        "pages": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name":            {"type": "string"},
+                                    "route":           {"type": "string"},
+                                    "description":     {"type": "string"},
+                                    "sections":        {"type": "array", "items": {"type": "string"}},
+                                    "interactions":    {"type": "array", "items": {"type": "string"}},
+                                    "states":          {"type": "array", "items": {"type": "string"}},
+                                    "auth_visibility": {"type": "string"}
+                                },
+                                "required": ["name", "route", "description"]
+                            }
+                        },
+                        "design": {
+                            "type": "object",
+                            "properties": {
+                                "aesthetic": {"type": "string"},
+                                "colors": {"type": "object"},
+                                "typography": {"type": "object"},
+                                "motion": {"type": "string"}
+                            },
+                            "required": ["aesthetic", "colors", "typography", "motion"]
+                        },
+                        "data": {
+                            "type": "object",
+                            "properties": {
+                                "backend":       {"type": "string"},
+                                "auth_required": {"type": "boolean"},
+                                "tables":        {"type": "array", "items": {"type": "object"}},
+                                "data_flow":     {"type": "string"}
+                            },
+                            "required": ["backend", "auth_required", "data_flow"]
+                        },
+                        "content": {
+                            "type": "object",
+                            "properties": {
+                                "copy":   {"type": "object"},
+                                "images": {"type": "array", "items": {"type": "object"}}
+                            },
+                            "required": ["copy", "images"]
+                        },
+                        "out_of_scope": {"type": "array", "items": {"type": "string"}},
+                        "assumptions":  {"type": "array", "items": {"type": "string"}},
+                        "notes":        {"type": "string"}
+                    },
+                    "required": ["project", "pages", "design", "data", "content", "out_of_scope", "assumptions", "notes"]
+                }
+            },
+            "required": ["summary", "spec"]
+        }
+    },
+    {
+        "name": "edit_spec",
+        "description": (
+            "Apply targeted patches to the live spec. "
+            "Returns APPROVED, REJECTED with feedback, or EDIT REQUEST with more instructions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path":   {"type": "string", "description": "Dot-notation path (e.g. 'design.colors.accent')"},
+                            "value":  {"description": "New value (any JSON type)"},
+                            "reason": {"type": "string"}
+                        },
+                        "required": ["path", "value", "reason"]
+                    }
+                },
+                "summary": {"type": "string", "description": "Updated summary reflecting edits."}
+            },
+            "required": ["edits", "summary"]
+        }
+    }
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _set_nested(d, path, value):
+    parts = path.split(".")
+    target = d
+    for part in parts[:-1]:
+        key = int(part) if isinstance(target, list) else part
+        target = target[key]
+    last = parts[-1]
+    if isinstance(target, list):
+        target[int(last)] = value
+    else:
+        target[last] = value
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TOOL HANDLERS (file-based I/O for web)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def make_tool_handlers(workspace):
+    """
+    Returns tool handler functions that communicate via file-based signaling.
+    Each handler writes state, blocks until the frontend provides a response,
+    then returns the result to the agent.
+    """
+
+    # Shared mutable spec state
+    current_spec = {}
+    current_summary = ""
+
+    def handle_ask_user(questions, context):
+        """
+        Write questions to planner_state.json, wait for answer.
+        """
+        nonlocal current_spec, current_summary
+
+        # Save questions for frontend to render
+        write_planner_state(workspace, "waiting_questions", {
+            "questions": questions,
+            "context": context,
+        })
+
+        # Log the questions
+        append_planner_message(workspace, "planner", json.dumps({
+            "type": "questions",
+            "context": context,
+            "questions": questions,
+        }))
+
+        print(f"[planner] Asking {len(questions)} questions, waiting for user...")
+
+        # Block until answer arrives
+        answer_data = wait_for_answer(workspace)
+        answer_text = answer_data.get("answer", "")
+
+        # Log the user's answer
+        append_planner_message(workspace, "user", answer_text)
+
+        print(f"[planner] Got answer: {answer_text[:100]}...")
+
+        # Update state to show we're thinking again
+        write_planner_state(workspace, "thinking")
+
+        return answer_text
+
+    def handle_propose_spec(spec, summary):
+        """
+        Save spec, write to planner_state.json for frontend to render,
+        wait for user decision (approve/edit/reject).
+        """
+        nonlocal current_spec, current_summary
+
+        current_spec.clear()
+        current_spec.update(spec)
+        current_summary = summary
+
+        # Save spec for frontend
+        write_planner_state(workspace, "waiting_spec", {
+            "spec": spec,
+            "summary": summary,
+        })
+
+        append_planner_message(workspace, "planner", json.dumps({
+            "type": "spec",
+            "spec": spec,
+            "summary": summary,
+        }))
+
+        print(f"[planner] Spec proposed, waiting for user decision...")
+
+        # Block until decision
+        answer_data = wait_for_answer(workspace)
+        decision = answer_data.get("decision", "").lower()
+        detail = answer_data.get("detail", "")
+
+        append_planner_message(workspace, "user", f"[{decision}] {detail}")
+
+        if decision == "approve":
+            print(f"[planner] Spec approved!")
+            # Save final spec
+            spec_path = os.path.join(workspace, "planner_spec.json")
+            with open(spec_path, "w") as f:
+                json.dump({"spec": spec, "summary": summary}, f, indent=2)
+            return StopAgent(
+                data={"spec": spec, "summary": summary},
+                reason="APPROVED"
+            )
+
+        if decision == "reject":
+            print(f"[planner] Spec rejected with feedback: {detail}")
+            write_planner_state(workspace, "thinking")
+            return f"REJECTED — User feedback: {detail}\n\nUse this feedback to ask better questions with ask_user and then propose a revised spec."
+
+        # Edit request
+        print(f"[planner] Edit requested: {detail}")
+        write_planner_state(workspace, "thinking")
+        return f"EDIT REQUEST: {detail}"
+
+    def handle_edit_spec(edits, summary):
+        """
+        Apply patches to current_spec, save updated spec for frontend,
+        wait for user decision.
+        """
+        nonlocal current_spec, current_summary
+
+        if not current_spec:
+            return "ERROR: No spec has been proposed yet. Call propose_spec first."
+
+        # Apply patches
+        for edit in edits:
+            path = edit["path"]
+            value = edit["value"]
+            try:
+                _set_nested(current_spec, path, value)
+                print(f"[planner] Patched {path}")
+            except (KeyError, IndexError, TypeError) as e:
+                print(f"[planner] Failed to patch {path}: {e}")
+
+        current_summary = summary
+
+        # Save updated spec for frontend
+        write_planner_state(workspace, "waiting_edit", {
+            "spec": dict(current_spec),
+            "summary": current_summary,
+            "edits_applied": [{"path": e["path"], "reason": e.get("reason", "")} for e in edits],
+        })
+
+        append_planner_message(workspace, "planner", json.dumps({
+            "type": "spec_edit",
+            "spec": dict(current_spec),
+            "summary": current_summary,
+            "edits": [{"path": e["path"], "reason": e.get("reason", "")} for e in edits],
+        }))
+
+        print(f"[planner] Edits applied, waiting for decision...")
+
+        # Block until decision
+        answer_data = wait_for_answer(workspace)
+        decision = answer_data.get("decision", "").lower()
+        detail = answer_data.get("detail", "")
+
+        append_planner_message(workspace, "user", f"[{decision}] {detail}")
+
+        if decision == "approve":
+            print(f"[planner] Spec approved after edits!")
+            spec_path = os.path.join(workspace, "planner_spec.json")
+            with open(spec_path, "w") as f:
+                json.dump({"spec": dict(current_spec), "summary": current_summary}, f, indent=2)
+            return StopAgent(
+                data={"spec": dict(current_spec), "summary": current_summary},
+                reason="APPROVED"
+            )
+
+        if decision == "reject":
+            print(f"[planner] Spec rejected after edits, feedback: {detail}")
+            write_planner_state(workspace, "thinking")
+            return f"REJECTED — User feedback: {detail}\n\nUse this feedback to ask better questions with ask_user and then propose a revised spec."
+
+        print(f"[planner] More edits requested: {detail}")
+        write_planner_state(workspace, "thinking")
+        return f"EDIT REQUEST: {detail}"
+
+    return {
+        "ask_user":     lambda questions, context: handle_ask_user(questions, context),
+        "propose_spec": lambda spec, summary: handle_propose_spec(spec, summary),
+        "edit_spec":    lambda edits, summary: handle_edit_spec(edits, summary),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SAVE CREDITS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_planner_deduction(workspace, token_breakdown, credits_used):
+    path = os.path.join(workspace, "deduct_credits.json")
+    existing = []
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+        except Exception:
+            existing = []
+
+    existing.append({
+        "input_tokens":       token_breakdown.get("input", 0),
+        "output_tokens":      token_breakdown.get("output", 0),
+        "cache_write_tokens": token_breakdown.get("cache_write", 0),
+        "cache_read_tokens":  token_breakdown.get("cache_read", 0),
+        "tokens_used":        sum(token_breakdown.values()),
+        "credits_used":       credits_used,
+        "source":             "planner",
+        "ts":                 time.time(),
+    })
+
+    with open(path, "w") as f:
+        json.dump(existing, f)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--message",   required=True)
+    parser.add_argument("--model",     default=None)
+    args = parser.parse_args()
+
+    WORKSPACE = args.workspace
+
+    # Resolve model
+    anthropic_model = args.model
+    if not anthropic_model:
+        meta_path = os.path.join(WORKSPACE, "meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                hb_model = meta.get("model", "hb-6")
+                model_map = {
+                    "hb-6":     "claude-haiku-4-5-20251001",
+                    "hb-6-pro": "claude-sonnet-4-6",
+                    "hb-7":     "claude-opus-4-6",
+                }
+                anthropic_model = model_map.get(hb_model, "claude-sonnet-4-6")
+            except Exception:
+                anthropic_model = "claude-sonnet-4-6"
+        else:
+            anthropic_model = "claude-sonnet-4-6"
+
+    hb_model = ANTHROPIC_TO_HB.get(anthropic_model, "hb-6-pro")
+    print(f"[planner] Using model: {anthropic_model} (HB: {hb_model})")
+
+    try:
+        write_planner_state(WORKSPACE, "thinking")
+
+        # Clean up any stale signal files
+        for stale in ["planner_answer.json", "planner_quit.json"]:
+            p = os.path.join(WORKSPACE, stale)
+            if os.path.exists(p):
+                os.remove(p)
+
+        # Create tool handlers
+        tool_handlers = make_tool_handlers(WORKSPACE)
+
+        # Create the agent
+        agent = BaseAgent(
+            client=client,
+            model=anthropic_model,
+            system_prompt=REQUIREMENTS_AGENT_SYSTEM_PROMPT,
+            tools=REQUIREMENTS_AGENT_TOOLS,
+            tool_map=tool_handlers,
+            temperature=1,
+            max_tokens=8096,
+            workspace=WORKSPACE,
+        )
+
+        user_message = args.message.strip()
+        append_planner_message(WORKSPACE, "user", user_message)
+
+        print(f"[planner] Starting with message: {user_message[:100]}...")
+
+        # Run the agentic loop
+        text, token_totals, code_changed, stop_data = agent.chat(user_message)
+
+        print(f"[planner] Agent finished. stop_data={'present' if stop_data else 'None'}")
+
+        # Calculate credits
+        credits_used = tokens_to_credits(
+            input_tokens=token_totals["input"],
+            output_tokens=token_totals["output"],
+            cache_write_tokens=token_totals["cache_write"],
+            cache_read_tokens=token_totals["cache_read"],
+            model=hb_model,
+        )
+        print(f"[planner] Credits: {credits_used} | Tokens: {token_totals}")
+
+        save_planner_deduction(WORKSPACE, token_totals, credits_used)
+
+        if stop_data is not None:
+            # Spec was approved
+            write_planner_state(WORKSPACE, "completed", {
+                "spec": stop_data.get("spec"),
+                "summary": stop_data.get("summary"),
+                "credits_used": credits_used,
+            })
+        else:
+            # Agent ended without approval (shouldn't normally happen)
+            write_planner_state(WORKSPACE, "completed", {
+                "message": text,
+                "credits_used": credits_used,
+            })
+
+    except PlannerQuit:
+        print(f"[planner] User quit the planner.")
+        write_planner_state(WORKSPACE, "quit")
+
+    except TimeoutError as e:
+        print(f"[planner] Timeout: {e}")
+        write_planner_state(WORKSPACE, "error", {"error": str(e)})
+
+    except Exception as e:
+        print(f"[planner] Error: {e}")
+        traceback.print_exc()
+        write_planner_state(WORKSPACE, "error", {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        })
+
+
+if __name__ == "__main__":
+    main()

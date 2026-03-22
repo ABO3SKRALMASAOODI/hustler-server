@@ -14,6 +14,8 @@ from routes.deploy import deploy_bp
 from routes.supabase_mgmt import supabase_bp
 from routes.stripe_mgmt import stripe_bp
 from routes.ai_proxy import ai_proxy_bp
+from backend.routes.planner import planner_bp
+
 load_dotenv()
 
 
@@ -62,6 +64,7 @@ def create_app():
     app.register_blueprint(supabase_bp,  url_prefix='/supabase')
     app.register_blueprint(stripe_bp,    url_prefix='/stripe')
     app.register_blueprint(ai_proxy_bp)
+    app.register_blueprint(planner_bp)
     return app
 
 

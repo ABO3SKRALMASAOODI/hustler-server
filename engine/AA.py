@@ -693,7 +693,7 @@ def main():
         generator.on_text       = hooks["on_text"]
         generator.on_rate_limit = hooks["on_rate_limit"]
 
-        output, token_breakdown, code_changed = generator.chat(chat_input)
+        output, token_breakdown, code_changed, _stop_data = generator.chat(chat_input)
 
         print(f"[AA] code_changed={code_changed} — {'will build' if code_changed else 'skipping build (text-only reply)'}")
 
