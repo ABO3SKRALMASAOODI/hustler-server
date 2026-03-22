@@ -1338,31 +1338,54 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                         print(f"[image_gen] Failed after {attempt+1} attempts: {e}")
                         return f"IMAGE_GENERATION_FAILED: {str(e)[:200]} — use a CSS gradient placeholder instead. Do NOT import this path."
 
-            image_url = None
+            # ── Extract output — handle both URL and raw bytes ────────
+            raw_item = None
             if isinstance(output, list) and len(output) > 0:
-                image_url = str(output[0])
+                raw_item = output[0]
             elif hasattr(output, '__iter__'):
                 for item in output:
-                    image_url = str(item)
+                    raw_item = item
                     break
 
-            if not image_url:
+            if raw_item is None:
                 return "IMAGE_GENERATION_FAILED: No output received from model — use a CSS gradient placeholder instead. Do NOT import this path."
 
-            # ── Download with retry ───────────────────────────────────
-            image_data = None
-            for dl_attempt in range(2):
-                try:
-                    response = requests.get(image_url, timeout=60)
-                    if response.status_code == 200:
-                        image_data = response.content
-                        break
-                    else:
-                        print(f"[image_gen] Download attempt {dl_attempt+1} failed: status {response.status_code}")
-                except Exception as dl_err:
-                    print(f"[image_gen] Download attempt {dl_attempt+1} error: {dl_err}")
-                if dl_attempt < 1:
-                    time.sleep(2)
+            # Check if the output is already raw bytes (some models return bytes directly)
+            if isinstance(raw_item, bytes):
+                print(f"[image_gen] Got raw bytes directly ({len(raw_item)} bytes)")
+                image_data = raw_item
+            elif isinstance(raw_item, str) and raw_item.startswith(("http://", "https://")):
+                # It's a URL — download it
+                image_data = None
+                for dl_attempt in range(2):
+                    try:
+                        response = requests.get(raw_item, timeout=60)
+                        if response.status_code == 200:
+                            image_data = response.content
+                            break
+                        else:
+                            print(f"[image_gen] Download attempt {dl_attempt+1} failed: status {response.status_code}")
+                    except Exception as dl_err:
+                        print(f"[image_gen] Download attempt {dl_attempt+1} error: {dl_err}")
+                    if dl_attempt < 1:
+                        time.sleep(2)
+            elif hasattr(raw_item, 'read'):
+                # It's a file-like object (some replicate versions return this)
+                print(f"[image_gen] Got file-like object, reading bytes")
+                image_data = raw_item.read()
+            else:
+                # Unknown type — try converting to string and downloading as URL
+                url_str = str(raw_item)
+                if url_str.startswith(("http://", "https://")):
+                    try:
+                        response = requests.get(url_str, timeout=60)
+                        image_data = response.content if response.status_code == 200 else None
+                    except Exception as e:
+                        print(f"[image_gen] Fallback download failed: {e}")
+                        image_data = None
+                else:
+                    print(f"[image_gen] Unknown output type: {type(raw_item)}")
+                    image_data = None
 
             if not image_data:
                 return f"IMAGE_GENERATION_FAILED: Download failed after retries — use a CSS gradient placeholder instead. Do NOT import this path."
