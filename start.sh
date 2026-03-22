@@ -75,4 +75,4 @@ else:
     print(f'  Total fixed: {fixed}')
 "
 
-exec gunicorn --timeout 600 --chdir backend "app:create_app()"
+exec gunicorn --workers 3 --timeout 600 --chdir backend "app:create_app()"
