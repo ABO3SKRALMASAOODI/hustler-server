@@ -1,10 +1,17 @@
 """
 planner.py — Flask blueprint for the Requirements Gatherer (Planner) agent.
 
+Key changes from v1:
+  - Runs planner_runner.run_planner() directly in a thread (not subprocess)
+  - New state: "waiting_reply" for text-only responses (greetings, clarifications)
+  - POST /auth/planner/<job_id>/continue — resume after text-only responses
+  - Model respects meta.json (user's model selector choice)
+
 Endpoints:
   POST /auth/planner/start          — Start planner for a job
   GET  /auth/planner/<job_id>/status — Poll planner state
   POST /auth/planner/<job_id>/answer — Submit user answer/decision
+  POST /auth/planner/<job_id>/continue — Continue conversation (for text replies)
   POST /auth/planner/<job_id>/quit   — Quit the planner
   GET  /auth/planner/<job_id>/spec   — Get the final approved spec
 """
@@ -13,7 +20,7 @@ from flask import Blueprint, request, jsonify
 from routes.auth import token_required
 import json
 import os
-import subprocess
+import sys
 import threading
 import time
 
@@ -21,6 +28,10 @@ planner_bp = Blueprint("planner", __name__)
 
 OUTPUTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "outputs"))
 ENGINE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "engine"))
+
+# Add engine to path so we can import planner_runner directly
+if ENGINE_DIR not in sys.path:
+    sys.path.insert(0, ENGINE_DIR)
 
 
 def _get_workspace(job_id):
@@ -37,11 +48,55 @@ def _verify_job_ownership(job_id, user_id):
             meta = json.load(f)
         meta_uid = str(meta.get("user_id", "")).strip()
         req_uid  = str(user_id).strip()
-        print(f"[planner] ownership: meta={repr(meta_uid)} req={repr(req_uid)} match={meta_uid == req_uid}")
         return meta_uid == req_uid
     except Exception as e:
         print(f"[planner] ownership check error: {e}")
         return False
+
+
+def _resolve_model(workspace):
+    """Read model from meta.json and return anthropic model string."""
+    MODEL_MAP = {
+        "hb-6":     "claude-haiku-4-5-20251001",
+        "hb-6-pro": "claude-sonnet-4-6",
+        "hb-7":     "claude-opus-4-6",
+    }
+    meta_path = os.path.join(workspace, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            hb_model = meta.get("model", "hb-6")
+            return MODEL_MAP.get(hb_model, "claude-haiku-4-5-20251001")
+        except Exception:
+            pass
+    return "claude-haiku-4-5-20251001"
+
+
+def _start_planner_thread(workspace, message, model_arg=None):
+    """Launch planner in a daemon thread. No subprocess, no timeout."""
+    from planner_runner import run_planner
+
+    def _run():
+        try:
+            run_planner(workspace, message, model_arg)
+        except Exception as e:
+            print(f"[planner_route] Thread error: {e}")
+            try:
+                import traceback
+                with open(os.path.join(workspace, "planner_state.json"), "w") as f:
+                    json.dump({
+                        "state": "error",
+                        "error": str(e),
+                        "traceback": traceback.format_exc(),
+                    }, f)
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  POST /auth/planner/start
@@ -57,7 +112,6 @@ def start_planner(user_id):
     if not job_id or not message:
         return jsonify({"error": "job_id and message required"}), 400
 
-    
     if not _verify_job_ownership(job_id, user_id):
         return jsonify({"error": "Job not found or unauthorized"}), 404
 
@@ -85,64 +139,9 @@ def start_planner(user_id):
             except Exception:
                 pass
 
-    # Resolve model from meta.json
-    model_arg = None
-    meta_path = os.path.join(workspace, "meta.json")
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path) as f:
-                meta = json.load(f)
-            hb_model = meta.get("model", "hb-6")
-            model_map = {
-                "hb-6":     "claude-haiku-4-5-20251001",
-                "hb-6-pro": "claude-sonnet-4-6",
-                "hb-7":     "claude-opus-4-6",
-            }
-            model_arg = model_map.get(hb_model, "claude-sonnet-4-6")
-        except Exception:
-            pass
+    model_arg = _resolve_model(workspace)
 
-    # Launch planner in background thread
-    def run_planner():
-        try:
-            cmd = [
-                "python", os.path.join(ENGINE_DIR, "planner_runner.py"),
-                "--workspace", workspace,
-                "--message", message,
-            ]
-            if model_arg:
-                cmd.extend(["--model", model_arg])
-
-            print(f"[planner_route] Starting planner for job {job_id}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=900,
-                cwd=ENGINE_DIR,
-            )
-            print(f"[planner_route] Finished with code {result.returncode}")
-            if result.stdout:
-                print(f"[planner_route] stdout (last 500): {result.stdout[-500:]}")
-            if result.stderr:
-                print(f"[planner_route] stderr (last 500): {result.stderr[-500:]}")
-        except subprocess.TimeoutExpired:
-            print(f"[planner_route] Planner timed out for job {job_id}")
-            try:
-                with open(os.path.join(workspace, "planner_state.json"), "w") as f:
-                    json.dump({"state": "error", "error": "Planner timed out"}, f)
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[planner_route] Error: {e}")
-            try:
-                with open(os.path.join(workspace, "planner_state.json"), "w") as f:
-                    json.dump({"state": "error", "error": str(e)}, f)
-            except Exception:
-                pass
-
-    thread = threading.Thread(target=run_planner, daemon=True)
-    thread.start()
+    _start_planner_thread(workspace, message, model_arg)
 
     return jsonify({"ok": True, "state": "thinking"})
 
@@ -189,6 +188,50 @@ def planner_answer(user_id, job_id):
         json.dump(data, f)
 
     return jsonify({"ok": True})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  POST /auth/planner/<job_id>/continue — Resume after text-only response
+# ══════════════════════════════════════════════════════════════════════════════
+
+@planner_bp.route("/auth/planner/<job_id>/continue", methods=["POST"])
+@token_required
+def planner_continue(user_id, job_id):
+    """
+    Continue the planner conversation after a text-only response.
+    The planner thread has exited after producing a text reply,
+    so we need to start a new thread with the follow-up message.
+    It will reload conversation history from planner_messages.jsonl.
+    """
+    if not _verify_job_ownership(job_id, user_id):
+        return jsonify({"error": "Job not found"}), 404
+
+    data = request.get_json() or {}
+    message = data.get("message", "").strip()
+
+    if not message:
+        return jsonify({"error": "message required"}), 400
+
+    workspace = _get_workspace(job_id)
+
+    # Verify planner is in a resumable state
+    state_path = os.path.join(workspace, "planner_state.json")
+    if os.path.exists(state_path):
+        try:
+            with open(state_path) as f:
+                st = json.load(f)
+            current = st.get("state", "")
+            if current in ("thinking", "waiting_questions", "waiting_spec", "waiting_edit"):
+                return jsonify({"error": "Planner is already running", "state": current}), 409
+        except Exception:
+            pass
+
+    model_arg = _resolve_model(workspace)
+
+    # Start new thread — planner_runner will reload history from planner_messages.jsonl
+    _start_planner_thread(workspace, message, model_arg)
+
+    return jsonify({"ok": True, "state": "thinking"})
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -1,17 +1,22 @@
 """
 planner_runner.py — Background runner for the Requirements Gatherer (Planner) agent.
 
-Similar to AA.py but for the planner phase. Runs in a background thread,
-communicates with the frontend via file-based signaling in the job workspace.
+Runs as a persistent background thread (NOT a subprocess with timeout).
+Communicates with the frontend via file-based signaling in the job workspace.
+
+Key changes from v1:
+  - No subprocess timeout — runs indefinitely until user quits or spec is approved
+  - Handles text-only responses (no tool calls) — shows them as planner messages
+  - Respects model selector via meta.json
+  - Loads conversation history for resume after text-only replies
+  - Proper credits tracking via deduct_credits.json
 
 Files used:
-  planner_state.json   — current planner status (waiting_questions, waiting_spec, waiting_edit, completed, rejected, error)
-  planner_messages.jsonl — planner conversation log (separate from execution agent messages)
-  planner_answer.json  — frontend writes user answers here, runner picks them up
-  planner_spec.json    — the final approved spec (read by frontend to pass to execution agent)
-
-Usage:
-  python planner_runner.py --workspace /path/to/job --message "Build me a pet store"
+  planner_state.json    — current planner status
+  planner_messages.jsonl — planner conversation log
+  planner_answer.json   — frontend writes user answers here, runner picks them up
+  planner_spec.json     — the final approved spec
+  planner_quit.json     — signal to quit
 """
 
 import argparse
@@ -55,6 +60,12 @@ ANTHROPIC_TO_HB = {
     "claude-opus-4-6":           "hb-7",
 }
 
+MODEL_MAP = {
+    "hb-6":     "claude-haiku-4-5-20251001",
+    "hb-6-pro": "claude-sonnet-4-6",
+    "hb-7":     "claude-opus-4-6",
+}
+
 client = anthropic.Anthropic()
 
 
@@ -78,8 +89,22 @@ def append_planner_message(workspace, role, text, extra=None):
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def wait_for_answer(workspace, timeout=600):
-    """Block until planner_answer.json appears or timeout. Returns parsed content."""
+def check_quit(workspace):
+    quit_path = os.path.join(workspace, "planner_quit.json")
+    if os.path.exists(quit_path):
+        try:
+            os.remove(quit_path)
+        except Exception:
+            pass
+        return True
+    return False
+
+
+def wait_for_answer(workspace, timeout=7200):
+    """
+    Block until planner_answer.json appears, quit is signaled, or timeout.
+    timeout = 2 hours — effectively unlimited for a session.
+    """
     answer_path = os.path.join(workspace, "planner_answer.json")
     quit_path = os.path.join(workspace, "planner_quit.json")
     elapsed = 0
@@ -90,6 +115,7 @@ def wait_for_answer(workspace, timeout=600):
             except Exception:
                 pass
             raise PlannerQuit()
+
         if os.path.exists(answer_path):
             try:
                 with open(answer_path) as f:
@@ -98,23 +124,26 @@ def wait_for_answer(workspace, timeout=600):
                 return data
             except Exception:
                 pass
-        time.sleep(2)
-        elapsed += 2
+
+        time.sleep(1.5)
+        elapsed += 1.5
+
     raise TimeoutError("No answer from user within timeout")
 
 
 class PlannerQuit(Exception):
-    """User clicked Quit Planner."""
     pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SYSTEM PROMPT (same as your research, adapted for web)
+#  SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
 
 REQUIREMENTS_AGENT_SYSTEM_PROMPT = """You are the Requirements Gatherer — the first agent in a multi-agent web development pipeline.
 
 Your ONLY job is to extract a complete, unambiguous specification from the user's request before handing it off to the Builder agent. The Builder works autonomously with zero user interaction, so every gap you leave becomes a wrong assumption baked into the final product.
+
+IMPORTANT: Users may start with casual messages like "hi", "hello", or general questions. That's perfectly fine — respond conversationally and naturally. Ask what they'd like to build. You don't need to immediately jump into structured questions. Build rapport, understand their idea, THEN start gathering requirements.
 
 ────────────────────────────────────────────────────────
 YOUR THREE TOOLS
@@ -124,6 +153,7 @@ YOUR THREE TOOLS
 3. edit_spec    — Apply targeted patches when the user requests changes after propose_spec.
 
 FLOW:
+  Conversation (natural back-and-forth) ->
   ask_user (loop until complete) -> propose_spec ->
     approved : stop (tool returns APPROVED via StopAgent)
     rejected : continue gathering with rejection feedback
@@ -133,6 +163,7 @@ FLOW:
                  more edits : tool returns "EDIT REQUEST: ..." — call edit_spec again
 
 IMPORTANT:
+- You CAN respond with plain text (no tool call) for casual conversation, greetings, clarifications, or when the user hasn't given enough context for structured questions yet.
 - After propose_spec returns an edit request, ALWAYS call edit_spec. Never call propose_spec again.
 - After any tool returns APPROVED, stop immediately — do not say anything.
 - After rejection, you get the rejection feedback — use it to ask better questions or revise.
@@ -183,7 +214,7 @@ SPEC QUALITY RULES
 ────────────────────────────────────────────────────────
 TONE
 ────────────────────────────────────────────────────────
-Professional, direct, efficient. No filler phrases. No emojis."""
+Professional, direct, efficient. Friendly but focused. No filler phrases. No emojis."""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -339,34 +370,35 @@ def _set_nested(d, path, value):
         target[last] = value
 
 
+def resolve_model_from_meta(workspace, fallback=None):
+    meta_path = os.path.join(workspace, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            hb_model = meta.get("model", "hb-6")
+            return MODEL_MAP.get(hb_model, "claude-haiku-4-5-20251001")
+        except Exception:
+            pass
+    return fallback or "claude-haiku-4-5-20251001"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  TOOL HANDLERS (file-based I/O for web)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def make_tool_handlers(workspace):
-    """
-    Returns tool handler functions that communicate via file-based signaling.
-    Each handler writes state, blocks until the frontend provides a response,
-    then returns the result to the agent.
-    """
-
-    # Shared mutable spec state
     current_spec = {}
     current_summary = ""
 
     def handle_ask_user(questions, context):
-        """
-        Write questions to planner_state.json, wait for answer.
-        """
         nonlocal current_spec, current_summary
 
-        # Save questions for frontend to render
         write_planner_state(workspace, "waiting_questions", {
             "questions": questions,
             "context": context,
         })
 
-        # Log the questions
         append_planner_message(workspace, "planner", json.dumps({
             "type": "questions",
             "context": context,
@@ -375,32 +407,22 @@ def make_tool_handlers(workspace):
 
         print(f"[planner] Asking {len(questions)} questions, waiting for user...")
 
-        # Block until answer arrives
         answer_data = wait_for_answer(workspace)
         answer_text = answer_data.get("answer", "")
 
-        # Log the user's answer
         append_planner_message(workspace, "user", answer_text)
-
         print(f"[planner] Got answer: {answer_text[:100]}...")
 
-        # Update state to show we're thinking again
         write_planner_state(workspace, "thinking")
-
         return answer_text
 
     def handle_propose_spec(spec, summary):
-        """
-        Save spec, write to planner_state.json for frontend to render,
-        wait for user decision (approve/edit/reject).
-        """
         nonlocal current_spec, current_summary
 
         current_spec.clear()
         current_spec.update(spec)
         current_summary = summary
 
-        # Save spec for frontend
         write_planner_state(workspace, "waiting_spec", {
             "spec": spec,
             "summary": summary,
@@ -414,7 +436,6 @@ def make_tool_handlers(workspace):
 
         print(f"[planner] Spec proposed, waiting for user decision...")
 
-        # Block until decision
         answer_data = wait_for_answer(workspace)
         decision = answer_data.get("decision", "").lower()
         detail = answer_data.get("detail", "")
@@ -423,7 +444,6 @@ def make_tool_handlers(workspace):
 
         if decision == "approve":
             print(f"[planner] Spec approved!")
-            # Save final spec
             spec_path = os.path.join(workspace, "planner_spec.json")
             with open(spec_path, "w") as f:
                 json.dump({"spec": spec, "summary": summary}, f, indent=2)
@@ -437,22 +457,16 @@ def make_tool_handlers(workspace):
             write_planner_state(workspace, "thinking")
             return f"REJECTED — User feedback: {detail}\n\nUse this feedback to ask better questions with ask_user and then propose a revised spec."
 
-        # Edit request
         print(f"[planner] Edit requested: {detail}")
         write_planner_state(workspace, "thinking")
         return f"EDIT REQUEST: {detail}"
 
     def handle_edit_spec(edits, summary):
-        """
-        Apply patches to current_spec, save updated spec for frontend,
-        wait for user decision.
-        """
         nonlocal current_spec, current_summary
 
         if not current_spec:
             return "ERROR: No spec has been proposed yet. Call propose_spec first."
 
-        # Apply patches
         for edit in edits:
             path = edit["path"]
             value = edit["value"]
@@ -464,7 +478,6 @@ def make_tool_handlers(workspace):
 
         current_summary = summary
 
-        # Save updated spec for frontend
         write_planner_state(workspace, "waiting_edit", {
             "spec": dict(current_spec),
             "summary": current_summary,
@@ -480,7 +493,6 @@ def make_tool_handlers(workspace):
 
         print(f"[planner] Edits applied, waiting for decision...")
 
-        # Block until decision
         answer_data = wait_for_answer(workspace)
         decision = answer_data.get("decision", "").lower()
         detail = answer_data.get("detail", "")
@@ -543,54 +555,34 @@ def save_planner_deduction(workspace, token_breakdown, credits_used):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MAIN
+#  MAIN — called from planner route's background thread
 # ══════════════════════════════════════════════════════════════════════════════
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--workspace", required=True)
-    parser.add_argument("--message",   required=True)
-    parser.add_argument("--model",     default=None)
-    args = parser.parse_args()
+def run_planner(workspace, message, model_override=None):
+    """
+    Main planner entry point. Called directly from the planner route's
+    background thread — NOT as a subprocess.
 
-    WORKSPACE = args.workspace
-
-    # Resolve model
-    anthropic_model = args.model
+    Returns nothing. Communicates results via file-based signaling.
+    """
+    anthropic_model = model_override
     if not anthropic_model:
-        meta_path = os.path.join(WORKSPACE, "meta.json")
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-                hb_model = meta.get("model", "hb-6")
-                model_map = {
-                    "hb-6":     "claude-haiku-4-5-20251001",
-                    "hb-6-pro": "claude-sonnet-4-6",
-                    "hb-7":     "claude-opus-4-6",
-                }
-                anthropic_model = model_map.get(hb_model, "claude-sonnet-4-6")
-            except Exception:
-                anthropic_model = "claude-sonnet-4-6"
-        else:
-            anthropic_model = "claude-sonnet-4-6"
+        anthropic_model = resolve_model_from_meta(workspace)
 
     hb_model = ANTHROPIC_TO_HB.get(anthropic_model, "hb-6-pro")
     print(f"[planner] Using model: {anthropic_model} (HB: {hb_model})")
 
     try:
-        write_planner_state(WORKSPACE, "thinking")
+        write_planner_state(workspace, "thinking")
 
         # Clean up any stale signal files
         for stale in ["planner_answer.json", "planner_quit.json"]:
-            p = os.path.join(WORKSPACE, stale)
+            p = os.path.join(workspace, stale)
             if os.path.exists(p):
                 os.remove(p)
 
-        # Create tool handlers
-        tool_handlers = make_tool_handlers(WORKSPACE)
+        tool_handlers = make_tool_handlers(workspace)
 
-        # Create the agent
         agent = BaseAgent(
             client=client,
             model=anthropic_model,
@@ -599,18 +591,37 @@ def main():
             tool_map=tool_handlers,
             temperature=1,
             max_tokens=8096,
-            workspace=WORKSPACE,
+            workspace=workspace,
         )
 
-        user_message = args.message.strip()
-        append_planner_message(WORKSPACE, "user", user_message)
+        # ── Load existing planner conversation history for resume ─────
+        messages_path = os.path.join(workspace, "planner_messages.jsonl")
+        if os.path.exists(messages_path):
+            with open(messages_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        role = entry.get("role")
+                        text = entry.get("text", "")
+                        if role == "user" and text:
+                            agent.messages.append({"role": "user", "content": text})
+                        elif role == "planner" and text:
+                            agent.messages.append({"role": "assistant", "content": text})
+                    except json.JSONDecodeError:
+                        continue
+
+        user_message = message.strip()
+        append_planner_message(workspace, "user", user_message)
 
         print(f"[planner] Starting with message: {user_message[:100]}...")
 
         # Run the agentic loop
         text, token_totals, code_changed, stop_data = agent.chat(user_message)
 
-        print(f"[planner] Agent finished. stop_data={'present' if stop_data else 'None'}")
+        print(f"[planner] Agent finished. stop_data={'present' if stop_data else 'None'}, text_len={len(text)}")
 
         # Calculate credits
         credits_used = tokens_to_credits(
@@ -622,37 +633,52 @@ def main():
         )
         print(f"[planner] Credits: {credits_used} | Tokens: {token_totals}")
 
-        save_planner_deduction(WORKSPACE, token_totals, credits_used)
+        save_planner_deduction(workspace, token_totals, credits_used)
 
         if stop_data is not None:
             # Spec was approved
-            write_planner_state(WORKSPACE, "completed", {
+            write_planner_state(workspace, "completed", {
                 "spec": stop_data.get("spec"),
                 "summary": stop_data.get("summary"),
                 "credits_used": credits_used,
             })
-        else:
-            # Agent ended without approval (shouldn't normally happen)
-            write_planner_state(WORKSPACE, "completed", {
+        elif text:
+            # Text-only response (no tool calls) — e.g. response to "hi"
+            append_planner_message(workspace, "planner", text)
+            write_planner_state(workspace, "waiting_reply", {
                 "message": text,
+                "credits_used": credits_used,
+            })
+        else:
+            write_planner_state(workspace, "idle", {
                 "credits_used": credits_used,
             })
 
     except PlannerQuit:
         print(f"[planner] User quit the planner.")
-        write_planner_state(WORKSPACE, "quit")
+        write_planner_state(workspace, "quit")
 
     except TimeoutError as e:
         print(f"[planner] Timeout: {e}")
-        write_planner_state(WORKSPACE, "error", {"error": str(e)})
+        write_planner_state(workspace, "error", {"error": str(e)})
 
     except Exception as e:
         print(f"[planner] Error: {e}")
         traceback.print_exc()
-        write_planner_state(WORKSPACE, "error", {
+        write_planner_state(workspace, "error", {
             "error": str(e),
             "traceback": traceback.format_exc(),
         })
+
+
+# CLI entrypoint (for backward compat, but route now calls run_planner directly)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--message",   required=True)
+    parser.add_argument("--model",     default=None)
+    args = parser.parse_args()
+    run_planner(args.workspace, args.message, args.model)
 
 
 if __name__ == "__main__":
