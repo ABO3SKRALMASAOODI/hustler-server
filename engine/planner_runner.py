@@ -597,6 +597,7 @@ def make_tool_handlers(workspace):
             append_main_message(workspace, "system", json.dumps({
                 "type": "planner_complete",
                 "summary": summary,
+                "spec": spec,
             }))
             return StopAgent(
                 data={"spec": spec, "summary": summary},
@@ -641,10 +642,11 @@ def make_tool_handlers(workspace):
             "summary": current_summary,
             "edits": [{"path": e["path"], "reason": e.get("reason", "")} for e in edits],
         }))
-        append_main_message(workspace, "assistant", json.dumps({
-            "type": "spec_edit",
-            "summary": current_summary,
-        }))
+        append_main_message(workspace, "system", json.dumps({
+                "type": "planner_complete",
+                "summary": current_summary,
+                "spec": dict(current_spec),
+            }))
 
         print(f"[planner] Edits applied, waiting for decision...")
 
