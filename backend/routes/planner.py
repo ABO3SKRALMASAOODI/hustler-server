@@ -28,7 +28,6 @@ def _get_workspace(job_id):
 
 
 def _verify_job_ownership(job_id, user_id):
-    """Verify the user owns this job via meta.json."""
     workspace = _get_workspace(job_id)
     meta_path = os.path.join(workspace, "meta.json")
     if not os.path.exists(meta_path):
@@ -36,10 +35,13 @@ def _verify_job_ownership(job_id, user_id):
     try:
         with open(meta_path) as f:
             meta = json.load(f)
-        return str(meta.get("user_id")) == str(user_id)
-    except Exception:
+        meta_uid = str(meta.get("user_id", "")).strip()
+        req_uid  = str(user_id).strip()
+        print(f"[planner] ownership: meta={repr(meta_uid)} req={repr(req_uid)} match={meta_uid == req_uid}")
+        return meta_uid == req_uid
+    except Exception as e:
+        print(f"[planner] ownership check error: {e}")
         return False
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  POST /auth/planner/start
@@ -55,9 +57,9 @@ def start_planner(user_id):
     if not job_id or not message:
         return jsonify({"error": "job_id and message required"}), 400
 
-    # TEMPORARILY SKIP ownership check to debug
-    # if not _verify_job_ownership(job_id, user_id):
-    #     return jsonify({"error": "Job not found or unauthorized"}), 404
+    
+    if not _verify_job_ownership(job_id, user_id):
+        return jsonify({"error": "Job not found or unauthorized"}), 404
 
     workspace = _get_workspace(job_id)
 
