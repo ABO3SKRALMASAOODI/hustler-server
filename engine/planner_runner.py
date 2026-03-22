@@ -4,19 +4,19 @@ planner_runner.py — Background runner for the Requirements Gatherer (Planner) 
 Runs as a persistent background thread (NOT a subprocess with timeout).
 Communicates with the frontend via file-based signaling in the job workspace.
 
-Key changes from v1:
-  - No subprocess timeout — runs indefinitely until user quits or spec is approved
-  - Handles text-only responses (no tool calls) — shows them as planner messages
-  - Respects model selector via meta.json
-  - Loads conversation history for resume after text-only replies
-  - Proper credits tracking via deduct_credits.json
+Credits handling:
+  - Deducted immediately after each planner turn via direct DB call
+  - NOT written to deduct_credits.json (avoids double-deduction when builder runs)
+  - On quit/error mid-run, reads partial_deduction.json left by BaseAgent and deducts that
+  - Uses negative turn numbers (-1, -2, -3...) to distinguish from builder turns (1, 2, 3...)
 
 Files used:
-  planner_state.json    — current planner status
-  planner_messages.jsonl — planner conversation log
-  planner_answer.json   — frontend writes user answers here, runner picks them up
-  planner_spec.json     — the final approved spec
-  planner_quit.json     — signal to quit
+  planner_state.json       — current planner status
+  planner_messages.jsonl   — planner conversation log
+  planner_answer.json      — frontend writes user answers here, runner picks them up
+  planner_spec.json        — the final approved spec
+  planner_quit.json        — signal to quit
+  planner_turn_counter.txt — tracks negative turn numbers for credit entries
 """
 
 import argparse
@@ -36,8 +36,9 @@ load_dotenv()
 from AAgent import BaseAgent, StopAgent
 
 try:
-    from credits import tokens_to_credits
+    from credits import tokens_to_credits, deduct_credits as _deduct_credits_fn
 except ImportError:
+    _deduct_credits_fn = None
     def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="hb-6-pro"):
         pricing = {
             "hb-6":     {"input": 1.00, "output": 5.00,  "cache_write": 1.25, "cache_read": 0.10},
@@ -66,6 +67,8 @@ MODEL_MAP = {
     "hb-7":     "claude-opus-4-6",
 }
 
+PLANNER_TURN_FILE = "planner_turn_counter.txt"
+
 client = anthropic.Anthropic()
 
 
@@ -80,13 +83,15 @@ def write_planner_state(workspace, state, extra=None):
     with open(os.path.join(workspace, "planner_state.json"), "w") as f:
         json.dump(data, f)
 
+
 def append_main_message(workspace, role, text, extra=None):
-    """Also write planner messages to the main messages.jsonl so they persist."""
+    """Write planner messages to the main messages.jsonl so they persist across refresh."""
     entry = {"role": role, "text": text, "ts": time.time(), "source": "planner"}
     if extra:
         entry.update(extra)
     with open(os.path.join(workspace, "messages.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
 
 def append_planner_message(workspace, role, text, extra=None):
     entry = {"role": role, "text": text, "ts": time.time()}
@@ -94,6 +99,22 @@ def append_planner_message(workspace, role, text, extra=None):
         entry.update(extra)
     with open(os.path.join(workspace, "planner_messages.jsonl"), "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def get_next_planner_turn(workspace):
+    """Get next planner turn number (negative: -1, -2, -3...) to avoid collision with builder turns."""
+    path = os.path.join(workspace, PLANNER_TURN_FILE)
+    current = 0
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                current = int(f.read().strip())
+        except Exception:
+            current = 0
+    next_turn = current - 1
+    with open(path, "w") as f:
+        f.write(str(next_turn))
+    return next_turn
 
 
 def check_quit(workspace):
@@ -108,10 +129,6 @@ def check_quit(workspace):
 
 
 def wait_for_answer(workspace, timeout=7200):
-    """
-    Block until planner_answer.json appears, quit is signaled, or timeout.
-    timeout = 2 hours — effectively unlimited for a session.
-    """
     answer_path = os.path.join(workspace, "planner_answer.json")
     quit_path = os.path.join(workspace, "planner_quit.json")
     elapsed = 0
@@ -140,6 +157,118 @@ def wait_for_answer(workspace, timeout=7200):
 
 class PlannerQuit(Exception):
     pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CREDITS — immediate deduction, no deduct_credits.json
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get_db_connection():
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return None
+        return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+    except Exception as e:
+        print(f"[planner] DB connection failed: {e}")
+        return None
+
+
+def _get_user_id(workspace):
+    meta_path = os.path.join(workspace, "meta.json")
+    if not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+        uid = meta.get("user_id")
+        return int(uid) if uid else None
+    except Exception:
+        return None
+
+
+def deduct_planner_credits(workspace, token_breakdown, hb_model):
+    """
+    Deduct planner credits immediately from the user's balance.
+    Uses negative turn numbers to avoid collision with builder turns.
+    Does NOT write to deduct_credits.json — avoids double-deduction.
+    Returns credits_used amount.
+    """
+    if not _deduct_credits_fn:
+        print("[planner] deduct_credits not available, skipping direct deduction")
+        return 0
+
+    user_id = _get_user_id(workspace)
+    if not user_id:
+        print("[planner] No user_id found, skipping deduction")
+        return 0
+
+    job_id = os.path.basename(workspace)
+    turn = get_next_planner_turn(workspace)
+
+    conn = _get_db_connection()
+    if not conn:
+        print("[planner] No DB connection, skipping deduction")
+        return 0
+
+    try:
+        credits_used = _deduct_credits_fn(
+            conn,
+            user_id=user_id,
+            job_id=job_id,
+            turn=turn,
+            tokens_used=sum(token_breakdown.values()),
+            input_tokens=token_breakdown.get("input", 0),
+            output_tokens=token_breakdown.get("output", 0),
+            cache_write_tokens=token_breakdown.get("cache_write", 0),
+            cache_read_tokens=token_breakdown.get("cache_read", 0),
+            model=hb_model,
+        )
+        print(f"[planner] Deducted {credits_used} credits (turn={turn})")
+        return credits_used
+    except Exception as e:
+        print(f"[planner] Direct deduction failed: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def deduct_from_partial(workspace, hb_model):
+    """
+    Read partial_deduction.json (written by BaseAgent mid-run) and deduct.
+    Called on quit/error when the agent was interrupted mid-API-call.
+    Cleans up the file after deduction.
+    """
+    partial_path = os.path.join(workspace, "partial_deduction.json")
+    if not os.path.exists(partial_path):
+        return
+
+    try:
+        with open(partial_path) as f:
+            entries = json.load(f)
+        if not entries:
+            return
+
+        entry = entries[-1] if isinstance(entries, list) else entries
+        token_breakdown = {
+            "input": int(entry.get("input_tokens", 0)),
+            "output": int(entry.get("output_tokens", 0)),
+            "cache_write": int(entry.get("cache_write_tokens", 0)),
+            "cache_read": int(entry.get("cache_read_tokens", 0)),
+        }
+
+        total_tokens = sum(token_breakdown.values())
+        if total_tokens == 0:
+            return
+
+        credits = deduct_planner_credits(workspace, token_breakdown, hb_model)
+        print(f"[planner] Deducted {credits} from partial (quit/error mid-run)")
+
+        os.remove(partial_path)
+    except Exception as e:
+        print(f"[planner] Failed to deduct from partial: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -391,7 +520,7 @@ def resolve_model_from_meta(workspace, fallback=None):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TOOL HANDLERS (file-based I/O for web)
+#  TOOL HANDLERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def make_tool_handlers(workspace):
@@ -450,6 +579,7 @@ def make_tool_handlers(workspace):
             "type": "spec",
             "summary": summary,
         }))
+
         print(f"[planner] Spec proposed, waiting for user decision...")
 
         answer_data = wait_for_answer(workspace)
@@ -464,7 +594,6 @@ def make_tool_handlers(workspace):
             spec_path = os.path.join(workspace, "planner_spec.json")
             with open(spec_path, "w") as f:
                 json.dump({"spec": spec, "summary": summary}, f, indent=2)
-            # Write transition marker
             append_main_message(workspace, "system", json.dumps({
                 "type": "planner_complete",
                 "summary": summary,
@@ -516,6 +645,7 @@ def make_tool_handlers(workspace):
             "type": "spec_edit",
             "summary": current_summary,
         }))
+
         print(f"[planner] Edits applied, waiting for decision...")
 
         answer_data = wait_for_answer(workspace)
@@ -530,10 +660,9 @@ def make_tool_handlers(workspace):
             spec_path = os.path.join(workspace, "planner_spec.json")
             with open(spec_path, "w") as f:
                 json.dump({"spec": dict(current_spec), "summary": current_summary}, f, indent=2)
-            # Write transition marker
             append_main_message(workspace, "system", json.dumps({
                 "type": "planner_complete",
-                "summary": summary,
+                "summary": current_summary,
             }))
             return StopAgent(
                 data={"spec": dict(current_spec), "summary": current_summary},
@@ -557,44 +686,16 @@ def make_tool_handlers(workspace):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SAVE CREDITS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def save_planner_deduction(workspace, token_breakdown, credits_used):
-    path = os.path.join(workspace, "deduct_credits.json")
-    existing = []
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                existing = json.load(f)
-        except Exception:
-            existing = []
-
-    existing.append({
-        "input_tokens":       token_breakdown.get("input", 0),
-        "output_tokens":      token_breakdown.get("output", 0),
-        "cache_write_tokens": token_breakdown.get("cache_write", 0),
-        "cache_read_tokens":  token_breakdown.get("cache_read", 0),
-        "tokens_used":        sum(token_breakdown.values()),
-        "credits_used":       credits_used,
-        "source":             "planner",
-        "ts":                 time.time(),
-    })
-
-    with open(path, "w") as f:
-        json.dump(existing, f)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MAIN — called from planner route's background thread
+#  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_planner(workspace, message, model_override=None):
     """
-    Main planner entry point. Called directly from the planner route's
-    background thread — NOT as a subprocess.
+    Main planner entry point. Called from the planner route's background thread.
 
-    Returns nothing. Communicates results via file-based signaling.
+    Credits are deducted immediately after each run via direct DB call.
+    NOT written to deduct_credits.json — avoids double-deduction when builder runs.
+    On quit/error, partial_deduction.json (from BaseAgent) is read and deducted.
     """
     anthropic_model = model_override
     if not anthropic_model:
@@ -606,11 +707,19 @@ def run_planner(workspace, message, model_override=None):
     try:
         write_planner_state(workspace, "thinking")
 
-        # Clean up any stale signal files
+        # Clean up stale signal files
         for stale in ["planner_answer.json", "planner_quit.json"]:
             p = os.path.join(workspace, stale)
             if os.path.exists(p):
                 os.remove(p)
+
+        # Clean up partial_deduction from any previous run
+        partial_path = os.path.join(workspace, "partial_deduction.json")
+        if os.path.exists(partial_path):
+            try:
+                os.remove(partial_path)
+            except Exception:
+                pass
 
         tool_handlers = make_tool_handlers(workspace)
 
@@ -655,27 +764,33 @@ def run_planner(workspace, message, model_override=None):
 
         print(f"[planner] Agent finished. stop_data={'present' if stop_data else 'None'}, text_len={len(text)}")
 
-        # Calculate credits
-        credits_used = tokens_to_credits(
-            input_tokens=token_totals["input"],
-            output_tokens=token_totals["output"],
-            cache_write_tokens=token_totals["cache_write"],
-            cache_read_tokens=token_totals["cache_read"],
-            model=hb_model,
-        )
+        # ── Deduct credits immediately (no deduct_credits.json) ───────
+        credits_used = deduct_planner_credits(workspace, token_totals, hb_model)
+        if credits_used == 0:
+            # Fallback: calculate for display even if DB deduction failed
+            credits_used = tokens_to_credits(
+                input_tokens=token_totals["input"],
+                output_tokens=token_totals["output"],
+                cache_write_tokens=token_totals["cache_write"],
+                cache_read_tokens=token_totals["cache_read"],
+                model=hb_model,
+            )
         print(f"[planner] Credits: {credits_used} | Tokens: {token_totals}")
 
-        save_planner_deduction(workspace, token_totals, credits_used)
+        # Clean up partial since we deducted the full amount
+        if os.path.exists(partial_path):
+            try:
+                os.remove(partial_path)
+            except Exception:
+                pass
 
         if stop_data is not None:
-            # Spec was approved
             write_planner_state(workspace, "completed", {
                 "spec": stop_data.get("spec"),
                 "summary": stop_data.get("summary"),
                 "credits_used": credits_used,
             })
         elif text:
-            # Text-only response (no tool calls) — e.g. response to "hi"
             append_planner_message(workspace, "planner", text)
             append_main_message(workspace, "assistant", text)
             write_planner_state(workspace, "waiting_reply", {
@@ -689,22 +804,24 @@ def run_planner(workspace, message, model_override=None):
 
     except PlannerQuit:
         print(f"[planner] User quit the planner.")
+        deduct_from_partial(workspace, hb_model)
         write_planner_state(workspace, "quit")
 
     except TimeoutError as e:
         print(f"[planner] Timeout: {e}")
+        deduct_from_partial(workspace, hb_model)
         write_planner_state(workspace, "error", {"error": str(e)})
 
     except Exception as e:
         print(f"[planner] Error: {e}")
         traceback.print_exc()
+        deduct_from_partial(workspace, hb_model)
         write_planner_state(workspace, "error", {
             "error": str(e),
             "traceback": traceback.format_exc(),
         })
 
 
-# CLI entrypoint (for backward compat, but route now calls run_planner directly)
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", required=True)
