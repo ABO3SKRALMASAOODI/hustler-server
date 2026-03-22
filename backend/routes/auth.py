@@ -1640,6 +1640,65 @@ def preview_console_log(job_id):
 # ------------------------------------------------------------------ #
 #  Health check                                                        #
 # ------------------------------------------------------------------ #
+# ------------------------------------------------------------------ #
+#  Create job workspace (for planner — no AA.py launched)            #
+# ------------------------------------------------------------------ #
+
+@auth_bp.route('/job/create', methods=['POST'])
+@token_required
+def create_job_workspace(user_id):
+    data  = request.get_json() or {}
+    model = data.get("model", "hb-6")
+    title = data.get("title", "New Project")
+
+    plan = _get_user_plan(user_id)
+    if not is_model_allowed(plan, model):
+        return jsonify({"error": f"Your {plan} plan doesn't include access to this model."}), 403
+
+    conn = get_db()
+    try:
+        if not check_and_reserve(conn, int(user_id)):
+            return jsonify({"error": "Not enough credits. Please subscribe or wait for your daily refresh."}), 402
+    finally:
+        conn.close()
+
+    job_id     = str(uuid.uuid4())[:8]
+    job_folder = os.path.join(OUTPUTS_DIR, job_id)
+
+    while os.path.exists(job_folder):
+        job_id     = str(uuid.uuid4())[:8]
+        job_folder = os.path.join(OUTPUTS_DIR, job_id)
+
+    os.makedirs(job_folder, exist_ok=True)
+
+    shutil.copytree(
+        TEMPLATE_SCAFFOLD, job_folder,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns('node_modules', '.git')
+    )
+
+    with open(os.path.join(job_folder, "meta.json"), "w") as f:
+        json.dump({"user_id": str(user_id), "model": model}, f)
+
+    with open(os.path.join(job_folder, "state.json"), "w") as f:
+        json.dump({"state": "idle", "created_at": time.time()}, f)
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO jobs (job_id, user_id, title, state)
+                VALUES (%s, %s, %s, 'idle')
+                ON CONFLICT (job_id) DO NOTHING
+                """,
+                (job_id, int(user_id), title[:50])
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    return jsonify({"job_id": job_id}), 200
 
 @auth_bp.route('/generate-test', methods=['GET'])
 def generate_test():
