@@ -14,7 +14,7 @@ from routes.deploy import deploy_bp
 from routes.supabase_mgmt import supabase_bp
 from routes.stripe_mgmt import stripe_bp
 from routes.ai_proxy import ai_proxy_bp
-from backend.routes.planner import planner_bp
+from routes.planner import planner_bp
 
 load_dotenv()
 
