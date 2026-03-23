@@ -11,8 +11,12 @@ import shutil
 import json
 import anthropic
 import requests
-import replicate
+import fal_client
 import time
+
+# ── fal.ai authentication ──────────────────────────────────────────────────
+# Set FAL_KEY in your .env file. That's all that's needed.
+fal_client.api_key = os.getenv("FAL_KEY", "")
 
 client = anthropic.Anthropic()
 
@@ -22,11 +26,6 @@ client = anthropic.Anthropic()
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SupabaseTools:
-    """
-    Provides tool functions for the AI agent to interact with Supabase.
-    Initialized with the project's Supabase credentials.
-    """
-
     def __init__(self, supabase_url: str, anon_key: str, service_role_key: str, preview_url: str = "", project_ref: str = ""):
         self.url              = supabase_url.rstrip("/")
         self.anon_key         = anon_key
@@ -42,24 +41,17 @@ class SupabaseTools:
         }
 
     def _execute_sql(self, sql: str) -> dict:
-        """Execute raw SQL via the Supabase Management API against this project."""
         try:
             access_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
             project_ref  = self.project_ref or os.getenv("SUPABASE_PROJECT_REF", "")
-
             if not access_token or not project_ref:
                 return {"success": False, "error": "SUPABASE_ACCESS_TOKEN or project_ref not available"}
-
             resp = requests.post(
                 f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type":  "application/json",
-                },
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
                 json={"query": sql},
                 timeout=30,
             )
-
             if resp.status_code < 400:
                 return {"success": True, "data": resp.json()}
             else:
@@ -71,7 +63,6 @@ class SupabaseTools:
         sql = f"CREATE TABLE IF NOT EXISTS public.{table_name} ({columns});"
         if enable_rls:
             sql += f" ALTER TABLE public.{table_name} ENABLE ROW LEVEL SECURITY;"
-
         result = self._execute_sql(sql)
         if result["success"]:
             msg = f"TABLE_CREATED: {table_name}"
@@ -79,16 +70,12 @@ class SupabaseTools:
                 msg += " (RLS enabled — add policies to control access)"
             print(f"[supabase] Created table: {table_name}")
             return msg
-        else:
-            print(f"[supabase] Failed to create table {table_name}: {result['error']}")
-            return f"TABLE_CREATE_ERROR: {result['error']}"
+        return f"TABLE_CREATE_ERROR: {result['error']}"
 
     def add_rls_policy(self, table_name: str, policy_name: str, operation: str,
                        using_expression: str, check_expression: str = "") -> str:
         self._execute_sql(f'DROP POLICY IF EXISTS "{policy_name}" ON public.{table_name};')
-
         op = operation.upper()
-
         if op == "INSERT":
             check_expr = check_expression if check_expression else using_expression
             sql = f"""CREATE POLICY "{policy_name}" ON public.{table_name}
@@ -99,23 +86,17 @@ class SupabaseTools:
             if check_expression:
                 sql += f" WITH CHECK ({check_expression})"
             sql += ";"
-
         result = self._execute_sql(sql)
         if result["success"]:
             print(f"[supabase] Added RLS policy '{policy_name}' on {table_name}")
             return f"RLS_POLICY_CREATED: '{policy_name}' on {table_name} for {op}"
-        else:
-            print(f"[supabase] Failed to add RLS policy: {result['error']}")
-            return f"RLS_POLICY_ERROR: {result['error']}"
+        return f"RLS_POLICY_ERROR: {result['error']}"
 
     def enable_auth(self) -> str:
         config = {
             "supabase_url": self.url,
             "anon_key":     self.anon_key,
-            "auth_methods": [
-                "email/password (built-in, no config needed)",
-                "magic link (built-in, no config needed)",
-            ],
+            "auth_methods": ["email/password (built-in)", "magic link (built-in)"],
             "usage": {
                 "sign_up":   "await supabase.auth.signUp({ email, password })",
                 "sign_in":   "await supabase.auth.signInWithPassword({ email, password })",
@@ -123,11 +104,6 @@ class SupabaseTools:
                 "get_user":  "const { data: { user } } = await supabase.auth.getUser()",
                 "on_change": "supabase.auth.onAuthStateChange((event, session) => { ... })",
             },
-            "notes": [
-                "Auth is already enabled — just use the supabase client.",
-                "For user-specific data, add a user_id column referencing auth.users(id).",
-                "Use auth.uid() in RLS policies to restrict access to the user's own rows.",
-            ]
         }
         return f"AUTH_ENABLED: Supabase Auth is ready.\n\nConfiguration:\n{json.dumps(config, indent=2)}"
 
@@ -150,7 +126,7 @@ class SupabaseTools:
         if result["success"]:
             data = result["data"]
             if not data:
-                return "NO_TABLES: The database has no tables yet. Use create_table to create one."
+                return "NO_TABLES: The database has no tables yet."
             output = "DATABASE_TABLES:\n"
             for table in data:
                 name = table.get("table_name", "unknown")
@@ -161,8 +137,7 @@ class SupabaseTools:
                     default  = f" default={col['column_default']}" if col.get("column_default") else ""
                     output  += f"    - {col['column_name']}: {col['data_type']} ({nullable}{default})\n"
             return output
-        else:
-            return f"LIST_TABLES_ERROR: {result['error']}"
+        return f"LIST_TABLES_ERROR: {result['error']}"
 
     def run_sql(self, sql: str) -> str:
         sql_lower = sql.lower().strip()
@@ -173,8 +148,7 @@ class SupabaseTools:
         result = self._execute_sql(sql)
         if result["success"]:
             return f"SQL_EXECUTED_SUCCESSFULLY\n{json.dumps(result['data'], indent=2)[:2000]}"
-        else:
-            return f"SQL_ERROR: {result['error']}"
+        return f"SQL_ERROR: {result['error']}"
 
     def get_supabase_config(self) -> str:
         return json.dumps({
@@ -185,39 +159,32 @@ class SupabaseTools:
                 "Create a file src/lib/supabase.ts with:\n"
                 "  import { createClient } from '@supabase/supabase-js'\n"
                 f"  export const supabase = createClient('{self.url}', '{self.anon_key}')\n"
-                f"  export const REDIRECT_URL = '{self.preview_url}'  // MUST be this exact hardcoded string\n"
-                "\nThen import {{ supabase, REDIRECT_URL }} from '@/lib/supabase' wherever needed.\n"
-                "CRITICAL: REDIRECT_URL must always be this exact hardcoded string. NEVER use window.location.origin or any dynamic value."
+                f"  export const REDIRECT_URL = '{self.preview_url}'\n"
             ),
         })
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SUPABASE TOOL DEFINITIONS (Anthropic format)
+#  SUPABASE TOOL DEFINITIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 SUPABASE_TOOL_DEFINITIONS = [
     {
         "name": "create_table",
         "description": (
-            "Create a new database table in Supabase. Row Level Security (RLS) is enabled by default.\n\n"
-            "After creating a table, you MUST add RLS policies using add_rls_policy, otherwise "
-            "the table will be inaccessible from the frontend.\n\n"
-            "Common column patterns:\n"
+            "Create a new database table in Supabase. RLS is enabled by default.\n"
+            "After creating a table you MUST add RLS policies or the table will be inaccessible.\n"
+            "Common patterns:\n"
             "- Primary key: 'id uuid default gen_random_uuid() primary key'\n"
-            "- User reference: 'user_id uuid references auth.users(id) on delete cascade not null'\n"
-            "- Timestamps: 'created_at timestamptz default now()'\n"
-            "- Text: 'title text not null'\n"
-            "- Boolean: 'done boolean default false'\n"
-            "- Number: 'price numeric(10,2)'\n"
-            "- JSON: 'metadata jsonb default ''{}''::jsonb'"
+            "- User ref: 'user_id uuid references auth.users(id) on delete cascade not null'\n"
+            "- Timestamps: 'created_at timestamptz default now()'"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "table_name": {"type": "string", "description": "Table name (lowercase, underscores)"},
-                "columns":    {"type": "string", "description": "SQL column definitions, comma-separated."},
-                "enable_rls": {"type": "boolean", "description": "Enable Row Level Security. Default true."}
+                "table_name": {"type": "string"},
+                "columns":    {"type": "string"},
+                "enable_rls": {"type": "boolean"}
             },
             "required": ["table_name", "columns"]
         }
@@ -225,58 +192,50 @@ SUPABASE_TOOL_DEFINITIONS = [
     {
         "name": "add_rls_policy",
         "description": (
-            "Add a Row Level Security policy to a table.\n\n"
-            "Common patterns:\n"
-            "- Users read own data: operation='SELECT', using='auth.uid() = user_id'\n"
-            "- Users insert own data: operation='INSERT', using='true', check='auth.uid() = user_id'\n"
-            "- Users update own data: operation='UPDATE', using='auth.uid() = user_id', check='auth.uid() = user_id'\n"
-            "- Users delete own data: operation='DELETE', using='auth.uid() = user_id'\n\n"
-            "IMPORTANT: A table with RLS enabled but NO policies will block ALL access."
+            "Add a Row Level Security policy.\n"
+            "Common: SELECT using='auth.uid() = user_id', INSERT check='auth.uid() = user_id'"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "table_name":        {"type": "string"},
-                "policy_name":       {"type": "string", "description": "Descriptive name (e.g., 'Users can read own todos')"},
-                "operation":         {"type": "string", "description": "SELECT, INSERT, UPDATE, DELETE, or ALL"},
-                "using_expression":  {"type": "string", "description": "SQL boolean for USING clause"},
-                "check_expression":  {"type": "string", "description": "Optional WITH CHECK for INSERT/UPDATE"}
+                "table_name":       {"type": "string"},
+                "policy_name":      {"type": "string"},
+                "operation":        {"type": "string", "description": "SELECT, INSERT, UPDATE, DELETE, or ALL"},
+                "using_expression": {"type": "string"},
+                "check_expression": {"type": "string"}
             },
             "required": ["table_name", "policy_name", "operation", "using_expression"]
         }
     },
     {
         "name": "enable_auth",
-        "description": "Get authentication configuration. Returns exact code patterns for sign up, sign in, sign out, and session management.",
+        "description": "Get Supabase auth configuration and code patterns.",
         "input_schema": {"type": "object", "properties": {}}
     },
     {
         "name": "list_tables",
-        "description": "List all tables in the database with their columns, types, and constraints.",
+        "description": "List all tables with columns, types, and constraints.",
         "input_schema": {"type": "object", "properties": {}}
     },
     {
         "name": "run_sql",
-        "description": (
-            "Execute arbitrary SQL. Use for creating indexes, inserting seed data, altering tables, "
-            "creating functions/triggers, etc. Cannot drop databases or schemas."
-        ),
+        "description": "Execute arbitrary SQL. Cannot drop databases or schemas.",
         "input_schema": {
             "type": "object",
-            "properties": {"sql": {"type": "string", "description": "The SQL query to execute"}},
+            "properties": {"sql": {"type": "string"}},
             "required": ["sql"]
         }
     },
     {
         "name": "get_supabase_config",
-        "description": "Get the Supabase project URL and anon key for the generated frontend code.",
+        "description": "Get the Supabase URL and anon key for frontend code.",
         "input_schema": {"type": "object", "properties": {}}
     },
 ]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SUPABASE SYSTEM PROMPT ADDITION
+#  PROMPT ADDITIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 SUPABASE_PROMPT_ADDITION = """
@@ -290,220 +249,53 @@ set up authentication, and configure Row Level Security.
 IMPORTANT: You MUST install @supabase/supabase-js if not already in package.json:
   run_install_command: "npm install @supabase/supabase-js -y"
 
-── SETUP (do this first if not already done) ──
-
 1) Call get_supabase_config to get the project URL and anon key.
 2) Create src/lib/supabase.ts with the client.
-3) Install the dependency if needed.
+3) After creating any table, ALWAYS add RLS policies using add_rls_policy.
 
-── DATABASE ──
-
-Use create_table to create tables. Always include:
-- A uuid primary key: `id uuid default gen_random_uuid() primary key`
-- A user_id for user-owned data: `user_id uuid references auth.users(id) on delete cascade not null`
-- Timestamps: `created_at timestamptz default now()`
-
-After creating a table, ALWAYS add RLS policies using add_rls_policy.
-A table with RLS enabled but no policies will block ALL access from the frontend.
-
-CRITICAL: The column names in your TypeScript interfaces MUST exactly match the database column names you created.
-
-CRITICAL: When mapping images to database records (e.g. productImages[product.name]),
-the mapping keys MUST exactly match the values stored in the database.
-After seeding data with specific names like "Elevate Sports Bra", the image mapping
-must use that exact string — not a shortened version like "Sports Bra".
-Always call list_tables or run_sql to verify the actual data before writing image mappings.
-
-Standard RLS pattern for user-owned data (call these 4 policies for each table):
+Standard RLS pattern for user-owned data:
 - SELECT: using_expression = "auth.uid() = user_id"
 - INSERT: using_expression = "true", check_expression = "auth.uid() = user_id"
 - UPDATE: using_expression = "auth.uid() = user_id", check_expression = "auth.uid() = user_id"
 - DELETE: using_expression = "auth.uid() = user_id"
 
-── AUTHENTICATION ──
+IMPORTANT: Email confirmation is ENABLED. After sign up, show a verification message.
+Import REDIRECT_URL from '@/lib/supabase' — never use window.location.origin.
 
-Call enable_auth to get the configuration. Supabase Auth supports email/password out of the box.
-
-IMPORTANT: Email confirmation is ENABLED. After sign up, users receive a verification email.
-- Always pass emailRedirectTo in signUp(): options: { emailRedirectTo: REDIRECT_URL }
-- After signUp(), show: "We sent a verification link to your email. Click it to verify, then sign in."
-- Do NOT auto-redirect to dashboard after sign up.
-- Import REDIRECT_URL from '@/lib/supabase' — never use window.location.origin.
-
-Auth patterns:
-```typescript
-const { data, error } = await supabase.auth.signUp({ email, password })
-const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-await supabase.auth.signOut()
-const { data: { user } } = await supabase.auth.getUser()
-supabase.auth.onAuthStateChange((event, session) => { setUser(session?.user ?? null) })
-```
-
-── QUERYING DATA ──
-```typescript
-const { data, error } = await supabase.from('todos').select('*').order('created_at', { ascending: false })
-const { data, error } = await supabase.from('todos').insert({ title: 'New', user_id: user.id }).select()
-const { data, error } = await supabase.from('todos').update({ done: true }).eq('id', todoId).select()
-const { error } = await supabase.from('todos').delete().eq('id', todoId)
-```
-
-── RECOMMENDED AUTH ARCHITECTURE ──
-1) src/lib/supabase.ts — Supabase client
-2) src/contexts/AuthContext.tsx — Auth provider
-3) src/components/ProtectedRoute.tsx — Route wrapper
-4) src/pages/Login.tsx + src/pages/Register.tsx
-
-── CRITICAL RULES ──
+CRITICAL RULES:
 - ALWAYS add RLS policies after creating tables.
-- NEVER put the service_role key in frontend code. Only the anon key.
-- ALWAYS use auth.uid() in RLS policies for user-owned data.
+- NEVER put the service_role key in frontend code.
+- Column names in TypeScript interfaces MUST exactly match database column names.
 """
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  STRIPE SYSTEM PROMPT ADDITION
-# ══════════════════════════════════════════════════════════════════════════════
 
 STRIPE_PROMPT_ADDITION = """
 
 ────────────────────────────────────────────────────────
 STRIPE PAYMENTS
 ────────────────────────────────────────────────────────
-This project has Stripe enabled. Use the proxy endpoints below — NEVER put the secret key in frontend code.
-
 INSTALL: run_install_command: "npm install @stripe/stripe-js @stripe/react-stripe-js -y"
-
 Publishable key (safe for frontend): {STRIPE_PUBLISHABLE_KEY}
+Proxy URL: {STRIPE_PROXY_URL}
 
-── PROXY ENDPOINTS ──
-
-One-time payment (PaymentIntent):
-  POST {STRIPE_PROXY_URL}/create-payment-intent
-  Body: { "amount": 2999, "currency": "usd" }
-  Returns: { "client_secret": "pi_xxx_secret_xxx" }
-
-Checkout redirect (recommended — simplest):
-  POST {STRIPE_PROXY_URL}/create-checkout-session
-  Body: {
-    "line_items": [{"price_data": {"currency": "usd", "product_data": {"name": "Product"}, "unit_amount": 2999}, "quantity": 1}],
-    "mode": "payment",
-    "success_url": "https://yourapp.com/success",
-    "cancel_url": "https://yourapp.com/cancel"
-  }
-  Returns: { "url": "https://checkout.stripe.com/..." }
-  Then: window.location.href = data.url
-
-── DEFAULT PATTERN (use this unless user requests otherwise) ──
-
-CRITICAL: The preview runs inside an iframe. Stripe Checkout blocks iframes.
-You MUST use window.open(url, '_blank') — NEVER window.location.href for Stripe redirects.
-This applies to ALL Stripe checkout URLs, payment links, and redirect flows.
-
-const handleCheckout = async () => {
-  const res = await fetch("{STRIPE_PROXY_URL}/create-checkout-session", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      line_items: [{ price_data: { currency: "usd", product_data: { name: "Product" }, unit_amount: 2999 }, quantity: 1 }],
-      mode: "payment",
-      success_url: window.location.origin + "/success",
-      cancel_url: window.location.origin + "/cancel",
-    }),
-  });
-  const data = await res.json();
-  if (data.url) window.open(data.url, '_blank');
-};
-
-── RULES ──
-- NEVER put sk_xxx in frontend code
-- NEVER use window.location.href for Stripe checkout URLs — always use window.open(url, '_blank') because the preview runs in an iframe and Stripe blocks iframe redirects
-- Use mode: "subscription" for recurring billing
-- Test card: 4242 4242 4242 4242, any future date, any CVC
+CRITICAL: The preview runs inside an iframe. Use window.open(url, '_blank') — NEVER window.location.href.
+NEVER put sk_xxx in frontend code.
+Test card: 4242 4242 4242 4242, any future date, any CVC.
 """
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  AI PROXY SYSTEM PROMPT ADDITION
-# ══════════════════════════════════════════════════════════════════════════════
 
 AI_PROMPT_ADDITION = """
 
 ────────────────────────────────────────────────────────
 AI / CLAUDE INTEGRATION
 ────────────────────────────────────────────────────────
-This project has Claude AI enabled via a secure proxy. NEVER put API keys in frontend code.
-
 Proxy endpoint: {AI_PROXY_URL}
-App token (hardcoded — safe to embed, scoped to AI calls only): {APP_TOKEN}
+App token: {APP_TOKEN}
 
-── REQUEST FORMAT ──
 POST {AI_PROXY_URL}
 Headers: { "Content-Type": "application/json", "Authorization": "Bearer {APP_TOKEN}" }
-Body: {
-  "messages": [{"role": "user", "content": "Hello"}],
-  "system": "You are a helpful assistant.",
-  "max_tokens": 1000
-}
+Body: { "messages": [...], "system": "...", "max_tokens": 1000 }
 Returns: { "content": "response text" }
 
-── useAI HOOK (create this at src/hooks/useAI.ts) ──
-
-import { useState } from 'react';
-
-const APP_TOKEN = '{APP_TOKEN}';
-const AI_PROXY  = '{AI_PROXY_URL}';
-
-export const useAI = () => {
-  const [loading, setLoading] = useState(false);
-
-  const ask = async (
-    messages: Array<{role: string; content: string}>,
-    system?: string
-  ): Promise<string> => {
-    setLoading(true);
-    try {
-      const res = await fetch(AI_PROXY, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${APP_TOKEN}`,
-        },
-        body: JSON.stringify({ messages, system, max_tokens: 1000 }),
-      });
-      if (res.status === 402) {
-        throw new Error('AI features are temporarily unavailable.');
-      }
-      if (!res.ok) {
-        throw new Error('Something went wrong. Please try again.');
-      }
-      const data = await res.json();
-      return data.content as string;
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return { ask, loading };
-};
-
-── CHATBOT USAGE ──
-
-const [messages, setMessages] = useState<Array<{role:string;content:string}>>([]);
-const { ask, loading } = useAI();
-
-const sendMessage = async (text: string) => {
-  const updated = [...messages, { role: 'user', content: text }];
-  setMessages(updated);
-  const reply = await ask(updated, 'You are a helpful assistant.');
-  setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
-};
-
-── RULES ──
-- APP_TOKEN is already hardcoded above — never ask the user to provide a token
-- max_tokens capped at 1000 by proxy
-- Credits deducted from the app owner's account per call automatically
-- On 402: show "AI features are temporarily unavailable." to end users
-- Never show raw error messages or mention credits to end users of the published app
+On 402: show "AI features are temporarily unavailable." — never mention credits.
 """
 
 
@@ -518,407 +310,166 @@ CRITICAL OUTPUT RULES
 ────────────────────────────────────────────────────────
 - Never use emojis anywhere — not in summaries, comments, or code.
 - Never tell the user to run any terminal command. The platform builds and previews automatically.
-- Never reference localhost, local servers, or development servers. The app is served via a hosted preview URL after every build.
+- Never reference localhost, local servers, or development servers.
 - Never output file contents to the user. Write them with write_file or edit_file.
-- Never say an image was "scheduled" or "will be generated later." If you called generate_image, say it was generated. If you skipped it, say you used a placeholder. Be honest.
+- Never say an image was "scheduled" or "will be generated later."
 - Never ask for confirmation between tasks. Plan → build → summarize.
 - Never use bullet point lists or numbered lists in your final summary. Write 2-4 sentences of plain prose.
-- Never say filler phrases like "Everything is now wired up and ready to go" or "Everything is working perfectly."
-- Do not ask the user to do anything after finishing. The preview updates automatically.
+- Never say filler phrases like "Everything is now wired up and ready to go."
+- Do not ask the user to do anything after finishing.
 - Do not mention credits, token usage, or internal system details to the user.
-- Do not use numbered lists in responses unless the user explicitly asks for one.
 
 ────────────────────────────────────────────────────────
 WHAT TO SAY WHEN YOU FINISH
 ────────────────────────────────────────────────────────
-Write a single short paragraph of 2-4 sentences describing what was built and what design direction was used. Nothing more.
-
-Example:
-"Built a women's clothing store with an editorial aesthetic — warm ivory backgrounds, Playfair Display headings, and terracotta accents. Includes a shop page with category filtering, a cart, and Stripe checkout via the hosted proxy. Products are seeded from the database on first load."
-
-No lists. No emojis. No instructions for the user.
-
-────────────────────────────────────────────────────────
-HONESTY RULES
-────────────────────────────────────────────────────────
-- If an image failed to generate, say so and describe what placeholder was used instead.
-- If a feature was skipped or mocked, say so clearly.
-- If Stripe or Supabase was denied, build a realistic mockup and state that payments or auth are not yet connected.
-- Never tell the user the app "works perfectly" — let them judge by looking at the preview.
-- Never imply something works if it does not.
+Write a single short paragraph of 2-4 sentences describing what was built and what design direction was used. Nothing more. No lists. No emojis. No instructions for the user.
 
 ────────────────────────────────────────────────────────
 MANDATORY STARTUP SEQUENCE
 ────────────────────────────────────────────────────────
-On every new project, execute these steps — batch parallel calls where possible:
-
 1. Call files_list + read_package_json simultaneously.
-2. Read all config files in one parallel batch: vite.config.*, tsconfig.*, tailwind.config.*, index.html.
-3. Determine the stack from what you actually read — never assume.
-4. If the request needs auth, a database, or any data persistence: call request_backend immediately. Do not write a single line of auth or database code before getting a response.
-5. If the request needs payments, checkout, or subscriptions: call request_stripe immediately. Do not write any Stripe code before getting a response.
-6. If the request needs AI features, a chatbot, or text generation: call request_ai immediately. Do not write any AI code before getting a response.
-7. Output your plan.
-8. Execute immediately.
+2. Read config files in one parallel batch: vite.config.*, tsconfig.*, tailwind.config.*, index.html.
+3. If the request needs auth/database: call request_backend before writing any code.
+4. If the request needs payments: call request_stripe before writing any code.
+5. If the request needs AI features: call request_ai before writing any code.
+6. Output your plan. Execute immediately.
 
-CRITICAL — SCAFFOLD ENTRY POINT:
-The scaffold template has src/pages/Index.tsx as the home page (route "/") in App.tsx.
-It shows a default "Welcome to Your Blank App" placeholder.
-You MUST overwrite src/pages/Index.tsx (or replace the "/" route in App.tsx) with the
-actual app content on EVERY new project. If you create a component at a different route
-like "/counter", users will still see the placeholder at "/".
-ALWAYS make sure the root route "/" renders your main app content, not the scaffold default.
-Either rewrite Index.tsx directly, or update App.tsx to point "/" at your new component.
+CRITICAL: Always overwrite src/pages/Index.tsx with actual content. Never leave the scaffold default at "/".
 
-For follow-up edits:
-- Do not re-run the startup sequence.
-- Read only the files directly relevant to the change.
-- Use edit_file by default. Use write_file only for new files or full rewrites.
 ────────────────────────────────────────────────────────
 PLANNING (NEW PROJECTS ONLY)
 ────────────────────────────────────────────────────────
-Output this before writing any code, then immediately begin:
-
 PLAN
-Aesthetic Direction: [chosen direction and brief reasoning]
-Pages: [numbered list]
+Aesthetic Direction: [direction and reasoning]
+Pages: [list]
 Shared Components: [list]
 Tasks:
 [ ] Task 1
-[ ] Task 2
 
-Mark [→] when started, [✓] when done. Print updated list after each task.
+Mark [→] when started, [✓] when done.
 
 ────────────────────────────────────────────────────────
 PARALLEL EXECUTION
 ────────────────────────────────────────────────────────
-Never make sequential tool calls when they can be parallel.
-
-Always parallel:
-- Reading multiple unrelated files
-- Creating multiple components
-- Generating multiple images (max 4 at a time)
-- Creating a file and updating its import
-
-Sequential only when the output of one call is required as input to the next.
+Always parallel: reading unrelated files, creating multiple components, generating images (max 4 at a time).
+Sequential only when output of one call is required as input to the next.
 
 ────────────────────────────────────────────────────────
-BATCHING RULES — STRICTLY ENFORCED
+BATCHING RULES
 ────────────────────────────────────────────────────────
 A standard e-commerce app must be built in 10 steps or fewer.
 A standard landing page must be built in 5 steps or fewer.
-
-Batch file writes aggressively:
-- All context providers → one parallel batch
-- All page components → one parallel batch  
-- All shared components → one parallel batch
-- Config files → one parallel batch
-
 Never write one file per step when multiple files can be written simultaneously.
-Never read a file you just wrote — you already know its contents.
-Never read console logs unless the user explicitly reports something is broken.
-If you find yourself exceeding 15 steps on any project, stop and batch the remaining work.
 
 ────────────────────────────────────────────────────────
 COMMON MISTAKES TO AVOID
 ────────────────────────────────────────────────────────
-CSS BUILD ERRORS:
-- index.css must always start with exactly these three lines, in this order:
+CSS: index.css must always start with exactly:
     @tailwind base;
     @tailwind components;
     @tailwind utilities;
-- Never write @layer base without those three directives above it.
-- Never overwrite the top of index.css without including the Tailwind directives.
 
-IMPORTS:
-- Every file you create must be importable. Check that exports match imports.
-- Never import a file that does not exist.
-
-ROUTING:
-- Every route in App.tsx must point to a component that exists.
-- Never add a route without creating the page component first.
-
-SUPABASE:
-- Never put service_role keys in frontend code. Only anon keys.
-- Every table with RLS enabled needs policies — a table with RLS and no policies blocks all access.
-- Column names in TypeScript interfaces must exactly match database column names.
-
-STRIPE:
-- Never put sk_ keys in frontend code.
-- Stripe Checkout cannot run inside an iframe. The preview uses an iframe, so Stripe redirects only work on the published URL. Do not tell the user checkout is broken if they test in preview — tell them it works on the published URL.
+IMPORTS: Every file you create must be importable. Never import a file that does not exist.
+ROUTING: Every route in App.tsx must point to a component that exists.
+SUPABASE: Never put service_role keys in frontend. Every RLS table needs policies.
+STRIPE: Never put sk_ keys in frontend. Use window.open(url, '_blank') for checkout redirects.
 
 ────────────────────────────────────────────────────────
 RUNTIME DEBUGGING
 ────────────────────────────────────────────────────────
-When a user reports their app is broken, blank, or not working:
-1. Call read_console_logs first. Do not guess at the cause.
-2. Read relevant source files based on what the errors say.
+When a user reports their app is broken:
+1. Call read_console_logs first. Do not guess.
+2. Read relevant source files based on errors.
 3. Fix the root cause. Do not add try/catch to hide errors.
-4. Do not attempt to fix 402 errors from the AI proxy — these are expected credit responses, not code bugs.
 
 ────────────────────────────────────────────────────────
 DEPENDENCY MANAGEMENT
 ────────────────────────────────────────────────────────
 Always call read_package_json before run_install_command.
-The following packages are pre-installed in every project — never install them again:
-- @supabase/supabase-js
-- @stripe/stripe-js
-- @stripe/react-stripe-js
-- framer-motion
-
-When installing anything else, always use the -y flag.
+Pre-installed in every project — never install again:
+- @supabase/supabase-js, @stripe/stripe-js, @stripe/react-stripe-js, framer-motion
 
 ────────────────────────────────────────────────────────
-DOMAIN CONSISTENCY
+IMAGE GENERATION
 ────────────────────────────────────────────────────────
-Before writing a single line of code, identify the core domain from the user's request. Every product, image, category, piece of copy, and UI label must be consistent with that domain throughout the entire app. Never mix domains or add content that does not belong.
+Images are not optional. Every e-commerce store, landing page, or content site must have real generated images.
 
-When generating images, always include the domain and audience context in the prompt so the generated content matches what was requested. A prompt must describe subject, style, lighting, and background — never just the object name alone.
+Models (fal.ai):
+- flux-schnell: fastest, $0.003/MP — use for ALL images except the hero
+- flux-pro:     high quality, $0.03/MP — complex product shots only
+- flux-ultra:   hero banners only, $0.06/image — ONE per project maximum
 
-CRITICAL — AUDIENCE CONSISTENCY IN IMAGE PROMPTS:
-If the app is for women's clothing, EVERY product image prompt must explicitly say "women's" — e.g. "women's running shorts" not just "running shorts." If the app is for men, say "men's." If unisex, say "unisex." Never leave the audience ambiguous in an image prompt, because the image model will default to the wrong gender, style, or audience. This applies to every single product image, not just the hero.
+MANDATORY per commerce project:
+- One hero image (1920x1080) using flux-ultra
+- All other images using flux-schnell
+
+Generate max 4 images at a time. Generate ALL images before writing any page components.
+Write detailed prompts — subject, audience, style, lighting, background.
+Import as ES6 modules: import heroImg from '../assets/hero.jpg'
+Never use string paths in JSX. Never import a path that returned IMAGE_GENERATION_FAILED.
+On failure: use a CSS gradient, never a flat color block.
+
+AUDIENCE CONSISTENCY: If the app is for women's clothing, every prompt must say "women's".
+Never leave the audience ambiguous in a prompt.
+
 ────────────────────────────────────────────────────────
 DESIGN PHILOSOPHY
 ────────────────────────────────────────────────────────
-Every app must look like a real product — not generic AI output. Before writing any code, commit to one clear aesthetic direction and execute it without compromise.
+Commit to one clear aesthetic direction. Never default to a safe middle ground.
 
-Never default to a safe middle ground. Never blend directions. Read the user's request, infer the appropriate mood, and commit fully.
+FORBIDDEN: Inter/Poppins as only font, purple gradients on white, generic centered hero,
+Lorem ipsum, flat colorless designs, layouts that look like every other AI app.
 
-FORBIDDEN regardless of direction:
-- Inter or Poppins as the only font
-- Purple gradients on white backgrounds
-- Generic centered hero with one headline and one button
-- Lorem ipsum or placeholder text anywhere
-- Flat colorless designs with no visual hierarchy
-- Layouts that look identical to every other AI-generated app
+REQUIRED: Two Google Fonts, CSS variables for all colors, framer-motion animation on hero,
+hover states on every interactive element, realistic domain-appropriate content.
 
-REQUIRED for every project:
-- Import at least two Google Fonts — one display font for headings, one readable font for body
-- Define all colors as CSS variables in index.css
-- At least one framer-motion entrance animation on the hero or first section
-- Hover states on every interactive element
-- Realistic domain-appropriate content throughout
--All button's are functional and working no dead button leftover
+Aesthetic directions: BRUTALLY MINIMAL, MAXIMALIST, RETRO-FUTURISTIC, PLAYFUL,
+EDITORIAL, BRUTALIST, ART DECO, ORGANIC — pick one and execute without compromise.
 
-────────────────────────────────────────────────────────
-AESTHETIC DIRECTIONS
-────────────────────────────────────────────────────────
-Pick one direction per project and execute it with full commitment.
-
-BRUTALLY MINIMAL
-Extreme whitespace. One typeface, one weight variation. No decorative elements.
-Color: near-white background, near-black text, one functional accent only.
-Every element must justify its existence. If it does not carry meaning, remove it.
-
-MAXIMALIST
-Dense, layered, overwhelming in a controlled way. Competing textures, patterns, type sizes.
-Color: rich, saturated, multiple hues that clash intentionally.
-Nothing is bare. Every surface has something on it.
-
-RETRO-FUTURISTIC
-Combines nostalgia with technology. CRT aesthetics, chrome, phosphor glows.
-Color: deep backgrounds with neon or phosphor accents — greens, magentas, ambers.
-Monospace type mixed with geometric display fonts. Terminal aesthetics, scan lines, grids.
-
-PLAYFUL
-Rounded everything. Bouncy animations. Unexpected color combinations that feel joyful.
-Color: bright, saturated, warm. Candy palettes or bold primaries.
-Personality over polish. Surprise the user.
-
-EDITORIAL
-Inspired by print magazines. Strong typographic hierarchy. Asymmetric grid layouts.
-Color: restrained — black, white, one strong ink color. Let layout do the work.
-Typography is the design. Font size contrast is dramatic.
-
-BRUTALIST
-Raw, unfinished, intentionally uncomfortable. Visible structure, exposed grid.
-Color: stark — black on white, or one harsh color on white. No gradients, no shadows.
-Borders everywhere. Monospace or grotesque fonts. Forms that look like forms.
-
-ART DECO
-Geometric precision, symmetry, luxury. Gold, brass, marble references.
-Color: deep jewel tones — navy, emerald, burgundy — with gold or champagne accents.
-Ornamental but structured. Every decorative element follows a geometric rule.
-
-ORGANIC
-Natural materials, irregular shapes, imperfect textures. Nothing feels manufactured.
-Color: muted earth tones — clay, sage, sand, warm stone. No pure blacks or whites.
-Soft curves, grain textures. Feels grown, not built.
-
-────────────────────────────────────────────────────────
-DESIGN SYSTEM IMPLEMENTATION
-────────────────────────────────────────────────────────
-Always define colors as CSS variables in index.css. Never hardcode hex values in Tailwind classes or component JSX. Choose your own palette that fits the selected aesthetic direction.
-
-Pattern to follow:
-
-index.css:
-  :root {
-    --color-bg:         <your background>;
-    --color-surface:    <your card or panel color>;
-    --color-border:     <your border color>;
-    --color-text:       <your primary text>;
-    --color-muted:      <your secondary text>;
-    --color-accent:     <your brand accent>;
-    --color-accent-dim: <accent at low opacity>;
-  }
-
-tailwind.config.ts:
-  theme: { extend: { colors: {
-    bg:      'var(--color-bg)',
-    surface: 'var(--color-surface)',
-    accent:  'var(--color-accent)',
-    muted:   'var(--color-muted)',
-  }}}
-
-In components:
-  className="bg-surface text-accent"
-  Never: className="bg-[#111118]" or style={{ color: '#e84040' }}
+Design system: define all colors as CSS variables in index.css. Use in Tailwind config.
+Never hardcode hex values in component JSX.
 
 ────────────────────────────────────────────────────────
 WHAT YOU MUST BUILD
 ────────────────────────────────────────────────────────
 1. Every described page, fully implemented. No stubs, no TODOs.
-2. All routes working. Mobile menu if layout requires it.
-3. Every layout works at 320px, 768px, and 1440px.
-4. Forms submit, modals open and close, dropdowns work.
-5. Realistic domain-appropriate content throughout. Zero Lorem Ipsum.
-6. AI images for heroes, product shots, and cards. Never leave broken image tags.
-7. Entrance animations on major sections. Hover states on all interactive elements.
-8. Loading states, empty states, and error states for all data-dependent UI.
-
-────────────────────────────────────────────────────────
-IMAGE GENERATION
-────────────────────────────────────────────────────────
-Images are not optional. Every e-commerce store, landing page, or content site
-must have real generated images. CSS placeholders are a last resort only when
-generation explicitly fails — never a first choice.
-
-MANDATORY images for every commerce project:
-- One large hero image (1920x1080) — a strong editorial or lifestyle shot
-- One image per product (minimum 6 products)
-- One image per category section
-
-IMPORTANT: Generate images in batches of no more than 4 at a time.
-If you need 8 images, do two batches of 4.
-
-Generate all images in parallel in a single batch before writing any page components.
-Do not write Home.tsx, Shop.tsx, or ProductCard.tsx before the images exist —
-the components must import real images, not reference placeholder divs.
-
-The hero image must be large and dominant — full width, at least 500px tall.
-It must show a real scene, person, or product — not a color block or gradient.
-A hero section with no image is not acceptable for any commerce or lifestyle app.
-
-Models:
-- flux.schnell: product cards, thumbnails — default for most images, fastest
-- flux.dev: complex shots where quality is critical, slower
-- flux2.dev: hero banners — high quality, use for the main hero image only
-
-Write detailed prompts. Include subject, audience, style, lighting, background.
-Weak prompt: "women's clothing"
-Strong prompt: "editorial fashion photograph of a woman in a flowing cream linen dress
-walking through a sunlit European market, natural light, film grain, wide angle,
-warm tones, high fashion magazine style"
-
-CRITICAL: Every image prompt must be UNIQUE and SPECIFIC to the individual product.
-Never use the same prompt template for different products — vary the subject,
-color, composition, angle, and background for each one.
-
-After generating, always import as ES6 modules:
-  import heroImg from '../assets/hero.jpg'
-  <img src={heroImg} />
-
-Never use string paths in JSX — they always produce broken images in Vite.
-If generate_image returns IMAGE_GENERATION_FAILED, do NOT import that path.
-Instead use a CSS gradient — never a flat color block with just text on it.
-────────────────────────────────────────────────────────
-BROKEN IMAGE PREVENTION
-────────────────────────────────────────────────────────
-Before finishing, verify every image in the project:
-- Was generate_image called and confirmed successful (returned IMAGE_GENERATED, not IMAGE_GENERATION_FAILED)?
-- Is it imported as an ES6 module at the top of the file that uses it?
-- Is the import path correct relative to the file?
-- Is the imported variable used in JSX, not the string path?
-
-If any check fails — replace with a CSS gradient placeholder immediately.
-Do NOT import a path that returned IMAGE_GENERATION_FAILED.
-
-────────────────────────────────────────────────────────
-CODE QUALITY
-────────────────────────────────────────────────────────
-1. Every file complete and immediately runnable.
-2. One primary component per file, named to match the filename.
-3. All imports resolve. If you create a file, ensure it exports correctly.
-4. No unused imports. No console.log in production code. No commented-out dead code.
-5. Full TypeScript with proper types. Avoid any unless genuinely unavoidable.
-6. Components over 300 lines should be split into focused subcomponents.
-
-────────────────────────────────────────────────────────
-FILE ORGANIZATION
-────────────────────────────────────────────────────────
-src/pages/      — page components, one per route
-src/components/ — reusable UI components
-src/hooks/      — custom React hooks
-src/utils/      — utility functions
-src/lib/        — library configs such as supabase client
-src/contexts/   — React context providers
-src/assets/     — images and static assets
-
-────────────────────────────────────────────────────────
-TOOL USAGE
-────────────────────────────────────────────────────────
-files_list           — call at startup, not needed again unless unsure what exists
-read_file            — read before modifying, never edit a file you have not seen
-write_file           — new files or complete rewrites only, always write full content
-edit_file            — default for changes to existing files, old_str must be exact
-read_package_json    — always call before run_install_command
-read_console_logs    — only call when the user explicitly reports something is broken, do not call proactively
-generate_image       — call in parallel, MAX 4 at a time. If you need more, do multiple batches.
-request_backend      — call before any auth or database code
-request_stripe       — call before any payment or checkout code
-request_ai           — call before any AI or chatbot code
+2. All routes working. Mobile menu if needed.
+3. Every layout works at 320px, 768px, 1440px.
+4. Forms submit, modals open/close, dropdowns work.
+5. Realistic domain-appropriate content. Zero Lorem Ipsum.
+6. Loading states, empty states, error states for all data-dependent UI.
+7. All buttons functional — no dead buttons.
 
 ────────────────────────────────────────────────────────
 SELF-CHECK BEFORE FINISHING
 ────────────────────────────────────────────────────────
-Before writing your summary, verify:
-- Every described page exists and is fully implemented
-- Every route in App.tsx points to a component that exists
+- Every page exists and is fully implemented
+- Every route points to a component that exists
 - Every import resolves to a real file
 - index.css starts with the three Tailwind directives
-- No TODOs, stubs, or placeholder content anywhere
-- All images that returned IMAGE_GENERATED are imported as ES6 modules
-- All images that returned IMAGE_GENERATION_FAILED are NOT imported — use CSS gradients instead
-- Animations and hover states are present
-- The design has a clear committed aesthetic direction
-- The summary contains no instructions for the user, no emojis, no bullet points
+- No TODOs or placeholder content
+- All IMAGE_GENERATED images imported as ES6 modules
+- All IMAGE_GENERATION_FAILED images replaced with CSS gradients
+- Animations and hover states present
+- Clear committed aesthetic direction
+- Summary: no instructions, no emojis, no bullet points
 """
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ANTHROPIC TOOL DEFINITIONS (base tools — always available)
+#  TOOL DEFINITIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 REQUEST_BACKEND_TOOL = {
     "name": "request_backend",
     "description": (
-        "Request a backend (database + authentication) for this project. "
-        "Call this when the user's app needs: user accounts, login/signup, "
-        "data persistence, database tables, or any server-side functionality.\n\n"
-        "This will ask the user for permission to enable a Supabase backend. "
-        "IMPORTANT: Call this EARLY in your startup sequence — before writing any auth or database code. "
-        "If approved, you'll get access to Supabase tools (create_table, add_rls_policy, etc.). "
+        "Request a Supabase backend. Call EARLY — before writing any auth or database code. "
+        "If approved you get create_table, add_rls_policy, etc. "
         "If denied, build a frontend-only version using localStorage."
     ),
     "input_schema": {
         "type": "object",
-        "properties": {
-            "reason": {
-                "type": "string",
-                "description": "Brief explanation of why the app needs a backend."
-            }
-        },
+        "properties": {"reason": {"type": "string"}},
         "required": ["reason"]
     }
 }
@@ -926,99 +477,72 @@ REQUEST_BACKEND_TOOL = {
 anthropic_tools = [
     {
         "name": "read_file",
-        "description": "Read the content of an existing file from the disk.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"]
-        }
+        "description": "Read the content of an existing file from disk.",
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
     },
     {
         "name": "write_file",
-        "description": "Create, write or overwrite a file. Use for new files or complete rewrites. Always write the full file content.",
+        "description": "Create or overwrite a file. Always write the full file content.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "path":    {"type": "string"},
-                "content": {"type": "string", "description": "The full source code"}
-            },
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
             "required": ["path", "content"]
         }
     },
     {
         "name": "edit_file",
-        "description": (
-            "Surgically edit an existing file by replacing a specific string with new content. "
-            "This is the DEFAULT tool for modifying existing files — prefer it over write_file. "
-            "old_str must be an exact match of content in the file. "
-            "To append, provide the last line of the file as old_str and add your new content after it."
-        ),
+        "description": "Replace an exact string in an existing file. Default for modifying existing files.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "path":    {"type": "string"},
-                "old_str": {"type": "string", "description": "The exact block of text to replace. Must exist in the file."},
-                "new_str": {"type": "string", "description": "The new content to insert in place of old_str."}
+                "old_str": {"type": "string", "description": "Exact block to replace. Must exist in the file."},
+                "new_str": {"type": "string"}
             },
             "required": ["path", "old_str", "new_str"]
         }
     },
     {
         "name": "delete_file",
-        "description": "Delete a file or folder from the project. When deleting a folder, all files within it will be removed.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"path": {"type": "string", "description": "Path to the file or folder to delete."}},
-            "required": ["path"]
-        }
+        "description": "Delete a file or folder.",
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
     },
     {
         "name": "rename_file",
-        "description": "Rename or move a file to a new path. Always use this instead of creating a new file and deleting the old one.",
+        "description": "Rename or move a file.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "original_path": {"type": "string"},
-                "new_path":      {"type": "string"}
-            },
+            "properties": {"original_path": {"type": "string"}, "new_path": {"type": "string"}},
             "required": ["original_path", "new_path"]
         }
     },
     {
         "name": "search_files",
-        "description": (
-            "Regex-based code search across project files. "
-            "Use to find where components, functions, or patterns are used before renaming or refactoring. "
-            "Much more efficient than reading every file."
-        ),
+        "description": "Regex search across project files. Use before renaming or refactoring.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query":            {"type": "string", "description": "Regex pattern to search for."},
-                "search_dir":       {"type": "string", "description": "Directory to search in. Defaults to 'src'."},
-                "include_patterns": {"type": "string", "description": "Comma-separated glob patterns for files to include."},
-                "case_sensitive":   {"type": "boolean", "description": "Case-sensitive search. Defaults to false."}
+                "query":            {"type": "string"},
+                "search_dir":       {"type": "string"},
+                "include_patterns": {"type": "string"},
+                "case_sensitive":   {"type": "boolean"}
             },
             "required": ["query"]
         }
     },
     {
         "name": "files_list",
-        "description": "Get the list of all current project files. Call at startup and when unsure what files exist.",
+        "description": "Get the list of all project files. Call at startup.",
         "input_schema": {"type": "object", "properties": {}}
     },
     {
         "name": "run_install_command",
-        "description": (
-            "Run a terminal command to install dependencies. "
-            "ALWAYS call read_package_json first to check if the package is already installed. "
-            "Always include the -y flag: e.g. 'npm install framer-motion -y'"
-        ),
+        "description": "Install npm packages. Always call read_package_json first. Always use -y flag.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "command":   {"type": "string", "description": "The full terminal command (e.g., 'npm install framer-motion -y')."},
-                "directory": {"type": "string", "description": "Relative path from project root where the command should run."}
+                "command":   {"type": "string"},
+                "directory": {"type": "string"}
             },
             "required": ["command"]
         }
@@ -1026,108 +550,138 @@ anthropic_tools = [
     {
         "name": "generate_image",
         "description": (
-            "Generate an AI image and save it to the specified path.\n\n"
+            "Generate an AI image using fal.ai and save it to the specified path.\n\n"
             "Models:\n"
-            "- flux.schnell: fastest, good for cards/thumbnails/avatars (<1000px). Default.\n"
-            "- flux2.dev: high quality, only supports 1024x1024 and 1920x1080. Use for hero banners.\n"
-            "- flux.dev: highest quality, any resolution, slower. Use for complex product shots.\n\n"
-            "Max resolution: 1920x1920. Dimensions must be multiples of 32, min 512.\n"
-            "Write detailed prompts — style, mood, lighting, content, photography style.\n"
-            "IMPORTANT: Generate max 4 images at a time. If you need more, do multiple batches.\n"
-            "If this returns IMAGE_GENERATION_FAILED, do NOT import that path — use a CSS gradient instead."
+            "- flux-schnell: fastest, cheapest ($0.003/MP). Use for ALL images except the hero.\n"
+            "- flux-pro:     high quality ($0.03/MP). Only for complex product shots.\n"
+            "- flux-ultra:   hero banners only ($0.06). One per project maximum.\n\n"
+            "Generate max 4 images at a time. Always use flux-schnell unless hero or complex shot.\n"
+            "On IMAGE_GENERATION_FAILED: use CSS gradient, never import that path."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "prompt":      {"type": "string", "description": "Detailed description of the image to generate. Must be unique per image."},
-                "target_path": {"type": "string", "description": "File path where the image will be saved (prefer src/assets/)."},
-                "width":       {"type": "number", "description": "Image width (min 512, max 1920, multiple of 32). Defaults to 1024."},
-                "height":      {"type": "number", "description": "Image height (min 512, max 1920, multiple of 32). Defaults to 768."},
-                "model":       {"type": "string", "description": "flux.schnell | flux.dev | flux2.dev"}
+                "prompt":      {"type": "string"},
+                "target_path": {"type": "string"},
+                "width":       {"type": "number", "description": "Min 512, max 1920, multiple of 32. Default 1024."},
+                "height":      {"type": "number", "description": "Min 512, max 1920, multiple of 32. Default 768."},
+                "model":       {"type": "string", "description": "flux-schnell | flux-pro | flux-ultra"}
             },
             "required": ["prompt", "target_path"]
         }
     },
     {
         "name": "edit_image",
-        "description": "Edit or merge existing images based on a text prompt. Aspect ratio options: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9.",
+        "description": "Edit existing images based on a text prompt.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "image_paths": {"type": "array", "items": {"type": "string"}, "description": "Paths to source images."},
-                "prompt":      {"type": "string", "description": "Description of the edit to apply."},
-                "target_path": {"type": "string", "description": "Where to save the edited image."},
-                "aspect_ratio":{"type": "string", "description": "Output aspect ratio. Defaults to source ratio."}
+                "image_paths":  {"type": "array", "items": {"type": "string"}},
+                "prompt":       {"type": "string"},
+                "target_path":  {"type": "string"},
+                "aspect_ratio": {"type": "string"}
             },
             "required": ["image_paths", "prompt", "target_path"]
         }
     },
     {
-    "name": "read_console_logs",
-    "description": (
-        "Read runtime console errors from the previewed app.\n\n"
-        "ONLY call this when the user's message explicitly says the app is broken, "
-        "blank, crashing, or not working.\n\n"
-        "NEVER call this proactively, speculatively, or as part of a build sequence.\n"
-        "NEVER call this before the build is complete.\n"
-        "NEVER call this to verify your own work.\n\n"
-        "Calling this at any other time wastes credits and will produce stale or irrelevant results."
-    ),
-    "input_schema": {"type": "object", "properties": {}}
-    },  
+        "name": "read_console_logs",
+        "description": (
+            "Read runtime console errors. ONLY call when the user says the app is broken. "
+            "NEVER call proactively or before the build is complete."
+        ),
+        "input_schema": {"type": "object", "properties": {}}
+    },
     {
         "name": "read_package_json",
-        "description": (
-            "Read the current package.json to check what dependencies are already installed.\n\n"
-            "ALWAYS call this before run_install_command to avoid redundant installs.\n"
-            "Returns the full package.json content including dependencies and devDependencies."
-        ),
+        "description": "Read package.json. ALWAYS call before run_install_command.",
         "input_schema": {"type": "object", "properties": {}}
     },
     REQUEST_BACKEND_TOOL,
     {
         "name": "request_stripe",
-        "description": (
-            "Request Stripe payment integration for this project. "
-            "Call this when the user wants: payments, checkout, subscriptions, pricing pages, "
-            "buy buttons, or any e-commerce functionality.\n\n"
-            "IMPORTANT: Call this EARLY — before writing any Stripe code. "
-            "If approved, you'll get the publishable key and backend proxy URLs. "
-            "If denied, build a UI-only mockup with 'Coming soon' buttons."
-        ),
+        "description": "Request Stripe integration. Call EARLY — before writing any payment code.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "Brief explanation of what payment feature is needed."
-                }
-            },
+            "properties": {"reason": {"type": "string"}},
             "required": ["reason"]
         }
     },
     {
         "name": "request_ai",
-        "description": (
-            "Request AI/Claude integration for this project. "
-            "Call this when the user wants: a chatbot, AI responses, text generation, "
-            "summarization, translation, content generation, or any AI-powered feature.\n\n"
-            "IMPORTANT: Call this EARLY — before writing any AI code. "
-            "If approved, you'll get a proxy URL and app token to call Claude API safely. "
-            "If not configured, build a UI mockup with placeholder AI responses."
-        ),
+        "description": "Request Claude AI integration. Call EARLY — before writing any AI code.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "Brief explanation of what AI feature is needed."
-                }
-            },
+            "properties": {"reason": {"type": "string"}},
             "required": ["reason"]
         }
     },
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FAL.AI IMAGE MODEL MAP
+#
+#  fal.ai endpoint strings — these are what get passed to fal_client.subscribe()
+#  Response shape: result["images"][0]["url"] — always a plain HTTPS URL.
+#  No FileOutput objects, no byte extraction, no .read() — just download the URL.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FAL_MODEL_MAP: dict[str, str] = {
+    # Primary names — what the agent uses
+    "flux-schnell": "fal-ai/flux/schnell",           # $0.003/MP — default for ALL non-hero images
+    "flux-pro":     "fal-ai/flux-pro/v1.1",          # $0.03/MP  — complex shots only
+    "flux-ultra":   "fal-ai/flux/dev",               # fal-ai/flux/dev used as high-quality hero
+
+    # Legacy aliases — kept so old prompts don't hard-fail
+    "flux.schnell": "fal-ai/flux/schnell",
+    "flux.dev":     "fal-ai/flux/dev",
+    "flux-dev":     "fal-ai/flux/dev",
+    "flux2.dev":    "fal-ai/flux/dev",               # retired Replicate model — remapped to flux/dev
+}
+
+# NOTE on flux-ultra:
+# fal-ai/flux-pro/v1.1-ultra routes through BFL's US2 API (api.us2.bfl.ai) which has
+# an expired SSL certificate as of March 2026. Remapped to fal-ai/flux/dev which is
+# high quality, fully hosted on fal.ai infrastructure, and has no SSL issues.
+# Revert to "fal-ai/flux-pro/v1.1-ultra" once BFL fixes their cert.
+
+# Models that use aspect_ratio instead of explicit width/height
+# fal-ai/flux/dev uses image_size like schnell, so this set is now empty
+_ULTRA_MODELS: set[str] = set()
+
+# Minimum bytes for a real image
+_MIN_IMAGE_BYTES = 10 * 1024  # 10 KB
+
+
+def _aspect_ratio_from_dims(width: int, height: int) -> str:
+    ratio = width / height
+    if ratio > 1.6:   return "16:9"
+    elif ratio > 1.2: return "4:3"
+    elif ratio < 0.7: return "9:16"
+    else:             return "1:1"
+
+
+def _download_image(url: str) -> bytes | None:
+    """Download image from a fal.ai CDN URL. Retries up to 3 times."""
+    print(f"[image_gen] Downloading from: {url[:100]}")
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, timeout=120, stream=True, allow_redirects=True)
+            print(f"[image_gen] Download HTTP {resp.status_code} on attempt {attempt + 1}")
+            if resp.status_code == 200:
+                data = b"".join(resp.iter_content(8192))
+                print(f"[image_gen] Downloaded {len(data)} bytes")
+                if len(data) >= _MIN_IMAGE_BYTES:
+                    return data
+                print(f"[image_gen] Too small ({len(data)} bytes) — retrying")
+            else:
+                print(f"[image_gen] Bad status {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            print(f"[image_gen] Download attempt {attempt + 1} exception: {type(e).__name__}: {e}")
+        if attempt < 2:
+            time.sleep(2)
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1143,23 +697,17 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     system_prompt = FRONTEND_AGENT_SYSTEM_PROMPT
     if supabase_config:
         system_prompt += SUPABASE_PROMPT_ADDITION
-        print(f"[Agent5] Supabase enabled — added backend tools and prompt")
+        print(f"[Agent5] Supabase enabled")
     if stripe_config:
-        prompt_with_keys = STRIPE_PROMPT_ADDITION.replace(
+        system_prompt += STRIPE_PROMPT_ADDITION.replace(
             "{STRIPE_PUBLISHABLE_KEY}", stripe_config.get("publishable_key", "")
-        ).replace(
-            "{STRIPE_PROXY_URL}", stripe_config.get("proxy_url", "")
-        )
-        system_prompt += prompt_with_keys
-        print(f"[Agent5] Stripe enabled — added payment tools and prompt")
+        ).replace("{STRIPE_PROXY_URL}", stripe_config.get("proxy_url", ""))
+        print(f"[Agent5] Stripe enabled")
     if ai_config:
-        prompt_with_url = AI_PROMPT_ADDITION.replace(
+        system_prompt += AI_PROMPT_ADDITION.replace(
             "{AI_PROXY_URL}", ai_config.get("proxy_url", "")
-        ).replace(
-            "{APP_TOKEN}", ai_config.get("app_token", "")
-        )
-        system_prompt += prompt_with_url
-        print(f"[Agent5] AI proxy enabled — added AI tools and prompt")
+        ).replace("{APP_TOKEN}", ai_config.get("app_token", ""))
+        print(f"[Agent5] AI proxy enabled")
 
     all_tools = list(anthropic_tools)
     if supabase_config:
@@ -1192,7 +740,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             f.write(content)
         if not existed:
             add_file(path)
-        print(f"""{Back.WHITE}agent6 is taking action: "type": "FILE_WRITE", "path": {path}, "existed": {existed}{Style.RESET_ALL}""")
+        print(f"""{Back.WHITE}agent6: FILE_WRITE {path}{Style.RESET_ALL}""")
         agent6.notify_reviewer({"type": "FILE_WRITE", "path": path, "existed": existed, "old_content": old_content, "new_content": content})
         return f"WRITE_COMPLETED PATH:{path}"
 
@@ -1206,12 +754,11 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         updated_content = full_content.replace(old_str, new_str, 1)
         with open(path, 'w', encoding='utf-8') as f:
             f.write(updated_content)
-        print(f"""{Back.WHITE}agent6 is taking action: "type": "EDIT", "path": {path}{Style.RESET_ALL}""")
+        print(f"""{Back.WHITE}agent6: EDIT {path}{Style.RESET_ALL}""")
         agent6.notify_reviewer({"type": "FILE_WRITE", "path": path, "old_string": old_str, "new_string": new_str, "new_content": updated_content})
         return f"EDIT_COMPLETED PATH: {path}"
 
     def read_file(path, **kwargs):
-        print(f"THE GENERATOR REQUESTED A READ FOR:{path}")
         p = Path(path)
         if not p.exists():
             return f"[READ_FILE_ERROR] FILE NOT FOUND {path}"
@@ -1231,11 +778,9 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                     if os.path.normpath(f).startswith(dir_prefix):
                         remove_file(f)
                 shutil.rmtree(path)
-                print(f"[delete] Removed directory: {path}")
             else:
                 os.remove(path)
                 remove_file(path)
-                print(f"[delete] Removed file: {path}")
             agent6.notify_reviewer({"type": "FILE_DELETE", "path": path})
             return f"DELETE_COMPLETED PATH:{path}"
         except Exception as e:
@@ -1257,22 +802,21 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
 
     def search_files(query: str, search_dir: str = "src", include_patterns: str = "", case_sensitive: bool = False) -> str:
         try:
-            cmd = ["grep", "-r", "-n", "--include=*.ts", "--include=*.tsx", "--include=*.js", "--include=*.jsx", "--include=*.css", "--include=*.html", "--include=*.json", "--include=*.md"]
+            cmd = ["grep", "-r", "-n", "--include=*.ts", "--include=*.tsx", "--include=*.js", "--include=*.jsx", "--include=*.css", "--include=*.html", "--include=*.json"]
             if include_patterns:
                 cmd = ["grep", "-r", "-n"]
                 for pattern in include_patterns.split(","):
-                    pattern = pattern.strip()
-                    if pattern:
-                        cmd.append(f"--include={pattern}")
+                    p = pattern.strip()
+                    if p:
+                        cmd.append(f"--include={p}")
             if not case_sensitive:
                 cmd.append("-i")
-            cmd.extend(["--exclude-dir=node_modules", "--exclude-dir=dist", "--exclude-dir=.git", "--exclude-dir=__pycache__"])
-            cmd.append(query)
-            cmd.append(search_dir if os.path.isdir(search_dir) else ".")
+            cmd.extend(["--exclude-dir=node_modules", "--exclude-dir=dist", "--exclude-dir=.git"])
+            cmd.extend([query, search_dir if os.path.isdir(search_dir) else "."])
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
             output = result.stdout.strip()
             if not output:
-                return f"SEARCH_NO_RESULTS: No matches found for '{query}' in {search_dir}"
+                return f"SEARCH_NO_RESULTS: No matches for '{query}' in {search_dir}"
             lines = output.split("\n")
             if len(lines) > 50:
                 output = "\n".join(lines[:50]) + f"\n... and {len(lines) - 50} more matches"
@@ -1283,11 +827,15 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             return f"SEARCH_ERROR: {str(e)}"
 
     # ══════════════════════════════════════════════════════════════════════
-    #  FIXED: generate_image with retry, backoff, and validation
+    #  generate_image — fal.ai implementation
+    #
+    #  fal.ai always returns a plain HTTPS URL in result["images"][0]["url"].
+    #  There are no FileOutput objects, no byte extraction complexity.
+    #  The full flow is: call fal_client.subscribe() → get URL → download → save.
     # ══════════════════════════════════════════════════════════════════════
-    def generate_image(prompt: str, target_path: str, width: int = 1024, height: int = 768, model: str = "flux.schnell") -> str:
+    def generate_image(prompt: str, target_path: str, width: int = 1024, height: int = 768, model: str = "flux-schnell") -> str:
         try:
-            print(f"[image_gen] Generating: {target_path} ({width}x{height}, {model})")
+            # Clamp and align dimensions
             width  = max(512, min(1920, int(width)))
             height = max(512, min(1920, int(height)))
             width  = (width  // 32) * 32
@@ -1297,126 +845,103 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             if parent:
                 os.makedirs(parent, exist_ok=True)
 
-            model_map = {
-                "flux.schnell": "black-forest-labs/flux-schnell",
-                "flux.dev":     "black-forest-labs/flux-dev",
-                "flux2.dev":    "black-forest-labs/flux-2-pro",
-            }
-            replicate_model = model_map.get(model, model_map["flux.schnell"])
+            # Resolve model — unknown names fall back to flux-schnell
+            fal_endpoint = _FAL_MODEL_MAP.get(model, _FAL_MODEL_MAP["flux-schnell"])
+            if model not in _FAL_MODEL_MAP:
+                print(f"[image_gen] Unknown model '{model}' — falling back to flux-schnell")
 
-            ext           = target_path.rsplit(".", 1)[-1].lower() if "." in target_path else "webp"
-            format_map    = {"jpg": "jpg", "jpeg": "jpg", "png": "png", "webp": "webp"}
-            output_format = format_map.get(ext, "webp")
+            ext           = target_path.rsplit(".", 1)[-1].lower() if "." in target_path else "jpeg"
+            output_format = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(ext, "jpeg")
 
-            replicate_input = {
-                "prompt": prompt,
-                "width": width,
-                "height": height,
-                "output_format": output_format,
-                "output_quality": 90,
-                "num_outputs": 1,
-            }
-            if model == "flux.schnell":
-                replicate_input["go_fast"] = True
+            # Build arguments — ultra uses aspect_ratio, others use image_size dict
+            if fal_endpoint in _ULTRA_MODELS:
+                arguments = {
+                    "prompt":        prompt,
+                    "aspect_ratio":  _aspect_ratio_from_dims(width, height),
+                    "output_format": output_format,
+                }
+                print(f"[image_gen] flux-ultra → aspect_ratio={arguments['aspect_ratio']}")
+            else:
+                arguments = {
+                    "prompt":      prompt,
+                    "image_size":  {"width": width, "height": height},
+                    "output_format": output_format,
+                    "num_images":  1,
+                }
 
-            # ── Retry with exponential backoff for rate limits ────────
-            max_retries = 3
-            output = None
-            for attempt in range(max_retries):
+            print(f"[image_gen] ── START ──────────────────────────────────────")
+            print(f"[image_gen] target_path : {target_path}")
+            print(f"[image_gen] model       : {model} → {fal_endpoint}")
+            print(f"[image_gen] dimensions  : {width}x{height}")
+            print(f"[image_gen] arguments   : {json.dumps({k: v for k, v in arguments.items() if k != 'prompt'})}")
+            print(f"[image_gen] prompt      : {prompt[:120]}...")
+            print(f"[image_gen] fal_key set : {'yes' if fal_client.api_key else 'NO — FAL_KEY missing!'}")
+
+            # ── Call fal.ai with retry + exponential backoff ──────────────
+            result = None
+            for attempt in range(3):
                 try:
-                    output = replicate.run(replicate_model, input=replicate_input)
+                    print(f"[image_gen] Calling fal_client.subscribe() attempt {attempt + 1}...")
+                    result = fal_client.subscribe(fal_endpoint, arguments=arguments)
+                    print(f"[image_gen] fal_client.subscribe() succeeded")
+                    print(f"[image_gen] result type : {type(result).__name__}")
+                    print(f"[image_gen] result keys : {list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
                     break
                 except Exception as e:
                     err_str = str(e).lower()
-                    is_rate_limit = "429" in err_str or "rate limit" in err_str or "throttl" in err_str
-                    if is_rate_limit and attempt < max_retries - 1:
+                    print(f"[image_gen] attempt {attempt + 1} exception: {type(e).__name__}: {e}")
+                    is_rate_limit = "429" in err_str or "rate" in err_str or "throttl" in err_str or "queue" in err_str
+                    if is_rate_limit and attempt < 2:
                         delay = 5 * (2 ** attempt)  # 5s, 10s, 20s
-                        print(f"[image_gen] Rate limited on attempt {attempt+1}, retrying in {delay}s...")
+                        print(f"[image_gen] Rate limited — retrying in {delay}s...")
                         time.sleep(delay)
                         continue
-                    else:
-                        print(f"[image_gen] Failed after {attempt+1} attempts: {e}")
-                        return f"IMAGE_GENERATION_FAILED: {str(e)[:200]} — use a CSS gradient placeholder instead. Do NOT import this path."
+                    print(f"[image_gen] FAILED after {attempt + 1} attempts: {e}")
+                    return f"IMAGE_GENERATION_FAILED: {str(e)[:200]} — use a CSS gradient placeholder instead. Do NOT import this path."
 
-            # ── Extract output — handle both URL and raw bytes ────────
-            raw_item = None
-            if isinstance(output, list) and len(output) > 0:
-                raw_item = output[0]
-            elif hasattr(output, '__iter__'):
-                for item in output:
-                    raw_item = item
-                    break
-            print(f"[image_gen] output type: {type(output)}, raw_item type: {type(raw_item)}")
-            if raw_item is not None:
-                print(f"[image_gen] raw_item repr (first 200): {repr(str(raw_item)[:200])}")
+            if result is None:
+                return "IMAGE_GENERATION_FAILED: No result returned — use a CSS gradient placeholder instead. Do NOT import this path."
 
-            if raw_item is None:
-                return "IMAGE_GENERATION_FAILED: No output received from model — use a CSS gradient placeholder instead. Do NOT import this path."
+            # ── Extract the image URL ──────────────────────────────────────
+            # fal.ai always returns: result["images"][0]["url"]
+            image_url = None
+            try:
+                image_url = result["images"][0]["url"]
+                print(f"[image_gen] Extracted URL from result['images'][0]['url']")
+            except (KeyError, IndexError, TypeError) as e:
+                print(f"[image_gen] Could not extract via result['images'][0]['url']: {e}")
 
-            # Check if the output is already raw bytes (some models return bytes directly)
-            if isinstance(raw_item, bytes):
-                print(f"[image_gen] Got raw bytes directly ({len(raw_item)} bytes)")
-                print(f"[image_gen] First 200 bytes repr: {repr(raw_item[:200])}")
-                try:
-                    print(f"[image_gen] Decoded as text: {raw_item.decode('utf-8', errors='replace')[:500]}")
-                except Exception:
-                    pass
-                image_data = raw_item
-            elif isinstance(raw_item, str) and raw_item.startswith(("http://", "https://")):
-                # It's a URL — download it
-                image_data = None
-                for dl_attempt in range(2):
-                    try:
-                        response = requests.get(raw_item, timeout=60)
-                        if response.status_code == 200:
-                            image_data = response.content
-                            break
-                        else:
-                            print(f"[image_gen] Download attempt {dl_attempt+1} failed: status {response.status_code}")
-                    except Exception as dl_err:
-                        print(f"[image_gen] Download attempt {dl_attempt+1} error: {dl_err}")
-                    if dl_attempt < 1:
-                        time.sleep(2)
-            elif hasattr(raw_item, 'read'):
-                # It's a file-like object (some replicate versions return this)
-                print(f"[image_gen] Got file-like object, reading bytes")
-                image_data = raw_item.read()
-            else:
-                # Unknown type — try converting to string and downloading as URL
-                url_str = str(raw_item)
-                if url_str.startswith(("http://", "https://")):
-                    try:
-                        response = requests.get(url_str, timeout=60)
-                        image_data = response.content if response.status_code == 200 else None
-                    except Exception as e:
-                        print(f"[image_gen] Fallback download failed: {e}")
-                        image_data = None
-                else:
-                    print(f"[image_gen] Unknown output type: {type(raw_item)}")
-                    image_data = None
+            if not image_url:
+                if isinstance(result, dict):
+                    image_url = result.get("image", {}).get("url") or result.get("url")
+                    print(f"[image_gen] Fallback extraction got: {image_url}")
+                if not image_url:
+                    print(f"[image_gen] Full result dump: {str(result)[:500]}")
+                    return "IMAGE_GENERATION_FAILED: Could not find image URL in result — use a CSS gradient placeholder instead. Do NOT import this path."
+
+            print(f"[image_gen] Got URL: {image_url[:120]}")
+
+            # ── Download the image ────────────────────────────────────────
+            image_data = _download_image(image_url)
 
             if not image_data:
-                return f"IMAGE_GENERATION_FAILED: Download failed after retries — use a CSS gradient placeholder instead. Do NOT import this path."
+                return "IMAGE_GENERATION_FAILED: Download failed after retries — use a CSS gradient placeholder instead. Do NOT import this path."
 
-            # ── Verify file is a real image (not an error page) ───────
-            if len(image_data) < 1024:
-                print(f"[image_gen] WARNING: Downloaded file suspiciously small ({len(image_data)} bytes)")
-                return "IMAGE_GENERATION_FAILED: Generated file too small, likely an error — use a CSS gradient placeholder instead. Do NOT import this path."
-
+            # ── Save to disk ──────────────────────────────────────────────
             with open(target_path, "wb") as f:
                 f.write(image_data)
 
-            file_size_kb = len(image_data) / 1024
-            print(f"[image_gen] Saved: {target_path} ({file_size_kb:.1f} KB)")
+            size_kb = len(image_data) / 1024
+            print(f"[image_gen] Saved: {target_path} ({size_kb:.1f} KB)")
 
             add_file(target_path)
             agent6.notify_reviewer({"type": "IMAGE_GENERATED", "path": target_path, "prompt": prompt})
 
             if target_path.startswith("src/"):
-                return f"IMAGE_GENERATED PATH:{target_path} SIZE:{file_size_kb:.1f}KB — Import as ES6 module: import img from './{target_path}'"
+                return f"IMAGE_GENERATED PATH:{target_path} SIZE:{size_kb:.1f}KB — Import as ES6 module: import img from './{target_path}'"
             else:
                 public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
-                return f"IMAGE_GENERATED PATH:{target_path} SIZE:{file_size_kb:.1f}KB — Reference in code as {public_ref}"
+                return f"IMAGE_GENERATED PATH:{target_path} SIZE:{size_kb:.1f}KB — Reference in code as {public_ref}"
 
         except Exception as e:
             print(f"[image_gen] Exception: {e}")
@@ -1437,37 +962,39 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                         data = f.read()
                     ext  = img_path.rsplit(".", 1)[-1].lower()
                     mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
-                    uri  = f"data:{mime};base64,{base64.b64encode(data).decode()}"
-                    image_uris.append(uri)
+                    image_uris.append(f"data:{mime};base64,{base64.b64encode(data).decode()}")
                 else:
                     return f"IMAGE_EDIT_FAILED: Source image not found: {img_path}"
             if not image_uris:
                 return "IMAGE_EDIT_FAILED: No valid source images provided"
-            replicate_input = {"prompt": prompt, "input_image": image_uris[0], "aspect_ratio": aspect_ratio, "output_format": "webp", "output_quality": 90}
-            output = replicate.run("black-forest-labs/flux-kontext", input=replicate_input)
-            image_url = None
-            if isinstance(output, list) and len(output) > 0:
-                image_url = str(output[0])
-            elif hasattr(output, '__iter__'):
-                for item in output:
-                    image_url = str(item)
-                    break
-            elif output:
-                image_url = str(output)
+
+            # fal.ai Kontext endpoint for image editing
+            result = fal_client.subscribe(
+                "fal-ai/flux-pro/kontext",
+                arguments={
+                    "prompt":        prompt,
+                    "image_url":     image_uris[0],
+                    "aspect_ratio":  aspect_ratio,
+                    "output_format": "jpeg",
+                }
+            )
+            image_url = result["images"][0]["url"] if result and "images" in result else None
             if not image_url:
-                return "IMAGE_EDIT_FAILED: No output received from model"
-            response = requests.get(image_url, timeout=60)
-            if response.status_code != 200:
-                return f"IMAGE_EDIT_FAILED: Download failed (status {response.status_code})"
+                return "IMAGE_EDIT_FAILED: No output URL received"
+
+            image_data = _download_image(image_url)
+            if not image_data:
+                return "IMAGE_EDIT_FAILED: Download failed"
+
             with open(target_path, "wb") as f:
-                f.write(response.content)
+                f.write(image_data)
             add_file(target_path)
             agent6.notify_reviewer({"type": "IMAGE_EDITED", "source_paths": image_paths, "target_path": target_path})
+
             if target_path.startswith("src/"):
                 return f"IMAGE_EDITED PATH:{target_path} — Import as ES6 module: import img from './{target_path}'"
-            else:
-                public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
-                return f"IMAGE_EDITED PATH:{target_path} — Reference in code as {public_ref}"
+            public_ref = target_path.replace("public/", "/", 1) if target_path.startswith("public/") else f"/{target_path}"
+            return f"IMAGE_EDITED PATH:{target_path} — Reference in code as {public_ref}"
         except Exception as e:
             return f"IMAGE_EDIT_FAILED: {str(e)}"
 
@@ -1482,7 +1009,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             with open(log_path) as f:
                 logs = json.load(f)
             if not logs:
-                return "CONSOLE_LOGS_EMPTY: No errors or warnings captured — app appears clean."
+                return "CONSOLE_LOGS_EMPTY: No errors captured — app appears clean."
             output = f"CONSOLE_LOGS ({len(logs)} entries, showing last 30):\n"
             for entry in logs[-30:]:
                 level = entry.get("level", "log").upper()
@@ -1498,7 +1025,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             return "PACKAGE_JSON_ERROR: No workspace configured."
         path = os.path.join(_ws, "package.json")
         if not os.path.exists(path):
-            return "PACKAGE_JSON_NOT_FOUND: No package.json exists yet in this project."
+            return "PACKAGE_JSON_NOT_FOUND"
         try:
             with open(path) as f:
                 return f.read()
@@ -1516,7 +1043,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 with open(meta_path) as f:
                     meta = json.load(f)
                 if meta.get("supabase_enabled"):
-                    return "BACKEND_ALREADY_ENABLED: Supabase is already active. Use get_supabase_config to get credentials."
+                    return "BACKEND_ALREADY_ENABLED: Supabase is already active. Use get_supabase_config."
             except Exception:
                 pass
         print(f"[Agent5] Backend requested — reason: {reason}")
@@ -1525,8 +1052,8 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             json.dump({"reason": reason, "ts": _time.time()}, f)
         approved_path = os.path.join(_workspace, "backend_approved.json")
         denied_path   = os.path.join(_workspace, "backend_denied.json")
-        max_wait      = 300
-        elapsed       = 0
+        max_wait = 300
+        elapsed  = 0
         while elapsed < max_wait:
             _time.sleep(3)
             elapsed += 3
@@ -1545,11 +1072,11 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 except: pass
                 if supabase_url and anon_key:
                     sb = SupabaseTools(
-                        supabase_url      = supabase_url,
-                        anon_key          = anon_key,
-                        service_role_key  = meta.get("supabase_service_role", ""),
-                        preview_url       = f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{os.path.basename(_workspace)}/",
-                        project_ref       = meta.get("supabase_project_ref", ""),
+                        supabase_url     = supabase_url,
+                        anon_key         = anon_key,
+                        service_role_key = meta.get("supabase_service_role", ""),
+                        preview_url      = f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{os.path.basename(_workspace)}/",
+                        project_ref      = meta.get("supabase_project_ref", ""),
                     )
                     agent6.tool_map["create_table"]        = sb.create_table
                     agent6.tool_map["add_rls_policy"]      = sb.add_rls_policy
@@ -1562,26 +1089,20 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                             agent6.tools.append(tool_def)
                     if "BACKEND / DATABASE (SUPABASE)" not in agent6.system_prompt:
                         agent6.system_prompt += SUPABASE_PROMPT_ADDITION
-                    print(f"[Agent5] Backend approved — Supabase tools activated")
                 return (
                     f"BACKEND_APPROVED: Supabase is now active!\n"
                     f"URL: {supabase_url}\nAnon Key: {anon_key}\n\n"
-                    f"You now have access to: create_table, add_rls_policy, enable_auth, list_tables, run_sql, get_supabase_config.\n\n"
-                    f"NEXT STEPS:\n"
-                    f"1. Call get_supabase_config to get the client setup code\n"
-                    f"2. Create src/lib/supabase.ts with the client\n"
-                    f"3. Install @supabase/supabase-js\n"
-                    f"4. Create tables and RLS policies as needed"
+                    f"NEXT: call get_supabase_config, create src/lib/supabase.ts, then create tables with RLS policies."
                 )
             if os.path.exists(denied_path):
                 try: os.remove(denied_path)
                 except: pass
                 try: os.remove(req_path)
                 except: pass
-                return "BACKEND_DENIED: User declined the backend. Build a frontend-only version using localStorage for data persistence. Do NOT use any Supabase tools or imports."
+                return "BACKEND_DENIED: Build a frontend-only version using localStorage."
         try: os.remove(req_path)
         except: pass
-        return "BACKEND_TIMEOUT: No response from user within 5 minutes. Build a frontend-only version using localStorage for data persistence."
+        return "BACKEND_TIMEOUT: Build a frontend-only version using localStorage."
 
     def request_stripe(reason: str = "") -> str:
         import time as _time
@@ -1596,21 +1117,16 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 if meta.get("stripe_enabled"):
                     pk  = meta.get("stripe_publishable_key", "")
                     job = os.path.basename(_workspace)
-                    return (
-                        f"STRIPE_ALREADY_ENABLED: Stripe is active.\n"
-                        f"Publishable key: {pk}\n"
-                        f"Proxy URL: https://entrepreneur-bot-backend.onrender.com/stripe/job/{job}"
-                    )
+                    return f"STRIPE_ALREADY_ENABLED: pk={pk}, proxy=https://entrepreneur-bot-backend.onrender.com/stripe/job/{job}"
             except Exception:
                 pass
-        print(f"[Agent5] Stripe requested — reason: {reason}")
         req_path = os.path.join(_workspace, "stripe_requested.json")
         with open(req_path, "w") as f:
             json.dump({"reason": reason, "ts": _time.time()}, f)
         approved_path = os.path.join(_workspace, "stripe_approved.json")
         denied_path   = os.path.join(_workspace, "stripe_denied.json")
-        max_wait      = 300
-        elapsed       = 0
+        max_wait = 300
+        elapsed  = 0
         while elapsed < max_wait:
             _time.sleep(3)
             elapsed += 3
@@ -1629,30 +1145,19 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                     pass
                 proxy_url = f"https://entrepreneur-bot-backend.onrender.com/stripe/job/{job}"
                 if "STRIPE PAYMENTS" not in agent6.system_prompt:
-                    prompt_with_keys = STRIPE_PROMPT_ADDITION.replace(
+                    agent6.system_prompt += STRIPE_PROMPT_ADDITION.replace(
                         "{STRIPE_PUBLISHABLE_KEY}", pk
-                    ).replace(
-                        "{STRIPE_PROXY_URL}", proxy_url
-                    )
-                    agent6.system_prompt += prompt_with_keys
-                return (
-                    f"STRIPE_APPROVED: Stripe is now active!\n"
-                    f"Publishable key: {pk}\n"
-                    f"Proxy URL: {proxy_url}\n\n"
-                    f"NEXT STEPS:\n"
-                    f"1. Install: npm install @stripe/stripe-js @stripe/react-stripe-js -y\n"
-                    f"2. Use create-checkout-session proxy for payments (never put sk_ in frontend)\n"
-                    f"3. Use publishable key only for Stripe.js initialization"
-                )
+                    ).replace("{STRIPE_PROXY_URL}", proxy_url)
+                return f"STRIPE_APPROVED: pk={pk}, proxy={proxy_url}"
             if os.path.exists(denied_path):
                 try: os.remove(denied_path)
                 except: pass
                 try: os.remove(req_path)
                 except: pass
-                return "STRIPE_DENIED: User declined Stripe. Build a payment UI mockup without real processing. Show realistic checkout forms but make buttons display a 'Coming soon' message."
+                return "STRIPE_DENIED: Build a payment UI mockup with 'Coming soon' buttons."
         try: os.remove(req_path)
         except: pass
-        return "STRIPE_TIMEOUT: No response within 5 minutes. Build a payment UI mockup without real Stripe integration."
+        return "STRIPE_TIMEOUT: Build a payment UI mockup."
 
     def request_ai(reason: str = "") -> str:
         _workspace = workspace
@@ -1661,22 +1166,10 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         proxy_url = "https://entrepreneur-bot-backend.onrender.com/auth/ai/proxy"
         app_token = ai_config.get("app_token", "") if ai_config else ""
         if "AI / CLAUDE INTEGRATION" not in agent6.system_prompt:
-            prompt_with_url = AI_PROMPT_ADDITION.replace(
+            agent6.system_prompt += AI_PROMPT_ADDITION.replace(
                 "{AI_PROXY_URL}", proxy_url
-            ).replace(
-                "{APP_TOKEN}", app_token
-            )
-            agent6.system_prompt += prompt_with_url
-        return (
-            f"AI_APPROVED: Claude AI proxy is ready.\n"
-            f"Proxy URL: {proxy_url}\n"
-            f"App Token: {app_token}\n\n"
-            f"IMPORTANT: Use APP_TOKEN hardcoded in useAI.ts — safe to embed, scoped to AI calls only.\n"
-            f"Credits are charged to the app owner's account automatically.\n\n"
-            f"NEXT STEPS:\n"
-            f"1. Create src/hooks/useAI.ts with the hook from the AI integration guide\n"
-            f"2. Import and use useAI() in your components"
-        )
+            ).replace("{APP_TOKEN}", app_token)
+        return f"AI_APPROVED: proxy={proxy_url}, token={app_token}"
 
     tool_map = {
         'write_file':          write_file,
@@ -1699,11 +1192,11 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
 
     if supabase_config:
         sb = SupabaseTools(
-            supabase_url      = supabase_config["url"],
-            anon_key          = supabase_config["anon_key"],
-            service_role_key  = supabase_config.get("service_role_key", ""),
-            preview_url       = supabase_config.get("preview_url", ""),
-            project_ref       = supabase_config.get("project_ref", ""),
+            supabase_url     = supabase_config["url"],
+            anon_key         = supabase_config["anon_key"],
+            service_role_key = supabase_config.get("service_role_key", ""),
+            preview_url      = supabase_config.get("preview_url", ""),
+            project_ref      = supabase_config.get("project_ref", ""),
         )
         tool_map["create_table"]        = sb.create_table
         tool_map["add_rls_policy"]      = sb.add_rls_policy
