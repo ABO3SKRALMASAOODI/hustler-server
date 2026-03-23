@@ -631,24 +631,21 @@ _FAL_MODEL_MAP: dict[str, str] = {
     # Primary names — what the agent uses
     "flux-schnell": "fal-ai/flux/schnell",           # $0.003/MP — default for ALL non-hero images
     "flux-pro":     "fal-ai/flux-pro/v1.1",          # $0.03/MP  — complex shots only
-    "flux-ultra":   "fal-ai/flux/dev",               # fal-ai/flux/dev used as high-quality hero
+    "flux-ultra":   "fal-ai/flux-pro/v1.1-ultra",    # $0.06/image — hero only, fully on fal.ai infra
 
     # Legacy aliases — kept so old prompts don't hard-fail
     "flux.schnell": "fal-ai/flux/schnell",
     "flux.dev":     "fal-ai/flux/dev",
     "flux-dev":     "fal-ai/flux/dev",
-    "flux2.dev":    "fal-ai/flux/dev",               # retired Replicate model — remapped to flux/dev
+    "flux2.dev":    "fal-ai/flux-pro/v1.1-ultra",    # retired Replicate model — remapped to ultra
 }
 
-# NOTE on flux-ultra:
-# fal-ai/flux-pro/v1.1-ultra routes through BFL's US2 API (api.us2.bfl.ai) which has
-# an expired SSL certificate as of March 2026. Remapped to fal-ai/flux/dev which is
-# high quality, fully hosted on fal.ai infrastructure, and has no SSL issues.
-# Revert to "fal-ai/flux-pro/v1.1-ultra" once BFL fixes their cert.
+# NOTE: fal-ai/flux-pro/v1.1-ultra is fully hosted on fal.ai infrastructure.
+# The earlier SSL error (api.us2.bfl.ai) was from the old Replicate/BFL direct routing.
+# fal.ai proxies all requests through their own servers — no BFL SSL exposure.
 
-# Models that use aspect_ratio instead of explicit width/height
-# fal-ai/flux/dev uses image_size like schnell, so this set is now empty
-_ULTRA_MODELS: set[str] = set()
+# Models that use aspect_ratio instead of explicit width/height (no image_size param)
+_ULTRA_MODELS = {"fal-ai/flux-pro/v1.1-ultra"}
 
 # Minimum bytes for a real image
 _MIN_IMAGE_BYTES = 10 * 1024  # 10 KB
