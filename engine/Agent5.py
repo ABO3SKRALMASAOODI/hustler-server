@@ -1346,6 +1346,9 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 for item in output:
                     raw_item = item
                     break
+            print(f"[image_gen] output type: {type(output)}, raw_item type: {type(raw_item)}")
+            if raw_item is not None:
+                print(f"[image_gen] raw_item repr (first 200): {repr(str(raw_item)[:200])}")
 
             if raw_item is None:
                 return "IMAGE_GENERATION_FAILED: No output received from model — use a CSS gradient placeholder instead. Do NOT import this path."
@@ -1353,6 +1356,11 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             # Check if the output is already raw bytes (some models return bytes directly)
             if isinstance(raw_item, bytes):
                 print(f"[image_gen] Got raw bytes directly ({len(raw_item)} bytes)")
+                print(f"[image_gen] First 200 bytes repr: {repr(raw_item[:200])}")
+                try:
+                    print(f"[image_gen] Decoded as text: {raw_item.decode('utf-8', errors='replace')[:500]}")
+                except Exception:
+                    pass
                 image_data = raw_item
             elif isinstance(raw_item, str) and raw_item.startswith(("http://", "https://")):
                 # It's a URL — download it
