@@ -47,7 +47,6 @@ FINAL TEXT MARKER: After completing all tool calls, wrap your concluding summary
 </critical-instructions>
 
 ## Required Workflow
-
 1. Don't re-read files that are already provided in the context.
 
 2. **Assess scope**: For clear, narrow requests → implement. For broad/ambiguous requests → discuss options and ask clarifying questions before proceeding.
@@ -1849,27 +1848,6 @@ The following are the exact JSON schemas for all available tools as provided by 
   }
 }
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
