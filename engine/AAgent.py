@@ -79,12 +79,12 @@ class BaseAgent:
             return
         try:
             import os as _os, json as _json
-            anthropic_to_hb = {
-                "claude-haiku-4-5-20251001": "hb-6",
-                "claude-sonnet-4-6":         "hb-6-pro",
-                "claude-opus-4-6":           "hb-7",
+            anthropic_to_V = {
+                "claude-haiku-4-5-20251001": "V6",
+                "claude-sonnet-4-6":         "V6-pro",
+                "claude-opus-4-6":           "V7",
             }
-            hb_model = anthropic_to_hb.get(self.model, "hb-6-pro")
+            V_model = anthropic_to_V.get(self.model, "V6-pro")
             path = _os.path.join(self.workspace, "partial_deduction.json")
             data = [{
                 "input_tokens":       totals.get("input", 0),
@@ -93,7 +93,7 @@ class BaseAgent:
                 "cache_read_tokens":  totals.get("cache_read", 0),
                 "tokens_used":        sum(totals.values()),
                 "partial":            True,
-                "model":              hb_model,
+                "model":              V_model,
             }]
             with open(path, "w") as f:
                 _json.dump(data, f)

@@ -251,27 +251,27 @@ def get_available_models(user_id):
 
     models = [
         {
-            "id":          "hb-6",
-            "name":        "HB-6",
+            "id":          "V6",
+            "name":        "V6",
             "description": "Fast & efficient for everyday tasks",
             "engine":      "claude-haiku-4-5-20251001",
-            "locked":      "hb-6" not in allowed,
+            "locked":      "V6" not in allowed,
             "min_plan":    "free",
         },
         {
-            "id":          "hb-6-pro",
-            "name":        "HB-6 Pro",
+            "id":          "V6-pro",
+            "name":        "V6 Pro",
             "description": "Powerful for complex apps, uses more credits",
             "engine":      "claude-sonnet-4-6",
-            "locked":      "hb-6-pro" not in allowed,
+            "locked":      "V6-pro" not in allowed,
             "min_plan":    "plus",
         },
         {
-            "id":          "hb-7",
-            "name":        "HB-7",
+            "id":          "V7",
+            "name":        "V7",
             "description": "Advanced reasoning for complex tasks, highest credit usage",
             "engine":      "claude-opus-4-6",
-            "locked":      "hb-7" not in allowed,
+            "locked":      "V7" not in allowed,
             "min_plan":    "ultra",
         },
     ]
@@ -514,12 +514,12 @@ def _process_credits_deduction(job_id, job_folder, user_id):
         return
 
     meta_path = os.path.join(job_folder, "meta.json")
-    model     = "hb-6-pro"
+    model     = "V6-pro"
     if os.path.exists(meta_path):
         try:
             with open(meta_path) as f:
                 meta = json.load(f)
-            model = meta.get("model", "hb-6-pro")
+            model = meta.get("model", "V6-pro")
         except Exception:
             pass
 
@@ -655,13 +655,13 @@ def generate(user_id):
     if request.content_type and 'multipart/form-data' in request.content_type:
         prompt         = request.form.get("prompt", "")
         title          = request.form.get("title", "").strip() or (prompt[:40] if prompt else "New Project")
-        model          = request.form.get("model", "hb-6")
+        model          = request.form.get("model", "V6")
         uploaded_files = request.files.getlist("files")
     else:
         data           = request.get_json() or {}
         prompt         = data.get("prompt")
         title          = data.get("title", "").strip() or (prompt[:40] if prompt else "New Project")
-        model          = data.get("model", "hb-6")
+        model          = data.get("model", "V6")
         uploaded_files = []
 
     if not prompt:
@@ -774,12 +774,12 @@ def job_message(user_id, job_id):
                 json.dump(attachments, f)
 
     meta_path     = os.path.join(job_folder, "meta.json")
-    current_model = "hb-6"
+    current_model = "V6"
     if os.path.exists(meta_path):
         try:
             with open(meta_path) as f:
                 meta = json.load(f)
-            current_model = meta.get("model", "hb-6")
+            current_model = meta.get("model", "V6")
         except Exception:
             pass
 
@@ -1001,12 +1001,12 @@ def job_status(user_id, job_id):
             progress = []
 
     meta_path = os.path.join(job_folder, "meta.json")
-    job_model = "hb-6"
+    job_model = "V6"
     if os.path.exists(meta_path):
         try:
             with open(meta_path) as f:
                 meta = json.load(f)
-            job_model = meta.get("model", "hb-6")
+            job_model = meta.get("model", "V6")
         except Exception:
             pass
 
@@ -1107,7 +1107,7 @@ def clone_template(user_id):
     )
 
     with open(os.path.join(new_folder, "meta.json"), "w") as f:
-        json.dump({"user_id": user_id, "cloned_from": template_id, "model": "hb-6"}, f)
+        json.dump({"user_id": user_id, "cloned_from": template_id, "model": "V6"}, f)
 
     with open(os.path.join(new_folder, "state.json"), "w") as f:
         json.dump({"state": "completed", "cloned_from": template_id, "updated_at": time.time()}, f)
@@ -1648,7 +1648,7 @@ def preview_console_log(job_id):
 @token_required
 def create_job_workspace(user_id):
     data  = request.get_json() or {}
-    model = data.get("model", "hb-6")
+    model = data.get("model", "V6")
     title = data.get("title", "New Project")
 
     plan = _get_user_plan(user_id)
@@ -1749,12 +1749,12 @@ def cancel_job(user_id, job_id):
                         entries = json.load(f)
 
                     meta_path = os.path.join(job_folder, "meta.json")
-                    model     = "hb-6-pro"
+                    model     = "V6-pro"
                     if os.path.exists(meta_path):
                         try:
                             with open(meta_path) as f:
                                 meta = json.load(f)
-                            model = meta.get("model", "hb-6-pro")
+                            model = meta.get("model", "V6-pro")
                         except Exception:
                             pass
 

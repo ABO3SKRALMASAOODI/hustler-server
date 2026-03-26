@@ -10,13 +10,13 @@ load_dotenv()
 try:
     from credits import tokens_to_credits
 except ImportError:
-    def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="hb-6-pro"):
+    def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="V6-pro"):
         pricing = {
-            "hb-6":     {"input": 1.00, "output": 5.00,  "cache_write": 1.25, "cache_read": 0.10},
-            "hb-6-pro": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
-            "hb-7":     {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+            "V6":     {"input": 1.00, "output": 5.00,  "cache_write": 1.25, "cache_read": 0.10},
+            "V6-pro": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+            "V7":     {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
         }
-        p = pricing.get(model, pricing["hb-6-pro"])
+        p = pricing.get(model, pricing["V6-pro"])
         cost_dollars = (
             (input_tokens       * p["input"]) +
             (output_tokens      * p["output"]) +
@@ -26,10 +26,10 @@ except ImportError:
         return round(cost_dollars / 0.01, 2)
 
 
-ANTHROPIC_TO_HB = {
-    "claude-haiku-4-5-20251001": "hb-6",
-    "claude-sonnet-4-6":        "hb-6-pro",
-    "claude-opus-4-6":          "hb-7",
+ANTHROPIC_TO_V = {
+    "claude-haiku-4-5-20251001": "V6",
+    "claude-sonnet-4-6":        "V6-pro",
+    "claude-opus-4-6":          "V7",
 }
 
 
@@ -447,20 +447,20 @@ def main():
             try:
                 with open(meta_path) as f:
                     meta = json.load(f)
-                hb_model = meta.get("model", "hb-6")
+                V_model = meta.get("model", "V6")
                 model_map = {
-                    "hb-6":     "claude-haiku-4-5-20251001",
-                    "hb-6-pro": "claude-sonnet-4-6",
-                    "hb-7":     "claude-opus-4-6",
+                    "V6":     "claude-haiku-4-5-20251001",
+                    "V6-pro": "claude-sonnet-4-6",
+                    "V7":     "claude-opus-4-6",
                 }
-                anthropic_model = model_map.get(hb_model, "claude-haiku-4-5-20251001")
+                anthropic_model = model_map.get(V_model, "claude-haiku-4-5-20251001")
             except Exception:
                 anthropic_model = "claude-haiku-4-5-20251001"
         else:
             anthropic_model = "claude-haiku-4-5-20251001"
 
-    hb_model = ANTHROPIC_TO_HB.get(anthropic_model, "hb-6-pro")
-    print(f"[AA] Using model: {anthropic_model} (HB: {hb_model})")
+    V_model = ANTHROPIC_TO_V.get(anthropic_model, "V6-pro")
+    print(f"[AA] Using model: {anthropic_model} (V: {V_model})")
 
     try:
         write_state(WORKSPACE, "running")
@@ -706,10 +706,10 @@ def main():
             output_tokens      = token_breakdown["output"],
             cache_write_tokens = token_breakdown["cache_write"],
             cache_read_tokens  = token_breakdown["cache_read"],
-            model              = hb_model,
+            model              = V_model,
         )
 
-        print(f"[credits] model={hb_model} breakdown={token_breakdown} → {credits_used} credits")
+        print(f"[credits] model={V_model} breakdown={token_breakdown} → {credits_used} credits")
 
         append_message(WORKSPACE, "assistant", output,
                        token_breakdown=token_breakdown, credits=credits_used)

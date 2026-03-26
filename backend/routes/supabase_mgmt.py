@@ -28,7 +28,7 @@ supabase_bp = Blueprint('supabase', __name__)
 SUPABASE_API       = "https://api.supabase.com/v1"
 ORG_ID             = os.getenv("SUPABASE_ORG_ID", "kpkxuyxtclwllsfcqhdn")
 DEFAULT_REGION     = os.getenv("SUPABASE_REGION", "us-west-1")
-DB_PASSWORD_PREFIX = "hb-db-"  # prefix for generated DB passwords
+DB_PASSWORD_PREFIX = "V-db-"  # prefix for generated DB passwords
 
 OUTPUTS_DIR = os.path.join(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),

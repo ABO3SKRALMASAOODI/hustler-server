@@ -2,9 +2,9 @@
 Credits logic — per-model cost-based pricing.
 
 Model tiers:
-  HB-6      = Claude Haiku 4.5    (Free+ plans)
-  HB-6 Pro  = Claude Sonnet 4.6   (Plus/Pro+ plans)
-  HB-7      = Claude Opus 4.6     (Ultra/Titan/Ace plans)
+  V6      = Claude Haiku 4.5    (Free+ plans)
+  V6 Pro  = Claude Sonnet 4.6   (Plus/Pro+ plans)
+  V7      = Claude Opus 4.6     (Ultra/Titan/Ace plans)
 
 Anthropic pricing (per million tokens):
                     Input   Output  Cache Write  Cache Read
@@ -30,21 +30,21 @@ import math
 # ── Per-model pricing (per million tokens) ────────────────────────────────────
 
 MODEL_PRICING = {
-    "hb-6": {
+    "V6": {
         "anthropic_model": "claude-haiku-4-5-20251001",
         "input":       1.00,
         "output":      5.00,
         "cache_write": 1.25,
         "cache_read":  0.10,
     },
-    "hb-6-pro": {
+    "V6-pro": {
         "anthropic_model": "claude-sonnet-4-6",
         "input":       3.00,
         "output":      15.00,
         "cache_write": 3.75,
         "cache_read":  0.30,
     },
-    "hb-7": {
+    "V7": {
         "anthropic_model": "claude-opus-4-6",
         "input":       5.00,
         "output":      25.00,
@@ -54,17 +54,17 @@ MODEL_PRICING = {
 }
 
 # Fallback to Sonnet pricing if model not recognized
-DEFAULT_MODEL = "hb-6-pro"
+DEFAULT_MODEL = "V6-pro"
 
 # ── Plan → allowed models ─────────────────────────────────────────────────────
 
 PLAN_MODELS = {
-    "free":  ["hb-6"],
-    "plus":  ["hb-6", "hb-6-pro"],
-    "pro":   ["hb-6", "hb-6-pro"],
-    "ultra": ["hb-6", "hb-6-pro", "hb-7"],
-    "titan": ["hb-6", "hb-6-pro", "hb-7"],
-    "ace":   ["hb-6", "hb-6-pro", "hb-7"],
+    "free":  ["V6"],
+    "plus":  ["V6", "V6-pro"],
+    "pro":   ["V6", "V6-pro"],
+    "ultra": ["V6", "V6-pro", "V7"],
+    "titan": ["V6", "V6-pro", "V7"],
+    "ace":   ["V6", "V6-pro", "V7"],
 }
 
 # ── Plan → monthly credit limits ──────────────────────────────────────────────
@@ -86,7 +86,7 @@ INITIAL_BONUS       = 80    # One-time bonus on registration
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 
-def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="hb-6-pro"):
+def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, model="V6-pro"):
     """Convert token usage to credits based on the model's pricing."""
     pricing = MODEL_PRICING.get(model, MODEL_PRICING[DEFAULT_MODEL])
 
@@ -101,16 +101,16 @@ def tokens_to_credits(input_tokens, output_tokens, cache_write_tokens, cache_rea
     return round(cost_dollars / DOLLARS_PER_CREDIT, 2)
 
 
-def get_anthropic_model(hb_model):
-    """Convert HB model name to Anthropic API model string."""
-    pricing = MODEL_PRICING.get(hb_model, MODEL_PRICING[DEFAULT_MODEL])
+def get_anthropic_model(V_model):
+    """Convert V model name to Anthropic API model string."""
+    pricing = MODEL_PRICING.get(V_model, MODEL_PRICING[DEFAULT_MODEL])
     return pricing["anthropic_model"]
 
 
-def is_model_allowed(plan, hb_model):
+def is_model_allowed(plan, V_model):
     """Check if a plan allows access to a given model."""
     allowed = PLAN_MODELS.get(plan, PLAN_MODELS["free"])
-    return hb_model in allowed
+    return V_model in allowed
 
 
 # ── Daily refresh ─────────────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ def count_running_jobs(conn, user_id: int, stale_minutes: int = 15) -> int:
 def deduct_credits(conn, user_id: int, job_id: str, turn: int, tokens_used: int,
                    input_tokens: int = 0, output_tokens: int = 0,
                    cache_write_tokens: int = 0, cache_read_tokens: int = 0,
-                   model: str = "hb-6-pro"):
+                   model: str = "V6-pro"):
     if input_tokens or output_tokens or cache_write_tokens or cache_read_tokens:
         credits_used = tokens_to_credits(input_tokens, output_tokens,
                                          cache_write_tokens, cache_read_tokens,

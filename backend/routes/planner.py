@@ -57,17 +57,17 @@ def _verify_job_ownership(job_id, user_id):
 def _resolve_model(workspace):
     """Read model from meta.json and return anthropic model string."""
     MODEL_MAP = {
-        "hb-6":     "claude-haiku-4-5-20251001",
-        "hb-6-pro": "claude-sonnet-4-6",
-        "hb-7":     "claude-opus-4-6",
+        "V6":     "claude-haiku-4-5-20251001",
+        "V6-pro": "claude-sonnet-4-6",
+        "V7":     "claude-opus-4-6",
     }
     meta_path = os.path.join(workspace, "meta.json")
     if os.path.exists(meta_path):
         try:
             with open(meta_path) as f:
                 meta = json.load(f)
-            hb_model = meta.get("model", "hb-6")
-            return MODEL_MAP.get(hb_model, "claude-haiku-4-5-20251001")
+            V_model = meta.get("model", "V6")
+            return MODEL_MAP.get(V_model, "claude-haiku-4-5-20251001")
         except Exception:
             pass
     return "claude-haiku-4-5-20251001"
