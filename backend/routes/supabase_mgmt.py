@@ -179,7 +179,7 @@ def _provision_supabase(app, job_id, user_id, project_name):
                     "uri_allow_list": (
                         f"{callback_url},"
                         "https://entrepreneur-bot-backend.onrender.com/**,"
-                        "https://thehustlerbot.com/**"
+                        "https://valmera.io/**"
                     ),
                     "mailer_autoconfirm": False,
                 },

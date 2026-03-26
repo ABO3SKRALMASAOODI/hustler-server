@@ -37,7 +37,7 @@ def _rewrite_redirect_url(url, job_id):
     Rewrite a success/cancel URL to point to the correct base.
     Handles cases like:
       - window.location.origin + "/success"  → https://backend/auth/preview-raw/<job_id>/success
-      - https://myapp.thehustlerbot.com/success → kept as-is (published domain)
+      - https://myapp.valmera.io/success → kept as-is (published domain)
       - /success → rewritten to full URL
     """
     if not url:
@@ -46,7 +46,7 @@ def _rewrite_redirect_url(url, job_id):
     redirect_base = _get_redirect_base(job_id)
 
     # If URL is already pointing to a published domain, leave it alone
-    if url.startswith("https://") and "thehustlerbot.com" in url and "entrepreneur-bot" not in url:
+    if url.startswith("https://") and "valmera.io" in url and "entrepreneur-bot" not in url:
         return url
 
     # Extract the path portion

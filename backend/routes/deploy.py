@@ -84,7 +84,7 @@ def _get_zone_id():
     """Fetch the Cloudflare zone ID for thehustlerbot.com."""
     import requests as _requests
     resp = _requests.get(
-        "https://api.cloudflare.com/client/v4/zones?name=thehustlerbot.com",
+        "https://api.cloudflare.com/client/v4/zones?name=valmera.io",
         headers=CF_HEADERS(), timeout=15,
     )
     if resp.status_code == 200:
@@ -141,7 +141,7 @@ def _delete_custom_domain(cf_project_name, custom_domain, zone_id=None):
 
         if zone_id:
             # Extract subdomain name (e.g. "myapp" from "myapp.thehustlerbot.com")
-            subdomain_name = custom_domain.replace(".thehustlerbot.com", "")
+            subdomain_name = custom_domain.replace(".valmera.io", "")
 
             dns_resp = _requests.get(
                 f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=CNAME&name={custom_domain}",
@@ -196,7 +196,7 @@ def delete_domain(user_id, job_id):
             if not publish_name:
                 return jsonify({"error": "No domain to release"}), 400
 
-            custom_domain = f"{publish_name}.thehustlerbot.com"
+            custom_domain = f"{publish_name}.valmera.io"
 
     finally:
         conn.close()
@@ -296,7 +296,7 @@ def publish_project(user_id, job_id):
     )
 
     if domain_changed:
-        old_domain = f"{existing_publish_name}.thehustlerbot.com"
+        old_domain = f"{existing_publish_name}.valmera.io"
         print(f"[deploy] Domain change: {existing_publish_name} → {chosen_subdomain}. Cleaning up old domain...")
         zone_id = _get_zone_id()
         _delete_custom_domain(existing_cf_project, old_domain, zone_id)
@@ -444,7 +444,7 @@ def publish_project(user_id, job_id):
 
         # ── Add custom domain ─────────────────────────────────────────────
         chosen_name   = chosen_subdomain
-        custom_domain = f"{chosen_name}.thehustlerbot.com"
+        custom_domain = f"{chosen_name}.valmera.io"
         branded_url   = f"https://{custom_domain}"
         pages_dev_host = live_url.replace("https://", "") if live_url else f"{cf_project_name}.pages.dev"
 

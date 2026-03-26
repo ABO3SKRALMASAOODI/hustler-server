@@ -166,7 +166,7 @@ def push_to_github(user_id, job_id):
         headers=gh_headers,
         json={
             "name":        repo_name,
-            "description": f"Built with The Hustler Bot — https://thehustlerbot.com",
+            "description": f"Built with The Hustler Bot — https://valmera.io",
             "private":     False,
             "auto_init":   False,
         },
@@ -181,7 +181,7 @@ def push_to_github(user_id, job_id):
             headers=gh_headers,
             json={
                 "name":        repo_name,
-                "description": f"Built with The Hustler Bot — https://thehustlerbot.com",
+                "description": f"Built with The Hustler Bot — https://valmera.io",
                 "private":     False,
                 "auto_init":   False,
             },
@@ -202,7 +202,7 @@ def push_to_github(user_id, job_id):
             "path": "README.md",
             "content": f"""# {project_title}
 
-Built with [The Hustler Bot](https://thehustlerbot.com) — AI-powered app builder.
+Built with [valmera](https://valmera.io) — AI-powered app builder.
 
 ## Getting Started
 

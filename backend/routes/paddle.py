@@ -90,7 +90,7 @@ def create_checkout_session():
         "customer": {"email": user_email} if user_email else {},
         "custom_data": {"user_id": user_id, "plan": plan, "billing": billing},
         "collection_mode": "automatic",
-        "checkout": {"success_url": "https://thehustlerbot.com/purchase-success"}
+        "checkout": {"success_url": "https://valmera.io/purchase-success"}
     }
 
     # Apply 24-hour promo: 50% off first month only (monthly plans only)
