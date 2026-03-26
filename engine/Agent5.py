@@ -554,16 +554,6 @@ Write a single short 1-2 sentences describing what was built and what design dir
 CRITICAL: Always overwrite src/pages/Index.tsx with actual content. Never leave the scaffold default at "/".
 
 
-##PLANNING (NEW PROJECTS ONLY)
-
-PLAN
-Aesthetic Direction: [direction and reasoning]
-Pages: [list]
-Shared Components: [list]
-Tasks:
-[ ] Task 1
-
-Mark [→] when started, [✓] when done.
 
 
 ##PARALLEL EXECUTION
