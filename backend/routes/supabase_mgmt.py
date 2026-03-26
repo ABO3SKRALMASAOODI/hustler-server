@@ -7,7 +7,7 @@ When a user clicks "Enable Backend", we:
 2. Provision in a background thread:
    - Create a new Supabase project
    - Wait for it to become active
-   - Configure SMTP (Brevo) so emails come from support@thehustlerbot.com
+   - Configure SMTP (Brevo) so emails come from support@valmera.io
    - Disable email confirmation for smooth dev experience
    - Store the project's URL + anon key + service_role key in the job's meta.json and DB
 3. Frontend polls /supabase/job/<id>/backend-status until supabase_enabled=True
@@ -196,12 +196,12 @@ def _provision_supabase(app, job_id, user_id, project_name):
                     f"{SUPABASE_API}/projects/{project_ref}/config/auth",
                     headers=_mgmt_headers(),
                     json={
-                        "smtp_admin_email":                        "support@thehustlerbot.com",
+                        "smtp_admin_email":                        "support@valmera.io",
                         "smtp_host":                               "smtp-relay.brevo.com",
                         "smtp_port":                               "587",
                         "smtp_user":                               "8dc5e6001@smtp-brevo.com",
                         "smtp_pass":                               brevo_smtp_key,
-                        "smtp_sender_name":                        "The Hustler Bot",
+                        "smtp_sender_name":                        "Valmera",
                         "mailer_subjects_confirmation":            "Verify your email",
                         "mailer_templates_confirmation_content":   confirmation_template,
                     },

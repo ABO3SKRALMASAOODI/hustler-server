@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 admin_bp = Blueprint('admin', __name__)
 
-ADMIN_EMAIL = "thehustlerbot@gmail.com"
+ADMIN_EMAIL = "thevalmera@gmail.com"
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  The single SQL expression for "unique visitor".
@@ -81,7 +81,7 @@ def track_visit():
             return 'search'
         if any(x in ref_lower for x in ['facebook.', 'twitter.', 'x.com', 'instagram.', 'linkedin.', 'tiktok.', 'reddit.', 'youtube.']):
             return 'social'
-        if 'thehustlerbot.com' in ref_lower:
+        if 'valmera.io' in ref_lower:
             return 'internal'
         return 'referral'
 
