@@ -22,6 +22,218 @@ client = anthropic.Anthropic()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  TASK TRACKER CLASS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TaskTracker:
+    def __init__(self):
+        self.tasks = {}
+        self.task_notes = {}
+        self._next_id = 1
+
+    def create_task(self, title: str, description: str = "") -> str:
+        task_id = str(self._next_id)
+        self._next_id += 1
+        self.tasks[task_id] = {
+            "id": task_id,
+            "title": title,
+            "description": description,
+            "status": "todo",
+            "created_at": time.time()
+        }
+        self.task_notes[task_id] = []
+        print(f"[task_tracker] Created task {task_id}: {title}")
+        return task_id
+
+    def update_task_title(self, task_id: str, new_title: str) -> str:
+        if task_id not in self.tasks:
+            return f"TASK_NOT_FOUND: Task '{task_id}' does not exist."
+        self.tasks[task_id]["title"] = new_title
+        print(f"[task_tracker] Updated task {task_id} title: {new_title}")
+        return f"TASK_TITLE_UPDATED: '{new_title}'"
+
+    def update_task_description(self, task_id: str, new_description: str) -> str:
+        if task_id not in self.tasks:
+            return f"TASK_NOT_FOUND: Task '{task_id}' does not exist."
+        self.tasks[task_id]["description"] = new_description
+        print(f"[task_tracker] Updated task {task_id} description")
+        return f"TASK_DESCRIPTION_UPDATED"
+
+    def set_task_status(self, task_id: str, status: str) -> str:
+        if task_id not in self.tasks:
+            return f"TASK_NOT_FOUND: Task '{task_id}' does not exist."
+        valid_statuses = ["todo", "in_progress", "done"]
+        if status not in valid_statuses:
+            return f"INVALID_STATUS: Must be one of {valid_statuses}"
+        self.tasks[task_id]["status"] = status
+        self.tasks[task_id]["updated_at"] = time.time()
+        print(f"[task_tracker] Task {task_id} status: {status}")
+        return f"TASK_STATUS_UPDATED: {status}"
+
+    def get_task(self, task_id: str) -> str:
+        if task_id not in self.tasks:
+            return f"TASK_NOT_FOUND: Task '{task_id}' does not exist."
+        task = self.tasks[task_id].copy()
+        notes = self.task_notes.get(task_id, [])
+        return f"TASK_DETAILS:\nID: {task['id']}\nTitle: {task['title']}\nDescription: {task['description']}\nStatus: {task['status']}\nNotes: {len(notes)} note(s)"
+
+    def get_task_list(self) -> str:
+        if not self.tasks:
+            return "TASK_LIST_EMPTY: No tasks created yet."
+        output = "TASK_LIST:\n"
+        for task_id, task in sorted(self.tasks.items(), key=lambda x: x[1].get("created_at", 0)):
+            status_icon = {"todo": "[ ]", "in_progress": "[→]", "done": "[✓]"}[task["status"]]
+            output += f"  {status_icon} [{task_id}] {task['title']}\n"
+            if task.get("description"):
+                output += f"      {task['description'][:80]}{'...' if len(task['description']) > 80 else ''}\n"
+        return output.strip()
+
+    def add_task_note(self, task_id: str, note: str) -> str:
+        if task_id not in self.tasks:
+            return f"TASK_NOT_FOUND: Task '{task_id}' does not exist."
+        if task_id not in self.task_notes:
+            self.task_notes[task_id] = []
+        self.task_notes[task_id].append({
+            "note": note,
+            "timestamp": time.time()
+        })
+        print(f"[task_tracker] Added note to task {task_id}")
+        return f"TASK_NOTE_ADDED: {note[:50]}{'...' if len(note) > 50 else ''}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TASK TRACKER TOOL DEFINITIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+TASK_TRACKER_TOOL_DEFINITIONS = [
+    {
+        "name": "create_task",
+        "description": (
+            "Create a new task with title and description for tracking implementation progress.\n"
+            "Use for complex multi-step tasks that need to be tracked.\n"
+            "- Title: Short verb-led task name (max 6 words)\n"
+            "- Description: One sentence describing the work"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short task title (verb-led, max 6 words)"},
+                "description": {"type": "string", "description": "One sentence describing the work"}
+            },
+            "required": ["title"]
+        }
+    },
+    {
+        "name": "update_task_title",
+        "description": "Update a task's title when scope changes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Existing task ID"},
+                "new_title": {"type": "string", "description": "Replacement title"}
+            },
+            "required": ["task_id", "new_title"]
+        }
+    },
+    {
+        "name": "update_task_description",
+        "description": "Refine a task description with clearer guidance.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Existing task ID"},
+                "new_description": {"type": "string", "description": "Updated description text"}
+            },
+            "required": ["task_id", "new_description"]
+        }
+    },
+    {
+        "name": "set_task_status",
+        "description": "Move a task between todo, in_progress, and done.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Existing task ID"},
+                "status": {"type": "string", "description": "todo, in_progress, or done"}
+            },
+            "required": ["task_id", "status"]
+        }
+    },
+    {
+        "name": "get_task",
+        "description": "Review a single task with description, status, and notes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Existing task ID"}
+            },
+            "required": ["task_id"]
+        }
+    },
+    {
+        "name": "get_task_list",
+        "description": "Display the current task list for planning. Shows all tasks with their statuses.",
+        "input_schema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "add_task_note",
+        "description": "Attach a note to a task describing findings, decisions, or blockers.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Existing task ID"},
+                "note": {"type": "string", "description": "Progress note or decision"}
+            },
+            "required": ["task_id", "note"]
+        }
+    },
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TASK TRACKING PROMPT ADDITION
+# ══════════════════════════════════════════════════════════════════════════════
+
+TASK_TRACKING_PROMPT_ADDITION = """
+
+────────────────────────────────────────────────────────
+TASK TRACKING
+────────────────────────────────────────────────────────
+You have a task tracker for managing implementation progress. Use it for complex multi-step tasks.
+
+Tools: create_task, update_task_title, update_task_description, set_task_status, get_task, get_task_list, add_task_note
+
+Statuses:
+- todo: Task is planned but not started
+- in_progress: Task is actively being worked on
+- done: Task is completed satisfactorily
+
+When to use task tracking:
+1. Complex multi-step tasks (2+ distinct steps)
+2. Non-trivial tasks requiring careful planning
+3. User explicitly requests todo list
+4. User provides multiple tasks
+
+DO NOT create tasks for:
+- Single-file trivial edits
+- Pure Q&A with no code changes
+- One-step operations
+
+Rules:
+- Keep at most one task in_progress at a time
+- Add notes to capture discoveries and decisions
+- Mark tasks done immediately after completion
+- Tasks should be high-level, meaningful actions (not implementation details)
+
+Example task: "Add user authentication with login and signup pages" (good)
+Bad example: "Add useState hook in App.jsx" (too granular)
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  SUPABASE TOOLS CLASS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -737,7 +949,12 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         ).replace("{APP_TOKEN}", ai_config.get("app_token", ""))
         print(f"[Agent5] AI proxy enabled")
 
+    # Always enable task tracking
+    system_prompt += TASK_TRACKING_PROMPT_ADDITION
+    print(f"[Agent5] Task tracking enabled")
+
     all_tools = list(anthropic_tools)
+    all_tools.extend(TASK_TRACKER_TOOL_DEFINITIONS)
     if supabase_config:
         all_tools.extend(SUPABASE_TOOL_DEFINITIONS)
 
@@ -1234,6 +1451,23 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         tool_map["get_supabase_config"] = sb.get_supabase_config
         print(f"[Agent5] Registered 6 Supabase tools")
 
+    # Initialize task tracker
+    task_tracker = TaskTracker()
+
+    # Register task tracker functions
+    tool_map["create_task"] = task_tracker.create_task
+    tool_map["update_task_title"] = task_tracker.update_task_title
+    tool_map["update_task_description"] = task_tracker.update_task_description
+    tool_map["set_task_status"] = task_tracker.set_task_status
+    tool_map["get_task"] = task_tracker.get_task
+    tool_map["get_task_list"] = task_tracker.get_task_list
+    tool_map["add_task_note"] = task_tracker.add_task_note
+    print(f"[Agent5] Registered 7 task tracking tools")
+
     agent6.tool_map = tool_map
     agent6.reviewer = reviewer
+
+    # Store task tracker reference for frontend access
+    agent6.task_tracker = task_tracker
+
     return agent6
