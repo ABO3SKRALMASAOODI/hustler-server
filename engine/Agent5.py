@@ -18,7 +18,11 @@ import time
 # Set FAL_KEY in your .env file. That's all that's needed.
 fal_client.api_key = os.getenv("FAL_KEY", "")
 
-client = anthropic.Anthropic()
+client = anthropic.Anthropic(
+    api_key=os.getenv("MIMO_API_KEY"),          # ← was ANTHROPIC_API_KEY
+    base_url="https://api.xiaomimimo.com/anthropic",   # ← was api.anthropic.com
+)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
