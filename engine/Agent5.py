@@ -18,10 +18,7 @@ import time
 # Set FAL_KEY in your .env file. That's all that's needed.
 fal_client.api_key = os.getenv("FAL_KEY", "")
 
-client = anthropic.Anthropic(
-    api_key=os.getenv("MIMO_API_KEY"),          # ← was ANTHROPIC_API_KEY
-    base_url="https://api.xiaomimimo.com/anthropic",   # ← was api.anthropic.com
-)
+client = anthropic.Anthropic()
 
 
 
@@ -622,7 +619,7 @@ MANDATORY per commerce project:
 - One hero image (1920x1080) using flux-ultra
 - All other images using flux-schnell
 
-Generate max 4 images at a time. Generate ALL images before writing any page components.
+Generate ALL images before writing any page components.
 Write detailed prompts — subject, audience, style, lighting, background.
 Import as ES6 modules: import heroImg from '../assets/hero.jpg'
 Never use string paths in JSX. Never import a path that returned IMAGE_GENERATION_FAILED.
@@ -806,7 +803,7 @@ anthropic_tools = [
             "- flux-schnell: fastest, cheapest ($0.003/MP). Use for ALL images except the hero.\n"
             "- flux-pro:     high quality ($0.03/MP). Only for complex product shots.\n"
             "- flux-ultra:   hero banners only ($0.06). One per project maximum.\n\n"
-            "Generate max 4 images at a time. Always use flux-schnell unless hero or complex shot.\n"
+            "Always use flux-schnell unless hero or complex shot.\n"
             "On IMAGE_GENERATION_FAILED: use CSS gradient, never import that path."
         ),
         "input_schema": {

@@ -198,7 +198,7 @@ class BaseAgent:
             self._save_partial_deduction(totals)
 
             kwargs = dict(
-                model="mimo-v2-pro",
+                model=self.model,
                 system=self._build_system(),
                 messages=self.messages,
                 max_tokens=self.max_tokens,
