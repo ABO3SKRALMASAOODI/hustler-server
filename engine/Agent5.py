@@ -24,12 +24,22 @@ client = anthropic.Anthropic()
 # ══════════════════════════════════════════════════════════════════════════════
 #  TASK TRACKER CLASS
 # ══════════════════════════════════════════════════════════════════════════════
-
 class TaskTracker:
-    def __init__(self):
+    def __init__(self, workspace=None):
         self.tasks = {}
         self.task_notes = {}
         self._next_id = 1
+        self.workspace = workspace
+
+    def _flush(self):
+        if not self.workspace:
+            return
+        try:
+            tasks_list = [t for t in self.tasks.values()]
+            with open(os.path.join(self.workspace, "tasks.json"), "w") as f:
+                json.dump(tasks_list, f)
+        except Exception as e:
+            print(f"[task_tracker] Flush error: {e}")
 
     def create_task(self, title: str, description: str = "") -> str:
         task_id = str(self._next_id)
@@ -43,6 +53,7 @@ class TaskTracker:
         }
         self.task_notes[task_id] = []
         print(f"[task_tracker] Created task {task_id}: {title}")
+        self._flush()
         return task_id
 
     def update_task_title(self, task_id: str, new_title: str) -> str:
@@ -50,6 +61,7 @@ class TaskTracker:
             return f"TASK_NOT_FOUND: Task '{task_id}' does not exist."
         self.tasks[task_id]["title"] = new_title
         print(f"[task_tracker] Updated task {task_id} title: {new_title}")
+        self._flush()
         return f"TASK_TITLE_UPDATED: '{new_title}'"
 
     def update_task_description(self, task_id: str, new_description: str) -> str:
@@ -57,6 +69,7 @@ class TaskTracker:
             return f"TASK_NOT_FOUND: Task '{task_id}' does not exist."
         self.tasks[task_id]["description"] = new_description
         print(f"[task_tracker] Updated task {task_id} description")
+        self._flush()
         return f"TASK_DESCRIPTION_UPDATED"
 
     def set_task_status(self, task_id: str, status: str) -> str:
@@ -68,6 +81,7 @@ class TaskTracker:
         self.tasks[task_id]["status"] = status
         self.tasks[task_id]["updated_at"] = time.time()
         print(f"[task_tracker] Task {task_id} status: {status}")
+        self._flush()
         return f"TASK_STATUS_UPDATED: {status}"
 
     def get_task(self, task_id: str) -> str:
@@ -98,8 +112,8 @@ class TaskTracker:
             "timestamp": time.time()
         })
         print(f"[task_tracker] Added note to task {task_id}")
+        self._flush()
         return f"TASK_NOTE_ADDED: {note[:50]}{'...' if len(note) > 50 else ''}"
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  TASK TRACKER TOOL DEFINITIONS
@@ -1442,7 +1456,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         print(f"[Agent5] Registered 6 Supabase tools")
 
     # Initialize task tracker
-    task_tracker = TaskTracker()
+    task_tracker = TaskTracker(workspace=workspace)
 
     # Register task tracker functions
     tool_map["create_task"] = task_tracker.create_task
