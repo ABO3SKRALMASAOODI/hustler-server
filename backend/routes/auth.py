@@ -1823,33 +1823,20 @@ def cancel_job(user_id, job_id):
     except Exception as e:
         print(f"[cancel] Error: {e}")
         return jsonify({"error": str(e)}), 500
+    
+    
 @auth_bp.route('/job/<job_id>/tasks', methods=['GET'])
-
 @token_required
-
 def get_job_tasks(user_id, job_id):
-
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
-
     if not os.path.isdir(job_folder):
-
         return jsonify({"error": "Job not found"}), 404
-
     tasks_path = os.path.join(job_folder, "tasks.json")
-
     if not os.path.exists(tasks_path):
-
         return jsonify({"tasks": []}), 200
-
     try:
-
         with open(tasks_path) as f:
-
             tasks = json.load(f)
-
         return jsonify({"tasks": tasks}), 200
-
     except Exception:
-
         return jsonify({"tasks": []}), 200
-
