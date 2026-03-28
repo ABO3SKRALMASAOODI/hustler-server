@@ -6,7 +6,7 @@ from functools import wraps
 import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 import random
-from process_health import check_job_health
+from routes.process_health import check_job_health
 from routes.verify_email import send_code_to_email
 import uuid, subprocess, os, signal
 import shutil, json, time, base64
