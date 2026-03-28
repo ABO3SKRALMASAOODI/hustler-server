@@ -13,6 +13,7 @@ import anthropic
 import requests
 import fal_client
 import time
+import traceback
 
 # ── fal.ai authentication ──────────────────────────────────────────────────
 # Set FAL_KEY in your .env file. That's all that's needed.
@@ -283,6 +284,10 @@ class SupabaseTools:
                 return {"success": True, "data": resp.json()}
             else:
                 return {"success": False, "error": resp.text[:500]}
+        except requests.Timeout:
+            return {"success": False, "error": "SQL query timed out after 30s"}
+        except requests.ConnectionError as e:
+            return {"success": False, "error": f"Connection error: {str(e)[:200]}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -297,7 +302,9 @@ class SupabaseTools:
                 msg += " (RLS enabled — add policies to control access)"
             print(f"[supabase] Created table: {table_name}")
             return msg
-        return f"TABLE_CREATE_ERROR: {result['error']}"
+        error_msg = f"TABLE_CREATE_ERROR: {result['error']}"
+        print(f"[supabase] {error_msg}")
+        return error_msg
 
     def add_rls_policy(self, table_name: str, policy_name: str, operation: str,
                        using_expression: str, check_expression: str = "") -> str:
@@ -869,34 +876,20 @@ anthropic_tools = [
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  FAL.AI IMAGE MODEL MAP
-#
-#  fal.ai endpoint strings — these are what get passed to fal_client.subscribe()
-#  Response shape: result["images"][0]["url"] — always a plain HTTPS URL.
-#  No FileOutput objects, no byte extraction, no .read() — just download the URL.
 # ══════════════════════════════════════════════════════════════════════════════
 
 _FAL_MODEL_MAP: dict[str, str] = {
-    # Primary names — what the agent uses
-    "flux-schnell": "fal-ai/flux/schnell",           # $0.003/MP — default for ALL non-hero images
-    "flux-pro":     "fal-ai/flux-pro/v1.1",          # $0.03/MP  — complex shots only
-    "flux-ultra":   "fal-ai/flux-pro/v1.1-ultra",    # $0.06/image — hero only, fully on fal.ai infra
-
-    # Legacy aliases — kept so old prompts don't hard-fail
+    "flux-schnell": "fal-ai/flux/schnell",
+    "flux-pro":     "fal-ai/flux-pro/v1.1",
+    "flux-ultra":   "fal-ai/flux-pro/v1.1-ultra",
     "flux.schnell": "fal-ai/flux/schnell",
     "flux.dev":     "fal-ai/flux/dev",
     "flux-dev":     "fal-ai/flux/dev",
-    "flux2.dev":    "fal-ai/flux-pro/v1.1-ultra",    # retired Replicate model — remapped to ultra
+    "flux2.dev":    "fal-ai/flux-pro/v1.1-ultra",
 }
 
-# NOTE: fal-ai/flux-pro/v1.1-ultra is fully hosted on fal.ai infrastructure.
-# The earlier SSL error (api.us2.bfl.ai) was from the old Replicate/BFL direct routing.
-# fal.ai proxies all requests through their own servers — no BFL SSL exposure.
-
-# Models that use aspect_ratio instead of explicit width/height (no image_size param)
 _ULTRA_MODELS = {"fal-ai/flux-pro/v1.1-ultra"}
-
-# Minimum bytes for a real image
-_MIN_IMAGE_BYTES = 10 * 1024  # 10 KB
+_MIN_IMAGE_BYTES = 10 * 1024
 
 
 def _aspect_ratio_from_dims(width: int, height: int) -> str:
@@ -908,7 +901,6 @@ def _aspect_ratio_from_dims(width: int, height: int) -> str:
 
 
 def _download_image(url: str) -> bytes | None:
-    """Download image from a fal.ai CDN URL. Retries up to 3 times."""
     print(f"[image_gen] Downloading from: {url[:100]}")
     for attempt in range(3):
         try:
@@ -977,45 +969,69 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     rename_file_state = files_list_state.rename_file
     files_list        = files_list_state.files_list
 
+    # ══════════════════════════════════════════════════════════════════
+    #  Tool implementations — each wrapped in try/except so a single
+    #  tool failure never crashes the entire agent loop.
+    # ══════════════════════════════════════════════════════════════════
+
     def write_file(path: str, content: str) -> str:
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        existed     = os.path.exists(path)
-        old_content = None
-        if existed:
-            with open(path, "r", encoding="utf-8") as f:
-                old_content = f.read()
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        if not existed:
-            add_file(path)
-        print(f"""{Back.WHITE}agent6: FILE_WRITE {path}{Style.RESET_ALL}""")
-        agent6.notify_reviewer({"type": "FILE_WRITE", "path": path, "existed": existed, "old_content": old_content, "new_content": content})
-        return f"WRITE_COMPLETED PATH:{path}"
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            existed     = os.path.exists(path)
+            old_content = None
+            if existed:
+                with open(path, "r", encoding="utf-8") as f:
+                    old_content = f.read()
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            if not existed:
+                add_file(path)
+            print(f"""{Back.WHITE}agent6: FILE_WRITE {path}{Style.RESET_ALL}""")
+            agent6.notify_reviewer({"type": "FILE_WRITE", "path": path, "existed": existed, "old_content": old_content, "new_content": content})
+            return f"WRITE_COMPLETED PATH:{path}"
+        except Exception as e:
+            error_msg = f"WRITE_ERROR: {type(e).__name__}: {str(e)[:200]} — path: {path}"
+            print(f"[Agent5] {error_msg}")
+            return error_msg
 
     def edit_file(path, old_str, new_str):
-        if not os.path.exists(path):
-            return "ERROR: File does not exist, use write_file for new files."
-        with open(path, 'r', encoding='utf-8') as f:
-            full_content = f.read()
-        if old_str not in full_content:
-            return f"ERROR: The segment you want to replace was not found in {path}"
-        updated_content = full_content.replace(old_str, new_str, 1)
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(updated_content)
-        print(f"""{Back.WHITE}agent6: EDIT {path}{Style.RESET_ALL}""")
-        agent6.notify_reviewer({"type": "FILE_WRITE", "path": path, "old_string": old_str, "new_string": new_str, "new_content": updated_content})
-        return f"EDIT_COMPLETED PATH: {path}"
+        try:
+            if not os.path.exists(path):
+                return "ERROR: File does not exist, use write_file for new files."
+            with open(path, 'r', encoding='utf-8') as f:
+                full_content = f.read()
+            if old_str not in full_content:
+                return f"ERROR: The segment you want to replace was not found in {path}. The file may have changed. Try read_file first to see current contents."
+            updated_content = full_content.replace(old_str, new_str, 1)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+            print(f"""{Back.WHITE}agent6: EDIT {path}{Style.RESET_ALL}""")
+            agent6.notify_reviewer({"type": "FILE_WRITE", "path": path, "old_string": old_str, "new_string": new_str, "new_content": updated_content})
+            return f"EDIT_COMPLETED PATH: {path}"
+        except Exception as e:
+            error_msg = f"EDIT_ERROR: {type(e).__name__}: {str(e)[:200]} — path: {path}"
+            print(f"[Agent5] {error_msg}")
+            return error_msg
 
     def read_file(path, **kwargs):
-        p = Path(path)
-        if not p.exists():
-            return f"[READ_FILE_ERROR] FILE NOT FOUND {path}"
-        if p.is_dir():
-            return f"[READ_FILE_ERROR] '{path}' is a directory, not a file."
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
+        try:
+            p = Path(path)
+            if not p.exists():
+                return f"[READ_FILE_ERROR] FILE NOT FOUND {path}"
+            if p.is_dir():
+                return f"[READ_FILE_ERROR] '{path}' is a directory, not a file."
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # Safety: don't return absurdly large files that would blow up context
+            if len(content) > 100000:
+                return content[:100000] + f"\n\n[TRUNCATED — file is {len(content)} chars, showing first 100000]"
+            return content
+        except UnicodeDecodeError:
+            return f"[READ_FILE_ERROR] '{path}' is a binary file and cannot be read as text."
+        except Exception as e:
+            return f"[READ_FILE_ERROR] {type(e).__name__}: {str(e)[:200]}"
 
     def delete_file(path: str) -> str:
         try:
@@ -1076,16 +1092,8 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         except Exception as e:
             return f"SEARCH_ERROR: {str(e)}"
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  generate_image — fal.ai implementation
-    #
-    #  fal.ai always returns a plain HTTPS URL in result["images"][0]["url"].
-    #  There are no FileOutput objects, no byte extraction complexity.
-    #  The full flow is: call fal_client.subscribe() → get URL → download → save.
-    # ══════════════════════════════════════════════════════════════════════
     def generate_image(prompt: str, target_path: str, width: int = 1024, height: int = 768, model: str = "flux-schnell") -> str:
         try:
-            # Clamp and align dimensions
             width  = max(512, min(1920, int(width)))
             height = max(512, min(1920, int(height)))
             width  = (width  // 32) * 32
@@ -1095,7 +1103,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             if parent:
                 os.makedirs(parent, exist_ok=True)
 
-            # Resolve model — unknown names fall back to flux-schnell
             fal_endpoint = _FAL_MODEL_MAP.get(model, _FAL_MODEL_MAP["flux-schnell"])
             if model not in _FAL_MODEL_MAP:
                 print(f"[image_gen] Unknown model '{model}' — falling back to flux-schnell")
@@ -1103,7 +1110,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             ext           = target_path.rsplit(".", 1)[-1].lower() if "." in target_path else "jpeg"
             output_format = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(ext, "jpeg")
 
-            # Build arguments — ultra uses aspect_ratio, others use image_size dict
             if fal_endpoint in _ULTRA_MODELS:
                 arguments = {
                     "prompt":        prompt,
@@ -1123,26 +1129,22 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             print(f"[image_gen] target_path : {target_path}")
             print(f"[image_gen] model       : {model} → {fal_endpoint}")
             print(f"[image_gen] dimensions  : {width}x{height}")
-            print(f"[image_gen] arguments   : {json.dumps({k: v for k, v in arguments.items() if k != 'prompt'})}")
             print(f"[image_gen] prompt      : {prompt[:120]}...")
             print(f"[image_gen] fal_key set : {'yes' if fal_client.api_key else 'NO — FAL_KEY missing!'}")
 
-            # ── Call fal.ai with retry + exponential backoff ──────────────
             result = None
             for attempt in range(3):
                 try:
                     print(f"[image_gen] Calling fal_client.subscribe() attempt {attempt + 1}...")
                     result = fal_client.subscribe(fal_endpoint, arguments=arguments)
                     print(f"[image_gen] fal_client.subscribe() succeeded")
-                    print(f"[image_gen] result type : {type(result).__name__}")
-                    print(f"[image_gen] result keys : {list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
                     break
                 except Exception as e:
                     err_str = str(e).lower()
                     print(f"[image_gen] attempt {attempt + 1} exception: {type(e).__name__}: {e}")
                     is_rate_limit = "429" in err_str or "rate" in err_str or "throttl" in err_str or "queue" in err_str
                     if is_rate_limit and attempt < 2:
-                        delay = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                        delay = 5 * (2 ** attempt)
                         print(f"[image_gen] Rate limited — retrying in {delay}s...")
                         time.sleep(delay)
                         continue
@@ -1152,32 +1154,26 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             if result is None:
                 return "IMAGE_GENERATION_FAILED: No result returned — use a CSS gradient placeholder instead. Do NOT import this path."
 
-            # ── Extract the image URL ──────────────────────────────────────
-            # fal.ai always returns: result["images"][0]["url"]
             image_url = None
             try:
                 image_url = result["images"][0]["url"]
-                print(f"[image_gen] Extracted URL from result['images'][0]['url']")
             except (KeyError, IndexError, TypeError) as e:
                 print(f"[image_gen] Could not extract via result['images'][0]['url']: {e}")
 
             if not image_url:
                 if isinstance(result, dict):
                     image_url = result.get("image", {}).get("url") or result.get("url")
-                    print(f"[image_gen] Fallback extraction got: {image_url}")
                 if not image_url:
                     print(f"[image_gen] Full result dump: {str(result)[:500]}")
                     return "IMAGE_GENERATION_FAILED: Could not find image URL in result — use a CSS gradient placeholder instead. Do NOT import this path."
 
             print(f"[image_gen] Got URL: {image_url[:120]}")
 
-            # ── Download the image ────────────────────────────────────────
             image_data = _download_image(image_url)
 
             if not image_data:
                 return "IMAGE_GENERATION_FAILED: Download failed after retries — use a CSS gradient placeholder instead. Do NOT import this path."
 
-            # ── Save to disk ──────────────────────────────────────────────
             with open(target_path, "wb") as f:
                 f.write(image_data)
 
@@ -1194,7 +1190,8 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                 return f"IMAGE_GENERATED PATH:{target_path} SIZE:{size_kb:.1f}KB — Reference in code as {public_ref}"
 
         except Exception as e:
-            print(f"[image_gen] Exception: {e}")
+            tb = traceback.format_exc()
+            print(f"[image_gen] Exception: {e}\n{tb}")
             return f"IMAGE_GENERATION_FAILED: {str(e)[:200]} — use a CSS gradient placeholder instead. Do NOT import this path."
 
     def edit_image(image_paths: list, prompt: str, target_path: str, aspect_ratio: str = "16:9") -> str:
@@ -1218,7 +1215,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             if not image_uris:
                 return "IMAGE_EDIT_FAILED: No valid source images provided"
 
-            # fal.ai Kontext endpoint for image editing
             result = fal_client.subscribe(
                 "fal-ai/flux-pro/kontext",
                 arguments={
@@ -1305,6 +1301,12 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         max_wait = 300
         elapsed  = 0
         while elapsed < max_wait:
+            # Check for cancellation during the wait
+            cancelled_path = os.path.join(_workspace, "cancelled.lock")
+            if os.path.exists(cancelled_path):
+                try: os.remove(req_path)
+                except: pass
+                return "BACKEND_CANCELLED: Job was cancelled by user."
             _time.sleep(3)
             elapsed += 3
             if os.path.exists(approved_path):
@@ -1378,6 +1380,12 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         max_wait = 300
         elapsed  = 0
         while elapsed < max_wait:
+            # Check for cancellation during the wait
+            cancelled_path = os.path.join(_workspace, "cancelled.lock")
+            if os.path.exists(cancelled_path):
+                try: os.remove(req_path)
+                except: pass
+                return "STRIPE_CANCELLED: Job was cancelled by user."
             _time.sleep(3)
             elapsed += 3
             if os.path.exists(approved_path):

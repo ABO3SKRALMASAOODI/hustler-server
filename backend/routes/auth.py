@@ -6,6 +6,7 @@ from functools import wraps
 import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 import random
+from process_health import check_job_health
 from routes.verify_email import send_code_to_email
 import uuid, subprocess, os, signal
 import shutil, json, time, base64
@@ -939,23 +940,36 @@ def get_app_token(user_id, job_id):
             return jsonify({"app_token": token}), 200
     finally:
         conn.close()
+
 @auth_bp.route('/job/<job_id>/status', methods=['GET'])
 @token_required
 def job_status(user_id, job_id):
     job_folder = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_folder):
         return jsonify({"error": "Job not found"}), 404
-
-    state_path = os.path.join(job_folder, "state.json")
-    state_data = {}
-    if os.path.exists(state_path):
-        with open(state_path) as f:
-            state_data = json.load(f)
-
+ 
+    # ── Health check: detect dead processes that left state as "running" ──
+    state_data = check_job_health(job_folder, job_id, user_id)
+ 
     cancelled_path = os.path.join(job_folder, "cancelled.lock")
     if os.path.exists(cancelled_path):
         state_data["state"] = "failed"
-
+ 
+    # If health check changed state from running to failed, process credits
+    if state_data.get("recovered_by") == "health_check":
+        _process_credits_deduction(job_id, job_folder, user_id)
+        # Also update DB state
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET state = 'failed', updated_at = NOW() WHERE job_id = %s AND state = 'running'",
+                    (job_id,)
+                )
+                conn.commit()
+        finally:
+            conn.close()
+ 
     if state_data.get("state") == "completed":
         _process_credits_deduction(job_id, job_folder, user_id)
 
@@ -1166,6 +1180,7 @@ INTERNAL_FILES = {
     "cancelled.lock", "backend_requested.json", "backend_approved.json",
     "backend_denied.json", "partial_deduction.json",
     "console_logs.json", "build_output.json",   # diagnostic files
+    "crash_log.json", "tasks.json",              # agent crash + task tracking
 }
 
 SKIP_DIRS = {"node_modules", "dist", ".git", "__pycache__", "uploads"}

@@ -60,7 +60,7 @@ def google_login():
 
 @google_auth_bp.route("/google/callback")
 def google_callback():
-    frontend_url = os.getenv("FRONTEND_URL", "https://thehustlerbot.com")
+    frontend_url = os.getenv("FRONTEND_URL", "https://valmera.io")
     error_redirect = f"{frontend_url}/signin?error=google_failed"
 
     code = request.args.get("code")

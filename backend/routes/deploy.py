@@ -81,7 +81,7 @@ def _ensure_wrangler():
 
 
 def _get_zone_id():
-    """Fetch the Cloudflare zone ID for thehustlerbot.com."""
+    """Fetch the Cloudflare zone ID for valmera.io."""
     import requests as _requests
     resp = _requests.get(
         "https://api.cloudflare.com/client/v4/zones?name=valmera.io",
@@ -140,7 +140,7 @@ def _delete_custom_domain(cf_project_name, custom_domain, zone_id=None):
             zone_id = _get_zone_id()
 
         if zone_id:
-            # Extract subdomain name (e.g. "myapp" from "myapp.thehustlerbot.com")
+            
             subdomain_name = custom_domain.replace(".valmera.io", "")
 
             dns_resp = _requests.get(
@@ -479,7 +479,7 @@ def publish_project(user_id, job_id):
                 else:
                     print(f"[deploy] DNS CNAME already exists for {custom_domain}")
             else:
-                print("[deploy] Could not find zone ID for thehustlerbot.com")
+                print("[deploy] Could not find zone ID for valmera.io")
 
             # Add custom domain to Pages project
             cf_api_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/pages/projects/{cf_project_name}/domains"
