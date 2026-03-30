@@ -164,8 +164,8 @@ def google_callback():
             )
             conn.commit()
 
-        # Short redirect URL — Safari won't strip this
-        return redirect(f"{frontend_url}/login?google=1&code={one_time_code}")
+        # Use path segment instead of query params — Safari blocks query param access
+        return redirect(f"{frontend_url}/google-callback/{one_time_code}")
 
     except Exception as e:
         print(f"[google] DB error: {e}")
