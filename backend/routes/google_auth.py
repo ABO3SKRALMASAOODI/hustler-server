@@ -148,8 +148,8 @@ def google_callback():
         # Redirect to frontend with token + plan in URL fragment
         # Frontend reads these and stores them in localStorage
         return redirect(
-            f"{frontend_url}/login?google=1"
-            f"#token={token}&plan={plan}&email={requests.utils.quote(email)}"
+        f"{frontend_url}/signin?google=1"
+        f"&token={token}&plan={plan}&email={requests.utils.quote(email)}"
         )
 
     except Exception as e:
