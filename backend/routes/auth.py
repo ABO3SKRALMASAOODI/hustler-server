@@ -71,12 +71,26 @@ ALLOWED_UPLOAD_EXTENSIONS = {
 # ------------------------------------------------------------------ #
 
 TEMPLATE_JOB_IDS = {
-    "6a1def90": "SaaS Landing Page",
-    "ea5cb482": "Developer Portfolio",
-    "70d042cf": "E-commerce Product Page",
-    "515567f6": "Analytics Dashboard",
-    "0fa66551": "Waitlist / Coming Soon",
-    "4338edbb": "Restaurant / Menu",
+    "53960469": "SaaS Landing Page",
+    "5d583e9c": "Waitlist / Coming Soon",
+    "aeb1f7f9": "Agency Landing Page",
+    "7e32d305": "Developer Portfolio",
+    "0267d760": "Designer Showcase",
+    "ad82b926": "Freelancer Profile",
+    "827b568f": "Product Page",
+    "a481aa42": "Storefront",
+    "9de83432": "Checkout Flow",
+    "481b9743": "Analytics Dashboard",
+    "ea3a5f4e": "Admin Panel",
+    "3cd4dbcf": "CRM Dashboard",
+    "2e93ebcc": "Task Manager",
+    "f818b1e1": "Finance Tracker",
+    "cbd1a751": "Habit Tracker",
+    "d53328dd": "Restaurant Website",
+    "068464e9": "Law Firm Site",
+    "12c4f2f1": "Real Estate Listing",
+    "0e7ddeb6": "Product Hunt Launch",
+    "72839479": "Notes App",
 }
 
 
