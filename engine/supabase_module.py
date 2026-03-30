@@ -1089,6 +1089,32 @@ export const Constants = {
         except Exception:
             pass
 
+    # 7. Register scaffold files in Files_list.txt so the agent discovers them
+    scaffold_files = [
+        ".env",
+        "src/integrations/supabase/client.ts",
+        "src/integrations/supabase/types.ts",
+    ]
+    files_list_path = os.path.join(workspace, "Files_list.txt")
+    try:
+        existing_files = []
+        if os.path.exists(files_list_path):
+            with open(files_list_path, "r", encoding="utf-8") as f:
+                existing_files = [line.strip() for line in f if line.strip()]
+
+        added = []
+        for sf in scaffold_files:
+            if sf not in existing_files:
+                existing_files.append(sf)
+                added.append(sf)
+
+        if added:
+            with open(files_list_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(existing_files))
+            print(f"[scaffold] Registered {len(added)} files in Files_list.txt: {added}")
+    except Exception as e:
+        print(f"[scaffold] Warning: could not update Files_list.txt: {e}")
+
     print(f"[scaffold] Supabase scaffold injection complete")
 
 
@@ -1228,6 +1254,13 @@ SUPABASE_PROMPT_ADDITION = """
 ────────────────────────────────────────────────────────
 BACKEND / DATABASE (SUPABASE)
 ────────────────────────────────────────────────────────
+CRITICAL: Supabase is now your database. STOP and re-plan if you were going to use localStorage.
+- NEVER use localStorage for application data (products, carts, orders, users, messages, profiles)
+- NEVER create a "storage.ts", "data.ts", or "store.ts" file that wraps localStorage for app data
+- localStorage is ONLY acceptable for UI preferences (theme, sidebar collapsed state)
+- ALL data persistence MUST go through Supabase using the tools below
+- If you already planned a localStorage approach — DISCARD that plan entirely and use Supabase
+
 This project has a Supabase backend enabled with a pre-configured client.
 
 ALREADY SET UP (do NOT recreate these):
