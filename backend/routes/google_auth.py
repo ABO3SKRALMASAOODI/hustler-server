@@ -4,15 +4,17 @@ Google OAuth 2.0 login flow.
 Flow:
   1. Frontend hits GET /auth/google/login  → redirects user to Google
   2. Google redirects to GET /auth/google/callback?code=...
-  3. We exchange code for profile, create/find user, return JWT via redirect
-     to frontend with token in URL fragment.
+  3. We exchange code for profile, create/find user, store token with
+     a one-time code, redirect frontend with just the short code.
+  4. Frontend exchanges the code for the real token via POST /auth/google/exchange.
 """
 
 import os
 import jwt
+import secrets
 import datetime
 import requests
-from flask import Blueprint, redirect, request, current_app
+from flask import Blueprint, redirect, request, current_app, jsonify
 from werkzeug.security import generate_password_hash
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -61,7 +63,7 @@ def google_login():
 @google_auth_bp.route("/google/callback")
 def google_callback():
     frontend_url = os.getenv("FRONTEND_URL", "https://valmera.io")
-    error_redirect = f"{frontend_url}/signin?error=google_failed"
+    error_redirect = f"{frontend_url}/login?error=google_failed"
 
     code = request.args.get("code")
     if not code:
@@ -112,7 +114,6 @@ def google_callback():
             user = cur.fetchone()
 
             if user:
-                # Existing user — if previously unverified, verify them now
                 if user["is_verified"] == 0:
                     cur.execute(
                         "UPDATE users SET is_verified = 1 WHERE email = %s",
@@ -122,8 +123,6 @@ def google_callback():
                 user_id = user["id"]
                 plan    = user.get("plan", "free") or "free"
             else:
-                # New user — create with a random unusable password
-                # is_verified = 1 because Google already verified their email
                 dummy_pw = generate_password_hash(os.urandom(32).hex())
                 cur.execute(
                     """
@@ -138,23 +137,75 @@ def google_callback():
                 plan    = "free"
                 conn.commit()
 
-        # Issue JWT — same format as regular login
+        # Issue JWT
         token = jwt.encode({
             "sub":   str(user_id),
             "email": email,
             "exp":   datetime.datetime.utcnow() + datetime.timedelta(days=7),
         }, current_app.config["SECRET_KEY"], algorithm="HS256")
 
-        # Redirect to frontend with token + plan in URL fragment
-        # Frontend reads these and stores them in localStorage
-        return redirect(
-        f"{frontend_url}/login?google=1"
-        f"&token={token}&plan={plan}&email={requests.utils.quote(email)}"
-        )
+        # Store token with a short-lived one-time code
+        one_time_code = secrets.token_urlsafe(32)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS google_auth_codes (
+                    code TEXT PRIMARY KEY,
+                    token TEXT NOT NULL,
+                    plan TEXT DEFAULT 'free',
+                    email TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+                """)
+            cur.execute("DELETE FROM google_auth_codes WHERE created_at < NOW() - INTERVAL '5 minutes'")
+            cur.execute(
+                "INSERT INTO google_auth_codes (code, token, plan, email) VALUES (%s, %s, %s, %s)",
+                (one_time_code, token, plan, email)
+            )
+            conn.commit()
+
+        # Short redirect URL — Safari won't strip this
+        return redirect(f"{frontend_url}/login?google=1&code={one_time_code}")
 
     except Exception as e:
         print(f"[google] DB error: {e}")
         conn.rollback()
         return redirect(error_redirect)
+    finally:
+        conn.close()
+
+
+# ── Step 3: Frontend exchanges one-time code for token ────────────────────────
+
+@google_auth_bp.route("/google/exchange", methods=["POST"])
+def google_exchange():
+    """Exchange a one-time code for the actual JWT token."""
+    data = request.get_json() or {}
+    code = data.get("code")
+    if not code:
+        return jsonify({"error": "Missing code"}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT token, plan, email FROM google_auth_codes WHERE code = %s",
+                (code,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Invalid or expired code"}), 400
+
+            cur.execute("DELETE FROM google_auth_codes WHERE code = %s", (code,))
+            conn.commit()
+
+            return jsonify({
+                "token": row["token"],
+                "plan":  row["plan"],
+                "email": row["email"],
+            })
+    except Exception as e:
+        print(f"[google] exchange error: {e}")
+        return jsonify({"error": "Server error"}), 500
     finally:
         conn.close()
