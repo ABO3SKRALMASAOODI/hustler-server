@@ -12,6 +12,7 @@ import json
 import anthropic
 import requests
 import fal_client
+from approval_tools import create_approval_tools
 import time
 from supabase_module import (
     SupabaseTools,
@@ -95,8 +96,11 @@ Write a single short 1-2 sentences describing what was built and what design dir
 
 1. Call files_list + read_package_json simultaneously.
 2. Read config files in one parallel batch: vite.config.*, tsconfig.*, tailwind.config.*, index.html.
-3. If the request needs auth/database: call request_backend before writing any code.
-4. If the request needs payments: call request_stripe before writing any code.
+3. If the request needs auth/database: call request_backend (returns instantly).
+4. If the request needs payments: call request_stripe (returns instantly).
+   You CAN call both in the SAME parallel batch — they don't block.
+5. After requesting, call check_approvals to wait for user responses.
+   Do NOT write any database, auth, or payment code until check_approvals returns.
 5. If the request needs AI features: call request_ai before writing any code.
 6. Output your plan. Execute immediately.
 
@@ -133,7 +137,9 @@ IMPORTS: Every file you create must be importable. Never import a file that does
 ROUTING: Every route in App.tsx must point to a component that exists.
 SUPABASE: Never put service_role keys in frontend. Every RLS table needs policies.
 STRIPE: Never put sk_ keys in frontend. Use window.open(url, '_blank') for checkout redirects.
-
+APPROVALS: Always call check_approvals after request_backend/request_stripe.
+Never write database or payment code before check_approvals returns approved.
+Never use localStorage as a substitute when Supabase is requested — wait for approval.
 
 ##RUNTIME DEBUGGING
 
@@ -251,19 +257,7 @@ const buttonVariants = cva("...", {
 #  TOOL DEFINITIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-REQUEST_BACKEND_TOOL = {
-    "name": "request_backend",
-    "description": (
-        "Request a Supabase backend. Call EARLY — before writing any auth or database code. "
-        "If approved you get create_table, add_rls_policy, etc. "
-        "If denied, build a frontend-only version using localStorage."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {"reason": {"type": "string"}},
-        "required": ["reason"]
-    }
-}
+
 
 anthropic_tools = [
     {
@@ -389,16 +383,7 @@ anthropic_tools = [
         "description": "Read package.json. ALWAYS call before run_install_command.",
         "input_schema": {"type": "object", "properties": {}}
     },
-    REQUEST_BACKEND_TOOL,
-    {
-        "name": "request_stripe",
-        "description": "Request Stripe integration. Call EARLY — before writing any payment code.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"reason": {"type": "string"}},
-            "required": ["reason"]
-        }
-    },
+    
     {
         "name": "request_ai",
         "description": "Request Claude AI integration. Call EARLY — before writing any AI code.",
@@ -817,117 +802,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         except Exception as e:
             return f"PACKAGE_JSON_READ_ERROR: {str(e)}"
 
-    def request_backend(reason: str = "") -> str:
-        import time as _time
-        _workspace = workspace
-        if not _workspace:
-            return "BACKEND_ERROR: No workspace configured"
-        meta_path = os.path.join(_workspace, "meta.json")
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-                if meta.get("supabase_enabled"):
-                    return "BACKEND_ALREADY_ENABLED: Supabase is already active. Use get_supabase_config."
-            except Exception:
-                pass
-        print(f"[Agent5] Backend requested — reason: {reason}")
-        req_path = os.path.join(_workspace, "backend_requested.json")
-        with open(req_path, "w") as f:
-            json.dump({"reason": reason, "ts": _time.time()}, f)
-        approved_path = os.path.join(_workspace, "backend_approved.json")
-        denied_path   = os.path.join(_workspace, "backend_denied.json")
-        max_wait = 300
-        elapsed  = 0
-        while elapsed < max_wait:
-            _time.sleep(3)
-            elapsed += 3
-            if os.path.exists(approved_path):
-                try: os.remove(approved_path)
-                except: pass
-                try: os.remove(req_path)
-                except: pass
-                supabase_url = ""
-                anon_key     = ""
-                try:
-                    with open(meta_path) as f:
-                        meta = json.load(f)
-                    supabase_url = meta.get("supabase_url", "")
-                    anon_key     = meta.get("supabase_anon_key", "")
-                except: pass
-                if supabase_url and anon_key:
-                    from supabase_module import register_supabase_tools
-                    register_supabase_tools(agent6, {
-                        "url": supabase_url,
-                        "anon_key": anon_key,
-                        "service_role_key": meta.get("supabase_service_role", ""),
-                        "project_ref": meta.get("supabase_project_ref", ""),
-                        "preview_url": f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{os.path.basename(_workspace)}/",
-                    }, _workspace)
-            if os.path.exists(denied_path):
-                try: os.remove(denied_path)
-                except: pass
-                try: os.remove(req_path)
-                except: pass
-                return "BACKEND_DENIED: Build a frontend-only version using localStorage."
-        try: os.remove(req_path)
-        except: pass
-        return "BACKEND_TIMEOUT: Build a frontend-only version using localStorage."
-
-    def request_stripe(reason: str = "") -> str:
-        import time as _time
-        _workspace = workspace
-        if not _workspace:
-            return "STRIPE_ERROR: No workspace configured"
-        meta_path = os.path.join(_workspace, "meta.json")
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-                if meta.get("stripe_enabled"):
-                    pk  = meta.get("stripe_publishable_key", "")
-                    job = os.path.basename(_workspace)
-                    return f"STRIPE_ALREADY_ENABLED: pk={pk}, proxy=https://entrepreneur-bot-backend.onrender.com/stripe/job/{job}"
-            except Exception:
-                pass
-        req_path = os.path.join(_workspace, "stripe_requested.json")
-        with open(req_path, "w") as f:
-            json.dump({"reason": reason, "ts": _time.time()}, f)
-        approved_path = os.path.join(_workspace, "stripe_approved.json")
-        denied_path   = os.path.join(_workspace, "stripe_denied.json")
-        max_wait = 300
-        elapsed  = 0
-        while elapsed < max_wait:
-            _time.sleep(3)
-            elapsed += 3
-            if os.path.exists(approved_path):
-                try: os.remove(approved_path)
-                except: pass
-                try: os.remove(req_path)
-                except: pass
-                pk  = ""
-                job = os.path.basename(_workspace)
-                try:
-                    with open(meta_path) as f:
-                        meta = json.load(f)
-                    pk = meta.get("stripe_publishable_key", "")
-                except Exception:
-                    pass
-                proxy_url = f"https://entrepreneur-bot-backend.onrender.com/stripe/job/{job}"
-                if "STRIPE PAYMENTS" not in agent6.system_prompt:
-                    agent6.system_prompt += STRIPE_PROMPT_ADDITION.replace(
-                        "{STRIPE_PUBLISHABLE_KEY}", pk
-                    ).replace("{STRIPE_PROXY_URL}", proxy_url)
-                return f"STRIPE_APPROVED: pk={pk}, proxy={proxy_url}"
-            if os.path.exists(denied_path):
-                try: os.remove(denied_path)
-                except: pass
-                try: os.remove(req_path)
-                except: pass
-                return "STRIPE_DENIED: Build a payment UI mockup with 'Coming soon' buttons."
-        try: os.remove(req_path)
-        except: pass
-        return "STRIPE_TIMEOUT: Build a payment UI mockup."
+    
 
     def request_ai(reason: str = "") -> str:
         _workspace = workspace
@@ -953,16 +828,22 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         'run_install_command': run_install_command,
         'generate_image':      generate_image,
         'edit_image':          edit_image,
-        'request_backend':     request_backend,
-        'request_stripe':      request_stripe,
         'request_ai':          request_ai,
         'read_console_logs':   read_console_logs,
         'read_package_json':   read_package_json,
     }
+    approval_map, approval_defs = create_approval_tools(agent6, workspace)
+    tool_map.update(approval_map)
 
     if supabase_config:
         register_supabase_tools(agent6, supabase_config, workspace)
 
+    
     agent6.tool_map = tool_map
+    
+    # Add approval tool definitions
+    for td in approval_defs:
+        if not any(t["name"] == td["name"] for t in agent6.tools):
+            agent6.tools.append(td)
     agent6.reviewer = reviewer
     return agent6
