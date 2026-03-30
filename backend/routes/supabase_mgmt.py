@@ -1,16 +1,11 @@
 """
-Supabase management routes for The Hustler Bot — Phase 2.
+supabase_routes.py — Refactored Supabase provisioning routes.
 
-Each generated app gets its OWN Supabase project via the Management API.
-When a user clicks "Enable Backend", we:
-1. Immediately return 202 so the frontend doesn't time out
-2. Provision in a background thread:
-   - Create a new Supabase project
-   - Wait for it to become active
-   - Configure SMTP (Brevo) so emails come from support@valmera.io
-   - Disable email confirmation for smooth dev experience
-   - Store the project's URL + anon key + service_role key in the job's meta.json and DB
-3. Frontend polls /supabase/job/<id>/backend-status until supabase_enabled=True
+Changes from original:
+  1. After provisioning completes, automatically injects scaffold files
+     (client.ts, types.ts, .env) into the job workspace
+  2. Cleaner error handling and logging
+  3. Same API surface — no frontend changes needed
 """
 
 from flask import Blueprint, request, jsonify, current_app
@@ -21,6 +16,15 @@ import json
 import threading
 import requests as http_requests
 
+# Import scaffold injection from the engine module
+# Project structure: hustler-server/backend/routes/supabase_mgmt.py
+#                    hustler-server/engine/supabase_module.py
+import sys
+_engine_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "engine"))
+if _engine_dir not in sys.path:
+    sys.path.insert(0, _engine_dir)
+from supabase_module import inject_scaffold
+
 supabase_bp = Blueprint('supabase', __name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -28,7 +32,7 @@ supabase_bp = Blueprint('supabase', __name__)
 SUPABASE_API       = "https://api.supabase.com/v1"
 ORG_ID             = os.getenv("SUPABASE_ORG_ID", "kpkxuyxtclwllsfcqhdn")
 DEFAULT_REGION     = os.getenv("SUPABASE_REGION", "us-west-1")
-DB_PASSWORD_PREFIX = "V-db-"  # prefix for generated DB passwords
+DB_PASSWORD_PREFIX = "V-db-"
 
 OUTPUTS_DIR = os.path.join(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
@@ -37,7 +41,6 @@ OUTPUTS_DIR = os.path.join(
 
 
 def _mgmt_headers():
-    """Headers for Supabase Management API."""
     token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
     return {
         "Authorization": f"Bearer {token}",
@@ -50,15 +53,13 @@ def _mgmt_headers():
 def _provision_supabase(app, job_id, user_id, project_name):
     """
     Runs in a daemon thread. Creates and configures the Supabase project,
-    then writes the result back to the DB and meta.json.
-
-    Uses app.app_context() so Flask globals (current_app, g) work correctly
-    outside a request.
+    then injects scaffold files and writes credentials to DB/meta.json.
     """
     with app.app_context():
         import uuid as _uuid
 
         db_password = DB_PASSWORD_PREFIX + _uuid.uuid4().hex[:16]
+        job_folder  = os.path.join(OUTPUTS_DIR, job_id)
 
         print(f"[supabase] Creating project '{project_name}' for job {job_id}...")
 
@@ -90,10 +91,10 @@ def _provision_supabase(app, job_id, user_id, project_name):
         project_ref  = project_data.get("id", "")
         project_url  = f"https://{project_ref}.supabase.co"
 
-        print(f"[supabase] Project created: {project_ref} — waiting for it to become active...")
+        print(f"[supabase] Project created: {project_ref} — waiting for active status...")
 
         # ── Step 2: Wait for project to become active ─────────────────────
-        max_wait      = 180  # seconds — bumped up slightly for safety
+        max_wait      = 180
         poll_interval = 5
         elapsed       = 0
         became_active = False
@@ -101,7 +102,6 @@ def _provision_supabase(app, job_id, user_id, project_name):
         while elapsed < max_wait:
             time.sleep(poll_interval)
             elapsed += poll_interval
-
             try:
                 status_resp = http_requests.get(
                     f"{SUPABASE_API}/projects/{project_ref}",
@@ -114,8 +114,6 @@ def _provision_supabase(app, job_id, user_id, project_name):
                     if status == "ACTIVE_HEALTHY":
                         became_active = True
                         break
-                else:
-                    print(f"[supabase] Status check failed: {status_resp.text[:200]}")
             except Exception as e:
                 print(f"[supabase] Status poll error: {e}")
 
@@ -185,7 +183,7 @@ def _provision_supabase(app, job_id, user_id, project_name):
                 },
                 timeout=15,
             )
-            print(f"[supabase] URL config — status {url_resp.status_code} — {url_resp.text[:300]}")
+            print(f"[supabase] URL config — status {url_resp.status_code}")
         except Exception as e:
             print(f"[supabase] URL config error: {e}")
 
@@ -207,7 +205,7 @@ def _provision_supabase(app, job_id, user_id, project_name):
                     },
                     timeout=15,
                 )
-                print(f"[supabase] SMTP config — status {smtp_resp.status_code} — {smtp_resp.text[:300]}")
+                print(f"[supabase] SMTP config — status {smtp_resp.status_code}")
             except Exception as e:
                 print(f"[supabase] SMTP config error: {e}")
 
@@ -245,16 +243,30 @@ def _provision_supabase(app, job_id, user_id, project_name):
             meta["supabase_anon_key"]     = anon_key
             meta["supabase_service_role"] = service_role_key
             meta["supabase_project_ref"]  = project_ref
+            # Clear provisioning sentinel
+            meta.pop("supabase_provisioning", None)
             with open(meta_path, "w") as f:
                 json.dump(meta, f)
         except Exception as e:
             print(f"[supabase] Warning: couldn't update meta.json: {e}")
 
-        print(f"[supabase] ✓ Project {project_ref} ready for job {job_id}")
+        # ── Step 6: NEW — Inject scaffold files into the workspace ────────
+        try:
+            inject_scaffold(
+                workspace=job_folder,
+                supabase_url=project_url,
+                anon_key=anon_key,
+                project_ref=project_ref,
+            )
+            print(f"[supabase] Scaffold files injected into {job_id}")
+        except Exception as e:
+            print(f"[supabase] Warning: scaffold injection failed: {e}")
+            # Non-fatal — the agent can still create these files manually
+
+        print(f"[supabase] Project {project_ref} fully ready for job {job_id}")
 
 
 def _mark_failed(job_id):
-    """Write a sentinel so the frontend can stop polling on hard failure."""
     meta_path = os.path.join(OUTPUTS_DIR, job_id, "meta.json")
     try:
         meta = {}
@@ -262,29 +274,22 @@ def _mark_failed(job_id):
             with open(meta_path) as f:
                 meta = json.load(f)
         meta["supabase_provisioning_failed"] = True
+        meta.pop("supabase_provisioning", None)
         with open(meta_path, "w") as f:
             json.dump(meta, f)
     except Exception as e:
         print(f"[supabase] _mark_failed error: {e}")
 
 
-# ── Provision a new Supabase project for a job ───────────────────────────────
+# ── Routes — same API surface as before ───────────────────────────────────────
 
 @supabase_bp.route('/job/<job_id>/enable-backend', methods=['POST'])
 @token_required
 def enable_backend(user_id, job_id):
-    """
-    Kick off Supabase provisioning in a background thread and return 202
-    immediately so the frontend never hits Render's 30-second request timeout.
-
-    The frontend should then poll GET /supabase/job/<job_id>/backend-status
-    until supabase_enabled=True (or provisioning_failed=True).
-    """
     access_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
     if not access_token:
         return jsonify({"error": "Supabase Management API not configured."}), 500
 
-    # Check job belongs to user
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -296,7 +301,6 @@ def enable_backend(user_id, job_id):
             if not row:
                 return jsonify({"error": "Job not found"}), 404
 
-            # Already enabled — return existing credentials immediately
             if row.get("supabase_enabled") and row.get("supabase_project_ref"):
                 cur.execute(
                     "SELECT supabase_url, supabase_anon_key FROM jobs WHERE job_id = %s",
@@ -312,7 +316,7 @@ def enable_backend(user_id, job_id):
     finally:
         conn.close()
 
-    # Check if provisioning is already in-flight (meta.json sentinel)
+    # Check if already provisioning
     meta_path = os.path.join(OUTPUTS_DIR, job_id, "meta.json")
     try:
         if os.path.exists(meta_path):
@@ -323,7 +327,7 @@ def enable_backend(user_id, job_id):
     except Exception:
         pass
 
-    # Get job title for the Supabase project name
+    # Get job title
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -334,7 +338,7 @@ def enable_backend(user_id, job_id):
     finally:
         conn.close()
 
-    # Write in-flight sentinel to meta.json so duplicate clicks are ignored
+    # Write provisioning sentinel
     try:
         meta = {}
         if os.path.exists(meta_path):
@@ -346,9 +350,7 @@ def enable_backend(user_id, job_id):
     except Exception as e:
         print(f"[supabase] Could not write provisioning sentinel: {e}")
 
-    # Grab the Flask app instance before leaving the request context
     app = current_app._get_current_object()
-
     thread = threading.Thread(
         target=_provision_supabase,
         args=(app, job_id, user_id, project_name),
@@ -359,26 +361,15 @@ def enable_backend(user_id, job_id):
     return jsonify({"provisioning": True}), 202
 
 
-# ── Check backend status ─────────────────────────────────────────────────────
-
 @supabase_bp.route('/job/<job_id>/backend-status', methods=['GET'])
 @token_required
 def backend_status(user_id, job_id):
-    """
-    Poll this endpoint after calling enable-backend.
-    Returns:
-      - supabase_enabled=True once provisioning is done
-      - provisioning=True while still in-flight
-      - provisioning_failed=True on hard failure
-    """
     conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT supabase_enabled, supabase_url, supabase_anon_key, supabase_project_ref
-                FROM jobs WHERE job_id = %s AND user_id = %s
-                """,
+                """SELECT supabase_enabled, supabase_url, supabase_anon_key, supabase_project_ref
+                   FROM jobs WHERE job_id = %s AND user_id = %s""",
                 (job_id, int(user_id))
             )
             row = cur.fetchone()
@@ -388,7 +379,6 @@ def backend_status(user_id, job_id):
     if not row:
         return jsonify({"error": "Job not found"}), 404
 
-    # Check meta.json for in-flight / failed sentinels
     provisioning        = False
     provisioning_failed = False
     meta_path = os.path.join(OUTPUTS_DIR, job_id, "meta.json")
@@ -411,14 +401,11 @@ def backend_status(user_id, job_id):
     }), 200
 
 
-# ── Execute SQL on a job's Supabase project ──────────────────────────────────
-
 @supabase_bp.route('/job/<job_id>/sql', methods=['POST'])
 @token_required
 def execute_sql(user_id, job_id):
     data = request.get_json() or {}
     sql  = data.get("sql", "").strip()
-
     if not sql:
         return jsonify({"error": "SQL query required"}), 400
 
@@ -439,10 +426,10 @@ def execute_sql(user_id, job_id):
             if not row:
                 return jsonify({"error": "Job not found"}), 404
             if not row.get("supabase_enabled"):
-                return jsonify({"error": "Backend not enabled for this job"}), 400
+                return jsonify({"error": "Backend not enabled"}), 400
             project_ref = row.get("supabase_project_ref")
             if not project_ref:
-                return jsonify({"error": "No Supabase project found for this job"}), 400
+                return jsonify({"error": "No Supabase project found"}), 400
     finally:
         conn.close()
 
@@ -460,8 +447,6 @@ def execute_sql(user_id, job_id):
     except Exception as e:
         return jsonify({"error": f"SQL execution error: {str(e)}"}), 500
 
-
-# ── List tables ──────────────────────────────────────────────────────────────
 
 @supabase_bp.route('/job/<job_id>/tables', methods=['GET'])
 @token_required

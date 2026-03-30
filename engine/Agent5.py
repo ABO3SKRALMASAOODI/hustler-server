@@ -13,6 +13,13 @@ import anthropic
 import requests
 import fal_client
 import time
+from supabase_module import (
+    SupabaseTools,
+    SUPABASE_TOOL_DEFINITIONS,
+    SUPABASE_PROMPT_ADDITION,
+    inject_scaffold,
+    register_supabase_tools,
+)
 
 # ── fal.ai authentication ──────────────────────────────────────────────────
 # Set FAL_KEY in your .env file. That's all that's needed.
@@ -21,252 +28,6 @@ fal_client.api_key = os.getenv("FAL_KEY", "")
 client = anthropic.Anthropic()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SUPABASE TOOLS CLASS
-# ══════════════════════════════════════════════════════════════════════════════
-
-class SupabaseTools:
-    def __init__(self, supabase_url: str, anon_key: str, service_role_key: str, preview_url: str = "", project_ref: str = ""):
-        self.url              = supabase_url.rstrip("/")
-        self.anon_key         = anon_key
-        self.service_role_key = service_role_key
-        self.preview_url      = preview_url
-        self.project_ref      = project_ref
-
-    def _headers(self):
-        return {
-            "apikey":        self.service_role_key,
-            "Authorization": f"Bearer {self.service_role_key}",
-            "Content-Type":  "application/json",
-        }
-
-    def _execute_sql(self, sql: str) -> dict:
-        try:
-            access_token = os.getenv("SUPABASE_ACCESS_TOKEN", "")
-            project_ref  = self.project_ref or os.getenv("SUPABASE_PROJECT_REF", "")
-            if not access_token or not project_ref:
-                return {"success": False, "error": "SUPABASE_ACCESS_TOKEN or project_ref not available"}
-            resp = requests.post(
-                f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
-                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-                json={"query": sql},
-                timeout=30,
-            )
-            if resp.status_code < 400:
-                return {"success": True, "data": resp.json()}
-            else:
-                return {"success": False, "error": resp.text[:500]}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def create_table(self, table_name: str, columns: str, enable_rls: bool = True) -> str:
-        sql = f"CREATE TABLE IF NOT EXISTS public.{table_name} ({columns});"
-        if enable_rls:
-            sql += f" ALTER TABLE public.{table_name} ENABLE ROW LEVEL SECURITY;"
-        result = self._execute_sql(sql)
-        if result["success"]:
-            msg = f"TABLE_CREATED: {table_name}"
-            if enable_rls:
-                msg += " (RLS enabled — add policies to control access)"
-            print(f"[supabase] Created table: {table_name}")
-            return msg
-        return f"TABLE_CREATE_ERROR: {result['error']}"
-
-    def add_rls_policy(self, table_name: str, policy_name: str, operation: str,
-                       using_expression: str, check_expression: str = "") -> str:
-        self._execute_sql(f'DROP POLICY IF EXISTS "{policy_name}" ON public.{table_name};')
-        op = operation.upper()
-        if op == "INSERT":
-            check_expr = check_expression if check_expression else using_expression
-            sql = f"""CREATE POLICY "{policy_name}" ON public.{table_name}
-                FOR INSERT TO authenticated WITH CHECK ({check_expr});"""
-        else:
-            sql = f"""CREATE POLICY "{policy_name}" ON public.{table_name}
-                FOR {op} TO authenticated USING ({using_expression})"""
-            if check_expression:
-                sql += f" WITH CHECK ({check_expression})"
-            sql += ";"
-        result = self._execute_sql(sql)
-        if result["success"]:
-            print(f"[supabase] Added RLS policy '{policy_name}' on {table_name}")
-            return f"RLS_POLICY_CREATED: '{policy_name}' on {table_name} for {op}"
-        return f"RLS_POLICY_ERROR: {result['error']}"
-
-    def enable_auth(self) -> str:
-        config = {
-            "supabase_url": self.url,
-            "anon_key":     self.anon_key,
-            "auth_methods": ["email/password (built-in)", "magic link (built-in)"],
-            "usage": {
-                "sign_up":   "await supabase.auth.signUp({ email, password })",
-                "sign_in":   "await supabase.auth.signInWithPassword({ email, password })",
-                "sign_out":  "await supabase.auth.signOut()",
-                "get_user":  "const { data: { user } } = await supabase.auth.getUser()",
-                "on_change": "supabase.auth.onAuthStateChange((event, session) => { ... })",
-            },
-        }
-        return f"AUTH_ENABLED: Supabase Auth is ready.\n\nConfiguration:\n{json.dumps(config, indent=2)}"
-
-    def list_tables(self) -> str:
-        sql = """
-            SELECT t.table_name,
-                   json_agg(json_build_object(
-                       'column_name', c.column_name,
-                       'data_type', c.data_type,
-                       'is_nullable', c.is_nullable,
-                       'column_default', c.column_default
-                   ) ORDER BY c.ordinal_position) as columns
-            FROM information_schema.tables t
-            JOIN information_schema.columns c
-                ON c.table_name = t.table_name AND c.table_schema = t.table_schema
-            WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-            GROUP BY t.table_name ORDER BY t.table_name;
-        """
-        result = self._execute_sql(sql)
-        if result["success"]:
-            data = result["data"]
-            if not data:
-                return "NO_TABLES: The database has no tables yet."
-            output = "DATABASE_TABLES:\n"
-            for table in data:
-                name = table.get("table_name", "unknown")
-                cols = table.get("columns", [])
-                output += f"\n  {name}:\n"
-                for col in cols:
-                    nullable = "nullable" if col.get("is_nullable") == "YES" else "not null"
-                    default  = f" default={col['column_default']}" if col.get("column_default") else ""
-                    output  += f"    - {col['column_name']}: {col['data_type']} ({nullable}{default})\n"
-            return output
-        return f"LIST_TABLES_ERROR: {result['error']}"
-
-    def run_sql(self, sql: str) -> str:
-        sql_lower = sql.lower().strip()
-        blocked   = ["drop database", "drop schema public", "pg_terminate_backend", "drop owned", "reassign owned"]
-        for b in blocked:
-            if b in sql_lower:
-                return f"SQL_BLOCKED: Operation '{b}' is not allowed."
-        result = self._execute_sql(sql)
-        if result["success"]:
-            return f"SQL_EXECUTED_SUCCESSFULLY\n{json.dumps(result['data'], indent=2)[:2000]}"
-        return f"SQL_ERROR: {result['error']}"
-
-    def get_supabase_config(self) -> str:
-        return json.dumps({
-            "supabase_url": self.url,
-            "anon_key":     self.anon_key,
-            "preview_url":  self.preview_url,
-            "usage": (
-                "Create a file src/lib/supabase.ts with:\n"
-                "  import { createClient } from '@supabase/supabase-js'\n"
-                f"  export const supabase = createClient('{self.url}', '{self.anon_key}')\n"
-                f"  export const REDIRECT_URL = '{self.preview_url}'\n"
-            ),
-        })
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  SUPABASE TOOL DEFINITIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-SUPABASE_TOOL_DEFINITIONS = [
-    {
-        "name": "create_table",
-        "description": (
-            "Create a new database table in Supabase. RLS is enabled by default.\n"
-            "After creating a table you MUST add RLS policies or the table will be inaccessible.\n"
-            "Common patterns:\n"
-            "- Primary key: 'id uuid default gen_random_uuid() primary key'\n"
-            "- User ref: 'user_id uuid references auth.users(id) on delete cascade not null'\n"
-            "- Timestamps: 'created_at timestamptz default now()'"
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "table_name": {"type": "string"},
-                "columns":    {"type": "string"},
-                "enable_rls": {"type": "boolean"}
-            },
-            "required": ["table_name", "columns"]
-        }
-    },
-    {
-        "name": "add_rls_policy",
-        "description": (
-            "Add a Row Level Security policy.\n"
-            "Common: SELECT using='auth.uid() = user_id', INSERT check='auth.uid() = user_id'"
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "table_name":       {"type": "string"},
-                "policy_name":      {"type": "string"},
-                "operation":        {"type": "string", "description": "SELECT, INSERT, UPDATE, DELETE, or ALL"},
-                "using_expression": {"type": "string"},
-                "check_expression": {"type": "string"}
-            },
-            "required": ["table_name", "policy_name", "operation", "using_expression"]
-        }
-    },
-    {
-        "name": "enable_auth",
-        "description": "Get Supabase auth configuration and code patterns.",
-        "input_schema": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "list_tables",
-        "description": "List all tables with columns, types, and constraints.",
-        "input_schema": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "run_sql",
-        "description": "Execute arbitrary SQL. Cannot drop databases or schemas.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"sql": {"type": "string"}},
-            "required": ["sql"]
-        }
-    },
-    {
-        "name": "get_supabase_config",
-        "description": "Get the Supabase URL and anon key for frontend code.",
-        "input_schema": {"type": "object", "properties": {}}
-    },
-]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  PROMPT ADDITIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-SUPABASE_PROMPT_ADDITION = """
-
-────────────────────────────────────────────────────────
-BACKEND / DATABASE (SUPABASE)
-────────────────────────────────────────────────────────
-This project has a Supabase backend enabled. You have full access to create database tables,
-set up authentication, and configure Row Level Security.
-
-IMPORTANT: You MUST install @supabase/supabase-js if not already in package.json:
-  run_install_command: "npm install @supabase/supabase-js -y"
-
-1) Call get_supabase_config to get the project URL and anon key.
-2) Create src/lib/supabase.ts with the client.
-3) After creating any table, ALWAYS add RLS policies using add_rls_policy.
-
-Standard RLS pattern for user-owned data:
-- SELECT: using_expression = "auth.uid() = user_id"
-- INSERT: using_expression = "true", check_expression = "auth.uid() = user_id"
-- UPDATE: using_expression = "auth.uid() = user_id", check_expression = "auth.uid() = user_id"
-- DELETE: using_expression = "auth.uid() = user_id"
-
-IMPORTANT: Email confirmation is ENABLED. After sign up, show a verification message.
-Import REDIRECT_URL from '@/lib/supabase' — never use window.location.origin.
-
-CRITICAL RULES:
-- ALWAYS add RLS policies after creating tables.
-- NEVER put the service_role key in frontend code.
-- Column names in TypeScript interfaces MUST exactly match database column names.
-"""
 
 STRIPE_PROMPT_ADDITION = """
 
@@ -723,9 +484,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     print(f"[Agent5] Creating generator with model: {model}")
 
     system_prompt = FRONTEND_AGENT_SYSTEM_PROMPT
-    if supabase_config:
-        system_prompt += SUPABASE_PROMPT_ADDITION
-        print(f"[Agent5] Supabase enabled")
+    
     if stripe_config:
         system_prompt += STRIPE_PROMPT_ADDITION.replace(
             "{STRIPE_PUBLISHABLE_KEY}", stripe_config.get("publishable_key", "")
@@ -738,8 +497,6 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
         print(f"[Agent5] AI proxy enabled")
 
     all_tools = list(anthropic_tools)
-    if supabase_config:
-        all_tools.extend(SUPABASE_TOOL_DEFINITIONS)
 
     agent6 = BaseAgent(
         client        = client,
@@ -1099,29 +856,14 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
                     anon_key     = meta.get("supabase_anon_key", "")
                 except: pass
                 if supabase_url and anon_key:
-                    sb = SupabaseTools(
-                        supabase_url     = supabase_url,
-                        anon_key         = anon_key,
-                        service_role_key = meta.get("supabase_service_role", ""),
-                        preview_url      = f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{os.path.basename(_workspace)}/",
-                        project_ref      = meta.get("supabase_project_ref", ""),
-                    )
-                    agent6.tool_map["create_table"]        = sb.create_table
-                    agent6.tool_map["add_rls_policy"]      = sb.add_rls_policy
-                    agent6.tool_map["enable_auth"]         = sb.enable_auth
-                    agent6.tool_map["list_tables"]         = sb.list_tables
-                    agent6.tool_map["run_sql"]             = sb.run_sql
-                    agent6.tool_map["get_supabase_config"] = sb.get_supabase_config
-                    for tool_def in SUPABASE_TOOL_DEFINITIONS:
-                        if not any(t["name"] == tool_def["name"] for t in agent6.tools):
-                            agent6.tools.append(tool_def)
-                    if "BACKEND / DATABASE (SUPABASE)" not in agent6.system_prompt:
-                        agent6.system_prompt += SUPABASE_PROMPT_ADDITION
-                return (
-                    f"BACKEND_APPROVED: Supabase is now active!\n"
-                    f"URL: {supabase_url}\nAnon Key: {anon_key}\n\n"
-                    f"NEXT: call get_supabase_config, create src/lib/supabase.ts, then create tables with RLS policies."
-                )
+                    from supabase_module import register_supabase_tools
+                    register_supabase_tools(agent6, {
+                        "url": supabase_url,
+                        "anon_key": anon_key,
+                        "service_role_key": meta.get("supabase_service_role", ""),
+                        "project_ref": meta.get("supabase_project_ref", ""),
+                        "preview_url": f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{os.path.basename(_workspace)}/",
+                    }, _workspace)
             if os.path.exists(denied_path):
                 try: os.remove(denied_path)
                 except: pass
@@ -1219,20 +961,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     }
 
     if supabase_config:
-        sb = SupabaseTools(
-            supabase_url     = supabase_config["url"],
-            anon_key         = supabase_config["anon_key"],
-            service_role_key = supabase_config.get("service_role_key", ""),
-            preview_url      = supabase_config.get("preview_url", ""),
-            project_ref      = supabase_config.get("project_ref", ""),
-        )
-        tool_map["create_table"]        = sb.create_table
-        tool_map["add_rls_policy"]      = sb.add_rls_policy
-        tool_map["enable_auth"]         = sb.enable_auth
-        tool_map["list_tables"]         = sb.list_tables
-        tool_map["run_sql"]             = sb.run_sql
-        tool_map["get_supabase_config"] = sb.get_supabase_config
-        print(f"[Agent5] Registered 6 Supabase tools")
+        register_supabase_tools(agent6, supabase_config, workspace)
 
     agent6.tool_map = tool_map
     agent6.reviewer = reviewer

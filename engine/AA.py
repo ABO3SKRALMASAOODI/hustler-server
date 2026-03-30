@@ -491,6 +491,7 @@ def main():
                     meta_sb = json.load(f)
 
                 # ── Supabase ──────────────────────────────────────────
+                # ── Supabase ──────────────────────────────────────────
                 if meta_sb.get("supabase_enabled"):
                     job_id = os.path.basename(WORKSPACE)
                     supabase_config = {
@@ -502,6 +503,14 @@ def main():
                     }
                     print(f"[AA] Supabase enabled — project ref: {supabase_config['project_ref']}")
 
+                    # Ensure scaffold files exist on every run (idempotent)
+                    from supabase_module import inject_scaffold
+                    inject_scaffold(
+                        workspace=WORKSPACE,
+                        supabase_url=supabase_config["url"],
+                        anon_key=supabase_config["anon_key"],
+                        project_ref=supabase_config.get("project_ref", ""),
+                    )
                 # ── Stripe ────────────────────────────────────────────
                 if meta_sb.get("stripe_enabled"):
                     job_id_str = os.path.basename(WORKSPACE)
