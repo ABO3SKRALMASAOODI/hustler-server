@@ -834,12 +834,12 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     }
     approval_map, approval_defs = create_approval_tools(agent6, workspace)
     tool_map.update(approval_map)
-
+    agent6.tool_map = tool_map
     if supabase_config:
         register_supabase_tools(agent6, supabase_config, workspace)
 
     
-    agent6.tool_map = tool_map
+    
     
     # Add approval tool definitions
     for td in approval_defs:
