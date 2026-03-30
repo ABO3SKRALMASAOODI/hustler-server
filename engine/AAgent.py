@@ -287,7 +287,7 @@ class BaseAgent:
                     print(f"[code_changed] set True — tool '{name}' was called")
 
                 if name not in self.tool_map:
-                    raise RuntimeError(f"Model called unknown tool: {name}")
+                    result = f"TOOL_ERROR: Unknown tool '{name}'. Available tools: {', '.join(self.tool_map.keys())}"
 
                 result = self.tool_map[name](**args)
 
