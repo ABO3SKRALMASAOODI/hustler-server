@@ -2,3 +2,7 @@ backend/venv/
 **/__pycache__/
 **/*.pyc
 .env
+outputs/
+outputs_template/.DS_Store
+*.DS_Store
+node_modules/ # in case no trailing newline
