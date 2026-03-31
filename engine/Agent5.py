@@ -140,7 +140,18 @@ STRIPE: Never put sk_ keys in frontend. Use window.open(url, '_blank') for check
 APPROVALS: Always call check_approvals after request_backend/request_stripe.
 Never write database or payment code before check_approvals returns approved.
 Never use localStorage as a substitute when Supabase is requested — wait for approval.
-
+PRODUCT IMAGES IN DATABASE: When products have images stored in the database:
+- NEVER use database image_urls values directly in <img src>. They are just filenames.
+- OPTION 1 (preferred): Use Supabase Storage. Call create_storage_bucket, upload images
+  there, and store the FULL public URL in the database. Then <img src={product.image_url}>
+  works everywhere with zero mapping.
+- OPTION 2 (local images): If images are generated locally in src/assets:
+  1. Import ALL product images as ES6 modules at the top of EVERY page that shows them
+  2. Create an imageMap object: { "filename.jpg": importedModule, ... }
+  3. Create a getProductImage(dbValue) helper that resolves filenames to imports
+  4. Use <img src={getProductImage(product.image_urls[0])} />
+  5. Apply this pattern to EVERY page: Home, Shop, ProductDetail, Cart, Admin, Orders
+  Never apply the fix to one page and forget the others.
 ##RUNTIME DEBUGGING
 
 When a user reports their app is broken:
