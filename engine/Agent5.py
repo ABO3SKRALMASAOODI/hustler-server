@@ -534,8 +534,24 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
             return f"[READ_FILE_ERROR] FILE NOT FOUND {path}"
         if p.is_dir():
             return f"[READ_FILE_ERROR] '{path}' is a directory, not a file."
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
+        # Reject binary files — don't crash trying to read them as text
+        binary_exts = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.ico', '.svg',
+                       '.woff', '.woff2', '.ttf', '.otf', '.eot',
+                       '.mp4', '.mp3', '.wav', '.ogg', '.webm',
+                       '.zip', '.tar', '.gz', '.pdf', '.wasm'}
+        ext = p.suffix.lower()
+        if ext in binary_exts:
+            try:
+                size = p.stat().st_size
+                size_str = f"{size/1024:.1f}KB" if size < 1024*1024 else f"{size/(1024*1024):.1f}MB"
+                return f"[BINARY_FILE] {path} is a {ext} file ({size_str}). Cannot read as text. Use it by importing: import img from '{path}'"
+            except:
+                return f"[BINARY_FILE] {path} is a binary file ({ext}). Cannot read as text."
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            return f"[BINARY_FILE] {path} is not a text file. Cannot read as text."
 
     def delete_file(path: str) -> str:
         try:
