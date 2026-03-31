@@ -278,29 +278,44 @@ class BaseAgent:
                 call_id = _get(block, "id")
                 raw_in  = _get(block, "input") or {}
                 args    = raw_in if isinstance(raw_in, dict) else json.loads(raw_in)
-
+ 
                 if self.on_tool_start:
                     self.on_tool_start(name, args)
-
+ 
                 if name in self.CODE_WRITING_TOOLS:
                     code_changed = True
                     print(f"[code_changed] set True — tool '{name}' was called")
-
+ 
                 if name not in self.tool_map:
                     result = f"TOOL_ERROR: Unknown tool '{name}'. Available tools: {', '.join(self.tool_map.keys())}"
-
-                result = self.tool_map[name](**args)
-
+                else:
+                    try:
+                        result = self.tool_map[name](**args)
+                    except TypeError as e:
+                        # Wrong arguments passed to tool
+                        result = f"TOOL_ERROR: Bad arguments for '{name}': {str(e)[:200]}. Check the tool schema and try again."
+                        print(f"[tool_error] {name} TypeError: {e}")
+                    except FileNotFoundError as e:
+                        result = f"TOOL_ERROR: File not found: {str(e)[:200]}"
+                        print(f"[tool_error] {name} FileNotFoundError: {e}")
+                    except PermissionError as e:
+                        result = f"TOOL_ERROR: Permission denied: {str(e)[:200]}"
+                        print(f"[tool_error] {name} PermissionError: {e}")
+                    except Exception as e:
+                        # Catch-all: return error to model so it can self-correct
+                        result = f"TOOL_ERROR: {type(e).__name__}: {str(e)[:300]}. Fix the issue and try again."
+                        print(f"[tool_error] {name} {type(e).__name__}: {e}")
+ 
                 # ── StopAgent check ───────────────────────────────────
                 if isinstance(result, StopAgent):
                     stop_sentinel = result
                     result_content = result.reason if result.reason else "APPROVED"
                 else:
                     result_content = result if isinstance(result, str) else json.dumps(result)
-
+ 
                 if self.on_tool_end:
                     self.on_tool_end(name, args, result_content)
-
+ 
                 tool_results.append({
                     "type":        "tool_result",
                     "tool_use_id": call_id,
@@ -317,21 +332,23 @@ class BaseAgent:
                     call_id = _get(block, "id")
                     raw_in  = _get(block, "input") or {}
                     args    = raw_in if isinstance(raw_in, dict) else json.loads(raw_in)
-
+ 
                     if self.on_tool_start:
                         self.on_tool_start(name, args)
-
+ 
                     if name not in self.tool_map:
                         return call_id, f"IMAGE_GENERATION_FAILED: unknown tool {name}"
-
+ 
                     try:
                         result = self.tool_map[name](**args)
                     except Exception as e:
-                        result = f"IMAGE_GENERATION_FAILED: {str(e)[:120]} — use CSS gradient placeholder instead. Do NOT import this path."
-
+                        error_msg = f"IMAGE_GENERATION_FAILED: {type(e).__name__}: {str(e)[:120]} — use CSS gradient placeholder instead. Do NOT import this path."
+                        print(f"[image_error] {name}: {e}")
+                        result = error_msg
+ 
                     if self.on_tool_end:
                         self.on_tool_end(name, args, result)
-
+ 
                     return call_id, result
 
                 for batch_idx in range(0, len(image_blocks), BATCH_SIZE):

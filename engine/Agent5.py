@@ -9,6 +9,7 @@ import os
 import subprocess
 import shutil
 import json
+from task_tools import create_task_tools
 import anthropic
 import requests
 import fal_client
@@ -263,6 +264,36 @@ const buttonVariants = cva("...", {
 -After you finish building output a very short 1-2 line telling the user that you finished
 """
 
+TASK_TRACKING_PROMPT = """
+ 
+## Task Tracking
+ 
+You have tools to track your work: create_task, set_task_status, add_task_note, get_tasks, delete_task.
+ 
+**Statuses**: todo (planned), in_progress (actively working), done (completed)
+ 
+**When to use**:
+1. Complex multi-step tasks (2+ distinct steps) — create tasks BEFORE starting work
+2. Non-trivial implementations requiring planning
+3. Tasks should be high-level and meaningful (e.g. "Create auth login page", not "Write line 42")
+ 
+**Rules**:
+- Keep at most one task in_progress at a time
+- Mark tasks done as you complete them — users see this in real-time
+- Titles must be short (6 words max, verb-led, clear outcome)
+- Do NOT create tasks for single-file trivial edits or pure Q&A
+- Add notes for important discoveries or decisions
+ 
+**Example flow**:
+1. create_task("Set up routing and pages")
+2. create_task("Build hero section")  
+3. create_task("Create product cards")
+4. set_task_status(task_id, "in_progress")  // start first task
+5. ... do the work ...
+6. set_task_status(task_id, "done")  // mark complete
+7. set_task_status(next_id, "in_progress")  // start next
+"""
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  TOOL DEFINITIONS
@@ -480,7 +511,7 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     print(f"[Agent5] Creating generator with model: {model}")
 
     system_prompt = FRONTEND_AGENT_SYSTEM_PROMPT
-    
+    system_prompt += TASK_TRACKING_PROMPT
     if stripe_config:
         system_prompt += STRIPE_PROMPT_ADDITION.replace(
             "{STRIPE_PUBLISHABLE_KEY}", stripe_config.get("publishable_key", "")
@@ -872,5 +903,13 @@ def create_generator(files_list_state, reviewer=None, model=None, supabase_confi
     for td in approval_defs:
         if not any(t["name"] == td["name"] for t in agent6.tools):
             agent6.tools.append(td)
+
+    task_map, task_defs = create_task_tools(workspace)
+    tool_map.update(task_map)
+    for td in task_defs:
+        if not any(t["name"] == td["name"] for t in agent6.tools):
+            agent6.tools.append(td)
+ 
     agent6.reviewer = reviewer
+
     return agent6
