@@ -359,15 +359,60 @@ class SupabaseTools:
     def create_storage_bucket(self, bucket_name: str, public: bool = True) -> str:
         """
         Create a storage bucket and set up default policies.
+        Uses Storage REST API (more reliable on fresh projects) with SQL fallback.
         Idempotent — safe to call multiple times.
         """
-        # Step 1: Create the bucket (ON CONFLICT handles re-runs)
-        bucket_sql = f"INSERT INTO storage.buckets (id, name, public) VALUES ('{bucket_name}', '{bucket_name}', {str(public).lower()}) ON CONFLICT (id) DO NOTHING;"
-        result = self._execute_sql(bucket_sql)
-        if not result["success"]:
-            return f"STORAGE_ERROR: Could not create bucket: {result['error']}"
+        if not self.service_role_key:
+            return "STORAGE_ERROR: service_role_key not configured."
 
-        # Step 2: Create policies wrapped in exception handlers (idempotent)
+        # ── Step 1: Create bucket via Storage REST API (with retry for fresh projects)
+        bucket_created = False
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    f"{self.url}/storage/v1/bucket",
+                    headers={
+                        "apikey": self.service_role_key,
+                        "Authorization": f"Bearer {self.service_role_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"id": bucket_name, "name": bucket_name, "public": public},
+                    timeout=15,
+                )
+                print(f"[storage] Create bucket attempt {attempt + 1}: HTTP {resp.status_code} — {resp.text[:200]}")
+
+                if resp.status_code < 400:
+                    bucket_created = True
+                    break
+                elif resp.status_code == 409 or "already exists" in resp.text.lower() or "Duplicate" in resp.text:
+                    bucket_created = True  # already exists = success
+                    print(f"[storage] Bucket '{bucket_name}' already exists — OK")
+                    break
+                else:
+                    # Fresh project might not be ready — wait and retry
+                    if attempt < 2:
+                        import time as _time
+                        delay = 5 * (attempt + 1)
+                        print(f"[storage] Bucket creation failed, retrying in {delay}s...")
+                        _time.sleep(delay)
+            except Exception as e:
+                print(f"[storage] REST API error attempt {attempt + 1}: {e}")
+                if attempt < 2:
+                    import time as _time
+                    _time.sleep(5)
+
+        # ── Fallback: try SQL if REST API failed
+        if not bucket_created:
+            print(f"[storage] REST API failed — trying SQL fallback")
+            sql = f"INSERT INTO storage.buckets (id, name, public) VALUES ('{bucket_name}', '{bucket_name}', {str(public).lower()}) ON CONFLICT (id) DO NOTHING;"
+            result = self._execute_sql(sql)
+            if result["success"]:
+                bucket_created = True
+                print(f"[storage] SQL fallback succeeded")
+            else:
+                return f"STORAGE_ERROR: Could not create bucket after REST + SQL attempts: {result['error'][:200]}"
+
+        # ── Step 2: Create RLS policies (each wrapped in exception handler)
         if public:
             policies = [
                 (f"Public read {bucket_name}", "SELECT", "public",
