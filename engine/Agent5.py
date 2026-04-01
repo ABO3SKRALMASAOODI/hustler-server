@@ -141,18 +141,20 @@ STRIPE: Never put sk_ keys in frontend. Use window.open(url, '_blank') for check
 APPROVALS: Always call check_approvals after request_backend/request_stripe.
 Never write database or payment code before check_approvals returns approved.
 Never use localStorage as a substitute when Supabase is requested — wait for approval.
-PRODUCT IMAGES IN DATABASE: When products have images stored in the database:
-- NEVER use database image_urls values directly in <img src>. They are just filenames.
-- OPTION 1 (preferred): Use Supabase Storage. Call create_storage_bucket, upload images
-  there, and store the FULL public URL in the database. Then <img src={product.image_url}>
-  works everywhere with zero mapping.
-- OPTION 2 (local images): If images are generated locally in src/assets:
-  1. Import ALL product images as ES6 modules at the top of EVERY page that shows them
-  2. Create an imageMap object: { "filename.jpg": importedModule, ... }
-  3. Create a getProductImage(dbValue) helper that resolves filenames to imports
-  4. Use <img src={getProductImage(product.image_urls[0])} />
-  5. Apply this pattern to EVERY page: Home, Shop, ProductDetail, Cart, Admin, Orders
-  Never apply the fix to one page and forget the others.
+DATABASE-REFERENCED IMAGES (products, listings, blog posts, etc.):
+- Generate images to public/images/ (NOT src/assets/)
+- Files in public/ are served as-is with no Vite hashing — paths work at runtime
+- Store the path in the database as /images/filename.jpg
+- Use <img src={product.image_url} /> directly — no imports or mapping needed
+- This applies to ALL database-backed content with images
+
+STATIC UI IMAGES (hero banners, logos, backgrounds hardcoded in components):
+- Generate to src/assets/ as usual
+- Import as ES6 modules: import heroImg from '../assets/hero.jpg'
+- These are NOT referenced from any database
+
+NEVER generate images to src/assets/ and then store the path in a database.
+NEVER store paths like /./src/assets/filename.jpg in a database — they break after build.
 ##RUNTIME DEBUGGING
 
 When a user reports their app is broken:
@@ -181,7 +183,8 @@ MANDATORY per commerce project:
 - One hero image (1920x1080) using flux-ultra
 - All other images using flux-schnell
 
-Generate max 4 images at a time. Generate ALL images before writing any page components.
+Generate ALL images before writing any page components.
+Database-referenced images go to public/images/. Static UI images go to src/assets/.
 Write detailed prompts — subject, audience, style, lighting, background.
 Import as ES6 modules: import heroImg from '../assets/hero.jpg'
 Never use string paths in JSX. Never import a path that returned IMAGE_GENERATION_FAILED.
@@ -383,7 +386,7 @@ anthropic_tools = [
             "- flux-schnell: fastest, cheapest ($0.003/MP). Use for ALL images except the hero.\n"
             "- flux-pro:     high quality ($0.03/MP). Only for complex product shots.\n"
             "- flux-ultra:   hero banners only ($0.06). One per project maximum.\n\n"
-            "Generate max 4 images at a time. Always use flux-schnell unless hero or complex shot.\n"
+            "Always use flux-schnell unless hero or complex shot.\n"
             "On IMAGE_GENERATION_FAILED: use CSS gradient, never import that path."
         ),
         "input_schema": {
