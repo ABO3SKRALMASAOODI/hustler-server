@@ -215,11 +215,13 @@ class BaseAgent:
                     with self.client.messages.stream(**kwargs) as stream:
                         resp = stream.get_final_message()
                     break
-                except anthropic.RateLimitError:
-                    if attempt == max_retries - 1:
+                except (anthropic.RateLimitError, anthropic.APIStatusError) as e:
+                    err_msg = str(e).lower()
+                    is_retryable = isinstance(e, anthropic.RateLimitError) or "overloaded" in err_msg or "529" in err_msg or "503" in err_msg
+                    if not is_retryable or attempt == max_retries - 1:
                         raise
                     delay = base_delay * (2 ** attempt)
-                    print(f"[rate limit] hit on attempt {attempt + 1}, retrying in {delay}s...")
+                    print(f"[api error] {type(e).__name__} on attempt {attempt + 1}, retrying in {delay}s...")
                     if self.on_rate_limit:
                         self.on_rate_limit(attempt, delay)
                     time.sleep(delay)
