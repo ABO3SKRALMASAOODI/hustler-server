@@ -730,29 +730,21 @@ def main():
             os.remove(partial_path)
 
         build_ok = False
-        preview_url = None
         if code_changed:
             write_progress(WORKSPACE, {
                 "action": "building",
                 "detail": "Installing dependencies & compiling...",
             })
             build_ok = build_project(WORKSPACE)
-            if build_ok:
-                job_id_str = os.path.basename(WORKSPACE)
-                preview_url = f"https://entrepreneur-bot-backend.onrender.com/auth/preview-raw/{job_id_str}/"
 
         clear_progress(WORKSPACE)
 
-        state_extra = {
+        write_state(WORKSPACE, "completed", {
             "build_ok":        build_ok,
             "code_changed":    code_changed,
             "token_breakdown": token_breakdown,
             "credits_used":    credits_used,
-        }
-        if preview_url:
-            state_extra["preview_url"] = preview_url
-
-        write_state(WORKSPACE, "completed", state_extra)
+        })
 
     except Exception as e:
         clear_progress(WORKSPACE)
