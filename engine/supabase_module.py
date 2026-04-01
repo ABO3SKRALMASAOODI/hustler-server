@@ -359,60 +359,68 @@ class SupabaseTools:
     def create_storage_bucket(self, bucket_name: str, public: bool = True) -> str:
         """
         Create a storage bucket and set up default policies.
-        For image uploads (products, avatars, etc).
+        Idempotent — safe to call multiple times.
         """
-        # Create bucket via SQL
-        sql = f"INSERT INTO storage.buckets (id, name, public) VALUES ('{bucket_name}', '{bucket_name}', {str(public).lower()}) ON CONFLICT (id) DO NOTHING;"
+        # Step 1: Create the bucket (ON CONFLICT handles re-runs)
+        bucket_sql = f"INSERT INTO storage.buckets (id, name, public) VALUES ('{bucket_name}', '{bucket_name}', {str(public).lower()}) ON CONFLICT (id) DO NOTHING;"
+        result = self._execute_sql(bucket_sql)
+        if not result["success"]:
+            return f"STORAGE_ERROR: Could not create bucket: {result['error']}"
 
-        # Add default policies
+        # Step 2: Create policies wrapped in exception handlers (idempotent)
         if public:
-            sql += f"""
-                CREATE POLICY "Public read {bucket_name}" ON storage.objects
-                    FOR SELECT USING (bucket_id = '{bucket_name}');
-                CREATE POLICY "Authenticated upload {bucket_name}" ON storage.objects
-                    FOR INSERT TO authenticated
-                    WITH CHECK (bucket_id = '{bucket_name}');
-                CREATE POLICY "Owner update {bucket_name}" ON storage.objects
-                    FOR UPDATE TO authenticated
-                    USING (bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]);
-                CREATE POLICY "Owner delete {bucket_name}" ON storage.objects
-                    FOR DELETE TO authenticated
-                    USING (bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]);
-            """
+            policies = [
+                (f"Public read {bucket_name}", "SELECT", "public",
+                 f"bucket_id = '{bucket_name}'", None),
+                (f"Authenticated upload {bucket_name}", "INSERT", "authenticated",
+                 None, f"bucket_id = '{bucket_name}'"),
+                (f"Owner update {bucket_name}", "UPDATE", "authenticated",
+                 f"bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]", None),
+                (f"Owner delete {bucket_name}", "DELETE", "authenticated",
+                 f"bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]", None),
+            ]
         else:
-            sql += f"""
-                CREATE POLICY "Owner read {bucket_name}" ON storage.objects
-                    FOR SELECT TO authenticated
-                    USING (bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]);
-                CREATE POLICY "Owner upload {bucket_name}" ON storage.objects
-                    FOR INSERT TO authenticated
-                    WITH CHECK (bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]);
-                CREATE POLICY "Owner update {bucket_name}" ON storage.objects
-                    FOR UPDATE TO authenticated
-                    USING (bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]);
-                CREATE POLICY "Owner delete {bucket_name}" ON storage.objects
-                    FOR DELETE TO authenticated
-                    USING (bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]);
-            """
+            policies = [
+                (f"Owner read {bucket_name}", "SELECT", "authenticated",
+                 f"bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]", None),
+                (f"Owner upload {bucket_name}", "INSERT", "authenticated",
+                 None, f"bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]"),
+                (f"Owner update {bucket_name}", "UPDATE", "authenticated",
+                 f"bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]", None),
+                (f"Owner delete {bucket_name}", "DELETE", "authenticated",
+                 f"bucket_id = '{bucket_name}' AND auth.uid()::text = (storage.foldername(name))[1]", None),
+            ]
 
-        result = self._execute_sql(sql)
-        if result["success"]:
-            public_url = f"{self.url}/storage/v1/object/public/{bucket_name}"
-            upload_pattern = (
-                f"const {{ data, error }} = await supabase.storage\n"
-                f"  .from('{bucket_name}')\n"
-                f"  .upload(`${{userId}}/${{fileName}}`, file);\n\n"
-                f"// Get public URL:\n"
-                f"const {{ data: urlData }} = supabase.storage\n"
-                f"  .from('{bucket_name}')\n"
-                f"  .getPublicUrl(filePath);"
-            )
-            return (
-                f"STORAGE_BUCKET_CREATED: '{bucket_name}' ({'public' if public else 'private'})\n"
-                f"Public base URL: {public_url}\n\n"
-                f"Upload pattern:\n{upload_pattern}"
-            )
-        return f"STORAGE_ERROR: {result['error']}"
+        for policy_name, cmd, role, using_expr, check_expr in policies:
+            using_clause = f"USING ({using_expr})" if using_expr else ""
+            check_clause = f"WITH CHECK ({check_expr})" if check_expr else ""
+            policy_sql = f"""
+                DO $$ BEGIN
+                    CREATE POLICY "{policy_name}" ON storage.objects
+                        FOR {cmd} TO {role}
+                        {using_clause} {check_clause};
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$;
+            """
+            res = self._execute_sql(policy_sql)
+            if not res["success"]:
+                print(f"[storage] Policy '{policy_name}' warning: {res['error'][:200]}")
+
+        public_url = f"{self.url}/storage/v1/object/public/{bucket_name}"
+        upload_pattern = (
+            f"const {{ data, error }} = await supabase.storage\n"
+            f"  .from('{bucket_name}')\n"
+            f"  .upload(`${{userId}}/${{fileName}}`, file);\n\n"
+            f"// Get public URL:\n"
+            f"const {{ data: urlData }} = supabase.storage\n"
+            f"  .from('{bucket_name}')\n"
+            f"  .getPublicUrl(filePath);"
+        )
+        return (
+            f"STORAGE_BUCKET_CREATED: '{bucket_name}' ({'public' if public else 'private'})\n"
+            f"Public base URL: {public_url}\n\n"
+            f"Upload pattern:\n{upload_pattern}"
+        )
     # ══════════════════════════════════════════════════════════════════
     #  TOOL: upload_to_storage
     # ══════════════════════════════════════════════════════════════════

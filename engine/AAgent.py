@@ -314,7 +314,9 @@ class BaseAgent:
                     result_content = result.reason if result.reason else "APPROVED"
                 else:
                     result_content = result if isinstance(result, str) else json.dumps(result)
- 
+                # Log tool results for debugging
+                if name in ("create_storage_bucket", "upload_to_storage", "migration"):
+                    print(f"[tool_result] {name}: {result_content[:300]}")
                 if self.on_tool_end:
                     self.on_tool_end(name, args, result_content)
  
