@@ -155,6 +155,8 @@ WHEN NO BACKEND (static sites only):
 - Generate images to public/images/ (NOT src/assets/)
 - Files in public/ are served as-is with no Vite hashing — paths work at runtime
 - Store the path in data as images/filename.jpg (NO leading slash — relative path)
+- NEVER use /images/ with a leading slash — it breaks inside the preview iframe
+- Correct: images/hero.jpg | Wrong: /images/hero.jpg
 - Use <img src={product.image_url} /> directly — no imports needed
 
 STATIC UI IMAGES (hero banners, logos, backgrounds hardcoded in components):
