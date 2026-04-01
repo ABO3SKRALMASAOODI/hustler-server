@@ -1428,10 +1428,34 @@ def serve_preview_raw(job_id, filename):
     html = html.replace('href="./favicon',   f'href="{asset_base}favicon')
     html = html.replace('href="./placeholder', f'href="{asset_base}placeholder')
 
+    html = html.replace('src="/images/',    f'src="{asset_base}images/')
+    html = html.replace("src='/images/",    f"src='{asset_base}images/")
+    html = html.replace('url("/images/',    f'url("{asset_base}images/')
+    html = html.replace("url('/images/",    f"url('{asset_base}images/")
+
     from flask import request as flask_request
     base     = flask_request.host_url.rstrip("/")
     boot_fix = f"""<script>
 history.replaceState(null, '', '/');
+(function() {{
+  var _previewBase = "{base}/auth/preview/{job_id}";
+  var _fix = function() {{
+    document.querySelectorAll('img[src^="/images/"]').forEach(function(img) {{
+      img.src = _previewBase + img.getAttribute('src');
+    }});
+    document.querySelectorAll('[style*="/images/"]').forEach(function(el) {{
+      el.style.cssText = el.style.cssText.replace(/\\/images\\//g, _previewBase + '/images/');
+    }});
+  }};
+  var _obs = new MutationObserver(_fix);
+  document.addEventListener('DOMContentLoaded', function() {{
+    _obs.observe(document.body, {{childList: true, subtree: true, attributes: true, attributeFilter: ['src']}});
+    _fix();
+  }});
+  setTimeout(_fix, 200);
+  setTimeout(_fix, 1000);
+  setTimeout(_fix, 3000);
+}})();
 (function() {{
   var _endpoint = "{base}/auth/preview/{job_id}/console-log";
   var _buf = [];
