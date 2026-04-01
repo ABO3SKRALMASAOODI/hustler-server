@@ -144,7 +144,7 @@ Never use localStorage as a substitute when Supabase is requested — wait for a
 DATABASE-REFERENCED IMAGES (products, listings, blog posts, etc.):
 - Generate images to public/images/ (NOT src/assets/)
 - Files in public/ are served as-is with no Vite hashing — paths work at runtime
-- Store the path in the database as /images/filename.jpg
+- Store the path in the data as images/filename.jpg (NO leading slash — relative path)
 - Use <img src={product.image_url} /> directly — no imports or mapping needed
 - This applies to ALL database-backed content with images
 
