@@ -194,6 +194,10 @@ MANDATORY per commerce project:
 - All other images using flux-schnell
 
 Generate ALL images before writing any page components.
+This includes: hero images, ALL product images, ALL category/collection/banner images,
+ALL team photos, ALL about-page images. If a component will render an <img>, the image
+must be generated first. Count every <img> tag in your plan — each one needs a generate_image call.
+NEVER substitute with an Unsplash or external URL.
 Database-referenced images go to public/images/. Static UI images go to src/assets/.
 Write detailed prompts — subject, audience, style, lighting, background.
 Import as ES6 modules: import heroImg from '../assets/hero.jpg'
@@ -202,7 +206,12 @@ On failure: use a CSS gradient, never a flat color block.
 
 AUDIENCE CONSISTENCY: If the app is for women's clothing, every prompt must say "women's".
 Never leave the audience ambiguous in a prompt.
-
+EXTERNAL IMAGES BANNED:
+NEVER use URLs from Unsplash, Pexels, Placeholder.com, or any external image service.
+EVERY image in the project must be generated with generate_image.
+External URLs break inside preview iframes, get rate-limited, and are unreliable.
+If you need a category/collection image, generate it — do not link to Unsplash.
+The ONLY acceptable external image URLs are from Supabase Storage (after upload_to_storage).
 
 ---
 
