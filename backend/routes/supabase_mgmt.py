@@ -262,7 +262,53 @@ def _provision_supabase(app, job_id, user_id, project_name):
         except Exception as e:
             print(f"[supabase] Warning: scaffold injection failed: {e}")
             # Non-fatal — the agent can still create these files manually
-
+        # ── Step 7: Create default 'images' storage bucket ───────────
+        # Storage service needs extra time after project creation.
+        # Retry with longer delays since we're in a background thread.
+        for attempt in range(5):
+            try:
+                bucket_resp = http_requests.post(
+                    f"{project_url}/storage/v1/bucket",
+                    headers={
+                        "apikey": service_role_key,
+                        "Authorization": f"Bearer {service_role_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"id": "images", "name": "images", "public": True},
+                    timeout=15,
+                )
+                status = bucket_resp.status_code
+                print(f"[supabase] Create 'images' bucket attempt {attempt + 1}: HTTP {status}")
+                if status < 400 or status == 409:
+                    # Success or already exists — add public read policy
+                    try:
+                        policy_sql = """
+                            DO $$ BEGIN
+                                CREATE POLICY "Public read images" ON storage.objects
+                                    FOR SELECT TO public USING (bucket_id = 'images');
+                            EXCEPTION WHEN duplicate_object THEN NULL;
+                            END $$;
+                            DO $$ BEGIN
+                                CREATE POLICY "Authenticated upload images" ON storage.objects
+                                    FOR INSERT TO authenticated WITH CHECK (bucket_id = 'images');
+                            EXCEPTION WHEN duplicate_object THEN NULL;
+                            END $$;
+                        """
+                        http_requests.post(
+                            f"https://api.supabase.com/v1/projects/{project_ref}/database/query",
+                            headers=_mgmt_headers(),
+                            json={"query": policy_sql},
+                            timeout=15,
+                        )
+                    except Exception as pe:
+                        print(f"[supabase] Bucket policy warning: {pe}")
+                    print(f"[supabase] 'images' bucket ready")
+                    break
+                else:
+                    print(f"[supabase] Bucket not ready: {bucket_resp.text[:200]}")
+            except Exception as e:
+                print(f"[supabase] Bucket attempt {attempt + 1} error: {e}")
+            time.sleep(10)  # 10s between attempts — plenty of time in background thread
         print(f"[supabase] Project {project_ref} fully ready for job {job_id}")
 
 
