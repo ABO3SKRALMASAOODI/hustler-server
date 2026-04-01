@@ -141,20 +141,30 @@ STRIPE: Never put sk_ keys in frontend. Use window.open(url, '_blank') for check
 APPROVALS: Always call check_approvals after request_backend/request_stripe.
 Never write database or payment code before check_approvals returns approved.
 Never use localStorage as a substitute when Supabase is requested — wait for approval.
-DATABASE-REFERENCED IMAGES (products, listings, blog posts, etc.):
+DATABASE-REFERENCED IMAGES (products, listings, blog posts, portfolios, etc.):
+WHEN SUPABASE/BACKEND IS ENABLED:
+- Call create_storage_bucket('images', true) ONCE at the start
+- Generate images to public/images/ as a TEMPORARY staging location
+- IMMEDIATELY call upload_to_storage('images', 'public/images/file.jpg', 'products/file.jpg')
+- The tool returns a permanent CDN URL — use THAT in your code and database
+- The local temp file is auto-deleted after upload
+- You CAN batch generate_image calls in parallel, then batch upload_to_storage calls in parallel
+- Store the URL in database columns (image_url TEXT) — never a local path
+
+WHEN NO BACKEND (static sites only):
 - Generate images to public/images/ (NOT src/assets/)
 - Files in public/ are served as-is with no Vite hashing — paths work at runtime
-- Store the path in the data as images/filename.jpg (NO leading slash — relative path)
-- Use <img src={product.image_url} /> directly — no imports or mapping needed
-- This applies to ALL database-backed content with images
+- Store the path in data as images/filename.jpg (NO leading slash — relative path)
+- Use <img src={product.image_url} /> directly — no imports needed
 
 STATIC UI IMAGES (hero banners, logos, backgrounds hardcoded in components):
 - Generate to src/assets/ as usual
 - Import as ES6 modules: import heroImg from '../assets/hero.jpg'
-- These are NOT referenced from any database
+- These are NOT referenced from any database — no upload needed
 
 NEVER generate images to src/assets/ and then store the path in a database.
 NEVER store paths like /./src/assets/filename.jpg in a database — they break after build.
+NEVER skip upload_to_storage when Supabase is enabled and images are for database content.
 ##RUNTIME DEBUGGING
 
 When a user reports their app is broken:

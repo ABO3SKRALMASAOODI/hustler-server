@@ -413,7 +413,87 @@ class SupabaseTools:
                 f"Upload pattern:\n{upload_pattern}"
             )
         return f"STORAGE_ERROR: {result['error']}"
+    # ══════════════════════════════════════════════════════════════════
+    #  TOOL: upload_to_storage
+    # ══════════════════════════════════════════════════════════════════
 
+    def upload_to_storage(self, bucket_name: str, local_path: str, storage_path: str = "") -> str:
+        """
+        Upload a local file to a Supabase Storage bucket.
+        Returns the permanent public URL.
+        Used after generate_image for database-referenced images.
+        """
+        # Resolve path relative to workspace if not absolute
+        if not os.path.isabs(local_path) and self.workspace:
+            resolved = os.path.join(self.workspace, local_path)
+            if os.path.isfile(resolved):
+                local_path = resolved
+
+        if not os.path.isfile(local_path):
+            return f"UPLOAD_ERROR: File not found: {local_path}"
+
+        if not self.service_role_key:
+            return "UPLOAD_ERROR: service_role_key not configured — cannot upload to storage."
+
+        try:
+            with open(local_path, "rb") as f:
+                file_data = f.read()
+        except Exception as e:
+            return f"UPLOAD_ERROR: Could not read file: {e}"
+
+        if len(file_data) < 1024:
+            return f"UPLOAD_ERROR: File too small ({len(file_data)} bytes) — likely corrupt or empty."
+
+        ext = local_path.rsplit(".", 1)[-1].lower() if "." in local_path else ""
+        content_type_map = {
+            "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "png": "image/png", "webp": "image/webp",
+            "gif": "image/gif", "svg": "image/svg+xml",
+            "pdf": "application/pdf",
+        }
+        content_type = content_type_map.get(ext, "application/octet-stream")
+
+        if not storage_path:
+            storage_path = os.path.basename(local_path)
+
+        upload_url = f"{self.url}/storage/v1/object/{bucket_name}/{storage_path}"
+        headers = {
+            "apikey": self.service_role_key,
+            "Authorization": f"Bearer {self.service_role_key}",
+            "Content-Type": content_type,
+            "x-upsert": "true",
+        }
+
+        try:
+            resp = requests.post(upload_url, headers=headers, data=file_data, timeout=60)
+            print(f"[storage] Upload {storage_path} to {bucket_name}: HTTP {resp.status_code}")
+
+            if resp.status_code >= 400:
+                error_text = resp.text[:300]
+                print(f"[storage] Upload failed: {error_text}")
+                return f"UPLOAD_ERROR: {error_text}"
+        except Exception as e:
+            print(f"[storage] Upload exception: {e}")
+            return f"UPLOAD_ERROR: {str(e)[:200]}"
+
+        public_url = f"{self.url}/storage/v1/object/public/{bucket_name}/{storage_path}"
+        size_kb = len(file_data) / 1024
+        print(f"[storage] Uploaded: {storage_path} ({size_kb:.1f} KB) -> {public_url[:100]}")
+
+        # Clean up local file to save disk space
+        try:
+            os.remove(local_path)
+            print(f"[storage] Cleaned up local file: {local_path}")
+        except Exception:
+            pass
+
+        return (
+            f"UPLOAD_SUCCESS URL:{public_url}\n"
+            f"Size: {size_kb:.1f} KB\n"
+            f"Use this URL directly in code: <img src=\"{public_url}\" />\n"
+            f"Or store it in a database column (e.g. image_url TEXT).\n"
+            f"Do NOT import this as an ES6 module — use the URL string directly."
+        )
     # ══════════════════════════════════════════════════════════════════
     #  TOOL: configure_auth
     # ══════════════════════════════════════════════════════════════════
@@ -434,59 +514,61 @@ class SupabaseTools:
         }
 
         patterns = """
-AUTH IMPLEMENTATION PATTERNS:
+        AUTH IMPLEMENTATION PATTERNS:
 
-1. SIGN UP:
-   const { data, error } = await supabase.auth.signUp({
-     email,
-     password,
-     options: { emailRedirectTo: window.location.origin }
-   });
-   // IMPORTANT: If email confirmation is enabled, show a "Check your email" message.
-   // Do NOT auto-redirect to dashboard after signup.
+        1. SIGN UP:
+          const { data, error } = await supabase.auth.signUp({
+            email,
+            password,
+            options: { emailRedirectTo: window.location.origin }
+          });
+          // IMPORTANT: If email confirmation is enabled, show a "Check your email" message.
+          // Do NOT auto-redirect to dashboard after signup.
 
-2. SIGN IN:
-   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        2. SIGN IN:
+          const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
-3. SIGN OUT:
-   await supabase.auth.signOut();
+        3. SIGN OUT:
+          await supabase.auth.signOut();
 
-4. GET CURRENT USER:
-   const { data: { user } } = await supabase.auth.getUser();
+        4. GET CURRENT USER:
+          const { data: { user } } = await supabase.auth.getUser();
 
-5. AUTH STATE LISTENER (CRITICAL — set up BEFORE getSession):
-   useEffect(() => {
-     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-       (event, session) => {
-         setUser(session?.user ?? null);
-         setLoading(false);
-       }
-     );
-     // Then check existing session
-     supabase.auth.getSession().then(({ data: { session } }) => {
-       setUser(session?.user ?? null);
-       setLoading(false);
-     });
-     return () => subscription.unsubscribe();
-   }, []);
+        5. AUTH STATE LISTENER (CRITICAL — set up BEFORE getSession):
+          useEffect(() => {
+            const { data: { subscription } } = supabase.auth.onAuthStateChange(
+              (event, session) => {
+                setUser(session?.user ?? null);
+                setLoading(false);
+              }
+            );
+            // Then check existing session
+            supabase.auth.getSession().then(({ data: { session } }) => {
+              setUser(session?.user ?? null);
+              setLoading(false);
+            });
+            return () => subscription.unsubscribe();
+          }, []);
 
-6. PROTECTED ROUTE PATTERN:
-   if (loading) return <LoadingSpinner />;
-   if (!user) return <Navigate to="/login" />;
-   return <Outlet />;
+        6. PROTECTED ROUTE PATTERN:
+          if (loading) return <LoadingSpinner />;
+          if (!user) return <Navigate to="/login" />;
+          return <Outlet />;
 
-7. PASSWORD RESET:
-   // Step 1: Send reset email
-   await supabase.auth.resetPasswordForEmail(email, {
-     redirectTo: `${window.location.origin}/reset-password`
-   });
-   // Step 2: Create a /reset-password page that:
-   //   - Checks URL hash for type=recovery
-   //   - Shows new password form
-   //   - Calls: await supabase.auth.updateUser({ password: newPassword })
-   //   - This page MUST be a public route (not behind auth guard)
-"""
+        7. PASSWORD RESET:
+          // Step 1: Send reset email
+          await supabase.auth.resetPasswordForEmail(email, {
+            redirectTo: `${window.location.origin}/reset-password`
+          });
+          // Step 2: Create a /reset-password page that:
+          //   - Checks URL hash for type=recovery
+          //   - Shows new password form
+          //   - Calls: await supabase.auth.updateUser({ password: newPassword })
+          //   - This page MUST be a public route (not behind auth guard)
+        """
         return f"AUTH_CONFIG:\n{json.dumps(config, indent=2)}\n\n{patterns}"
+    
+
 
     # ══════════════════════════════════════════════════════════════════
     #  TOOL: get_project_info
@@ -1218,6 +1300,42 @@ SUPABASE_TOOL_DEFINITIONS = [
         }
     },
     {
+        "name": "upload_to_storage",
+        "description": (
+            "Upload a local file (image, PDF, etc.) to a Supabase Storage bucket.\n"
+            "Returns a permanent public URL that works forever — no build hashing, no path issues.\n\n"
+            "WORKFLOW FOR DATABASE-REFERENCED IMAGES:\n"
+            "1. Call create_storage_bucket (once per project) to create the bucket\n"
+            "2. Call generate_image to create the image locally (to public/images/ as temp)\n"
+            "3. Call upload_to_storage to upload it and get a permanent URL\n"
+            "4. Use that URL directly in your code or store it in a database column\n\n"
+            "IMPORTANT:\n"
+            "- The local file is auto-deleted after upload to save disk space\n"
+            "- The returned URL is permanent and CDN-served — it never breaks\n"
+            "- Use storage_path to organize: 'products/shirt.jpg', 'heroes/banner.jpg'\n"
+            "- Always create the bucket first with create_storage_bucket\n"
+            "- NEVER use the local path after uploading — only use the returned URL"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "bucket_name": {
+                    "type": "string",
+                    "description": "Name of the storage bucket (must already exist). E.g. 'images', 'product-images'."
+                },
+                "local_path": {
+                    "type": "string",
+                    "description": "Path to the local file to upload. E.g. 'public/images/shirt.jpg'."
+                },
+                "storage_path": {
+                    "type": "string",
+                    "description": "Path inside the bucket. E.g. 'products/shirt.jpg'. Defaults to filename."
+                },
+            },
+            "required": ["bucket_name", "local_path"]
+        }
+    },
+    {
         "name": "configure_auth",
         "description": (
             "Get authentication configuration, code patterns, and implementation guide.\n"
@@ -1344,17 +1462,38 @@ USER ROLES — CRITICAL SECURITY:
 - Use a security definer function: public.has_role(user_id, role)
 
 STORAGE — FOR FILE/IMAGE UPLOADS:
-Use create_storage_bucket tool, then in frontend:
-    // Upload
-    const { data, error } = await supabase.storage
-      .from('bucket-name')
-      .upload(`${user.id}/${file.name}`, file);
-    // Get URL
-    const { data: urlData } = supabase.storage
-      .from('bucket-name')
-      .getPublicUrl(data.path);
-    // Save URL to database
-    await supabase.from('products').update({ image_url: urlData.publicUrl }).eq('id', productId);
+CRITICAL: ALL database-referenced images (products, listings, blog posts, portfolios)
+MUST be uploaded to Supabase Storage. NEVER store local file paths in a database.
+
+WORKFLOW FOR DYNAMIC/DATABASE-REFERENCED IMAGES:
+1. Call create_storage_bucket('images', true) — once at the start of the project
+2. Call generate_image to create the image locally (use public/images/ as temp location)
+3. Call upload_to_storage(bucket_name='images', local_path='public/images/filename.jpg', storage_path='products/filename.jpg')
+4. The tool returns a permanent CDN URL like: https://xxxxx.supabase.co/storage/v1/object/public/images/products/shirt.jpg
+5. Use that URL directly in your code or store it in a database column (image_url TEXT)
+6. The local temp file is auto-deleted after upload — this is expected behavior
+
+You CAN batch multiple generate_image calls in parallel, then batch multiple upload_to_storage calls in parallel.
+
+STATIC UI IMAGES (hero banners, logos, backgrounds hardcoded in components — NOT in any database):
+- These are fine in src/assets/ with ES6 imports — they do NOT need storage upload
+- Only database-referenced images need the upload workflow
+
+FRONTEND USER-UPLOAD PATTERN (for images uploaded by end users at runtime):
+  const { data, error } = await supabase.storage
+    .from('images')
+    .upload(`${user.id}/${file.name}`, file);
+  const { data: urlData } = supabase.storage
+    .from('images')
+    .getPublicUrl(data.path);
+  await supabase.from('products').update({ image_url: urlData.publicUrl }).eq('id', productId);
+
+ANTI-PATTERNS — NEVER DO THESE:
+- NEVER store paths like 'public/images/shirt.jpg' or './src/assets/shirt.jpg' in a database
+- NEVER generate images to src/assets/ and reference them from database records
+- NEVER use local filesystem paths as image URLs in database-backed content
+- NEVER skip upload_to_storage when building database-backed content with images
+- NEVER import a storage URL as an ES6 module — use it as a plain string in src or img tags
 
 IMPORTANT: Email confirmation is ENABLED. After signup, show a "Check your email to verify" message.
 Never put the service_role key in frontend code.
@@ -1392,6 +1531,7 @@ def register_supabase_tools(agent, supabase_config: dict, workspace: str):
         "read_query": lambda sql: sb.read_query(sql),
         "list_tables": lambda: sb.list_tables(),
         "create_storage_bucket": lambda bucket_name, public=True: sb.create_storage_bucket(bucket_name, public),
+        "upload_to_storage": lambda bucket_name, local_path, storage_path="": sb.upload_to_storage(bucket_name, local_path, storage_path),
         "configure_auth": lambda enable_email_confirm=True: sb.configure_auth(enable_email_confirm),
         "get_project_info": lambda: sb.get_project_info(),
     }
