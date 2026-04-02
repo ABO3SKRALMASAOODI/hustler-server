@@ -187,6 +187,7 @@ class BaseAgent:
         totals = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
         code_changed = False
         turn_count = 0
+        accumulated_thinking = []  # Track thinking text from tool-use turns
 
         while True:
             turn_count += 1
@@ -253,6 +254,7 @@ class BaseAgent:
             tool_uses = [b for b in resp.content if _get(b, "type") == "tool_use"]
 
             if not tool_uses:
+                # Final response — this is the actual answer to the user
                 text = "".join(
                     _get(b, "text", "")
                     for b in resp.content
@@ -260,12 +262,15 @@ class BaseAgent:
                 )
                 return text, totals, code_changed, None
 
+            # This is a tool-use turn — any text here is "thinking", not the final answer
             thinking_text = "".join(
                 _get(b, "text", "") for b in resp.content if _get(b, "type") == "text"
             ).strip()
 
-            if thinking_text and self.on_text:
-                self.on_text(thinking_text)
+            if thinking_text:
+                accumulated_thinking.append(thinking_text)
+                if self.on_text:
+                    self.on_text(thinking_text)
 
             # ── Split image tools from other tools ────────────────────
             image_blocks = [b for b in tool_uses if _get(b, "name") == "generate_image"]
