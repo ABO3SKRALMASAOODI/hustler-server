@@ -139,5 +139,16 @@ def init_db(app):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_jobs_job_id  ON jobs(job_id)')
 
+        # ── Newsletter subscribers ─────────────────────────────────────────
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS newsletter_subscribers (
+                id            SERIAL PRIMARY KEY,
+                email         TEXT UNIQUE NOT NULL,
+                is_active     BOOLEAN DEFAULT TRUE,
+                subscribed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_newsletter_email ON newsletter_subscribers(email)')
+
         conn.commit()
         cursor.close()
