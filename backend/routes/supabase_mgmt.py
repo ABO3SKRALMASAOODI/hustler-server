@@ -279,7 +279,7 @@ def _provision_supabase(app, job_id, user_id, project_name):
                 )
                 status = bucket_resp.status_code
                 print(f"[supabase] Create 'images' bucket attempt {attempt + 1}: HTTP {status}")
-                if status < 400 or status == 409:
+                if status < 400 or status == 409 or "already exists" in bucket_resp.text.lower() or "Duplicate" in bucket_resp.text:
                     # Success or already exists — add public read policy
                     try:
                         policy_sql = """

@@ -389,3 +389,12 @@ Additional files:
 - `public/sitemap.xml` — lists all public routes
 - `public/robots.txt` — blocks private routes (/studio, /account, /admin, etc.)
 - Google Search Console sitemap last submitted: April 2, 2026
+
+
+Always commit with: git config user.name "ABO3SKRALMASAOODI" and git config user.email "shmarymuslim@gmail.com" — never commit as Claude or noreply@anthropic.com. Vercel Hobby plan blocks deploys from unrecognized committers.
+
+Don't modify models.py for schema changes. I manage the database schema directly through Render shell commands. Only use models.py for its existing helper functions like get_db() and update_user_subscription_status().
+heres the url:
+
+render external url: postgresql://the_hustler_bot_user:ajcmtxLo05sonfhqiTjA4kRAegN099DO@dpg-d0vgraggjchc7385l1u0-a.oregon-postgres.render.com/the_hustler_bot 
+ 
