@@ -1045,6 +1045,17 @@ def job_status(user_id, job_id):
     if os.path.exists(stripe_req_path):
         stripe_requested = True
 
+    build_error_text = None
+    if not state_data.get("build_ok", True):
+        build_output_path = os.path.join(job_folder, "build_output.json")
+        if os.path.exists(build_output_path):
+            try:
+                with open(build_output_path) as f:
+                    build_output = json.load(f)
+                build_error_text = build_output.get("build_stderr", "")
+            except Exception:
+                pass
+
     return jsonify({
         "job_id":            job_id,
         "state":             state_data.get("state", "unknown"),
@@ -1060,6 +1071,7 @@ def job_status(user_id, job_id):
         "published_url":     published_url,
         "backend_requested": backend_requested,
         "stripe_requested":  stripe_requested,
+        "build_error":       build_error_text,
     }), 200
 
 
