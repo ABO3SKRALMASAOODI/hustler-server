@@ -1,5 +1,7 @@
 import os
 import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
 from functools import wraps
 import jwt
@@ -8,7 +10,10 @@ newsletter_bp = Blueprint('newsletter', __name__)
 
 ADMIN_EMAIL = "thevalmera@gmail.com"
 BREVO_BASE = "https://api.brevo.com/v3"
-NEWSLETTER_LIST_NAME = "Valmera Newsletter"
+
+
+def get_db():
+    return psycopg2.connect(current_app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
 
 
 def _brevo_headers():
@@ -39,131 +44,39 @@ def admin_required(f):
     return decorated
 
 
-def _get_or_create_list():
-    """Get the newsletter list ID from Brevo, creating it if it doesn't exist."""
-    headers = _brevo_headers()
-
-    # Fetch all lists
-    res = requests.get(f"{BREVO_BASE}/contacts/lists", headers=headers, params={"limit": 50, "offset": 0})
-    if res.status_code == 200:
-        for lst in res.json().get("lists", []):
-            if lst["name"] == NEWSLETTER_LIST_NAME:
-                return lst["id"]
-
-    # Create if not found
-    res = requests.post(f"{BREVO_BASE}/contacts/lists", headers=headers, json={
-        "name": NEWSLETTER_LIST_NAME,
-        "folderId": 1,
-    })
-    if res.status_code == 201:
-        return res.json().get("id")
-
-    return None
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-#  PUBLIC: Subscribe to newsletter
-# ─────────────────────────────────────────────────────────────────────────────
-
-@newsletter_bp.route('/subscribe', methods=['POST'])
-def subscribe():
-    data = request.get_json(silent=True) or {}
-    email = (data.get('email') or '').strip().lower()
-    if not email or '@' not in email:
-        return jsonify({'error': 'Valid email is required'}), 400
-
-    list_id = _get_or_create_list()
-    if not list_id:
-        return jsonify({'error': 'Newsletter service unavailable'}), 500
-
-    headers = _brevo_headers()
-
-    # Add or update contact in Brevo and assign to list
-    payload = {
-        "email": email,
-        "listIds": [list_id],
-        "updateEnabled": True,
-    }
-    res = requests.post(f"{BREVO_BASE}/contacts", headers=headers, json=payload)
-
-    if res.status_code in (201, 204):
-        return jsonify({'message': 'Subscribed successfully'}), 200
-
-    # If contact already exists, add to list
-    if res.status_code == 400 and "already exist" in res.text.lower():
-        add_res = requests.post(
-            f"{BREVO_BASE}/contacts/lists/{list_id}/contacts/add",
-            headers=headers,
-            json={"emails": [email]},
-        )
-        if add_res.status_code in (200, 201, 204):
-            return jsonify({'message': 'Subscribed successfully'}), 200
-
-    return jsonify({'error': 'Failed to subscribe'}), 500
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PUBLIC: Unsubscribe from newsletter
-# ─────────────────────────────────────────────────────────────────────────────
-
-@newsletter_bp.route('/unsubscribe', methods=['POST'])
-def unsubscribe():
-    data = request.get_json(silent=True) or {}
-    email = (data.get('email') or '').strip().lower()
-    if not email:
-        return jsonify({'error': 'Email is required'}), 400
-
-    list_id = _get_or_create_list()
-    if not list_id:
-        return jsonify({'error': 'Newsletter service unavailable'}), 500
-
-    headers = _brevo_headers()
-    res = requests.post(
-        f"{BREVO_BASE}/contacts/lists/{list_id}/contacts/remove",
-        headers=headers,
-        json={"emails": [email]},
-    )
-
-    if res.status_code in (200, 201, 204):
-        return jsonify({'message': 'Unsubscribed successfully'}), 200
-
-    return jsonify({'error': 'Failed to unsubscribe'}), 500
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  ADMIN: Get subscriber list + count
+#  ADMIN: Get all registered users (the recipients)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @newsletter_bp.route('/subscribers', methods=['GET'])
 @admin_required
 def get_subscribers():
-    list_id = _get_or_create_list()
-    if not list_id:
-        return jsonify({'error': 'Newsletter service unavailable'}), 500
+    conn = get_db()
+    cursor = conn.cursor()
 
-    headers = _brevo_headers()
+    cursor.execute("SELECT COUNT(*) AS count FROM users WHERE is_verified = 1")
+    total = cursor.fetchone()['count']
+
     limit = int(request.args.get('limit', 50))
     offset = int(request.args.get('offset', 0))
 
-    res = requests.get(
-        f"{BREVO_BASE}/contacts/lists/{list_id}/contacts",
-        headers=headers,
-        params={"limit": limit, "offset": offset},
+    cursor.execute(
+        "SELECT email, plan, created_at FROM users WHERE is_verified = 1 ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        (limit, offset)
     )
+    users = cursor.fetchall()
 
-    if res.status_code == 200:
-        data = res.json()
-        contacts = data.get("contacts", [])
-        return jsonify({
-            'subscribers': [{"email": c["email"], "id": c.get("id")} for c in contacts],
-            'total': data.get("count", len(contacts)),
-        }), 200
+    cursor.close()
+    conn.close()
 
-    return jsonify({'subscribers': [], 'total': 0}), 200
+    return jsonify({
+        'subscribers': [{"email": u['email'], "plan": u.get('plan', 'free'), "joined": str(u.get('created_at', ''))} for u in users],
+        'total': total,
+    }), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ADMIN: Send newsletter to all subscribers
+#  ADMIN: Send newsletter to all verified users
 # ─────────────────────────────────────────────────────────────────────────────
 
 @newsletter_bp.route('/send', methods=['POST'])
@@ -178,60 +91,70 @@ def send_newsletter():
     if not html_content:
         return jsonify({'error': 'HTML content is required'}), 400
 
-    list_id = _get_or_create_list()
-    if not list_id:
-        return jsonify({'error': 'Newsletter service unavailable'}), 500
+    # Fetch all verified user emails from DB
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT email FROM users WHERE is_verified = 1")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if not rows:
+        return jsonify({'error': 'No verified users to send to'}), 400
+
+    emails = [r['email'] for r in rows]
 
     headers = _brevo_headers()
     sender_email = os.getenv("FROM_EMAIL", "support@valmera.io")
     sender_name = os.getenv("FROM_NAME", "Valmera")
 
-    # Add unsubscribe footer to HTML content
+    # Add unsubscribe footer
     unsubscribe_footer = (
         '<br/><hr style="border:none;border-top:1px solid #333;margin:32px 0 16px"/>'
         '<p style="font-size:12px;color:#888;text-align:center;">'
-        'You received this because you subscribed to the Valmera newsletter.<br/>'
-        'To unsubscribe, reply to this email with "unsubscribe" or visit '
-        '<a href="https://valmera.io" style="color:#dc2626;">valmera.io</a>.'
+        'You received this because you have an account on '
+        '<a href="https://valmera.io" style="color:#dc2626;">Valmera</a>.'
         '</p>'
     )
     full_html = html_content + unsubscribe_footer
 
-    # Create an email campaign
-    campaign_payload = {
-        "name": f"Newsletter: {subject[:60]}",
-        "subject": subject,
-        "sender": {"name": sender_name, "email": sender_email},
-        "type": "classic",
-        "htmlContent": full_html,
-        "recipients": {"listIds": [list_id]},
-    }
+    # Send in batches of 50 using Brevo transactional email
+    # (Brevo allows up to 50 recipients in the "to" field per call)
+    BATCH_SIZE = 50
+    sent = 0
+    failed = 0
 
-    res = requests.post(f"{BREVO_BASE}/emailCampaigns", headers=headers, json=campaign_payload)
+    for i in range(0, len(emails), BATCH_SIZE):
+        batch = emails[i:i + BATCH_SIZE]
+        # Use BCC so users don't see each other's emails
+        # First email goes in "to", rest in "bcc" — or send individually
+        # Brevo transactional: send to each batch via messageVersions for isolation
+        # Simplest: use "to" with one recipient per call is cleanest but slow
+        # Best approach: use Brevo's batch with BCC
+        payload = {
+            "sender": {"name": sender_name, "email": sender_email},
+            "to": [{"email": sender_email}],  # send to self
+            "bcc": [{"email": e} for e in batch],
+            "subject": subject,
+            "htmlContent": full_html,
+        }
 
-    if res.status_code != 201:
-        error_detail = res.json().get("message", "Unknown error") if res.headers.get("content-type", "").startswith("application/json") else res.text
-        return jsonify({'error': f'Failed to create campaign: {error_detail}'}), 500
+        res = requests.post(f"{BREVO_BASE}/smtp/email", json=payload, headers=headers)
+        if res.status_code == 201:
+            sent += len(batch)
+        else:
+            failed += len(batch)
 
-    campaign_id = res.json().get("id")
-
-    # Send the campaign immediately
-    send_res = requests.post(f"{BREVO_BASE}/emailCampaigns/{campaign_id}/sendNow", headers=headers)
-
-    if send_res.status_code in (200, 204):
-        return jsonify({'message': 'Newsletter sent successfully', 'campaignId': campaign_id}), 200
-
-    # If sendNow fails, try to return useful info
-    error_detail = ""
-    try:
-        error_detail = send_res.json().get("message", "")
-    except Exception:
-        error_detail = send_res.text
-    return jsonify({'error': f'Campaign created but failed to send: {error_detail}', 'campaignId': campaign_id}), 500
+    return jsonify({
+        'message': f'Newsletter sent to {sent} users' + (f' ({failed} failed)' if failed else ''),
+        'sent': sent,
+        'failed': failed,
+        'total': len(emails),
+    }), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ADMIN: Get past campaigns
+#  ADMIN: Get past campaigns (from Brevo)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @newsletter_bp.route('/campaigns', methods=['GET'])
@@ -241,24 +164,21 @@ def get_campaigns():
     limit = int(request.args.get('limit', 20))
     offset = int(request.args.get('offset', 0))
 
+    # Get transactional email events for our newsletter subject lines
     res = requests.get(
-        f"{BREVO_BASE}/emailCampaigns",
+        f"{BREVO_BASE}/smtp/statistics/aggregatedReport",
         headers=headers,
-        params={"type": "classic", "limit": limit, "offset": offset, "sort": "desc"},
     )
 
+    stats = {}
     if res.status_code == 200:
-        data = res.json()
-        campaigns = []
-        for c in data.get("campaigns", []):
-            campaigns.append({
-                "id": c.get("id"),
-                "name": c.get("name"),
-                "subject": c.get("subject"),
-                "status": c.get("status"),
-                "sentDate": c.get("sentDate") or c.get("scheduledAt"),
-                "stats": c.get("statistics", {}).get("globalStats", {}),
-            })
-        return jsonify({'campaigns': campaigns, 'total': data.get("count", 0)}), 200
+        stats = res.json()
 
-    return jsonify({'campaigns': [], 'total': 0}), 200
+    return jsonify({
+        'stats': {
+            'delivered': stats.get('delivered', 0),
+            'opens': stats.get('uniqueOpens', 0),
+            'clicks': stats.get('uniqueClicks', 0),
+            'blocked': stats.get('blocked', 0),
+        }
+    }), 200
