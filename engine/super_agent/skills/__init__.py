@@ -7,11 +7,36 @@ from engine.super_agent.skills.memory_skill import MemorySkill
 from engine.super_agent.skills.http_request import HttpRequestSkill
 from engine.super_agent.skills.send_email import SendEmailSkill
 from engine.super_agent.skills.web_search import WebSearchSkill
+from engine.super_agent.skills.send_whatsapp import SendWhatsAppSkill
+from engine.super_agent.skills.send_telegram import SendTelegramSkill
+from engine.super_agent.skills.send_slack import SendSlackSkill
+from engine.super_agent.skills.google_calendar import GoogleCalendarSkill
+from engine.super_agent.skills.gmail_skill import GmailSkill
+from engine.super_agent.skills.url_scraper import UrlScraperSkill
+from engine.super_agent.skills.data_analyzer import DataAnalyzerSkill
+from engine.super_agent.skills.news_monitor import NewsMonitorSkill
+from engine.super_agent.skills.workflow_engine import WorkflowEngineSkill
+from engine.super_agent.skills.notification_hub import NotificationHubSkill
 
 # All available skills keyed by skill_type
 SKILL_CATALOG = {
     skill.SKILL_TYPE: skill
-    for skill in [MemorySkill, HttpRequestSkill, SendEmailSkill, WebSearchSkill]
+    for skill in [
+        MemorySkill,
+        HttpRequestSkill,
+        SendEmailSkill,
+        WebSearchSkill,
+        SendWhatsAppSkill,
+        SendTelegramSkill,
+        SendSlackSkill,
+        GoogleCalendarSkill,
+        GmailSkill,
+        UrlScraperSkill,
+        DataAnalyzerSkill,
+        NewsMonitorSkill,
+        WorkflowEngineSkill,
+        NotificationHubSkill,
+    ]
 }
 
 

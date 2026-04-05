@@ -75,4 +75,14 @@ else:
     print(f'  Total fixed: {fixed}')
 "
 
+# ── Start Super Agent scheduler in background (single instance) ────────
+# The scheduler polls DB every 60s for new/changed schedules and executes them.
+# Only start on one worker — the first gunicorn worker handles it.
+if [ "${ENABLE_SCHEDULER:-0}" = "1" ]; then
+  echo "Starting Super Agent scheduler..."
+  python3 engine/super_agent/scheduler.py &
+  SCHEDULER_PID=$!
+  echo "Scheduler started (PID: $SCHEDULER_PID)"
+fi
+
 exec gunicorn --workers 3 --timeout 600 --chdir backend "app:create_app()"

@@ -17,6 +17,7 @@ from routes.ai_proxy import ai_proxy_bp
 from routes.planner import planner_bp
 from routes.newsletter import newsletter_bp
 from routes.super_agents import super_agents_bp
+from routes.super_agent_webhooks import super_agent_webhooks_bp
 
 load_dotenv()
 
@@ -69,6 +70,7 @@ def create_app():
     app.register_blueprint(planner_bp)
     app.register_blueprint(newsletter_bp, url_prefix='/newsletter')
     app.register_blueprint(super_agents_bp, url_prefix='/agents')
+    app.register_blueprint(super_agent_webhooks_bp)  # public webhooks, no prefix
     return app
 
 
