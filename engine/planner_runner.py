@@ -732,7 +732,7 @@ def run_planner(workspace, message, model_override=None):
             tools=REQUIREMENTS_AGENT_TOOLS,
             tool_map=tool_handlers,
             temperature=1,
-            max_tokens=8096,
+            max_tokens=16384,
             workspace=workspace,
         )
 

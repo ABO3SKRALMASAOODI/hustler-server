@@ -187,6 +187,7 @@ class BaseAgent:
         totals = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
         code_changed = False
         turn_count = 0
+        max_tokens_retries = 0
         accumulated_thinking = []  # Track thinking text from tool-use turns
 
         while True:
@@ -252,6 +253,17 @@ class BaseAgent:
             })
 
             tool_uses = [b for b in resp.content if _get(b, "type") == "tool_use"]
+
+            # ── Handle max_tokens truncation (tool call cut off) ─────
+            stop_reason = getattr(resp, "stop_reason", None)
+            if stop_reason == "max_tokens" and not tool_uses and max_tokens_retries < 3:
+                max_tokens_retries += 1
+                new_limit = min(self.max_tokens * 2, 64000)
+                print(f"[max_tokens] Truncated at {self.max_tokens} tokens (no tool calls completed), "
+                      f"retrying with {new_limit} (attempt {max_tokens_retries}/3)")
+                self.messages.pop()  # Remove truncated assistant message
+                self.max_tokens = new_limit
+                continue
 
             if not tool_uses:
                 # Final response — this is the actual answer to the user
