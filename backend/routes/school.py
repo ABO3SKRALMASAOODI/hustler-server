@@ -18,7 +18,7 @@ import anthropic
 
 school_bp = Blueprint('school', __name__, url_prefix='/school')
 
-MODEL              = "claude-haiku-4-5-20251001"
+MODEL              = "claude-opus-4-7"
 MAX_TOKENS         = 1400
 MAX_CONTEXT_CHARS  = 120_000   # cap what we embed in the system prompt
 MAX_FILE_BYTES     = 8 * 1024 * 1024  # 8 MB
