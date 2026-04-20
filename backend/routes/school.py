@@ -63,6 +63,33 @@ def _extract_pdf_text(data: bytes) -> tuple[str, int]:
         return "", 0
 
 
+def _extract_docx_text(data: bytes) -> str:
+    """Extract text from a .docx file using python-docx, with a zip-based fallback."""
+    try:
+        from docx import Document
+        doc = Document(io.BytesIO(data))
+        parts = [p.text for p in doc.paragraphs if p.text]
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text:
+                        parts.append(cell.text)
+        return "\n".join(parts)
+    except Exception:
+        pass
+    # Fallback: unzip and pull raw text out of word/document.xml
+    try:
+        import zipfile, re
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            with zf.open("word/document.xml") as f:
+                xml = f.read().decode("utf-8", errors="replace")
+        xml = re.sub(r"</w:p>", "\n", xml)
+        xml = re.sub(r"<[^>]+>", "", xml)
+        return xml.strip()
+    except Exception:
+        return ""
+
+
 def _build_system_prompt(ctx: dict) -> str:
     subjects = ctx.get("subjects") or []
     schedule = ctx.get("schedule") or {}
@@ -189,7 +216,6 @@ def school_chat():
             max_tokens  = MAX_TOKENS,
             system      = system_prompt,
             messages    = clean,
-            temperature = 0.6,
         )
         text = "".join(b.text for b in resp.content if hasattr(b, "text"))
         return jsonify({
@@ -227,6 +253,8 @@ def school_extract():
 
     if ext == "pdf":
         text, pages = _extract_pdf_text(raw)
+    elif ext in ("docx", "doc"):
+        text = _extract_docx_text(raw)
     else:
         # treat everything else as text (txt/md/csv/json/etc)
         try:
