@@ -25,6 +25,9 @@ Format: Markdown. Short paragraphs. Bullets. Use **bold** to highlight the one k
 """.strip()
 
 
+SUPPORTED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
+
+
 def _trim(text: str, limit: int) -> str:
     if not text:
         return ""
@@ -34,7 +37,41 @@ def _trim(text: str, limit: int) -> str:
     return text[:limit] + f"\n\n[...truncated, original was {len(text)} characters]"
 
 
-def _build_system(subjects: dict, schedule: str, now_iso: str, student_meta: dict) -> str:
+def _data_url_to_image_block(data_url, media_type):
+    """Parse data:image/...;base64,... → Anthropic image content block."""
+    if not data_url or not isinstance(data_url, str):
+        return None
+    try:
+        if data_url.startswith("data:"):
+            header, b64 = data_url.split(",", 1)
+            if not media_type:
+                meta = header[5:]  # strip "data:"
+                media_type = meta.split(";")[0]
+        else:
+            b64 = data_url
+        if not media_type:
+            media_type = "image/jpeg"
+        media_type = str(media_type).lower()
+        if media_type not in SUPPORTED_IMAGE_TYPES:
+            return None
+        # Hard cap on base64 size to avoid blowing the request body
+        if len(b64) > 7_000_000:
+            return None
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": b64,
+            },
+        }
+    except Exception:
+        return None
+
+
+def _build_system(subjects, schedule, now_iso, student_meta,
+                  schedule_is_image=False, image_subject_names=None):
+    image_subject_names = image_subject_names or []
     parts = [TUTOR_PERSONA, ""]
 
     parts.append("# Student profile")
@@ -55,12 +92,14 @@ def _build_system(subjects: dict, schedule: str, now_iso: str, student_meta: dic
         parts.append("```")
         parts.append(_trim(schedule, 8000))
         parts.append("```")
+    elif schedule_is_image:
+        parts.append("(uploaded as an image — see the attached schedule image in this message; read the times and subject names directly from it)")
     else:
         parts.append("(not uploaded yet — if the student says 'I just came out of class' and you don't know which one, ask them which subject before guessing)")
     parts.append("")
 
     parts.append("# Student's subjects, syllabuses, and textbook material")
-    if subjects:
+    if subjects or image_subject_names:
         for name, content in subjects.items():
             parts.append(f"## {name}")
             if content:
@@ -69,6 +108,12 @@ def _build_system(subjects: dict, schedule: str, now_iso: str, student_meta: dic
                 parts.append("```")
             else:
                 parts.append("(file not uploaded yet)")
+            parts.append("")
+        for name in image_subject_names:
+            if name in subjects:
+                continue
+            parts.append(f"## {name}")
+            parts.append("(uploaded as an image — see the attached syllabus image for this subject; read its contents directly)")
             parts.append("")
     else:
         parts.append("(no subject files uploaded yet)")
@@ -81,7 +126,9 @@ def school_chat():
     data = request.get_json(silent=True) or {}
     messages = data.get("messages", [])
     subjects = data.get("subjects") or {}
+    subjects_images = data.get("subjects_images") or {}
     schedule = data.get("schedule") or ""
+    schedule_image = data.get("schedule_image")
     now_iso = data.get("now_iso") or ""
     student_meta = data.get("student") or {}
 
@@ -107,11 +154,43 @@ def school_chat():
             if v:
                 subjects_clean[str(k)[:120]] = str(v)
 
+    # Build image attachments for the most recent user turn (Claude Vision).
+    image_attachments = []  # list of (label, image_block)
+    image_subject_names = []
+    if isinstance(schedule_image, dict) and schedule_image.get("dataUrl"):
+        block = _data_url_to_image_block(schedule_image.get("dataUrl"), schedule_image.get("mediaType"))
+        if block:
+            image_attachments.append(("[Attached: the student's weekly class schedule (image)]", block))
+    if isinstance(subjects_images, dict):
+        for name, img in subjects_images.items():
+            if not isinstance(img, dict):
+                continue
+            block = _data_url_to_image_block(img.get("dataUrl"), img.get("mediaType"))
+            if block:
+                label_name = str(name)[:120]
+                image_subject_names.append(label_name)
+                image_attachments.append((f"[Attached syllabus image for: {label_name}]", block))
+
+    if image_attachments:
+        # Attach to the most recent user message — model sees them as fresh context for the question.
+        for i in range(len(clean) - 1, -1, -1):
+            if clean[i]["role"] == "user":
+                user_text = clean[i]["content"]
+                blocks = []
+                for label, img_block in image_attachments:
+                    blocks.append({"type": "text", "text": label})
+                    blocks.append(img_block)
+                blocks.append({"type": "text", "text": user_text})
+                clean[i] = {"role": "user", "content": blocks}
+                break
+
     system_prompt = _build_system(
         subjects_clean,
         str(schedule),
         str(now_iso),
         student_meta if isinstance(student_meta, dict) else {},
+        schedule_is_image=bool(isinstance(schedule_image, dict) and schedule_image.get("dataUrl")),
+        image_subject_names=image_subject_names,
     )
 
     try:
