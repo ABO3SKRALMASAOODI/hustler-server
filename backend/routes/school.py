@@ -5,7 +5,7 @@ import anthropic
 school_bp = Blueprint('school', __name__)
 print("✅ school.py (Mentora tutor) is active")
 
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1500
 
 TUTOR_PERSONA = """
