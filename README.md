@@ -57,6 +57,7 @@ frontend repo.
 | `LLM_TIMEOUT_S` / `LLM_MAX_RETRIES` | worker | default 90 / 1 (pooled client) |
 | `AGENT_TURN_TIMEOUT_S` | worker | default 300 — hard cap per agent turn; on expiry the user gets a chat message, never a silent stall |
 | `PREVIEW_PRESET` | worker | default `ultrafast` (previews only; finals stay `medium`) |
+| `PIPELINE_VERSION` | api, worker | default `2`. Bumped when the index pipeline output changes; older cached indexes re-build automatically on next project open |
 | `MAX_UPLOAD_GB` | api, worker | default `2` (chat attachments: images 10 MB, audio 50 MB) |
 | `MAX_DURATION_S` | worker | default 3h |
 | `PUBLIC_APP_URL` | (reserved) | `https://valmera.io` |
@@ -92,9 +93,12 @@ frontend repo.
    ```bash
    psql "$DATABASE_URL" -f backend/migrations/001_video_editor.sql
    psql "$DATABASE_URL" -f backend/migrations/002_video_editor_fixes.sql
+   psql "$DATABASE_URL" -f backend/migrations/003_index_pipeline_version.sql
    ```
    002 adds the `image_ref` asset kind (chat image attachments) and the
    unique index that makes chat sends idempotent on `client_msg_id`.
+   003 versions the index cache (`indexes.pipeline_version`) so stale
+   pre-fix indexes self-heal on next project open.
 
 ## Local development
 

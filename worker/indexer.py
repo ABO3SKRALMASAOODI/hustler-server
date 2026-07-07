@@ -59,9 +59,12 @@ def run_index_job(worker_db, job):
 
         proxy_key = f"proxies/{project_id}/{sha}.mp4"
 
-        # Cache hit: this exact file was indexed before (any project).
+        # Cache hit: this exact file was indexed before (any project) BY THE
+        # CURRENT PIPELINE. An index built by an older pipeline version is
+        # stale (different segmentation/VAD rules) and gets rebuilt.
         cached = worker_db.run(dbx.get_index_by_sha, sha)
-        if cached:
+        if cached and cached.get("pipeline_version", 1) == \
+                config.PIPELINE_VERSION:
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                           workdir)
             _finish_setup(worker_db, project_id, session_id, info,
@@ -71,6 +74,11 @@ def run_index_job(worker_db, job):
                     "shots": len(cached["json"].get("shots", [])),
                     "words": len(cached["json"].get("words", [])),
                     "timings": timings}
+        if cached:
+            print(f"[index {job_id}] stale index (pipeline "
+                  f"v{cached.get('pipeline_version', 1)} < "
+                  f"v{config.PIPELINE_VERSION}) for sha {sha[:12]} — "
+                  "re-indexing", flush=True)
 
         # 3. Proxy (VFR -> CFR here) + 16k mono wav
         proxy_local = os.path.join(workdir, "proxy.mp4")

@@ -298,6 +298,120 @@ sents = group_sentences(gappy)
 check("0.75s pause splits a sentence",
       len(sents) == 2 and sents[0].text == "a")
 
+print("== Word-boundary protection ==")
+import audit                                                  # noqa: E402
+import agent_tools                                            # noqa: E402
+from agent_loop import _reply_violations                      # noqa: E402
+from agent_tools import (get_words, get_transcript,           # noqa: E402
+                         merge_caption_style, _parse_partial_style)
+
+
+class StubCtx:
+    def __init__(self, index, duration):
+        self.index = index
+        self.duration = duration
+
+    def clamp(self, t):
+        return round(min(max(float(t), 0.0), self.duration), 2)
+
+
+check("subtract middle", audit.subtract_spans([[0, 10]], [[2, 3]]) ==
+      [(0.0, 2.0), (3.0, 10.0)])
+check("subtract across spans",
+      audit.subtract_spans([[0, 10], [20, 30]], [[5, 25]]) ==
+      [(0.0, 5.0), (25.0, 30.0)])
+check("subtract everything", audit.subtract_spans([[2, 3]], [[0, 10]]) == [])
+
+WORD = {"w": "ridiculous", "t0": 28.33, "t1": 29.21}
+words_r3 = [{"w": "is", "t0": 27.9, "t1": 28.1}, WORD]
+sil_r3 = [[26.5, 27.8]]
+hits = audit.midword_boundaries([[0.0, 28.81]], words_r3, 60.0)
+check("28.81 lands inside 'ridiculous'",
+      len(hits) == 1 and hits[0]["word"] == "ridiculous")
+check("word-edge boundary is clean",
+      audit.midword_boundaries([[0.0, 28.33]], words_r3, 60.0) == [])
+check("video-end boundary excluded",
+      audit.midword_boundaries([[0.0, 60.0]], words_r3, 60.0) == [])
+warn = audit.boundary_warning_lines([[0.0, 28.81]], words_r3, sil_r3, 60.0)
+check("warning names the word and both edges",
+      "ridiculous" in warn[0] and "28.33 (word start)" in warn[0]
+      and "29.21 (word end)" in warn[0])
+check("warning offers the silence midpoint", "27.15" in warn[0])
+
+check("snap: keep end moves outward to word end",
+      audit.snap_keep_to_words([[0.0, 28.81]], words_r3, 60.0) ==
+      [[0.0, 29.21]])
+check("snap: keep start moves outward to word start",
+      audit.snap_keep_to_words([[28.81, 40.0]], words_r3, 60.0) ==
+      [[28.33, 40.0]])
+check("snap merges spans that now overlap",
+      audit.snap_keep_to_words([[0.0, 28.81], [28.9, 40.0]], words_r3, 60.0)
+      == [[0.0, 40.0]])
+
+idx_r3 = {"silences": [[0.0, 2.83]],
+          "sentences": [
+              {"id": "s1", "t0": 0.5, "t1": 1.5, "text": "hello world"},
+              {"id": "s5", "t0": 6.33, "t1": 8.13, "text": "hello world"}]}
+w = audit.regression_warnings([[2.83, 60.0]], [[0.0, 60.0]], idx_r3)
+check("re-included leading silence flagged",
+      w and "re-includes 0.00-2.83" in w[0] and "leading silence" in w[0])
+w = audit.regression_warnings([[0.0, 6.0]], [[0.0, 8.2]], idx_r3)
+check("re-included duplicate sentence flagged",
+      w and "s5 is a verbatim duplicate of s1" in w[0])
+check("no warning when nothing re-included",
+      audit.regression_warnings([[0.0, 60.0]], [[0.0, 30.0]], idx_r3) == [])
+
+print("== get_words ==")
+long_words = [{"w": f"w{i}", "t0": i, "t1": i + 0.4} for i in range(100)]
+sctx = StubCtx({"words": long_words,
+                "sentences": [{"id": "s1", "t0": 0, "t1": 3,
+                               "text": "w0 w1 w2"}]}, 120.0)
+r = get_words(sctx, 0, 120)
+check("over-cap range rejected with guidance",
+      r.startswith("REJECTED") and "60" in r)
+r = get_words(sctx, 10, 20)
+check("word timings returned", "10.00-10.40 w10" in r)
+check("get_transcript points at get_words",
+      "get_words" in get_transcript(sctx, 0, 5))
+
+print("== Reply honesty detectors ==")
+LIE = ("Cuts applied at the 23.91 silence midpoint and the final phrase is "
+       "preserved. Captions are now red (#FF0000). Preview rendered.")
+v = _reply_violations(LIE, wrote=False, previewed=False)
+check("turn-4 lie trips both detectors", len(v) == 2)
+v = _reply_violations("The EDL didn't change — captions were already "
+                      "word-timed.", wrote=True, previewed=True)
+check("denial after real writes trips the deny detector", len(v) == 1)
+check("honest 'nothing was changed' is clean",
+      _reply_violations("I couldn't find that phrase, so nothing was "
+                        "changed.", wrote=False, previewed=False) == [])
+check("honest 'no preview was rendered' is clean",
+      _reply_violations("No preview was rendered because the EDL is "
+                        "unchanged.", wrote=False, previewed=False) == [])
+check("honest summary after real writes is clean",
+      _reply_violations("Removed the dead air; preview rendered on the "
+                        "right.", wrote=True, previewed=True) == [])
+
+print("== set_caption_style merge ==")
+p = _parse_partial_style({"color": "#ff0000"})
+check("partial style keeps only provided keys", p == {"color": "#FF0000"})
+check("unknown style field rejected",
+      isinstance(_parse_partial_style({"font": "arial"}), str))
+merged = merge_caption_style({"mode": "from_transcript",
+                              "max_words_per_caption": 3,
+                              "style": {"position": "top"}},
+                             {"color": "#FF0000"})
+check("merge preserves max_words + position",
+      merged["max_words_per_caption"] == 3 and
+      merged["style"] == {"position": "top", "color": "#FF0000"})
+merged = merge_caption_style([{"text": "a", "start": 0, "end": 1,
+                               "style": {"size": "l"}},
+                              {"text": "b", "start": 2, "end": 3}],
+                             {"color": "#00FF00"})
+check("manual items each get the patch, overrides kept",
+      merged[0]["style"] == {"size": "l", "color": "#00FF00"} and
+      merged[1]["style"] == {"color": "#00FF00"})
+
 print("== No-op detection (issue 3) ==")
 a = validate_edl({"keep": [[0, 30], [40, 60]],
                   "captions": {"mode": "from_transcript"}}, 60).model_dump()

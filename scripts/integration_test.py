@@ -312,6 +312,108 @@ def main():
        f"(<=3 words, #FF0000, top); state shows new preview "
        f"{state['latest_preview']['asset_id']} without refresh")
 
+    # ── zero-write false claims: regeneration path ───────────────────
+    v_before = latest_edl()["version"]
+    out = send("ZWC TEST cut at the silence and make the font colour red")
+    assert out.get("queued")
+    turn = wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    hon = (turn["result"] or {}).get("honesty") or {}
+    assert hon.get("false_claims") == 1 and not hon.get("corrective_note"), hon
+    assert latest_edl()["version"] == v_before, "zero-write turn made a version"
+    reply = latest_assistant()["content"]
+    assert "nothing was changed" in reply.lower(), reply
+    assert "#FF0000" not in reply and "rendered" not in reply.lower(), reply
+    ok("zero-write false claims caught; one regeneration produced an "
+       "honest reply")
+
+    # ── zero-write false claims: corrective-note path ────────────────
+    out = send("STUBBORN TEST same again")
+    assert out.get("queued")
+    turn = wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    hon = (turn["result"] or {}).get("honesty") or {}
+    assert hon.get("false_claims") == 2 and hon.get("corrective_note"), hon
+    reply = latest_assistant()["content"]
+    assert reply.startswith("*(system: no changes were made this turn)*"), \
+        reply[:80]
+    assert latest_edl()["version"] == v_before
+    ok("stubborn false claims got the automatic corrective note "
+       "(counters: false_claims=2, corrective_note=true)")
+
+    # ── mid-word protection: warning, dirty audit, snap fixes it ─────
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT i.json FROM indexes i JOIN assets a
+                       ON a.sha256 = i.video_sha256
+                       WHERE a.project_id = %s AND a.kind='original'
+                       ORDER BY a.id DESC LIMIT 1""", (project_id,))
+        target_word = next(w for w in cur.fetchone()["json"]["words"]
+                           if w["t0"] >= 10.0)
+    v_before = latest_edl()["version"]
+    out = send("WORDCUT TEST keep only the start")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    assert abs(edl["json"]["keep"][0][1] - target_word["t1"]) < 0.03, \
+        f"snap did not land on word end: {edl['json']['keep']} vs {target_word}"
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT COUNT(*) AS n FROM chat_messages cm
+                       JOIN projects p ON p.chat_session_id = cm.session_id
+                       WHERE p.id = %s AND cm.role='activity'
+                         AND cm.content LIKE %s""",
+                    (project_id, "%lands inside the word%"))
+        assert cur.fetchone()["n"] >= 1, "mid-word WARNING never surfaced"
+        cur.execute("""SELECT result FROM video_jobs
+                       WHERE project_id = %s AND type='preview'
+                         AND (result->>'edl_version')::int = %s""",
+                    (project_id, v_before + 1))
+        dirty = cur.fetchone()["result"]
+        assert dirty.get("midword_audit"), \
+            f"render audit missed the mid-word boundary: {dirty}"
+        cur.execute("""SELECT result FROM video_jobs
+                       WHERE project_id = %s AND type='preview'
+                         AND (result->>'edl_version')::int = %s""",
+                    (project_id, v_before + 2))
+        clean = cur.fetchone()["result"]
+        assert clean.get("midword_audit") == [], clean.get("midword_audit")
+    ok(f"mid-word boundary warned ('{target_word['w']}'), render audit "
+       "flagged it, snap_to_words landed on the word end, clean audit after")
+
+    # ── cut_range / restore_range + regression warning ───────────────
+    v_before = latest_edl()["version"]
+    out = send("RANGE TEST local fix roundtrip")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    assert latest_edl()["version"] == v_before + 3, \
+        "expected cut + restore + keep to make exactly 3 versions"
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT COUNT(*) AS n FROM chat_messages cm
+                       JOIN projects p ON p.chat_session_id = cm.session_id
+                       WHERE p.id = %s AND cm.role='activity'
+                         AND cm.content LIKE '%%re-includes%%'
+                         AND cm.content LIKE '%%silence%%'""", (project_id,))
+        assert cur.fetchone()["n"] >= 1, "regression warning never surfaced"
+        cur.execute("""SELECT COUNT(*) AS n FROM chat_messages cm
+                       JOIN projects p ON p.chat_session_id = cm.session_id
+                       WHERE p.id = %s AND cm.role='activity'
+                         AND cm.content LIKE '%%restored 2.0%%'""",
+                    (project_id,))
+        assert cur.fetchone()["n"] >= 1, "restore_range diff missing"
+    ok("cut_range/restore_range versioned with diffs; keep_segments "
+       "regression warning flagged the re-included silence")
+
+    # ── set_caption_style merges without touching anything else ──────
+    keep_before = latest_edl()["json"]["keep"]
+    out = send("STYLE TEST make it golden")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    caps = edl["json"]["captions"]
+    assert (caps.get("style") or {}).get("color") == "#FFD700", caps
+    assert caps.get("max_words_per_caption") == 3, \
+        f"style merge reset max_words: {caps}"
+    assert caps.get("mode") == "from_transcript"
+    assert edl["json"]["keep"] == keep_before, "style change touched the cut"
+    ok("set_caption_style merged color only — chunking and keep untouched")
+
     # ── turn 4: music attachment -> add_music with duck (issue 8) ────
     music_path = os.path.join(ROOT, "test_music.wav")
     if not os.path.exists(music_path):
@@ -365,6 +467,33 @@ def main():
     assert pv["state"] == "done" and \
         pv["result"]["edl_version"] == edl["version"]
     ok(f"music in EDL v{edl['version']} (duck=true), preview rendered")
+
+    # ── stale index self-heals on project open (pipeline version) ────
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE indexes SET pipeline_version = 1
+                       WHERE video_sha256 = (SELECT sha256 FROM assets
+                           WHERE project_id = %s AND kind='original'
+                           ORDER BY id DESC LIMIT 1)""", (project_id,))
+    state = get_state()          # "project open" — must trigger the refresh
+    assert state["indexed"] is True, "old index should keep serving"
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT id FROM video_jobs WHERE project_id = %s
+                       AND type='index' ORDER BY id DESC LIMIT 1""",
+                    (project_id,))
+        reindex_job = cur.fetchone()["id"]
+    row = wait_job(reindex_job, TIMEOUT_INDEX, "reindex")
+    assert (row["result"] or {}).get("cached") is not True, \
+        "stale index served from cache instead of rebuilding"
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT pipeline_version, json FROM indexes
+                       WHERE video_sha256 = (SELECT sha256 FROM assets
+                           WHERE project_id = %s AND kind='original'
+                           ORDER BY id DESC LIMIT 1)""", (project_id,))
+        idx2 = cur.fetchone()
+    assert idx2["pipeline_version"] == 2, idx2["pipeline_version"]
+    assert all(s["t1"] - s["t0"] <= 6.05 for s in idx2["json"]["sentences"])
+    ok("stale index (pipeline v1) re-indexed on open; fresh index is v2 "
+       "with capped sentences")
 
     # ── final render — only through the explicit confirm endpoint ────
     edl = latest_edl()

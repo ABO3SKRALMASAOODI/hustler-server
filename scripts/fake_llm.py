@@ -177,9 +177,108 @@ def plan_music(messages):
     return None, "Done."
 
 
+VIOLATING_DRAFT = ("Cuts applied at the 23.91 silence midpoint and the "
+                   "final phrase is preserved. Captions are now red "
+                   "(#FF0000). Preview rendered.")
+HONEST_CORRECTION = ("You're right — I only reviewed the transcript and "
+                     "silences; nothing was changed yet. Tell me the exact "
+                     "phrase to cut and I'll place the cut on its word "
+                     "boundaries.")
+
+
+def plan_zero_write(messages, stubborn):
+    """Replays production turn 4: reads only, then a reply full of false
+    claims. The loop's TURN FACTS check must catch it. The stubborn variant
+    repeats the lie after the correction (exercises the corrective note)."""
+    if messages[-1].get("role") == "system" and \
+            "TURN FACTS" in (messages[-1].get("content") or ""):
+        return None, (VIOLATING_DRAFT if stubborn else HONEST_CORRECTION)
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_transcript", {}
+    if last == "get_transcript":
+        return "find_silences", {"min_seconds": 0.7}
+    return None, VIOLATING_DRAFT
+
+
+def plan_wordcut(messages):
+    """Cuts deliberately mid-word (warning + dirty audit), then fixes it
+    with snap_to_words (clean audit)."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_words", {"start": 0, "end": 60}
+    words = [(float(a), float(b), w) for a, b, w in
+             re.findall(r"(\d+\.\d+)-(\d+\.\d+) (\S+)",
+                        find_result(messages, "get_words"))]
+    target = next(((a, b) for a, b, _w in words if a >= 10.0), (10.0, 10.6))
+    mid = round((target[0] + target[1]) / 2, 2)
+    n_keep = count_results(messages, "keep_segments")
+    n_prev = count_results(messages, "render_preview")
+    if last == "get_words" or (last == "render_preview" and n_keep == 1):
+        if n_keep == 0:
+            return "keep_segments", {"segments": [[0.0, mid]]}
+        return "keep_segments", {"segments": [[0.0, mid]],
+                                 "snap_to_words": True}
+    if last == "keep_segments":
+        return "render_preview", {}
+    if last == "render_preview" and n_prev >= 2:
+        return None, "Cut placed cleanly on the word boundary."
+    return None, "Done."
+
+
+def plan_range(messages):
+    """cut_range/restore_range round-trip, then a keep_segments that
+    re-includes a previously-cut silence (regression warning)."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_edl", {}
+    if last == "get_edl":
+        return "cut_range", {"start": 2.0, "end": 3.0}
+    if last == "cut_range":
+        return "restore_range", {"start": 2.0, "end": 3.0}
+    if last == "restore_range":
+        return "find_silences", {"min_seconds": 1.0}
+    if last == "find_silences":
+        edl = parse_edl_json(find_result(messages, "get_edl")) or {}
+        keep = [list(x) for x in (edl.get("keep") or [[0.0, 10.0]])]
+        keep_end = max(e for _s, e in keep)
+        sil = [(float(a), float(b)) for a, b in
+               re.findall(r"(\d+\.\d+)-(\d+\.\d+) \(",
+                          find_result(messages, "find_silences"))]
+        target = next(((a, b) for a, b in sil if a > keep_end),
+                      (keep_end + 5.0, keep_end + 8.0))
+        m = (target[0] + target[1]) / 2
+        return "keep_segments", {"segments":
+                                 keep + [[round(m - 0.5, 2),
+                                          round(m + 0.5, 2)]]}
+    if last == "keep_segments":
+        return "render_preview", {}
+    return None, ("Round-tripped a local cut and restored it, then extended "
+                  "the keep list — check the warnings in the log.")
+
+
+def plan_style_only(messages):
+    last = last_executed_tool(messages)
+    if last is None:
+        return "set_caption_style", {"style": {"color": "#FFD700"}}
+    if last == "set_caption_style":
+        return "render_preview", {}
+    return None, "Captions are now golden yellow — nothing else touched."
+
+
 def plan_next(messages):
     """Returns (tool_name, args) or (None, final_text)."""
     text = last_user_text(messages).lower()
+    if "stubborn test" in text:
+        return plan_zero_write(messages, stubborn=True)
+    if "zwc test" in text:
+        return plan_zero_write(messages, stubborn=False)
+    if "wordcut test" in text:
+        return plan_wordcut(messages)
+    if "range test" in text:
+        return plan_range(messages)
+    if "style test" in text:
+        return plan_style_only(messages)
     if "noop test" in text:
         return plan_noop(messages)
     if "3 words" in text or "red" in text:

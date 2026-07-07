@@ -23,6 +23,11 @@ VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-plus")
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
+# Bump whenever the index pipeline's OUTPUT changes (segmentation rules,
+# VAD settings, schema...): cached indexes from older pipeline versions are
+# re-built instead of served. Keep in sync with backend/routes/video.py.
+PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "2"))
+
 # Transcription
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")   # cpu | cuda

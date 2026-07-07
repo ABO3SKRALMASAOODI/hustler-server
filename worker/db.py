@@ -289,10 +289,14 @@ def get_index_by_sha(conn, sha256):
 def upsert_index(conn, project_id, sha256, index_json):
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO indexes (project_id, video_sha256, json)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (video_sha256) DO UPDATE SET json = EXCLUDED.json
-        """, (project_id, sha256, Json(index_json)))
+            INSERT INTO indexes (project_id, video_sha256, json,
+                                 pipeline_version)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (video_sha256)
+            DO UPDATE SET json = EXCLUDED.json,
+                          pipeline_version = EXCLUDED.pipeline_version
+        """, (project_id, sha256, Json(index_json),
+              config.PIPELINE_VERSION))
 
 
 def latest_edl(conn, project_id):

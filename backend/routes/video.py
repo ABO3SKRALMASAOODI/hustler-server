@@ -25,6 +25,10 @@ video_bp = Blueprint("video", __name__)
 MAX_CONCURRENT_JOBS_PER_USER = int(os.getenv("MAX_CONCURRENT_JOBS_PER_USER", "3"))
 MESSAGES_PER_HOUR = int(os.getenv("MESSAGES_PER_HOUR", "20"))
 
+# Keep in sync with worker/config.py — indexes built by an older pipeline
+# version are re-indexed automatically when the project is opened.
+PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "2"))
+
 VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
                "music", "image_ref")
 
@@ -74,8 +78,8 @@ def _active_original(cur, project_id):
 def _index_row(cur, sha256):
     if not sha256:
         return None
-    cur.execute("SELECT id, created_at FROM indexes WHERE video_sha256 = %s",
-                (sha256,))
+    cur.execute("""SELECT id, created_at, pipeline_version FROM indexes
+                   WHERE video_sha256 = %s""", (sha256,))
     return cur.fetchone()
 
 
@@ -386,7 +390,8 @@ def project_state(user_id, project_id):
             return jsonify({"error": "Project not found"}), 404
 
         original = _active_original(cur, project_id)
-        indexed = bool(original and _index_row(cur, original["sha256"]))
+        idx_row = _index_row(cur, original["sha256"]) if original else None
+        indexed = bool(idx_row)
         edl = _latest_edl(cur, project_id)
 
         cur.execute("""
@@ -399,6 +404,19 @@ def project_state(user_id, project_id):
             "id": r["id"], "state": r["state"], "progress": r["progress"],
             "error": r["error"], "updated_at": r["updated_at"].isoformat(),
         } for r in cur.fetchall()}
+
+        # Self-heal: an index built by an older pipeline version is stale —
+        # re-index in the background (the old index keeps serving meanwhile,
+        # so the workspace stays usable).
+        if idx_row and idx_row.get("pipeline_version", 1) != PIPELINE_VERSION:
+            ij = jobs.get("index")
+            if not ij or ij["state"] not in ("queued", "running"):
+                current_app.logger.info(
+                    "project %s: index pipeline v%s != v%s — refreshing",
+                    project_id, idx_row.get("pipeline_version"),
+                    PIPELINE_VERSION)
+                _enqueue(cur, project_id, user_id, "index",
+                         {"asset_id": original["id"]})
 
         cur.execute("""SELECT id, role, content, meta, created_at
                        FROM chat_messages

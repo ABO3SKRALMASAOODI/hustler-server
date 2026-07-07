@@ -4,6 +4,7 @@ the frontend shows live progress over the existing polling channel."""
 
 import json
 import os
+import re
 import shutil
 import time
 
@@ -122,6 +123,11 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
                   f"audio={'yes' if v['has_audio'] else 'no'}.")
     edl = ctx.latest_edl()
     edl_line = f"v{edl['version']} — {describe_edl(edl['json'], v['duration'])}"
+    keep = edl["json"].get("keep") or []
+    keep_line = json.dumps(keep[:40]) + \
+        (f" ...(+{len(keep) - 40} more spans)" if len(keep) > 40 else "")
+    caps = edl["json"].get("captions")
+    captions_line = json.dumps(caps) if caps else "none"
     history = worker_db.run(dbx.edl_history, ctx.project_id)
     history_lines = [f"v{h['version']} ({h['created_by']})" for h in history]
     music = worker_db.run(agent_tools._music_assets, ctx.project_id)
@@ -130,7 +136,9 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
         for m in music]
 
     state = project_state_block(video_line, _index_summary(index), edl_line,
-                                history_lines, music_lines)
+                                history_lines, music_lines,
+                                keep_line=keep_line,
+                                captions_line=captions_line)
 
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "system", "content": state}]
@@ -148,14 +156,23 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
 
 
 def _activity(worker_db, session_id, name, args, result):
-    arg_str = json.dumps(args or {}, ensure_ascii=False)
-    if len(arg_str) > 160:
-        arg_str = arg_str[:160] + "…"
     res_str = (result or "").replace("\n", " ")
-    if len(res_str) > 240:
-        res_str = res_str[:240] + "…"
+    # Long enough that a diff line PLUS its appended WARNING lines survive —
+    # truncating warnings out of the activity feed would hide them from the
+    # user entirely.
+    if len(res_str) > 600:
+        res_str = res_str[:600] + "…"
+    # Auto-triggered previews read as "auto preview" in the UI; the raw
+    # trigger tag stays in meta for the logs.
+    if name == "render_preview" and (args or {}).get("auto"):
+        label = "auto preview"
+    else:
+        arg_str = json.dumps(args or {}, ensure_ascii=False)
+        if len(arg_str) > 160:
+            arg_str = arg_str[:160] + "…"
+        label = f"{name}{arg_str if arg_str != '{}' else '()'}"
     worker_db.run(dbx.add_message, session_id, "activity",
-                  f"{name}{arg_str if arg_str != '{}' else '()'} → {res_str}",
+                  f"{label} → {res_str}",
                   {"tool": name, "args": args})
 
 
@@ -210,13 +227,11 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
-              timings):
-    """Post the assistant reply, auto-rendering first if the model changed
-    the EDL this turn but never successfully previewed it. The reply may
-    never claim a render that did not happen — the attached preview meta is
-    the ground truth the UI shows."""
+def _auto_render_if_needed(ctx, worker_db, session_id, timings):
+    """If the EDL changed this turn without a successful render_preview,
+    render one now (logged + counted). Returns (latest_edl_row, fail_note)."""
     latest = ctx.latest_edl()
+    fail_note = None
     if ctx.versions_written and latest["version"] not in ctx.rendered_versions:
         ctx.autorendered = True
         print(f"[honesty] job {ctx.job['id']}: model ended the turn without "
@@ -228,14 +243,137 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
         _activity(worker_db, session_id, "render_preview",
                   {"auto": "model skipped it"}, result)
         if "FAILED" in result:
-            final_text += ("\n\n(Heads up: the preview render failed — "
-                           f"{result[:200]})")
+            fail_note = ("\n\n(Heads up: the preview render failed — "
+                         f"{result[:200]})")
+    return latest, fail_note
+
+
+# ── TURN FACTS: the reply must match what the tools actually did ──────
+
+EDIT_CLAIM = re.compile(
+    r"(?i)("
+    r"\b(?:i(?:'ve| have)?|we(?:'ve| have)?|now|just) "
+    r"(?:cut|trimmed|removed|applied|added|set|updated|changed|adjusted|"
+    r"restored|made|moved)\b"
+    r"|\b(?:cuts?|changes?|edits?|adjustments?)(?: (?:were|have been|are|got))? "
+    r"(?:applied|made|done)\b"
+    r"|\bapplied (?:the |a )?(?:cut|change|edit|style)"
+    r"|\bcaptions? (?:are|is|were|have been)[^.\n]{0,60}"
+    r"(?:red|blue|green|yellow|white|black|orange|purple|pink|"
+    r"#[0-9A-Fa-f]{6}|top|bottom|bigger|smaller)"
+    r"|\bis now (?:red|blue|green|yellow|white|black|orange|purple|pink|"
+    r"#[0-9A-Fa-f]{6}|at the top|at the bottom|bigger|smaller)\b"
+    r"|\b(?:font|colou?r|style) (?:is|was|has been) "
+    r"(?:changed|set|updated|applied)\b"
+    r")")
+RENDER_CLAIM = re.compile(
+    r"(?i)(\b(?<!no )preview (?:is |was |has been )?"
+    r"(?:rendered|ready|updated|attached|refreshed|playing)\b"
+    r"|\brendered (?:a |the )?(?:new )?preview\b|\bre-?rendered\b)")
+DENY_CLAIM = re.compile(
+    r"(?i)(\bedl (?:did not|didn't) change\b"
+    r"|\bnothing (?:was |has been )?changed\b"
+    r"|\bno changes? (?:were|was|have been) made\b"
+    r"|\bdidn'?t (?:change|modify|touch) (?:the )?(?:edl|edit|video|anything)\b"
+    r"|\b(?:edit|edl) (?:is|remains) unchanged\b)")
+
+
+def _reply_violations(draft, wrote, previewed):
+    v = []
+    # An explicit denial ("nothing was changed") dominates — its own words
+    # ("changes were made") must not read as a change claim.
+    if not wrote and EDIT_CLAIM.search(draft) and not DENY_CLAIM.search(draft):
+        v.append("claims edits, but no write tool succeeded this turn")
+    if not previewed and RENDER_CLAIM.search(draft):
+        v.append("claims a render, but no preview was rendered this turn")
+    if wrote and DENY_CLAIM.search(draft):
+        v.append("denies changes, but the EDL DID change this turn")
+    return v
+
+
+def _turn_facts(ctx, start_version):
+    latest = ctx.latest_edl()
+    if ctx.versions_written:
+        edl_line = (f"EDL: v{start_version} -> v{latest['version']} "
+                    f"({len(ctx.versions_written)} new version(s))")
+    else:
+        edl_line = f"EDL: unchanged (v{latest['version']})"
+    writes = ", ".join(ctx.write_calls) if ctx.write_calls else "none"
+    if ctx.last_preview is not None:
+        pv = (f"rendered v{ctx.last_preview.get('edl_version')} "
+              f"({ctx.last_preview.get('duration_s')}s)")
+        if ctx.last_selfcheck:
+            pv += f"; self-check: {ctx.last_selfcheck[:120]}"
+    else:
+        pv = "none"
+    return ("TURN FACTS (system-verified):\n"
+            f"- {edl_line}\n"
+            f"- Successful write tools this turn: {writes}\n"
+            f"- Preview: {pv}\n"
+            "Rules: your reply may not claim any change, render, or setting "
+            "that is not present in these facts. If no writes occurred, say "
+            "plainly that nothing was changed and why, or what you need "
+            "from the user.")
+
+
+def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
+                     honesty):
+    """Deterministic check of the drafted reply against the turn facts.
+    On violation: one forced regeneration with an explicit correction; if
+    the redraft still violates, post it behind an automatic system note."""
+    wrote = bool(ctx.versions_written)
+    previewed = ctx.last_preview is not None
+    viol = _reply_violations(draft, wrote, previewed)
+    if not viol:
+        return draft
+    honesty["false_claims"] += 1
+    facts = _turn_facts(ctx, start_version)
+    print(f"[honesty] job {ctx.job['id']}: reply violates turn facts "
+          f"({'; '.join(viol)}) — forcing one regeneration", flush=True)
+    msgs = messages + [
+        {"role": "assistant", "content": draft},
+        {"role": "system",
+         "content": facts + "\n\nYour draft above violates these facts: it "
+         + "; ".join(viol) + ". Rewrite your reply to match the facts "
+         "exactly — do not claim anything the facts do not show."},
+    ]
+    redraft = ""
+    try:
+        resp = client.chat.completions.create(
+            model=config.AGENT_MODEL, messages=msgs, tools=tools,
+            tool_choice="none", temperature=config.AGENT_TEMPERATURE,
+            max_tokens=800)
+        redraft = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[honesty] regeneration failed: {e}", flush=True)
+    if redraft and not _reply_violations(redraft, wrote, previewed):
+        return redraft
+    honesty["false_claims"] += 1
+    honesty["corrective_note"] = True
+    print(f"[honesty] job {ctx.job['id']}: regeneration still violates — "
+          "posting a corrective note", flush=True)
+    if wrote:
+        prefix = ("*(system: this turn DID modify the edit — see the "
+                  "editing steps above)*\n\n")
+    else:
+        prefix = "*(system: no changes were made this turn)*\n\n"
+    return prefix + (redraft or draft)
+
+
+def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
+              timings, honesty=None):
+    """Post a system-authored assistant reply (timeout/step-limit paths),
+    auto-rendering first when the EDL changed without a preview."""
+    latest, fail_note = _auto_render_if_needed(ctx, worker_db, session_id,
+                                               timings)
+    if fail_note:
+        final_text += fail_note
     worker_db.run(dbx.add_message, session_id, "assistant", final_text,
                   {"edl_version": latest["version"],
                    "preview": ctx.last_preview})
     return {"status": status, "edl_version": latest["version"],
             "steps": total_steps, "auto_render": ctx.autorendered,
-            "timings": timings}
+            "honesty": honesty, "timings": timings}
 
 
 def _run_loop(ctx, worker_db, job, session_id, user_message,
@@ -246,6 +384,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     total_steps = 0
     t_start = time.monotonic()
     timings = {"llm_s": 0.0, "llm_calls": 0, "tools": {}}
+    honesty = {"false_claims": 0, "corrective_note": False}
+    start_version = ctx.latest_edl()["version"]
 
     for iteration in range(config.AGENT_MAX_ITERATIONS):
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
@@ -257,7 +397,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "That took longer than I allow myself per request, so "
                     "I'm stopping here — the edits I completed are saved "
                     "and previewed below. Send a follow-up to continue.",
-                    "timeout", total_steps, timings)
+                    "timeout", total_steps, timings, honesty)
             worker_db.run(dbx.add_message, session_id, "assistant",
                           "That request timed out before I could finish "
                           "anything — nothing was changed. Please try again, "
@@ -281,10 +421,25 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         msg = resp.choices[0].message
 
         if not msg.tool_calls:
-            final = (msg.content or "").strip() or \
-                "Done — check the preview on the right."
-            return _finalize(ctx, worker_db, session_id, final, "replied",
-                             total_steps, timings)
+            # Auto-render first so the turn facts include the real preview.
+            latest, fail_note = _auto_render_if_needed(ctx, worker_db,
+                                                       session_id, timings)
+            draft = (msg.content or "").strip()
+            if not draft:
+                draft = ("Done — check the preview on the right."
+                         if ctx.versions_written or ctx.last_preview else
+                         "I only reviewed the video — nothing was changed.")
+            final = _enforce_honesty(ctx, client, messages, tools, draft,
+                                     start_version, honesty)
+            if fail_note:
+                final += fail_note
+            honesty["auto_render"] = ctx.autorendered
+            worker_db.run(dbx.add_message, session_id, "assistant", final,
+                          {"edl_version": latest["version"],
+                           "preview": ctx.last_preview})
+            return {"status": "replied", "edl_version": latest["version"],
+                    "steps": total_steps, "auto_render": ctx.autorendered,
+                    "honesty": honesty, "timings": timings}
 
         messages.append({
             "role": "assistant",
@@ -321,6 +476,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
                 tt["n"] += 1
                 tt["s"] = round(tt["s"] + time.monotonic() - t0, 2)
+                if name in agent_tools.WRITE_TOOLS and \
+                        isinstance(result, str) and result.startswith("EDL v"):
+                    ctx.write_calls.append(name)
             total_steps += 1
             _activity(worker_db, session_id, name, args, result)
             messages.append({"role": "tool", "tool_call_id": tc.id,
@@ -330,4 +488,4 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         ctx, worker_db, session_id,
         "I hit my step limit for one request. The edits so far are saved — "
         "tell me to continue, or narrow the request.",
-        "step_limit", total_steps, timings)
+        "step_limit", total_steps, timings, honesty)

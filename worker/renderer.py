@@ -13,6 +13,7 @@ import os
 import shutil
 import time
 
+import audit
 import captions as caplib
 import config
 import db as dbx
@@ -261,8 +262,18 @@ def run_render_job(worker_db, job):
             fps=out_info["fps"],
             meta={"variant": variant, "edl_version": version,
                   "sheet_key": sheet_key, "src_sha256": original["sha256"]})
+        # Deterministic mid-word audit: keep boundaries that clip a word,
+        # computed straight from the index — visible in logs and to the
+        # agent even if it ignored the write-time warnings.
+        mw = audit.midword_audit(edl_row["json"]["keep"],
+                                 index.get("words", []),
+                                 index["video"]["duration"])
+        if mw:
+            print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
+                  flush=True)
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
                 "duration_s": out_dur, "edl_version": version,
-                "variant": variant, "timings": timings}
+                "variant": variant, "timings": timings,
+                "midword_audit": mw}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

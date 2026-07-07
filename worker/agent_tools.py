@@ -7,6 +7,7 @@ import json
 import os
 import time
 
+import audit
 import config
 import db as dbx
 import llm
@@ -36,9 +37,11 @@ class ToolContext:
         self.workdir = workdir
         self._proxy_local = None
         self.last_preview = None      # set by render_preview
+        self.last_selfcheck = None    # vision one-liner from the last preview
         self.versions_written = []    # EDL versions created this turn
         self.rendered_versions = set()  # versions with a successful preview
         self.autorendered = False     # loop set: model skipped render_preview
+        self.write_calls = []         # successful write tool names this turn
 
     def clamp(self, t):
         try:
@@ -132,6 +135,33 @@ def get_transcript(ctx, start=0, end=None):
                 "This video has no transcript (no speech or no audio track).")
     out = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}] {s['text']}"
            for s in rows]
+    return (_cap("\n".join(out))
+            + "\n(for word-exact timing, call get_words(start, end))")
+
+
+GET_WORDS_MAX_RANGE_S = 60.0
+
+
+def get_words(ctx, start=0, end=None):
+    """Word-level timestamps straight from the index — the ONLY correct
+    source for cut points inside a sentence."""
+    start = ctx.clamp(start or 0)
+    end = ctx.clamp(end if end is not None else ctx.duration)
+    if end <= start:
+        return "REJECTED: end must be greater than start."
+    if end - start > GET_WORDS_MAX_RANGE_S + 0.01:
+        return (f"REJECTED: range {end - start:.0f}s is too wide — call "
+                f"get_words on ranges of {GET_WORDS_MAX_RANGE_S:.0f}s or "
+                f"less (e.g. get_words({start:.0f}, "
+                f"{start + GET_WORDS_MAX_RANGE_S:.0f}), then the next "
+                "window). Use get_transcript to find the right region first.")
+    words = ctx.index.get("words", [])
+    rows = [w for w in words if w["t1"] > start and w["t0"] < end]
+    if not rows:
+        return (f"No transcribed words between {start}s and {end}s."
+                if words else
+                "This video has no transcript (no speech or no audio track).")
+    out = [f"{_fmt_t(w['t0'])}-{_fmt_t(w['t1'])} {w['w']}" for w in rows]
     return _cap("\n".join(out))
 
 
@@ -267,7 +297,49 @@ def look_at(ctx, start, end, question):
 #  WRITE tools                                                         #
 # ------------------------------------------------------------------ #
 
-def keep_segments(ctx, segments):
+def _merge_touching(spans):
+    spans = sorted([list(x) for x in spans], key=lambda x: x[0])
+    merged = [spans[0]]
+    for s, e in spans[1:]:
+        if s <= merged[-1][1] + 0.01:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return merged
+
+
+def _write_keep(ctx, new_keep, desc, snap_to_words=False,
+                check_regression=False):
+    """Shared tail for every keep-modifying write: optional outward word
+    snapping, the version write, then mid-word boundary warnings (and, for
+    full replacements, mechanical regression warnings) appended to a still
+    SUCCESSFUL result."""
+    words = ctx.index.get("words", [])
+    silences = ctx.index.get("silences", [])
+    if snap_to_words and words:
+        new_keep = audit.snap_keep_to_words(new_keep, words, ctx.duration)
+    new_keep = [x for x in new_keep if x[1] - x[0] >= 0.05]
+    if not new_keep:
+        return "REJECTED: nothing would survive that keep list."
+    prev = ctx.latest_edl()
+    prev_keep = prev["json"]["keep"]
+    edl = dict(prev["json"])
+    edl["keep"] = new_keep
+    result = ctx.write_edl(edl, desc)
+    if not result.startswith("EDL v"):
+        return result
+    warn = audit.boundary_warning_lines(new_keep, words, silences,
+                                        ctx.duration)
+    if snap_to_words:
+        warn = []   # snapping guarantees word-clean boundaries
+    if check_regression:
+        warn += audit.regression_warnings(prev_keep, new_keep, ctx.index)
+    if warn:
+        result += "\n" + "\n".join(warn)
+    return result
+
+
+def keep_segments(ctx, segments, snap_to_words=False):
     if not isinstance(segments, list) or not segments:
         return "REJECTED: segments must be a non-empty array of [start, end]."
     cleaned = []
@@ -279,20 +351,42 @@ def keep_segments(ctx, segments):
         except ValueError as err:
             return f"REJECTED: segments[{i}]: {err}"
         cleaned.append([s, e])
-    cleaned.sort(key=lambda x: x[0])
-    # Merge touching/overlapping spans instead of bouncing them back.
-    merged = [cleaned[0]]
-    for s, e in cleaned[1:]:
-        if s <= merged[-1][1] + 0.01:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-    edl = dict(ctx.latest_edl()["json"])
-    edl["keep"] = merged
+    merged = _merge_touching(cleaned)
     kept = output_duration(merged)
-    return ctx.write_edl(
-        edl, f"keep set to {len(merged)} segment(s), {kept}s of "
-             f"{ctx.duration}s survives")
+    return _write_keep(
+        ctx, merged,
+        f"keep set to {len(merged)} segment(s), {kept}s of "
+        f"{ctx.duration}s survives",
+        snap_to_words=bool(snap_to_words), check_regression=True)
+
+
+def cut_range(ctx, start, end, snap_to_words=False):
+    try:
+        s, e = ctx.clamp(start), ctx.clamp(end)
+    except ValueError as err:
+        return f"REJECTED: {err}"
+    if e - s < 0.05:
+        return "REJECTED: the range to cut must be at least 0.05s."
+    cur = ctx.latest_edl()["json"]["keep"]
+    new = [list(x) for x in audit.subtract_spans(cur, [[s, e]])]
+    if not new:
+        return ("REJECTED: cutting {:.2f}-{:.2f} would remove everything "
+                "that's currently kept.".format(s, e))
+    return _write_keep(ctx, new, f"cut {s}-{e}s ({e - s:.2f}s removed)",
+                       snap_to_words=bool(snap_to_words))
+
+
+def restore_range(ctx, start, end, snap_to_words=False):
+    try:
+        s, e = ctx.clamp(start), ctx.clamp(end)
+    except ValueError as err:
+        return f"REJECTED: {err}"
+    if e - s < 0.05:
+        return "REJECTED: the range to restore must be at least 0.05s."
+    cur = ctx.latest_edl()["json"]["keep"]
+    new = _merge_touching([list(x) for x in cur] + [[s, e]])
+    return _write_keep(ctx, new, f"restored {s}-{e}s to the edit",
+                       snap_to_words=bool(snap_to_words))
 
 
 def _parse_style(style):
@@ -357,6 +451,59 @@ def add_captions(ctx, mode=None, items=None, style=None,
         return ctx.write_edl(edl, "captions removed")
     return ("REJECTED: mode must be 'from_transcript' or 'off', or pass "
             "items=[{text,start,end}].")
+
+
+def _parse_partial_style(style):
+    """Validate a PARTIAL style patch, returning only the provided keys
+    (normalized), or an 'ERR: ...' string. Unlike _parse_style this never
+    fills defaults, so merging cannot reset fields the user didn't mention."""
+    if not isinstance(style, dict) or not style:
+        return ('ERR: style must be a non-empty object with any of '
+                '{"color":"#RRGGBB","size":"s|m|l","position":"bottom|top"}')
+    unknown = sorted(set(style) - {"color", "size", "position"})
+    if unknown:
+        return (f"ERR: unknown style field(s) {unknown} — only color, size "
+                "and position exist (no fonts, outlines or animations).")
+    try:
+        validated = CaptionStyle.model_validate(style).model_dump()
+    except Exception as e:
+        return (f"ERR: bad style: {str(e)[:160]}. Use "
+                '{"color":"#RRGGBB","size":"s|m|l","position":"bottom|top"}.')
+    return {k: validated[k] for k in style}
+
+
+def merge_caption_style(captions, partial):
+    """Merge a partial style into an existing captions value (from_transcript
+    dict or manual item list). Returns the new captions value."""
+    if isinstance(captions, dict):
+        new = dict(captions)
+        st = dict(captions.get("style") or {})
+        st.update(partial)
+        new["style"] = st
+        return new
+    out = []
+    for it in captions:
+        nit = dict(it)
+        st = dict(it.get("style") or {})
+        st.update(partial)
+        nit["style"] = st
+        out.append(nit)
+    return out
+
+
+def set_caption_style(ctx, style):
+    partial = _parse_partial_style(style)
+    if isinstance(partial, str):
+        return "REJECTED: " + partial[5:]
+    edl = dict(ctx.latest_edl()["json"])
+    caps = edl.get("captions")
+    if not caps:
+        return ("REJECTED: no captions exist yet — call "
+                "add_captions(mode='from_transcript') first (you can pass "
+                "a style there directly).")
+    edl["captions"] = merge_caption_style(caps, partial)
+    return ctx.write_edl(
+        edl, f"caption style updated: {json.dumps(partial)}")
 
 
 def add_music(ctx, storage_key, start, end, gain_db=-18.0, duck=True):
@@ -446,7 +593,13 @@ def render_preview(ctx):
                     f"and playing in the user's workspace.")
             check = _self_check(ctx, result)
             if check:
+                ctx.last_selfcheck = check
                 note += f" Visual self-check: {check}"
+            mw = result.get("midword_audit") or []
+            if mw:
+                note += (" MID-WORD AUDIT: " + "; ".join(mw[:5])
+                         + " — snap these boundaries to word edges "
+                           "(get_words) and re-render.")
             return note
         if j["state"] == "failed":
             return (f"Preview render FAILED: {j.get('error')}. "
@@ -495,9 +648,16 @@ TOOLS = {
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
                        "summary. Call this first.", {}),
     "get_transcript": (get_transcript, "Sentence-level transcript with "
-                       "timestamps for a time range (source seconds).",
+                       "timestamps for a time range (source seconds). For "
+                       "word-exact timing use get_words.",
                        {"start": {"type": "number"},
                         "end": {"type": "number"}}),
+    "get_words": (get_words, "Word-level timestamps [{t0-t1 word}] for a "
+                  "range of up to 60s (source seconds). THE source of truth "
+                  "for cut points inside a sentence — never estimate word "
+                  "timing from sentence ranges.",
+                  {"start": {"type": "number"},
+                   "end": {"type": "number"}}),
     "search_transcript": (search_transcript, "Find where something is said "
                           "(substring + fuzzy over sentences).",
                           {"query": {"type": "string"}}),
@@ -517,10 +677,26 @@ TOOLS = {
                 "answer.", {"start": {"type": "number"},
                             "end": {"type": "number"},
                             "question": {"type": "string"}}),
-    "keep_segments": (keep_segments, "Replace the keep list: the parts of "
-                      "the SOURCE video that survive, [[start,end],...] in "
-                      "seconds, sorted. Everything else is cut.",
-                      {"segments": _seg_schema()}),
+    "keep_segments": (keep_segments, "REPLACE the whole keep list: the parts "
+                      "of the SOURCE video that survive, [[start,end],...] "
+                      "in seconds. Everything else is cut. Use only for "
+                      "wholesale restructuring, always after get_edl — for "
+                      "local fixes prefer cut_range/restore_range. "
+                      "snap_to_words:true moves boundaries outward to word "
+                      "edges so no word is clipped.",
+                      {"segments": _seg_schema(),
+                       "snap_to_words": {"type": "boolean"}}),
+    "cut_range": (cut_range, "Remove ONE source-time range from the current "
+                  "keep set (a local edit — the rest of the edit is "
+                  "untouched). Creates a new EDL version. snap_to_words:true "
+                  "keeps neighbouring words whole.",
+                  {"start": {"type": "number"}, "end": {"type": "number"},
+                   "snap_to_words": {"type": "boolean"}}),
+    "restore_range": (restore_range, "Add a previously-cut source-time range "
+                      "back into the keep set (undo one cut without touching "
+                      "the rest). Creates a new EDL version.",
+                      {"start": {"type": "number"}, "end": {"type": "number"},
+                       "snap_to_words": {"type": "boolean"}}),
     "add_captions": (add_captions, "Burned captions. mode='from_transcript' "
                      "(word-timed from the real transcript, recommended) or "
                      "mode='off', or items=[{text,start,end,style?}] (source "
@@ -557,6 +733,20 @@ TOOLS = {
                    "end": {"type": "number"},
                    "gain_db": {"type": "number"},
                    "duck": {"type": "boolean"}}),
+    "set_caption_style": (set_caption_style, "Change how existing captions "
+                          "LOOK without touching their text or timing. Pass "
+                          "only the fields to change: e.g. 'make it red' -> "
+                          '{"style":{"color":"#FF0000"}}. Works for '
+                          "from_transcript and manual captions; errors "
+                          "helpfully if no captions exist yet.",
+                          {"style": {"type": "object",
+                                     "properties": {
+                                         "color": {"type": "string"},
+                                         "size": {"type": "string",
+                                                  "enum": ["s", "m", "l"]},
+                                         "position": {"type": "string",
+                                                      "enum": ["bottom",
+                                                               "top"]}}}}),
     "set_volume": (set_volume, "Volume automation gain_db on a SOURCE-time "
                    "span of the original audio.",
                    {"start": {"type": "number"}, "end": {"type": "number"},
@@ -575,10 +765,18 @@ REQUIRED_ARGS = {
     "search_transcript": ["query"],
     "look_at": ["start", "end", "question"],
     "keep_segments": ["segments"],
+    "cut_range": ["start", "end"],
+    "restore_range": ["start", "end"],
+    "set_caption_style": ["style"],
     "add_music": ["storage_key", "start", "end"],
     "set_volume": ["start", "end", "gain_db"],
     "ask_user": ["question"],
 }
+
+# The loop uses this to build TURN FACTS: a write "succeeded" when its result
+# is a version diff line (write_edl's "EDL vX -> vY: ..." format).
+WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range", "add_captions",
+               "set_caption_style", "add_music", "set_volume"}
 
 
 def openai_tools():
