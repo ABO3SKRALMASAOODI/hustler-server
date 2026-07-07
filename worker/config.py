@@ -20,12 +20,16 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 AGENT_MODEL = os.getenv("AGENT_MODEL", "qwen-plus")
 # Empty string disables all vision features gracefully.
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-plus")
+LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
 # Transcription
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")   # cpu | cuda
 WHISPER_COMPUTE = os.getenv(
     "WHISPER_COMPUTE", "int8" if WHISPER_DEVICE == "cpu" else "float16")
+WHISPER_BEAM_SIZE = int(os.getenv(
+    "WHISPER_BEAM_SIZE", "1" if WHISPER_DEVICE == "cpu" else "5"))
 
 # Quotas / limits
 MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "2"))
@@ -43,8 +47,14 @@ MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resen
 
 AGENT_MAX_ITERATIONS = 30
 AGENT_TEMPERATURE = 0.2
+# Hard wall-clock cap for one agent turn. On expiry the loop stops, posts an
+# assistant error message, and the job terminates visibly — never a silent
+# "Editing…" forever.
+AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "300"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
+
+PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6

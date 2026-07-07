@@ -71,6 +71,9 @@ class Db:
 # ------------------------------------------------------------------ #
 
 def claim_job(conn, types, max_attempts):
+    # Previews (always a user or agent actively waiting) jump the queue over
+    # finals, and both jump over indexing — a turn's render_preview never
+    # waits behind another project's index job.
     with conn.cursor() as cur:
         cur.execute("""
             UPDATE video_jobs
@@ -83,7 +86,8 @@ def claim_job(conn, types, max_attempts):
                   AND (state = 'queued'
                        OR (state = 'running'
                            AND heartbeat_at < NOW() - make_interval(secs => %s)))
-                ORDER BY id
+                ORDER BY CASE type WHEN 'preview' THEN 0
+                                   WHEN 'final' THEN 1 ELSE 2 END, id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
@@ -93,7 +97,8 @@ def claim_job(conn, types, max_attempts):
 
 
 def fail_exhausted_jobs(conn):
-    """Reaper: stale running jobs with no attempts left become failed."""
+    """Reaper: stale running jobs with no attempts left become failed.
+    Returns the failed rows so the caller can surface each in chat."""
     with conn.cursor() as cur:
         cur.execute("""
             UPDATE video_jobs
@@ -102,9 +107,10 @@ def fail_exhausted_jobs(conn):
             WHERE state = 'running'
               AND heartbeat_at < NOW() - make_interval(secs => %s)
               AND attempts >= CASE WHEN type = 'agent_turn' THEN %s ELSE %s END
+            RETURNING id, type, project_id, error
         """, (config.STALE_AFTER_S, config.MAX_ATTEMPTS_AGENT,
               config.MAX_ATTEMPTS_MEDIA))
-        return cur.rowcount
+        return cur.fetchall()
 
 
 def set_progress(conn, job_id, progress):
@@ -222,6 +228,34 @@ def any_asset_by_sha(conn, kind, sha256):
                        WHERE kind = %s AND sha256 = %s
                        ORDER BY id DESC LIMIT 1""", (kind, sha256))
         return cur.fetchone()
+
+
+def find_render_asset(conn, project_id, variant, edl_version):
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = %s
+                         AND (meta->>'edl_version')::int = %s
+                       ORDER BY id DESC LIMIT 1""",
+                    (project_id, variant, int(edl_version)))
+        return cur.fetchone()
+
+
+def assets_by_kinds(conn, project_id, kinds, limit=40):
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = ANY(%s)
+                       ORDER BY id DESC LIMIT %s""",
+                    (project_id, list(kinds), limit))
+        return cur.fetchall()
+
+
+def update_asset_meta(conn, asset_id, patch):
+    """Shallow-merge patch into assets.meta."""
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE assets
+                       SET meta = COALESCE(meta, '{}'::jsonb) || %s::jsonb
+                       WHERE id = %s""", (json.dumps(patch), asset_id))
 
 
 def insert_asset(conn, project_id, kind, storage_key, *, bytes_=None,

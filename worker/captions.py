@@ -1,16 +1,26 @@
 """Burned-caption generation: EDL captions -> .ass subtitle file.
 
-from_transcript mode builds sentence-shaped caption lines from the index
-words that survive the cut, timed to word boundaries, max 2 lines x 42 chars.
-Explicit caption items are authored in source time and mapped to the output
-timeline here.
+from_transcript mode builds caption lines from the index words that survive
+the cut, timed to word boundaries (never invented times), max 2 lines x 42
+chars — or chunks of max_words_per_caption words when set. Explicit caption
+items are authored in source time and mapped to the output timeline here.
+
+Styling: a CaptionStyle ({color, size, position}) applies globally; manual
+items may override per-item. color is #RRGGBB and becomes ASS PrimaryColour
+in &H00BBGGRR order.
 """
 
 MAX_LINE_CHARS = 42
 MAX_LINES = 2
 MIN_EVENT_S = 0.6
 
-ASS_HEADER = """[Script Info]
+FONT_SIZES = {"s": 32, "m": 44, "l": 58}
+ALIGNMENTS = {"bottom": 2, "top": 8}
+MARGIN_V = {"bottom": 46, "top": 40}
+
+DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom"}
+
+ASS_HEADER_TOP = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
 PlayResY: 720
@@ -19,11 +29,38 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,44,&H00FFFFFF,&H00FFFFFF,&H00101010,&H96000000,-1,0,0,0,100,100,0,0,1,2.4,0,2,60,60,46,1
+"""
 
+EVENTS_HEADER = """
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+
+def ass_color(hex_rgb):
+    """#RRGGBB -> &H00BBGGRR (ASS stores colours blue-green-red)."""
+    h = (hex_rgb or "#FFFFFF").lstrip("#")
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"&H00{b}{g}{r}".upper()
+
+
+def _norm_style(style):
+    s = dict(DEFAULT_STYLE)
+    if style:
+        d = style if isinstance(style, dict) else style.model_dump()
+        for k in ("color", "size", "position"):
+            if d.get(k):
+                s[k] = d[k]
+    return s
+
+
+def style_line(name, style):
+    s = _norm_style(style)
+    return (f"Style: {name},DejaVu Sans,{FONT_SIZES.get(s['size'], 44)},"
+            f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
+            f"-1,0,0,0,100,100,0,0,1,2.4,0,"
+            f"{ALIGNMENTS.get(s['position'], 2)},60,60,"
+            f"{MARGIN_V.get(s['position'], 46)},1")
 
 
 def _ass_time(t):
@@ -54,10 +91,10 @@ def _wrap(text):
     return lines
 
 
-def events_from_transcript(out_words):
+def events_from_transcript(out_words, max_words=None):
     """out_words: [{'w','t0','t1'}] already in OUTPUT time (kept words only).
-    Groups words into events of at most 2 lines x 42 chars, timed to word
-    boundaries."""
+    Groups words into events of at most 2 lines x 42 chars — or at most
+    max_words words per event when set — timed to word boundaries."""
     events = []
     group, chars = [], 0
     limit = MAX_LINE_CHARS * MAX_LINES
@@ -74,9 +111,11 @@ def events_from_transcript(out_words):
                        "text": r"\N".join(_esc(l) for l in lines)})
         group, chars = [], 0
 
-    for i, w in enumerate(out_words):
+    for w in out_words:
         gap = (w["t0"] - group[-1]["t1"]) if group else 0.0
-        if group and (chars + 1 + len(w["w"]) > limit or gap > 1.2):
+        full = (chars + 1 + len(w["w"]) > limit or
+                (max_words and len(group) >= max_words))
+        if group and (full or gap > 1.2):
             flush()
         group.append(w)
         chars += (1 if chars else 0) + len(w["w"])
@@ -90,30 +129,57 @@ def events_from_transcript(out_words):
 
 
 def events_from_items(items, tl):
-    """Explicit caption items (source time) -> output-time events. Items whose
-    span is fully cut are dropped."""
+    """Explicit caption items (source time) -> output-time events. A span
+    crossing a cut boundary is clipped to its surviving pieces; items whose
+    span is fully cut are dropped. Items may carry a per-item style."""
     events = []
     for it in items:
-        text = it["text"] if isinstance(it, dict) else it.text
-        s = it["start"] if isinstance(it, dict) else it.start
-        e = it["end"] if isinstance(it, dict) else it.end
-        spans = tl.span_to_out(s, e)
+        get = (lambda k, d=None: it.get(k, d)) if isinstance(it, dict) \
+            else (lambda k, d=None: getattr(it, k, d))
+        spans = tl.span_to_out(get("start"), get("end"))
         if not spans:
             continue
         start, end = spans[0][0], spans[-1][1]
-        lines = _wrap(text)[:MAX_LINES]
+        lines = _wrap(get("text"))[:MAX_LINES]
         events.append({"start": start, "end": max(end, start + MIN_EVENT_S),
-                       "text": r"\N".join(_esc(l) for l in lines)})
+                       "text": r"\N".join(_esc(l) for l in lines),
+                       "item_style": get("style")})
     events.sort(key=lambda ev: ev["start"])
     return events
 
 
-def write_ass(events, path):
+def write_ass(events, path, global_style=None):
+    """events may carry item_style (per-item override) and are written
+    against a Default style built from global_style; each distinct override
+    becomes an extra named style."""
+    styles = [("Default", _norm_style(global_style))]
+    seen = {tuple(sorted(styles[0][1].items())): "Default"}
+    for ev in events:
+        ov = ev.get("item_style")
+        if not ov:
+            ev["style_name"] = "Default"
+            continue
+        merged = dict(_norm_style(global_style))
+        d = ov if isinstance(ov, dict) else ov.model_dump()
+        for k in ("color", "size", "position"):
+            if d.get(k):
+                merged[k] = d[k]
+        key = tuple(sorted(merged.items()))
+        if key not in seen:
+            name = f"VS{len(seen)}"
+            seen[key] = name
+            styles.append((name, merged))
+        ev["style_name"] = seen[key]
+
     with open(path, "w", encoding="utf-8") as f:
-        f.write(ASS_HEADER)
+        f.write(ASS_HEADER_TOP)
+        for name, st in styles:
+            f.write(style_line(name, st) + "\n")
+        f.write(EVENTS_HEADER)
         for ev in events:
             f.write(f"Dialogue: 0,{_ass_time(ev['start'])},"
-                    f"{_ass_time(ev['end'])},Default,,0,0,0,,{ev['text']}\n")
+                    f"{_ass_time(ev['end'])},{ev.get('style_name', 'Default')}"
+                    f",,0,0,0,,{ev['text']}\n")
     return path
 
 
@@ -124,11 +190,14 @@ def build_ass(edl, index, tl, path):
         return None
     if isinstance(captions, dict) and captions.get("mode") == "from_transcript":
         out_words = tl.kept_words(index.get("words", []))
-        events = events_from_transcript(out_words)
+        events = events_from_transcript(
+            out_words, max_words=captions.get("max_words_per_caption"))
+        global_style = captions.get("style")
     elif isinstance(captions, list):
         events = events_from_items(captions, tl)
+        global_style = None
     else:
         return None
     if not events:
         return None
-    return write_ass(events, path)
+    return write_ass(events, path, global_style)

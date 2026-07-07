@@ -17,10 +17,14 @@ def main():
     from app import create_app
     create_app()
 
-    sql = open(os.path.join(HERE, "migrations", "001_video_editor.sql")).read()
+    mig_dir = os.path.join(HERE, "migrations")
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    with conn, conn.cursor() as cur:
-        cur.execute(sql)
+    for name in sorted(os.listdir(mig_dir)):
+        if not name.endswith(".sql"):
+            continue
+        with conn, conn.cursor() as cur:
+            cur.execute(open(os.path.join(mig_dir, name)).read())
+        print(f"applied {name}")
     conn.close()
     print("migrations applied")
 

@@ -5,11 +5,13 @@ the frontend shows live progress over the existing polling channel."""
 import json
 import os
 import shutil
+import time
 
 import agent_tools
 import config
 import db as dbx
 import llm
+import storage
 from agent_prompt import SYSTEM_PROMPT, project_state_block
 from schemas import describe_edl
 
@@ -59,7 +61,60 @@ def _index_summary(index):
     return "\n".join(lines)
 
 
-def _build_messages(ctx, worker_db, user_message):
+IMAGE_CAPTION_PROMPT = (
+    "Describe this reference image concretely: subject, layout, colors, any "
+    "visible text. The user attached it to a video-editing request, so "
+    "capture what an editor would need to know about it.")
+
+
+def _attachment_context(worker_db, ctx, user_message):
+    """Chat attachments on this message -> honest context lines. New images
+    are captioned once via the vision model (cached on the asset)."""
+    ids = (user_message.get("meta") or {}).get("attachments") or []
+    if not isinstance(ids, list):
+        return ""
+    notes = []
+    for aid in ids[:4]:
+        if isinstance(aid, dict):
+            aid = aid.get("id")
+        asset = worker_db.run(dbx.get_asset, aid)
+        if not asset or asset["project_id"] != ctx.project_id:
+            continue
+        m = asset.get("meta") or {}
+        name = m.get("filename") or os.path.basename(asset["storage_key"])
+        if asset["kind"] in ("music", "audio"):
+            dur = (f" ({asset['duration_s']:.0f}s)"
+                   if asset.get("duration_s") else "")
+            notes.append(f'[User attached music "{name}"{dur} — '
+                         f'storage_key: {asset["storage_key"]}]')
+        elif asset["kind"] == "image_ref":
+            cap = m.get("caption")
+            if not cap and llm.vision_available() and \
+                    (asset.get("bytes") or 0) <= 12 * 1024 * 1024:
+                local = os.path.join(
+                    ctx.workdir, f"attach_{asset['id']}"
+                    + os.path.splitext(asset["storage_key"])[1])
+                try:
+                    storage.download_to(asset["storage_key"], local)
+                    cap = llm.ask_vision(IMAGE_CAPTION_PROMPT, [local],
+                                         max_tokens=300)
+                    if cap:
+                        worker_db.run(dbx.update_asset_meta, asset["id"],
+                                      {"caption": cap})
+                except Exception:
+                    cap = None
+            if cap:
+                notes.append(f'[User attached reference image "{name}" — '
+                             f'what it shows: {cap}]')
+            else:
+                notes.append(
+                    f'[User attached reference image "{name}" — no vision '
+                    "model is available, so you CANNOT see it. Say so "
+                    "honestly and ask the user to describe what matters.]")
+    return ("\n\n" + "\n".join(notes)) if notes else ""
+
+
+def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     index = ctx.index
     v = index["video"]
     video_line = (f"Video: {v['duration']}s ({v['duration']/60:.1f} min), "
@@ -87,7 +142,8 @@ def _build_messages(ctx, worker_db, user_message):
         content = (m["content"] or "")[:2000]
         if content:
             msgs.append({"role": role, "content": content})
-    msgs.append({"role": "user", "content": user_message["content"][:4000]})
+    msgs.append({"role": "user",
+                 "content": user_message["content"][:4000] + attachment_note})
     return msgs
 
 
@@ -139,7 +195,9 @@ def run_agent_job(worker_db, job):
     try:
         ctx = agent_tools.ToolContext(worker_db, job, project,
                                       index_row["json"], workdir)
-        return _run_loop(ctx, worker_db, job, session_id, user_message)
+        attachment_note = _attachment_context(worker_db, ctx, user_message)
+        return _run_loop(ctx, worker_db, job, session_id, user_message,
+                         attachment_note)
     except agent_tools.AskUser:
         raise   # never reaches here (handled in loop), but keep explicit
     except Exception as e:
@@ -152,15 +210,65 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _run_loop(ctx, worker_db, job, session_id, user_message):
+def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
+              timings):
+    """Post the assistant reply, auto-rendering first if the model changed
+    the EDL this turn but never successfully previewed it. The reply may
+    never claim a render that did not happen — the attached preview meta is
+    the ground truth the UI shows."""
+    latest = ctx.latest_edl()
+    if ctx.versions_written and latest["version"] not in ctx.rendered_versions:
+        ctx.autorendered = True
+        print(f"[honesty] job {ctx.job['id']}: model ended the turn without "
+              f"render_preview after writing v{latest['version']} — "
+              "auto-rendering", flush=True)
+        t0 = time.monotonic()
+        result = agent_tools.render_preview(ctx)
+        timings["auto_render_s"] = round(time.monotonic() - t0, 2)
+        _activity(worker_db, session_id, "render_preview",
+                  {"auto": "model skipped it"}, result)
+        if "FAILED" in result:
+            final_text += ("\n\n(Heads up: the preview render failed — "
+                           f"{result[:200]})")
+    worker_db.run(dbx.add_message, session_id, "assistant", final_text,
+                  {"edl_version": latest["version"],
+                   "preview": ctx.last_preview})
+    return {"status": status, "edl_version": latest["version"],
+            "steps": total_steps, "auto_render": ctx.autorendered,
+            "timings": timings}
+
+
+def _run_loop(ctx, worker_db, job, session_id, user_message,
+              attachment_note=""):
     client = llm.client()
-    messages = _build_messages(ctx, worker_db, user_message)
+    messages = _build_messages(ctx, worker_db, user_message, attachment_note)
     tools = agent_tools.openai_tools()
     total_steps = 0
+    t_start = time.monotonic()
+    timings = {"llm_s": 0.0, "llm_calls": 0, "tools": {}}
 
     for iteration in range(config.AGENT_MAX_ITERATIONS):
+        if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
+            print(f"[job {job['id']}] turn timeout after "
+                  f"{config.AGENT_TURN_TIMEOUT_S:.0f}s", flush=True)
+            if ctx.versions_written:
+                return _finalize(
+                    ctx, worker_db, session_id,
+                    "That took longer than I allow myself per request, so "
+                    "I'm stopping here — the edits I completed are saved "
+                    "and previewed below. Send a follow-up to continue.",
+                    "timeout", total_steps, timings)
+            worker_db.run(dbx.add_message, session_id, "assistant",
+                          "That request timed out before I could finish "
+                          "anything — nothing was changed. Please try again, "
+                          "or break the request into smaller steps.",
+                          {"error": "turn_timeout"})
+            return {"status": "timeout", "steps": total_steps,
+                    "timings": timings}
+
         worker_db.run(dbx.set_progress, job["id"],
                       int(100 * iteration / config.AGENT_MAX_ITERATIONS))
+        t0 = time.monotonic()
         resp = client.chat.completions.create(
             model=config.AGENT_MODEL,
             messages=messages,
@@ -168,17 +276,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message):
             temperature=config.AGENT_TEMPERATURE,
             max_tokens=2000,
         )
+        timings["llm_s"] = round(timings["llm_s"] + time.monotonic() - t0, 2)
+        timings["llm_calls"] += 1
         msg = resp.choices[0].message
 
         if not msg.tool_calls:
             final = (msg.content or "").strip() or \
                 "Done — check the preview on the right."
-            edl = ctx.latest_edl()
-            worker_db.run(dbx.add_message, session_id, "assistant", final,
-                          {"edl_version": edl["version"],
-                           "preview": ctx.last_preview})
-            return {"status": "replied", "edl_version": edl["version"],
-                    "steps": total_steps}
+            return _finalize(ctx, worker_db, session_id, final, "replied",
+                             total_steps, timings)
 
         messages.append({
             "role": "assistant",
@@ -202,6 +308,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message):
                 result = ("REJECTED: arguments were not valid JSON. "
                           "Send a proper JSON object.")
             else:
+                t0 = time.monotonic()
                 try:
                     result = agent_tools.execute(ctx, name, args)
                 except agent_tools.AskUser as q:
@@ -209,16 +316,18 @@ def _run_loop(ctx, worker_db, job, session_id, user_message):
                               f"asked: {q.question}")
                     worker_db.run(dbx.add_message, session_id, "assistant",
                                   q.question, {"ask_user": True})
-                    return {"status": "awaiting_user", "steps": total_steps}
+                    return {"status": "awaiting_user", "steps": total_steps,
+                            "timings": timings}
+                tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
+                tt["n"] += 1
+                tt["s"] = round(tt["s"] + time.monotonic() - t0, 2)
             total_steps += 1
             _activity(worker_db, session_id, name, args, result)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
 
-    edl = ctx.latest_edl()
-    worker_db.run(dbx.add_message, session_id, "assistant",
-                  "I hit my step limit for one request. The edits so far are "
-                  f"saved as EDL v{edl['version']} — tell me to continue, or "
-                  "narrow the request.", {"edl_version": edl["version"]})
-    return {"status": "step_limit", "edl_version": edl["version"],
-            "steps": total_steps}
+    return _finalize(
+        ctx, worker_db, session_id,
+        "I hit my step limit for one request. The edits so far are saved — "
+        "tell me to continue, or narrow the request.",
+        "step_limit", total_steps, timings)

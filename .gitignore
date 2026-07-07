@@ -8,3 +8,4 @@ outputs_template/.DS_Store
 node_modules/ # in case no trailing newline
 
 test_video.mp4
+test_music.wav

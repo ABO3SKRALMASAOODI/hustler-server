@@ -25,7 +25,8 @@ video_bp = Blueprint("video", __name__)
 MAX_CONCURRENT_JOBS_PER_USER = int(os.getenv("MAX_CONCURRENT_JOBS_PER_USER", "3"))
 MESSAGES_PER_HOUR = int(os.getenv("MESSAGES_PER_HOUR", "20"))
 
-VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render", "music")
+VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
+               "music", "image_ref")
 
 
 @contextmanager
@@ -225,8 +226,8 @@ def create_upload(user_id, project_id):
     filename = data.get("filename") or ""
     nbytes = data.get("bytes")
     kind = data.get("kind") or "original"
-    if kind not in ("original", "music"):
-        return jsonify({"error": "kind must be original or music"}), 400
+    if kind not in ("original", "music", "image"):
+        return jsonify({"error": "kind must be original, music or image"}), 400
 
     try:
         ext, content_type = storage.validate_upload(filename, nbytes, kind)
@@ -260,9 +261,10 @@ def complete_upload(user_id, project_id):
     filename = data.get("filename") or ""
     upload_id = data.get("upload_id")
     parts = data.get("parts") or []
+    duration_s = data.get("duration_s")   # client-probed, music only
 
-    prefix = "music/" if kind == "music" else "originals/"
-    if not key.startswith(f"{prefix}{project_id}/"):
+    prefix = storage.KEY_PREFIX.get(kind, "originals")
+    if not key.startswith(f"{prefix}/{project_id}/"):
         return jsonify({"error": "storage_key does not belong to this project"}), 400
 
     with vdb() as conn:
@@ -287,11 +289,21 @@ def complete_upload(user_id, project_id):
     if nbytes > storage.max_upload_bytes():
         return jsonify({"error": "File exceeds the upload size limit"}), 400
 
+    asset_kind = {"original": "original", "music": "music",
+                  "image": "image_ref"}[kind]
+    try:
+        duration_s = min(max(float(duration_s), 0.1), 4 * 3600) \
+            if duration_s else None
+    except (TypeError, ValueError):
+        duration_s = None
+
     with vdb() as conn:
         cur = conn.cursor()
-        cur.execute("""INSERT INTO assets (project_id, kind, storage_key, bytes, meta)
-                       VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-                    (project_id, kind, key, nbytes,
+        cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
+                                           bytes, duration_s, meta)
+                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (project_id, asset_kind, key, nbytes,
+                     duration_s if kind == "music" else None,
                      Json({"filename": filename})))
         asset_id = cur.fetchone()["id"]
         job_id = None
@@ -299,7 +311,8 @@ def complete_upload(user_id, project_id):
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": asset_id})
 
-    return jsonify({"asset_id": asset_id, "index_job_id": job_id})
+    return jsonify({"asset_id": asset_id, "index_job_id": job_id,
+                    "kind": asset_kind})
 
 
 # ------------------------------------------------------------------ #
@@ -355,6 +368,104 @@ def get_index(user_id, project_id):
 
 
 # ------------------------------------------------------------------ #
+#  Consolidated live state — ONE endpoint the studio polls             #
+# ------------------------------------------------------------------ #
+
+@video_bp.route("/projects/<int:project_id>/state", methods=["GET"])
+@token_required
+def project_state(user_id, project_id):
+    """Everything the studio needs per polling tick in one response:
+    new messages (after_id), job progress, the latest EDL, the version
+    list with render pointers, the newest preview, and music assets.
+    A page refresh must never be required — this endpoint is the reason."""
+    after_id = request.args.get("after_id", type=int) or 0
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+
+        original = _active_original(cur, project_id)
+        indexed = bool(original and _index_row(cur, original["sha256"]))
+        edl = _latest_edl(cur, project_id)
+
+        cur.execute("""
+            SELECT DISTINCT ON (type) id, type, state, progress, error,
+                   updated_at
+            FROM video_jobs WHERE project_id = %s
+            ORDER BY type, id DESC
+        """, (project_id,))
+        jobs = {r["type"]: {
+            "id": r["id"], "state": r["state"], "progress": r["progress"],
+            "error": r["error"], "updated_at": r["updated_at"].isoformat(),
+        } for r in cur.fetchall()}
+
+        cur.execute("""SELECT id, role, content, meta, created_at
+                       FROM chat_messages
+                       WHERE session_id = %s AND id > %s
+                       ORDER BY id ASC LIMIT 500""",
+                    (p["chat_session_id"], after_id))
+        msgs = cur.fetchall()
+
+        cur.execute("""SELECT version, created_by, created_at FROM edls
+                       WHERE project_id = %s ORDER BY version DESC LIMIT 100""",
+                    (project_id,))
+        versions = cur.fetchall()
+
+        cur.execute("""SELECT id, kind, storage_key, duration_s, sha256, meta,
+                              created_at
+                       FROM assets
+                       WHERE project_id = %s
+                         AND kind IN ('render', 'music', 'proxy')
+                       ORDER BY id DESC LIMIT 100""", (project_id,))
+        extra = cur.fetchall()
+
+    renders = [a for a in extra if a["kind"] == "render"]
+    by_version = {}
+    latest_preview = None
+    for a in renders:
+        m = a.get("meta") or {}
+        v, variant = m.get("edl_version"), m.get("variant")
+        if v is not None:
+            by_version.setdefault(int(v), {})[variant] = a["id"]
+        if variant == "preview" and latest_preview is None:
+            latest_preview = {"asset_id": a["id"],
+                              "edl_version": v,
+                              "created_at": a["created_at"].isoformat()}
+    music = [a for a in extra if a["kind"] == "music"]
+    proxies = [a for a in extra if a["kind"] == "proxy"]
+    proxy = next((a for a in proxies
+                  if original and a["sha256"] == original["sha256"]),
+                 proxies[0] if proxies else None)
+
+    return jsonify({
+        "project": {"id": p["id"], "title": p["title"]},
+        "video": _asset_out(original) if original else None,
+        "proxy_asset_id": proxy["id"] if proxy else None,
+        "indexed": indexed,
+        "jobs": jobs,
+        "messages": [
+            {"id": r["id"], "role": r["role"], "content": r["content"],
+             "meta": r["meta"], "created_at": r["created_at"].isoformat()}
+            for r in msgs],
+        "last_message_id": msgs[-1]["id"] if msgs else after_id,
+        "latest_edl": ({"version": edl["version"], "json": edl["json"],
+                        "created_by": edl["created_by"]} if edl else None),
+        "edl_versions": [
+            {"version": v["version"], "created_by": v["created_by"],
+             "created_at": v["created_at"].isoformat(),
+             "preview_asset_id": by_version.get(v["version"], {}).get("preview"),
+             "final_asset_id": by_version.get(v["version"], {}).get("final")}
+            for v in versions],
+        "latest_preview": latest_preview,
+        "music_assets": [
+            {"id": a["id"], "storage_key": a["storage_key"],
+             "filename": (a.get("meta") or {}).get("filename"),
+             "duration_s": a["duration_s"]} for a in music],
+    })
+
+
+# ------------------------------------------------------------------ #
 #  Chat -> agent turns                                                 #
 # ------------------------------------------------------------------ #
 
@@ -383,7 +494,14 @@ def get_messages(user_id, project_id):
 @video_bp.route("/projects/<int:project_id>/messages", methods=["POST"])
 @token_required
 def post_message(user_id, project_id):
-    text = ((request.get_json() or {}).get("text") or "").strip()
+    data = request.get_json() or {}
+    text = (data.get("text") or "").strip()
+    client_msg_id = (str(data.get("client_msg_id") or "")[:64]) or None
+    attachment_ids = data.get("attachments") or []
+    if not isinstance(attachment_ids, list):
+        attachment_ids = []
+    attachment_ids = [int(a) for a in attachment_ids[:4]
+                      if isinstance(a, (int, str)) and str(a).isdigit()]
     if not text:
         return jsonify({"error": "text required"}), 400
     if len(text) > 4000:
@@ -394,6 +512,19 @@ def post_message(user_id, project_id):
         p = _project_for_user(cur, project_id, user_id)
         if not p:
             return jsonify({"error": "Project not found"}), 404
+
+        # Idempotency FIRST: a retransmit of a message we already accepted
+        # returns the original row — before rate limits or the busy check,
+        # so a duplicate POST can never 409 or double-enqueue.
+        if client_msg_id:
+            cur.execute("""SELECT id FROM chat_messages
+                           WHERE session_id = %s AND role = 'user'
+                             AND meta->>'client_msg_id' = %s""",
+                        (p["chat_session_id"], client_msg_id))
+            dup = cur.fetchone()
+            if dup:
+                return jsonify({"queued": True, "message_id": dup["id"],
+                                "duplicate": True})
 
         # Rate limit: cap LLM spend per project.
         cur.execute("""SELECT COUNT(*) AS n FROM chat_messages
@@ -412,10 +543,45 @@ def post_message(user_id, project_id):
             return jsonify({"error": "The editor is still working on your "
                                      "previous request."}), 409
 
-        cur.execute("""INSERT INTO chat_messages (session_id, role, content)
-                       VALUES (%s, 'user', %s) RETURNING id""",
-                    (p["chat_session_id"], text))
-        message_id = cur.fetchone()["id"]
+        # Attachments must be this project's chat-attachable assets.
+        attachments_meta = []
+        if attachment_ids:
+            cur.execute("""SELECT id, kind, duration_s, meta FROM assets
+                           WHERE project_id = %s AND id = ANY(%s)
+                             AND kind IN ('music','image_ref')""",
+                        (project_id, attachment_ids))
+            by_id = {a["id"]: a for a in cur.fetchall()}
+            attachments_meta = [
+                {"id": aid, "kind": by_id[aid]["kind"],
+                 "filename": (by_id[aid].get("meta") or {}).get("filename"),
+                 "duration_s": by_id[aid]["duration_s"]}
+                for aid in attachment_ids if aid in by_id]
+
+        meta = {}
+        if client_msg_id:
+            meta["client_msg_id"] = client_msg_id
+        if attachments_meta:
+            meta["attachments"] = [a["id"] for a in attachments_meta]
+            meta["attachments_info"] = attachments_meta
+        try:
+            cur.execute("""INSERT INTO chat_messages (session_id, role,
+                                                      content, meta)
+                           VALUES (%s, 'user', %s, %s) RETURNING id""",
+                        (p["chat_session_id"], text,
+                         Json(meta) if meta else None))
+            message_id = cur.fetchone()["id"]
+        except psycopg2.errors.UniqueViolation:
+            # Raced with an identical retransmit — the unique index on
+            # (session_id, client_msg_id) makes exactly one insert win.
+            conn.rollback()
+            cur = conn.cursor()
+            cur.execute("""SELECT id FROM chat_messages
+                           WHERE session_id = %s AND role = 'user'
+                             AND meta->>'client_msg_id' = %s""",
+                        (p["chat_session_id"], client_msg_id))
+            row = cur.fetchone()
+            return jsonify({"queued": True, "duplicate": True,
+                            "message_id": row["id"] if row else None})
 
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))

@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import captions as caplib                                    # noqa: E402
 from renderer import build_filtergraph                       # noqa: E402
 from schemas import (EDLValidationError, default_edl,        # noqa: E402
-                     describe_edl, output_duration, validate_edl)
+                     describe_edl, edl_signature, output_duration,
+                     validate_edl)
 from timeline import Timeline, merge_spans                   # noqa: E402
 from transcribe import group_sentences                       # noqa: E402
 from schemas import Word                                     # noqa: E402
@@ -154,14 +155,160 @@ g2 = build_filtergraph(edl, 60.0, True, tl3, None,
                        [(1, {"storage_key": "music/1/a.mp3", "start": 0.0,
                              "end": 15.0, "gain_db": -18, "duck": True})],
                        index, preview=False)
-check("music input trimmed+delayed", "adelay=0:all=1" in g2)
+check("music at t=0 has no adelay (portability)", "adelay" not in g2)
 check("ducking windows present", "volume=-12.0dB:enable=" in g2)
 check("amix normalize off", "amix=inputs=2:duration=first:normalize=0" in g2)
+
+g2b = build_filtergraph(edl, 60.0, True, tl3, None,
+                        [(1, {"storage_key": "music/1/a.mp3", "start": 3.0,
+                              "end": 15.0, "gain_db": -18, "duck": False})],
+                        index, preview=False)
+check("music at t=3 delayed into the output timeline",
+      ",adelay=3000:all=1" in g2b)
 
 edl_single = validate_edl({"keep": [[5, 25]]}, 60).model_dump()
 g3 = build_filtergraph(edl_single, 60.0, False, Timeline(edl_single["keep"]),
                        None, [], index, preview=True)
 check("single segment skips split", "split=" not in g3)
 check("silent source uses lavfi input label", "[1:a]" in g3)
+
+print("== Caption styling (issue 2) ==")
+styled = validate_edl(
+    {"keep": [[0, 60]],
+     "captions": {"mode": "from_transcript", "max_words_per_caption": 3,
+                  "style": {"color": "#ff0000", "size": "l",
+                            "position": "top"}}}, 60).model_dump()
+check("style normalized to upper hex",
+      styled["captions"]["style"]["color"] == "#FF0000")
+expect_reject("bad hex color",
+              {"keep": [[0, 60]],
+               "captions": {"mode": "from_transcript",
+                            "style": {"color": "red"}}}, 60)
+expect_reject("max words out of range",
+              {"keep": [[0, 60]],
+               "captions": {"mode": "from_transcript",
+                            "max_words_per_caption": 40}}, 60)
+
+legacy = validate_edl({"keep": [[0, 60]],
+                       "captions": {"mode": "from_transcript",
+                                    "style": "default"}}, 60).model_dump()
+check("legacy string style coerced to defaults",
+      legacy["captions"]["style"] is None)
+
+sty_words = [{"w": "one", "t0": 0.0, "t1": 0.3},
+             {"w": "two", "t0": 0.4, "t1": 0.7},
+             {"w": "three", "t0": 0.8, "t1": 1.1},
+             {"w": "four", "t0": 1.2, "t1": 1.5},
+             {"w": "five", "t0": 1.6, "t1": 1.9}]
+sty_index = {"video": {"duration": 60}, "words": sty_words, "sentences": []}
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(styled, sty_index, Timeline(styled["keep"]),
+                         os.path.join(td, "styled.ass"))
+    content = open(p).read()
+    # #FF0000 in ASS &H00BBGGRR order is &H000000FF
+    style_row = next(l for l in content.splitlines()
+                     if l.startswith("Style: Default"))
+    fields = style_row.split(",")
+    check("PrimaryColour is &H000000FF (red in BBGGRR)",
+          fields[3] == "&H000000FF")
+    check("Fontsize 58 for size 'l'", fields[2] == "58")
+    check("Alignment 8 for position 'top'", fields[18] == "8")
+    dialogues = [l for l in content.splitlines() if l.startswith("Dialogue:")]
+    check("chunking produced 2 events for 5 words @3",
+          len(dialogues) == 2)
+    for d in dialogues:
+        n_words = len(d.split(",,0,0,0,,")[1].replace(r"\N", " ").split())
+        check(f"event has <= 3 words ({n_words})", n_words <= 3)
+    check("first event starts at the real first-word time",
+          ",0:00:00.00," in dialogues[0])
+    check("second event starts at word 4's real timestamp (1.2s)",
+          ",0:00:01.20," in dialogues[1])
+
+with tempfile.TemporaryDirectory() as td:
+    # per-item override on manual captions
+    items_edl = validate_edl(
+        {"keep": [[0, 60]],
+         "captions": [{"text": "plain", "start": 1, "end": 3},
+                      {"text": "loud", "start": 5, "end": 7,
+                       "style": {"color": "#00FF00", "size": "s"}}]},
+        60).model_dump()
+    p = caplib.build_ass(items_edl, sty_index, Timeline(items_edl["keep"]),
+                         os.path.join(td, "items.ass"))
+    content = open(p).read()
+    check("override created a second named style",
+          "Style: VS1," in content)
+    check("override colour green in BBGGRR", "&H0000FF00" in content)
+    check("plain item uses Default", ",Default,,0,0,0,,plain" in content)
+    check("styled item uses VS1", ",VS1,,0,0,0,,loud" in content)
+
+print("== Cut-before-caption remap (issue 4) ==")
+cut_tl = Timeline([[10.0, 20.0]])
+with tempfile.TemporaryDirectory() as td:
+    remap_edl = validate_edl(
+        {"keep": [[10, 20]],
+         "captions": [
+             {"text": "shifted", "start": 12, "end": 14},   # -> 2..4 out
+             {"text": "straddles", "start": 5, "end": 15},  # clipped -> 0..5
+             {"text": "gone", "start": 0, "end": 8}]},      # fully cut
+        60).model_dump()
+    p = caplib.build_ass(remap_edl, sty_index, cut_tl,
+                         os.path.join(td, "remap.ass"))
+    content = open(p).read()
+    check("caption after a cut appears at remapped output time (2s not 12s)",
+          "Dialogue: 0,0:00:02.00,0:00:04.00" in content)
+    check("caption straddling the cut is clipped to the kept piece",
+          "Dialogue: 0,0:00:00.00,0:00:05.00" in content)
+    check("fully-cut caption dropped", "gone" not in content)
+    check("no caption at source time 12s", "0:00:12" not in content)
+
+# music + volume + ducking remap through the filtergraph (output vs source)
+remap_edl2 = validate_edl(
+    {"keep": [[10, 20], [40, 50]],
+     "volume": [{"start": 12, "end": 14, "gain_db": -6}],
+     "captions": None}, 60).model_dump()
+tl_r = Timeline(remap_edl2["keep"])
+speech_index = {"video": {"duration": 60}, "words": [],
+                "sentences": [{"t0": 41.0, "t1": 43.0}]}   # out: 11..13
+g_r = build_filtergraph(remap_edl2, 60.0, True, tl_r, None,
+                        [(1, {"storage_key": "music/1/a.mp3", "start": 5.0,
+                              "end": 18.0, "gain_db": -18, "duck": True})],
+                        speech_index, preview=False)
+check("volume stays in SOURCE time (pre-trim)",
+      "volume=-6.0dB:enable='between(t,12.00,14.00)'" in g_r)
+check("music positioned in OUTPUT time (adelay 5000)",
+      ",adelay=5000:all=1" in g_r)
+check("duck window remapped source 41-43 -> output 11-13",
+      "between(t,11.00,13.00)" in g_r)
+
+print("== Sentence caps (issue 6) ==")
+run_on = [Word(w=f"w{i}", t0=i * 0.4, t1=i * 0.4 + 0.3) for i in range(13)]
+sents = group_sentences(run_on)
+check("13 unpunctuated words split into 2 sentences", len(sents) == 2)
+check("no sentence over 12 words",
+      max(s.wi1 - s.wi0 + 1 for s in sents) <= 12)
+
+slow = [Word(w=f"s{i}", t0=i * 1.4, t1=i * 1.4 + 1.35) for i in range(6)]
+sents = group_sentences(slow)
+check("long-duration speech split by the 6s cap",
+      all(s.t1 - s.t0 <= 6.0 for s in sents) and len(sents) >= 2)
+
+gappy = [Word(w="a", t0=0.0, t1=0.3), Word(w="b", t0=1.05, t1=1.3),
+         Word(w="c", t0=1.4, t1=1.7)]
+sents = group_sentences(gappy)
+check("0.75s pause splits a sentence",
+      len(sents) == 2 and sents[0].text == "a")
+
+print("== No-op detection (issue 3) ==")
+a = validate_edl({"keep": [[0, 30], [40, 60]],
+                  "captions": {"mode": "from_transcript"}}, 60).model_dump()
+b = validate_edl({"captions": {"mode": "from_transcript"},
+                  "keep": [[40, 60], [0, 30]]}, 60).model_dump()
+check("identical EDLs (different key/segment order) have equal signatures",
+      edl_signature(a) == edl_signature(b))
+c = validate_edl({"keep": [[0, 30], [40, 60]],
+                  "captions": {"mode": "from_transcript",
+                               "max_words_per_caption": 3}}, 60).model_dump()
+check("real change alters the signature",
+      edl_signature(a) != edl_signature(c))
 
 print(f"\nALL {PASS} CHECKS PASSED")

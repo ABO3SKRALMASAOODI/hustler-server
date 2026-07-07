@@ -11,6 +11,7 @@ of the result for the agent's self-check.
 
 import os
 import shutil
+import time
 
 import captions as caplib
 import config
@@ -157,8 +158,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               music_inputs, index, preview)
 
     if preview:
-        encode = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
-                  "-c:a", "aac", "-b:a", "128k"]
+        encode = ["-c:v", "libx264", "-preset", config.PREVIEW_PRESET,
+                  "-crf", "27", "-c:a", "aac", "-b:a", "128k"]
     else:
         encode = ["-c:v", "libx264", "-preset", "medium", "-crf", "18",
                   "-c:a", "aac", "-b:a", "192k"]
@@ -186,6 +187,18 @@ def run_render_job(worker_db, job):
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     if not original or not original["sha256"]:
         raise RuntimeError("No indexed original video for this project")
+
+    # Cache: this exact EDL version was already rendered in this variant
+    # against this exact source file — serve the stored asset instead of
+    # re-encoding the same output. (EDL versions are append-only, so version
+    # N's content can never change; the sha guard covers video replacement.)
+    cached = worker_db.run(dbx.find_render_asset, project_id, variant, version)
+    if cached and (cached.get("meta") or {}).get("src_sha256") == \
+            original["sha256"] and storage.exists(cached["storage_key"]):
+        return {"render_asset_id": cached["id"],
+                "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
+                "duration_s": cached["duration_s"], "edl_version": version,
+                "variant": variant, "cached": True}
     index_row = worker_db.run(dbx.get_index_by_sha, original["sha256"])
     if not index_row:
         raise RuntimeError("Video index missing — re-run indexing")
@@ -199,12 +212,20 @@ def run_render_job(worker_db, job):
 
     workdir = os.path.join(config.TMP_DIR, f"render_{job_id}")
     os.makedirs(workdir, exist_ok=True)
+    timings, t0 = {}, time.monotonic()
+
+    def _mark(stage):
+        nonlocal t0
+        timings[stage] = round(time.monotonic() - t0, 2)
+        t0 = time.monotonic()
+
     try:
         src_local = os.path.join(
             workdir, "src" + os.path.splitext(src_asset["storage_key"])[1])
         worker_db.run(dbx.set_progress, job_id, 5)
         storage.download_to(src_asset["storage_key"], src_local)
         worker_db.run(dbx.set_progress, job_id, 10)
+        _mark("download_s")
 
         out_local = os.path.join(workdir, f"{variant}_v{version}.mp4")
 
@@ -214,12 +235,14 @@ def run_render_job(worker_db, job):
         out_dur = render_edl(edl_row["json"], index, src_local, out_local,
                              workdir, preview=(variant == "preview"),
                              progress_cb=_prog)
+        _mark("encode_s")
 
         sheet_local = os.path.join(workdir, "result_sheet.jpg")
         try:
             sheets.build_result_sheet(out_local, sheet_local, out_dur)
         except Exception:
             sheet_local = None
+        _mark("sheet_s")
 
         render_key = f"renders/{project_id}/{variant}_v{version}.mp4"
         storage.upload_file(out_local, render_key, "video/mp4")
@@ -228,6 +251,7 @@ def run_render_job(worker_db, job):
             sheet_key = f"renders/{project_id}/{variant}_v{version}_sheet.jpg"
             storage.upload_file(sheet_local, sheet_key, "image/jpeg")
         worker_db.run(dbx.set_progress, job_id, 96)
+        _mark("upload_s")
 
         out_info = media.probe(out_local)
         asset_id = worker_db.run(
@@ -236,9 +260,9 @@ def run_render_job(worker_db, job):
             width=out_info["width"], height=out_info["height"],
             fps=out_info["fps"],
             meta={"variant": variant, "edl_version": version,
-                  "sheet_key": sheet_key})
+                  "sheet_key": sheet_key, "src_sha256": original["sha256"]})
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
                 "duration_s": out_dur, "edl_version": version,
-                "variant": variant}
+                "variant": variant, "timings": timings}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

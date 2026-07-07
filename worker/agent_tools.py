@@ -12,8 +12,8 @@ import db as dbx
 import llm
 import media
 import storage
-from schemas import (EDLValidationError, describe_edl, output_duration,
-                     validate_edl)
+from schemas import (CaptionStyle, EDLValidationError, describe_edl,
+                     edl_signature, output_duration, validate_edl)
 
 
 class AskUser(Exception):
@@ -36,6 +36,9 @@ class ToolContext:
         self.workdir = workdir
         self._proxy_local = None
         self.last_preview = None      # set by render_preview
+        self.versions_written = []    # EDL versions created this turn
+        self.rendered_versions = set()  # versions with a successful preview
+        self.autorendered = False     # loop set: model skipped render_preview
 
     def clamp(self, t):
         try:
@@ -64,15 +67,23 @@ class ToolContext:
         return row
 
     def write_edl(self, new_edl_dict, change_desc):
-        """Validate + append a new version. Returns the diff line, or a
-        REJECTED message on validation failure."""
+        """Validate + append a new version. Returns the diff line, a NO
+        CHANGE notice when the result is byte-identical to the current
+        version (no version row is created), or a REJECTED message on
+        validation failure."""
         prev = self.latest_edl()
         try:
             normalized = validate_edl(new_edl_dict, self.duration).model_dump()
         except EDLValidationError as e:
             return f"REJECTED (EDL v{prev['version']} unchanged): {e}"
+        if edl_signature(normalized) == edl_signature(prev["json"]):
+            return (f"NO CHANGE — the EDL is identical to v{prev['version']}; "
+                    "the requested change may need a different tool or may "
+                    "not be supported. Do NOT tell the user you changed "
+                    "anything.")
         version = self.db.run(dbx.insert_edl, self.project_id, normalized,
                               "agent")
+        self.versions_written.append(version)
         before = describe_edl(prev["json"])
         after = describe_edl(normalized, self.duration)
         return (f"EDL v{prev['version']} -> v{version}: {change_desc}. "
@@ -193,6 +204,31 @@ def find_silences(ctx, min_seconds=0.7):
     return _cap(f"{len(sil)} silences >= {min_s}s:\n" + "\n".join(lines) + note)
 
 
+def list_assets(ctx, kind=None):
+    """Project files the user has uploaded or the system has produced."""
+    kinds = {"music": ["music", "audio"], "image": ["image_ref"],
+             "render": ["render"], "all": ["music", "audio", "image_ref",
+                                           "render", "original"]}
+    sel = kinds.get((kind or "music").strip().lower())
+    if not sel:
+        return ("REJECTED: kind must be one of "
+                f"{', '.join(sorted(kinds))}.")
+    rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, sel)
+    if not rows:
+        if sel == kinds["music"]:
+            return ("No music files in this project. Ask the user to attach "
+                    "one with the paperclip button in chat (mp3/wav/m4a).")
+        return f"No {kind} assets in this project."
+    lines = []
+    for a in rows:
+        m = a.get("meta") or {}
+        dur = f", {a['duration_s']:.1f}s" if a.get("duration_s") else ""
+        cap = f" — {m['caption'][:120]}" if m.get("caption") else ""
+        lines.append(f"[{a['kind']}] storage_key={a['storage_key']} "
+                     f"\"{m.get('filename', '?')}\"{dur}{cap}")
+    return _cap("\n".join(lines))
+
+
 def look_at(ctx, start, end, question):
     if not llm.vision_available():
         return ("Visual inspection unavailable (no vision model configured). "
@@ -259,8 +295,28 @@ def keep_segments(ctx, segments):
              f"{ctx.duration}s survives")
 
 
-def add_captions(ctx, mode=None, items=None, style="default"):
+def _parse_style(style):
+    """Validate a style dict -> normalized dict, None for absent, or an
+    error string. Legacy string styles ('default') mean absent."""
+    if style is None or isinstance(style, str) or style == {}:
+        return None
+    if not isinstance(style, dict):
+        return ("ERR: style must be an object like "
+                '{"color":"#FF0000","size":"l","position":"top"}')
+    try:
+        return CaptionStyle.model_validate(style).model_dump()
+    except Exception as e:
+        return (f"ERR: bad style: {str(e)[:160]}. Use "
+                '{"color":"#RRGGBB","size":"s|m|l","position":"bottom|top"} '
+                "(all fields optional).")
+
+
+def add_captions(ctx, mode=None, items=None, style=None,
+                 max_words_per_caption=None):
     edl = dict(ctx.latest_edl()["json"])
+    parsed_style = _parse_style(style)
+    if isinstance(parsed_style, str):
+        return "REJECTED: " + parsed_style[5:]
     if items:
         if not isinstance(items, list):
             return "REJECTED: items must be an array of {text,start,end}."
@@ -268,18 +324,34 @@ def add_captions(ctx, mode=None, items=None, style="default"):
         for i, it in enumerate(items):
             if not isinstance(it, dict) or "text" not in it:
                 return f"REJECTED: items[{i}] must be {{text,start,end}}."
+            item_style = _parse_style(it.get("style")) or parsed_style
+            if isinstance(item_style, str):
+                return f"REJECTED: items[{i}]: {item_style[5:]}"
             try:
                 norm.append({"text": str(it["text"]),
                              "start": ctx.clamp(it.get("start", 0)),
-                             "end": ctx.clamp(it.get("end", 0))})
+                             "end": ctx.clamp(it.get("end", 0)),
+                             "style": item_style})
             except ValueError as err:
                 return f"REJECTED: items[{i}]: {err}"
         edl["captions"] = norm
         return ctx.write_edl(edl, f"{len(norm)} manual caption(s) set")
     if mode in (None, "", "from_transcript"):
+        mw = None
+        if max_words_per_caption is not None:
+            try:
+                mw = int(max_words_per_caption)
+            except (TypeError, ValueError):
+                return "REJECTED: max_words_per_caption must be an integer."
         edl["captions"] = {"mode": "from_transcript",
-                           "style": style or "default"}
-        return ctx.write_edl(edl, "captions from transcript enabled")
+                           "max_words_per_caption": mw,
+                           "style": parsed_style}
+        desc = "captions from transcript enabled"
+        if mw:
+            desc += f", <= {mw} words each"
+        if parsed_style:
+            desc += f", style {parsed_style}"
+        return ctx.write_edl(edl, desc)
     if mode == "off":
         edl["captions"] = None
         return ctx.write_edl(edl, "captions removed")
@@ -354,15 +426,20 @@ def get_edl(ctx):
 def render_preview(ctx):
     row = ctx.latest_edl()
     version = row["version"]
+    if version in ctx.rendered_versions and \
+            (ctx.last_preview or {}).get("edl_version") == version:
+        return (f"Preview v{version} is already rendered and attached — "
+                "no need to render again.")
     job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id, ctx.job["user_id"],
                         "preview", {"edl_version": version})
     deadline = time.time() + config.PREVIEW_WAIT_TIMEOUT_S
     while time.time() < deadline:
-        time.sleep(3)
+        time.sleep(1)
         j = ctx.db.run(dbx.get_job, job_id)
         if j["state"] == "done":
             result = j.get("result") or {}
             ctx.last_preview = result
+            ctx.rendered_versions.add(version)
             out_dur = result.get("duration_s")
             note = (f"Preview v{version} rendered: {out_dur}s "
                     f"(source {ctx.duration}s). It is attached to the chat "
@@ -431,6 +508,10 @@ TOOLS = {
                       "midpoints and surrounding words — cut points should "
                       "snap to these midpoints or word boundaries.",
                       {"min_seconds": {"type": "number"}}),
+    "list_assets": (list_assets, "Files in this project. kind='music' lists "
+                    "uploaded music (use its storage_key with add_music); "
+                    "'image' lists reference images; 'render' past renders; "
+                    "'all' everything.", {"kind": {"type": "string"}}),
     "look_at": (look_at, "Ask the vision model about up to 4 frames from a "
                 "range. Use for taste/visual questions the transcript can't "
                 "answer.", {"start": {"type": "number"},
@@ -441,20 +522,41 @@ TOOLS = {
                       "seconds, sorted. Everything else is cut.",
                       {"segments": _seg_schema()}),
     "add_captions": (add_captions, "Burned captions. mode='from_transcript' "
-                     "(word-timed, recommended) or mode='off', or pass "
-                     "items=[{text,start,end}] (source seconds) for manual "
-                     "text.", {"mode": {"type": "string"},
-                               "style": {"type": "string"},
-                               "items": {"type": "array",
-                                         "items": {"type": "object"}}}),
-    "add_music": (add_music, "Mix a project music file under the edit. "
-                  "start/end are OUTPUT-timeline seconds (position in the "
-                  "finished video). duck=true lowers music 12dB under "
-                  "speech.", {"storage_key": {"type": "string"},
-                              "start": {"type": "number"},
-                              "end": {"type": "number"},
-                              "gain_db": {"type": "number"},
-                              "duck": {"type": "boolean"}}),
+                     "(word-timed from the real transcript, recommended) or "
+                     "mode='off', or items=[{text,start,end,style?}] (source "
+                     "seconds) for text the user dictates. Optional style "
+                     "{color:'#RRGGBB', size:'s|m|l', position:'bottom|top'} "
+                     "and max_words_per_caption (1-12) to show short, "
+                     "punchy caption chunks. Example — 'captions 3 words "
+                     "max, red, at the top': {mode:'from_transcript', "
+                     "max_words_per_caption:3, style:{color:'#FF0000', "
+                     "position:'top'}}. Example — one manual title card: "
+                     "{items:[{text:'CHAPTER ONE', start:0, end:2.5, "
+                     "style:{size:'l'}}]}. There are NO other style fields — "
+                     "fonts, animations, and outline colors are not "
+                     "supported; say so if asked.",
+                     {"mode": {"type": "string"},
+                      "style": {"type": "object",
+                                "properties": {
+                                    "color": {"type": "string"},
+                                    "size": {"type": "string",
+                                             "enum": ["s", "m", "l"]},
+                                    "position": {"type": "string",
+                                                 "enum": ["bottom", "top"]}}},
+                      "max_words_per_caption": {"type": "integer"},
+                      "items": {"type": "array",
+                                "items": {"type": "object"}}}),
+    "add_music": (add_music, "Mix a project music file under the edit. Call "
+                  "list_assets(kind='music') first and pass the exact "
+                  "storage_key it returns — if none exist, ask the user to "
+                  "attach a file instead of guessing. start/end are "
+                  "OUTPUT-timeline seconds (position in the finished video). "
+                  "duck=true lowers music 12dB under speech.",
+                  {"storage_key": {"type": "string"},
+                   "start": {"type": "number"},
+                   "end": {"type": "number"},
+                   "gain_db": {"type": "number"},
+                   "duck": {"type": "boolean"}}),
     "set_volume": (set_volume, "Volume automation gain_db on a SOURCE-time "
                    "span of the original audio.",
                    {"start": {"type": "number"}, "end": {"type": "number"},

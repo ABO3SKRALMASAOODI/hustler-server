@@ -10,10 +10,20 @@ from openai import OpenAI
 import config
 
 
+_client = None
+
+
 def client():
-    return OpenAI(base_url=config.OPENAI_BASE_URL,
-                  api_key=config.OPENAI_API_KEY,
-                  timeout=180.0, max_retries=2)
+    """One pooled client per process (the OpenAI SDK's httpx client is
+    thread-safe) — connection reuse across turns instead of a new TLS
+    handshake per call."""
+    global _client
+    if _client is None:
+        _client = OpenAI(base_url=config.OPENAI_BASE_URL,
+                         api_key=config.OPENAI_API_KEY,
+                         timeout=config.LLM_TIMEOUT_S,
+                         max_retries=config.LLM_MAX_RETRIES)
+    return _client
 
 
 def vision_available():

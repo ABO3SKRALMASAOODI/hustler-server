@@ -38,6 +38,16 @@ ALLOWED_MUSIC_EXT = {
     ".aac": "audio/aac",
     ".ogg": "audio/ogg",
 }
+ALLOWED_IMAGE_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+# Chat attachments are small; only the main video gets the multi-GB budget.
+MUSIC_MAX_BYTES = 50 * 1024 * 1024
+IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
 
 def is_configured():
@@ -74,20 +84,27 @@ def max_upload_bytes():
 def validate_upload(filename, nbytes, kind):
     """Returns (ext, content_type) or raises ValueError with a user-facing reason."""
     ext = os.path.splitext(filename or "")[1].lower()
-    allowed = ALLOWED_MUSIC_EXT if kind == "music" else ALLOWED_VIDEO_EXT
+    allowed, cap, cap_label = {
+        "music": (ALLOWED_MUSIC_EXT, MUSIC_MAX_BYTES, "50 MB"),
+        "image": (ALLOWED_IMAGE_EXT, IMAGE_MAX_BYTES, "10 MB"),
+    }.get(kind, (ALLOWED_VIDEO_EXT, max_upload_bytes(),
+                 f"{os.getenv('MAX_UPLOAD_GB', '2')} GB"))
     if ext not in allowed:
         raise ValueError(f"File type {ext or '(none)'} not supported. "
                          f"Allowed: {', '.join(sorted(allowed))}")
     if not isinstance(nbytes, int) or nbytes <= 0:
         raise ValueError("File size missing or invalid")
-    if nbytes > max_upload_bytes():
-        raise ValueError(f"File is larger than the "
-                         f"{os.getenv('MAX_UPLOAD_GB', '2')} GB upload limit")
+    if nbytes > cap:
+        raise ValueError(f"File is larger than the {cap_label} limit "
+                         f"for {kind or 'video'} uploads")
     return ext, allowed[ext]
 
 
+KEY_PREFIX = {"original": "originals", "music": "music", "image": "images"}
+
+
 def new_original_key(project_id, ext, kind="original"):
-    prefix = "music" if kind == "music" else "originals"
+    prefix = KEY_PREFIX.get(kind, "originals")
     return f"{prefix}/{project_id}/{uuid.uuid4().hex[:12]}{ext}"
 
 

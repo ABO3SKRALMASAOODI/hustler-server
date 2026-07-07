@@ -53,7 +53,11 @@ frontend repo.
 | `VISION_MODEL` | worker | default `qwen-vl-plus`; set empty to disable all vision |
 | `WHISPER_MODEL` | worker | default `small` |
 | `WHISPER_DEVICE` | worker | `cpu` (default, int8) or `cuda` — pointing at a GPU box needs no code change |
-| `MAX_UPLOAD_GB` | api, worker | default `2` |
+| `WHISPER_BEAM_SIZE` | worker | default `1` on cpu, `5` on cuda |
+| `LLM_TIMEOUT_S` / `LLM_MAX_RETRIES` | worker | default 90 / 1 (pooled client) |
+| `AGENT_TURN_TIMEOUT_S` | worker | default 300 — hard cap per agent turn; on expiry the user gets a chat message, never a silent stall |
+| `PREVIEW_PRESET` | worker | default `ultrafast` (previews only; finals stay `medium`) |
+| `MAX_UPLOAD_GB` | api, worker | default `2` (chat attachments: images 10 MB, audio 50 MB) |
 | `MAX_DURATION_S` | worker | default 3h |
 | `PUBLIC_APP_URL` | (reserved) | `https://valmera.io` |
 | `MESSAGES_PER_HOUR` | api | default 20 per project |
@@ -83,11 +87,14 @@ frontend repo.
    `small` int8 peaks around 1 GB. Env: `DATABASE_URL`, all `S3_*`,
    `OPENAI_*`, `AGENT_MODEL`, `VISION_MODEL`, `WHISPER_MODEL`,
    `WHISPER_DEVICE=cpu`.
-6. **DB schema:** already applied (additive) via
-   `backend/migrations/001_video_editor.sql`. Re-running is safe:
+6. **DB schema:** applied (additive) via the files in `backend/migrations/`,
+   in order. Re-running is safe:
    ```bash
    psql "$DATABASE_URL" -f backend/migrations/001_video_editor.sql
+   psql "$DATABASE_URL" -f backend/migrations/002_video_editor_fixes.sql
    ```
+   002 adds the `image_ref` asset kind (chat image attachments) and the
+   unique index that makes chat sends idempotent on `client_msg_id`.
 
 ## Local development
 

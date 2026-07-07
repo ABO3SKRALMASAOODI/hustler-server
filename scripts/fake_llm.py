@@ -7,6 +7,15 @@ from the conversation and reacts — e.g. it computes keep segments from the
 real find_silences output — so the loop's tool plumbing is genuinely
 exercised.
 
+Scenarios are chosen by the latest user message, mirroring behaviours seen
+in production (including the dishonest ones the loop must now correct):
+  - "NOOP TEST ..."          re-applies an identical edit (expects NO CHANGE),
+                             then makes a real edit and ends WITHOUT calling
+                             render_preview — the loop must auto-render.
+  - "... 3 words ... red ..."styled captions (max words + color + position).
+  - "... music ..."          list_assets -> add_music with the real key.
+  - anything else            cut silences + captions + preview (default).
+
 Usage: python scripts/fake_llm.py [port]
 """
 
@@ -30,22 +39,55 @@ def last_executed_tool(messages):
     return None
 
 
-def find_result(messages, tool_name):
-    """Content of the latest result for tool_name."""
+def find_result(messages, tool_name, nth_last=1):
+    """Content of the nth-most-recent result for tool_name."""
     ids = set()
     for m in messages:
         if m.get("role") == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
                 if tc["function"]["name"] == tool_name:
                     ids.add(tc["id"])
+    hits = 0
     for m in reversed(messages):
         if m.get("role") == "tool" and m.get("tool_call_id") in ids:
+            hits += 1
+            if hits == nth_last:
+                return m.get("content") or ""
+    return ""
+
+
+def count_results(messages, tool_name):
+    ids = set()
+    for m in messages:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                if tc["function"]["name"] == tool_name:
+                    ids.add(tc["id"])
+    return sum(1 for m in messages
+               if m.get("role") == "tool" and m.get("tool_call_id") in ids)
+
+
+def last_user_text(messages):
+    for m in reversed(messages):
+        if m.get("role") == "user":
             return m.get("content") or ""
     return ""
 
 
-def plan_next(messages):
-    """Returns (tool_name, args) or (None, final_text)."""
+def parse_edl_json(get_edl_result):
+    brace = get_edl_result.find("{")
+    if brace < 0:
+        return None
+    try:
+        return json.loads(get_edl_result[brace:])
+    except json.JSONDecodeError:
+        return None
+
+
+# ── scenarios ────────────────────────────────────────────────────────
+
+
+def plan_silences(messages):
     last = last_executed_tool(messages)
     if last is None:
         return "get_video_info", {}
@@ -77,6 +119,74 @@ def plan_next(messages):
                       "The preview is on the right — happy to tighten it "
                       "further.")
     return None, "Done."
+
+
+def plan_noop(messages):
+    """Re-applies an identical EDL (the tool must answer NO CHANGE), then a
+    real edit, then ends WITHOUT render_preview — testing auto-render."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_edl", {}
+    if last == "get_edl":
+        edl = parse_edl_json(find_result(messages, "get_edl")) or {}
+        keep = edl.get("keep") or [[0.0, 60.0]]
+        return "keep_segments", {"segments": keep}   # identical -> NO CHANGE
+    if last == "keep_segments":
+        if count_results(messages, "keep_segments") == 1:
+            edl = parse_edl_json(find_result(messages, "get_edl")) or {}
+            keep = [list(s) for s in (edl.get("keep") or [[0.0, 60.0]])]
+            keep[0][0] = round(keep[0][0] + 0.3, 2)   # a real change
+            return "keep_segments", {"segments": keep}
+        # Dishonest model behaviour: EDL changed, no render_preview call.
+        return None, "Tightened the opening slightly."
+    return None, "Done."
+
+
+def plan_styled(messages):
+    last = last_executed_tool(messages)
+    if last is None:
+        return "add_captions", {"mode": "from_transcript",
+                                "max_words_per_caption": 3,
+                                "style": {"color": "#FF0000",
+                                          "position": "top"}}
+    if last == "add_captions":
+        return "render_preview", {}
+    if last == "render_preview":
+        return None, ("Captions now show at most three words at a time, in "
+                      "red at the top of the frame.")
+    return None, "Done."
+
+
+def plan_music(messages):
+    last = last_executed_tool(messages)
+    if last is None:
+        return "list_assets", {"kind": "music"}
+    if last == "list_assets":
+        m = re.search(r"storage_key=(\S+)", find_result(messages,
+                                                        "list_assets"))
+        if not m:
+            return None, ("There's no music uploaded yet — attach a file "
+                          "with the paperclip and I'll mix it in.")
+        return "add_music", {"storage_key": m.group(1), "start": 0,
+                             "end": 9999, "gain_db": -20, "duck": True}
+    if last == "add_music":
+        return "render_preview", {}
+    if last == "render_preview":
+        return None, ("Mixed your track quietly under the whole edit, "
+                      "ducked while people speak.")
+    return None, "Done."
+
+
+def plan_next(messages):
+    """Returns (tool_name, args) or (None, final_text)."""
+    text = last_user_text(messages).lower()
+    if "noop test" in text:
+        return plan_noop(messages)
+    if "3 words" in text or "red" in text:
+        return plan_styled(messages)
+    if "music" in text:
+        return plan_music(messages)
+    return plan_silences(messages)
 
 
 class Handler(BaseHTTPRequestHandler):

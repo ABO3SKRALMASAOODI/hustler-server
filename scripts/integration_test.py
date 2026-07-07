@@ -51,22 +51,31 @@ def db():
     return psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
 
 
-def wait_job(job_id, timeout, label):
+JOB_TIMES = {}
+
+
+def wait_job(job_id, timeout, label, poll_s=1.0):
     t0 = time.time()
     last = None
     while time.time() - t0 < timeout:
         with db() as conn, conn.cursor() as cur:
-            cur.execute("SELECT state, progress, error FROM video_jobs "
+            cur.execute("SELECT state, progress, error, result FROM video_jobs "
                         "WHERE id = %s", (job_id,))
             row = cur.fetchone()
         if row["state"] != last:
-            print(f"    [{label}] {row['state']} {row['progress']}%")
+            print(f"    [{label}] {row['state']} {row['progress']}% "
+                  f"(t+{time.time() - t0:.1f}s)")
             last = row["state"]
         if row["state"] == "done":
-            return
+            elapsed = time.time() - t0
+            JOB_TIMES.setdefault(label, []).append(elapsed)
+            timings = (row.get("result") or {}).get("timings")
+            print(f"    [{label}] total {elapsed:.1f}s"
+                  + (f" timings={json.dumps(timings)}" if timings else ""))
+            return row
         if row["state"] == "failed":
             die(f"{label} job failed: {row['error']}")
-        time.sleep(3)
+        time.sleep(poll_s)
     die(f"{label} job timed out after {timeout}s")
 
 
@@ -75,10 +84,12 @@ def main():
     app = create_app()                               # also creates base tables
     client = app.test_client()
 
-    # migration (idempotent)
-    with db() as conn, conn.cursor() as cur:
-        cur.execute(open(os.path.join(
-            ROOT, "backend/migrations/001_video_editor.sql")).read())
+    # migrations (idempotent, in order)
+    mig_dir = os.path.join(ROOT, "backend/migrations")
+    for name in sorted(os.listdir(mig_dir)):
+        if name.endswith(".sql"):
+            with db() as conn, conn.cursor() as cur:
+                cur.execute(open(os.path.join(mig_dir, name)).read())
     ok("schema ready")
 
     # bucket
@@ -168,19 +179,68 @@ def main():
     assert any(a["kind"] == "proxy" for a in pj["assets"]), "no proxy asset"
     ok("proxy asset present; project reports indexed")
 
-    # chat -> agent turn
-    r = client.post(f"/projects/{project_id}/messages",
-                    json={"text": "remove the silences and add captions"},
-                    headers=H)
-    assert r.status_code == 200, r.get_data(as_text=True)
-    out = r.get_json()
+    # ── transcript quality: hard caps + tail coverage (issue 6) ──────
+    sentences = idx["sentences"]
+    if words:
+        worst = max(s["t1"] - s["t0"] for s in sentences)
+        assert worst <= 6.05, f"run-on sentence: {worst:.1f}s > 6s cap"
+        assert max(len(s["text"].split()) for s in sentences) <= 12, \
+            "sentence over the 12-word cap"
+        assert any(w["t0"] >= 50.0 for w in words), \
+            "tail words missing — nothing transcribed in the final slate"
+        ok(f"transcript: {len(sentences)} sentences, longest {worst:.1f}s, "
+           "tail words present")
+
+    def send(text, attachments=None, client_msg_id=None):
+        payload = {"text": text}
+        if attachments:
+            payload["attachments"] = attachments
+        if client_msg_id:
+            payload["client_msg_id"] = client_msg_id
+        r = client.post(f"/projects/{project_id}/messages", json=payload,
+                        headers=H)
+        assert r.status_code == 200, r.get_data(as_text=True)
+        return r.get_json()
+
+    def latest_edl():
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM edls WHERE project_id = %s "
+                        "ORDER BY version DESC LIMIT 1", (project_id,))
+            return cur.fetchone()
+
+    def latest_assistant():
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT cm.* FROM chat_messages cm
+                           JOIN projects p ON p.chat_session_id = cm.session_id
+                           WHERE p.id = %s AND cm.role='assistant'
+                           ORDER BY cm.id DESC LIMIT 1""", (project_id,))
+            return cur.fetchone()
+
+    def get_state():
+        r = client.get(f"/projects/{project_id}/state?after_id=0", headers=H)
+        assert r.status_code == 200, r.get_data(as_text=True)
+        return r.get_json()
+
+    # ── chat turn 1 + idempotency (issue 1) ──────────────────────────
+    cmid = "itest-dedup-001"
+    out = send("remove the silences and add captions", client_msg_id=cmid)
     assert out.get("queued"), f"agent turn not queued: {out}"
+    dup = send("remove the silences and add captions", client_msg_id=cmid)
+    assert dup.get("duplicate") and dup["message_id"] == out["message_id"], \
+        f"duplicate POST not idempotent: {dup} vs {out}"
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT COUNT(*) AS n FROM video_jobs
+                       WHERE project_id = %s AND type='agent_turn'""",
+                    (project_id,))
+        assert cur.fetchone()["n"] == 1, "duplicate POST enqueued a 2nd turn"
+        cur.execute("""SELECT COUNT(*) AS n FROM chat_messages cm
+                       JOIN projects p ON p.chat_session_id = cm.session_id
+                       WHERE p.id = %s AND cm.role='user'""", (project_id,))
+        assert cur.fetchone()["n"] == 1, "duplicate POST stored a 2nd message"
+    ok("duplicate POST with same client_msg_id: same message, one agent turn")
     wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
 
-    with db() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM edls WHERE project_id = %s "
-                    "ORDER BY version DESC LIMIT 1", (project_id,))
-        edl = cur.fetchone()
+    edl = latest_edl()
     assert edl["version"] >= 2, "agent did not write a new EDL version"
     kept = sum(e - s for s, e in edl["json"]["keep"])
     assert kept < src_duration - 1, \
@@ -190,7 +250,6 @@ def main():
     ok(f"agent wrote EDL v{edl['version']}: kept {kept:.1f}s of "
        f"{src_duration:.1f}s, captions={json.dumps(caps)[:60]}")
 
-    # preview rendered by the agent
     with db() as conn, conn.cursor() as cur:
         cur.execute("""SELECT * FROM video_jobs WHERE project_id = %s AND
                        type='preview' ORDER BY id DESC LIMIT 1""",
@@ -201,16 +260,114 @@ def main():
     assert prev_dur < src_duration - 1, \
         f"preview {prev_dur}s not shorter than source {src_duration}s"
     ok(f"preview rendered: {prev_dur:.1f}s (< {src_duration:.1f}s)")
+    ok(f"assistant replied: {latest_assistant()['content'][:70]}...")
 
-    if words:
-        with db() as conn, conn.cursor() as cur:
-            cur.execute("""SELECT content FROM chat_messages cm
-                           JOIN projects p ON p.chat_session_id = cm.session_id
-                           WHERE p.id = %s AND cm.role='assistant'
-                           ORDER BY cm.id DESC LIMIT 1""", (project_id,))
-            ok(f"assistant replied: {cur.fetchone()['content'][:70]}...")
+    state = get_state()
+    assert state["latest_preview"], "state endpoint missing latest_preview"
+    assert state["edl_versions"] and state["messages"], "state incomplete"
+    preview_before = state["latest_preview"]["asset_id"]
+    ok(f"state endpoint: preview asset {preview_before}, "
+       f"{len(state['edl_versions'])} versions, "
+       f"{len(state['messages'])} messages")
 
-    # final render — only through the explicit confirm endpoint
+    # ── turn 2: no-op honesty + auto-render (issue 3) ────────────────
+    v_before = latest_edl()["version"]
+    out = send("NOOP TEST then tighten the opening slightly")
+    assert out.get("queued")
+    turn = wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT COUNT(*) AS n FROM chat_messages cm
+                       JOIN projects p ON p.chat_session_id = cm.session_id
+                       WHERE p.id = %s AND cm.role='activity'
+                         AND cm.content LIKE %s""",
+                    (project_id, "%NO CHANGE%"))
+        assert cur.fetchone()["n"] >= 1, "no-op write did not report NO CHANGE"
+    v_after = latest_edl()["version"]
+    assert v_after == v_before + 1, \
+        f"no-op created a version: v{v_before} -> v{v_after} (expected +1)"
+    assert (turn["result"] or {}).get("auto_render") is True, \
+        f"loop did not auto-render: {turn['result']}"
+    reply = latest_assistant()
+    assert (reply["meta"] or {}).get("preview"), \
+        "auto-rendered preview not attached to the reply"
+    assert (reply["meta"] or {}).get("preview", {}).get("edl_version") == \
+        v_after, "attached preview is not for the new version"
+    ok(f"NO CHANGE surfaced; identical write made no version; "
+       f"auto-render attached preview for v{v_after}")
+
+    # ── turn 3: styled captions land in EDL + UI state (issue 2/5) ───
+    out = send("make the captions 3 words max, red, at the top")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    caps = edl["json"]["captions"]
+    assert caps.get("max_words_per_caption") == 3, caps
+    assert (caps.get("style") or {}).get("color") == "#FF0000", caps
+    assert (caps.get("style") or {}).get("position") == "top", caps
+    state = get_state()
+    assert state["latest_preview"]["asset_id"] != preview_before, \
+        "new preview did not surface via the state endpoint"
+    assert state["latest_edl"]["version"] == edl["version"]
+    ok(f"styled captions in EDL v{edl['version']} "
+       f"(<=3 words, #FF0000, top); state shows new preview "
+       f"{state['latest_preview']['asset_id']} without refresh")
+
+    # ── turn 4: music attachment -> add_music with duck (issue 8) ────
+    music_path = os.path.join(ROOT, "test_music.wav")
+    if not os.path.exists(music_path):
+        import subprocess
+        subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i",
+                        "sine=frequency=220:duration=18", "-ac", "2",
+                        music_path], check=True, capture_output=True)
+    mbytes = os.path.getsize(music_path)
+    r = client.post(f"/projects/{project_id}/uploads",
+                    json={"filename": "test_music.wav", "bytes": mbytes,
+                          "kind": "music"}, headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    up = r.get_json()
+    assert up["storage_key"].startswith(f"music/{project_id}/")
+    with open(music_path, "rb") as f:
+        pr = requests.put(up["url"], data=f.read(),
+                          headers={"Content-Type": up["content_type"]})
+        assert pr.status_code in (200, 204)
+    r = client.post(f"/projects/{project_id}/uploads/complete",
+                    json={"storage_key": up["storage_key"], "kind": "music",
+                          "filename": "test_music.wav", "duration_s": 18.0},
+                    headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    music_asset = r.get_json()["asset_id"]
+    state = get_state()
+    assert any(a["id"] == music_asset for a in state["music_assets"]), \
+        "uploaded music not listed in state"
+    ok(f"music uploaded as asset {music_asset} (18.0s), visible in state")
+
+    out = send("add this music quietly under the speech",
+               attachments=[music_asset])
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    music_items = edl["json"].get("music") or []
+    assert music_items, "music missing from EDL"
+    assert music_items[0]["duck"] is True
+    assert music_items[0]["storage_key"] == up["storage_key"]
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT cm.meta FROM chat_messages cm
+                       JOIN projects p ON p.chat_session_id = cm.session_id
+                       WHERE p.id = %s AND cm.role='user'
+                       ORDER BY cm.id DESC LIMIT 1""", (project_id,))
+        umeta = cur.fetchone()["meta"] or {}
+    assert umeta.get("attachments") == [music_asset], umeta
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT * FROM video_jobs WHERE project_id = %s AND
+                       type='preview' ORDER BY id DESC LIMIT 1""",
+                    (project_id,))
+        pv = cur.fetchone()
+    assert pv["state"] == "done" and \
+        pv["result"]["edl_version"] == edl["version"]
+    ok(f"music in EDL v{edl['version']} (duck=true), preview rendered")
+
+    # ── final render — only through the explicit confirm endpoint ────
+    edl = latest_edl()
     r = client.post(f"/projects/{project_id}/render/final",
                     json={"edl_version": edl["version"]}, headers=H)
     assert r.status_code == 200, r.get_data(as_text=True)
@@ -228,6 +385,19 @@ def main():
     ok(f"final render {fin['width']}x{fin['height']}, "
        f"{fin['duration_s']:.1f}s, presigned GET works")
 
+    # render cache: re-requesting the same version must serve the cached
+    # asset (no second encode)
+    r = client.post(f"/projects/{project_id}/render/final",
+                    json={"edl_version": edl["version"]}, headers=H)
+    assert r.status_code == 200
+    row = wait_job(r.get_json()["job_id"], TIMEOUT_RENDER, "final-cached")
+    assert (row["result"] or {}).get("cached") is True, \
+        f"expected cached render, got {row['result']}"
+    assert row["result"]["render_asset_id"] == fin["id"]
+    ok("re-render of same version served from cache")
+
+    print(f"\njob wall times: " + json.dumps(
+        {k: [round(x, 1) for x in v] for k, v in JOB_TIMES.items()}))
     print("\nALL INTEGRATION CHECKS PASSED")
 
 

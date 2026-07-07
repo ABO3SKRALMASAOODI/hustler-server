@@ -8,6 +8,7 @@ assemble VideoIndex.
 
 import os
 import shutil
+import time
 
 import config
 import db as dbx
@@ -29,13 +30,22 @@ def run_index_job(worker_db, job):
 
     workdir = os.path.join(config.TMP_DIR, f"index_{job_id}")
     os.makedirs(workdir, exist_ok=True)
+    timings, _t = {}, time.monotonic()
+
+    def _mark(stage):
+        nonlocal _t
+        timings[stage] = round(time.monotonic() - _t, 2)
+        _t = time.monotonic()
+
     try:
         # 1. Pull original + hash it
         src = os.path.join(workdir,
                            "src" + os.path.splitext(asset["storage_key"])[1])
         storage.download_to(asset["storage_key"], src)
         worker_db.run(dbx.set_progress, job_id, 8)
+        _mark("download_s")
         sha = media.sha256_file(src)
+        _mark("sha256_s")
 
         # 2. Probe (also enforces the duration quota)
         info = media.probe(src)
@@ -56,21 +66,25 @@ def run_index_job(worker_db, job):
                           workdir)
             _finish_setup(worker_db, project_id, session_id, info,
                           cached["json"])
+            _mark("cache_hit_s")
             return {"sha256": sha, "cached": True,
                     "shots": len(cached["json"].get("shots", [])),
-                    "words": len(cached["json"].get("words", []))}
+                    "words": len(cached["json"].get("words", [])),
+                    "timings": timings}
 
         # 3. Proxy (VFR -> CFR here) + 16k mono wav
         proxy_local = os.path.join(workdir, "proxy.mp4")
         media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
                          info["has_audio"])
         worker_db.run(dbx.set_progress, job_id, 30)
+        _mark("proxy_s")
 
         wav_local = None
         if info["has_audio"]:
             wav_local = os.path.join(workdir, "audio.wav")
             media.extract_wav(src, wav_local)
         worker_db.run(dbx.set_progress, job_id, 35)
+        _mark("wav_s")
 
         # 4. Transcription
         words, sentences = [], []
@@ -78,12 +92,14 @@ def run_index_job(worker_db, job):
             words, _lang = transcribe.transcribe(wav_local)
             sentences = transcribe.group_sentences(words)
         worker_db.run(dbx.set_progress, job_id, 60)
+        _mark("whisper_s")
 
         # 5. Silences
         silences = []
         if wav_local:
             silences = media.detect_silences(wav_local, info["duration"])
         worker_db.run(dbx.set_progress, job_id, 65)
+        _mark("silences_s")
 
         # 6. Shots + middle-frame thumbnails
         shots = scenes.detect_shots(proxy_local, info["duration"])
@@ -99,6 +115,7 @@ def run_index_job(worker_db, job):
             except media.MediaError:
                 pass
         worker_db.run(dbx.set_progress, job_id, 75)
+        _mark("shots_s")
 
         # 7. Contact sheets + optional vision captions
         sheet_dir = os.path.join(workdir, "sheets")
@@ -106,6 +123,7 @@ def run_index_job(worker_db, job):
         sheet_list = sheets.build_contact_sheets(shots, thumb_paths, sheet_dir)
         sheets.caption_shots(sheet_list, {s.id: s for s in shots})
         worker_db.run(dbx.set_progress, job_id, 85)
+        _mark("sheets_vision_s")
 
         # 8. Upload artifacts
         storage.upload_file(proxy_local, proxy_key, "video/mp4")
@@ -151,8 +169,10 @@ def run_index_job(worker_db, job):
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         _finish_setup(worker_db, project_id, session_id, info, index)
+        _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
-                "words": len(words), "silences": len(silences)}
+                "words": len(words), "silences": len(silences),
+                "timings": timings}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

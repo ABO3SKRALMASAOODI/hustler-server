@@ -6,13 +6,17 @@ filtergraphs. A TypeScript mirror of the EDL type lives in the frontend repo
 at src/types/edl.ts — keep the two in sync.
 """
 
+import json
+import re
 from typing import List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0
 GAIN_MAX_DB = 12.0
+HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+MAX_WORDS_PER_CAPTION = 12
 
 
 class EDLValidationError(ValueError):
@@ -27,15 +31,49 @@ def _r(t):
 #  EDL                                                                 #
 # ------------------------------------------------------------------ #
 
+class CaptionStyle(BaseModel):
+    """Burn style. color is #RRGGBB; the renderer converts it to the .ass
+    &HBBGGRR order. Defaults match the pre-style captions exactly, so EDLs
+    written before styling existed render unchanged."""
+    color: str = "#FFFFFF"
+    size: Literal["s", "m", "l"] = "m"
+    position: Literal["bottom", "top"] = "bottom"
+
+    @field_validator("color")
+    @classmethod
+    def _color_hex(cls, v):
+        v = (v or "").strip()
+        if not HEX_COLOR.match(v):
+            raise ValueError(
+                f"color '{v}' must be #RRGGBB hex, e.g. #FF0000 for red")
+        return v.upper()
+
+
+def _coerce_style(v):
+    # Legacy EDLs stored style as the string "default" — treat any string
+    # as "use defaults" instead of failing to load old versions.
+    if isinstance(v, str) or v == {}:
+        return None
+    return v
+
+
 class CaptionItem(BaseModel):
     text: str
     start: float   # source-timeline seconds
     end: float
+    style: Optional[CaptionStyle] = None   # per-item override
+
+    _style = field_validator("style", mode="before")(_coerce_style)
 
 
 class CaptionsFromTranscript(BaseModel):
     mode: Literal["from_transcript"] = "from_transcript"
-    style: str = "default"
+    # Chunk word-timed captions into groups of at most N words. Timing always
+    # comes from the real word timestamps in the index — never invented.
+    max_words_per_caption: Optional[int] = None
+    style: Optional[CaptionStyle] = None
+
+    _style = field_validator("style", mode="before")(_coerce_style)
 
 
 class MusicItem(BaseModel):
@@ -121,8 +159,18 @@ def validate_edl(data, duration):
             _check_span(f"captions[{i}]", s, e, duration)
             if not c.text.strip():
                 raise EDLValidationError(f"captions[{i}] has empty text.")
-            norm.append(CaptionItem(text=c.text.strip(), start=s, end=e))
+            norm.append(CaptionItem(text=c.text.strip(), start=s, end=e,
+                                    style=c.style))
         edl.captions = norm
+    elif isinstance(edl.captions, CaptionsFromTranscript):
+        mw = edl.captions.max_words_per_caption
+        if mw is not None:
+            mw = int(mw)
+            if not (1 <= mw <= MAX_WORDS_PER_CAPTION):
+                raise EDLValidationError(
+                    f"max_words_per_caption {mw} outside "
+                    f"[1, {MAX_WORDS_PER_CAPTION}].")
+            edl.captions.max_words_per_caption = mw
 
     for i, m in enumerate(edl.music):
         m.start, m.end = _r(m.start), _r(m.end)
@@ -144,6 +192,26 @@ def validate_edl(data, duration):
     return edl
 
 
+def edl_signature(edl_dict):
+    """Canonical string form of an EDL for byte-identity comparison (no-op
+    write detection). Assumes the dict is already validate_edl-normalized."""
+    return json.dumps(edl_dict, sort_keys=True, separators=(",", ":"))
+
+
+def _style_desc(style):
+    if not style:
+        return ""
+    s = style if isinstance(style, dict) else style.model_dump()
+    bits = []
+    if s.get("color") and s["color"] != "#FFFFFF":
+        bits.append(s["color"])
+    if s.get("size") and s["size"] != "m":
+        bits.append(f"size {s['size']}")
+    if s.get("position") and s["position"] != "bottom":
+        bits.append(s["position"])
+    return f" ({', '.join(bits)})" if bits else ""
+
+
 def describe_edl(edl_dict, duration=None):
     """One-line human summary used in diffs and activity messages."""
     edl = EDL.model_validate(edl_dict)
@@ -152,7 +220,10 @@ def describe_edl(edl_dict, duration=None):
     if duration:
         parts[-1] += f" of {round(duration, 1)}s"
     if isinstance(edl.captions, CaptionsFromTranscript):
-        parts.append("captions: transcript")
+        d = "captions: transcript"
+        if edl.captions.max_words_per_caption:
+            d += f" <= {edl.captions.max_words_per_caption} words"
+        parts.append(d + _style_desc(edl.captions.style))
     elif isinstance(edl.captions, list):
         parts.append(f"captions: {len(edl.captions)} manual")
     if edl.music:
