@@ -1,0 +1,103 @@
+# Local dev stack for the video editor core: postgres + minio + api + worker.
+#
+#   cp .env.example .env       # fill in OPENAI_API_KEY (or run the fake LLM)
+#   docker compose up --build
+#
+# API on http://localhost:5001, MinIO console on http://localhost:9001
+# (minioadmin/minioadmin). Point the frontend proxy at localhost:5001 or use
+# scripts/integration_test.py inside the api container:
+#
+#   docker compose exec api python /repo/scripts/integration_test.py
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: valmera
+      POSTGRES_PASSWORD: valmera
+      POSTGRES_DB: valmera
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U valmera"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  createbucket:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/valmera-dev &&
+      exit 0"
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+    environment: &shared_env
+      DATABASE_URL: postgresql://valmera:valmera@postgres:5432/valmera
+      S3_ENDPOINT: http://minio:9000
+      # Browsers hit MinIO through the host port, containers through the
+      # service name — presigned URLs must use the public one.
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_BUCKET: valmera-dev
+      S3_REGION: us-east-1
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENT_MODEL: ${AGENT_MODEL:-qwen-plus}
+      VISION_MODEL: ${VISION_MODEL:-qwen-vl-plus}
+      MAX_UPLOAD_GB: "2"
+      SECRET_KEY: devsecret
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./scripts:/repo/scripts:ro
+      - ./backend/migrations:/app/migrations:ro
+
+  worker:
+    build:
+      context: ./worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+    environment:
+      <<: *shared_env
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_DEVICE: cpu
+
+volumes:
+  pgdata:
+  miniodata:

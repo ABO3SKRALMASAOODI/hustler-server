@@ -1,0 +1,10 @@
+psycopg2-binary==2.9.10
+boto3==1.35.99
+pydantic==2.9.2
+openai==1.59.9
+faster-whisper==1.1.1
+scenedetect==0.6.4
+opencv-python-headless==4.10.0.84
+numpy<2
+pillow==10.4.0
+requests==2.32.3

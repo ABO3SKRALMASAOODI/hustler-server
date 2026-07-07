@@ -6,3 +6,5 @@ outputs/
 outputs_template/.DS_Store
 *.DS_Store
 node_modules/ # in case no trailing newline
+
+test_video.mp4

@@ -1,0 +1,12 @@
+# Dev-only image for docker-compose (production API deploys on Render via
+# pip install -r backend/requirements.txt, not this file).
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+CMD ["sh", "-c", "python apply_migrations.py && gunicorn --workers 2 --timeout 300 -b 0.0.0.0:5001 'app:create_app()'"]

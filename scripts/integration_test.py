@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""End-to-end acceptance test for the video editor core.
+
+Exercises the REAL code paths: Flask API (via test client) -> presigned
+upload to S3-compatible storage -> worker index job (ffmpeg/whisper/scenes)
+-> chat message -> agent loop (against OPENAI_BASE_URL — use
+scripts/fake_llm.py for a keyless run) -> EDL versions -> preview render ->
+confirmation-gated final render.
+
+Requires services reachable via env (see scripts/run_local_integration.sh
+for a no-docker macOS harness, or docker-compose.yml for the containers):
+  DATABASE_URL, S3_ENDPOINT, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY,
+  S3_BUCKET, OPENAI_BASE_URL, OPENAI_API_KEY
+
+The worker must be running against the same env. Asserts:
+  - index completes; >3 shots and >3 silences found
+  - agent turn writes a new EDL (output shorter than input) + captions
+  - preview renders; duration < source duration
+  - final render only via the explicit confirm endpoint, at source res
+"""
+
+import json
+import os
+import sys
+import time
+
+import jwt
+import psycopg2
+import requests
+from psycopg2.extras import RealDictCursor
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(ROOT, "backend"))
+
+DB_URL = os.environ["DATABASE_URL"]
+TIMEOUT_INDEX = int(os.getenv("TEST_INDEX_TIMEOUT", "900"))
+TIMEOUT_AGENT = int(os.getenv("TEST_AGENT_TIMEOUT", "600"))
+TIMEOUT_RENDER = int(os.getenv("TEST_RENDER_TIMEOUT", "600"))
+
+
+def die(msg):
+    print(f"\nFAIL: {msg}")
+    sys.exit(1)
+
+
+def ok(msg):
+    print(f"  ok  {msg}")
+
+
+def db():
+    return psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+
+
+def wait_job(job_id, timeout, label):
+    t0 = time.time()
+    last = None
+    while time.time() - t0 < timeout:
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT state, progress, error FROM video_jobs "
+                        "WHERE id = %s", (job_id,))
+            row = cur.fetchone()
+        if row["state"] != last:
+            print(f"    [{label}] {row['state']} {row['progress']}%")
+            last = row["state"]
+        if row["state"] == "done":
+            return
+        if row["state"] == "failed":
+            die(f"{label} job failed: {row['error']}")
+        time.sleep(3)
+    die(f"{label} job timed out after {timeout}s")
+
+
+def main():
+    from app import create_app                       # real Flask app
+    app = create_app()                               # also creates base tables
+    client = app.test_client()
+
+    # migration (idempotent)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute(open(os.path.join(
+            ROOT, "backend/migrations/001_video_editor.sql")).read())
+    ok("schema ready")
+
+    # bucket
+    import boto3
+    s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT"],
+                      aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
+                      aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
+                      region_name=os.getenv("S3_REGION", "auto"))
+    try:
+        s3.create_bucket(Bucket=os.environ["S3_BUCKET"])
+    except Exception:
+        pass
+
+    # user + token
+    email = f"itest_{int(time.time())}@example.com"
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO users (email, password, is_verified) "
+                    "VALUES (%s, 'x', 1) RETURNING id", (email,))
+        user_id = cur.fetchone()["id"]
+    token = jwt.encode({"sub": str(user_id)},
+                       app.config["SECRET_KEY"], algorithm="HS256")
+    H = {"Authorization": f"Bearer {token}"}
+    ok(f"user {user_id}")
+
+    # project
+    r = client.post("/projects", json={"title": "integration test"}, headers=H)
+    assert r.status_code == 201, r.get_data(as_text=True)
+    project_id = r.get_json()["project"]["id"]
+    ok(f"project {project_id}")
+
+    # test video
+    video_path = os.getenv("TEST_VIDEO", os.path.join(ROOT, "test_video.mp4"))
+    if not os.path.exists(video_path):
+        sys.path.insert(0, os.path.join(ROOT, "scripts"))
+        import make_test_video
+        make_test_video.main(video_path)
+    nbytes = os.path.getsize(video_path)
+    src_duration = _probe_duration(video_path)
+    ok(f"test video {nbytes} bytes, {src_duration:.1f}s")
+
+    # presigned upload (full path: presign -> HTTP PUT -> complete)
+    r = client.post(f"/projects/{project_id}/uploads",
+                    json={"filename": "test_video.mp4", "bytes": nbytes},
+                    headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    up = r.get_json()
+    with open(video_path, "rb") as f:
+        if up["mode"] == "single":
+            pr = requests.put(up["url"], data=f.read(),
+                              headers={"Content-Type": "video/mp4"})
+            assert pr.status_code in (200, 204), pr.text[:300]
+            parts = []
+        else:
+            parts = []
+            for part in up["part_urls"]:
+                chunk = f.read(up["part_size"])
+                pr = requests.put(part["url"], data=chunk)
+                assert pr.status_code in (200, 204), pr.text[:300]
+                parts.append({"part_number": part["part_number"],
+                              "etag": pr.headers.get("ETag", '"x"')})
+    r = client.post(f"/projects/{project_id}/uploads/complete",
+                    json={"storage_key": up["storage_key"],
+                          "upload_id": up.get("upload_id"),
+                          "parts": parts, "filename": "test_video.mp4"},
+                    headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    index_job = r.get_json()["index_job_id"]
+    ok(f"uploaded via presigned {up['mode']}; index job {index_job}")
+
+    wait_job(index_job, TIMEOUT_INDEX, "index")
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT i.json FROM indexes i JOIN assets a
+                       ON a.sha256 = i.video_sha256
+                       WHERE a.project_id = %s AND a.kind='original'
+                       ORDER BY a.id DESC LIMIT 1""", (project_id,))
+        idx = cur.fetchone()["json"]
+    shots, silences = idx["shots"], idx["silences"]
+    words = idx["words"]
+    assert len(shots) > 3, f"expected >3 shots, got {len(shots)}"
+    assert len(silences) > 3, f"expected >3 silences, got {len(silences)}"
+    ok(f"index: {len(shots)} shots, {len(silences)} silences, "
+       f"{len(words)} words")
+
+    r = client.get(f"/projects/{project_id}", headers=H)
+    pj = r.get_json()
+    assert pj["indexed"] is True
+    assert any(a["kind"] == "proxy" for a in pj["assets"]), "no proxy asset"
+    ok("proxy asset present; project reports indexed")
+
+    # chat -> agent turn
+    r = client.post(f"/projects/{project_id}/messages",
+                    json={"text": "remove the silences and add captions"},
+                    headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    out = r.get_json()
+    assert out.get("queued"), f"agent turn not queued: {out}"
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM edls WHERE project_id = %s "
+                    "ORDER BY version DESC LIMIT 1", (project_id,))
+        edl = cur.fetchone()
+    assert edl["version"] >= 2, "agent did not write a new EDL version"
+    kept = sum(e - s for s, e in edl["json"]["keep"])
+    assert kept < src_duration - 1, \
+        f"expected trimmed output, kept {kept}s of {src_duration}s"
+    caps = edl["json"].get("captions")
+    assert caps, "captions missing from EDL"
+    ok(f"agent wrote EDL v{edl['version']}: kept {kept:.1f}s of "
+       f"{src_duration:.1f}s, captions={json.dumps(caps)[:60]}")
+
+    # preview rendered by the agent
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT * FROM video_jobs WHERE project_id = %s AND
+                       type='preview' ORDER BY id DESC LIMIT 1""",
+                    (project_id,))
+        pv = cur.fetchone()
+    assert pv and pv["state"] == "done", "agent preview did not complete"
+    prev_dur = pv["result"]["duration_s"]
+    assert prev_dur < src_duration - 1, \
+        f"preview {prev_dur}s not shorter than source {src_duration}s"
+    ok(f"preview rendered: {prev_dur:.1f}s (< {src_duration:.1f}s)")
+
+    if words:
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT content FROM chat_messages cm
+                           JOIN projects p ON p.chat_session_id = cm.session_id
+                           WHERE p.id = %s AND cm.role='assistant'
+                           ORDER BY cm.id DESC LIMIT 1""", (project_id,))
+            ok(f"assistant replied: {cur.fetchone()['content'][:70]}...")
+
+    # final render — only through the explicit confirm endpoint
+    r = client.post(f"/projects/{project_id}/render/final",
+                    json={"edl_version": edl["version"]}, headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    wait_job(r.get_json()["job_id"], TIMEOUT_RENDER, "final")
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets WHERE project_id = %s
+                       AND kind='render' AND meta->>'variant'='final'
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        fin = cur.fetchone()
+    assert fin, "final render asset missing"
+    assert fin["height"] == 720 and fin["width"] == 1280, \
+        f"final not at source resolution: {fin['width']}x{fin['height']}"
+    r = client.get(f"/assets/{fin['id']}/url", headers=H)
+    assert r.status_code == 200 and r.get_json()["url"]
+    ok(f"final render {fin['width']}x{fin['height']}, "
+       f"{fin['duration_s']:.1f}s, presigned GET works")
+
+    print("\nALL INTEGRATION CHECKS PASSED")
+
+
+def _probe_duration(path):
+    import subprocess
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path], capture_output=True, text=True)
+    return float(out.stdout.strip())
+
+
+if __name__ == "__main__":
+    main()
