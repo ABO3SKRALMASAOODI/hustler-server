@@ -48,6 +48,7 @@ ALLOWED_IMAGE_EXT = {
 # Chat attachments are small; only the main video gets the multi-GB budget.
 MUSIC_MAX_BYTES = 50 * 1024 * 1024
 IMAGE_MAX_BYTES = 10 * 1024 * 1024
+CLIP_MAX_BYTES = 500 * 1024 * 1024   # clips spliced into the edit
 
 
 def is_configured():
@@ -87,6 +88,7 @@ def validate_upload(filename, nbytes, kind):
     allowed, cap, cap_label = {
         "music": (ALLOWED_MUSIC_EXT, MUSIC_MAX_BYTES, "50 MB"),
         "image": (ALLOWED_IMAGE_EXT, IMAGE_MAX_BYTES, "10 MB"),
+        "clip": (ALLOWED_VIDEO_EXT, CLIP_MAX_BYTES, "500 MB"),
     }.get(kind, (ALLOWED_VIDEO_EXT, max_upload_bytes(),
                  f"{os.getenv('MAX_UPLOAD_GB', '2')} GB"))
     if ext not in allowed:
@@ -100,7 +102,8 @@ def validate_upload(filename, nbytes, kind):
     return ext, allowed[ext]
 
 
-KEY_PREFIX = {"original": "originals", "music": "music", "image": "images"}
+KEY_PREFIX = {"original": "originals", "music": "music", "image": "images",
+              "clip": "clips"}
 
 
 def new_original_key(project_id, ext, kind="original"):

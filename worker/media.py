@@ -157,3 +157,13 @@ def frame_at(src, t, dst, width=None, quality=4):
 
 def duration_of(path):
     return probe(path)["duration"]
+
+
+def probe_audio_duration(path):
+    """Duration of an audio-only file (probe() requires a video stream)."""
+    out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+               "-of", "csv=p=0", path], timeout=120)
+    try:
+        return round(float(out.strip()), 3)
+    except (TypeError, ValueError):
+        raise MediaError(f"Could not determine audio duration of {path}")

@@ -336,6 +336,35 @@ def edl_history(conn, project_id, limit=8):
         return cur.fetchall()
 
 
+LLM_PAYLOAD_CAP = 200_000     # bytes of JSON per side, then truncated marker
+
+
+def _capped_payload(obj):
+    """Redact secrets and cap the stored JSON. The cap keeps llm_calls
+    readable in the admin inspector without ever dropping a call."""
+    s = json.dumps(obj, ensure_ascii=False, default=str)
+    if config.OPENAI_API_KEY:
+        s = s.replace(config.OPENAI_API_KEY, "[REDACTED]")
+    if len(s) > LLM_PAYLOAD_CAP:
+        return {"_truncated": True, "_original_bytes": len(s),
+                "_prefix": s[:LLM_PAYLOAD_CAP] + "…[truncated]"}
+    return json.loads(s)
+
+
+def insert_llm_call(conn, project_id, job_id, purpose, model, request,
+                    response, prompt_tokens=None, completion_tokens=None):
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO llm_calls (project_id, job_id, purpose, model,
+                                   request, response, prompt_tokens,
+                                   completion_tokens)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (project_id, job_id, purpose[:32], model,
+              Json(_capped_payload(request)),
+              Json(_capped_payload(response) if response is not None else None),
+              prompt_tokens, completion_tokens))
+
+
 def add_message(conn, session_id, role, content, meta=None):
     with conn.cursor() as cur:
         cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)

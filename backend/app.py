@@ -17,6 +17,7 @@ from routes.ai_proxy import ai_proxy_bp
 from routes.planner import planner_bp
 from routes.newsletter import newsletter_bp
 from routes.video import video_bp
+from routes.admin_video import admin_video_bp
 
 load_dotenv()
 
@@ -69,6 +70,7 @@ def create_app():
     app.register_blueprint(planner_bp)
     app.register_blueprint(newsletter_bp, url_prefix='/newsletter')
     app.register_blueprint(video_bp)
+    app.register_blueprint(admin_video_bp)
     return app
 
 

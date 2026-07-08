@@ -25,13 +25,21 @@ Two phases, per the core rules:
    detection + thumbnails → contact sheets → optional vision captions →
    one JSON index in the `indexes` table.
 2. **Agent turns (one per chat message):** OpenAI tool-calling loop over
-   READ tools (`get_transcript`, `search_transcript`, `get_shots`,
-   `find_silences`, `look_at`), WRITE tools (`keep_segments`, `add_captions`,
-   `add_music`, `set_volume` — each creates a new EDL version), and META
-   tools (`get_edl`, `render_preview`, `ask_user`). Every tool call is
-   persisted as an `activity` chat message. Previews render at 480p from the
-   proxy; finals render from the original, only via the user-confirmed
-   `POST /projects/:id/render/final`.
+   READ tools (`get_transcript`, `get_words`, `search_transcript`,
+   `get_shots`, `find_silences`, `list_assets`, `look_at`), WRITE tools
+   (`keep_segments`, `cut_range`, `restore_range`, `add_captions`,
+   `set_caption_style`, `add_music`, `set_volume`, `set_frame`,
+   `insert_media`, `remove_insert`, `add_voiceover`, `remove_voiceover` —
+   each creates a new EDL version), and META tools (`get_edl`,
+   `render_preview`, `ask_user`). A CAPABILITIES digest auto-generated from
+   the registry is injected each turn so the model can't promise features
+   that don't exist; every model call is persisted to `llm_calls` for the
+   admin inspector, and every tool call is persisted as an `activity` chat
+   message. Previews render at 480p from the proxy with dense keyframes;
+   finals render from the original (veryfast/CRF 20, `+faststart`), only via
+   the user-confirmed `POST /projects/:id/render/final`. The UI writes
+   `created_by='user'` EDL versions through `POST /projects/:id/edl`
+   (frame selector, timeline inserts, voiceover).
 
 All timestamps everywhere are seconds as floats. The EDL schema lives in
 `worker/schemas.py` (Pydantic) and is mirrored at `src/types/edl.ts` in the
@@ -56,7 +64,9 @@ frontend repo.
 | `WHISPER_BEAM_SIZE` | worker | default `1` on cpu, `5` on cuda |
 | `LLM_TIMEOUT_S` / `LLM_MAX_RETRIES` | worker | default 90 / 1 (pooled client) |
 | `AGENT_TURN_TIMEOUT_S` | worker | default 300 — hard cap per agent turn; on expiry the user gets a chat message, never a silent stall |
-| `PREVIEW_PRESET` | worker | default `ultrafast` (previews only; finals stay `medium`) |
+| `PREVIEW_PRESET` | worker | default `ultrafast` (previews only) |
+| `FINAL_PRESET` / `FINAL_CRF` | worker | default `veryfast` / `20` — visually transparent for this content and several times faster than the old medium/CRF18 |
+| `LLM_PRICE_IN_PER_M` / `LLM_PRICE_OUT_PER_M` | api | $/1M tokens for the admin cost view (defaults 0.4 / 1.2, qwen-plus ballpark) |
 | `PIPELINE_VERSION` | api, worker | default `2`. Bumped when the index pipeline output changes; older cached indexes re-build automatically on next project open |
 | `MAX_UPLOAD_GB` | api, worker | default `2` (chat attachments: images 10 MB, audio 50 MB) |
 | `MAX_DURATION_S` | worker | default 3h |
@@ -94,11 +104,19 @@ frontend repo.
    psql "$DATABASE_URL" -f backend/migrations/001_video_editor.sql
    psql "$DATABASE_URL" -f backend/migrations/002_video_editor_fixes.sql
    psql "$DATABASE_URL" -f backend/migrations/003_index_pipeline_version.sql
+   psql "$DATABASE_URL" -f backend/migrations/004_video_observability.sql
    ```
    002 adds the `image_ref` asset kind (chat image attachments) and the
    unique index that makes chat sends idempotent on `client_msg_id`.
    003 versions the index cache (`indexes.pipeline_version`) so stale
    pre-fix indexes self-heal on next project open.
+   004 adds the `video_clip` asset kind (timeline inserts) and the
+   `llm_calls` table (per-turn model I/O for the admin inspector; payloads
+   capped + key-redacted by the worker).
+
+   Player timing across browsers is covered by
+   `docs/safari-player-checklist.md` (automated parts run in the
+   integration suite).
 
 ## Local development
 

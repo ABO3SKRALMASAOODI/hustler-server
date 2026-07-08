@@ -326,18 +326,22 @@ def main():
     ok("zero-write false claims caught; one regeneration produced an "
        "honest reply")
 
-    # ── zero-write false claims: corrective-note path ────────────────
+    # ── zero-write false claims: stubborn regen -> drafts DISCARDED ──
+    # (round 4 hardened this: the old corrective-note path published the
+    # fabrication behind a prefix; now the user only sees the fallback)
     out = send("STUBBORN TEST same again")
     assert out.get("queued")
     turn = wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
     hon = (turn["result"] or {}).get("honesty") or {}
     assert hon.get("false_claims") == 2 and hon.get("corrective_note"), hon
+    assert hon.get("fallback_reply") is True, hon
+    assert hon.get("discarded_drafts"), hon
     reply = latest_assistant()["content"]
-    assert reply.startswith("*(system: no changes were made this turn)*"), \
-        reply[:80]
+    assert reply.startswith("I wasn't able to make that change"), reply[:80]
+    assert "Captions are now red" not in reply and "Cuts applied" not in reply
     assert latest_edl()["version"] == v_before
-    ok("stubborn false claims got the automatic corrective note "
-       "(counters: false_claims=2, corrective_note=true)")
+    ok("stubborn false claims: both drafts discarded, system fallback "
+       "posted (false_claims=2, fallback_reply=true)")
 
     # ── mid-word protection: warning, dirty audit, snap fixes it ─────
     with db() as conn, conn.cursor() as cur:
@@ -414,6 +418,205 @@ def main():
     assert edl["json"]["keep"] == keep_before, "style change touched the cut"
     ok("set_caption_style merged color only — chunking and keep untouched")
 
+    def download_asset(asset_id, dest):
+        r = client.get(f"/assets/{asset_id}/url", headers=H)
+        assert r.status_code == 200, r.get_data(as_text=True)
+        url = r.get_json()["url"]
+        assert url.startswith(os.environ["S3_ENDPOINT"]), \
+            f"asset URL not direct-from-storage: {url[:80]}"
+        blob = requests.get(url)
+        assert blob.status_code == 200
+        with open(dest, "wb") as f:
+            f.write(blob.content)
+        return dest
+
+    def probe_dims(path):
+        import subprocess
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+            capture_output=True, text=True)
+        w, h = out.stdout.strip().split(",")[:2]
+        return int(w), int(h)
+
+    def last_preview_result():
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT result FROM video_jobs
+                           WHERE project_id = %s AND type='preview'
+                             AND state='done'
+                           ORDER BY id DESC LIMIT 1""", (project_id,))
+            return cur.fetchone()["result"]
+
+    def all_chat_text():
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT string_agg(cm.content, '\n') AS t
+                           FROM chat_messages cm
+                           JOIN projects p ON p.chat_session_id = cm.session_id
+                           WHERE p.id = %s AND cm.role IN
+                                 ('assistant','user')""", (project_id,))
+            return cur.fetchone()["t"] or ""
+
+    def user_edl_op(op, args, expect=200):
+        r = client.post(f"/projects/{project_id}/edl",
+                        json={"op": op, "args": args}, headers=H)
+        assert r.status_code == expect, r.get_data(as_text=True)
+        return r.get_json()
+
+    # ── ISSUE 2: zero-write 9:16 fabrication — regen also fabricates,
+    #    the user must ONLY see the system-authored fallback ─────────────
+    v_before = latest_edl()["version"]
+    out = send("RATIO916 TEST make the video 9:16")
+    assert out.get("queued")
+    turn = wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    hon = (turn["result"] or {}).get("honesty") or {}
+    assert hon.get("false_claims") == 2 and hon.get("corrective_note"), hon
+    assert hon.get("fallback_reply") is True, hon
+    assert any("cropped to 9:16" in d for d in hon.get("discarded_drafts")
+               or []), f"discarded drafts not stored: {hon}"
+    assert latest_edl()["version"] == v_before, "fabrication turn wrote EDL"
+    reply = latest_assistant()["content"]
+    assert reply.startswith("I wasn't able to make that change"), reply[:90]
+    assert "What I CAN do" in reply, f"no alternative hint: {reply}"
+    chat = all_chat_text()
+    assert "cropped to 9:16" not in chat and "Preview attached" not in chat, \
+        "fabricated sentence leaked into user-visible chat"
+    ok("9:16 fabrication: both drafts discarded, system fallback + honest "
+       "alternative shown; drafts stored for admin")
+
+    # ── ISSUE 1: set_frame as an agent tool ─────────────────────────────
+    out = send("FRAME TEST make it vertical for tiktok")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    assert (edl["json"].get("frame") or {}).get("ratio") == "9:16", edl["json"]
+    pv = last_preview_result()
+    assert pv["edl_version"] == edl["version"]
+    prev_path = os.path.join(ROOT, "itest_preview_916.mp4")
+    download_asset(pv["render_asset_id"], prev_path)
+    w, h = probe_dims(prev_path)
+    assert h > w and h == 480, f"9:16 preview not vertical: {w}x{h}"
+    ok(f"set_frame 9:16: preview is vertical {w}x{h}, direct storage URL")
+
+    # keyframe density for accurate scrubbing (Safari)
+    import subprocess as _sp
+    kf = _sp.run(["ffprobe", "-v", "error", "-skip_frame", "nokey",
+                  "-select_streams", "v:0", "-show_entries", "frame=pts_time",
+                  "-of", "csv=p=0", prev_path], capture_output=True, text=True)
+    kts = [float(x.split(",")[0]) for x in kf.stdout.split() if x.strip(",")]
+    gaps = [b - a for a, b in zip(kts, kts[1:])]
+    assert kts and (not gaps or max(gaps) <= 2.2), \
+        f"keyframes too sparse for scrubbing: max gap {max(gaps):.1f}s"
+    ok(f"preview keyframes dense: {len(kts)} keyframes, "
+       f"max gap {max(gaps) if gaps else 0:.2f}s")
+
+    # ── ISSUE 3: middle captions ─────────────────────────────────────────
+    out = send("MIDPOS TEST captions in the middle")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    caps = latest_edl()["json"]["captions"]
+    assert (caps.get("style") or {}).get("position") == "middle", caps
+    assert (caps.get("style") or {}).get("color") == "#FFD700", \
+        f"middle merge reset color: {caps}"
+    dur_before_insert = last_preview_result()["duration_s"]
+    ok(f"caption position middle merged (color kept); baseline program "
+       f"{dur_before_insert:.1f}s")
+
+    # ── ISSUE 4: image insert via the agent ─────────────────────────────
+    img_path = os.path.join(ROOT, "test_image.png")
+    if not os.path.exists(img_path):
+        _sp.run(["ffmpeg", "-y", "-f", "lavfi", "-i",
+                 "color=c=orange:size=640x360:duration=0.1", "-frames:v", "1",
+                 img_path], check=True, capture_output=True)
+    ibytes = os.path.getsize(img_path)
+    r = client.post(f"/projects/{project_id}/uploads",
+                    json={"filename": "test_image.png", "bytes": ibytes,
+                          "kind": "image"}, headers=H)
+    up = r.get_json()
+    with open(img_path, "rb") as f:
+        requests.put(up["url"], data=f.read(),
+                     headers={"Content-Type": up["content_type"]})
+    r = client.post(f"/projects/{project_id}/uploads/complete",
+                    json={"storage_key": up["storage_key"], "kind": "image",
+                          "filename": "test_image.png"}, headers=H)
+    assert r.status_code == 200
+
+    out = send("IMGINSERT TEST splice the image in at the start")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    ins = edl["json"].get("inserts") or []
+    assert len(ins) == 1 and ins[0]["kind"] == "image" and \
+        ins[0]["at_output_s"] == 0 and ins[0]["duration_s"] == 3.0, ins
+    pv = last_preview_result()
+    assert abs(pv["duration_s"] - (dur_before_insert + 3.0)) < 0.25, \
+        f"program did not grow by 3s: {dur_before_insert} -> {pv['duration_s']}"
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT COUNT(*) AS n FROM chat_messages cm
+                       JOIN projects p ON p.chat_session_id = cm.session_id
+                       WHERE p.id = %s AND cm.role='activity'
+                         AND cm.content LIKE '%%not transcribed%%'""",
+                    (project_id,))
+        assert cur.fetchone()["n"] >= 1, "insert caption note missing"
+    ok(f"image insert at 0s: program {pv['duration_s']:.1f}s "
+       f"(+3.0s), captions-scope note surfaced")
+
+    # ── ISSUE 4: video clip insert + remove via the UI endpoint ─────────
+    clip_path = os.path.join(ROOT, "test_clip.mp4")
+    if not os.path.exists(clip_path):
+        _sp.run(["ffmpeg", "-y", "-f", "lavfi", "-i",
+                 "testsrc=size=320x240:rate=15:duration=2",
+                 "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                 "-shortest", clip_path], check=True, capture_output=True)
+    cbytes = os.path.getsize(clip_path)
+    r = client.post(f"/projects/{project_id}/uploads",
+                    json={"filename": "test_clip.mp4", "bytes": cbytes,
+                          "kind": "clip"}, headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    up = r.get_json()
+    assert up["storage_key"].startswith(f"clips/{project_id}/")
+    with open(clip_path, "rb") as f:
+        requests.put(up["url"], data=f.read(),
+                     headers={"Content-Type": up["content_type"]})
+    r = client.post(f"/projects/{project_id}/uploads/complete",
+                    json={"storage_key": up["storage_key"], "kind": "clip",
+                          "filename": "test_clip.mp4", "duration_s": 2.0},
+                    headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    clip_asset = r.get_json()["asset_id"]
+    state = get_state()
+    assert any(a["id"] == clip_asset and a["kind"] == "video_clip"
+               for a in state.get("media_assets") or []), \
+        "clip not in state media_assets"
+
+    dur_before_clip = last_preview_result()["duration_s"]
+    res = user_edl_op("insert_media",
+                      {"asset_id": clip_asset, "at_output_s": 99999})
+    assert res.get("version") and res.get("preview_job_id"), res
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT created_by FROM edls WHERE project_id=%s
+                       AND version=%s""", (project_id, res["version"]))
+        assert cur.fetchone()["created_by"] == "user"
+    wait_job(res["preview_job_id"], TIMEOUT_RENDER, "preview-clip")
+    pv = last_preview_result()
+    assert abs(pv["duration_s"] - (dur_before_clip + 2.0)) < 0.25, \
+        f"clip insert wrong growth: {dur_before_clip} -> {pv['duration_s']}"
+    clip_prev = os.path.join(ROOT, "itest_preview_clip.mp4")
+    download_asset(pv["render_asset_id"], clip_prev)
+    w, h = probe_dims(clip_prev)
+    assert h > w and h == 480, \
+        f"240p/15fps clip not normalized into 9:16 frame: {w}x{h}"
+    clip_ins_id = next(i["id"] for i in latest_edl()["json"]["inserts"]
+                       if i["asset_key"] == up["storage_key"])
+    res = user_edl_op("remove_insert", {"id": clip_ins_id})
+    wait_job(res["preview_job_id"], TIMEOUT_RENDER, "preview-clip-removed")
+    pv = last_preview_result()
+    assert abs(pv["duration_s"] - dur_before_clip) < 0.06, \
+        f"remove_insert did not restore timing: {dur_before_clip} vs " \
+        f"{pv['duration_s']}"
+    ok(f"user-endpoint clip insert (mixed res/fps, normalized) then "
+       f"remove_insert restored {pv['duration_s']:.2f}s exactly")
+
     # ── turn 4: music attachment -> add_music with duck (issue 8) ────
     music_path = os.path.join(ROOT, "test_music.wav")
     if not os.path.exists(music_path):
@@ -468,6 +671,34 @@ def main():
         pv["result"]["edl_version"] == edl["version"]
     ok(f"music in EDL v{edl['version']} (duck=true), preview rendered")
 
+    # ── ISSUE 4: voiceover over the whole program (agent tool) ──────────
+    out = send("VOICEOVER TEST lay my narration over everything")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    vos = edl["json"].get("voiceover") or []
+    assert vos and vos[0]["duck_others"] is True and \
+        vos[0]["start_output_s"] == 0, vos
+    pv = last_preview_result()
+    assert pv["edl_version"] == edl["version"], "voiceover preview missing"
+    ok(f"voiceover in EDL v{edl['version']} (duck_others=true), "
+       "preview rendered with the mix")
+
+    # ── ISSUE 1: UI frame toggle writes a user version + auto-previews ──
+    res = user_edl_op("set_frame", {"ratio": "1:1", "mode": "pad"})
+    assert res.get("version") and res.get("preview_job_id"), res
+    wait_job(res["preview_job_id"], TIMEOUT_RENDER, "preview-1x1")
+    sq_prev = os.path.join(ROOT, "itest_preview_1x1.mp4")
+    download_asset(last_preview_result()["render_asset_id"], sq_prev)
+    w, h = probe_dims(sq_prev)
+    assert w == h, f"1:1 pad preview not square: {w}x{h}"
+    # back to source frame so the final-render resolution assertion below
+    # keeps guarding "finals render at source resolution"
+    res = user_edl_op("set_frame", {"ratio": "source"})
+    wait_job(res["preview_job_id"], TIMEOUT_RENDER, "preview-src-frame")
+    ok(f"UI frame toggle: user EDL versions + auto previews "
+       f"(1:1 pad {w}x{h}, then back to source)")
+
     # ── stale index self-heals on project open (pipeline version) ────
     with db() as conn, conn.cursor() as cur:
         cur.execute("""UPDATE indexes SET pipeline_version = 1
@@ -514,6 +745,16 @@ def main():
     ok(f"final render {fin['width']}x{fin['height']}, "
        f"{fin['duration_s']:.1f}s, presigned GET works")
 
+    # faststart: moov atom must lead so duration is known immediately
+    fin_path = os.path.join(ROOT, "itest_final.mp4")
+    download_asset(fin["id"], fin_path)
+    head = open(fin_path, "rb").read(64 * 1024)
+    moov, mdat = head.find(b"moov"), head.find(b"mdat")
+    assert moov != -1 and (mdat == -1 or moov < mdat), \
+        f"final not faststart (moov={moov}, mdat={mdat})"
+    ok("final has +faststart (moov before mdat); download URL is a direct "
+       "storage presigned GET")
+
     # render cache: re-requesting the same version must serve the cached
     # asset (no second encode)
     r = client.post(f"/projects/{project_id}/render/final",
@@ -525,9 +766,78 @@ def main():
     assert row["result"]["render_asset_id"] == fin["id"]
     ok("re-render of same version served from cache")
 
+    # ── ISSUE 7: admin observability ─────────────────────────────────────
+    admin_token = jwt.encode({"sub": str(user_id),
+                              "email": "thevalmera@gmail.com"},
+                             app.config["SECRET_KEY"], algorithm="HS256")
+    AH = {"Authorization": f"Bearer {admin_token}"}
+
+    r = client.get("/admin/video/overview", headers=H)
+    assert r.status_code == 403, "non-admin was not blocked"
+    r = client.get("/admin/video/overview", headers=AH)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    ov = r.get_json()
+    row = next((u for u in ov["users"] if u["id"] == user_id), None)
+    assert row and row["projects"] >= 1 and row["messages"] >= 10, row
+    assert row["storage_bytes"] > 0
+    assert ov["ops"]["turns_total"] >= 10
+    assert ov["ops"]["false_claims"] >= 5, ov["ops"]     # zwc 1 + stubborn 2 + ratio 2
+    assert ov["ops"]["fallback_replies"] >= 1, ov["ops"]
+    assert ov["ops"]["auto_renders"] >= 1
+    assert ov["ops"]["no_change_count"] >= 1
+    assert ov["ops"]["stage_medians"].get("agent_turn", {}).get("total_s") \
+        is not None
+    ok(f"admin overview: user rollup + ops counters "
+       f"(false_claims={ov['ops']['false_claims']}, "
+       f"fallback_replies={ov['ops']['fallback_replies']}, "
+       f"auto_renders={ov['ops']['auto_renders']})")
+
+    r = client.get("/admin/video/projects?search=", headers=AH)
+    assert any(p["id"] == project_id for p in r.get_json()["projects"])
+    r = client.get(f"/admin/video/projects/{project_id}", headers=AH)
+    assert r.status_code == 200
+    det = r.get_json()
+    assert len(det["messages"]) > 20 and \
+        any(m["role"] == "activity" and (m["meta"] or {}).get("tool")
+            for m in det["messages"]), "activity steps missing meta"
+    assert len(det["edls"]) >= 10 and det["edls"][0]["json"].get("keep")
+    assert any(j["type"] == "agent_turn" and
+               (j["result"] or {}).get("timings") for j in det["jobs"])
+    sheets_ = [a for a in det["assets"] if a["kind"] == "sheet"]
+    assert sheets_ and all(a.get("url") for a in sheets_), \
+        "contact sheets not viewable"
+    fabricated = [j for j in det["jobs"]
+                  if (j.get("result") or {}).get("honesty", {})
+                  .get("discarded_drafts")]
+    assert fabricated, "discarded honesty drafts not visible in admin jobs"
+    assert det["llm_call_count"] > 10
+    r = client.get(f"/admin/video/projects/{project_id}/llm_calls",
+                   headers=AH)
+    calls = r.get_json()["calls"]
+    assert calls and any(c["purpose"] == "agent" and
+                         (c["request"] or {}).get("messages")
+                         for c in calls), "agent llm_calls missing context"
+    assert any(c["purpose"] == "honesty_regen" for c in calls) or \
+        any(c["purpose"] == "honesty_regen"
+            for c in _all_llm_calls(project_id)), "regen call not recorded"
+    r = client.get(f"/admin/video/projects/{project_id}/index", headers=AH)
+    assert r.status_code == 200 and r.get_json()["index"].get("words")
+    r = client.get("/admin/video/costs", headers=AH)
+    assert r.status_code == 200 and "daily" in r.get_json()
+    ok(f"admin inspector: chat+activity, {len(det['edls'])} EDL versions, "
+       f"jobs w/ timings, assets incl contact sheets, index, "
+       f"{det['llm_call_count']} llm_calls (incl honesty regen), costs")
+
     print(f"\njob wall times: " + json.dumps(
         {k: [round(x, 1) for x in v] for k, v in JOB_TIMES.items()}))
     print("\nALL INTEGRATION CHECKS PASSED")
+
+
+def _all_llm_calls(project_id):
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT purpose FROM llm_calls WHERE project_id = %s""",
+                    (project_id,))
+        return cur.fetchall()
 
 
 def _probe_duration(path):

@@ -13,8 +13,10 @@ import db as dbx
 import llm
 import media
 import storage
-from schemas import (CaptionStyle, EDLValidationError, describe_edl,
-                     edl_signature, output_duration, validate_edl)
+from schemas import (CaptionStyle, EDLValidationError, Frame, describe_edl,
+                     edl_signature, keep_boundaries, output_duration,
+                     program_duration, validate_edl, MAX_INSERT_DURATION_S)
+from timeline import Timeline
 
 
 class AskUser(Exception):
@@ -237,8 +239,9 @@ def find_silences(ctx, min_seconds=0.7):
 def list_assets(ctx, kind=None):
     """Project files the user has uploaded or the system has produced."""
     kinds = {"music": ["music", "audio"], "image": ["image_ref"],
-             "render": ["render"], "all": ["music", "audio", "image_ref",
-                                           "render", "original"]}
+             "clip": ["video_clip"], "render": ["render"],
+             "all": ["music", "audio", "image_ref", "video_clip",
+                     "render", "original"]}
     sel = kinds.get((kind or "music").strip().lower())
     if not sel:
         return ("REJECTED: kind must be one of "
@@ -274,13 +277,14 @@ def look_at(ctx, start, end, question):
     except Exception as err:
         return f"Cannot fetch frames right now ({err}). Decide from the index."
     n = 4 if e - s > 1.5 else 2
-    frames = []
+    frames, frame_names = [], []
     for i in range(n):
         t = s + (e - s) * (i + 0.5) / n
         fp = os.path.join(ctx.workdir, f"look_{int(t * 100)}.jpg")
         try:
             media.frame_at(proxy, t, fp)
             frames.append(fp)
+            frame_names.append(f"proxy frame @{t:.2f}s")
         except media.MediaError:
             pass
     if not frames:
@@ -288,7 +292,8 @@ def look_at(ctx, start, end, question):
     prompt = (f"These are {len(frames)} frames sampled evenly from "
               f"{s:.2f}s to {e:.2f}s of a video. Question from the editor: "
               f"{question}\nAnswer concisely and concretely.")
-    answer = llm.ask_vision(prompt, frames)
+    answer = llm.ask_vision(prompt, frames, purpose="vision_look",
+                            image_names=frame_names)
     return _cap(answer or "The vision model did not return an answer; "
                           "proceed using the transcript and shot captions.")
 
@@ -325,6 +330,14 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     prev_keep = prev["json"]["keep"]
     edl = dict(prev["json"])
     edl["keep"] = new_keep
+    # Inserts sit at keep boundaries; when the keep list changes, re-snap
+    # each to the nearest boundary of the NEW keep so the edit stays valid.
+    if edl.get("inserts"):
+        bounds = keep_boundaries(new_keep)
+        edl["inserts"] = [
+            {**ins, "at_output_s": min(bounds,
+                                       key=lambda b: abs(b - ins["at_output_s"]))}
+            for ins in edl["inserts"]]
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
         return result
@@ -401,8 +414,8 @@ def _parse_style(style):
         return CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
-                '{"color":"#RRGGBB","size":"s|m|l","position":"bottom|top"} '
-                "(all fields optional).")
+                '{"color":"#RRGGBB","size":"s|m|l",'
+                '"position":"bottom|top|middle"} (all fields optional).')
 
 
 def add_captions(ctx, mode=None, items=None, style=None,
@@ -459,7 +472,8 @@ def _parse_partial_style(style):
     fills defaults, so merging cannot reset fields the user didn't mention."""
     if not isinstance(style, dict) or not style:
         return ('ERR: style must be a non-empty object with any of '
-                '{"color":"#RRGGBB","size":"s|m|l","position":"bottom|top"}')
+                '{"color":"#RRGGBB","size":"s|m|l",'
+                '"position":"bottom|top|middle"}')
     unknown = sorted(set(style) - {"color", "size", "position"})
     if unknown:
         return (f"ERR: unknown style field(s) {unknown} — only color, size "
@@ -468,7 +482,8 @@ def _parse_partial_style(style):
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
-                '{"color":"#RRGGBB","size":"s|m|l","position":"bottom|top"}.')
+                '{"color":"#RRGGBB","size":"s|m|l",'
+                '"position":"bottom|top|middle"}.')
     return {k: validated[k] for k in style}
 
 
@@ -559,6 +574,179 @@ def set_volume(ctx, start, end, gain_db):
     return ctx.write_edl(edl, f"volume {g:+.1f}dB on {s}-{e}s (source time)")
 
 
+def set_frame(ctx, ratio, mode="crop"):
+    try:
+        frame = Frame.model_validate({"ratio": str(ratio),
+                                      "mode": str(mode or "crop")})
+    except Exception:
+        return ('REJECTED: ratio must be one of source, 16:9, 9:16, 1:1, 4:5 '
+                'and mode one of crop, pad, pad_blur. Example: '
+                'set_frame("9:16", "crop") for TikTok.')
+    edl = dict(ctx.latest_edl()["json"])
+    if frame.ratio == "source":
+        edl["frame"] = None
+        return ctx.write_edl(edl, "output frame back to the source ratio")
+    edl["frame"] = frame.model_dump()
+    return ctx.write_edl(
+        edl, f"output frame set to {frame.ratio} ({frame.mode})")
+
+
+def _next_item_id(items, prefix):
+    n = 1
+    taken = {it.get("id") for it in items}
+    while f"{prefix}{n}" in taken:
+        n += 1
+    return f"{prefix}{n}"
+
+
+def _resolve_media_asset(ctx, asset_key, kinds):
+    asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+    if not asset or asset["kind"] not in kinds:
+        avail = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, list(kinds))
+        hint = ("Available storage_keys: "
+                + "; ".join(a["storage_key"] for a in avail[:12])
+                if avail else "Nothing of that type is uploaded to this "
+                              "project yet — ask the user to attach or "
+                              "upload one.")
+        return None, (f"REJECTED: '{asset_key}' is not a "
+                      f"{'/'.join(kinds)} asset in this project. {hint}")
+    return asset, None
+
+
+def _asset_media_duration(ctx, asset):
+    """Duration of a clip/audio asset, probing once on first use if the
+    browser couldn't provide it (and persisting the result)."""
+    if asset.get("duration_s"):
+        return float(asset["duration_s"])
+    local = os.path.join(ctx.workdir, f"probe_{asset['id']}"
+                         + os.path.splitext(asset["storage_key"])[1])
+    storage.download_to(asset["storage_key"], local)
+    try:
+        info = media.probe(local)
+        ctx.db.run(dbx.update_asset_probe, asset["id"], info["duration"],
+                   info["width"], info["height"], info["fps"],
+                   asset.get("sha256"))
+        return float(info["duration"])
+    except media.MediaError:
+        dur = media.probe_audio_duration(local)
+        ctx.db.run(dbx.update_asset_probe, asset["id"], dur, None, None,
+                   None, asset.get("sha256"))
+        return float(dur)
+
+
+def insert_media(ctx, asset_key, at_output_s, duration_s=None):
+    asset, err = _resolve_media_asset(ctx, asset_key,
+                                      ("video_clip", "image_ref"))
+    if err:
+        return err
+    kind = "image" if asset["kind"] == "image_ref" else "video"
+    try:
+        at = float(at_output_s)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s must be a number — a position in the "
+                "FINAL edited video, in seconds.")
+    if kind == "image":
+        try:
+            dur = round(min(max(float(duration_s if duration_s is not None
+                                       else 3.0), 0.2), 60.0), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: duration_s must be a number of seconds."
+    else:
+        clip_dur = _asset_media_duration(ctx, asset)
+        try:
+            dur = round(min(max(float(duration_s), 0.2), clip_dur,
+                            MAX_INSERT_DURATION_S), 2) \
+                if duration_s is not None else round(
+                    min(clip_dur, MAX_INSERT_DURATION_S), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: duration_s must be a number of seconds."
+
+    edl = dict(ctx.latest_edl()["json"])
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    # Snap the requested FINAL-time position to the keep boundary whose
+    # final-time position is nearest (inserts splice between segments).
+    tl = Timeline(edl["keep"], inserts)
+    pre_bounds = keep_boundaries(edl["keep"])
+    final_of = {b: b + sum(d for a, d in tl.ins if a <= b + 1e-6)
+                for b in pre_bounds}
+    target_pre = min(pre_bounds, key=lambda b: abs(final_of[b] - at))
+    snapped = abs(final_of[target_pre] - at) > 0.05
+    item = {"id": _next_item_id(inserts, "ins"), "asset_key": asset_key,
+            "kind": kind, "at_output_s": target_pre, "duration_s": dur}
+    edl["inserts"] = inserts + [item]
+    name = (asset.get("meta") or {}).get("filename") or \
+        os.path.basename(asset_key)
+    desc = (f"inserted {kind} '{name}' ({dur}s) at "
+            f"{round(final_of[target_pre], 2)}s of the edited video "
+            f"[{item['id']}]")
+    if snapped:
+        desc += (f" (snapped from {round(at, 2)}s to the nearest segment "
+                 "boundary)")
+    result = ctx.write_edl(edl, desc)
+    if result.startswith("EDL v"):
+        result += ("\nNote: captions cover the main footage only — inserted "
+                   "media is not transcribed or captioned.")
+    return result
+
+
+def remove_insert(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    hit = next((i for i in inserts if i.get("id") == id), None)
+    if not hit:
+        have = ", ".join(i.get("id", "?") for i in inserts) or "none"
+        return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
+                f"{have}. Call get_edl to see them.")
+    edl["inserts"] = [i for i in inserts if i.get("id") != id]
+    return ctx.write_edl(
+        edl, f"removed insert {id} "
+             f"('{os.path.basename(hit['asset_key'])}', {hit['duration_s']}s) "
+             "— prior timing restored")
+
+
+def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
+                  duck_others=True):
+    asset, err = _resolve_media_asset(ctx, asset_key, ("music", "audio"))
+    if err:
+        return err
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    try:
+        start = round(min(max(float(start_output_s), 0.0),
+                          max(0.0, prog - 0.1)), 2)
+        g = float(gain_db)
+    except (TypeError, ValueError):
+        return ("REJECTED: start_output_s and gain_db must be numbers "
+                "(start is a position in the FINAL edited video).")
+    vos = [dict(v) for v in (edl.get("voiceover") or [])]
+    item = {"id": _next_item_id(vos, "vo"), "asset_key": asset_key,
+            "start_output_s": start, "gain_db": g,
+            "duck_others": bool(duck_others)}
+    edl["voiceover"] = vos + [item]
+    name = (asset.get("meta") or {}).get("filename") or \
+        os.path.basename(asset_key)
+    return ctx.write_edl(
+        edl, f"voiceover '{name}' from {start}s (output time), {g:+.1f}dB, "
+             f"ducking other audio {DUCK_NOTE if bool(duck_others) else 'off'}"
+             f" [{item['id']}]")
+
+
+DUCK_NOTE = "-12dB while it speaks"
+
+
+def remove_voiceover(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    vos = [dict(v) for v in (edl.get("voiceover") or [])]
+    hit = next((v for v in vos if v.get("id") == id), None)
+    if not hit:
+        have = ", ".join(v.get("id", "?") for v in vos) or "none"
+        return (f"REJECTED: no voiceover with id '{id}'. Existing: {have}.")
+    edl["voiceover"] = [v for v in vos if v.get("id") != id]
+    return ctx.write_edl(
+        edl, f"removed voiceover {id} "
+             f"('{os.path.basename(hit['asset_key'])}')")
+
+
 # ------------------------------------------------------------------ #
 #  META tools                                                          #
 # ------------------------------------------------------------------ #
@@ -623,7 +811,8 @@ def _self_check(ctx, result):
         "edited video. In one or two sentences: does anything look broken "
         "(black frames, half-cut faces mid-action, missing captions if text "
         "was expected)? If it looks fine, say 'looks clean'.",
-        [local], max_tokens=200)
+        [local], max_tokens=200, purpose="vision_selfcheck",
+        image_names=[sheet_key])
 
 
 def ask_user(ctx, question):
@@ -669,9 +858,11 @@ TOOLS = {
                       "snap to these midpoints or word boundaries.",
                       {"min_seconds": {"type": "number"}}),
     "list_assets": (list_assets, "Files in this project. kind='music' lists "
-                    "uploaded music (use its storage_key with add_music); "
-                    "'image' lists reference images; 'render' past renders; "
-                    "'all' everything.", {"kind": {"type": "string"}}),
+                    "uploaded music (use its storage_key with add_music or "
+                    "add_voiceover); 'clip' lists uploaded video clips and "
+                    "'image' reference images (use with insert_media); "
+                    "'render' past renders; 'all' everything.",
+                    {"kind": {"type": "string"}}),
     "look_at": (look_at, "Ask the vision model about up to 4 frames from a "
                 "range. Use for taste/visual questions the transcript can't "
                 "answer.", {"start": {"type": "number"},
@@ -701,7 +892,8 @@ TOOLS = {
                      "(word-timed from the real transcript, recommended) or "
                      "mode='off', or items=[{text,start,end,style?}] (source "
                      "seconds) for text the user dictates. Optional style "
-                     "{color:'#RRGGBB', size:'s|m|l', position:'bottom|top'} "
+                     "{color:'#RRGGBB', size:'s|m|l', "
+                     "position:'bottom|top|middle'} "
                      "and max_words_per_caption (1-12) to show short, "
                      "punchy caption chunks. Example — 'captions 3 words "
                      "max, red, at the top': {mode:'from_transcript', "
@@ -718,7 +910,8 @@ TOOLS = {
                                     "size": {"type": "string",
                                              "enum": ["s", "m", "l"]},
                                     "position": {"type": "string",
-                                                 "enum": ["bottom", "top"]}}},
+                                                 "enum": ["bottom", "top",
+                                                          "middle"]}}},
                       "max_words_per_caption": {"type": "integer"},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
@@ -736,9 +929,10 @@ TOOLS = {
     "set_caption_style": (set_caption_style, "Change how existing captions "
                           "LOOK without touching their text or timing. Pass "
                           "only the fields to change: e.g. 'make it red' -> "
-                          '{"style":{"color":"#FF0000"}}. Works for '
-                          "from_transcript and manual captions; errors "
-                          "helpfully if no captions exist yet.",
+                          '{"style":{"color":"#FF0000"}}, \'center the '
+                          'captions\' -> {"style":{"position":"middle"}}. '
+                          "Works for from_transcript and manual captions; "
+                          "errors helpfully if no captions exist yet.",
                           {"style": {"type": "object",
                                      "properties": {
                                          "color": {"type": "string"},
@@ -746,11 +940,49 @@ TOOLS = {
                                                   "enum": ["s", "m", "l"]},
                                          "position": {"type": "string",
                                                       "enum": ["bottom",
-                                                               "top"]}}}}),
+                                                               "top",
+                                                               "middle"]}}}}),
     "set_volume": (set_volume, "Volume automation gain_db on a SOURCE-time "
                    "span of the original audio.",
                    {"start": {"type": "number"}, "end": {"type": "number"},
                     "gain_db": {"type": "number"}}),
+    "set_frame": (set_frame, "Set the output aspect ratio for every render. "
+                  "ratio: source, 16:9, 9:16, 1:1 or 4:5; mode: crop "
+                  "(center-crop, default), pad (black bars) or pad_blur "
+                  "(blurred backdrop). Never upscales beyond the source's "
+                  "pixels. Example — 'make it 9:16 for TikTok': "
+                  "set_frame(\"9:16\", \"crop\").",
+                  {"ratio": {"type": "string",
+                             "enum": ["source", "16:9", "9:16", "1:1",
+                                      "4:5"]},
+                   "mode": {"type": "string",
+                            "enum": ["crop", "pad", "pad_blur"]}}),
+    "insert_media": (insert_media, "Splice an uploaded video clip or image "
+                     "INTO the edit at a position in the FINAL edited video "
+                     "(snapped to the nearest segment boundary — the result "
+                     "notes any snap). Call list_assets(kind='clip') or "
+                     "kind='image' first and pass the exact storage_key. "
+                     "duration_s: required intent for images (default 3.0s); "
+                     "for clips defaults to the full clip. Inserted media is "
+                     "NOT transcribed — captions cover the main footage "
+                     "only.",
+                     {"asset_key": {"type": "string"},
+                      "at_output_s": {"type": "number"},
+                      "duration_s": {"type": "number"}}),
+    "remove_insert": (remove_insert, "Remove one spliced insert by its id "
+                      "(see get_edl) — the surrounding timing is restored "
+                      "exactly.", {"id": {"type": "string"}}),
+    "add_voiceover": (add_voiceover, "Lay an uploaded audio file OVER the "
+                      "whole program from start_output_s (a position in the "
+                      "FINAL edited video, default 0). duck_others (default "
+                      "true) lowers all other audio 12dB while it plays. "
+                      "Use a storage_key from list_assets(kind='music').",
+                      {"asset_key": {"type": "string"},
+                       "start_output_s": {"type": "number"},
+                       "gain_db": {"type": "number"},
+                       "duck_others": {"type": "boolean"}}),
+    "remove_voiceover": (remove_voiceover, "Remove one voiceover by its id "
+                         "(see get_edl).", {"id": {"type": "string"}}),
     "get_edl": (get_edl, "Current EDL JSON and version.", {}),
     "render_preview": (render_preview, "Render the current EDL as a fast "
                        "480p preview from the proxy, attach it to chat, and "
@@ -770,13 +1002,34 @@ REQUIRED_ARGS = {
     "set_caption_style": ["style"],
     "add_music": ["storage_key", "start", "end"],
     "set_volume": ["start", "end", "gain_db"],
+    "set_frame": ["ratio"],
+    "insert_media": ["asset_key", "at_output_s"],
+    "remove_insert": ["id"],
+    "add_voiceover": ["asset_key"],
+    "remove_voiceover": ["id"],
     "ask_user": ["question"],
 }
 
 # The loop uses this to build TURN FACTS: a write "succeeded" when its result
 # is a version diff line (write_edl's "EDL vX -> vY: ..." format).
 WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range", "add_captions",
-               "set_caption_style", "add_music", "set_volume"}
+               "set_caption_style", "add_music", "set_volume", "set_frame",
+               "insert_media", "remove_insert", "add_voiceover",
+               "remove_voiceover"}
+
+
+def capabilities_digest():
+    """One line per WRITE tool, generated from the registry at turn start —
+    the model checks requests against this before promising anything, and it
+    can never go stale because nobody maintains it by hand."""
+    lines = []
+    for name, (_fn, desc, props) in TOOLS.items():
+        if name not in WRITE_TOOLS:
+            continue
+        params = ", ".join(props.keys())
+        first = desc.split(". ")[0].rstrip(".")
+        lines.append(f"- {name}({params}): {first}.")
+    return "\n".join(lines)
 
 
 def openai_tools():

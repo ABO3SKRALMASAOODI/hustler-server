@@ -1,22 +1,64 @@
-"""Source-timeline <-> output-timeline mapping for a set of keep segments.
+"""Source-timeline <-> output-timeline mapping for a set of keep segments,
+optionally with inserts spliced at keep boundaries.
 
-Everything the agent writes is in SOURCE seconds (except music, which is
-output-positioned by definition). The renderer uses this mapping to place
-captions, volume automation, and ducking windows on the OUTPUT timeline after
-the cuts are applied.
+Everything the agent writes is in SOURCE seconds (except music and voiceover,
+which are output-positioned by definition). The renderer uses this mapping to
+place captions, volume automation, and ducking windows on the OUTPUT (final
+program) timeline after the cuts are applied and inserts spliced in. A JS
+mirror of this math lives in the studio page (frontend repo) — keep in sync.
 """
 
 
+def _ins_tuple(i):
+    if isinstance(i, dict):
+        return (float(i["at_output_s"]), float(i["duration_s"]))
+    return (float(i.at_output_s), float(i.duration_s))
+
+
 class Timeline:
-    def __init__(self, keep):
-        """keep: sorted, non-overlapping [[s, e], ...] in source seconds."""
+    def __init__(self, keep, inserts=None):
+        """keep: sorted, non-overlapping [[s, e], ...] in source seconds.
+        inserts: items with at_output_s (a position in the PRE-INSERT output
+        timeline, i.e. a keep boundary) and duration_s. An insert at a
+        boundary plays BEFORE the segment that starts there."""
         self.segs = [(float(s), float(e)) for s, e in keep]
-        self.offsets = []          # output start time of each segment
+        self.ins = sorted(_ins_tuple(i) for i in (inserts or []))
+        pre = []                   # pre-insert output start of each segment
         acc = 0.0
         for s, e in self.segs:
-            self.offsets.append(acc)
+            pre.append(acc)
             acc += e - s
-        self.out_duration = acc
+        self.pre_duration = acc
+        self.inserted_total = sum(d for _, d in self.ins)
+        # Final-program start of each segment: its pre-insert start shifted
+        # by every insert at or before that boundary.
+        self.offsets = [
+            p + sum(d for at, d in self.ins if at <= p + 1e-6) for p in pre]
+        self.out_duration = acc + self.inserted_total
+
+    def insert_positions(self):
+        """[(final_start, duration)] for each insert, in program order."""
+        out, consumed = [], 0.0
+        for at, d in self.ins:
+            out.append((at + consumed, d))
+            consumed += d
+        return out
+
+    def src_to_out(self, t):
+        """Map a source time to final-program time. Times inside a cut
+        region map to None."""
+        for (s, e), off in zip(self.segs, self.offsets):
+            if s - 1e-6 <= t <= e + 1e-6:
+                return off + min(max(t, s), e) - s
+        return None
+
+    def out_to_src(self, t):
+        """Map a final-program time back to source time. Times inside a
+        spliced insert (or past the end) map to None."""
+        for (s, e), off in zip(self.segs, self.offsets):
+            if off - 1e-6 <= t <= off + (e - s) + 1e-6:
+                return s + min(max(t, off), off + (e - s)) - off
+        return None
 
     def src_to_out(self, t):
         """Map a source time to output time. Times inside a cut region map to

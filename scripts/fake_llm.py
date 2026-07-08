@@ -266,6 +266,76 @@ def plan_style_only(messages):
     return None, "Captions are now golden yellow — nothing else touched."
 
 
+VIOLATING_916 = ("The video is now cropped to 9:16 (1080x1920) for TikTok "
+                 "with the subject centered. Preview attached.")
+
+
+def plan_ratio916(messages):
+    """Replays the production 9:16 turn: zero writes, a fabricated crop
+    claim, and a regeneration that ALSO fabricates — the loop must discard
+    both drafts and post its system-authored fallback."""
+    if messages[-1].get("role") == "system" and \
+            "TURN FACTS" in (messages[-1].get("content") or ""):
+        return None, VIOLATING_916
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_video_info", {}
+    return None, VIOLATING_916
+
+
+def plan_frame(messages):
+    last = last_executed_tool(messages)
+    if last is None:
+        return "set_frame", {"ratio": "9:16", "mode": "crop"}
+    if last == "set_frame":
+        return "render_preview", {}
+    return None, ("Reframed the whole edit to a 9:16 vertical crop — "
+                  "preview on the right.")
+
+
+def plan_midpos(messages):
+    last = last_executed_tool(messages)
+    if last is None:
+        return "set_caption_style", {"style": {"position": "middle"}}
+    if last == "set_caption_style":
+        return "render_preview", {}
+    return None, "Captions are vertically centered now."
+
+
+def plan_img_insert(messages):
+    last = last_executed_tool(messages)
+    if last is None:
+        return "list_assets", {"kind": "image"}
+    if last == "list_assets":
+        m = re.search(r"storage_key=(\S+)", find_result(messages,
+                                                        "list_assets"))
+        if not m:
+            return None, "No image is uploaded yet — attach one first."
+        return "insert_media", {"asset_key": m.group(1), "at_output_s": 0,
+                                "duration_s": 3.0}
+    if last == "insert_media":
+        return "render_preview", {}
+    return None, "Spliced the image in as a 3-second opener."
+
+
+def plan_voiceover(messages):
+    last = last_executed_tool(messages)
+    if last is None:
+        return "list_assets", {"kind": "music"}
+    if last == "list_assets":
+        m = re.search(r"storage_key=(\S+)", find_result(messages,
+                                                        "list_assets"))
+        if not m:
+            return None, "No audio uploaded yet — attach a file first."
+        return "add_voiceover", {"asset_key": m.group(1),
+                                 "start_output_s": 0, "gain_db": 0,
+                                 "duck_others": True}
+    if last == "add_voiceover":
+        return "render_preview", {}
+    return None, ("Laid your narration over the whole edit; everything else "
+                  "ducks while it speaks.")
+
+
 def plan_next(messages):
     """Returns (tool_name, args) or (None, final_text)."""
     text = last_user_text(messages).lower()
@@ -273,6 +343,16 @@ def plan_next(messages):
         return plan_zero_write(messages, stubborn=True)
     if "zwc test" in text:
         return plan_zero_write(messages, stubborn=False)
+    if "ratio916 test" in text:
+        return plan_ratio916(messages)
+    if "frame test" in text:
+        return plan_frame(messages)
+    if "midpos test" in text:
+        return plan_midpos(messages)
+    if "imginsert test" in text:
+        return plan_img_insert(messages)
+    if "voiceover test" in text:
+        return plan_voiceover(messages)
     if "wordcut test" in text:
         return plan_wordcut(messages)
     if "range test" in text:

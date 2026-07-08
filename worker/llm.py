@@ -4,6 +4,7 @@ Swapping DashScope for OpenAI/anything else is an env change, never code."""
 import base64
 import json
 import re
+import threading
 
 from openai import OpenAI
 
@@ -11,6 +12,29 @@ import config
 
 
 _client = None
+
+# Per-thread model-I/O recorder (set by the agent loop for the duration of a
+# turn). Signature: fn(purpose, request_payload, response_payload, usage).
+# Thread-local because agent lanes run turns concurrently.
+_tls = threading.local()
+
+
+def set_recorder(fn):
+    _tls.recorder = fn
+
+
+def get_recorder():
+    return getattr(_tls, "recorder", None)
+
+
+def record(purpose, request, response, usage=None):
+    fn = get_recorder()
+    if not fn:
+        return
+    try:
+        fn(purpose, request, response, usage)
+    except Exception as e:
+        print(f"[llm] recorder failed: {e}", flush=True)
 
 
 def client():
@@ -37,13 +61,16 @@ def image_part(jpeg_path):
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
 
 
-def ask_vision(prompt, image_paths, max_tokens=1500):
+def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
+               image_names=None):
     """One call to VISION_MODEL with N images. Returns text, or None on any
-    failure — vision is always optional."""
+    failure — vision is always optional. image_names (storage keys / labels)
+    are what gets recorded to llm_calls — never the image bytes."""
     if not vision_available():
         return None
     content = [{"type": "text", "text": prompt}]
     content += [image_part(p) for p in image_paths]
+    names = image_names or [str(p).rsplit("/", 1)[-1] for p in image_paths]
     try:
         resp = client().chat.completions.create(
             model=config.VISION_MODEL,
@@ -51,9 +78,18 @@ def ask_vision(prompt, image_paths, max_tokens=1500):
             max_tokens=max_tokens,
             temperature=0.1,
         )
-        return (resp.choices[0].message.content or "").strip() or None
+        answer = (resp.choices[0].message.content or "").strip() or None
+        record(purpose,
+               {"model": config.VISION_MODEL, "question": prompt,
+                "images": names},
+               {"answer": answer}, getattr(resp, "usage", None))
+        return answer
     except Exception as e:
         print(f"[vision] call failed: {e}", flush=True)
+        record(purpose,
+               {"model": config.VISION_MODEL, "question": prompt,
+                "images": names},
+               {"error": str(e)[:300]}, None)
         return None
 
 

@@ -8,22 +8,28 @@ items are authored in source time and mapped to the output timeline here.
 Styling: a CaptionStyle ({color, size, position}) applies globally; manual
 items may override per-item. color is #RRGGBB and becomes ASS PrimaryColour
 in &H00BBGGRR order.
+
+The script's PlayRes is the OUTPUT FRAME (so top/middle/bottom land correctly
+at any aspect ratio): font sizes scale with width, vertical margins with
+height, relative to the 1280x720 the base numbers were tuned on.
 """
 
 MAX_LINE_CHARS = 42
 MAX_LINES = 2
 MIN_EVENT_S = 0.6
 
+BASE_PLAY_RES = (1280, 720)
 FONT_SIZES = {"s": 32, "m": 44, "l": 58}
-ALIGNMENTS = {"bottom": 2, "top": 8}
-MARGIN_V = {"bottom": 46, "top": 40}
+ALIGNMENTS = {"bottom": 2, "top": 8, "middle": 5}
+# middle (Alignment 5) is vertically centered; libass ignores MarginV there.
+MARGIN_V = {"bottom": 46, "top": 40, "middle": 0}
 
 DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom"}
 
 ASS_HEADER_TOP = """[Script Info]
 ScriptType: v4.00+
-PlayResX: 1280
-PlayResY: 720
+PlayResX: {resx}
+PlayResY: {resy}
 WrapStyle: 0
 ScaledBorderAndShadow: yes
 
@@ -54,13 +60,20 @@ def _norm_style(style):
     return s
 
 
-def style_line(name, style):
+def style_line(name, style, play_res=BASE_PLAY_RES):
     s = _norm_style(style)
-    return (f"Style: {name},DejaVu Sans,{FONT_SIZES.get(s['size'], 44)},"
+    # Text width fraction tracks frame WIDTH; vertical margins track HEIGHT.
+    fx = play_res[0] / BASE_PLAY_RES[0]
+    fy = play_res[1] / BASE_PLAY_RES[1]
+    font = max(10, round(FONT_SIZES.get(s["size"], 44) * fx))
+    margin_lr = max(10, round(60 * fx))
+    margin_v = round(MARGIN_V.get(s["position"], 46) * fy)
+    outline = max(1.2, round(2.4 * fx, 1))
+    return (f"Style: {name},DejaVu Sans,{font},"
             f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
-            f"-1,0,0,0,100,100,0,0,1,2.4,0,"
-            f"{ALIGNMENTS.get(s['position'], 2)},60,60,"
-            f"{MARGIN_V.get(s['position'], 46)},1")
+            f"-1,0,0,0,100,100,0,0,1,{outline},0,"
+            f"{ALIGNMENTS.get(s['position'], 2)},{margin_lr},{margin_lr},"
+            f"{margin_v},1")
 
 
 def _ass_time(t):
@@ -148,10 +161,11 @@ def events_from_items(items, tl):
     return events
 
 
-def write_ass(events, path, global_style=None):
+def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
     """events may carry item_style (per-item override) and are written
     against a Default style built from global_style; each distinct override
-    becomes an extra named style."""
+    becomes an extra named style. play_res must be the output frame so
+    positions are correct at any aspect ratio."""
     styles = [("Default", _norm_style(global_style))]
     seen = {tuple(sorted(styles[0][1].items())): "Default"}
     for ev in events:
@@ -172,9 +186,10 @@ def write_ass(events, path, global_style=None):
         ev["style_name"] = seen[key]
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write(ASS_HEADER_TOP)
+        f.write(ASS_HEADER_TOP.format(resx=int(play_res[0]),
+                                      resy=int(play_res[1])))
         for name, st in styles:
-            f.write(style_line(name, st) + "\n")
+            f.write(style_line(name, st, play_res) + "\n")
         f.write(EVENTS_HEADER)
         for ev in events:
             f.write(f"Dialogue: 0,{_ass_time(ev['start'])},"
@@ -183,8 +198,11 @@ def write_ass(events, path, global_style=None):
     return path
 
 
-def build_ass(edl, index, tl, path):
-    """EDL captions field -> .ass file (or None when captions are off)."""
+def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
+    """EDL captions field -> .ass file (or None when captions are off).
+    Captions come from the MAIN footage's transcript only — inserted clips
+    are not transcribed (v1), so no events land inside spliced insert time
+    (kept_words maps around inserts via the Timeline)."""
     captions = edl.get("captions")
     if not captions:
         return None
@@ -200,4 +218,4 @@ def build_ass(edl, index, tl, path):
         return None
     if not events:
         return None
-    return write_ass(events, path, global_style)
+    return write_ass(events, path, global_style, play_res)

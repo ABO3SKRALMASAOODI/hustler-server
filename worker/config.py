@@ -60,6 +60,10 @@ PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
+# Final exports: veryfast/CRF20 is effectively transparent for talking-head /
+# screen content and several times faster than the old medium/CRF18.
+FINAL_PRESET = os.getenv("FINAL_PRESET", "veryfast")
+FINAL_CRF = int(os.getenv("FINAL_CRF", "20"))
 
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6

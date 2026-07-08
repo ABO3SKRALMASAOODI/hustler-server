@@ -168,9 +168,11 @@ check("music at t=3 delayed into the output timeline",
 
 edl_single = validate_edl({"keep": [[5, 25]]}, 60).model_dump()
 g3 = build_filtergraph(edl_single, 60.0, False, Timeline(edl_single["keep"]),
-                       None, [], index, preview=True)
+                       None, [], index, preview=True, silence_idx=1)
 check("single segment skips split", "split=" not in g3)
 check("silent source uses lavfi input label", "[1:a]" in g3)
+check("plain cut keeps the cheap graph (no per-segment scaling)",
+      "force_original_aspect_ratio" not in g3)
 
 print("== Caption styling (issue 2) ==")
 styled = validate_edl(
@@ -424,5 +426,200 @@ c = validate_edl({"keep": [[0, 30], [40, 60]],
                                "max_words_per_caption": 3}}, 60).model_dump()
 check("real change alters the signature",
       edl_signature(a) != edl_signature(c))
+
+print("== Output frame (round 4, issue 1) ==")
+from renderer import frame_dims                               # noqa: E402
+
+check("9:16 from 1080p landscape", frame_dims(1920, 1080, "9:16")
+      == (1080, 1920))
+check("16:9 from 1080p is identity", frame_dims(1920, 1080, "16:9")
+      == (1920, 1080))
+check("1:1 from 1080p", frame_dims(1920, 1080, "1:1") == (1080, 1080))
+check("4:5 from 1080p", frame_dims(1920, 1080, "4:5") == (1080, 1350))
+check("9:16 from a square source caps at the source long side",
+      frame_dims(1000, 1000, "9:16") == (562, 1000))
+check("source ratio untouched", frame_dims(1280, 720, None) == (1280, 720))
+w_odd, h_odd = frame_dims(1281, 721, None)
+check("odd dims rounded even", w_odd % 2 == 0 and h_odd % 2 == 0)
+
+f_edl = validate_edl({"keep": [[0, 60]],
+                      "frame": {"ratio": "9:16", "mode": "crop"}},
+                     60).model_dump()
+check("frame survives validation", f_edl["frame"]["ratio"] == "9:16")
+check("explicit source frame normalizes to None",
+      validate_edl({"keep": [[0, 60]],
+                    "frame": {"ratio": "source"}}, 60).model_dump()["frame"]
+      is None)
+expect_reject("bad ratio", {"keep": [[0, 60]],
+                            "frame": {"ratio": "3:7"}}, 60)
+check("describe mentions the frame",
+      "frame 9:16 (crop)" in describe_edl(f_edl, 60))
+
+old_dump = {"keep": [[0.0, 30.0]], "captions": None, "music": [],
+            "volume": []}   # what a pre-round-4 EDL row looks like
+new_dump = validate_edl({"keep": [[0, 30]]}, 60).model_dump()
+check("old EDL rows compare NO CHANGE against new dumps (frame/inserts keys)",
+      edl_signature(old_dump) == edl_signature(new_dump))
+
+print("== Inserts + voiceover validation (round 4, issue 4) ==")
+ins_edl = validate_edl(
+    {"keep": [[0, 10], [20, 30]],
+     "inserts": [{"id": "ins1", "asset_key": "clips/1/a.mp4",
+                  "kind": "video", "at_output_s": 10.0, "duration_s": 2.0}],
+     "voiceover": [{"id": "vo1", "asset_key": "music/1/v.mp3",
+                    "start_output_s": 5.0}]}, 60).model_dump()
+check("insert at a boundary passes", ins_edl["inserts"][0]["at_output_s"]
+      == 10.0)
+check("voiceover default gain/duck",
+      ins_edl["voiceover"][0]["gain_db"] == 0.0 and
+      ins_edl["voiceover"][0]["duck_others"] is True)
+check("describe mentions inserts + voiceover",
+      "inserts x1 (+2.0s)" in describe_edl(ins_edl, 60) and
+      "voiceover x1" in describe_edl(ins_edl, 60))
+expect_reject("insert off-boundary",
+              {"keep": [[0, 10], [20, 30]],
+               "inserts": [{"id": "i", "asset_key": "k", "kind": "image",
+                            "at_output_s": 5.0, "duration_s": 3.0}]}, 60)
+expect_reject("duplicate insert ids",
+              {"keep": [[0, 10]],
+               "inserts": [
+                   {"id": "i", "asset_key": "k", "kind": "image",
+                    "at_output_s": 0.0, "duration_s": 3.0},
+                   {"id": "i", "asset_key": "k2", "kind": "image",
+                    "at_output_s": 10.0, "duration_s": 3.0}]}, 60)
+expect_reject("voiceover past the program end",
+              {"keep": [[0, 10]],
+               "voiceover": [{"id": "v", "asset_key": "k",
+                              "start_output_s": 55.0}]}, 60)
+check("music validated against the PROGRAM duration (keep + inserts)",
+      validate_edl({"keep": [[0, 10]],
+                    "inserts": [{"id": "i", "asset_key": "k",
+                                 "kind": "image", "at_output_s": 10.0,
+                                 "duration_s": 5.0}],
+                    "music": [{"storage_key": "m", "start": 0,
+                               "end": 14.0}]}, 60)
+      .model_dump()["music"][0]["end"] == 14.0)
+
+print("== Timeline with inserts (both directions) ==")
+tli = Timeline([[0, 10], [20, 30]],
+               [{"at_output_s": 10.0, "duration_s": 5.0}])
+check("insert extends the program", tli.out_duration == 25.0)
+check("src before the insert unshifted", tli.src_to_out(5.0) == 5.0)
+check("src after the insert shifted by its duration",
+      tli.src_to_out(25.0) == 20.0)
+check("out inside main maps back", tli.out_to_src(5.0) == 5.0)
+check("out inside the INSERT maps to None", tli.out_to_src(12.0) is None)
+check("out after the insert maps back shifted", tli.out_to_src(20.0) == 25.0)
+check("insert final position", tli.insert_positions() == [(10.0, 5.0)])
+tli0 = Timeline([[0, 10]], [{"at_output_s": 0.0, "duration_s": 3.0}])
+check("insert at 0 shifts everything", tli0.src_to_out(0.0) == 3.0 and
+      tli0.out_to_src(1.0) is None and tli0.out_to_src(4.0) == 1.0)
+check("kept words shift around an insert",
+      Timeline([[0, 10]], [{"at_output_s": 0.0, "duration_s": 3.0}])
+      .kept_words([{"w": "hi", "t0": 1.0, "t1": 1.4}])[0]["t0"] == 4.0)
+
+print("== Filtergraph with frame + insert + voiceover ==")
+edl_i = validate_edl(
+    {"keep": [[0, 10], [20, 30]],
+     "frame": {"ratio": "9:16", "mode": "crop"},
+     "inserts": [{"id": "ins1", "asset_key": "images/1/a.png",
+                  "kind": "image", "at_output_s": 10.0,
+                  "duration_s": 3.0}]}, 60).model_dump()
+tl_i = Timeline(edl_i["keep"], edl_i["inserts"])
+g_i = build_filtergraph(
+    edl_i, 60.0, True, tl_i, None, [], index, preview=False,
+    W=720, H=1280, fps=30.0, frame_mode="crop",
+    insert_inputs=[(2, edl_i["inserts"][0], False)],
+    vo_inputs=[(3, {"id": "vo1", "asset_key": "m", "start_output_s": 1.0,
+                    "gain_db": 0.0, "duck_others": True}, 4.0)],
+    silence_idx=1)
+check("every block normalized to the frame",
+      g_i.count("scale=720:1280:force_original_aspect_ratio=increase,"
+                "crop=720:1280") == 3)
+check("insert spliced between the segments",
+      "[v_seg0][a_seg0][v_ins0][a_ins0][v_seg1][a_seg1]concat=n=3:v=1:a=1"
+      in g_i)
+check("image insert audio comes from the anullsrc slice",
+      "[sil0]atrim=start=0:end=3.000" in g_i)
+check("program audio ducks -12dB under the voiceover window",
+      "volume=-12.0dB:enable='between(t,1.00,5.00)'" in g_i)
+check("voiceover delayed to its output position and mixed",
+      ",adelay=1000:all=1" in g_i and "amix=inputs=2" in g_i)
+
+g_pb = build_filtergraph(
+    validate_edl({"keep": [[0, 10]],
+                  "frame": {"ratio": "1:1", "mode": "pad_blur"}},
+                 60).model_dump(),
+    60.0, True, Timeline([[0, 10]]), None, [], index, preview=False,
+    W=720, H=720, fps=30.0, frame_mode="pad_blur")
+check("pad_blur builds the blurred-backdrop overlay",
+      "boxblur=20" in g_pb and "overlay=(W-w)/2:(H-h)/2" in g_pb)
+g_pad = build_filtergraph(
+    validate_edl({"keep": [[0, 10]]}, 60).model_dump(),
+    60.0, True, Timeline([[0, 10]]), None, [], index, preview=False,
+    W=720, H=720, fps=30.0, frame_mode="pad")
+check("pad mode letterboxes with centered black bars",
+      "pad=720:720:(ow-iw)/2:(oh-ih)/2:color=black" in g_pad)
+
+print("== Captions at 9:16 with middle position (issues 1+3) ==")
+mid_edl = validate_edl(
+    {"keep": [[0, 60]],
+     "captions": {"mode": "from_transcript",
+                  "style": {"position": "middle"}}}, 60).model_dump()
+check("middle position accepted",
+      mid_edl["captions"]["style"]["position"] == "middle")
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(mid_edl, sty_index, Timeline(mid_edl["keep"]),
+                         os.path.join(td, "mid.ass"), play_res=(1080, 1920))
+    content = open(p).read()
+    check("PlayRes matches the 9:16 output frame",
+          "PlayResX: 1080" in content and "PlayResY: 1920" in content)
+    style_row = next(l for l in content.splitlines()
+                     if l.startswith("Style: Default"))
+    fields = style_row.split(",")
+    check("Alignment 5 for middle", fields[18] == "5")
+    check("middle ignores MarginV (0)", fields[21] == "0")
+    check("font scales with frame width (44 -> 37 @1080/1280)",
+          fields[2] == "37")
+with tempfile.TemporaryDirectory() as td:
+    top_edl = validate_edl(
+        {"keep": [[0, 60]],
+         "captions": {"mode": "from_transcript",
+                      "style": {"position": "top"}}}, 60).model_dump()
+    p = caplib.build_ass(top_edl, sty_index, Timeline(top_edl["keep"]),
+                         os.path.join(td, "top.ass"), play_res=(1080, 1920))
+    fields = next(l for l in open(p).read().splitlines()
+                  if l.startswith("Style: Default")).split(",")
+    check("top MarginV scales with frame height (40 -> 107 @1920/720)",
+          fields[21] == "107")
+
+print("== Capabilities digest (issue 2) ==")
+digest = agent_tools.capabilities_digest()
+for tool_name in agent_tools.WRITE_TOOLS:
+    check(f"digest covers {tool_name}", f"- {tool_name}(" in digest)
+check("digest is write-tools only", "get_transcript(" not in digest)
+
+print("== Round-4 honesty: 9:16 fabrication + fallback ==")
+from agent_loop import (FALLBACK_REPLY, _nearest_alternative)  # noqa: E402
+LIE916 = ("The video is now cropped to 9:16 (1080x1920) for TikTok with "
+          "the subject centered. Preview attached.")
+v = _reply_violations(LIE916, wrote=False, previewed=False)
+check("9:16 fabrication trips edit + render detectors", len(v) == 2)
+check("violation names the fabricated claim",
+      any("is now cropped" in x for x in v))
+v = _reply_violations("Captions are vertically centered now.",
+                      wrote=False, previewed=False)
+check("middle-position fabrication detected", len(v) == 1)
+check("same sentence fine after a real write",
+      _reply_violations("Captions are vertically centered now.",
+                        wrote=True, previewed=True) == [])
+check("fallback text never claims a change",
+      _reply_violations(FALLBACK_REPLY, wrote=False, previewed=False) == [])
+check("alternative hint for aspect requests",
+      "output frame" in _nearest_alternative("make the video 9:16"))
+check("alternative hint for caption requests",
+      "middle" in _nearest_alternative("move the captions to the middle"))
+check("no hint when nothing matches",
+      _nearest_alternative("do the thing") is None)
 
 print(f"\nALL {PASS} CHECKS PASSED")

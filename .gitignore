@@ -9,3 +9,6 @@ node_modules/ # in case no trailing newline
 
 test_video.mp4
 test_music.wav
+itest_*.mp4
+test_clip.mp4
+test_image.png

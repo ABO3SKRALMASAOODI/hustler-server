@@ -9,8 +9,10 @@ chat_sessions / chat_messages tables (one session per project, plus an
 'activity' role for agent tool calls).
 """
 
+import importlib.util
 import json
 import os
+import uuid
 from contextlib import contextmanager
 
 import psycopg2
@@ -19,6 +21,16 @@ from flask import Blueprint, request, jsonify, current_app
 
 from routes.auth import token_required
 import storage
+
+# The EDL schema's single source of truth is worker/schemas.py (pure
+# pydantic, no worker-internal imports). Loaded under a unique module name so
+# nothing in the worker dir can shadow backend modules.
+_schemas_path = os.path.join(os.path.dirname(__file__), "..", "..",
+                             "worker", "schemas.py")
+_spec = importlib.util.spec_from_file_location(
+    "worker_schemas", os.path.abspath(_schemas_path))
+wschemas = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(wschemas)
 
 video_bp = Blueprint("video", __name__)
 
@@ -30,7 +42,7 @@ MESSAGES_PER_HOUR = int(os.getenv("MESSAGES_PER_HOUR", "20"))
 PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "2"))
 
 VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
-               "music", "image_ref")
+               "music", "image_ref", "video_clip")
 
 
 @contextmanager
@@ -230,8 +242,9 @@ def create_upload(user_id, project_id):
     filename = data.get("filename") or ""
     nbytes = data.get("bytes")
     kind = data.get("kind") or "original"
-    if kind not in ("original", "music", "image"):
-        return jsonify({"error": "kind must be original, music or image"}), 400
+    if kind not in ("original", "music", "image", "clip"):
+        return jsonify({"error": "kind must be original, music, image "
+                                 "or clip"}), 400
 
     try:
         ext, content_type = storage.validate_upload(filename, nbytes, kind)
@@ -294,7 +307,7 @@ def complete_upload(user_id, project_id):
         return jsonify({"error": "File exceeds the upload size limit"}), 400
 
     asset_kind = {"original": "original", "music": "music",
-                  "image": "image_ref"}[kind]
+                  "image": "image_ref", "clip": "video_clip"}[kind]
     try:
         duration_s = min(max(float(duration_s), 0.1), 4 * 3600) \
             if duration_s else None
@@ -307,7 +320,7 @@ def complete_upload(user_id, project_id):
                                            bytes, duration_s, meta)
                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
                     (project_id, asset_kind, key, nbytes,
-                     duration_s if kind == "music" else None,
+                     duration_s if kind in ("music", "clip") else None,
                      Json({"filename": filename})))
         asset_id = cur.fetchone()["id"]
         job_id = None
@@ -434,8 +447,9 @@ def project_state(user_id, project_id):
                               created_at
                        FROM assets
                        WHERE project_id = %s
-                         AND kind IN ('render', 'music', 'proxy')
-                       ORDER BY id DESC LIMIT 100""", (project_id,))
+                         AND kind IN ('render', 'music', 'proxy',
+                                      'video_clip', 'image_ref')
+                       ORDER BY id DESC LIMIT 150""", (project_id,))
         extra = cur.fetchall()
 
     renders = [a for a in extra if a["kind"] == "render"]
@@ -480,6 +494,12 @@ def project_state(user_id, project_id):
             {"id": a["id"], "storage_key": a["storage_key"],
              "filename": (a.get("meta") or {}).get("filename"),
              "duration_s": a["duration_s"]} for a in music],
+        "media_assets": [
+            {"id": a["id"], "kind": a["kind"],
+             "storage_key": a["storage_key"],
+             "filename": (a.get("meta") or {}).get("filename"),
+             "duration_s": a["duration_s"]}
+            for a in extra if a["kind"] in ("video_clip", "image_ref")],
     })
 
 
@@ -566,7 +586,8 @@ def post_message(user_id, project_id):
         if attachment_ids:
             cur.execute("""SELECT id, kind, duration_s, meta FROM assets
                            WHERE project_id = %s AND id = ANY(%s)
-                             AND kind IN ('music','image_ref')""",
+                             AND kind IN ('music','image_ref',
+                                          'video_clip')""",
                         (project_id, attachment_ids))
             by_id = {a["id"]: a for a in cur.fetchall()}
             attachments_meta = [
@@ -638,6 +659,173 @@ def post_message(user_id, project_id):
 
     return jsonify({"queued": True, "message_id": message_id,
                     "job_id": job_id})
+
+
+# ------------------------------------------------------------------ #
+#  User-authored EDL writes (frame selector, timeline inserts, voiceover)
+# ------------------------------------------------------------------ #
+
+def _apply_edl_op(edl, op, args, assets_by_id):
+    """Apply one UI operation to an EDL dict. Returns (new_edl, desc) or
+    raises ValueError with a user-facing message. Mirrors the agent tools'
+    snapping semantics (worker/agent_tools.py)."""
+    edl = json.loads(json.dumps(edl))   # deep copy
+    if op == "set_frame":
+        ratio = str(args.get("ratio") or "source")
+        mode = str(args.get("mode") or "crop")
+        if ratio == "source":
+            edl["frame"] = None
+            return edl, "output frame back to source"
+        edl["frame"] = {"ratio": ratio, "mode": mode}
+        return edl, f"output frame {ratio} ({mode})"
+
+    if op == "insert_media":
+        asset = assets_by_id.get(int(args.get("asset_id") or 0))
+        if not asset or asset["kind"] not in ("video_clip", "image_ref"):
+            raise ValueError("Pick an uploaded clip or image to insert.")
+        kind = "image" if asset["kind"] == "image_ref" else "video"
+        if kind == "image":
+            dur = round(min(max(float(args.get("duration_s") or 3.0), 0.2),
+                            60.0), 2)
+        else:
+            base = args.get("duration_s") or asset.get("duration_s")
+            if not base:
+                raise ValueError("That clip's duration isn't known yet — "
+                                 "give it a second and try again.")
+            dur = round(min(float(base),
+                            float(asset.get("duration_s") or base)), 2)
+        at = float(args.get("at_output_s") or 0.0)
+        inserts = list(edl.get("inserts") or [])
+        bounds = wschemas.keep_boundaries(edl["keep"])
+        ins_sorted = sorted((float(i["at_output_s"]), float(i["duration_s"]))
+                            for i in inserts)
+        final_of = {b: b + sum(d for a, d in ins_sorted if a <= b + 1e-6)
+                    for b in bounds}
+        target = min(bounds, key=lambda b: abs(final_of[b] - at))
+        taken = {i.get("id") for i in inserts}
+        n = 1
+        while f"ins{n}" in taken:
+            n += 1
+        inserts.append({"id": f"ins{n}", "asset_key": asset["storage_key"],
+                        "kind": kind, "at_output_s": target,
+                        "duration_s": dur})
+        edl["inserts"] = inserts
+        return edl, (f"inserted {kind} at "
+                     f"{round(final_of[target], 2)}s (ins{n})")
+
+    if op == "set_insert_duration":
+        for i in (edl.get("inserts") or []):
+            if i.get("id") == args.get("id"):
+                i["duration_s"] = round(
+                    min(max(float(args.get("duration_s") or 3.0), 0.2),
+                        600.0), 2)
+                return edl, f"insert {i['id']} duration {i['duration_s']}s"
+        raise ValueError("That insert no longer exists.")
+
+    if op == "remove_insert":
+        before = edl.get("inserts") or []
+        edl["inserts"] = [i for i in before if i.get("id") != args.get("id")]
+        if len(edl["inserts"]) == len(before):
+            raise ValueError("That insert no longer exists.")
+        return edl, f"removed insert {args.get('id')}"
+
+    if op == "add_voiceover":
+        asset = assets_by_id.get(int(args.get("asset_id") or 0))
+        if not asset or asset["kind"] not in ("music", "audio"):
+            raise ValueError("Pick an uploaded audio file for the voiceover.")
+        vos = list(edl.get("voiceover") or [])
+        taken = {v.get("id") for v in vos}
+        n = 1
+        while f"vo{n}" in taken:
+            n += 1
+        vos.append({"id": f"vo{n}", "asset_key": asset["storage_key"],
+                    "start_output_s": round(
+                        max(0.0, float(args.get("start_output_s") or 0.0)), 2),
+                    "gain_db": float(args.get("gain_db") or 0.0),
+                    "duck_others": bool(args.get("duck_others", True))})
+        edl["voiceover"] = vos
+        return edl, f"voiceover added (vo{n})"
+
+    if op == "remove_voiceover":
+        before = edl.get("voiceover") or []
+        edl["voiceover"] = [v for v in before if v.get("id") != args.get("id")]
+        if len(edl["voiceover"]) == len(before):
+            raise ValueError("That voiceover no longer exists.")
+        return edl, f"removed voiceover {args.get('id')}"
+
+    raise ValueError(f"Unknown operation '{op}'.")
+
+
+@video_bp.route("/projects/<int:project_id>/edl", methods=["POST"])
+@token_required
+def user_edl_write(user_id, project_id):
+    """User-authored EDL version from a UI action (frame selector, timeline
+    insert/voiceover chips). Validates with the same schema the worker uses,
+    appends a created_by='user' version and auto-renders a preview."""
+    data = request.get_json() or {}
+    op = str(data.get("op") or "")
+    args = data.get("args") or {}
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        original = _active_original(cur, project_id)
+        if not original or not original["duration_s"]:
+            return jsonify({"error": "Upload a video first"}), 400
+        # EDL writes must not race the agent
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND state IN ('queued','running')""", (project_id,))
+        if cur.fetchone():
+            return jsonify({"error": "The editor is working on a request — "
+                                     "try again when it finishes."}), 409
+        edl_row = _latest_edl(cur, project_id)
+        if not edl_row:
+            cur.execute("""INSERT INTO edls (project_id, version, json,
+                                             created_by)
+                           VALUES (%s, 1, %s, 'user')""",
+                        (project_id,
+                         Json(wschemas.default_edl(original["duration_s"]))))
+            edl_row = _latest_edl(cur, project_id)
+
+        cur.execute("""SELECT id, kind, storage_key, duration_s, meta
+                       FROM assets WHERE project_id = %s""", (project_id,))
+        assets_by_id = {a["id"]: a for a in cur.fetchall()}
+
+        try:
+            new_edl, desc = _apply_edl_op(edl_row["json"], op, args,
+                                          assets_by_id)
+            normalized = wschemas.validate_edl(
+                new_edl, float(original["duration_s"])).model_dump()
+        except (ValueError, wschemas.EDLValidationError) as e:
+            return jsonify({"error": str(e)[:300]}), 400
+
+        if wschemas.edl_signature(normalized) == \
+                wschemas.edl_signature(edl_row["json"]):
+            return jsonify({"version": edl_row["version"],
+                            "no_change": True})
+
+        cur.execute("""INSERT INTO edls (project_id, version, json, created_by)
+                       VALUES (%s, (SELECT COALESCE(MAX(version), 0) + 1
+                                    FROM edls WHERE project_id = %s),
+                               %s, 'user') RETURNING version""",
+                    (project_id, project_id, Json(normalized)))
+        version = cur.fetchone()["version"]
+
+        preview_job = None
+        if _running_jobs_count(cur, user_id) < MAX_CONCURRENT_JOBS_PER_USER:
+            preview_job = _enqueue(cur, project_id, user_id, "preview",
+                                   {"edl_version": version})
+        cur.execute("""INSERT INTO chat_messages (session_id, role, content,
+                                                  meta)
+                       VALUES (%s, 'activity', %s, %s)""",
+                    (p["chat_session_id"],
+                     f"you → EDL v{version}: {desc}",
+                     Json({"tool": "user_edit", "op": op})))
+
+    return jsonify({"version": version, "preview_job_id": preview_job,
+                    "desc": desc})
 
 
 # ------------------------------------------------------------------ #

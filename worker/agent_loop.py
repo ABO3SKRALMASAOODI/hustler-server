@@ -88,6 +88,12 @@ def _attachment_context(worker_db, ctx, user_message):
                    if asset.get("duration_s") else "")
             notes.append(f'[User attached music "{name}"{dur} — '
                          f'storage_key: {asset["storage_key"]}]')
+        elif asset["kind"] == "video_clip":
+            dur = (f" ({asset['duration_s']:.0f}s)"
+                   if asset.get("duration_s") else "")
+            notes.append(f'[User attached a video clip "{name}"{dur} — '
+                         f'storage_key: {asset["storage_key"]}. It can be '
+                         "spliced into the edit with insert_media.]")
         elif asset["kind"] == "image_ref":
             cap = m.get("caption")
             if not cap and llm.vision_available() and \
@@ -98,7 +104,9 @@ def _attachment_context(worker_db, ctx, user_message):
                 try:
                     storage.download_to(asset["storage_key"], local)
                     cap = llm.ask_vision(IMAGE_CAPTION_PROMPT, [local],
-                                         max_tokens=300)
+                                         max_tokens=300,
+                                         purpose="vision_caption",
+                                         image_names=[asset["storage_key"]])
                     if cap:
                         worker_db.run(dbx.update_asset_meta, asset["id"],
                                       {"caption": cap})
@@ -140,7 +148,18 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
                                 keep_line=keep_line,
                                 captions_line=captions_line)
 
+    # Auto-generated from the tool registry every turn — the model checks
+    # requests against this before promising anything.
+    caps = ("CAPABILITIES — the complete list of write operations that "
+            "exist, generated from the tool registry:\n"
+            + agent_tools.capabilities_digest()
+            + "\nNothing else exists. If the user asks for anything not "
+            "listed (speed changes, transitions, zooms, filters, fonts, "
+            "animations, ...), say so plainly and offer the closest listed "
+            "alternative — NEVER describe a change these tools cannot make.")
+
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": caps},
             {"role": "system", "content": state}]
     chat = worker_db.run(dbx.recent_chat, ctx.session_id, 20)
     for m in chat:
@@ -209,6 +228,17 @@ def run_agent_job(worker_db, job):
 
     workdir = os.path.join(config.TMP_DIR, f"agent_{job['id']}")
     os.makedirs(workdir, exist_ok=True)
+
+    # Persist every model call this turn (agent, honesty regen, vision) to
+    # llm_calls for the admin inspector. Payloads are capped + redacted in
+    # dbx.insert_llm_call; failures never break the turn.
+    def _llm_recorder(purpose, request, response, usage):
+        worker_db.run(dbx.insert_llm_call, job["project_id"], job["id"],
+                      purpose, (request or {}).get("model"),
+                      request, response,
+                      getattr(usage, "prompt_tokens", None) if usage else None,
+                      getattr(usage, "completion_tokens", None) if usage else None)
+    llm.set_recorder(_llm_recorder)
     try:
         ctx = agent_tools.ToolContext(worker_db, job, project,
                                       index_row["json"], workdir)
@@ -224,6 +254,7 @@ def run_agent_job(worker_db, job):
                       "safe — try sending that again.")
         raise
     finally:
+        llm.set_recorder(None)
         shutil.rmtree(workdir, ignore_errors=True)
 
 
@@ -254,16 +285,19 @@ EDIT_CLAIM = re.compile(
     r"(?i)("
     r"\b(?:i(?:'ve| have)?|we(?:'ve| have)?|now|just) "
     r"(?:cut|trimmed|removed|applied|added|set|updated|changed|adjusted|"
-    r"restored|made|moved)\b"
+    r"restored|made|moved|cropped|resized|reframed|inserted|spliced)\b"
     r"|\b(?:cuts?|changes?|edits?|adjustments?)(?: (?:were|have been|are|got))? "
     r"(?:applied|made|done)\b"
     r"|\bapplied (?:the |a )?(?:cut|change|edit|style)"
+    r"|\b(?:cropped|resized|reframed|converted) to\b"
     r"|\bcaptions? (?:are|is|were|have been)[^.\n]{0,60}"
     r"(?:red|blue|green|yellow|white|black|orange|purple|pink|"
-    r"#[0-9A-Fa-f]{6}|top|bottom|bigger|smaller)"
+    r"#[0-9A-Fa-f]{6}|top|bottom|middle|cent(?:er|re)|bigger|smaller)"
     r"|\bis now (?:red|blue|green|yellow|white|black|orange|purple|pink|"
-    r"#[0-9A-Fa-f]{6}|at the top|at the bottom|bigger|smaller)\b"
-    r"|\b(?:font|colou?r|style) (?:is|was|has been) "
+    r"#[0-9A-Fa-f]{6}|at the top|at the bottom|in the middle|centered|"
+    r"cropped|9:16|16:9|1:1|4:5|vertical|square|portrait|landscape|"
+    r"bigger|smaller)\b"
+    r"|\b(?:font|colou?r|style|frame|aspect ratio) (?:is|was|has been) "
     r"(?:changed|set|updated|applied)\b"
     r")")
 RENDER_CLAIM = re.compile(
@@ -279,15 +313,23 @@ DENY_CLAIM = re.compile(
 
 
 def _reply_violations(draft, wrote, previewed):
+    """Each violation names the exact fabricated claim it matched, so the
+    regeneration correction (and the logs) point at the offending words."""
     v = []
     # An explicit denial ("nothing was changed") dominates — its own words
     # ("changes were made") must not read as a change claim.
-    if not wrote and EDIT_CLAIM.search(draft) and not DENY_CLAIM.search(draft):
-        v.append("claims edits, but no write tool succeeded this turn")
-    if not previewed and RENDER_CLAIM.search(draft):
-        v.append("claims a render, but no preview was rendered this turn")
-    if wrote and DENY_CLAIM.search(draft):
-        v.append("denies changes, but the EDL DID change this turn")
+    m = EDIT_CLAIM.search(draft)
+    if not wrote and m and not DENY_CLAIM.search(draft):
+        v.append(f'claims edits ("{m.group(0).strip()}"), but no write tool '
+                 "succeeded this turn")
+    m = RENDER_CLAIM.search(draft)
+    if not previewed and m:
+        v.append(f'claims a render ("{m.group(0).strip()}"), but no preview '
+                 "was rendered this turn")
+    m = DENY_CLAIM.search(draft)
+    if wrote and m:
+        v.append(f'denies changes ("{m.group(0).strip()}"), but the EDL DID '
+                 "change this turn")
     return v
 
 
@@ -316,11 +358,49 @@ def _turn_facts(ctx, start_version):
             "from the user.")
 
 
+# Nearest supported alternative for the honest fallback, keyed on what the
+# user asked for. User-facing phrasing (no tool names).
+ALTERNATIVE_HINTS = [
+    (re.compile(r"(?i)9.?:.?16|16.?:.?9|1.?:.?1|4.?:.?5|aspect|ratio|"
+                r"vertical|portrait|square|crop|tiktok|reels?|shorts?"),
+     "What I CAN do: change the output frame to 16:9, 9:16, 1:1 or 4:5 with "
+     "a center-crop or a padded fit."),
+    (re.compile(r"(?i)caption|subtitle|font|animat|outline|middle|"
+                r"cent(?:er|re)"),
+     "What I CAN do with captions: color (#RRGGBB), size (s/m/l) and "
+     "position (top / middle / bottom)."),
+    (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio"),
+     "What I CAN do: mix uploaded music under the edit, or lay an uploaded "
+     "voiceover over it (other audio ducks while it speaks)."),
+    (re.compile(r"(?i)insert|splice|b.?roll|logo|image|photo|clip|overlay"),
+     "What I CAN do: splice an uploaded video clip or image between "
+     "segments — attach or upload it and tell me where."),
+    (re.compile(r"(?i)cut|trim|remove|shorten|tighten|silence|pause"),
+     "What I CAN do: cut or restore any time range with word-accurate "
+     "boundaries, and remove silences."),
+]
+
+FALLBACK_REPLY = ("I wasn't able to make that change — it needs a "
+                  "capability I don't have yet; nothing was modified this "
+                  "turn.")
+
+
+def _nearest_alternative(user_text):
+    for rx, hint in ALTERNATIVE_HINTS:
+        if rx.search(user_text or ""):
+            return hint
+    return None
+
+
 def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
-                     honesty):
+                     honesty, user_text=""):
     """Deterministic check of the drafted reply against the turn facts.
-    On violation: one forced regeneration with an explicit correction; if
-    the redraft still violates, post it behind an automatic system note."""
+    On violation: one forced regeneration with a correction naming the exact
+    fabricated claims. If the redraft STILL fabricates on a zero-write turn,
+    the draft is DISCARDED — the user only ever sees a system-authored
+    honest reply; the discarded text goes to the job result for admin
+    inspection. (A wrote-but-denies redraft keeps the corrective-note path:
+    a denial is wrong but not a fabrication worth suppressing.)"""
     wrote = bool(ctx.versions_written)
     previewed = ctx.last_preview is not None
     viol = _reply_violations(draft, wrote, previewed)
@@ -334,8 +414,9 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
         {"role": "assistant", "content": draft},
         {"role": "system",
          "content": facts + "\n\nYour draft above violates these facts: it "
-         + "; ".join(viol) + ". Rewrite your reply to match the facts "
-         "exactly — do not claim anything the facts do not show."},
+         + "; ".join(viol) + ". Each quoted phrase is a fabrication — none "
+         "of it happened. Rewrite your reply to match the facts exactly; "
+         "do not claim anything the facts do not show."},
     ]
     redraft = ""
     try:
@@ -343,6 +424,11 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
             model=config.AGENT_MODEL, messages=msgs, tools=tools,
             tool_choice="none", temperature=config.AGENT_TEMPERATURE,
             max_tokens=800)
+        llm.record("honesty_regen",
+                   {"model": config.AGENT_MODEL, "messages": msgs[-2:],
+                    "note": "regeneration after turn-facts violation"},
+                   {"content": (resp.choices[0].message.content or "")},
+                   getattr(resp, "usage", None))
         redraft = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[honesty] regeneration failed: {e}", flush=True)
@@ -350,14 +436,19 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
         return redraft
     honesty["false_claims"] += 1
     honesty["corrective_note"] = True
-    print(f"[honesty] job {ctx.job['id']}: regeneration still violates — "
-          "posting a corrective note", flush=True)
+    honesty["discarded_drafts"] = [d for d in (draft, redraft) if d]
     if wrote:
-        prefix = ("*(system: this turn DID modify the edit — see the "
-                  "editing steps above)*\n\n")
-    else:
-        prefix = "*(system: no changes were made this turn)*\n\n"
-    return prefix + (redraft or draft)
+        print(f"[honesty] job {ctx.job['id']}: regeneration still denies "
+              "real changes — posting a corrective note", flush=True)
+        return ("*(system: this turn DID modify the edit — see the editing "
+                "steps above)*\n\n" + (redraft or draft))
+    # Zero-write fabrication that survived regeneration: never publish it.
+    honesty["fallback_reply"] = True
+    print(f"[honesty] job {ctx.job['id']}: regeneration still fabricates — "
+          "discarding both drafts and posting the system fallback",
+          flush=True)
+    hint = _nearest_alternative(user_text)
+    return FALLBACK_REPLY + (f"\n\n{hint}" if hint else "")
 
 
 def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
@@ -419,6 +510,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         timings["llm_s"] = round(timings["llm_s"] + time.monotonic() - t0, 2)
         timings["llm_calls"] += 1
         msg = resp.choices[0].message
+        llm.record("agent",
+                   {"model": config.AGENT_MODEL, "messages": messages,
+                    "tools": [t["function"]["name"] for t in tools]},
+                   {"content": msg.content,
+                    "tool_calls": [{"name": tc.function.name,
+                                    "arguments": tc.function.arguments}
+                                   for tc in (msg.tool_calls or [])]},
+                   getattr(resp, "usage", None))
 
         if not msg.tool_calls:
             # Auto-render first so the turn facts include the real preview.
@@ -430,7 +529,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          if ctx.versions_written or ctx.last_preview else
                          "I only reviewed the video — nothing was changed.")
             final = _enforce_honesty(ctx, client, messages, tools, draft,
-                                     start_version, honesty)
+                                     start_version, honesty,
+                                     user_text=user_message["content"] or "")
             if fail_note:
                 final += fail_note
             honesty["auto_render"] = ctx.autorendered
