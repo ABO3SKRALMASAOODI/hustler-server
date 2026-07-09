@@ -714,19 +714,39 @@ def _apply_edl_op(edl, op, args, assets_by_id):
                      f"{round(final_of[target], 2)}s (ins{n})")
 
     if op == "set_insert_duration":
+        # Idempotent: the chip may reference an insert a previous click (or
+        # the agent) already removed — treat as a no-op, not an error.
         for i in (edl.get("inserts") or []):
             if i.get("id") == args.get("id"):
                 i["duration_s"] = round(
                     min(max(float(args.get("duration_s") or 3.0), 0.2),
                         600.0), 2)
                 return edl, f"insert {i['id']} duration {i['duration_s']}s"
-        raise ValueError("That insert no longer exists.")
+        return edl, "insert already gone"
+
+    if op == "move_insert":
+        inserts = list(edl.get("inserts") or [])
+        target_ins = next((i for i in inserts
+                           if i.get("id") == args.get("id")), None)
+        if not target_ins:
+            return edl, "insert already gone"
+        at = float(args.get("at_output_s") or 0.0)
+        bounds = wschemas.keep_boundaries(edl["keep"])
+        others = sorted((float(i["at_output_s"]), float(i["duration_s"]))
+                        for i in inserts if i is not target_ins)
+        final_of = {b: b + sum(d for a, d in others if a <= b + 1e-6)
+                    for b in bounds}
+        target = min(bounds, key=lambda b: abs(final_of[b] - at))
+        target_ins["at_output_s"] = target
+        edl["inserts"] = inserts
+        return edl, (f"moved insert {target_ins['id']} to "
+                     f"{round(final_of[target], 2)}s")
 
     if op == "remove_insert":
         before = edl.get("inserts") or []
         edl["inserts"] = [i for i in before if i.get("id") != args.get("id")]
         if len(edl["inserts"]) == len(before):
-            raise ValueError("That insert no longer exists.")
+            return edl, "insert already gone"
         return edl, f"removed insert {args.get('id')}"
 
     if op == "add_voiceover":
@@ -746,11 +766,22 @@ def _apply_edl_op(edl, op, args, assets_by_id):
         edl["voiceover"] = vos
         return edl, f"voiceover added (vo{n})"
 
+    if op == "move_voiceover":
+        prog = wschemas.program_duration(edl)
+        for v in (edl.get("voiceover") or []):
+            if v.get("id") == args.get("id"):
+                start = max(0.0, float(args.get("start_output_s") or 0.0))
+                v["start_output_s"] = round(
+                    min(start, max(0.0, prog - 0.1)), 2)
+                return edl, (f"moved voiceover {v['id']} to "
+                             f"{v['start_output_s']}s")
+        return edl, "voiceover already gone"
+
     if op == "remove_voiceover":
         before = edl.get("voiceover") or []
         edl["voiceover"] = [v for v in before if v.get("id") != args.get("id")]
         if len(edl["voiceover"]) == len(before):
-            raise ValueError("That voiceover no longer exists.")
+            return edl, "voiceover already gone"
         return edl, f"removed voiceover {args.get('id')}"
 
     raise ValueError(f"Unknown operation '{op}'.")
@@ -804,7 +835,8 @@ def user_edl_write(user_id, project_id):
         if wschemas.edl_signature(normalized) == \
                 wschemas.edl_signature(edl_row["json"]):
             return jsonify({"version": edl_row["version"],
-                            "no_change": True})
+                            "no_change": True,
+                            "edl": edl_row["json"]})
 
         cur.execute("""INSERT INTO edls (project_id, version, json, created_by)
                        VALUES (%s, (SELECT COALESCE(MAX(version), 0) + 1
@@ -825,7 +857,7 @@ def user_edl_write(user_id, project_id):
                      Json({"tool": "user_edit", "op": op})))
 
     return jsonify({"version": version, "preview_job_id": preview_job,
-                    "desc": desc})
+                    "desc": desc, "edl": normalized})
 
 
 # ------------------------------------------------------------------ #

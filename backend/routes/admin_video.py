@@ -155,7 +155,40 @@ def video_overview():
         """)
         no_change = cur.fetchone()["n"]
 
+        # headline totals + liveness — "is everything working" at a glance
+        cur.execute("""
+            SELECT
+              (SELECT COUNT(*) FROM projects) AS projects,
+              (SELECT COUNT(*) FROM assets WHERE kind='original') AS videos,
+              (SELECT COUNT(*) FROM video_jobs
+                 WHERE type IN ('preview','final')
+                   AND state='done') AS renders_done,
+              (SELECT COUNT(*) FROM video_jobs
+                 WHERE state='queued') AS queued_now,
+              (SELECT COUNT(*) FROM video_jobs
+                 WHERE state='running') AS running_now,
+              (SELECT MAX(updated_at) FROM video_jobs
+                 WHERE state IN ('done','failed','running'))
+                 AS last_worker_activity
+        """)
+        totals = cur.fetchone()
+
     return jsonify({
+        "totals": {
+            "users": len(users),
+            "projects": totals["projects"],
+            "videos": totals["videos"],
+            "renders_done": totals["renders_done"],
+            "queued_now": totals["queued_now"],
+            "running_now": totals["running_now"],
+            "last_worker_activity": totals["last_worker_activity"].isoformat()
+                if totals["last_worker_activity"] else None,
+        },
+        "health": {
+            "storage_configured": bool(os.getenv("S3_ENDPOINT")
+                                       and os.getenv("S3_BUCKET")),
+            "llm_configured": bool(os.getenv("OPENAI_API_KEY")),
+        },
         "users": [{**u, "last_active": u["last_active"].isoformat()
                    if u.get("last_active") else None,
                    "storage_bytes": int(u["storage_bytes"] or 0),

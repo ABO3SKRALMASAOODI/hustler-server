@@ -617,6 +617,34 @@ def main():
     ok(f"user-endpoint clip insert (mixed res/fps, normalized) then "
        f"remove_insert restored {pv['duration_s']:.2f}s exactly")
 
+    # ── ROUND 5: removing an already-removed insert must be a no-op, not
+    #    an error (the UI chip lingers until the next poll; a second click
+    #    used to 400 with "That insert no longer exists") ─────────────────
+    res = user_edl_op("remove_insert", {"id": clip_ins_id})
+    assert res.get("no_change") is True and "edl" in res, res
+    res = user_edl_op("set_insert_duration",
+                      {"id": clip_ins_id, "duration_s": 5.0})
+    assert res.get("no_change") is True, res
+    res = user_edl_op("remove_voiceover", {"id": "vo-ghost"})
+    assert res.get("no_change") is True, res
+    ok("double-remove / stale-id ops are idempotent no-ops (no error toast)")
+
+    # ── ROUND 5: move_insert snaps to the nearest keep boundary and the
+    #    response carries the new EDL for optimistic UI updates ──────────
+    img_ins_id = latest_edl()["json"]["inserts"][0]["id"]
+    res = user_edl_op("move_insert",
+                      {"id": img_ins_id, "at_output_s": 99999})
+    assert res.get("version") and isinstance(res.get("edl"), dict), res
+    moved = next(i for i in res["edl"]["inserts"] if i["id"] == img_ins_id)
+    keep_out = sum(e - s for s, e in res["edl"]["keep"])
+    assert abs(moved["at_output_s"] - keep_out) < 0.02, \
+        f"move_insert did not snap to the end boundary: {moved}"
+    res = user_edl_op("move_insert", {"id": img_ins_id, "at_output_s": 0})
+    moved = next(i for i in res["edl"]["inserts"] if i["id"] == img_ins_id)
+    assert moved["at_output_s"] == 0, moved
+    ok("move_insert drags between boundaries (snapped end + back to 0), "
+       "op responses carry the new EDL json")
+
     # ── turn 4: music attachment -> add_music with duck (issue 8) ────
     music_path = os.path.join(ROOT, "test_music.wav")
     if not os.path.exists(music_path):
@@ -683,6 +711,17 @@ def main():
     assert pv["edl_version"] == edl["version"], "voiceover preview missing"
     ok(f"voiceover in EDL v{edl['version']} (duck_others=true), "
        "preview rendered with the mix")
+
+    # ── ROUND 5: move_voiceover repositions and clamps in program time ──
+    res = user_edl_op("move_voiceover",
+                      {"id": vos[0]["id"], "start_output_s": 5.0})
+    vo = next(v for v in res["edl"]["voiceover"] if v["id"] == vos[0]["id"])
+    assert vo["start_output_s"] == 5.0, vo
+    res = user_edl_op("move_voiceover",
+                      {"id": vos[0]["id"], "start_output_s": 0})
+    vo = next(v for v in res["edl"]["voiceover"] if v["id"] == vos[0]["id"])
+    assert vo["start_output_s"] == 0, vo
+    ok("move_voiceover drags the narration block (5.0s and back)")
 
     # ── ISSUE 1: UI frame toggle writes a user version + auto-previews ──
     res = user_edl_op("set_frame", {"ratio": "1:1", "mode": "pad"})
@@ -785,6 +824,12 @@ def main():
     assert ov["ops"]["fallback_replies"] >= 1, ov["ops"]
     assert ov["ops"]["auto_renders"] >= 1
     assert ov["ops"]["no_change_count"] >= 1
+    assert ov["totals"]["projects"] >= 1 and ov["totals"]["videos"] >= 1, \
+        ov.get("totals")
+    assert ov["totals"]["renders_done"] >= 5, ov["totals"]
+    assert ov["totals"]["last_worker_activity"], "worker liveness missing"
+    assert ov["health"]["storage_configured"] is True and \
+        ov["health"]["llm_configured"] is True, ov.get("health")
     assert ov["ops"]["stage_medians"].get("agent_turn", {}).get("total_s") \
         is not None
     ok(f"admin overview: user rollup + ops counters "
