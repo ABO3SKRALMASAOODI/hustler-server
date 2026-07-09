@@ -77,6 +77,9 @@ class CaptionsFromTranscript(BaseModel):
 
 
 class MusicItem(BaseModel):
+    # id is optional so pre-round-6 EDLs (whose music items have none) stay
+    # valid and signature-compatible; new items always get one.
+    id: Optional[str] = None
     storage_key: str
     # Music is new content with no source-time meaning, so start/end are
     # positions in the OUTPUT (edited) timeline. Documented in the tool spec.
@@ -283,7 +286,13 @@ def validate_edl(data, duration):
                 f"voiceover[{i}].gain_db {vo.gain_db} outside "
                 f"[{GAIN_MIN_DB}, {GAIN_MAX_DB}].")
 
+    seen_music_ids = set()
     for i, m in enumerate(edl.music):
+        if m.id is not None:
+            if not m.id or m.id in seen_music_ids:
+                raise EDLValidationError(
+                    f"music[{i}].id must be non-empty and unique.")
+            seen_music_ids.add(m.id)
         m.start, m.end = _r(m.start), _r(m.end)
         # music positions live in the FINAL program timeline (incl. inserts)
         _check_span(f"music[{i}]", m.start, m.end, prog_dur)
@@ -303,13 +312,25 @@ def validate_edl(data, duration):
     return edl
 
 
+def _sig_canon(v):
+    # Nested None-valued keys are dropped too, so items written before an
+    # optional field existed (e.g. music without 'id') compare equal to
+    # re-validated dumps that carry the field as None.
+    if isinstance(v, dict):
+        return {k: _sig_canon(x) for k, x in v.items() if x is not None}
+    if isinstance(v, list):
+        return [_sig_canon(x) for x in v]
+    return v
+
+
 def edl_signature(edl_dict):
     """Canonical string form of an EDL for byte-identity comparison (no-op
     write detection). Assumes the dict is already validate_edl-normalized.
     Keys with empty values are dropped so EDLs written before a field existed
     (no 'frame'/'inserts' key) compare equal to fresh dumps that carry the
     field's empty default."""
-    canon = {k: v for k, v in edl_dict.items() if v not in (None, [], {})}
+    canon = {k: _sig_canon(v) for k, v in edl_dict.items()
+             if v not in (None, [], {})}
     return json.dumps(canon, sort_keys=True, separators=(",", ":"))
 
 

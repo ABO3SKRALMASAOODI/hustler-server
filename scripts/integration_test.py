@@ -723,6 +723,86 @@ def main():
     assert vo["start_output_s"] == 0, vo
     ok("move_voiceover drags the narration block (5.0s and back)")
 
+    # ── ROUND 6: "lower the music" while the music sits in a voiceover —
+    #    the agent must set_audio_gain on the item, NOT set_volume on the
+    #    speech (the production failure lowered the speaker by -6dB) ──────
+    vol_before = latest_edl()["json"].get("volume") or []
+    out = send("MUSICFIX TEST lower the volume of the music so the "
+               "speakers sound can be heard")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    vo_after = next(v for v in edl["json"]["voiceover"]
+                    if v["id"] == vos[0]["id"])
+    assert vo_after["gain_db"] == -12.0, vo_after
+    assert (edl["json"].get("volume") or []) == vol_before, \
+        "set_volume was misapplied to the program audio"
+    pv = last_preview_result()
+    assert pv["edl_version"] == edl["version"]
+    ok("set_audio_gain lowered the voiceover-music to -12dB; program "
+       "(speech) volume untouched")
+
+    # ── ROUND 6: the production music fabrication must hit the honest
+    #    fallback (zero writes, claim regex now covers audio phrasing) ────
+    v_before = latest_edl()["version"]
+    out = send("MUSICFAB TEST make the music for the first 15 seconds "
+               "only then cut it")
+    assert out.get("queued")
+    turn = wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    hon = (turn["result"] or {}).get("honesty") or {}
+    assert hon.get("false_claims") == 2 and hon.get("fallback_reply"), hon
+    assert latest_edl()["version"] == v_before, "fabrication turn wrote EDL"
+    reply = latest_assistant()["content"]
+    assert reply.startswith("I wasn't able to make that change"), reply[:90]
+    assert "louder/quieter" in reply, f"audio alternative hint missing: {reply}"
+    assert "now plays only from 0.0 to 15.0" not in all_chat_text(), \
+        "fabricated music claim leaked into user-visible chat"
+    ok("music fabrication caught: fallback posted, audio hint shown, "
+       "claim never visible")
+
+    # ── ROUND 6: retime the music properly — vo removed, music bed 0-15 ──
+    out = send("MUSRANGE TEST music only for the first 15 seconds please")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    assert not (edl["json"].get("voiceover") or []), edl["json"]["voiceover"]
+    # add_music clamps end to the kept footage, so expect min(15, keep)
+    keep_out = sum(e - s for s, e in edl["json"]["keep"])
+    exp_end = round(min(15.0, keep_out), 2)
+    mus = [m for m in edl["json"]["music"] if m["start"] == 0.0
+           and abs(m["end"] - exp_end) < 0.05 and m.get("id") == "mus2"]
+    assert mus, (edl["json"]["music"], exp_end)
+    ok(f"music moved to the bed 0-{exp_end}s ({mus[0]['id']}), "
+       "voiceover removed")
+
+    # ── ROUND 6: user music ops on the timeline (add / move / remove) ────
+    res = user_edl_op("add_music", {"asset_id": music_asset, "start": 5.0})
+    m2 = next(m for m in res["edl"]["music"] if m["start"] == 5.0)
+    assert m2["gain_db"] == -18.0 and m2["duck"] is True and m2["id"], m2
+    res = user_edl_op("move_music", {"id": m2["id"], "start": 0.0})
+    moved = next(m for m in res["edl"]["music"] if m["id"] == m2["id"])
+    assert moved["start"] == 0.0 and \
+        abs((moved["end"] - moved["start"]) - (m2["end"] - m2["start"])) \
+        < 0.01, moved
+    res = user_edl_op("remove_music", {"id": m2["id"]})
+    assert all(m.get("id") != m2["id"] for m in res["edl"]["music"])
+    res = user_edl_op("remove_music", {"id": m2["id"]})
+    assert res.get("no_change") is True, res
+    # drain the auto-previews these ops queued so the next user op isn't
+    # refused a preview slot by the per-user job cap
+    t0 = time.time()
+    while time.time() - t0 < TIMEOUT_RENDER:
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT COUNT(*) AS n FROM video_jobs
+                           WHERE project_id = %s
+                             AND state IN ('queued','running')""",
+                        (project_id,))
+            if cur.fetchone()["n"] == 0:
+                break
+        time.sleep(1)
+    ok("user timeline music ops: add (-18dB ducked), drag, remove, "
+       "idempotent re-remove")
+
     # ── ISSUE 1: UI frame toggle writes a user version + auto-previews ──
     res = user_edl_op("set_frame", {"ratio": "1:1", "mode": "pad"})
     assert res.get("version") and res.get("preview_job_id"), res

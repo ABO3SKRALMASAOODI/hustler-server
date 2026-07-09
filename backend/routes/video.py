@@ -766,6 +766,46 @@ def _apply_edl_op(edl, op, args, assets_by_id):
         edl["voiceover"] = vos
         return edl, f"voiceover added (vo{n})"
 
+    if op == "add_music":
+        asset = assets_by_id.get(int(args.get("asset_id") or 0))
+        if not asset or asset["kind"] not in ("music", "audio"):
+            raise ValueError("Pick an uploaded audio file for the music.")
+        prog = wschemas.program_duration(edl)
+        start = round(min(max(float(args.get("start") or 0.0), 0.0),
+                          max(0.0, prog - 0.2)), 2)
+        end_default = start + float(asset.get("duration_s") or prog)
+        end = round(min(max(float(args.get("end") or end_default),
+                            start + 0.1), prog), 2)
+        items = list(edl.get("music") or [])
+        taken = {m.get("id") for m in items}
+        n = 1
+        while f"mus{n}" in taken:
+            n += 1
+        items.append({"id": f"mus{n}", "storage_key": asset["storage_key"],
+                      "start": start, "end": end,
+                      "gain_db": -18.0, "duck": True})
+        edl["music"] = items
+        return edl, f"music added {start}-{end}s (mus{n})"
+
+    if op == "move_music":
+        prog = wschemas.program_duration(edl)
+        for m in (edl.get("music") or []):
+            if m.get("id") == args.get("id"):
+                length = float(m["end"]) - float(m["start"])
+                start = round(min(max(float(args.get("start") or 0.0), 0.0),
+                                  max(0.0, prog - length)), 2)
+                m["start"] = start
+                m["end"] = round(min(start + length, prog), 2)
+                return edl, f"moved music {m['id']} to {start}s"
+        return edl, "music already gone"
+
+    if op == "remove_music":
+        before = edl.get("music") or []
+        edl["music"] = [m for m in before if m.get("id") != args.get("id")]
+        if len(edl["music"]) == len(before):
+            return edl, "music already gone"
+        return edl, f"removed music {args.get('id')}"
+
     if op == "move_voiceover":
         prog = wschemas.program_duration(edl)
         for v in (edl.get("voiceover") or []):

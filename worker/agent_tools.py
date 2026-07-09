@@ -15,7 +15,8 @@ import media
 import storage
 from schemas import (CaptionStyle, EDLValidationError, Frame, describe_edl,
                      edl_signature, keep_boundaries, output_duration,
-                     program_duration, validate_edl, MAX_INSERT_DURATION_S)
+                     program_duration, validate_edl, MAX_INSERT_DURATION_S,
+                     GAIN_MIN_DB, GAIN_MAX_DB)
 from timeline import Timeline
 
 
@@ -289,7 +290,15 @@ def look_at(ctx, start, end, question):
             pass
     if not frames:
         return "Could not extract frames for that range."
-    prompt = (f"These are {len(frames)} frames sampled evenly from "
+    try:
+        has_frame = bool((ctx.latest_edl()["json"].get("frame") or {})
+                         .get("ratio"))
+    except Exception:
+        has_frame = False
+    src_note = ("These frames are from the SOURCE footage — the output "
+                "frame (crop/letterbox) is applied later at render, so do "
+                "not judge aspect ratio here. " if has_frame else "")
+    prompt = (f"{src_note}These are {len(frames)} frames sampled evenly from "
               f"{s:.2f}s to {e:.2f}s of a video. Question from the editor: "
               f"{question}\nAnswer concisely and concretely.")
     answer = llm.ask_vision(prompt, frames, purpose="vision_look",
@@ -542,13 +551,61 @@ def add_music(ctx, storage_key, start, end, gain_db=-18.0, duck=True):
         g = float(gain_db)
     except (TypeError, ValueError):
         return "REJECTED: gain_db must be a number."
-    music = list(edl.get("music") or [])
-    music.append({"storage_key": storage_key, "start": s, "end": e,
-                  "gain_db": g, "duck": bool(duck)})
+    music = [dict(m) for m in (edl.get("music") or [])]
+    item = {"id": _next_item_id(music, "mus"), "storage_key": storage_key,
+            "start": s, "end": e, "gain_db": g, "duck": bool(duck)}
+    music.append(item)
     edl["music"] = music
-    return ctx.write_edl(
+    res = ctx.write_edl(
         edl, f"music '{os.path.basename(storage_key)}' at {s}-{e}s "
-             f"(output timeline), {g}dB, duck={bool(duck)}")
+             f"(output timeline), {g}dB, duck={bool(duck)} [{item['id']}]")
+    dup_vo = [v.get("id") for v in (edl.get("voiceover") or [])
+              if v.get("asset_key") == storage_key]
+    if dup_vo and not str(res).startswith("REJECTED"):
+        res += (f"\nWARNING: this same file is also active as voiceover "
+                f"{', '.join(dup_vo)} — it will play TWICE. If you meant to "
+                f"replace it, call remove_voiceover('{dup_vo[0]}').")
+    return res
+
+
+def remove_music(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(m) for m in (edl.get("music") or [])]
+    hit = next((m for m in items if m.get("id") == id), None)
+    if not hit:
+        have = ", ".join(m.get("id") or "?" for m in items) or "none"
+        return (f"REJECTED: no music with id '{id}'. Existing music ids: "
+                f"{have}. Call get_edl to see them.")
+    edl["music"] = [m for m in items if m.get("id") != id]
+    return ctx.write_edl(
+        edl, f"removed music {id} "
+             f"('{os.path.basename(hit['storage_key'])}', "
+             f"{hit['start']}-{hit['end']}s)")
+
+
+def set_audio_gain(ctx, kind, id, gain_db):
+    """Change the loudness of an EXISTING music or voiceover item."""
+    if kind not in ("music", "voiceover"):
+        return "REJECTED: kind must be 'music' or 'voiceover'."
+    try:
+        g = round(float(gain_db), 1)
+    except (TypeError, ValueError):
+        return "REJECTED: gain_db must be a number (dB, e.g. -12)."
+    g = min(max(g, GAIN_MIN_DB), GAIN_MAX_DB)
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(m) for m in (edl.get(kind) or [])]
+    hit = next((m for m in items if m.get("id") == id), None)
+    if not hit:
+        have = ", ".join(m.get("id") or "?" for m in items) or "none"
+        return (f"REJECTED: no {kind} with id '{id}'. Existing {kind} ids: "
+                f"{have}. Call get_edl to see them.")
+    old = hit.get("gain_db", 0.0)
+    hit["gain_db"] = g
+    edl[kind] = items
+    key = hit.get("storage_key") or hit.get("asset_key") or "?"
+    return ctx.write_edl(
+        edl, f"{kind} {id} ('{os.path.basename(key)}') gain "
+             f"{old:+.1f}dB -> {g:+.1f}dB")
 
 
 def _music_assets(conn, project_id):
@@ -725,10 +782,17 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
     edl["voiceover"] = vos + [item]
     name = (asset.get("meta") or {}).get("filename") or \
         os.path.basename(asset_key)
-    return ctx.write_edl(
+    res = ctx.write_edl(
         edl, f"voiceover '{name}' from {start}s (output time), {g:+.1f}dB, "
              f"ducking other audio {DUCK_NOTE if bool(duck_others) else 'off'}"
              f" [{item['id']}]")
+    dup_mus = [m.get("id") or "?" for m in (edl.get("music") or [])
+               if m.get("storage_key") == asset_key]
+    if dup_mus and not str(res).startswith("REJECTED"):
+        res += (f"\nWARNING: this same file is also active as music "
+                f"{', '.join(dup_mus)} — it will play TWICE. Background "
+                f"music belongs in music items, not voiceover.")
+    return res
 
 
 DUCK_NOTE = "-12dB while it speaks"
@@ -797,6 +861,21 @@ def render_preview(ctx):
             "attach to the chat. Summarize your edit for the user now.")
 
 
+def _frame_context(edl):
+    """One sentence of output-frame context for vision prompts, so letterbox
+    bars on pad renders don't read as 'broken black frames'."""
+    frame = (edl or {}).get("frame") or {}
+    ratio, mode = frame.get("ratio"), frame.get("mode")
+    if not ratio:
+        return ""
+    if mode in ("pad", "pad_blur"):
+        bg = "blurred" if mode == "pad_blur" else "solid black"
+        return (f"The output frame is {ratio} letterboxed ({bg} bars around "
+                f"a smaller image are EXPECTED and are NOT broken frames; "
+                f"dark footage can make whole thumbnails look near-black). ")
+    return f"The output frame is tightly center-cropped to {ratio}. "
+
+
 def _self_check(ctx, result):
     sheet_key = result.get("sheet_key")
     if not sheet_key or not llm.vision_available():
@@ -806,11 +885,17 @@ def _self_check(ctx, result):
         storage.download_to(sheet_key, local)
     except Exception:
         return None
+    try:
+        frame_note = _frame_context(ctx.latest_edl()["json"])
+    except Exception:
+        frame_note = ""
     return llm.ask_vision(
+        frame_note +
         "This is a 3x3 contact sheet sampled evenly from an automatically "
         "edited video. In one or two sentences: does anything look broken "
-        "(black frames, half-cut faces mid-action, missing captions if text "
-        "was expected)? If it looks fine, say 'looks clean'.",
+        "(unexpected black frames, half-cut faces mid-action, missing "
+        "captions if text was expected)? If it looks fine, say "
+        "'looks clean'.",
         [local], max_tokens=200, purpose="vision_selfcheck",
         image_names=[sheet_key])
 
@@ -915,8 +1000,9 @@ TOOLS = {
                       "max_words_per_caption": {"type": "integer"},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
-    "add_music": (add_music, "Mix a project music file under the edit. Call "
-                  "list_assets(kind='music') first and pass the exact "
+    "add_music": (add_music, "Mix a project music file under the edit as "
+                  "BACKGROUND MUSIC (default -18dB, ducked under speech). "
+                  "Call list_assets(kind='music') first and pass the exact "
                   "storage_key it returns — if none exist, ask the user to "
                   "attach a file instead of guessing. start/end are "
                   "OUTPUT-timeline seconds (position in the finished video). "
@@ -926,6 +1012,19 @@ TOOLS = {
                    "end": {"type": "number"},
                    "gain_db": {"type": "number"},
                    "duck": {"type": "boolean"}}),
+    "remove_music": (remove_music, "Remove one background-music item by its "
+                     "id (see get_edl). Use this to cut the music entirely "
+                     "or before re-adding it with a different range.",
+                     {"id": {"type": "string"}}),
+    "set_audio_gain": (set_audio_gain, "Change the loudness of an EXISTING "
+                       "music or voiceover item without re-adding it — THE "
+                       "tool for 'lower the music' / 'make the narration "
+                       "quieter'. kind: 'music' or 'voiceover'; id from "
+                       "get_edl; gain_db e.g. -12.",
+                       {"kind": {"type": "string",
+                                 "enum": ["music", "voiceover"]},
+                        "id": {"type": "string"},
+                        "gain_db": {"type": "number"}}),
     "set_caption_style": (set_caption_style, "Change how existing captions "
                           "LOOK without touching their text or timing. Pass "
                           "only the fields to change: e.g. 'make it red' -> "
@@ -942,8 +1041,10 @@ TOOLS = {
                                                       "enum": ["bottom",
                                                                "top",
                                                                "middle"]}}}}),
-    "set_volume": (set_volume, "Volume automation gain_db on a SOURCE-time "
-                   "span of the original audio.",
+    "set_volume": (set_volume, "Volume automation on the ORIGINAL footage's "
+                   "audio (the speaker) over a SOURCE-time span. NOT for "
+                   "music or voiceover loudness — use set_audio_gain for "
+                   "those.",
                    {"start": {"type": "number"}, "end": {"type": "number"},
                     "gain_db": {"type": "number"}}),
     "set_frame": (set_frame, "Set the output aspect ratio for every render. "
@@ -1001,6 +1102,8 @@ REQUIRED_ARGS = {
     "restore_range": ["start", "end"],
     "set_caption_style": ["style"],
     "add_music": ["storage_key", "start", "end"],
+    "remove_music": ["id"],
+    "set_audio_gain": ["kind", "id", "gain_db"],
     "set_volume": ["start", "end", "gain_db"],
     "set_frame": ["ratio"],
     "insert_media": ["asset_key", "at_output_s"],
@@ -1013,7 +1116,8 @@ REQUIRED_ARGS = {
 # The loop uses this to build TURN FACTS: a write "succeeded" when its result
 # is a version diff line (write_edl's "EDL vX -> vY: ..." format).
 WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range", "add_captions",
-               "set_caption_style", "add_music", "set_volume", "set_frame",
+               "set_caption_style", "add_music", "remove_music",
+               "set_audio_gain", "set_volume", "set_frame",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover"}
 

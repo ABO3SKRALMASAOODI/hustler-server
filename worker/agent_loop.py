@@ -299,11 +299,23 @@ EDIT_CLAIM = re.compile(
     r"bigger|smaller)\b"
     r"|\b(?:font|colou?r|style|frame|aspect ratio) (?:is|was|has been) "
     r"(?:changed|set|updated|applied)\b"
+    # audio claims — "The music now plays only from 0.0 to 15.0 seconds…"
+    # Stative/perfect constructions only, so honest offers ("I can make the
+    # music quieter") don't trip the guard.
+    r"|\b(?:music|audio|track|song|soundtrack|voice.?over|narration|sound)\b"
+    r"[^.\n]{0,60}\b(?:now plays|plays? only|plays? from|is cut|"
+    r"cut (?:after|off)|(?:is|are|was|were|has been|have been) (?:now )?"
+    r"(?:added|removed|lowered|reduced|quieter|louder|softer|ducked|muted|"
+    r"cut|trimmed|gone))\b"
+    r"|\bvolume (?:is |was |has been )?(?:lowered|raised|reduced|increased|"
+    r"set|changed|adjusted)\b"
+    r"|\b(?:lowered|raised|reduced|boosted) (?:the )?(?:volume|music|audio)\b"
     r")")
 RENDER_CLAIM = re.compile(
     r"(?i)(\b(?<!no )preview (?:is |was |has been )?"
     r"(?:rendered|ready|updated|attached|refreshed|playing)\b"
-    r"|\brendered (?:a |the )?(?:new )?preview\b|\bre-?rendered\b)")
+    r"|\brendered (?:a |the )?(?:new )?preview\b|\bre-?rendered\b"
+    r"|\brendering (?:the |a )?(?:new )?preview\b)")
 DENY_CLAIM = re.compile(
     r"(?i)(\bedl (?:did not|didn't) change\b"
     r"|\bnothing (?:was |has been )?changed\b"
@@ -369,9 +381,10 @@ ALTERNATIVE_HINTS = [
                 r"cent(?:er|re)"),
      "What I CAN do with captions: color (#RRGGBB), size (s/m/l) and "
      "position (top / middle / bottom)."),
-    (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio"),
-     "What I CAN do: mix uploaded music under the edit, or lay an uploaded "
-     "voiceover over it (other audio ducks while it speaks)."),
+    (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
+     "What I CAN do: mix uploaded music under the edit on any time range, "
+     "make existing music or narration louder/quieter, remove it, or lay an "
+     "uploaded voiceover over the edit (other audio ducks while it speaks)."),
     (re.compile(r"(?i)insert|splice|b.?roll|logo|image|photo|clip|overlay"),
      "What I CAN do: splice an uploaded video clip or image between "
      "segments — attach or upload it and tell me where."),

@@ -336,9 +336,75 @@ def plan_voiceover(messages):
                   "ducks while it speaks.")
 
 
+# Round 6: the production music fabrication, verbatim.
+VIOLATING_MUSIC = ("The music now plays only from 0.0 to 15.0 seconds in "
+                   "the output timeline and is cut thereafter. Captions "
+                   "remain large and word-chunked. Rendering preview now.")
+
+
+def plan_musicfab(messages):
+    """Replays the production music turn: zero tool calls, a fabricated
+    'music is cut at 15s' claim; the regeneration fabricates again."""
+    if messages[-1].get("role") == "system" and \
+            "TURN FACTS" in (messages[-1].get("content") or ""):
+        return None, VIOLATING_MUSIC
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_edl", {}
+    return None, VIOLATING_MUSIC
+
+
+def plan_musicfix(messages):
+    """'Lower the music' when the music is sitting in a voiceover item —
+    the right move is set_audio_gain on vo1, NOT set_volume on the speech."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_edl", {}
+    if last == "get_edl":
+        m = re.search(r'"id":\s*"(vo\d+)"', find_result(messages, "get_edl"))
+        if not m:
+            return None, "There is no voiceover or music in the edit yet."
+        return "set_audio_gain", {"kind": "voiceover", "id": m.group(1),
+                                  "gain_db": -12}
+    if last == "set_audio_gain":
+        return "render_preview", {}
+    return None, ("Lowered that track by 12dB so the speaker stays on top; "
+                  "the speech itself is untouched.")
+
+
+def plan_musrange(messages):
+    """'Music only for the first 15s': the file lives in voiceover, so move
+    it to the music bed — remove_voiceover, then add_music 0-15."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_edl", {}
+    if last == "get_edl":
+        m = re.search(r'"id":\s*"(vo\d+)"', find_result(messages, "get_edl"))
+        if not m:
+            return None, "No voiceover found to retime."
+        return "remove_voiceover", {"id": m.group(1)}
+    if last == "remove_voiceover":
+        return "list_assets", {"kind": "music"}
+    if last == "list_assets":
+        m = re.search(r"storage_key=(\S+)",
+                      find_result(messages, "list_assets"))
+        return "add_music", {"storage_key": m.group(1), "start": 0.0,
+                             "end": 15.0}
+    if last == "add_music":
+        return "render_preview", {}
+    return None, ("Moved that track to the music bed for the first 15 "
+                  "seconds only, ducked under the speech.")
+
+
 def plan_next(messages):
     """Returns (tool_name, args) or (None, final_text)."""
     text = last_user_text(messages).lower()
+    if "musicfab test" in text:
+        return plan_musicfab(messages)
+    if "musicfix test" in text:
+        return plan_musicfix(messages)
+    if "musrange test" in text:
+        return plan_musrange(messages)
     if "stubborn test" in text:
         return plan_zero_write(messages, stubborn=True)
     if "zwc test" in text:

@@ -622,4 +622,136 @@ check("alternative hint for caption requests",
 check("no hint when nothing matches",
       _nearest_alternative("do the thing") is None)
 
+print("== Round-6 honesty: audio/volume claims ==")
+LIEMUS = ("The music now plays only from 0.0 to 15.0 seconds in the output "
+          "timeline and is cut thereafter. Captions remain large and "
+          "word-chunked. Rendering preview now.")
+v = _reply_violations(LIEMUS, wrote=False, previewed=False)
+check("music fabrication trips edit + render detectors", len(v) == 2)
+check("violation names the music claim",
+      any("music now plays" in x for x in v))
+v = _reply_violations("The captions are active and the music volume is "
+                      "lowered by 6dB for better speech clarity.",
+                      wrote=False, previewed=False)
+check("volume-lowered fabrication detected", len(v) == 1)
+check("'Rendering preview now' alone is a render claim",
+      len(_reply_violations("Rendering preview now.",
+                            wrote=True, previewed=False)) == 1)
+check("honest offer to change music is clean",
+      _reply_violations("I can make the music quieter or remove it — "
+                        "which would you like?",
+                        wrote=False, previewed=False) == [])
+check("music claim fine after a real write",
+      _reply_violations("The music is now lowered to -12dB.",
+                        wrote=True, previewed=True) == [])
+check("audio hint mentions gain control",
+      "louder/quieter" in _nearest_alternative("lower the music volume"))
+
+print("== Round-6 music tools ==")
+import json                                                   # noqa: E402
+import schemas                                                # noqa: E402
+from agent_tools import (set_audio_gain, remove_music,        # noqa: E402
+                         add_music, _frame_context)
+
+
+class ToolCtx:
+    def __init__(self, edl, asset=None):
+        self._edl = {"version": 1, "json": edl}
+        self.written = None
+        self.db = self
+        self.project_id = 1
+        self._asset = asset
+
+    def latest_edl(self):
+        return self._edl
+
+    def write_edl(self, edl, desc):
+        self.written = edl
+        return f"EDL v1 -> v2: {desc}"
+
+    def run(self, fn, *a, **k):          # stands in for ctx.db.run
+        return self._asset
+
+MUS_EDL = {"keep": [[0.0, 30.0]],
+           "music": [{"id": "mus1", "storage_key": "music/1/a.mp3",
+                      "start": 0.0, "end": 30.0, "gain_db": -18.0,
+                      "duck": True}],
+           "voiceover": [{"id": "vo1", "asset_key": "music/1/a.mp3",
+                          "start_output_s": 0.0, "gain_db": 0.0,
+                          "duck_others": True}]}
+
+tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
+r = set_audio_gain(tctx, "voiceover", "vo1", -12)
+check("set_audio_gain lowers the voiceover item",
+      tctx.written["voiceover"][0]["gain_db"] == -12.0 and
+      "-12.0dB" in r)
+tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
+r = set_audio_gain(tctx, "music", "mus1", -99)
+check("set_audio_gain clamps to the gain floor",
+      tctx.written["music"][0]["gain_db"] == -60.0)
+r = set_audio_gain(ToolCtx(json.loads(json.dumps(MUS_EDL))),
+                   "music", "nope", -6)
+check("unknown id rejected listing existing ids",
+      r.startswith("REJECTED") and "mus1" in r)
+check("bad kind rejected",
+      set_audio_gain(ToolCtx({}), "speech", "x", -6)
+      .startswith("REJECTED"))
+
+tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
+r = remove_music(tctx, "mus1")
+check("remove_music removes the bed",
+      tctx.written["music"] == [] and "removed music mus1" in r)
+r = remove_music(ToolCtx(json.loads(json.dumps(MUS_EDL))), "musX")
+check("remove_music unknown id lists existing",
+      r.startswith("REJECTED") and "mus1" in r)
+
+tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
+tctx._asset = {"kind": "music", "storage_key": "music/1/a.mp3", "meta": {}}
+r = add_music(tctx, "music/1/a.mp3", 0, 15)
+check("add_music assigns the next id",
+      any(m.get("id") == "mus2" for m in tctx.written["music"]))
+check("add_music warns when the file is also a voiceover",
+      "WARNING" in r and "vo1" in r and "TWICE" in r)
+
+print("== Round-6 letterbox-aware self-check ==")
+check("pad frame context flags letterboxing as expected",
+      "letterboxed" in _frame_context({"frame": {"ratio": "9:16",
+                                                 "mode": "pad"}})
+      and "EXPECTED" in _frame_context({"frame": {"ratio": "9:16",
+                                                  "mode": "pad"}}))
+check("pad_blur mentions blurred bars",
+      "blurred" in _frame_context({"frame": {"ratio": "1:1",
+                                             "mode": "pad_blur"}}))
+check("crop frame context mentions the crop",
+      "center-cropped to 9:16" in
+      _frame_context({"frame": {"ratio": "9:16", "mode": "crop"}}))
+check("no frame -> no context", _frame_context({}) == "")
+
+print("== Round-6 MusicItem ids ==")
+mus_ok = {"keep": [[0.0, 30.0]],
+          "music": [{"storage_key": "m.mp3", "start": 0, "end": 10},
+                    {"id": "mus1", "storage_key": "m.mp3",
+                     "start": 10, "end": 20}]}
+validated = schemas.validate_edl(mus_ok, 30.0)
+check("legacy id-less music items still validate",
+      validated.music[0].id is None and validated.music[1].id == "mus1")
+try:
+    schemas.validate_edl(
+        {"keep": [[0.0, 30.0]],
+         "music": [{"id": "mus1", "storage_key": "a", "start": 0, "end": 5},
+                   {"id": "mus1", "storage_key": "b", "start": 5,
+                    "end": 10}]}, 30.0)
+    check("duplicate music ids rejected", False)
+except schemas.EDLValidationError:
+    check("duplicate music ids rejected", True)
+old_dump = schemas.validate_edl(
+    {"keep": [[0.0, 30.0]],
+     "music": [{"storage_key": "m.mp3", "start": 0, "end": 10}]},
+    30.0).model_dump()
+check("id-less music dump stays signature-stable (id=None stripped)",
+      schemas.edl_signature(old_dump) == schemas.edl_signature(
+          {"keep": [[0.0, 30.0]],
+           "music": [{"storage_key": "m.mp3", "start": 0.0, "end": 10.0,
+                      "gain_db": -18.0, "duck": True}]}))
+
 print(f"\nALL {PASS} CHECKS PASSED")
