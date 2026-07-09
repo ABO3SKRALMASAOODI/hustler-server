@@ -396,9 +396,48 @@ def plan_musrange(messages):
                   "seconds only, ducked under the speech.")
 
 
+def plan_kept(messages):
+    """Round 7: 'check for repetitions' — read the kept-program transcript
+    and report honestly (read-only turn)."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_kept_transcript", {}
+    res = find_result(messages, "get_kept_transcript")
+    if "POSSIBLE REPETITIONS" in (res or ""):
+        return None, ("I checked what the current edit keeps — some phrases "
+                      "still repeat; tell me if you want the weaker takes "
+                      "cut.")
+    return None, ("I checked what the current edit keeps — no repeated "
+                  "phrases survive the cut.")
+
+
+def plan_dyncap(messages):
+    """Round 7: 'make the captions huge and dynamic' -> xl + word-by-word
+    pop, then render. Falls back to add_captions when none exist yet."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "set_caption_style", {"style": {"size": "xl",
+                                               "dynamic": True}}
+    if last == "set_caption_style":
+        if (find_result(messages, "set_caption_style") or "") \
+                .startswith("REJECTED"):
+            return "add_captions", {"mode": "from_transcript",
+                                    "style": {"size": "xl",
+                                              "dynamic": True}}
+        return "render_preview", {}
+    if last == "add_captions":
+        return "render_preview", {}
+    return None, ("Captions are now extra large and animate word-by-word "
+                  "with a pop — rendered and attached.")
+
+
 def plan_next(messages):
     """Returns (tool_name, args) or (None, final_text)."""
     text = last_user_text(messages).lower()
+    if "kept test" in text:
+        return plan_kept(messages)
+    if "dyncap test" in text:
+        return plan_dyncap(messages)
     if "musicfab test" in text:
         return plan_musicfab(messages)
     if "musicfix test" in text:

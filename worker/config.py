@@ -58,6 +58,9 @@ AGENT_TEMPERATURE = 0.2
 AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "300"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
+# Transcript tools get a far larger budget: silently dropping the tail of a
+# long video's transcript is how far-apart repetitions go unseen.
+TRANSCRIPT_CHAR_BUDGET = 48000    # ~12000 tokens
 
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /

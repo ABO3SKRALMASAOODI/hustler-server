@@ -5,13 +5,14 @@ the cut, timed to word boundaries (never invented times), max 2 lines x 42
 chars — or chunks of max_words_per_caption words when set. Explicit caption
 items are authored in source time and mapped to the output timeline here.
 
-Styling: a CaptionStyle ({color, size, position}) applies globally; manual
-items may override per-item. color is #RRGGBB and becomes ASS PrimaryColour
-in &H00BBGGRR order.
+Styling: a CaptionStyle ({color, size, position, dynamic}) applies globally;
+manual items may override per-item. color is #RRGGBB and becomes ASS
+PrimaryColour in &H00BBGGRR order. dynamic renders word-by-word pop captions.
 
 The script's PlayRes is the OUTPUT FRAME (so top/middle/bottom land correctly
-at any aspect ratio): font sizes scale with width, vertical margins with
-height, relative to the 1280x720 the base numbers were tuned on.
+at any aspect ratio): font sizes scale with the LARGER frame dimension factor
+(so 9:16 verticals get properly big text), vertical margins with height,
+relative to the 1280x720 the base numbers were tuned on.
 """
 
 MAX_LINE_CHARS = 42
@@ -19,12 +20,16 @@ MAX_LINES = 2
 MIN_EVENT_S = 0.6
 
 BASE_PLAY_RES = (1280, 720)
-FONT_SIZES = {"s": 32, "m": 44, "l": 58}
+FONT_SIZES = {"s": 30, "m": 40, "l": 52, "xl": 68}
 ALIGNMENTS = {"bottom": 2, "top": 8, "middle": 5}
 # middle (Alignment 5) is vertically centered; libass ignores MarginV there.
 MARGIN_V = {"bottom": 46, "top": 40, "middle": 0}
 
-DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom"}
+DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
+                 "dynamic": False}
+
+# Pop-in scale animation for dynamic word-by-word captions.
+POP_TAG = r"{\fscx60\fscy60\t(0,110,\fscx108\fscy108)\t(110,220,\fscx100\fscy100)}"
 
 ASS_HEADER_TOP = """[Script Info]
 ScriptType: v4.00+
@@ -57,18 +62,23 @@ def _norm_style(style):
         for k in ("color", "size", "position"):
             if d.get(k):
                 s[k] = d[k]
+        if d.get("dynamic") is not None:
+            s["dynamic"] = bool(d["dynamic"])
     return s
 
 
 def style_line(name, style, play_res=BASE_PLAY_RES):
     s = _norm_style(style)
-    # Text width fraction tracks frame WIDTH; vertical margins track HEIGHT.
+    # Font size tracks the LARGER of the two frame scale factors so vertical
+    # frames (tall, narrow) get captions sized to their height — width-only
+    # scaling left 9:16 text at ~2.5% of frame height, unreadably small.
     fx = play_res[0] / BASE_PLAY_RES[0]
     fy = play_res[1] / BASE_PLAY_RES[1]
-    font = max(10, round(FONT_SIZES.get(s["size"], 44) * fx))
+    f = max(fx, fy)
+    font = max(10, round(FONT_SIZES.get(s["size"], 40) * f))
     margin_lr = max(10, round(60 * fx))
     margin_v = round(MARGIN_V.get(s["position"], 46) * fy)
-    outline = max(1.2, round(2.4 * fx, 1))
+    outline = max(1.2, round(2.4 * f, 1))
     return (f"Style: {name},DejaVu Sans,{font},"
             f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
             f"-1,0,0,0,100,100,0,0,1,{outline},0,"
@@ -89,12 +99,12 @@ def _esc(text):
             .replace("\n", r"\N"))
 
 
-def _wrap(text):
-    """Split into <= MAX_LINES lines of <= MAX_LINE_CHARS, word-boundary."""
+def _wrap(text, line_chars=MAX_LINE_CHARS):
+    """Split into <= MAX_LINES lines of <= line_chars, word-boundary."""
     words = text.split()
     lines, cur = [], ""
     for w in words:
-        if cur and len(cur) + 1 + len(w) > MAX_LINE_CHARS:
+        if cur and len(cur) + 1 + len(w) > line_chars:
             lines.append(cur)
             cur = w
         else:
@@ -104,20 +114,33 @@ def _wrap(text):
     return lines
 
 
-def events_from_transcript(out_words, max_words=None):
+def line_chars_for(style, play_res=BASE_PLAY_RES):
+    """How many characters fit on one caption line at this frame + font size.
+    Narrow/vertical frames with large fonts fit far fewer than the 42 the
+    base numbers were tuned on; chunking to the real width keeps libass from
+    wrapping a 2-line chunk into 4+ lines."""
+    s = _norm_style(style)
+    fx = play_res[0] / BASE_PLAY_RES[0]
+    fy = play_res[1] / BASE_PLAY_RES[1]
+    font = max(10, FONT_SIZES.get(s["size"], 40) * max(fx, fy))
+    usable = play_res[0] - 2 * max(10, round(60 * fx))
+    return max(8, min(MAX_LINE_CHARS, int(usable / (0.52 * font))))
+
+
+def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS):
     """out_words: [{'w','t0','t1'}] already in OUTPUT time (kept words only).
-    Groups words into events of at most 2 lines x 42 chars — or at most
-    max_words words per event when set — timed to word boundaries."""
+    Groups words into events of at most 2 lines x line_chars chars — or at
+    most max_words words per event when set — timed to word boundaries."""
     events = []
     group, chars = [], 0
-    limit = MAX_LINE_CHARS * MAX_LINES
+    limit = line_chars * MAX_LINES
 
     def flush():
         nonlocal group, chars
         if not group:
             return
         text = " ".join(w["w"] for w in group)
-        lines = _wrap(text)[:MAX_LINES]
+        lines = _wrap(text, line_chars)[:MAX_LINES]
         start = group[0]["t0"]
         end = max(group[-1]["t1"], start + MIN_EVENT_S)
         events.append({"start": start, "end": end,
@@ -141,7 +164,27 @@ def events_from_transcript(out_words, max_words=None):
     return events
 
 
-def events_from_items(items, tl):
+def events_dynamic(out_words):
+    """Word-by-word pop captions (TikTok style): every word is its own event
+    with a scale-in animation, shown until the next word starts (or briefly
+    past its own end at a pause). Word times come from the transcript — never
+    invented."""
+    events = []
+    for i, w in enumerate(out_words):
+        start = w["t0"]
+        if i + 1 < len(out_words):
+            nxt = out_words[i + 1]["t0"]
+            end = nxt if nxt - w["t1"] <= 1.2 else min(w["t1"] + 0.35, nxt)
+        else:
+            end = w["t1"] + 0.35
+        if end <= start:
+            end = start + 0.12
+        events.append({"start": start, "end": end,
+                       "text": POP_TAG + _esc(w["w"])})
+    return events
+
+
+def events_from_items(items, tl, line_chars=MAX_LINE_CHARS):
     """Explicit caption items (source time) -> output-time events. A span
     crossing a cut boundary is clipped to its surviving pieces; items whose
     span is fully cut are dropped. Items may carry a per-item style."""
@@ -153,7 +196,7 @@ def events_from_items(items, tl):
         if not spans:
             continue
         start, end = spans[0][0], spans[-1][1]
-        lines = _wrap(get("text"))[:MAX_LINES]
+        lines = _wrap(get("text"), line_chars)[:MAX_LINES]
         events.append({"start": start, "end": max(end, start + MIN_EVENT_S),
                        "text": r"\N".join(_esc(l) for l in lines),
                        "item_style": get("style")})
@@ -208,11 +251,16 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         return None
     if isinstance(captions, dict) and captions.get("mode") == "from_transcript":
         out_words = tl.kept_words(index.get("words", []))
-        events = events_from_transcript(
-            out_words, max_words=captions.get("max_words_per_caption"))
         global_style = captions.get("style")
+        if _norm_style(global_style)["dynamic"]:
+            events = events_dynamic(out_words)
+        else:
+            events = events_from_transcript(
+                out_words, max_words=captions.get("max_words_per_caption"),
+                line_chars=line_chars_for(global_style, play_res))
     elif isinstance(captions, list):
-        events = events_from_items(captions, tl)
+        events = events_from_items(captions, tl,
+                                   line_chars=line_chars_for(None, play_res))
         global_style = None
     else:
         return None

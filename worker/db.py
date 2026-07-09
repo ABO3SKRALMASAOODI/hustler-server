@@ -7,6 +7,7 @@ attempts are exhausted.
 """
 
 import json
+import os
 import threading
 import time
 
@@ -383,3 +384,55 @@ def recent_chat(conn, session_id, limit=24):
             ORDER BY id DESC LIMIT %s
         """, (session_id, limit))
         return list(reversed(cur.fetchall()))
+
+
+# ── Credits ──────────────────────────────────────────────────────────────────
+# 1 credit = $0.01 of model cost (same convention as backend/credits.py).
+# Charged from actual llm_calls usage after each agent turn, spending
+# daily -> bonus -> monthly, never below zero. Priced with the same env vars
+# the admin cost views use.
+
+LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "0.4"))
+LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "1.2"))
+MIN_TURN_CREDITS = 1.0
+
+
+def charge_turn_credits(conn, user_id, job_id):
+    """Deduct this turn's model cost from the user's credit pools.
+    Returns the credits charged (float). Never raises the balance below 0
+    and never fails the turn — callers swallow exceptions."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT COUNT(*) AS n,
+                              COALESCE(SUM(prompt_tokens),0) AS tin,
+                              COALESCE(SUM(completion_tokens),0) AS tout
+                       FROM llm_calls WHERE job_id = %s""", (job_id,))
+        row = cur.fetchone()
+        if not row["n"]:
+            # A turn that never reached the model costs nothing.
+            return 0.0
+        cost = (float(row["tin"]) * LLM_PRICE_IN_PER_M +
+                float(row["tout"]) * LLM_PRICE_OUT_PER_M) / 1e6
+        credits = max(MIN_TURN_CREDITS, round(cost / 0.01, 1))
+        cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
+                       FROM users WHERE id = %s FOR UPDATE""", (user_id,))
+        u = cur.fetchone()
+        if not u:
+            return 0.0
+        daily = float(u["credits_daily"] or 0)
+        bonus = float(u["credits_bonus"] or 0)
+        monthly = float(u["credits_monthly"] or 0)
+        left = credits
+        spend_daily = min(daily, left); left -= spend_daily
+        spend_bonus = min(bonus, left); left -= spend_bonus
+        spend_monthly = min(monthly, left)
+        cur.execute("""UPDATE users
+                       SET credits_daily = credits_daily - %s,
+                           credits_bonus = credits_bonus - %s,
+                           credits_monthly = credits_monthly - %s,
+                           credits_balance = (credits_daily - %s)
+                                           + (credits_bonus - %s)
+                                           + (credits_monthly - %s)
+                       WHERE id = %s""",
+                    (spend_daily, spend_bonus, spend_monthly,
+                     spend_daily, spend_bonus, spend_monthly, user_id))
+        return credits

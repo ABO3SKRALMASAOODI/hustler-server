@@ -20,6 +20,7 @@ from psycopg2.extras import RealDictCursor, Json
 from flask import Blueprint, request, jsonify, current_app
 
 from routes.auth import token_required
+from credits import check_and_reserve
 import storage
 
 # The EDL schema's single source of truth is worker/schemas.py (pure
@@ -580,6 +581,15 @@ def post_message(user_id, project_id):
         if cur.fetchone():
             return jsonify({"error": "The editor is still working on your "
                                      "previous request."}), 409
+
+        # Credits gate: each agent turn spends credits (the worker charges
+        # actual model usage after the turn). Same 402 + code shape as the
+        # legacy generate path so the frontend can offer an upgrade.
+        if not check_and_reserve(conn, user_id, min_credits=1.0):
+            return jsonify({
+                "error": "You're out of credits — they refresh daily, or "
+                         "upgrade for a bigger monthly pool.",
+                "code": "insufficient_credits"}), 402
 
         # Attachments must be this project's chat-attachable assets.
         attachments_meta = []

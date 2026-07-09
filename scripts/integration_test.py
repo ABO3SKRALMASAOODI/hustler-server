@@ -803,6 +803,66 @@ def main():
     ok("user timeline music ops: add (-18dB ducked), drag, remove, "
        "idempotent re-remove")
 
+    # ── ROUND 7: credits — zero balance blocks sends with a 402 ──────────
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE users SET credits_daily=0, credits_bonus=0,
+                           credits_monthly=0, credits_balance=0,
+                           credits_daily_reset=CURRENT_DATE
+                       WHERE id=%s""", (user_id,))
+    r = client.post(f"/projects/{project_id}/messages",
+                    json={"text": "this should be blocked"}, headers=H)
+    assert r.status_code == 402, (r.status_code, r.get_data(as_text=True))
+    assert r.get_json().get("code") == "insufficient_credits", r.get_json()
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE users SET credits_daily=20, credits_bonus=150,
+                           credits_balance=170 WHERE id=%s""", (user_id,))
+    ok("zero balance -> 402 insufficient_credits; balance restored")
+
+    # ── ROUND 7: kept-program transcript tool (repetition verification) ──
+    out = send("KEPT TEST check the edit for remaining repetitions")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT cm.content FROM chat_messages cm
+                       JOIN projects p ON p.chat_session_id = cm.session_id
+                       WHERE p.id = %s AND cm.role='activity'
+                         AND cm.content LIKE %s
+                       ORDER BY cm.id DESC LIMIT 1""",
+                    (project_id, "%get_kept_transcript%"))
+        act = cur.fetchone()
+    assert act and "Program transcript of EDL v" in act["content"], act
+    reply = latest_assistant()["content"]
+    assert "checked what the current edit keeps" in reply, reply[:120]
+    ok("get_kept_transcript: program transcript with src spans reaches "
+       "the agent; honest read-only reply")
+
+    # ── ROUND 7: xl dynamic word-pop captions render end to end ─────────
+    out = send("DYNCAP TEST make the captions huge and dynamic")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    st = ((edl["json"].get("captions") or {}).get("style")) or {}
+    assert st.get("dynamic") is True and st.get("size") == "xl", st
+    pv = last_preview_result()
+    assert pv["edl_version"] == edl["version"], (pv, edl["version"])
+    ok("dynamic xl captions written and preview rendered (per-word pop "
+       "events through ffmpeg)")
+
+    # ── ROUND 7: turns charge credits from actual usage (min 1) ─────────
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT credits_balance FROM users WHERE id=%s",
+                    (user_id,))
+        bal = float(cur.fetchone()["credits_balance"])
+        cur.execute("""SELECT result FROM video_jobs
+                       WHERE project_id=%s AND type='agent_turn'
+                         AND state='done'
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        turn_result = cur.fetchone()["result"] or {}
+    charged = float(turn_result.get("credits_charged") or 0)
+    assert charged >= 1.0, turn_result
+    assert bal < 170.0, f"balance never decreased: {bal}"
+    ok(f"agent turns charge credits (last turn {charged}, balance {bal})")
+
     # ── ISSUE 1: UI frame toggle writes a user version + auto-previews ──
     res = user_edl_op("set_frame", {"ratio": "1:1", "mode": "pad"})
     assert res.get("version") and res.get("preview_job_id"), res

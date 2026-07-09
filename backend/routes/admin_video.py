@@ -393,9 +393,28 @@ def video_project_llm_calls(project_id):
                        ORDER BY id DESC LIMIT %s OFFSET %s""",
                     (project_id, per, (page - 1) * per))
         rows = cur.fetchall()
+
+    def _vision_urls(req):
+        # Vision requests record image STORAGE KEYS (never bytes) — presign
+        # them so the admin can see the exact tiles the model saw.
+        names = (req or {}).get("images") or []
+        urls = {}
+        for n in names:
+            if isinstance(n, str) and "/" in n:
+                try:
+                    urls[n] = storage.presign_get(n)
+                except Exception:
+                    urls[n] = None
+        return urls or None
+
+    calls = []
+    for r in rows:
+        c = {**r, "created_at": r["created_at"].isoformat()}
+        if (r["purpose"] or "").startswith("vision"):
+            c["image_urls"] = _vision_urls(r["request"])
+        calls.append(c)
     return jsonify({"total": total, "page": page, "per_page": per,
-                    "calls": [{**r, "created_at": r["created_at"].isoformat()}
-                              for r in rows]})
+                    "calls": calls})
 
 
 @admin_video_bp.route("/admin/video/costs", methods=["GET"])

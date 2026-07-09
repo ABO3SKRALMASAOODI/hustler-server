@@ -36,8 +36,11 @@ class CaptionStyle(BaseModel):
     &HBBGGRR order. Defaults match the pre-style captions exactly, so EDLs
     written before styling existed render unchanged."""
     color: str = "#FFFFFF"
-    size: Literal["s", "m", "l"] = "m"
+    size: Literal["s", "m", "l", "xl"] = "m"
     position: Literal["bottom", "top", "middle"] = "bottom"
+    # word-by-word pop captions; Optional so pre-round-7 EDLs keep their
+    # signatures (None-valued keys are stripped by edl_signature).
+    dynamic: Optional[bool] = None
 
     @field_validator("color")
     @classmethod

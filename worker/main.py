@@ -51,6 +51,15 @@ def process_one(worker_db, job):
             timings = result.setdefault("timings", {})
             timings["queue_wait_s"] = queue_wait
             timings["total_s"] = total
+        if job["type"] == "agent_turn" and isinstance(result, dict):
+            try:
+                charged = worker_db.run(dbx.charge_turn_credits,
+                                        job["user_id"], job_id)
+                result["credits_charged"] = charged
+            except Exception as ce:
+                # Billing must never fail a finished edit.
+                print(f"[job {job_id}] credit charge failed: {ce}",
+                      flush=True)
         worker_db.run(dbx.finish_job, job_id, "done", None, result)
         print(f"[job {job_id}] done in {total}s "
               f"(queue {queue_wait}s) timings="

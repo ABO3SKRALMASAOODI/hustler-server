@@ -213,7 +213,7 @@ with tempfile.TemporaryDirectory() as td:
     fields = style_row.split(",")
     check("PrimaryColour is &H000000FF (red in BBGGRR)",
           fields[3] == "&H000000FF")
-    check("Fontsize 58 for size 'l'", fields[2] == "58")
+    check("Fontsize 52 for size 'l' at base res", fields[2] == "52")
     check("Alignment 8 for position 'top'", fields[18] == "8")
     dialogues = [l for l in content.splitlines() if l.startswith("Dialogue:")]
     check("chunking produced 2 events for 5 words @3",
@@ -579,8 +579,11 @@ with tempfile.TemporaryDirectory() as td:
     fields = style_row.split(",")
     check("Alignment 5 for middle", fields[18] == "5")
     check("middle ignores MarginV (0)", fields[21] == "0")
-    check("font scales with frame width (44 -> 37 @1080/1280)",
-          fields[2] == "37")
+    # round 7: fonts scale with the LARGER frame factor so 9:16 verticals
+    # get readable text (width-only scaling left 'm' at 34px on a 1920-tall
+    # frame — ~1.8% of the height).
+    check("font scales with frame height on verticals (40 -> 107 @1920/720)",
+          fields[2] == "107")
 with tempfile.TemporaryDirectory() as td:
     top_edl = validate_edl(
         {"keep": [[0, 60]],
@@ -753,5 +756,124 @@ check("id-less music dump stays signature-stable (id=None stripped)",
           {"keep": [[0.0, 30.0]],
            "music": [{"storage_key": "m.mp3", "start": 0.0, "end": 10.0,
                       "gain_db": -18.0, "duck": True}]}))
+
+# ─── Round 7: caption sizes/dynamic, kept transcript, repetition audit ───────
+
+print("== Caption xl + vertical sizing (round 7) ==")
+xl_edl = schemas.validate_edl(
+    {"keep": [[0, 60]],
+     "captions": {"mode": "from_transcript",
+                  "style": {"size": "xl"}}}, 60).model_dump()
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(xl_edl, sty_index, Timeline(xl_edl["keep"]),
+                         os.path.join(td, "xl.ass"))
+    fields = next(l for l in open(p).read().splitlines()
+                  if l.startswith("Style: Default")).split(",")
+    check("size xl accepted and 68px at base res", fields[2] == "68")
+    p = caplib.build_ass(xl_edl, sty_index, Timeline(xl_edl["keep"]),
+                         os.path.join(td, "xl916.ass"),
+                         play_res=(1080, 1920))
+    fields = next(l for l in open(p).read().splitlines()
+                  if l.startswith("Style: Default")).split(",")
+    check("xl on 9:16 1080x1920 is 181px (~9.5% of height)",
+          fields[2] == "181")
+check("line width budget shrinks on narrow frames (l @1080x1920)",
+      caplib.line_chars_for({"size": "l"}, (1080, 1920)) == 13)
+check("line width budget stays 42 at base res",
+      caplib.line_chars_for({"size": "m"}, (1280, 720)) == 42)
+
+print("== Dynamic word-pop captions (round 7) ==")
+dyn_edl = schemas.validate_edl(
+    {"keep": [[0, 60]],
+     "captions": {"mode": "from_transcript",
+                  "style": {"size": "xl", "dynamic": True}}}, 60).model_dump()
+check("dynamic:true survives validation",
+      dyn_edl["captions"]["style"]["dynamic"] is True)
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(dyn_edl, sty_index, Timeline(dyn_edl["keep"]),
+                         os.path.join(td, "dyn.ass"), play_res=(1080, 1920))
+    dialogues = [l for l in open(p).read().splitlines()
+                 if l.startswith("Dialogue:")]
+    check("dynamic renders one event per word",
+          len(dialogues) == len(sty_words))
+    check("dynamic events carry the pop animation tag",
+          all(r"\fscx60" in d and r"\t(0,110" in d for d in dialogues))
+    check("dynamic events are single words",
+          all(len(d.split(",,0,0,0,,")[1].split("}")[-1].split()) == 1
+              for d in dialogues))
+sig_a = schemas.edl_signature(schemas.validate_edl(
+    {"keep": [[0.0, 30.0]],
+     "captions": {"mode": "from_transcript",
+                  "style": {"size": "l", "color": "#FFFFFF",
+                            "position": "top"}}}, 30.0).model_dump())
+sig_b = schemas.edl_signature(
+    {"keep": [[0.0, 30.0]],
+     "captions": {"mode": "from_transcript", "max_words_per_caption": None,
+                  "style": {"size": "l", "color": "#FFFFFF",
+                            "position": "top"}}})
+check("pre-round-7 caption styles stay signature-stable (dynamic=None "
+      "stripped)", sig_a == sig_b)
+check("style parser accepts dynamic",
+      agent_tools._parse_partial_style({"dynamic": True}) ==
+      {"dynamic": True})
+check("style parser accepts xl",
+      agent_tools._parse_partial_style({"size": "xl"}) == {"size": "xl"})
+check("style parser still rejects unknown fields",
+      isinstance(agent_tools._parse_partial_style({"font": "Arial"}), str))
+
+print("== Repeated-phrase detection (round 7) ==")
+def _mk_words(text, t0=0.0):
+    out, t = [], t0
+    for w in text.split():
+        out.append({"w": w, "t0": round(t, 2), "t1": round(t + 0.3, 2)})
+        t += 0.4
+    return out
+
+rep_words = _mk_words(
+    "we just built the ultimate ai pipeline tool and then "
+    "we just built the ultimate ai pipeline tool where you can drop")
+reps = agent_tools.find_repeated_phrases(rep_words)
+check("repeated phrase detected once (merged, not per-shingle)",
+      len(reps) == 1)
+check("repeat reports both program times",
+      len(reps[0][1]) == 2 and reps[0][1][0] < reps[0][1][1])
+check("repeat text is the merged long phrase",
+      "we just built the ultimate ai pipeline tool" in reps[0][0])
+check("unique text has no repeats",
+      agent_tools.find_repeated_phrases(_mk_words(
+          "every word here is different from all of the other ones "
+          "nothing repeats in this sentence at all today")) == [])
+
+print("== get_kept_transcript (round 7) ==")
+class KeptCtx(ToolCtx):
+    def __init__(self, edl, words):
+        super().__init__(edl)
+        self.index = {"words": words,
+                      "video": {"duration": 60.0}}
+
+kctx = KeptCtx({"keep": [[0.0, 10.0], [20.0, 30.0]], "inserts": []},
+               rep_words)
+out = agent_tools.get_kept_transcript(kctx)
+check("kept transcript header names the EDL version",
+      out.startswith("Program transcript of EDL v1"))
+check("kept transcript lines carry program + source spans",
+      "| src " in out)
+check("kept transcript flags surviving repetitions",
+      "POSSIBLE REPETITIONS" in out and
+      "we just built the ultimate ai pipeline tool" in out)
+kctx2 = KeptCtx({"keep": [[0.0, 4.0]], "inserts": []}, rep_words)
+out2 = agent_tools.get_kept_transcript(kctx2)
+check("no false repetition flag when only one take survives",
+      "No repeated phrases detected" in out2)
+check("kept transcript maps cut source times away",
+      "20.00" not in out2)
+
+print("== Transcript budget (round 7) ==")
+check("default tool cap still truncates at 12k",
+      len(agent_tools._cap("x" * 20000)) < 13000)
+check("transcript budget keeps 20k chars intact",
+      agent_tools._cap("x" * 20000,
+                       budget=agent_tools.config.TRANSCRIPT_CHAR_BUDGET)
+      == "x" * 20000)
 
 print(f"\nALL {PASS} CHECKS PASSED")

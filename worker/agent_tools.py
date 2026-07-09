@@ -5,6 +5,7 @@ budget. Write tools create new EDL versions and return one-line diffs."""
 import difflib
 import json
 import os
+import re
 import time
 
 import audit
@@ -96,8 +97,8 @@ class ToolContext:
                 f"Before: {before}. After: {after}.")
 
 
-def _cap(text):
-    budget = config.TOOL_OUTPUT_CHAR_BUDGET
+def _cap(text, budget=None):
+    budget = budget or config.TOOL_OUTPUT_CHAR_BUDGET
     if len(text) <= budget:
         return text
     return text[:budget] + "\n...[truncated — narrow your range and call again]"
@@ -138,8 +139,93 @@ def get_transcript(ctx, start=0, end=None):
                 "This video has no transcript (no speech or no audio track).")
     out = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}] {s['text']}"
            for s in rows]
-    return (_cap("\n".join(out))
+    # Transcripts get a much larger budget than other tools: silently losing
+    # the tail of a long video is exactly how far-apart repetitions go unseen.
+    return (_cap("\n".join(out), budget=config.TRANSCRIPT_CHAR_BUDGET)
             + "\n(for word-exact timing, call get_words(start, end))")
+
+
+def _norm_token(w):
+    return re.sub(r"[^a-z0-9']+", "", (w or "").lower())
+
+
+def find_repeated_phrases(out_words, shingle=4):
+    """Repeated N-word phrases in the kept program text, as
+    [(phrase, [program_times])]. Consecutive repeated shingles merge into
+    longer phrases so 'we just built the ultimate ai pipeline' reports once,
+    not as four overlapping 4-gram hits."""
+    toks = [( _norm_token(w["w"]), w["t0"]) for w in out_words]
+    toks = [(t, at) for t, at in toks if t]
+    if len(toks) < shingle * 2:
+        return []
+    counts = {}
+    for i in range(len(toks) - shingle + 1):
+        key = " ".join(t for t, _ in toks[i:i + shingle])
+        counts.setdefault(key, []).append(i)
+    rep_idx = sorted({i for idxs in counts.values() if len(idxs) > 1
+                      for i in idxs})
+    if not rep_idx:
+        return []
+    runs, s, p = [], rep_idx[0], rep_idx[0]
+    for i in rep_idx[1:]:
+        if i == p + 1:
+            p = i
+        else:
+            runs.append((s, p))
+            s = p = i
+    runs.append((s, p))
+    phrases = {}
+    for a, b in runs:
+        text = " ".join(t for t, _ in toks[a:b + shingle])
+        phrases.setdefault(text, []).append(round(toks[a][1], 1))
+    return [(t, times) for t, times in phrases.items() if len(times) > 1]
+
+
+def get_kept_transcript(ctx):
+    """The transcript of what the CURRENT edit actually keeps — program
+    time — with repeated-phrase detection. THE tool for verifying that a
+    repetition/tightening pass really removed the repeats."""
+    latest = ctx.latest_edl()
+    edl = latest["json"]
+    tl = Timeline(edl["keep"], edl.get("inserts") or [])
+    out_words = tl.kept_words(ctx.index.get("words", []))
+    if not out_words:
+        return ("The current edit keeps no transcribed speech."
+                if ctx.index.get("words") else
+                "This video has no transcript (no speech or no audio track).")
+    lines, group = [], []
+
+    def flush():
+        if not group:
+            return
+        src0 = tl.out_to_src(group[0]["t0"])
+        src1 = tl.out_to_src(group[-1]["t1"])
+        src = (f" | src {_fmt_t(src0)}-{_fmt_t(src1)}"
+               if src0 is not None and src1 is not None else "")
+        lines.append(f"[{_fmt_t(group[0]['t0'])}-{_fmt_t(group[-1]['t1'])}"
+                     f"{src}] " + " ".join(w["w"] for w in group))
+        group.clear()
+
+    for w in out_words:
+        if group and (w["t0"] - group[-1]["t1"] > 0.9 or len(group) >= 14):
+            flush()
+        group.append(w)
+    flush()
+    header = (f"Program transcript of EDL v{latest['version']} "
+              f"({tl.out_duration:.1f}s output — program time, with the "
+              "matching source spans):")
+    reps = find_repeated_phrases(out_words)
+    if reps:
+        rep_lines = [f"  '{text}' at " + ", ".join(f"{t}s" for t in times)
+                     for text, times in reps[:6]]
+        note = ("\nPOSSIBLE REPETITIONS still in the output:\n"
+                + "\n".join(rep_lines)
+                + "\nIf these are true repeats, cut the weaker take using "
+                  "the src spans above.")
+    else:
+        note = "\nNo repeated phrases detected in the output."
+    return _cap(header + "\n" + "\n".join(lines) + note,
+                budget=config.TRANSCRIPT_CHAR_BUDGET)
 
 
 GET_WORDS_MAX_RANGE_S = 60.0
@@ -423,8 +509,9 @@ def _parse_style(style):
         return CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
-                '{"color":"#RRGGBB","size":"s|m|l",'
-                '"position":"bottom|top|middle"} (all fields optional).')
+                '{"color":"#RRGGBB","size":"s|m|l|xl",'
+                '"position":"bottom|top|middle","dynamic":true|false} '
+                '(all fields optional).')
 
 
 def add_captions(ctx, mode=None, items=None, style=None,
@@ -481,18 +568,19 @@ def _parse_partial_style(style):
     fills defaults, so merging cannot reset fields the user didn't mention."""
     if not isinstance(style, dict) or not style:
         return ('ERR: style must be a non-empty object with any of '
-                '{"color":"#RRGGBB","size":"s|m|l",'
-                '"position":"bottom|top|middle"}')
-    unknown = sorted(set(style) - {"color", "size", "position"})
+                '{"color":"#RRGGBB","size":"s|m|l|xl",'
+                '"position":"bottom|top|middle","dynamic":true|false}')
+    unknown = sorted(set(style) - {"color", "size", "position", "dynamic"})
     if unknown:
-        return (f"ERR: unknown style field(s) {unknown} — only color, size "
-                "and position exist (no fonts, outlines or animations).")
+        return (f"ERR: unknown style field(s) {unknown} — only color, size, "
+                "position and dynamic exist (no fonts or outlines; dynamic "
+                "gives animated word-by-word pop captions).")
     try:
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
-                '{"color":"#RRGGBB","size":"s|m|l",'
-                '"position":"bottom|top|middle"}.')
+                '{"color":"#RRGGBB","size":"s|m|l|xl",'
+                '"position":"bottom|top|middle","dynamic":true|false}.')
     return {k: validated[k] for k in style}
 
 
@@ -506,10 +594,14 @@ def merge_caption_style(captions, partial):
         new["style"] = st
         return new
     out = []
+    # dynamic word-pop only exists for from_transcript captions — writing it
+    # into manual items would let the reply claim an effect the renderer
+    # ignores.
+    item_partial = {k: v for k, v in partial.items() if k != "dynamic"}
     for it in captions:
         nit = dict(it)
         st = dict(it.get("style") or {})
-        st.update(partial)
+        st.update(item_partial)
         nit["style"] = st
         out.append(nit)
     return out
@@ -526,8 +618,13 @@ def set_caption_style(ctx, style):
                 "add_captions(mode='from_transcript') first (you can pass "
                 "a style there directly).")
     edl["captions"] = merge_caption_style(caps, partial)
-    return ctx.write_edl(
+    result = ctx.write_edl(
         edl, f"caption style updated: {json.dumps(partial)}")
+    if isinstance(caps, list) and "dynamic" in partial:
+        result += ("\nNote: dynamic word-by-word captions only apply to "
+                   "from_transcript captions — manual caption items ignore "
+                   "the dynamic flag.")
+    return result
 
 
 def add_music(ctx, storage_key, start, end, gain_db=-18.0, duck=True):
@@ -852,6 +949,23 @@ def render_preview(ctx):
                 note += (" MID-WORD AUDIT: " + "; ".join(mw[:5])
                          + " — snap these boundaries to word edges "
                            "(get_words) and re-render.")
+            # Repetition audit on what actually survived the cut — the agent
+            # must not tell the user repetitions are gone when they are not.
+            try:
+                edl = row["json"]
+                tl = Timeline(edl["keep"], edl.get("inserts") or [])
+                reps = find_repeated_phrases(
+                    tl.kept_words(ctx.index.get("words", [])))
+                if reps:
+                    flagged = "; ".join(
+                        f"'{t}' at " + ", ".join(f"{x}s" for x in times)
+                        for t, times in reps[:4])
+                    note += (f" REPETITION AUDIT: the output still repeats "
+                             f"{flagged} — verify with get_kept_transcript "
+                             "and cut the weaker take if these are true "
+                             "repeats.")
+            except Exception:
+                pass
             return note
         if j["state"] == "failed":
             return (f"Preview render FAILED: {j.get('error')}. "
@@ -921,11 +1035,18 @@ def _seg_schema():
 TOOLS = {
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
                        "summary. Call this first.", {}),
-    "get_transcript": (get_transcript, "Sentence-level transcript with "
-                       "timestamps for a time range (source seconds). For "
-                       "word-exact timing use get_words.",
+    "get_transcript": (get_transcript, "Sentence-level SOURCE transcript "
+                       "with timestamps for a time range (source seconds). "
+                       "For word-exact timing use get_words; for what the "
+                       "current EDIT keeps, use get_kept_transcript.",
                        {"start": {"type": "number"},
                         "end": {"type": "number"}}),
+    "get_kept_transcript": (get_kept_transcript, "The transcript the CURRENT "
+                            "edit actually keeps, in program time with "
+                            "matching source spans, plus automatic "
+                            "repeated-phrase detection. ALWAYS call this "
+                            "after cutting repetitions or tightening — it is "
+                            "how you verify nothing repeated survived.", {}),
     "get_words": (get_words, "Word-level timestamps [{t0-t1 word}] for a "
                   "range of up to 60s (source seconds). THE source of truth "
                   "for cut points inside a sentence — never estimate word "
@@ -977,26 +1098,30 @@ TOOLS = {
                      "(word-timed from the real transcript, recommended) or "
                      "mode='off', or items=[{text,start,end,style?}] (source "
                      "seconds) for text the user dictates. Optional style "
-                     "{color:'#RRGGBB', size:'s|m|l', "
-                     "position:'bottom|top|middle'} "
+                     "{color:'#RRGGBB', size:'s|m|l|xl', "
+                     "position:'bottom|top|middle', dynamic:true} "
                      "and max_words_per_caption (1-12) to show short, "
-                     "punchy caption chunks. Example — 'captions 3 words "
-                     "max, red, at the top': {mode:'from_transcript', "
+                     "punchy caption chunks. dynamic:true = animated "
+                     "word-by-word pop captions (TikTok style) — THE choice "
+                     "when the user wants big/dynamic/viral captions; pair "
+                     "with size 'xl'. Example — 'captions 3 words max, red, "
+                     "at the top': {mode:'from_transcript', "
                      "max_words_per_caption:3, style:{color:'#FF0000', "
                      "position:'top'}}. Example — one manual title card: "
                      "{items:[{text:'CHAPTER ONE', start:0, end:2.5, "
                      "style:{size:'l'}}]}. There are NO other style fields — "
-                     "fonts, animations, and outline colors are not "
-                     "supported; say so if asked.",
+                     "fonts and outline colors are not supported; say so if "
+                     "asked.",
                      {"mode": {"type": "string"},
                       "style": {"type": "object",
                                 "properties": {
                                     "color": {"type": "string"},
                                     "size": {"type": "string",
-                                             "enum": ["s", "m", "l"]},
+                                             "enum": ["s", "m", "l", "xl"]},
                                     "position": {"type": "string",
                                                  "enum": ["bottom", "top",
-                                                          "middle"]}}},
+                                                          "middle"]},
+                                    "dynamic": {"type": "boolean"}}},
                       "max_words_per_caption": {"type": "integer"},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
@@ -1029,18 +1154,24 @@ TOOLS = {
                           "LOOK without touching their text or timing. Pass "
                           "only the fields to change: e.g. 'make it red' -> "
                           '{"style":{"color":"#FF0000"}}, \'center the '
-                          'captions\' -> {"style":{"position":"middle"}}. '
-                          "Works for from_transcript and manual captions; "
-                          "errors helpfully if no captions exist yet.",
+                          'captions\' -> {"style":{"position":"middle"}}, '
+                          "'bigger / more dynamic captions' -> "
+                          '{"style":{"size":"xl","dynamic":true}} '
+                          "(dynamic = animated word-by-word pop). Works for "
+                          "from_transcript and manual captions; errors "
+                          "helpfully if no captions exist yet.",
                           {"style": {"type": "object",
                                      "properties": {
                                          "color": {"type": "string"},
                                          "size": {"type": "string",
-                                                  "enum": ["s", "m", "l"]},
+                                                  "enum": ["s", "m", "l",
+                                                           "xl"]},
                                          "position": {"type": "string",
                                                       "enum": ["bottom",
                                                                "top",
-                                                               "middle"]}}}}),
+                                                               "middle"]},
+                                         "dynamic": {"type":
+                                                     "boolean"}}}}),
     "set_volume": (set_volume, "Volume automation on the ORIGINAL footage's "
                    "audio (the speaker) over a SOURCE-time span. NOT for "
                    "music or voiceover loudness — use set_audio_gain for "

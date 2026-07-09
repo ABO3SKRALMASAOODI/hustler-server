@@ -69,20 +69,23 @@ PLAN_MODELS = {
 
 # ── Plan → monthly credit limits ──────────────────────────────────────────────
 
+# Keep in sync with routes/paddle_webhook.py PLAN_CREDITS — the webhook is
+# what actually grants the monthly pool on renewal.
 PLAN_MONTHLY_LIMITS = {
     "free":  0,
-    "plus":  1000,
+    "plus":  800,
     "pro":   2400,
     "ultra": 5000,
     "titan": 10000,
-    "ace":   25000,
+    "ace":   30000,
 }
 
 DOLLARS_PER_CREDIT  = 0.01
 MARKUP              = 1.0   # No markup — margin comes from bundle pricing
 FREE_DAILY_CREDITS  = 20
 SUB_DAILY_CREDITS   = 20
-INITIAL_BONUS       = 80    # One-time bonus on registration
+INITIAL_BONUS       = 150   # One-time bonus on registration — generous
+                            # runway before anyone hits the paywall
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 
