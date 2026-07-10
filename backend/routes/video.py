@@ -704,6 +704,11 @@ def _apply_edl_op(edl, op, args, assets_by_id):
                                  "give it a second and try again.")
             dur = round(min(float(base),
                             float(asset.get("duration_s") or base)), 2)
+            # A drop with no explicit duration starts as a 10s insert at
+            # most — dumping a 10-minute recording whole into a short edit
+            # is never intended; the duration chip can extend it.
+            if not args.get("duration_s"):
+                dur = min(dur, 10.0)
         at = float(args.get("at_output_s") or 0.0)
         inserts = list(edl.get("inserts") or [])
         bounds = wschemas.keep_boundaries(edl["keep"])
@@ -761,7 +766,9 @@ def _apply_edl_op(edl, op, args, assets_by_id):
 
     if op == "add_voiceover":
         asset = assets_by_id.get(int(args.get("asset_id") or 0))
-        if not asset or asset["kind"] not in ("music", "audio"):
+        # kind 'audio' is the pipeline's extracted source-audio track — it
+        # must never be layered back over itself.
+        if not asset or asset["kind"] != "music":
             raise ValueError("Pick an uploaded audio file for the voiceover.")
         vos = list(edl.get("voiceover") or [])
         taken = {v.get("id") for v in vos}
@@ -778,7 +785,7 @@ def _apply_edl_op(edl, op, args, assets_by_id):
 
     if op == "add_music":
         asset = assets_by_id.get(int(args.get("asset_id") or 0))
-        if not asset or asset["kind"] not in ("music", "audio"):
+        if not asset or asset["kind"] != "music":
             raise ValueError("Pick an uploaded audio file for the music.")
         prog = wschemas.program_duration(edl)
         start = round(min(max(float(args.get("start") or 0.0), 0.0),

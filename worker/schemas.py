@@ -38,9 +38,12 @@ class CaptionStyle(BaseModel):
     color: str = "#FFFFFF"
     size: Literal["s", "m", "l", "xl"] = "m"
     position: Literal["bottom", "top", "middle"] = "bottom"
-    # word-by-word pop captions; Optional so pre-round-7 EDLs keep their
+    # karaoke word-by-word captions; Optional so pre-round-7 EDLs keep their
     # signatures (None-valued keys are stripped by edl_signature).
     dynamic: Optional[bool] = None
+    # color of the actively-spoken word in dynamic mode; Optional for the
+    # same signature reason. None renders the default highlight.
+    highlight_color: Optional[str] = None
 
     @field_validator("color")
     @classmethod
@@ -49,6 +52,17 @@ class CaptionStyle(BaseModel):
         if not HEX_COLOR.match(v):
             raise ValueError(
                 f"color '{v}' must be #RRGGBB hex, e.g. #FF0000 for red")
+        return v.upper()
+
+    @field_validator("highlight_color")
+    @classmethod
+    def _hl_hex(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        if not HEX_COLOR.match(v):
+            raise ValueError(
+                f"highlight_color '{v}' must be #RRGGBB hex, e.g. #FFE14D")
         return v.upper()
 
 
@@ -114,16 +128,20 @@ MAX_INSERT_DURATION_S = 600.0
 
 
 class InsertItem(BaseModel):
-    """A clip or image spliced into the program at a keep-segment boundary.
-    at_output_s is a position in the PRE-INSERT output timeline (the keep
-    list alone), so items are stable when other inserts change. duration_s is
-    always concrete: the tool resolves it (image default 3.0s, video default
-    the full clip length)."""
+    """A clip or image spliced into the program at a keep-segment boundary
+    (insert_media splits a keep segment when asked to land mid-segment, so
+    any program position is reachable). at_output_s is a position in the
+    PRE-INSERT output timeline (the keep list alone), so items are stable
+    when other inserts change. duration_s is always concrete: the tool
+    resolves it (image default 3.0s, short clips their full length).
+    source_start_s picks WHERE in the source clip the window starts;
+    Optional so pre-round-8 EDLs keep their signatures."""
     id: str
     asset_key: str
     kind: Literal["video", "image"]
     at_output_s: float
     duration_s: float
+    source_start_s: Optional[float] = None
 
 
 class VoiceoverItem(BaseModel):
@@ -137,6 +155,31 @@ class VoiceoverItem(BaseModel):
     duck_others: bool = True
 
 
+GRADE_PRESETS = ("vibrant", "warm", "cool", "bw", "vintage", "cinematic")
+ZOOM_STRENGTH_MIN = 0.05
+ZOOM_STRENGTH_MAX = 1.0
+FADE_MAX_S = 5.0
+
+
+class ZoomItem(BaseModel):
+    """A punch-in zoom over a FINAL-program time range (output seconds)."""
+    id: str
+    start: float
+    end: float
+    strength: float = 0.25
+
+
+class Effects(BaseModel):
+    """Whole-program visual effects. grade is a color-grade preset applied
+    to all footage (never to burned captions); zooms are punch-in windows;
+    fades are to/from black at the very start/end (video + audio)."""
+    grade: Optional[Literal["vibrant", "warm", "cool", "bw", "vintage",
+                            "cinematic"]] = None
+    zooms: List[ZoomItem] = Field(default_factory=list)
+    fade_in_s: Optional[float] = None
+    fade_out_s: Optional[float] = None
+
+
 class EDL(BaseModel):
     keep: List[List[float]]
     captions: Optional[Union[CaptionsFromTranscript, List[CaptionItem]]] = None
@@ -145,6 +188,7 @@ class EDL(BaseModel):
     frame: Optional[Frame] = None
     inserts: List[InsertItem] = Field(default_factory=list)
     voiceover: List[VoiceoverItem] = Field(default_factory=list)
+    effects: Optional[Effects] = None
 
 
 def default_edl(duration):
@@ -260,6 +304,13 @@ def validate_edl(data, duration):
             raise EDLValidationError(
                 f"inserts[{i}].duration_s {ins.duration_s} outside "
                 f"[0.2, {MAX_INSERT_DURATION_S:.0f}].")
+        if ins.source_start_s is not None:
+            ins.source_start_s = _r(ins.source_start_s)
+            if ins.source_start_s < 0:
+                raise EDLValidationError(
+                    f"inserts[{i}].source_start_s must be >= 0.")
+            if ins.kind == "image" or ins.source_start_s == 0.0:
+                ins.source_start_s = None   # meaningless / default
         nearest = min(bounds, key=lambda b: abs(b - ins.at_output_s))
         if abs(nearest - ins.at_output_s) > 0.02:
             raise EDLValidationError(
@@ -312,6 +363,40 @@ def validate_edl(data, duration):
                 f"volume[{i}].gain_db {v.gain_db} outside "
                 f"[{GAIN_MIN_DB}, {GAIN_MAX_DB}].")
 
+    if edl.effects is not None:
+        fx = edl.effects
+        seen_z = set()
+        for i, z in enumerate(fx.zooms):
+            if not z.id or z.id in seen_z:
+                raise EDLValidationError(
+                    f"effects.zooms[{i}].id must be non-empty and unique.")
+            seen_z.add(z.id)
+            z.start, z.end = _r(z.start), _r(z.end)
+            # zooms live in the FINAL program timeline (incl. inserts)
+            _check_span(f"effects.zooms[{i}]", z.start, z.end, prog_dur,
+                        min_len=0.2)
+            z.strength = round(float(z.strength), 2)
+            if not (ZOOM_STRENGTH_MIN <= z.strength <= ZOOM_STRENGTH_MAX):
+                raise EDLValidationError(
+                    f"effects.zooms[{i}].strength {z.strength} outside "
+                    f"[{ZOOM_STRENGTH_MIN}, {ZOOM_STRENGTH_MAX}].")
+        fx.zooms.sort(key=lambda z: z.start)
+        for name in ("fade_in_s", "fade_out_s"):
+            val = getattr(fx, name)
+            if val is not None:
+                val = _r(val)
+                if val == 0.0:
+                    val = None          # 0 clears the fade
+                elif not (0.1 <= val <= FADE_MAX_S):
+                    raise EDLValidationError(
+                        f"effects.{name} {val} outside [0.1, {FADE_MAX_S}].")
+                setattr(fx, name, val)
+        # all-empty effects is the absence of effects — normalize so old
+        # EDLs and cleared-effects EDLs compare identical.
+        if fx.grade is None and not fx.zooms and fx.fade_in_s is None \
+                and fx.fade_out_s is None:
+            edl.effects = None
+
     return edl
 
 
@@ -348,6 +433,8 @@ def _style_desc(style):
         bits.append(f"size {s['size']}")
     if s.get("position") and s["position"] != "bottom":
         bits.append(s["position"])
+    if s.get("dynamic"):
+        bits.append("dynamic")
     return f" ({', '.join(bits)})" if bits else ""
 
 
@@ -376,6 +463,18 @@ def describe_edl(edl_dict, duration=None):
         parts.append(f"music x{len(edl.music)}")
     if edl.volume:
         parts.append(f"volume x{len(edl.volume)}")
+    if edl.effects:
+        fx = edl.effects
+        bits = []
+        if fx.grade:
+            bits.append(f"grade {fx.grade}")
+        if fx.zooms:
+            bits.append(f"zoom x{len(fx.zooms)}")
+        fades = [n for n, v in (("in", fx.fade_in_s),
+                                ("out", fx.fade_out_s)) if v]
+        if fades:
+            bits.append("fade " + "/".join(fades))
+        parts.append(", ".join(bits))
     return ", ".join(parts)
 
 

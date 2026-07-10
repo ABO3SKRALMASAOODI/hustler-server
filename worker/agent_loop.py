@@ -83,7 +83,10 @@ def _attachment_context(worker_db, ctx, user_message):
             continue
         m = asset.get("meta") or {}
         name = m.get("filename") or os.path.basename(asset["storage_key"])
-        if asset["kind"] in ("music", "audio"):
+        if asset["kind"] == "music":
+            # never 'audio' — that kind is the pipeline's own extracted
+            # transcription WAV, and presenting it as attached music is how
+            # the inaudible-music bug started
             dur = (f" ({asset['duration_s']:.0f}s)"
                    if asset.get("duration_s") else "")
             notes.append(f'[User attached music "{name}"{dur} — '
@@ -154,9 +157,11 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
             "exist, generated from the tool registry:\n"
             + agent_tools.capabilities_digest()
             + "\nNothing else exists. If the user asks for anything not "
-            "listed (speed changes, transitions, zooms, filters, fonts, "
-            "animations, ...), say so plainly and offer the closest listed "
-            "alternative — NEVER describe a change these tools cannot make.")
+            "listed (speed changes, transitions between cuts, stickers, "
+            "custom fonts, ...), say so plainly and offer the closest listed "
+            "alternative — NEVER describe a change these tools cannot make, "
+            "and NEVER claim something is impossible when a tool above "
+            "covers it.")
 
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "system", "content": caps},
@@ -290,19 +295,37 @@ EDIT_CLAIM = re.compile(
     r"(?:applied|made|done)\b"
     r"|\bapplied (?:the |a )?(?:cut|change|edit|style)"
     r"|\b(?:cropped|resized|reframed|converted) to\b"
-    r"|\bcaptions? (?:are|is|were|have been)[^.\n]{0,60}"
+    # status adverbs right after the verb mark an honest state answer
+    # ("captions are still static", "are already karaoke"), not a claim
+    r"|\bcaptions? (?:are|is|were|have been|now)"
+    r"(?! not\b| still\b| already\b| currently\b| unchanged\b)[^.\n]{0,60}"
     r"(?:red|blue|green|yellow|white|black|orange|purple|pink|"
-    r"#[0-9A-Fa-f]{6}|top|bottom|middle|cent(?:er|re)|bigger|smaller)"
+    r"#[0-9A-Fa-f]{6}|top|bottom|middle|cent(?:er|re)|bigger|smaller|"
+    r"karaoke|dynamic|pops?|light(?:s|ing)? up|word.by.word|highlight)"
     r"|\bis now (?:red|blue|green|yellow|white|black|orange|purple|pink|"
     r"#[0-9A-Fa-f]{6}|at the top|at the bottom|in the middle|centered|"
     r"cropped|9:16|16:9|1:1|4:5|vertical|square|portrait|landscape|"
-    r"bigger|smaller)\b"
+    r"bigger|smaller|graded|color.?graded|vibrant|cinematic|vintage)\b"
     r"|\b(?:font|colou?r|style|frame|aspect ratio) (?:is|was|has been) "
     r"(?:changed|set|updated|applied)\b"
+    # effects claims — "Added a vibrant grade, a punch-in and a fade to
+    # black" (bare past-participle openers have no I/we/now subject, so the
+    # first alternation misses them). Negated participles ("haven't added",
+    # "never applied") are honest, not claims.
+    r"|\b(?<!n't )(?<!n’t )(?<!not )(?<!never )(?<!no )"
+    r"(?:added|applied|enabled)\b[^.\n]{0,60}"
+    r"\b(?:grades?|color.?grades?|zooms?|punch.?ins?|fades?|filters?|"
+    r"karaoke|highlights?)\b"
+    r"|\b(?<!no )(?:color.?grade|grade|zoom|punch.?in|"
+    r"fades?(?:[- ]?(?:in|out)| to black)?|filter) "
+    r"(?:is|was|has been) (?:now )?"
+    r"(?:added|applied|set|enabled)\b"
     # audio claims — "The music now plays only from 0.0 to 15.0 seconds…"
     # Stative/perfect constructions only, so honest offers ("I can make the
-    # music quieter") don't trip the guard.
-    r"|\b(?:music|audio|track|song|soundtrack|voice.?over|narration|sound)\b"
+    # music quieter") don't trip the guard, and not negated ("No music was
+    # added" is an honest refusal, not a claim).
+    r"|\b(?<!no )(?:music|audio|track|song|soundtrack|voice.?over|narration|"
+    r"sound)\b"
     r"[^.\n]{0,60}\b(?:now plays|plays? only|plays? from|is cut|"
     r"cut (?:after|off)|(?:is|are|was|were|has been|have been) (?:now )?"
     r"(?:added|removed|lowered|reduced|quieter|louder|softer|ducked|muted|"
@@ -324,13 +347,28 @@ DENY_CLAIM = re.compile(
     r"|\b(?:edit|edl) (?:is|remains) unchanged\b)")
 
 
+NEGATORS = re.compile(r"(?i)\b(?:no|nothing|none|haven'?t|hasn'?t|"
+                      r"didn'?t|never|wasn'?t|weren'?t)\b")
+
+
+def _negated_claim(draft, m):
+    """True when the matched claim sits in a sentence that negates it —
+    "No color grade was applied", "Nothing was added" — which is an honest
+    refusal, not a fabrication. Only the words BEFORE the match in the same
+    sentence count."""
+    sent_start = max(draft.rfind(".", 0, m.start()),
+                     draft.rfind("\n", 0, m.start())) + 1
+    return bool(NEGATORS.search(draft[sent_start:m.start()]))
+
+
 def _reply_violations(draft, wrote, previewed):
     """Each violation names the exact fabricated claim it matched, so the
     regeneration correction (and the logs) point at the offending words."""
     v = []
     # An explicit denial ("nothing was changed") dominates — its own words
     # ("changes were made") must not read as a change claim.
-    m = EDIT_CLAIM.search(draft)
+    m = next((mm for mm in EDIT_CLAIM.finditer(draft)
+              if not _negated_claim(draft, mm)), None)
     if not wrote and m and not DENY_CLAIM.search(draft):
         v.append(f'claims edits ("{m.group(0).strip()}"), but no write tool '
                  "succeeded this turn")
@@ -373,21 +411,30 @@ def _turn_facts(ctx, start_version):
 # Nearest supported alternative for the honest fallback, keyed on what the
 # user asked for. User-facing phrasing (no tool names).
 ALTERNATIVE_HINTS = [
+    # effects first: zoom/filter/fade phrasings often also contain 'animated'
+    # or 'tiktok', and the most specific hint must win the first-match scan
+    (re.compile(r"(?i)effect|filter|grade|zoom|punch|fade|transition|"
+                r"viral|engag"),
+     "What I CAN do: color-grade the whole video (vibrant, warm, cool, "
+     "black-and-white, vintage, cinematic), punch-in zooms for emphasis, "
+     "fade in/out, and karaoke captions."),
     (re.compile(r"(?i)9.?:.?16|16.?:.?9|1.?:.?1|4.?:.?5|aspect|ratio|"
                 r"vertical|portrait|square|crop|tiktok|reels?|shorts?"),
      "What I CAN do: change the output frame to 16:9, 9:16, 1:1 or 4:5 with "
      "a center-crop or a padded fit."),
     (re.compile(r"(?i)caption|subtitle|font|animat|outline|middle|"
                 r"cent(?:er|re)"),
-     "What I CAN do with captions: color (#RRGGBB), size (s/m/l) and "
-     "position (top / middle / bottom)."),
+     "What I CAN do with captions: color, size (s/m/l/xl), position "
+     "(top / middle / bottom), and karaoke mode where the spoken word pops "
+     "and lights up."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
      "What I CAN do: mix uploaded music under the edit on any time range, "
      "make existing music or narration louder/quieter, remove it, or lay an "
      "uploaded voiceover over the edit (other audio ducks while it speaks)."),
     (re.compile(r"(?i)insert|splice|b.?roll|logo|image|photo|clip|overlay"),
-     "What I CAN do: splice an uploaded video clip or image between "
-     "segments — attach or upload it and tell me where."),
+     "What I CAN do: splice an uploaded video clip or image in at ANY "
+     "point — even mid-sentence (the take is split at a word edge) — "
+     "attach or upload it and tell me where."),
     (re.compile(r"(?i)cut|trim|remove|shorten|tighten|silence|pause"),
      "What I CAN do: cut or restore any time range with word-accurate "
      "boundaries, and remove silences."),

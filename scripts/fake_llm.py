@@ -431,9 +431,135 @@ def plan_dyncap(messages):
                   "with a pop — rendered and attached.")
 
 
+def _clip_key_by_duration(res, min_s=None, max_s=None):
+    """Parse list_assets(kind='clip') output -> a storage_key filtered by
+    duration."""
+    for k, d in re.findall(r'storage_key=(\S+) "[^"]*", ([0-9.]+)s', res):
+        d = float(d)
+        if (min_s is None or d > min_s) and (max_s is None or d <= max_s):
+            return k
+    return None
+
+
+def plan_srcaudio(messages):
+    """Round 8: the user text carries the extracted source-audio key; adding
+    it as music must be REJECTED and the reply must stay honest."""
+    last = last_executed_tool(messages)
+    m = re.search(r"(audio/\S+\.wav)", last_user_text(messages))
+    if last is None and m:
+        return "add_music", {"storage_key": m.group(1), "start": 0.0,
+                             "end": 5.0}
+    if last == "add_music":
+        res = find_result(messages, "add_music") or ""
+        if "OWN extracted audio" in res:
+            return None, ("I can't use that file — it's the video's own "
+                          "voice recording, not a song. Please attach real "
+                          "background music with the paperclip button.")
+        return None, "UNEXPECTED: source audio was accepted as music."
+    return None, "SRCAUDIO scenario got confused."
+
+
+def plan_midins(messages):
+    """Round 8: splice a 1s window of an uploaded clip into the MIDDLE of
+    the longest kept take — must split the take, not snap to 0."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "get_edl", {}
+    if last == "get_edl":
+        return "list_assets", {"kind": "clip"}
+    if last == "list_assets":
+        key = _clip_key_by_duration(find_result(messages, "list_assets"),
+                                    max_s=15.0)
+        if not key:
+            return None, "MIDINS: no short clip found."
+        edl = parse_edl_json(find_result(messages, "get_edl")) or {}
+        keep = edl.get("keep") or [[0.0, 10.0]]
+        acc, best_at, best_len = 0.0, 0.0, -1.0
+        for s, e in keep:
+            if e - s > best_len:
+                best_len = e - s
+                best_at = acc + (e - s) / 2.0
+            acc += e - s
+        return "insert_media", {"asset_key": key,
+                                "at_output_s": round(best_at, 2),
+                                "duration_s": 1.0, "clip_start_s": 0.5}
+    if last == "insert_media":
+        return "render_preview", {}
+    return None, ("Spliced a 1-second window of your clip right in the "
+                  "middle of the take — preview attached.")
+
+
+def plan_longins(messages):
+    """Round 8: inserting a long recording without a window must be refused;
+    the retry uses duration_s + clip_start_s."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "list_assets", {"kind": "clip"}
+    key = _clip_key_by_duration(find_result(messages, "list_assets") or "",
+                                min_s=15.0)
+    if last == "list_assets":
+        if not key:
+            return None, "LONGINS: no long clip found."
+        return "insert_media", {"asset_key": key, "at_output_s": 0.0}
+    if last == "insert_media":
+        res = find_result(messages, "insert_media") or ""
+        if res.startswith("REJECTED") and \
+                count_results(messages, "insert_media") == 1:
+            return "insert_media", {"asset_key": key, "at_output_s": 0.0,
+                                    "duration_s": 2.0, "clip_start_s": 10.0}
+        return "render_preview", {}
+    return None, ("That recording is far too long to splice whole, so I "
+                  "used a 2-second window starting 10s into it, placed at "
+                  "the top of the video — preview attached.")
+
+
+def plan_fx(messages):
+    """Round 8: grade + punch-in zoom + closing fade, then render."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "set_color_grade", {"preset": "vibrant"}
+    if last == "set_color_grade":
+        return "add_zoom", {"start": 0.4, "end": 1.6, "strength": 0.3}
+    if last == "add_zoom":
+        return "set_fades", {"fade_out_s": 0.6}
+    if last == "set_fades":
+        return "render_preview", {}
+    return None, ("Added a vibrant grade, a punch-in on the opening line "
+                  "and a closing fade to black — preview attached.")
+
+
+def plan_karaoke(messages):
+    """Round 8: karaoke captions with a custom highlight color."""
+    last = last_executed_tool(messages)
+    if last is None:
+        return "set_caption_style", {"style": {"dynamic": True,
+                                               "highlight_color": "#00FF88"}}
+    if last == "set_caption_style":
+        if (find_result(messages, "set_caption_style") or "") \
+                .startswith("REJECTED"):
+            return "add_captions", {"mode": "from_transcript",
+                                    "style": {"size": "xl", "dynamic": True,
+                                              "highlight_color": "#00FF88"}}
+        return "render_preview", {}
+    if last == "add_captions":
+        return "render_preview", {}
+    return None, ("The captions now light up word by word in green as each "
+                  "word is spoken — preview attached.")
+
+
 def plan_next(messages):
     """Returns (tool_name, args) or (None, final_text)."""
     text = last_user_text(messages).lower()
+    if "srcaudio test" in text:
+        return plan_srcaudio(messages)
+    if "midins test" in text:
+        return plan_midins(messages)
+    if "longins test" in text:
+        return plan_longins(messages)
+    if "fx test" in text:
+        return plan_fx(messages)
+    if "karaoke test" in text:
+        return plan_karaoke(messages)
     if "kept test" in text:
         return plan_kept(messages)
     if "dyncap test" in text:

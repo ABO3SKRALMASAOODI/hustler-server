@@ -4,6 +4,7 @@ Run from the worker/ directory:  python tests/test_units.py
 """
 
 import os
+import re
 import sys
 import tempfile
 
@@ -796,11 +797,18 @@ with tempfile.TemporaryDirectory() as td:
                  if l.startswith("Dialogue:")]
     check("dynamic renders one event per word",
           len(dialogues) == len(sty_words))
-    check("dynamic events carry the pop animation tag",
-          all(r"\fscx60" in d and r"\t(0,110" in d for d in dialogues))
-    check("dynamic events are single words",
-          all(len(d.split(",,0,0,0,,")[1].split("}")[-1].split()) == 1
-              for d in dialogues))
+    check("karaoke: the spoken word pops and lights up (default yellow)",
+          all(r"\1c&H4DE1FF&" in d and r"\t(0,90" in d for d in dialogues))
+    # xl on a 9:16 frame only fits ~2 short words per line — the word group
+    # must shrink to the frame instead of wrapping mid-pop (round-8 fix), so
+    # the >=3-word group check renders at the base 16:9 res where they fit
+    p = caplib.build_ass(dyn_edl, sty_index, Timeline(dyn_edl["keep"]),
+                         os.path.join(td, "dyn_wide.ass"))
+    wide_dialogues = [l for l in open(p).read().splitlines()
+                      if l.startswith("Dialogue:")]
+    check("karaoke shows the word group, not bare single words",
+          any(len(re.sub(r"\{[^}]*\}", " ", d.split(",,0,0,0,,")[1])
+                  .split()) >= 3 for d in wide_dialogues))
 sig_a = schemas.edl_signature(schemas.validate_edl(
     {"keep": [[0.0, 30.0]],
      "captions": {"mode": "from_transcript",
@@ -875,5 +883,355 @@ check("transcript budget keeps 20k chars intact",
       agent_tools._cap("x" * 20000,
                        budget=agent_tools.config.TRANSCRIPT_CHAR_BUDGET)
       == "x" * 20000)
+
+# ─── Round 8: source-audio guard, mid-take inserts, effects, karaoke ────────
+
+print("== Round-8 source-audio can never masquerade as music ==")
+tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
+tctx._asset = {"kind": "audio", "storage_key": "audio/1/deadbeef.wav",
+               "meta": {}, "id": 5}
+r = add_music(tctx, "audio/1/deadbeef.wav", 0, 15)
+check("add_music rejects the extracted source audio, explaining why",
+      r.startswith("REJECTED") and "OWN extracted audio" in r
+      and tctx.written is None)
+r = agent_tools._resolve_media_asset(tctx, "audio/1/deadbeef.wav",
+                                     ("music",))[1]
+check("voiceover/insert resolution rejects it too",
+      r and "OWN extracted" in r)
+
+print("== Round-8 insert_media: mid-take split + clip window ==")
+
+
+class InsCtx(ToolCtx):
+    def __init__(self, edl, asset, words):
+        super().__init__(edl, asset)
+        self.index = {"words": words, "video": {"duration": 60.0}}
+        self.workdir = "/tmp"
+
+
+CLIP = {"kind": "video_clip", "storage_key": "clips/1/rec.mp4",
+        "duration_s": 522.5, "meta": {"filename": "rec.mp4"}, "id": 9}
+ins_words = [{"w": "mid", "t0": 5.5, "t1": 5.8}]
+ictx = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
+r = agent_tools.insert_media(ictx, "clips/1/rec.mp4", 3.0,
+                             duration_s=2.5, clip_start_s=120.0)
+check("mid-take insert splits the keep segment instead of snapping to 0",
+      ictx.written["keep"] == [[2.67, 5.8], [5.8, 9.29]])
+check("insert sits on the new mid-take boundary",
+      ictx.written["inserts"][0]["at_output_s"] == 3.13)
+check("clip window recorded (source_start_s)",
+      ictx.written["inserts"][0]["source_start_s"] == 120.0)
+check("diff explains the split at a word edge",
+      "split the take at source 5.8s" in r and "clip 120.0-122.5s" in r)
+check("the split EDL passes full validation (boundary backstop)",
+      schemas.validate_edl(ictx.written, 60.0)
+      .inserts[0].at_output_s == 3.13)
+
+ictx2 = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
+r = agent_tools.insert_media(ictx2, "clips/1/rec.mp4", 3.0)
+check("long clips without a window are refused with guidance",
+      r.startswith("REJECTED") and "look_at_asset" in r
+      and "clip_start_s" in r and ictx2.written is None)
+r = agent_tools.insert_media(ictx2, "clips/1/rec.mp4", 3.0,
+                             duration_s=5.0, clip_start_s=520.0)
+check("window past the end of the clip is refused with the max offset",
+      r.startswith("REJECTED") and "517.5" in r)
+ictx3 = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
+agent_tools.insert_media(ictx3, "clips/1/rec.mp4", 0.1, duration_s=2.0,
+                         clip_start_s=10.0)
+check("positions near a boundary use it (no needless split)",
+      ictx3.written["keep"] == [[2.67, 9.29]] and
+      ictx3.written["inserts"][0]["at_output_s"] == 0.0)
+
+check("validate strips source_start_s from images and zero offsets",
+      schemas.validate_edl(
+          {"keep": [[0, 10]],
+           "inserts": [{"id": "i1", "asset_key": "k", "kind": "image",
+                        "at_output_s": 0.0, "duration_s": 3.0,
+                        "source_start_s": 4.0},
+                       {"id": "i2", "asset_key": "k", "kind": "video",
+                        "at_output_s": 10.0, "duration_s": 3.0,
+                        "source_start_s": 0.0}]}, 60)
+      .model_dump()["inserts"][0]["source_start_s"] is None)
+expect_reject("negative source_start_s",
+              {"keep": [[0, 10]],
+               "inserts": [{"id": "i", "asset_key": "k", "kind": "video",
+                            "at_output_s": 0.0, "duration_s": 3.0,
+                            "source_start_s": -2.0}]}, 60)
+
+print("== Round-8 effects: schema + tools ==")
+fx_edl = schemas.validate_edl(
+    {"keep": [[0, 20]],
+     "effects": {"grade": "vibrant",
+                 "zooms": [{"id": "zm1", "start": 2, "end": 4,
+                            "strength": 0.3}],
+                 "fade_out_s": 0.8}}, 60).model_dump()
+check("effects survive validation",
+      fx_edl["effects"]["grade"] == "vibrant" and
+      fx_edl["effects"]["zooms"][0]["strength"] == 0.3)
+check("describe mentions the effects",
+      "grade vibrant" in describe_edl(fx_edl, 60) and
+      "zoom x1" in describe_edl(fx_edl, 60) and
+      "fade out" in describe_edl(fx_edl, 60))
+expect_reject("zoom strength out of range",
+              {"keep": [[0, 20]],
+               "effects": {"zooms": [{"id": "z", "start": 0, "end": 2,
+                                      "strength": 3.0}]}}, 60)
+expect_reject("fade too long",
+              {"keep": [[0, 20]], "effects": {"fade_in_s": 30}}, 60)
+check("all-empty effects normalize away (signature-stable with old EDLs)",
+      schemas.edl_signature(schemas.validate_edl(
+          {"keep": [[0.0, 20.0]], "effects": {"zooms": []}}, 60)
+          .model_dump())
+      == schemas.edl_signature(schemas.validate_edl(
+          {"keep": [[0.0, 20.0]]}, 60).model_dump()))
+
+tctx = ToolCtx({"keep": [[0.0, 20.0]]})
+r = agent_tools.set_color_grade(tctx, "warm")
+check("set_color_grade writes the preset",
+      tctx.written["effects"]["grade"] == "warm" and "warm" in r)
+check("set_color_grade rejects unknown presets listing the real ones",
+      agent_tools.set_color_grade(ToolCtx({}), "sepia")
+      .startswith("REJECTED"))
+tctx = ToolCtx({"keep": [[0.0, 20.0]]})
+agent_tools.add_zoom(tctx, 2, 4, strength=5.0)
+check("add_zoom clamps strength and assigns an id",
+      tctx.written["effects"]["zooms"][0]["strength"] == 1.0 and
+      tctx.written["effects"]["zooms"][0]["id"] == "zm1")
+zctx = ToolCtx({"keep": [[0.0, 20.0]],
+                "effects": {"zooms": [{"id": "zm1", "start": 2.0,
+                                       "end": 4.0, "strength": 0.25}]}})
+r = agent_tools.remove_zoom(zctx, "zm9")
+check("remove_zoom unknown id lists existing",
+      r.startswith("REJECTED") and "zm1" in r)
+agent_tools.remove_zoom(zctx, "zm1")
+check("remove_zoom removes it", zctx.written["effects"]["zooms"] == [])
+tctx = ToolCtx({"keep": [[0.0, 20.0]]})
+agent_tools.set_fades(tctx, fade_in_s=0.5, fade_out_s=99)
+check("set_fades clamps to the 5s ceiling",
+      tctx.written["effects"]["fade_in_s"] == 0.5 and
+      tctx.written["effects"]["fade_out_s"] == 5.0)
+check("set_fades with nothing to do is rejected",
+      agent_tools.set_fades(ToolCtx({})).startswith("REJECTED"))
+
+print("== Round-8 effects: filtergraph ==")
+fx_tl = Timeline(fx_edl["keep"], [])
+g_fx = build_filtergraph(fx_edl, 60.0, True, fx_tl, None, [], index,
+                         preview=False, W=720, H=1280, fps=30.0,
+                         frame_mode=None)
+check("grade filter lands before captions",
+      "eq=saturation=1.35:contrast=1.08" in g_fx)
+check("zoom becomes a zoompan window in program time",
+      "zoompan=z='1+0.30*between(on/30.000,2.000,4.000)'" in g_fx)
+check("zooms force per-segment normalization to exact frames",
+      "scale=720:1280" in g_fx)
+check("video fades out at the end of the program",
+      "fade=t=out:st=19.20:d=0.80" in g_fx)
+check("audio fades with the video",
+      "afade=t=out:st=19.20:d=0.80" in g_fx)
+g_plain = build_filtergraph(
+    validate_edl({"keep": [[0, 10]]}, 60).model_dump(),
+    60.0, True, Timeline([[0, 10]]), None, [], index, preview=False,
+    W=720, H=720, fps=30.0, frame_mode=None)
+check("no effects -> no zoompan/fade in the graph",
+      "zoompan" not in g_plain and "fade=" not in g_plain)
+
+print("== Round-8 insert window rendering ==")
+win_edl = validate_edl(
+    {"keep": [[0, 5], [5, 10]],
+     "inserts": [{"id": "ins1", "asset_key": "clips/1/rec.mp4",
+                  "kind": "video", "at_output_s": 5.0, "duration_s": 2.5,
+                  "source_start_s": 120.0}]}, 60).model_dump()
+win_tl = Timeline(win_edl["keep"], win_edl["inserts"])
+g_win = build_filtergraph(win_edl, 60.0, True, win_tl, None, [], index,
+                          preview=False, W=720, H=720, fps=30.0,
+                          frame_mode=None,
+                          insert_inputs=[(2, win_edl["inserts"][0], True)],
+                          silence_idx=1)
+check("insert video window starts at clip_start_s",
+      "trim=start=120.000:end=122.500" in g_win)
+check("insert audio window matches",
+      "atrim=start=120.000:end=122.500" in g_win)
+
+print("== Round-8 karaoke style knobs ==")
+check("style parser accepts highlight_color",
+      agent_tools._parse_partial_style({"highlight_color": "#FF00AA"}) ==
+      {"highlight_color": "#FF00AA"})
+check("style parser rejects bad highlight_color hex",
+      isinstance(agent_tools._parse_partial_style(
+          {"highlight_color": "reddish"}), str))
+hl_edl = schemas.validate_edl(
+    {"keep": [[0, 60]],
+     "captions": {"mode": "from_transcript",
+                  "style": {"dynamic": True,
+                            "highlight_color": "#FF0000"}}}, 60).model_dump()
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(hl_edl, sty_index, Timeline(hl_edl["keep"]),
+                         os.path.join(td, "hl.ass"))
+    check("custom highlight color reaches the karaoke tag (BGR order)",
+          r"\1c&H0000FF&" in open(p).read())
+check("manual items never get dynamic/highlight written into them",
+      agent_tools.merge_caption_style(
+          [{"text": "t", "start": 0, "end": 2, "style": None}],
+          {"dynamic": True, "highlight_color": "#FF0000",
+           "color": "#00FF00"})[0]["style"] == {"color": "#00FF00"})
+
+print("== Round-8 capabilities cover the new tools ==")
+digest = agent_tools.capabilities_digest()
+for t in ("set_color_grade", "add_zoom", "set_fades", "remove_insert",
+          "insert_media"):
+    check(f"digest lists {t}", t + "(" in digest)
+check("insert_media digest advertises any-position splicing",
+      "ANY position" in digest)
+
+print("== Round-8 review fixes: karaoke overlap / width / cap honesty ==")
+# fast speech (word starts < 80ms apart) must not produce stacked captions
+fast = [{"w": "a", "t0": 1.00, "t1": 1.04},
+        {"w": "b", "t0": 1.05, "t1": 1.09},
+        {"w": "c", "t0": 1.10, "t1": 1.60}]
+evs = caplib.events_dynamic(fast)
+check("fast-speech karaoke events never overlap the next",
+      all(evs[i]["end"] <= evs[i + 1]["start"] + 1e-9
+          for i in range(len(evs) - 1)))
+# degenerate zero-duration chunk-final word must not bleed into next chunk
+deg = [{"w": "u", "t0": 0.0, "t1": 0.2}, {"w": "v", "t0": 0.2, "t1": 0.4},
+       {"w": "x", "t0": 0.5, "t1": 0.5}, {"w": "y", "t0": 0.5, "t1": 0.9}]
+evs = caplib.events_dynamic(deg)
+check("degenerate chunk-final word never overlaps the next chunk at all",
+      all(evs[i]["end"] <= evs[i + 1]["start"] + 1e-9
+          for i in range(len(evs) - 1)))
+check("events still have positive duration",
+      all(e["end"] > e["start"] for e in evs))
+# two words at the identical output t0 (cut-seam clamping) -> the sliver
+# event is DROPPED, not left overlapping for a stacked frame
+same = [{"w": "a", "t0": 3.0, "t1": 3.0}, {"w": "b", "t0": 3.0, "t1": 3.5}]
+evs = caplib.events_dynamic(same)
+check("identical-t0 words drop the sliver instead of stacking",
+      len(evs) == 1 and evs[0]["start"] == 3.0 and
+      all(evs[i]["end"] <= evs[i + 1]["start"] + 1e-9
+          for i in range(len(evs) - 1)))
+# chunks respect the line char budget so pops never move a wrap point
+wide = [{"w": "wwwwww", "t0": i * 0.5, "t1": i * 0.5 + 0.3}
+        for i in range(6)]
+evs = caplib.events_dynamic(wide, line_chars=14)
+plain = [re.sub(r"\{[^}]*\}", "", e["text"]) for e in evs]
+check("karaoke chunks stay within the line char budget",
+      all(len(t) <= 14 for t in plain))
+narrow_edl = schemas.validate_edl(
+    {"keep": [[0, 60]],
+     "captions": {"mode": "from_transcript",
+                  "style": {"dynamic": True, "size": "xl"}}},
+    60).model_dump()
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(narrow_edl, sty_index, Timeline(narrow_edl["keep"]),
+                         os.path.join(td, "n.ass"), play_res=(608, 1080))
+    lines = [ln for ln in open(p) if ln.startswith("Dialogue:")]
+    budget = caplib.line_chars_for({"dynamic": True, "size": "xl"},
+                                   (608, 1080))
+    plain = [re.sub(r"\{[^}]*\}", "", ln.rsplit(",,", 1)[-1]).strip()
+             for ln in lines]
+    check("9:16 xl karaoke chunks sized to the narrow frame",
+          lines and all(len(t) <= budget for t in plain))
+
+# the 4-word karaoke cap is applied to stored state and disclosed
+kctx = ToolCtx({"keep": [[0.0, 30.0]]})
+r = agent_tools.add_captions(kctx, mode="from_transcript",
+                             style={"dynamic": True},
+                             max_words_per_caption=8)
+check("add_captions clamps karaoke group size in the stored EDL",
+      kctx.written["captions"]["max_words_per_caption"] == 4)
+check("add_captions discloses the karaoke cap",
+      "at most 4 words" in r and "instead of 8" in r)
+kctx = ToolCtx({"keep": [[0.0, 30.0]]})
+r = agent_tools.add_captions(kctx, mode="from_transcript",
+                             max_words_per_caption=8)
+check("non-dynamic captions keep the requested group size",
+      kctx.written["captions"]["max_words_per_caption"] == 8 and
+      "Note" not in r)
+kctx = ToolCtx({"keep": [[0.0, 30.0]],
+                "captions": {"mode": "from_transcript",
+                             "max_words_per_caption": 8, "style": None}})
+r = agent_tools.set_caption_style(kctx, {"dynamic": True})
+check("set_caption_style clamps stored group size when enabling karaoke",
+      kctx.written["captions"]["max_words_per_caption"] == 4)
+check("set_caption_style discloses the clamp", "lowered from 8" in r)
+
+print("== Round-8 review fixes: honesty vocabulary + hint routing ==")
+import agent_loop as al                                       # noqa: E402
+for s in ("Added a vibrant grade, a punch-in on the opening line and a "
+          "closing fade to black.",
+          "The captions now light up word by word in green.",
+          "I've color-graded the video warm and added a fade-out.",
+          "The whole video is now graded cinematic.",
+          "A punch-in zoom was applied at 0:05 for emphasis.",
+          "Karaoke captions are enabled with a green highlight."):
+    check(f"EDIT_CLAIM catches effects fabrication: {s[:44]!r}",
+          al.EDIT_CLAIM.search(s))
+for s in ("No music was added — that file is the video's own voice "
+          "recording; attach a real music file and I'll mix it in.",
+          "I can set a fade-out at the end and add a vibrant color grade "
+          "— want me to go ahead?",
+          "I can make the captions karaoke-style where each spoken word "
+          "pops and lights up. Want that?",
+          # negated / status phrasings the verify pass flagged
+          "No grade was applied — the timeline is empty.",
+          "No color grade was applied this turn.",
+          "No zoom was added this turn because the write failed.",
+          "I haven't added a grade yet — want me to?",
+          "The tool call failed, so it never applied the grade.",
+          "Nothing was added — karaoke captions need a transcript first.",
+          "The captions are not karaoke yet — say the word and I'll "
+          "switch them.",
+          "The captions are still static, not dynamic.",
+          "The captions are already karaoke-style, so there was nothing "
+          "to change."):
+    check(f"honest phrasing passes: {s[:44]!r}",
+          not al._reply_violations(s, wrote=False, previewed=False) or
+          al.DENY_CLAIM.search(s))
+check("bare-fade fabrication caught",
+      al._reply_violations("The fade was added at the end.",
+                           wrote=False, previewed=False))
+check("negation rescue is per-sentence, not per-draft",
+      al._reply_violations("No zoom was added earlier. I've now applied "
+                           "a vibrant grade.", wrote=False, previewed=False))
+for q in ("add an animated zoom on my face",
+          "can you zoom into the middle of the shot at 0:05",
+          "make it a viral tiktok edit with zooms and filters"):
+    check(f"effects hint wins for {q[:36]!r}",
+          "color-grade" in (al._nearest_alternative(q) or ""))
+check("caption hint still owns caption asks",
+      "captions" in (al._nearest_alternative("animated captions please")
+                     or ""))
+check("insert hint says any point, not between segments",
+      "ANY" in al._nearest_alternative("splice my logo into the video") and
+      "between segments" not in
+      al._nearest_alternative("splice my logo into the video"))
+
+print("== Round-8 review fixes: attachment context skips 'audio' kind ==")
+
+
+class _AttDB:
+    def __init__(self, asset):
+        self._a = asset
+
+    def run(self, fn, *a, **k):
+        return self._a
+
+
+class _AttCtx:
+    project_id = 1
+    workdir = "/tmp"
+
+
+aud = {"id": 5, "project_id": 1, "kind": "audio", "meta": {},
+       "storage_key": "audio/1/x.wav", "duration_s": 10.4, "bytes": 100}
+msg = {"meta": {"attachments": [5]}}
+check("extracted-audio attachment produces no music context line",
+      al._attachment_context(_AttDB(aud), _AttCtx(), msg) == "")
+mus = dict(aud, kind="music", storage_key="music/1/song.mp3",
+           meta={"filename": "song.mp3"})
+check("real music attachment still produces the context line",
+      "User attached music" in
+      al._attachment_context(_AttDB(mus), _AttCtx(), msg))
 
 print(f"\nALL {PASS} CHECKS PASSED")

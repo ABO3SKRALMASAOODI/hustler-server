@@ -26,10 +26,15 @@ ALIGNMENTS = {"bottom": 2, "top": 8, "middle": 5}
 MARGIN_V = {"bottom": 46, "top": 40, "middle": 0}
 
 DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
-                 "dynamic": False}
+                 "dynamic": False, "highlight_color": None}
 
-# Pop-in scale animation for dynamic word-by-word captions.
-POP_TAG = r"{\fscx60\fscy60\t(0,110,\fscx108\fscy108)\t(110,220,\fscx100\fscy100)}"
+# Karaoke (dynamic) captions: groups of up to N words; the word being
+# spoken pops and lights up in the highlight color. Groups larger than
+# KARAOKE_HARD_MAX read as a wall of text, so max_words is clamped there
+# (the caption tools disclose the clamp to the agent).
+KARAOKE_MAX_WORDS = 3
+KARAOKE_HARD_MAX = 4
+DEFAULT_HIGHLIGHT = "#FFE14D"
 
 ASS_HEADER_TOP = """[Script Info]
 ScriptType: v4.00+
@@ -59,7 +64,7 @@ def _norm_style(style):
     s = dict(DEFAULT_STYLE)
     if style:
         d = style if isinstance(style, dict) else style.model_dump()
-        for k in ("color", "size", "position"):
+        for k in ("color", "size", "position", "highlight_color"):
             if d.get(k):
                 s[k] = d[k]
         if d.get("dynamic") is not None:
@@ -164,24 +169,73 @@ def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS)
     return events
 
 
-def events_dynamic(out_words):
-    """Word-by-word pop captions (TikTok style): every word is its own event
-    with a scale-in animation, shown until the next word starts (or briefly
-    past its own end at a pause). Word times come from the transcript — never
-    invented."""
+def _inline_hl(hex_rgb):
+    """#RRGGBB -> the &HBBGGRR& form inline \\1c override tags use."""
+    h = (hex_rgb or DEFAULT_HIGHLIGHT).lstrip("#")
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"&H{b}{g}{r}&".upper()
+
+
+def events_dynamic(out_words, style=None, max_words=None,
+                   line_chars=MAX_LINE_CHARS):
+    """Karaoke captions (modern reels style): the phrase shows in groups of
+    up to 3 words and the word being SPOKEN pops in and lights up in the
+    highlight color; the others stay in the base caption color. One Dialogue
+    per word — timing comes from the real transcript, never invented.
+    Chunks are kept within one line's char budget so the pop animation never
+    shifts a wrap point mid-word on narrow frames."""
+    s = _norm_style(style)
+    hl = _inline_hl(s.get("highlight_color") or DEFAULT_HIGHLIGHT)
+    group_n = min(int(max_words), KARAOKE_HARD_MAX) if max_words \
+        else KARAOKE_MAX_WORDS
+    active_pre = (r"{\1c" + hl + r"\fscx62\fscy62"
+                  r"\t(0,90,\fscx114\fscy114)\t(90,170,\fscx106\fscy106)}")
+    chunks, cur, chars = [], [], 0
+    for w in out_words:
+        would = chars + (1 if chars else 0) + len(w["w"])
+        if cur and (w["t0"] - cur[-1]["t1"] > 1.2 or len(cur) >= group_n
+                    or would > line_chars):
+            chunks.append(cur)
+            cur, chars = [], 0
+            would = len(w["w"])
+        cur.append(w)
+        chars = would
+    if cur:
+        chunks.append(cur)
     events = []
-    for i, w in enumerate(out_words):
-        start = w["t0"]
-        if i + 1 < len(out_words):
-            nxt = out_words[i + 1]["t0"]
-            end = nxt if nxt - w["t1"] <= 1.2 else min(w["t1"] + 0.35, nxt)
-        else:
-            end = w["t1"] + 0.35
-        if end <= start:
-            end = start + 0.12
-        events.append({"start": start, "end": end,
-                       "text": POP_TAG + _esc(w["w"])})
-    return events
+    for ci, chunk in enumerate(chunks):
+        nxt_t0 = chunks[ci + 1][0]["t0"] if ci + 1 < len(chunks) else None
+        for i, w in enumerate(chunk):
+            start = w["t0"]
+            if i + 1 < len(chunk):
+                end = max(chunk[i + 1]["t0"], start + 0.08)
+            elif nxt_t0 is not None:
+                end = nxt_t0 if nxt_t0 - w["t1"] <= 1.2 \
+                    else min(w["t1"] + 0.35, nxt_t0)
+            else:
+                end = w["t1"] + 0.35
+            if end <= start:
+                end = start + 0.12
+            text = " ".join(
+                (active_pre + _esc(x["w"]) + r"{\r}") if j == i
+                else _esc(x["w"])
+                for j, x in enumerate(chunk))
+            events.append({"start": start, "end": end, "text": text})
+    # never overlap the next event — same-layer overlaps make libass stack
+    # two copies of the phrase (fast speech pushes the +0.08 floor past the
+    # next word's start; the degenerate-word fallback can cross chunks).
+    # An event whose successor starts at (or within 10ms of) its own start
+    # is dropped outright: clamping it would leave a sliver that still
+    # renders one stacked frame.
+    kept = []
+    for i, ev in enumerate(events):
+        nxt = events[i + 1] if i + 1 < len(events) else None
+        if nxt and nxt["start"] <= ev["start"] + 0.01:
+            continue
+        if nxt and ev["end"] > nxt["start"]:
+            ev["end"] = nxt["start"]
+        kept.append(ev)
+    return kept
 
 
 def events_from_items(items, tl, line_chars=MAX_LINE_CHARS):
@@ -253,7 +307,10 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         out_words = tl.kept_words(index.get("words", []))
         global_style = captions.get("style")
         if _norm_style(global_style)["dynamic"]:
-            events = events_dynamic(out_words)
+            events = events_dynamic(
+                out_words, style=global_style,
+                max_words=captions.get("max_words_per_caption"),
+                line_chars=line_chars_for(global_style, play_res))
         else:
             events = events_from_transcript(
                 out_words, max_words=captions.get("max_words_per_caption"),

@@ -863,6 +863,135 @@ def main():
     assert bal < 170.0, f"balance never decreased: {bal}"
     ok(f"agent turns charge credits (last turn {charged}, balance {bal})")
 
+    def last_activity_like(pattern):
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT cm.content FROM chat_messages cm
+                           JOIN projects p ON p.chat_session_id = cm.session_id
+                           WHERE p.id = %s AND cm.role='activity'
+                             AND cm.content LIKE %s
+                           ORDER BY cm.id DESC LIMIT 1""",
+                        (project_id, pattern))
+            return cur.fetchone()
+
+    # The round-8 turns below need headroom under MESSAGES_PER_HOUR — age
+    # the session's existing messages out of the rate-limit window.
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE chat_messages
+                       SET created_at = created_at - INTERVAL '2 hours'
+                       WHERE session_id = (SELECT chat_session_id
+                                           FROM projects WHERE id = %s)""",
+                    (project_id,))
+
+    # ── ROUND 8: extracted source audio can never come back as music ────
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT storage_key FROM assets
+                       WHERE project_id = %s AND kind='audio'
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        audio_row = cur.fetchone()
+    assert audio_row, "extracted source-audio asset missing from pipeline"
+    music_before = json.dumps(latest_edl()["json"].get("music") or [])
+    out = send(f"SRCAUDIO TEST add this as music: {audio_row['storage_key']}")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    act = last_activity_like("%OWN extracted audio%")
+    assert act and "REJECTED" in act["content"], \
+        "source-audio add_music was not rejected with the honest explanation"
+    assert json.dumps(latest_edl()["json"].get("music") or []) \
+        == music_before, "source audio leaked into the music lane"
+    reply = latest_assistant()["content"]
+    assert "voice recording" in reply and "attach" in reply, reply[:160]
+    ok("extracted source audio rejected as music; EDL untouched; honest ask "
+       "for a real file")
+
+    # ── ROUND 8: mid-take insert splits the take exactly where asked ────
+    segs_before = len(latest_edl()["json"]["keep"])
+    dur_before8 = last_preview_result()["duration_s"]
+    out = send("MIDINS TEST put my clip in the middle of the talk")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    mid_ins = [i for i in edl["json"]["inserts"]
+               if i.get("source_start_s") == 0.5 and i["duration_s"] == 1.0]
+    assert mid_ins, edl["json"]["inserts"]
+    assert len(edl["json"]["keep"]) == segs_before + 1, \
+        f"take not split: {segs_before} -> {len(edl['json']['keep'])}"
+    act = last_activity_like("%split the take at source%")
+    assert act, "split note missing from the activity feed"
+    pv = last_preview_result()
+    assert pv["edl_version"] == edl["version"], (pv, edl["version"])
+    assert abs(pv["duration_s"] - (dur_before8 + 1.0)) < 0.3, \
+        f"mid insert wrong growth: {dur_before8} -> {pv['duration_s']}"
+    ok("mid-take insert: take split at a word edge, 1s clip window "
+       "(clip_start_s) rendered in place")
+
+    # ── ROUND 8: long recordings are refused without an explicit window ─
+    long_path = os.path.join(ROOT, "test_clip_long.mp4")
+    if not os.path.exists(long_path):
+        _sp.run(["ffmpeg", "-y", "-f", "lavfi", "-i",
+                 "testsrc=size=320x240:rate=15:duration=16",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", long_path],
+                check=True, capture_output=True)
+    lbytes = os.path.getsize(long_path)
+    r = client.post(f"/projects/{project_id}/uploads",
+                    json={"filename": "screen_recording.mp4",
+                          "bytes": lbytes, "kind": "clip"}, headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    up = r.get_json()
+    with open(long_path, "rb") as f:
+        requests.put(up["url"], data=f.read(),
+                     headers={"Content-Type": up["content_type"]})
+    r = client.post(f"/projects/{project_id}/uploads/complete",
+                    json={"storage_key": up["storage_key"], "kind": "clip",
+                          "filename": "screen_recording.mp4",
+                          "duration_s": 16.0}, headers=H)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    dur_before_long = last_preview_result()["duration_s"]
+    out = send("LONGINS TEST add my screen recording")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    act = last_activity_like("%look_at_asset%")
+    assert act and "REJECTED" in act["content"] and \
+        "clip_start_s" in act["content"], \
+        "whole-clip insert was not refused with window guidance"
+    edl = latest_edl()
+    long_ins = [i for i in edl["json"]["inserts"]
+                if i.get("source_start_s") == 10.0]
+    assert long_ins and long_ins[0]["duration_s"] == 2.0, \
+        edl["json"]["inserts"]
+    pv = last_preview_result()
+    assert abs(pv["duration_s"] - (dur_before_long + 2.0)) < 0.3, \
+        f"long insert wrong growth: {dur_before_long} -> {pv['duration_s']}"
+    ok("16s recording refused whole; retry with a 2s window at 10s "
+       "rendered correctly")
+
+    # ── ROUND 8: effects (grade + punch-in zoom + fade) render for real ─
+    dur_fx_before = last_preview_result()["duration_s"]
+    out = send("FX TEST make it engaging with effects")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    fx = latest_edl()["json"].get("effects") or {}
+    assert fx.get("grade") == "vibrant", fx
+    assert fx.get("zooms") and fx["zooms"][0]["strength"] == 0.3, fx
+    assert fx.get("fade_out_s") == 0.6, fx
+    pv = last_preview_result()
+    assert pv["edl_version"] == latest_edl()["version"], pv
+    assert abs(pv["duration_s"] - dur_fx_before) < 0.25, \
+        f"effects changed the duration: {dur_fx_before} -> {pv['duration_s']}"
+    ok("effects: vibrant grade + 30% punch-in zoom + 0.6s fade rendered "
+       "through ffmpeg, duration unchanged")
+
+    # ── ROUND 8: karaoke captions with a custom highlight color ─────────
+    out = send("KARAOKE TEST highlight the spoken word in green")
+    assert out.get("queued")
+    wait_job(out["job_id"], TIMEOUT_AGENT, "agent_turn")
+    edl = latest_edl()
+    st = ((edl["json"].get("captions") or {}).get("style")) or {}
+    assert st.get("dynamic") is True and \
+        st.get("highlight_color") == "#00FF88", st
+    pv = last_preview_result()
+    assert pv["edl_version"] == edl["version"], (pv, edl["version"])
+    ok("karaoke captions with #00FF88 highlight written and rendered")
+
     # ── ISSUE 1: UI frame toggle writes a user version + auto-previews ──
     res = user_edl_op("set_frame", {"ratio": "1:1", "mode": "pad"})
     assert res.get("version") and res.get("preview_job_id"), res

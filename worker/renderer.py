@@ -32,6 +32,18 @@ DUCK_DB = -12.0            # music under speech AND program audio under voiceove
 MAX_ENABLE_SPANS = 80
 AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
+# Color-grade presets (EDL.effects.grade). Applied to all footage after
+# concat, BEFORE captions burn — text never gets graded.
+GRADE_FILTERS = {
+    "vibrant": "eq=saturation=1.35:contrast=1.08",
+    "warm": "colorbalance=rs=.08:gs=.02:bs=-.08,eq=saturation=1.12",
+    "cool": "colorbalance=rs=-.05:bs=.08,eq=saturation=1.05",
+    "bw": "hue=s=0,eq=contrast=1.1",
+    "vintage": "curves=preset=vintage,eq=saturation=0.85",
+    "cinematic": ("colorbalance=bs=.05:rs=-.03,"
+                  "eq=contrast=1.12:saturation=1.12:brightness=-0.02"),
+}
+
 
 def _enable_expr(spans):
     return "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in spans)
@@ -136,9 +148,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          + "".join(f"[sil{i}]" for i in range(n_silent_blocks)))
 
     # A plain single-source cut needs no per-segment normalization (the old,
-    # cheap graph). The moment a frame is set or foreign material is spliced
-    # in, EVERY block must land on identical dims/fps/audio before concat.
-    do_norm = bool(insert_inputs) or frame_mode is not None
+    # cheap graph). The moment a frame is set, foreign material is spliced
+    # in, or a zoom needs exact CFR WxH frames, EVERY block must land on
+    # identical dims/fps/audio before concat.
+    fx = edl.get("effects") or {}
+    zooms = fx.get("zooms") or []
+    do_norm = bool(insert_inputs) or frame_mode is not None or bool(zooms)
     mode = frame_mode or "crop"
 
     # main segments: trim, then (when needed) normalize to the output frame
@@ -167,16 +182,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
                              mode, f"s{i}")
 
-    # insert blocks: trim to their duration, normalize like everything else
+    # insert blocks: trim to their window (source_start_s picks where in
+    # the clip the window starts), normalize like everything else
     sil_i = 0
     for j, (idx, item, ins_audio) in enumerate(insert_inputs):
         dur = float(item["duration_s"])
-        parts.append(f"[{idx}:v]trim=start=0:end={dur:.3f},"
+        off = float(item.get("source_start_s") or 0.0) \
+            if item["kind"] != "image" else 0.0
+        parts.append(f"[{idx}:v]trim=start={off:.3f}:end={off + dur:.3f},"
                      f"setpts=PTS-STARTPTS[insv{j}]")
         _normalize_video(parts, f"insv{j}", f"v_ins{j}", W, H, fps,
                          mode, f"i{j}")
         if ins_audio:
-            parts.append(f"[{idx}:a]atrim=start=0:end={dur:.3f},"
+            parts.append(f"[{idx}:a]atrim=start={off:.3f}:end={off + dur:.3f},"
                          f"asetpts=PTS-STARTPTS,{AUDIO_NORM},"
                          f"apad=whole_dur={dur:.3f}[a_ins{j}]")
         else:
@@ -202,9 +220,38 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
 
     vlabel = "vc"
+    # effects: grade -> punch-in zooms -> (captions burn) -> fades. Zooms use
+    # one zoompan whose z steps up inside each window; do_norm guarantees the
+    # frames entering it are exact CFR WxH so on/fps is program time.
+    grade = fx.get("grade")
+    if grade and grade in GRADE_FILTERS:
+        parts.append(f"[{vlabel}]{GRADE_FILTERS[grade]}[vgrade]")
+        vlabel = "vgrade"
+    zoom_terms = []
+    for z in zooms:
+        a = max(0.0, float(z["start"]))
+        b = min(tl.out_duration, float(z["end"]))
+        if b - a >= 0.05:
+            zoom_terms.append(f"{float(z.get('strength', 0.25)):.2f}"
+                              f"*between(on/{fps:.3f},{a:.3f},{b:.3f})")
+    if zoom_terms:
+        zexpr = "1+" + "+".join(zoom_terms)
+        parts.append(f"[{vlabel}]zoompan=z='{zexpr}'"
+                     f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                     f":d=1:s={W}x{H}:fps={fps:.3f}[vzoom]")
+        vlabel = "vzoom"
     if ass_path:
         parts.append(f"[{vlabel}]subtitles=filename='{ass_path}'[vsub]")
         vlabel = "vsub"
+    fade_in = float(fx.get("fade_in_s") or 0.0)
+    fade_out = float(fx.get("fade_out_s") or 0.0)
+    if fade_in:
+        parts.append(f"[{vlabel}]fade=t=in:st=0:d={fade_in:.2f}[vfi]")
+        vlabel = "vfi"
+    if fade_out:
+        st = max(0.0, tl.out_duration - fade_out)
+        parts.append(f"[{vlabel}]fade=t=out:st={st:.2f}:d={fade_out:.2f}[vfo]")
+        vlabel = "vfo"
     if preview:
         parts.append(rf"[{vlabel}]scale=-2:min(480\,floor(ih/2)*2)[vsc]")
         vlabel = "vsc"
@@ -249,12 +296,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      f"aresample=48000{delay}[vo{j}]")
         mix_labels.append(f"[vo{j}]")
 
+    a_final = "apre" if (fade_in or fade_out) else "aout"
     if mix_labels:
         parts.append(f"[{alabel}]" + "".join(mix_labels) +
                      f"amix=inputs={1 + len(mix_labels)}:duration=first:"
-                     f"normalize=0[aout]")
+                     f"normalize=0[{a_final}]")
     else:
-        parts.append(f"[{alabel}]anull[aout]")
+        parts.append(f"[{alabel}]anull[{a_final}]")
+    if a_final == "apre":
+        chain = []
+        if fade_in:
+            chain.append(f"afade=t=in:st=0:d={fade_in:.2f}")
+        if fade_out:
+            st = max(0.0, tl.out_duration - fade_out)
+            chain.append(f"afade=t=out:st={st:.2f}:d={fade_out:.2f}")
+        parts.append(f"[apre]{','.join(chain)}[aout]")
 
     return ";".join(parts)
 

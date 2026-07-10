@@ -14,10 +14,11 @@ import db as dbx
 import llm
 import media
 import storage
+from captions import KARAOKE_HARD_MAX
 from schemas import (CaptionStyle, EDLValidationError, Frame, describe_edl,
                      edl_signature, keep_boundaries, output_duration,
                      program_duration, validate_edl, MAX_INSERT_DURATION_S,
-                     GAIN_MIN_DB, GAIN_MAX_DB)
+                     GAIN_MIN_DB, GAIN_MAX_DB, GRADE_PRESETS)
 from timeline import Timeline
 
 
@@ -40,6 +41,7 @@ class ToolContext:
         self.duration = float(index["video"]["duration"])
         self.workdir = workdir
         self._proxy_local = None
+        self._asset_locals = {}       # asset id -> downloaded local path
         self.last_preview = None      # set by render_preview
         self.last_selfcheck = None    # vision one-liner from the last preview
         self.versions_written = []    # EDL versions created this turn
@@ -324,10 +326,13 @@ def find_silences(ctx, min_seconds=0.7):
 
 
 def list_assets(ctx, kind=None):
-    """Project files the user has uploaded or the system has produced."""
-    kinds = {"music": ["music", "audio"], "image": ["image_ref"],
+    """Project files the user has uploaded or the system has produced.
+    kind 'audio' (the pipeline's extracted copy of the source's own audio,
+    used for transcription) is deliberately excluded everywhere — offering
+    it as 'music' just doubles the speaker's voice under itself."""
+    kinds = {"music": ["music"], "image": ["image_ref"],
              "clip": ["video_clip"], "render": ["render"],
-             "all": ["music", "audio", "image_ref", "video_clip",
+             "all": ["music", "image_ref", "video_clip",
                      "render", "original"]}
     sel = kinds.get((kind or "music").strip().lower())
     if not sel:
@@ -391,6 +396,71 @@ def look_at(ctx, start, end, question):
                             image_names=frame_names)
     return _cap(answer or "The vision model did not return an answer; "
                           "proceed using the transcript and shot captions.")
+
+
+def _asset_local_path(ctx, asset):
+    local = ctx._asset_locals.get(asset["id"])
+    if not local:
+        local = os.path.join(ctx.workdir, f"asset_{asset['id']}"
+                             + os.path.splitext(asset["storage_key"])[1])
+        storage.download_to(asset["storage_key"], local)
+        ctx._asset_locals[asset["id"]] = local
+    return local
+
+
+def look_at_asset(ctx, asset_key, question, start=0, end=None):
+    """Frames from an UPLOADED clip or image (not the main video) — THE way
+    to pick which moment of a long clip to splice in with insert_media."""
+    if not llm.vision_available():
+        return ("Visual inspection unavailable (no vision model configured). "
+                "Ask the user which part of the clip to use.")
+    asset, err = _resolve_media_asset(ctx, asset_key,
+                                      ("video_clip", "image_ref"))
+    if err:
+        return err
+    name = (asset.get("meta") or {}).get("filename") or \
+        os.path.basename(asset_key)
+    try:
+        local = _asset_local_path(ctx, asset)
+    except Exception as e:
+        return f"Cannot fetch that asset right now ({e})."
+    if asset["kind"] == "image_ref":
+        answer = llm.ask_vision(
+            f"This is the uploaded image '{name}'. Question from the "
+            f"editor: {question}\nAnswer concisely and concretely.",
+            [local], purpose="vision_look", image_names=[asset_key])
+        return _cap(answer or "The vision model did not return an answer.")
+    dur = _asset_media_duration(ctx, asset)
+    try:
+        s = round(min(max(float(start or 0), 0.0), dur), 2)
+        e = round(min(max(float(end), s), dur), 2) if end is not None else dur
+    except (TypeError, ValueError):
+        return "REJECTED: start/end must be numbers of seconds."
+    if e <= s:
+        e = min(dur, s + 1.0)
+    n = 6 if e - s > 20 else 4
+    frames, frame_names = [], []
+    for i in range(n):
+        t = s + (e - s) * (i + 0.5) / n
+        fp = os.path.join(ctx.workdir, f"alook_{asset['id']}_{int(t * 10)}.jpg")
+        try:
+            media.frame_at(local, t, fp, width=640)
+            frames.append(fp)
+            frame_names.append(f"clip '{name}' frame @{t:.2f}s")
+        except media.MediaError:
+            pass
+    if not frames:
+        return "Could not extract frames from that clip."
+    labels = ", ".join(f"{s + (e - s) * (i + 0.5) / n:.1f}s"
+                       for i in range(len(frames)))
+    answer = llm.ask_vision(
+        f"These are {len(frames)} frames sampled from the uploaded clip "
+        f"'{name}' ({dur:.0f}s long), at {labels}. Question from the "
+        f"editor: {question}\nRefer to moments by those timestamps; answer "
+        "concisely.", frames, purpose="vision_look", image_names=frame_names)
+    return _cap((answer or "The vision model did not return an answer.")
+                + f"\n(clip is {dur:.1f}s long; call again with a narrower "
+                  "start/end to zoom into a region)")
 
 
 # ------------------------------------------------------------------ #
@@ -546,6 +616,16 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 mw = int(max_words_per_caption)
             except (TypeError, ValueError):
                 return "REJECTED: max_words_per_caption must be an integer."
+        # karaoke groups larger than the hard max read as a wall of text —
+        # clamp the STORED value so EDL, diff line and reply all match what
+        # actually renders, and disclose the clamp.
+        karaoke_note = ""
+        if mw and (parsed_style or {}).get("dynamic") \
+                and mw > KARAOKE_HARD_MAX:
+            karaoke_note = (f"\nNote: dynamic (karaoke) captions group at "
+                            f"most {KARAOKE_HARD_MAX} words per line — "
+                            f"using {KARAOKE_HARD_MAX} instead of {mw}.")
+            mw = KARAOKE_HARD_MAX
         edl["captions"] = {"mode": "from_transcript",
                            "max_words_per_caption": mw,
                            "style": parsed_style}
@@ -554,7 +634,7 @@ def add_captions(ctx, mode=None, items=None, style=None,
             desc += f", <= {mw} words each"
         if parsed_style:
             desc += f", style {parsed_style}"
-        return ctx.write_edl(edl, desc)
+        return ctx.write_edl(edl, desc) + karaoke_note
     if mode == "off":
         edl["captions"] = None
         return ctx.write_edl(edl, "captions removed")
@@ -569,18 +649,22 @@ def _parse_partial_style(style):
     if not isinstance(style, dict) or not style:
         return ('ERR: style must be a non-empty object with any of '
                 '{"color":"#RRGGBB","size":"s|m|l|xl",'
-                '"position":"bottom|top|middle","dynamic":true|false}')
-    unknown = sorted(set(style) - {"color", "size", "position", "dynamic"})
+                '"position":"bottom|top|middle","dynamic":true|false,'
+                '"highlight_color":"#RRGGBB"}')
+    unknown = sorted(set(style) - {"color", "size", "position", "dynamic",
+                                   "highlight_color"})
     if unknown:
         return (f"ERR: unknown style field(s) {unknown} — only color, size, "
-                "position and dynamic exist (no fonts or outlines; dynamic "
-                "gives animated word-by-word pop captions).")
+                "position, dynamic and highlight_color exist (no fonts or "
+                "outlines; dynamic gives karaoke word-by-word captions, "
+                "highlight_color is the color of the spoken word).")
     try:
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
                 '{"color":"#RRGGBB","size":"s|m|l|xl",'
-                '"position":"bottom|top|middle","dynamic":true|false}.')
+                '"position":"bottom|top|middle","dynamic":true|false,'
+                '"highlight_color":"#RRGGBB"}.')
     return {k: validated[k] for k in style}
 
 
@@ -594,10 +678,11 @@ def merge_caption_style(captions, partial):
         new["style"] = st
         return new
     out = []
-    # dynamic word-pop only exists for from_transcript captions — writing it
-    # into manual items would let the reply claim an effect the renderer
-    # ignores.
-    item_partial = {k: v for k, v in partial.items() if k != "dynamic"}
+    # dynamic word-pop (and its highlight color) only exists for
+    # from_transcript captions — writing it into manual items would let the
+    # reply claim an effect the renderer ignores.
+    item_partial = {k: v for k, v in partial.items()
+                    if k not in ("dynamic", "highlight_color")}
     for it in captions:
         nit = dict(it)
         st = dict(it.get("style") or {})
@@ -617,19 +702,40 @@ def set_caption_style(ctx, style):
         return ("REJECTED: no captions exist yet — call "
                 "add_captions(mode='from_transcript') first (you can pass "
                 "a style there directly).")
-    edl["captions"] = merge_caption_style(caps, partial)
+    merged = merge_caption_style(caps, partial)
+    # turning karaoke on with a stored group size above the render's hard
+    # max: clamp the stored value so state and output agree, and say so.
+    karaoke_note = ""
+    if isinstance(merged, dict) and partial.get("dynamic") \
+            and (merged.get("max_words_per_caption") or 0) > KARAOKE_HARD_MAX:
+        karaoke_note = (f"\nNote: dynamic (karaoke) captions group at most "
+                        f"{KARAOKE_HARD_MAX} words per line — "
+                        f"max_words_per_caption lowered from "
+                        f"{merged['max_words_per_caption']} to "
+                        f"{KARAOKE_HARD_MAX}.")
+        merged["max_words_per_caption"] = KARAOKE_HARD_MAX
+    edl["captions"] = merged
     result = ctx.write_edl(
         edl, f"caption style updated: {json.dumps(partial)}")
-    if isinstance(caps, list) and "dynamic" in partial:
-        result += ("\nNote: dynamic word-by-word captions only apply to "
-                   "from_transcript captions — manual caption items ignore "
-                   "the dynamic flag.")
+    result += karaoke_note
+    if isinstance(caps, list) and ({"dynamic", "highlight_color"}
+                                   & set(partial)):
+        result += ("\nNote: dynamic karaoke captions (and highlight_color) "
+                   "only apply to from_transcript captions — manual caption "
+                   "items ignore those fields.")
     return result
 
 
 def add_music(ctx, storage_key, start, end, gain_db=-18.0, duck=True):
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
-    if not asset or asset["kind"] not in ("music", "audio"):
+    if asset and asset["kind"] == "audio":
+        return ("REJECTED: that file is the video's OWN extracted audio "
+                "track (a transcription artifact), not background music — "
+                "mixing it in would only double the speaker's voice under "
+                "itself, near-inaudibly. Tell the user honestly that no "
+                "music has been uploaded and ask them to attach a music "
+                "file (paperclip button).")
+    if not asset or asset["kind"] != "music":
         avail = ctx.db.run(
             lambda conn: _music_assets(conn, ctx.project_id))
         hint = ("Available music storage_keys: " +
@@ -706,9 +812,11 @@ def set_audio_gain(ctx, kind, id, gain_db):
 
 
 def _music_assets(conn, project_id):
+    # kind 'audio' is the extracted source-audio track (transcription
+    # artifact) — never offer it as music.
     with conn.cursor() as cur:
         cur.execute("""SELECT storage_key, meta FROM assets
-                       WHERE project_id = %s AND kind IN ('music','audio')
+                       WHERE project_id = %s AND kind = 'music'
                        ORDER BY id DESC LIMIT 20""", (project_id,))
         return cur.fetchall()
 
@@ -745,6 +853,87 @@ def set_frame(ctx, ratio, mode="crop"):
         edl, f"output frame set to {frame.ratio} ({frame.mode})")
 
 
+def set_color_grade(ctx, preset):
+    p = (preset or "").strip().lower()
+    if p in ("none", "off"):
+        p = None
+    elif p not in GRADE_PRESETS:
+        return ("REJECTED: preset must be one of "
+                f"{', '.join(GRADE_PRESETS)} — or 'none' to clear.")
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    fx["grade"] = p
+    edl["effects"] = fx
+    return ctx.write_edl(edl, f"color grade set to {p or 'none'}")
+
+
+def add_zoom(ctx, start, end, strength=0.25):
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    try:
+        s = round(min(max(float(start), 0.0), max(0.0, prog - 0.2)), 2)
+        e = round(min(max(float(end), s), prog), 2)
+        st = round(min(max(float(strength if strength is not None else 0.25),
+                           0.05), 1.0), 2)
+    except (TypeError, ValueError):
+        return ("REJECTED: start/end/strength must be numbers. start/end are "
+                "OUTPUT-timeline seconds; strength 0.05-1.0 (0.25 = 25% "
+                "punch-in).")
+    if e - s < 0.2:
+        return "REJECTED: a zoom needs at least 0.2s."
+    fx = dict(edl.get("effects") or {})
+    zooms = [dict(z) for z in (fx.get("zooms") or [])]
+    item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
+            "strength": st}
+    zooms.append(item)
+    fx["zooms"] = zooms
+    edl["effects"] = fx
+    return ctx.write_edl(
+        edl, f"punch-in zoom {int(st * 100)}% on {s}-{e}s "
+             f"(output time) [{item['id']}]")
+
+
+def remove_zoom(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    zooms = [dict(z) for z in (fx.get("zooms") or [])]
+    hit = next((z for z in zooms if z.get("id") == id), None)
+    if not hit:
+        have = ", ".join(z.get("id", "?") for z in zooms) or "none"
+        return (f"REJECTED: no zoom with id '{id}'. Existing zooms: {have}. "
+                "Call get_edl to see them.")
+    fx["zooms"] = [z for z in zooms if z.get("id") != id]
+    edl["effects"] = fx
+    return ctx.write_edl(
+        edl, f"removed zoom {id} ({hit['start']}-{hit['end']}s)")
+
+
+def set_fades(ctx, fade_in_s=None, fade_out_s=None):
+    if fade_in_s is None and fade_out_s is None:
+        return ("REJECTED: pass fade_in_s and/or fade_out_s in seconds "
+                "(0 clears a fade).")
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    bits = []
+    try:
+        if fade_in_s is not None:
+            v = float(fade_in_s)
+            fx["fade_in_s"] = 0.0 if v <= 0 else round(min(max(v, 0.1),
+                                                           5.0), 2)
+            bits.append(f"in {fx['fade_in_s']}s" if fx["fade_in_s"]
+                        else "in cleared")
+        if fade_out_s is not None:
+            v = float(fade_out_s)
+            fx["fade_out_s"] = 0.0 if v <= 0 else round(min(max(v, 0.1),
+                                                            5.0), 2)
+            bits.append(f"out {fx['fade_out_s']}s" if fx["fade_out_s"]
+                        else "out cleared")
+    except (TypeError, ValueError):
+        return "REJECTED: fade_in_s/fade_out_s must be numbers of seconds."
+    edl["effects"] = fx
+    return ctx.write_edl(edl, "fade to/from black: " + ", ".join(bits))
+
+
 def _next_item_id(items, prefix):
     n = 1
     taken = {it.get("id") for it in items}
@@ -755,6 +944,11 @@ def _next_item_id(items, prefix):
 
 def _resolve_media_asset(ctx, asset_key, kinds):
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+    if asset and asset["kind"] == "audio" and "audio" not in kinds:
+        return None, ("REJECTED: that file is the video's OWN extracted "
+                      "audio track (a transcription artifact) — it is not "
+                      "user content and must not be mixed back in. Ask the "
+                      "user to attach the file you actually need.")
     if not asset or asset["kind"] not in kinds:
         avail = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, list(kinds))
         hint = ("Available storage_keys: "
@@ -788,17 +982,24 @@ def _asset_media_duration(ctx, asset):
         return float(dur)
 
 
-def insert_media(ctx, asset_key, at_output_s, duration_s=None):
+INSERT_NEEDS_WINDOW_S = 15.0    # clips longer than this need an explicit window
+
+
+def insert_media(ctx, asset_key, at_output_s, duration_s=None,
+                 clip_start_s=None):
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
         return err
     kind = "image" if asset["kind"] == "image_ref" else "video"
+    name = (asset.get("meta") or {}).get("filename") or \
+        os.path.basename(asset_key)
     try:
         at = float(at_output_s)
     except (TypeError, ValueError):
         return ("REJECTED: at_output_s must be a number — a position in the "
                 "FINAL edited video, in seconds.")
+    off = 0.0
     if kind == "image":
         try:
             dur = round(min(max(float(duration_s if duration_s is not None
@@ -807,35 +1008,82 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None):
             return "REJECTED: duration_s must be a number of seconds."
     else:
         clip_dur = _asset_media_duration(ctx, asset)
+        if duration_s is None and clip_dur > INSERT_NEEDS_WINDOW_S:
+            return (f"REJECTED: '{name}' is {clip_dur:.0f}s long — splicing "
+                    "ALL of it in is almost never what the user wants. Pass "
+                    "duration_s (2-8s is typical for a b-roll insert) and "
+                    "clip_start_s to choose WHICH part of the clip to use. "
+                    "Call look_at_asset first to see frames and pick the "
+                    "right moment.")
         try:
             dur = round(min(max(float(duration_s), 0.2), clip_dur,
                             MAX_INSERT_DURATION_S), 2) \
                 if duration_s is not None else round(
                     min(clip_dur, MAX_INSERT_DURATION_S), 2)
+            off = round(max(float(clip_start_s), 0.0), 2) \
+                if clip_start_s is not None else 0.0
         except (TypeError, ValueError):
-            return "REJECTED: duration_s must be a number of seconds."
+            return ("REJECTED: duration_s and clip_start_s must be numbers "
+                    "of seconds.")
+        if off + dur > clip_dur + 0.05:
+            return (f"REJECTED: the window {off}-{round(off + dur, 2)}s runs "
+                    f"past the end of the clip ({clip_dur:.1f}s). Use "
+                    f"clip_start_s <= {max(0.0, round(clip_dur - dur, 2))}.")
 
     edl = dict(ctx.latest_edl()["json"])
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
-    # Snap the requested FINAL-time position to the keep boundary whose
-    # final-time position is nearest (inserts splice between segments).
-    tl = Timeline(edl["keep"], inserts)
-    pre_bounds = keep_boundaries(edl["keep"])
-    final_of = {b: b + sum(d for a, d in tl.ins if a <= b + 1e-6)
+    keep = [list(x) for x in edl["keep"]]
+    tl = Timeline(keep, inserts)
+    at = round(min(max(at, 0.0), tl.out_duration), 2)
+    pre_bounds = keep_boundaries(keep)
+    final_of = {b: b + sum(d for a2, d in tl.ins if a2 <= b + 1e-6)
                 for b in pre_bounds}
-    target_pre = min(pre_bounds, key=lambda b: abs(final_of[b] - at))
-    snapped = abs(final_of[target_pre] - at) > 0.05
+    nearest_b = min(pre_bounds, key=lambda b: abs(final_of[b] - at))
+    note_bits = []
+    if abs(final_of[nearest_b] - at) <= 0.25:
+        target_pre = nearest_b          # close enough — use the boundary
+    else:
+        src = tl.out_to_src(at)
+        if src is None:
+            # requested point falls inside an existing insert
+            target_pre = nearest_b
+            note_bits.append(
+                f"snapped from {at}s to the nearest segment boundary — the "
+                "requested point is inside another insert")
+        else:
+            # split the containing keep segment so the insert lands exactly
+            # there; move the split to a word edge so no word is clipped
+            hit = next((w for w in ctx.index.get("words", [])
+                        if w["t0"] < src < w["t1"]), None)
+            if hit:
+                src = hit["t0"] if src - hit["t0"] <= hit["t1"] - src \
+                    else hit["t1"]
+            src = round(src, 2)
+            seg_i = next((i for i, (s, e) in enumerate(keep)
+                          if s + 0.05 < src < e - 0.05), None)
+            if seg_i is None:
+                target_pre = nearest_b
+            else:
+                s0, e0 = keep[seg_i]
+                keep[seg_i:seg_i + 1] = [[s0, src], [src, e0]]
+                edl["keep"] = keep
+                target_pre = keep_boundaries(keep)[seg_i + 1]
+                note_bits.append(
+                    f"split the take at source {src}s (a word edge) so the "
+                    "insert lands mid-talk exactly where asked")
+    final_at = round(target_pre + sum(d for a2, d in tl.ins
+                                      if a2 <= target_pre + 1e-6), 2)
     item = {"id": _next_item_id(inserts, "ins"), "asset_key": asset_key,
             "kind": kind, "at_output_s": target_pre, "duration_s": dur}
+    if kind == "video" and off:
+        item["source_start_s"] = off
     edl["inserts"] = inserts + [item]
-    name = (asset.get("meta") or {}).get("filename") or \
-        os.path.basename(asset_key)
-    desc = (f"inserted {kind} '{name}' ({dur}s) at "
-            f"{round(final_of[target_pre], 2)}s of the edited video "
-            f"[{item['id']}]")
-    if snapped:
-        desc += (f" (snapped from {round(at, 2)}s to the nearest segment "
-                 "boundary)")
+    window = (f" (using clip {off:.1f}-{round(off + dur, 2):.1f}s)"
+              if off else "")
+    desc = (f"inserted {kind} '{name}' ({dur}s){window} at {final_at}s of "
+            f"the edited video [{item['id']}]")
+    if note_bits:
+        desc += " — " + "; ".join(note_bits)
     result = ctx.write_edl(edl, desc)
     if result.startswith("EDL v"):
         result += ("\nNote: captions cover the main footage only — inserted "
@@ -860,7 +1108,7 @@ def remove_insert(ctx, id):
 
 def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
                   duck_others=True):
-    asset, err = _resolve_media_asset(ctx, asset_key, ("music", "audio"))
+    asset, err = _resolve_media_asset(ctx, asset_key, ("music",))
     if err:
         return err
     edl = dict(ctx.latest_edl()["json"])
@@ -1070,10 +1318,22 @@ TOOLS = {
                     "'render' past renders; 'all' everything.",
                     {"kind": {"type": "string"}}),
     "look_at": (look_at, "Ask the vision model about up to 4 frames from a "
-                "range. Use for taste/visual questions the transcript can't "
-                "answer.", {"start": {"type": "number"},
-                            "end": {"type": "number"},
-                            "question": {"type": "string"}}),
+                "range of the MAIN video. Use for taste/visual questions the "
+                "transcript can't answer.",
+                {"start": {"type": "number"},
+                 "end": {"type": "number"},
+                 "question": {"type": "string"}}),
+    "look_at_asset": (look_at_asset, "Ask the vision model about frames from "
+                      "an UPLOADED clip or image (storage_key from "
+                      "list_assets). THE way to choose which moment of a "
+                      "long clip to splice in: ask e.g. 'at which timestamps "
+                      "is the tool's page actually visible?' over the whole "
+                      "clip, then call again on a narrower start/end, then "
+                      "insert_media with clip_start_s at the chosen moment.",
+                      {"asset_key": {"type": "string"},
+                       "question": {"type": "string"},
+                       "start": {"type": "number"},
+                       "end": {"type": "number"}}),
     "keep_segments": (keep_segments, "REPLACE the whole keep list: the parts "
                       "of the SOURCE video that survive, [[start,end],...] "
                       "in seconds. Everything else is cut. Use only for "
@@ -1099,10 +1359,14 @@ TOOLS = {
                      "mode='off', or items=[{text,start,end,style?}] (source "
                      "seconds) for text the user dictates. Optional style "
                      "{color:'#RRGGBB', size:'s|m|l|xl', "
-                     "position:'bottom|top|middle', dynamic:true} "
-                     "and max_words_per_caption (1-12) to show short, "
-                     "punchy caption chunks. dynamic:true = animated "
-                     "word-by-word pop captions (TikTok style) — THE choice "
+                     "position:'bottom|top|middle', dynamic:true, "
+                     "highlight_color:'#RRGGBB'} "
+                     "and max_words_per_caption (1-12; dynamic mode groups "
+                     "at most 4 per line) to show short, "
+                     "punchy caption chunks. dynamic:true = karaoke "
+                     "captions (modern reels style): short groups where the "
+                     "word being spoken pops and lights up in "
+                     "highlight_color (default warm yellow) — THE choice "
                      "when the user wants big/dynamic/viral captions; pair "
                      "with size 'xl'. Example — 'captions 3 words max, red, "
                      "at the top': {mode:'from_transcript', "
@@ -1121,7 +1385,8 @@ TOOLS = {
                                     "position": {"type": "string",
                                                  "enum": ["bottom", "top",
                                                           "middle"]},
-                                    "dynamic": {"type": "boolean"}}},
+                                    "dynamic": {"type": "boolean"},
+                                    "highlight_color": {"type": "string"}}},
                       "max_words_per_caption": {"type": "integer"},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
@@ -1157,9 +1422,10 @@ TOOLS = {
                           'captions\' -> {"style":{"position":"middle"}}, '
                           "'bigger / more dynamic captions' -> "
                           '{"style":{"size":"xl","dynamic":true}} '
-                          "(dynamic = animated word-by-word pop). Works for "
-                          "from_transcript and manual captions; errors "
-                          "helpfully if no captions exist yet.",
+                          "(dynamic = karaoke captions where the spoken "
+                          "word pops and lights up in highlight_color). "
+                          "Works for from_transcript and manual captions; "
+                          "errors helpfully if no captions exist yet.",
                           {"style": {"type": "object",
                                      "properties": {
                                          "color": {"type": "string"},
@@ -1170,8 +1436,9 @@ TOOLS = {
                                                       "enum": ["bottom",
                                                                "top",
                                                                "middle"]},
-                                         "dynamic": {"type":
-                                                     "boolean"}}}}),
+                                         "dynamic": {"type": "boolean"},
+                                         "highlight_color": {"type":
+                                                             "string"}}}}),
     "set_volume": (set_volume, "Volume automation on the ORIGINAL footage's "
                    "audio (the speaker) over a SOURCE-time span. NOT for "
                    "music or voiceover loudness — use set_audio_gain for "
@@ -1190,20 +1457,49 @@ TOOLS = {
                    "mode": {"type": "string",
                             "enum": ["crop", "pad", "pad_blur"]}}),
     "insert_media": (insert_media, "Splice an uploaded video clip or image "
-                     "INTO the edit at a position in the FINAL edited video "
-                     "(snapped to the nearest segment boundary — the result "
-                     "notes any snap). Call list_assets(kind='clip') or "
-                     "kind='image' first and pass the exact storage_key. "
-                     "duration_s: required intent for images (default 3.0s); "
-                     "for clips defaults to the full clip. Inserted media is "
-                     "NOT transcribed — captions cover the main footage "
-                     "only.",
+                     "INTO the edit at ANY position in the FINAL edited "
+                     "video — mid-take positions split the take cleanly at a "
+                     "word edge, so 'in the middle of the talk' works "
+                     "exactly. Call list_assets(kind='clip') or kind='image' "
+                     "first and pass the exact storage_key. duration_s: how "
+                     "long the insert plays (image default 3.0s; REQUIRED "
+                     "for clips longer than 15s — never splice a long "
+                     "recording whole). clip_start_s: where in the source "
+                     "clip the window starts — use look_at_asset to pick "
+                     "the right moment. Inserted media is NOT transcribed — "
+                     "captions cover the main footage only.",
                      {"asset_key": {"type": "string"},
                       "at_output_s": {"type": "number"},
-                      "duration_s": {"type": "number"}}),
+                      "duration_s": {"type": "number"},
+                      "clip_start_s": {"type": "number"}}),
     "remove_insert": (remove_insert, "Remove one spliced insert by its id "
                       "(see get_edl) — the surrounding timing is restored "
-                      "exactly.", {"id": {"type": "string"}}),
+                      "exactly. If an insert landed wrong, remove it BEFORE "
+                      "re-inserting, or the old one stays in the video.",
+                      {"id": {"type": "string"}}),
+    "set_color_grade": (set_color_grade, "Apply a color-grade preset to the "
+                        "whole video (captions stay unstyled): vibrant, "
+                        "warm, cool, bw, vintage, cinematic — or 'none' to "
+                        "clear. THE tool when the user asks for a filter / "
+                        "look / mood.",
+                        {"preset": {"type": "string",
+                                    "enum": ["vibrant", "warm", "cool", "bw",
+                                             "vintage", "cinematic",
+                                             "none"]}}),
+    "add_zoom": (add_zoom, "Punch-in zoom on a time range of the FINAL "
+                 "edited video (output seconds) — the standard retention "
+                 "effect for emphasis on a key line. strength 0.05-1.0 "
+                 "(default 0.25 = 25% closer). Use 1-3 short zooms at "
+                 "emphatic moments, not wall-to-wall.",
+                 {"start": {"type": "number"}, "end": {"type": "number"},
+                  "strength": {"type": "number"}}),
+    "remove_zoom": (remove_zoom, "Remove one punch-in zoom by its id (see "
+                    "get_edl).", {"id": {"type": "string"}}),
+    "set_fades": (set_fades, "Fade from black at the start and/or to black "
+                  "at the end (video + audio). Seconds; 0 clears. Example: "
+                  "set_fades(fade_in_s=0.5, fade_out_s=0.8).",
+                  {"fade_in_s": {"type": "number"},
+                   "fade_out_s": {"type": "number"}}),
     "add_voiceover": (add_voiceover, "Lay an uploaded audio file OVER the "
                       "whole program from start_output_s (a position in the "
                       "FINAL edited video, default 0). duck_others (default "
@@ -1228,6 +1524,7 @@ TOOLS = {
 REQUIRED_ARGS = {
     "search_transcript": ["query"],
     "look_at": ["start", "end", "question"],
+    "look_at_asset": ["asset_key", "question"],
     "keep_segments": ["segments"],
     "cut_range": ["start", "end"],
     "restore_range": ["start", "end"],
@@ -1239,6 +1536,9 @@ REQUIRED_ARGS = {
     "set_frame": ["ratio"],
     "insert_media": ["asset_key", "at_output_s"],
     "remove_insert": ["id"],
+    "set_color_grade": ["preset"],
+    "add_zoom": ["start", "end"],
+    "remove_zoom": ["id"],
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
     "ask_user": ["question"],
@@ -1250,7 +1550,8 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range", "add_captions",
                "set_caption_style", "add_music", "remove_music",
                "set_audio_gain", "set_volume", "set_frame",
                "insert_media", "remove_insert", "add_voiceover",
-               "remove_voiceover"}
+               "remove_voiceover", "set_color_grade", "add_zoom",
+               "remove_zoom", "set_fades"}
 
 
 def capabilities_digest():
