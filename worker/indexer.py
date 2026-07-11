@@ -68,7 +68,7 @@ def run_index_job(worker_db, job):
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                           workdir)
             _finish_setup(worker_db, project_id, session_id, info,
-                          cached["json"])
+                          cached["json"], job["user_id"])
             _mark("cache_hit_s")
             return {"sha256": sha, "cached": True,
                     "shots": len(cached["json"].get("shots", [])),
@@ -176,7 +176,8 @@ def run_index_job(worker_db, job):
             sheet_keys=sheet_keys,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
-        _finish_setup(worker_db, project_id, session_id, info, index)
+        _finish_setup(worker_db, project_id, session_id, info, index,
+                      job["user_id"])
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "words": len(words), "silences": len(silences),
@@ -212,11 +213,34 @@ def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
                   height=p["height"], fps=p["fps"], sha256=sha)
 
 
-def _finish_setup(worker_db, project_id, session_id, info, index):
-    """Seed EDL v1 (keep everything) if none exists and greet in chat."""
+def _finish_setup(worker_db, project_id, session_id, info, index,
+                  user_id=None):
+    """Seed EDL v1 (keep everything) if none exists, greet in chat, and
+    auto-start the agent on any request the user sent while indexing was
+    still running (instead of asking them to resend it — nobody does)."""
     if not worker_db.run(dbx.latest_edl, project_id):
         worker_db.run(dbx.insert_edl, project_id,
                       default_edl(info["duration"]), "agent")
+
+    pending, out_of_credits = None, False
+    if session_id and user_id and config.OPENAI_API_KEY:
+        try:
+            found = worker_db.run(dbx.pending_user_message,
+                                  project_id, session_id)
+            if found and worker_db.run(dbx.has_active_agent_turn,
+                                       project_id):
+                found = None  # a turn is already working on this project
+            if found:
+                if worker_db.run(dbx.user_credits_balance,
+                                 user_id) >= 1.0:
+                    pending = found
+                else:
+                    # The canned reply promised an auto-start — don't break
+                    # that promise silently; say why it can't happen.
+                    out_of_credits = True
+        except Exception as e:
+            print(f"[index] auto-resume check failed: {e}", flush=True)
+
     mins = info["duration"] / 60.0
     n_shots = len(index.get("shots", []))
     n_words = len(index.get("words", []))
@@ -225,9 +249,26 @@ def _finish_setup(worker_db, project_id, session_id, info, index):
     summary = (f"Your video is ready to edit — {mins:.1f} min, {n_shots} "
                f"shot{'s' if n_shots != 1 else ''}, "
                f"{n_words} transcribed words, {n_sil} noticeable "
-               f"silence{'s' if n_sil != 1 else ''}. "
-               "Tell me what you'd like changed — for example: \"cut the "
-               "dead air, caption every word, and tighten the intro.\"")
+               f"silence{'s' if n_sil != 1 else ''}. ")
+    if pending:
+        summary += ("I'm starting on the request you sent while I was "
+                    "analyzing — give me a moment.")
+    elif out_of_credits:
+        summary += ("I found the request you sent while I was analyzing, "
+                    "but you're out of credits — they refresh daily, so "
+                    "send it again once they do.")
+    else:
+        summary += ("Tell me what you'd like changed — for example: \"cut "
+                    "the dead air, caption every word, and tighten the "
+                    "intro.\"")
     if session_id:
         worker_db.run(dbx.add_message, session_id, "assistant", summary,
-                      {"kind": "index_ready"})
+                      {"kind": "index_ready", "auto_resume": bool(pending)})
+    if pending:
+        try:
+            worker_db.run(dbx.enqueue_job, project_id, user_id, "agent_turn",
+                          {"message_id": pending["id"], "auto_resumed": True})
+            print(f"[index] auto-resumed pending message {pending['id']} "
+                  f"(project {project_id})", flush=True)
+        except Exception as e:
+            print(f"[index] auto-resume enqueue failed: {e}", flush=True)

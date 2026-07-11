@@ -641,14 +641,14 @@ def post_message(user_id, project_id):
             idx_job = cur.fetchone()
             if idx_job and idx_job["state"] in ("queued", "running"):
                 hint = ("I'm still analyzing your video — transcribing it and "
-                        "mapping the shots. I'll be ready for editing requests "
-                        "in a moment. Your message is saved; send it again "
-                        "once indexing finishes.")
+                        "mapping the shots. Your request is saved: I'll start "
+                        "on it automatically the moment analysis finishes, "
+                        "no need to resend it.")
             else:
-                hint = ("Upload a video first and I'll get to work. Drop a "
-                        "file into the panel on the right — once I've "
-                        "analyzed it you can ask for any edit in plain "
-                        "English.")
+                hint = ("Upload a video first and I'll get to work — drop a "
+                        "file into the panel on the right. Your request is "
+                        "saved: I'll start on it automatically once your "
+                        "video has been analyzed.")
             cur.execute("""INSERT INTO chat_messages (session_id, role, content)
                            VALUES (%s, 'assistant', %s)""",
                         (p["chat_session_id"], hint))

@@ -157,11 +157,11 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
             "exist, generated from the tool registry:\n"
             + agent_tools.capabilities_digest()
             + "\nNothing else exists. If the user asks for anything not "
-            "listed (speed changes, transitions between cuts, stickers, "
-            "custom fonts, ...), say so plainly and offer the closest listed "
-            "alternative — NEVER describe a change these tools cannot make, "
-            "and NEVER claim something is impossible when a tool above "
-            "covers it.")
+            "listed (speed changes, stickers/GIF overlays, custom fonts, "
+            "generated motion graphics, ...), say so plainly and offer the "
+            "closest listed alternative — NEVER describe a change these "
+            "tools cannot make, and NEVER claim something is impossible "
+            "when a tool above covers it.")
 
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "system", "content": caps},
@@ -315,11 +315,13 @@ EDIT_CLAIM = re.compile(
     r"|\b(?<!n't )(?<!n’t )(?<!not )(?<!never )(?<!no )"
     r"(?:added|applied|enabled)\b[^.\n]{0,60}"
     r"\b(?:grades?|color.?grades?|zooms?|punch.?ins?|fades?|filters?|"
-    r"karaoke|highlights?)\b"
+    r"karaoke|highlights?|transitions?|dips?|ken.?burns|animations?)\b"
     r"|\b(?<!no )(?:color.?grade|grade|zoom|punch.?in|"
-    r"fades?(?:[- ]?(?:in|out)| to black)?|filter) "
-    r"(?:is|was|has been) (?:now )?"
+    r"fades?(?:[- ]?(?:in|out)| to black)?|filter|transitions?|"
+    r"ken.?burns|animations?) "
+    r"(?:is|was|has been|are|were) (?:now )?"
     r"(?:added|applied|set|enabled)\b"
+    r"|\bcaptions? (?:now )?(?:fade|pop|slide) in\b"
     # audio claims — "The music now plays only from 0.0 to 15.0 seconds…"
     # Stative/perfect constructions only, so honest offers ("I can make the
     # music quieter") don't trip the guard, and not negated ("No music was
@@ -361,6 +363,24 @@ def _negated_claim(draft, m):
     return bool(NEGATORS.search(draft[sent_start:m.start()]))
 
 
+# The caption-animation alternation is the only EDIT_CLAIM branch that can
+# match inside an offer sentence ("I can make the captions fade in") because
+# it matches bare present tense; every other branch needs a perfect/stative
+# construction that offers don't use. So the modal guard applies only to it.
+CAPTION_ANIM_CLAIM = re.compile(r"(?i)^captions? (?:now )?(?:fade|pop|slide) in\b")
+OFFER_WORDS = re.compile(r"(?i)\b(?:can|could|would|shall|should|"
+                         r"able to|happy to|want)\b")
+
+
+def _offered_claim(draft, m):
+    """True when a caption-animation match is an offer, not a claim."""
+    if not CAPTION_ANIM_CLAIM.match(m.group(0)):
+        return False
+    sent_start = max(draft.rfind(".", 0, m.start()),
+                     draft.rfind("\n", 0, m.start())) + 1
+    return bool(OFFER_WORDS.search(draft[sent_start:m.start()]))
+
+
 def _reply_violations(draft, wrote, previewed):
     """Each violation names the exact fabricated claim it matched, so the
     regeneration correction (and the logs) point at the offending words."""
@@ -368,7 +388,8 @@ def _reply_violations(draft, wrote, previewed):
     # An explicit denial ("nothing was changed") dominates — its own words
     # ("changes were made") must not read as a change claim.
     m = next((mm for mm in EDIT_CLAIM.finditer(draft)
-              if not _negated_claim(draft, mm)), None)
+              if not _negated_claim(draft, mm)
+              and not _offered_claim(draft, mm)), None)
     if not wrote and m and not DENY_CLAIM.search(draft):
         v.append(f'claims edits ("{m.group(0).strip()}"), but no write tool '
                  "succeeded this turn")
@@ -414,19 +435,21 @@ ALTERNATIVE_HINTS = [
     # effects first: zoom/filter/fade phrasings often also contain 'animated'
     # or 'tiktok', and the most specific hint must win the first-match scan
     (re.compile(r"(?i)effect|filter|grade|zoom|punch|fade|transition|"
-                r"viral|engag"),
+                r"viral|engag|animat|ken.?burns|motion"),
      "What I CAN do: color-grade the whole video (vibrant, warm, cool, "
-     "black-and-white, vintage, cinematic), punch-in zooms for emphasis, "
-     "fade in/out, and karaoke captions."),
+     "black-and-white, vintage, cinematic), punch-in or smooth Ken Burns "
+     "zooms, dip-to-black/white transitions at every cut, fade in/out, "
+     "karaoke captions, animated caption entrances (fade/pop/slide), and "
+     "Ken Burns motion on inserted images."),
     (re.compile(r"(?i)9.?:.?16|16.?:.?9|1.?:.?1|4.?:.?5|aspect|ratio|"
                 r"vertical|portrait|square|crop|tiktok|reels?|shorts?"),
      "What I CAN do: change the output frame to 16:9, 9:16, 1:1 or 4:5 with "
      "a center-crop or a padded fit."),
-    (re.compile(r"(?i)caption|subtitle|font|animat|outline|middle|"
+    (re.compile(r"(?i)caption|subtitle|font|outline|middle|"
                 r"cent(?:er|re)"),
      "What I CAN do with captions: color, size (s/m/l/xl), position "
-     "(top / middle / bottom), and karaoke mode where the spoken word pops "
-     "and lights up."),
+     "(top / middle / bottom), karaoke mode where the spoken word pops "
+     "and lights up, and entrance animations (fade / pop / slide up)."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
      "What I CAN do: mix uploaded music under the edit on any time range, "
      "make existing music or narration louder/quieter, remove it, or lay an "

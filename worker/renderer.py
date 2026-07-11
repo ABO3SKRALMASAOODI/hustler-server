@@ -191,8 +191,26 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             if item["kind"] != "image" else 0.0
         parts.append(f"[{idx}:v]trim=start={off:.3f}:end={off + dur:.3f},"
                      f"setpts=PTS-STARTPTS[insv{j}]")
-        _normalize_video(parts, f"insv{j}", f"v_ins{j}", W, H, fps,
+        # Ken Burns motion on image inserts: a per-block zoompan that
+        # drifts across the still instead of freezing it.
+        motion = item.get("motion") if item["kind"] == "image" else None
+        norm_out = f"v_insn{j}" if motion else f"v_ins{j}"
+        _normalize_video(parts, f"insv{j}", norm_out, W, H, fps,
                          mode, f"i{j}")
+        if motion:
+            nframes = max(1, int(round(dur * fps)))
+            prog = f"(on/{nframes})"
+            cx, cy = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+            if motion == "zoom_in":
+                z, x, y = f"1+0.25*{prog}", cx, cy
+            elif motion == "zoom_out":
+                z, x, y = f"1.25-0.25*{prog}", cx, cy
+            elif motion == "pan_left":
+                z, x, y = "1.15", f"(iw-iw/zoom)*(1-{prog})", cy
+            else:                       # pan_right
+                z, x, y = "1.15", f"(iw-iw/zoom)*{prog}", cy
+            parts.append(f"[{norm_out}]zoompan=z='{z}':x='{x}':y='{y}'"
+                         f":d=1:s={W}x{H}:fps={fps:.3f}[v_ins{j}]")
         if ins_audio:
             parts.append(f"[{idx}:a]atrim=start={off:.3f}:end={off + dur:.3f},"
                          f"asetpts=PTS-STARTPTS,{AUDIO_NORM},"
@@ -208,15 +226,43 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     at_list = [tl.ins[j][0] for j in range(len(insert_inputs))]
     for i, (s, e) in enumerate(keep):
         while ins_j < len(insert_inputs) and at_list[ins_j] <= pre + 1e-6:
-            blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}"))
+            blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}",
+                           float(insert_inputs[ins_j][1]["duration_s"])))
             ins_j += 1
-        blocks.append((f"v_seg{i}", f"a_seg{i}"))
+        blocks.append((f"v_seg{i}", f"a_seg{i}", e - s))
         pre += e - s
     while ins_j < len(insert_inputs):
-        blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}"))
+        blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}",
+                       float(insert_inputs[ins_j][1]["duration_s"])))
         ins_j += 1
 
-    pairs = "".join(f"[{v}][{a}]" for v, a in blocks)
+    # Transitions: a dip through black/white at every junction. Duration-
+    # preserving by construction — each block fades out/in within its own
+    # footage (video only; audio concat is untouched), so no timeline math
+    # anywhere changes.
+    transition = fx.get("transition") or None
+    if transition and len(blocks) > 1:
+        tdur = float(transition.get("duration_s") or 0.3)
+        tcolor = "white" if transition.get("style") == "dip_white" \
+            else "black"
+        faded = []
+        for k, (vlab, alab, bd) in enumerate(blocks):
+            td = min(tdur, max(0.0, bd / 2 - 0.05))
+            chain = []
+            if td >= 0.05:
+                if k > 0:
+                    chain.append(f"fade=t=in:st=0:d={td:.2f}:c={tcolor}")
+                if k < len(blocks) - 1:
+                    chain.append(f"fade=t=out:st={max(0.0, bd - td):.2f}:"
+                                 f"d={td:.2f}:c={tcolor}")
+            if chain:
+                parts.append(f"[{vlab}]{','.join(chain)}[vtr{k}]")
+                faded.append((f"vtr{k}", alab, bd))
+            else:
+                faded.append((vlab, alab, bd))
+        blocks = faded
+
+    pairs = "".join(f"[{v}][{a}]" for v, a, _d in blocks)
     parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
 
     vlabel = "vc"
@@ -231,9 +277,28 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     for z in zooms:
         a = max(0.0, float(z["start"]))
         b = min(tl.out_duration, float(z["end"]))
-        if b - a >= 0.05:
-            zoom_terms.append(f"{float(z.get('strength', 0.25)):.2f}"
-                              f"*between(on/{fps:.3f},{a:.3f},{b:.3f})")
+        if b - a < 0.05:
+            continue
+        st = float(z.get("strength", 0.25))
+        t = f"on/{fps:.3f}"
+        zmode = z.get("mode") or "punch"
+        if zmode == "ease":
+            # smooth ramp in and out inside the window (0 outside it)
+            r = max(0.15, min(0.4, (b - a) / 4.0))
+            zoom_terms.append(
+                f"{st:.2f}*clip(({t}-{a:.3f})/{r:.3f},0,1)"
+                f"*clip(({b:.3f}-{t})/{r:.3f},0,1)")
+        elif zmode == "push_in":
+            # Ken Burns drift: zoom grows 0 -> strength across the window
+            zoom_terms.append(
+                f"{st:.2f}*(({t}-{a:.3f})/{b - a:.3f})"
+                f"*between({t},{a:.3f},{b:.3f})")
+        elif zmode == "pull_out":
+            zoom_terms.append(
+                f"{st:.2f}*(1-(({t}-{a:.3f})/{b - a:.3f}))"
+                f"*between({t},{a:.3f},{b:.3f})")
+        else:                           # punch: instant step in/out
+            zoom_terms.append(f"{st:.2f}*between({t},{a:.3f},{b:.3f})")
     if zoom_terms:
         zexpr = "1+" + "+".join(zoom_terms)
         parts.append(f"[{vlabel}]zoompan=z='{zexpr}'"

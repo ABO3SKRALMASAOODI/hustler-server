@@ -38,6 +38,28 @@ def _cost_expr():
             "/ 1000000.0")
 
 
+# A user message is "unserved" when no agent_turn job ever picked it up —
+# the strongest signal that a user asked for something and got silence.
+# payload->>'message_id' is text, so the message id is cast to match.
+UNSERVED_EXISTS = """NOT EXISTS (SELECT 1 FROM video_jobs vj
+                      WHERE vj.type = 'agent_turn'
+                        AND vj.payload->>'message_id' = cm.id::text)"""
+
+
+def _presign(key):
+    if not storage.is_configured():
+        return None
+    try:
+        return storage.presign_get(key)
+    except Exception:
+        return None
+
+
+def _msg_brief(m):
+    return {"id": m["id"], "content": m["content"], "meta": m["meta"],
+            "created_at": m["created_at"].isoformat()}
+
+
 @admin_video_bp.route("/admin/video/overview", methods=["GET"])
 @admin_required
 def video_overview():
@@ -155,6 +177,55 @@ def video_overview():
         """)
         no_change = cur.fetchone()["n"]
 
+        cur.execute(f"""
+            SELECT COUNT(*) AS n
+            FROM chat_messages cm
+            JOIN projects p ON p.chat_session_id = cm.session_id
+            WHERE cm.role = 'user'
+              AND cm.created_at > NOW() - INTERVAL '14 days'
+              AND {UNSERVED_EXISTS}
+        """)
+        unserved_messages = cur.fetchone()["n"]
+
+        # attention feed: everything that likely needs a human to look at it
+        cur.execute(f"""
+            SELECT * FROM (
+                SELECT 'unserved_message' AS type, p.id AS project_id,
+                       p.title AS project_title, u.email,
+                       LEFT(cm.content, 140) AS detail,
+                       cm.created_at AS happened_at
+                FROM chat_messages cm
+                JOIN projects p ON p.chat_session_id = cm.session_id
+                JOIN users u ON u.id = p.user_id
+                WHERE cm.role = 'user'
+                  AND cm.created_at > NOW() - INTERVAL '14 days'
+                  AND {UNSERVED_EXISTS}
+                UNION ALL
+                SELECT 'failed_job', p.id, p.title, u.email,
+                       vj.type || ': ' || LEFT(COALESCE(vj.error, ''), 140),
+                       vj.updated_at
+                FROM video_jobs vj
+                JOIN projects p ON p.id = vj.project_id
+                JOIN users u ON u.id = vj.user_id
+                WHERE vj.state = 'failed'
+                  AND vj.updated_at > NOW() - INTERVAL '7 days'
+                UNION ALL
+                SELECT 'stuck_job', p.id, p.title, u.email,
+                       vj.type || ' stuck (' || vj.state || ')',
+                       COALESCE(vj.heartbeat_at, vj.created_at)
+                FROM video_jobs vj
+                JOIN projects p ON p.id = vj.project_id
+                JOIN users u ON u.id = vj.user_id
+                WHERE vj.state IN ('queued', 'running')
+                  AND ((vj.heartbeat_at IS NULL
+                        AND vj.created_at < NOW() - INTERVAL '10 minutes')
+                       OR vj.heartbeat_at < NOW() - INTERVAL '10 minutes')
+            ) t
+            ORDER BY happened_at DESC NULLS LAST
+            LIMIT 40
+        """)
+        attention = cur.fetchall()
+
         # headline totals + liveness — "is everything working" at a glance
         cur.execute("""
             SELECT
@@ -205,12 +276,20 @@ def video_overview():
             "corrective_notes": ops["corrective_notes"],
             "fallback_replies": ops["fallback_replies"],
             "no_change_count": no_change,
+            "unserved_messages": unserved_messages,
             "job_failure_rate": round(
                 ops["failed"] / ops["finished"], 4) if ops["finished"] else 0,
             "median_queue_wait_s": round(ops["median_queue_wait_s"], 2)
                 if ops["median_queue_wait_s"] is not None else None,
             "stage_medians": stage_medians,
         },
+        "attention": [
+            {"type": a["type"], "project_id": a["project_id"],
+             "project_title": a["project_title"], "email": a["email"],
+             "detail": a["detail"],
+             "at": a["happened_at"].isoformat()
+                 if a["happened_at"] else None}
+            for a in attention],
     })
 
 
@@ -281,6 +360,26 @@ def video_project_detail(project_id):
                        WHERE project_id = %s""", (project_id,))
         llm_count = cur.fetchone()["n"]
 
+        cur.execute("""SELECT id, state, error, payload, result,
+                              created_at, updated_at
+                       FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                       ORDER BY id ASC""", (project_id,))
+        turn_jobs = cur.fetchall()
+
+        cur.execute("""SELECT id, job_id, purpose, model, prompt_tokens,
+                              completion_tokens, created_at
+                       FROM llm_calls
+                       WHERE project_id = %s AND job_id IS NOT NULL
+                       ORDER BY id ASC""", (project_id,))
+        llm_summaries = cur.fetchall()
+
+        cur.execute(f"""SELECT cm.id FROM chat_messages cm
+                        WHERE cm.session_id = %s AND cm.role = 'user'
+                          AND {UNSERVED_EXISTS}
+                        ORDER BY cm.id ASC""", (p["chat_session_id"],))
+        unserved_ids = [r["id"] for r in cur.fetchall()]
+
         # Thumbnails + contact sheets have no asset rows — their keys live
         # in the index JSON and in render results. Surface them here so the
         # admin grid can show everything.
@@ -290,14 +389,6 @@ def video_project_detail(project_id):
                            WHERE project_id = %s AND kind='original'
                            ORDER BY id DESC LIMIT 1)""", (project_id,))
         idx_row = cur.fetchone()
-
-    def _presign(key):
-        if not storage.is_configured():
-            return None
-        try:
-            return storage.presign_get(key)
-        except Exception:
-            return None
 
     out_assets = []
     for a in assets:
@@ -333,6 +424,63 @@ def video_project_detail(project_id):
                                "meta": {"render_asset": a["id"]},
                                "url": _presign(rkey)})
 
+    # Group the session into agent turns: a turn owns the window from its
+    # triggering user message up to (not including) the next user message.
+    # Rows before the first turn (canned replies, index_ready) stay only in
+    # the flat "messages" array above.
+    llm_by_job = {}
+    for r in llm_summaries:
+        llm_by_job.setdefault(r["job_id"], []).append(
+            {"id": r["id"], "purpose": r["purpose"], "model": r["model"],
+             "prompt_tokens": r["prompt_tokens"],
+             "completion_tokens": r["completion_tokens"],
+             "created_at": r["created_at"].isoformat()})
+
+    msg_by_id = {m["id"]: m for m in messages}
+    user_msg_ids = sorted(m["id"] for m in messages if m["role"] == "user")
+
+    turns = []
+    for t in turn_jobs:
+        payload = t.get("payload") if isinstance(t.get("payload"), dict) \
+            else {}
+        res = t.get("result") if isinstance(t.get("result"), dict) else {}
+        try:
+            mid = int(payload.get("message_id"))
+        except (TypeError, ValueError):
+            mid = None
+        um = msg_by_id.get(mid)
+        activity, assistant_msgs = [], []
+        if um:
+            nxt = next((i for i in user_msg_ids if i > um["id"]), None)
+            for m in messages:  # ordered by id ASC
+                if m["id"] <= um["id"]:
+                    continue
+                if nxt is not None and m["id"] >= nxt:
+                    break
+                if m["role"] == "activity":
+                    activity.append(_msg_brief(m))
+                elif m["role"] == "assistant":
+                    assistant_msgs.append(_msg_brief(m))
+        try:
+            edl_version = int(res["edl_version"]) \
+                if res.get("edl_version") is not None else None
+        except (TypeError, ValueError):
+            edl_version = None
+        turns.append({
+            "job_id": t["id"], "state": t["state"],
+            "created_at": t["created_at"].isoformat(),
+            "updated_at": t["updated_at"].isoformat(),
+            "user_message": _msg_brief(um) if um else None,
+            "activity": activity,
+            "assistant_messages": assistant_msgs,
+            "llm_calls": llm_by_job.get(t["id"], []),
+            "honesty": res.get("honesty"),
+            "timings": res.get("timings"),
+            "credits_charged": res.get("credits_charged"),
+            "edl_version": edl_version,
+            "error": t["error"],
+        })
+
     return jsonify({
         "project": {"id": p["id"], "title": p["title"], "email": p["email"],
                     "created_at": p["created_at"].isoformat()},
@@ -353,6 +501,8 @@ def video_project_detail(project_id):
              "updated_at": j["updated_at"].isoformat()} for j in jobs],
         "assets": out_assets,
         "llm_call_count": llm_count,
+        "turns": turns,
+        "unserved_message_ids": unserved_ids,
     })
 
 
@@ -382,16 +532,27 @@ def video_project_index(project_id):
 def video_project_llm_calls(project_id):
     page = max(1, request.args.get("page", type=int) or 1)
     per = 20
+    job_id = request.args.get("job_id", type=int)
+    purpose = request.args.get("purpose")
+    where = ["project_id = %s"]
+    params = [project_id]
+    if job_id is not None:
+        where.append("job_id = %s")
+        params.append(job_id)
+    if purpose:
+        where.append("purpose = %s")
+        params.append(purpose)
+    where_sql = " AND ".join(where)
     with adb() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) AS n FROM llm_calls WHERE project_id=%s",
-                    (project_id,))
+        cur.execute(f"SELECT COUNT(*) AS n FROM llm_calls WHERE {where_sql}",
+                    params)
         total = cur.fetchone()["n"]
-        cur.execute("""SELECT id, job_id, purpose, model, request, response,
-                              prompt_tokens, completion_tokens, created_at
-                       FROM llm_calls WHERE project_id = %s
-                       ORDER BY id DESC LIMIT %s OFFSET %s""",
-                    (project_id, per, (page - 1) * per))
+        cur.execute(f"""SELECT id, job_id, purpose, model, request, response,
+                               prompt_tokens, completion_tokens, created_at
+                        FROM llm_calls WHERE {where_sql}
+                        ORDER BY id DESC LIMIT %s OFFSET %s""",
+                    params + [per, (page - 1) * per])
         rows = cur.fetchall()
 
     def _vision_urls(req):
@@ -453,4 +614,175 @@ def video_costs():
                   for r in rows],
         "by_purpose": [{**r, "est_cost": round(float(r["est_cost"] or 0), 4)}
                        for r in by_purpose],
+    })
+
+
+UPLOAD_KINDS = ("original", "music", "image_ref", "video_clip")
+
+
+@admin_video_bp.route("/admin/video/users", methods=["GET"])
+@admin_required
+def video_users():
+    search = (request.args.get("search") or "").strip()
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT u.id, u.email, u.created_at, u.plan,
+                   u.credits_daily, u.credits_bonus, u.credits_monthly,
+                   u.credits_balance,
+                   pr.n AS projects,
+                   COALESCE(m.msgs, 0) AS messages,
+                   COALESCE(m.unserved, 0) AS unserved,
+                   COALESCE(j.turns, 0) AS turns,
+                   COALESCE(a.uploads, 0) AS uploads,
+                   COALESCE(a.bytes, 0) AS storage_bytes,
+                   COALESCE(l.tokens_in, 0) AS tokens_in,
+                   COALESCE(l.tokens_out, 0) AS tokens_out,
+                   COALESCE(l.est_cost, 0) AS est_cost,
+                   GREATEST(m.last, j.last, a.last) AS last_active
+            FROM users u
+            JOIN (SELECT user_id, COUNT(*) AS n FROM projects
+                  GROUP BY user_id) pr ON pr.user_id = u.id
+            LEFT JOIN (SELECT p2.user_id,
+                              COUNT(*) FILTER (WHERE cm.role='user') AS msgs,
+                              COUNT(*) FILTER (WHERE cm.role='user'
+                                  AND {UNSERVED_EXISTS}) AS unserved,
+                              MAX(cm.created_at) AS last
+                       FROM chat_messages cm
+                       JOIN projects p2 ON p2.chat_session_id = cm.session_id
+                       GROUP BY p2.user_id) m ON m.user_id = u.id
+            LEFT JOIN (SELECT user_id,
+                              COUNT(*) FILTER (WHERE type='agent_turn')
+                                  AS turns,
+                              MAX(updated_at) AS last
+                       FROM video_jobs GROUP BY user_id) j ON j.user_id = u.id
+            LEFT JOIN (SELECT p3.user_id,
+                              COUNT(*) FILTER (WHERE ast.kind IN %s)
+                                  AS uploads,
+                              SUM(ast.bytes)::bigint AS bytes,
+                              MAX(ast.created_at) AS last
+                       FROM assets ast
+                       JOIN projects p3 ON p3.id = ast.project_id
+                       GROUP BY p3.user_id) a ON a.user_id = u.id
+            LEFT JOIN (SELECT p4.user_id,
+                              SUM(lc.prompt_tokens) AS tokens_in,
+                              SUM(lc.completion_tokens) AS tokens_out,
+                              (SUM(COALESCE(lc.prompt_tokens,0)) * %s
+                               + SUM(COALESCE(lc.completion_tokens,0)) * %s)
+                              / 1000000.0 AS est_cost
+                       FROM llm_calls lc
+                       JOIN projects p4 ON p4.id = lc.project_id
+                       GROUP BY p4.user_id) l ON l.user_id = u.id
+            WHERE u.email ILIKE %s
+            ORDER BY last_active DESC NULLS LAST
+            LIMIT 200
+        """, (UPLOAD_KINDS, PRICE_IN_PER_M, PRICE_OUT_PER_M, f"%{search}%"))
+        rows = cur.fetchall()
+    return jsonify({"users": [
+        {"id": r["id"], "email": r["email"],
+         "created_at": r["created_at"].isoformat(),
+         "plan": r["plan"],
+         "credits": {"daily": float(r["credits_daily"] or 0),
+                     "bonus": float(r["credits_bonus"] or 0),
+                     "monthly": float(r["credits_monthly"] or 0),
+                     "balance": float(r["credits_balance"] or 0)},
+         "projects": r["projects"], "messages": r["messages"],
+         "turns": r["turns"], "unserved": r["unserved"],
+         "uploads": r["uploads"],
+         "storage_bytes": int(r["storage_bytes"] or 0),
+         "tokens_in": int(r["tokens_in"] or 0),
+         "tokens_out": int(r["tokens_out"] or 0),
+         "est_cost": round(float(r["est_cost"] or 0), 4),
+         "last_active": r["last_active"].isoformat()
+             if r["last_active"] else None}
+        for r in rows]})
+
+
+@admin_video_bp.route("/admin/video/users/<int:user_id>", methods=["GET"])
+@admin_required
+def video_user_detail(user_id):
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT id, email, created_at, plan, is_subscribed,
+                              credits_daily, credits_bonus, credits_monthly,
+                              credits_balance, credits_daily_reset
+                       FROM users WHERE id = %s""", (user_id,))
+        u = cur.fetchone()
+        if not u:
+            return jsonify({"error": "User not found"}), 404
+
+        cur.execute(f"""
+            SELECT p.id, p.title, p.created_at,
+                   (SELECT COUNT(*) FROM chat_messages cm
+                    WHERE cm.session_id = p.chat_session_id
+                      AND cm.role='user') AS messages,
+                   (SELECT COUNT(*) FROM video_jobs v
+                    WHERE v.project_id = p.id
+                      AND v.type='agent_turn') AS turns,
+                   (SELECT COUNT(*) FROM edls e
+                    WHERE e.project_id = p.id) AS versions,
+                   (SELECT COUNT(*) FROM chat_messages cm
+                    WHERE cm.session_id = p.chat_session_id
+                      AND cm.role='user' AND {UNSERVED_EXISTS}) AS unserved,
+                   GREATEST(
+                     (SELECT MAX(cm.created_at) FROM chat_messages cm
+                      WHERE cm.session_id = p.chat_session_id),
+                     (SELECT MAX(v.updated_at) FROM video_jobs v
+                      WHERE v.project_id = p.id),
+                     (SELECT MAX(a.created_at) FROM assets a
+                      WHERE a.project_id = p.id)) AS last_activity
+            FROM projects p WHERE p.user_id = %s
+            ORDER BY p.id DESC
+        """, (user_id,))
+        projects = cur.fetchall()
+
+        cur.execute("""SELECT a.id, a.project_id, a.kind, a.storage_key,
+                              a.bytes, a.duration_s, a.width, a.height,
+                              a.meta, a.created_at
+                       FROM assets a
+                       JOIN projects p ON p.id = a.project_id
+                       WHERE p.user_id = %s AND a.kind IN %s
+                       ORDER BY a.id DESC LIMIT 100""",
+                    (user_id, UPLOAD_KINDS))
+        uploads = cur.fetchall()
+
+        cur.execute("""SELECT job_id, credits_used, tokens_used, created_at
+                       FROM job_credits WHERE user_id = %s
+                       ORDER BY created_at DESC LIMIT 50""", (user_id,))
+        ledger = cur.fetchall()
+
+    return jsonify({
+        "user": {"id": u["id"], "email": u["email"],
+                 "created_at": u["created_at"].isoformat(),
+                 "plan": u["plan"], "is_subscribed": u["is_subscribed"],
+                 "credits": {"daily": float(u["credits_daily"] or 0),
+                             "bonus": float(u["credits_bonus"] or 0),
+                             "monthly": float(u["credits_monthly"] or 0),
+                             "balance": float(u["credits_balance"] or 0),
+                             "daily_reset": u["credits_daily_reset"]
+                                 .isoformat()
+                                 if u["credits_daily_reset"] else None}},
+        "projects": [
+            {"id": p["id"], "title": p["title"],
+             "created_at": p["created_at"].isoformat(),
+             "messages": p["messages"], "turns": p["turns"],
+             "versions": p["versions"], "unserved": p["unserved"],
+             "last_activity": p["last_activity"].isoformat()
+                 if p["last_activity"] else None}
+            for p in projects],
+        "uploads": [
+            {"id": a["id"], "project_id": a["project_id"],
+             "kind": a["kind"],
+             "filename": (a.get("meta") or {}).get("filename"),
+             "bytes": a["bytes"], "duration_s": a["duration_s"],
+             "width": a["width"], "height": a["height"],
+             "created_at": a["created_at"].isoformat(),
+             "url": _presign(a["storage_key"])}
+            for a in uploads],
+        "ledger": [
+            {"job_id": l["job_id"],
+             "credits_used": float(l["credits_used"] or 0),
+             "tokens_used": int(l["tokens_used"] or 0),
+             "created_at": l["created_at"].isoformat()}
+            for l in ledger],
     })

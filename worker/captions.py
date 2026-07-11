@@ -26,7 +26,7 @@ ALIGNMENTS = {"bottom": 2, "top": 8, "middle": 5}
 MARGIN_V = {"bottom": 46, "top": 40, "middle": 0}
 
 DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
-                 "dynamic": False, "highlight_color": None}
+                 "dynamic": False, "highlight_color": None, "animation": None}
 
 # Karaoke (dynamic) captions: groups of up to N words; the word being
 # spoken pops and lights up in the highlight color. Groups larger than
@@ -64,12 +64,39 @@ def _norm_style(style):
     s = dict(DEFAULT_STYLE)
     if style:
         d = style if isinstance(style, dict) else style.model_dump()
-        for k in ("color", "size", "position", "highlight_color"):
+        for k in ("color", "size", "position", "highlight_color",
+                  "animation"):
             if d.get(k):
                 s[k] = d[k]
         if d.get("dynamic") is not None:
             s["dynamic"] = bool(d["dynamic"])
     return s
+
+
+def _anim_prefix(anim, style, play_res):
+    """ASS override tags that animate a STATIC caption's entrance. Dynamic
+    karaoke events never get these (they animate word-by-word already)."""
+    if anim == "fade":
+        return r"{\fad(160,120)}"
+    if anim == "pop":
+        return (r"{\fscx70\fscy70\t(0,120,\fscx106\fscy106)"
+                r"\t(120,200,\fscx100\fscy100)}")
+    if anim == "slide_up":
+        # \move needs the real anchor point: derive it from the alignment
+        # + margins exactly as style_line computes them.
+        s = _norm_style(style)
+        fy = play_res[1] / BASE_PLAY_RES[1]
+        cx = int(play_res[0] / 2)
+        margin_v = round(MARGIN_V.get(s["position"], 46) * fy)
+        if s["position"] == "top":
+            y = margin_v
+        elif s["position"] == "middle":
+            y = int(play_res[1] / 2)
+        else:
+            y = int(play_res[1]) - margin_v
+        off = max(12, int(0.04 * play_res[1]))
+        return rf"{{\move({cx},{y + off},{cx},{y},0,160)\fad(120,0)}}"
+    return ""
 
 
 def style_line(name, style, play_res=BASE_PLAY_RES):
@@ -269,10 +296,11 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
         ov = ev.get("item_style")
         if not ov:
             ev["style_name"] = "Default"
+            ev["eff_style"] = styles[0][1]
             continue
         merged = dict(_norm_style(global_style))
         d = ov if isinstance(ov, dict) else ov.model_dump()
-        for k in ("color", "size", "position"):
+        for k in ("color", "size", "position", "animation"):
             if d.get(k):
                 merged[k] = d[k]
         key = tuple(sorted(merged.items()))
@@ -281,6 +309,16 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
             seen[key] = name
             styles.append((name, merged))
         ev["style_name"] = seen[key]
+        ev["eff_style"] = merged
+
+    # Entrance animation for static events. Dynamic karaoke events carry
+    # their own inline tags and are excluded (build_ass strips animation
+    # from the dynamic branch; this check is the backstop).
+    for ev in events:
+        eff = ev.get("eff_style") or styles[0][1]
+        if eff.get("animation") and not eff.get("dynamic"):
+            ev["text"] = _anim_prefix(eff["animation"], eff,
+                                      play_res) + ev["text"]
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(ASS_HEADER_TOP.format(resx=int(play_res[0]),

@@ -44,6 +44,10 @@ class CaptionStyle(BaseModel):
     # color of the actively-spoken word in dynamic mode; Optional for the
     # same signature reason. None renders the default highlight.
     highlight_color: Optional[str] = None
+    # entrance animation for STATIC captions (fade/pop/slide_up); dynamic
+    # karaoke captions animate word-by-word already, so animation is ignored
+    # there. Optional so pre-round-9 EDLs keep their signatures.
+    animation: Optional[Literal["fade", "pop", "slide_up"]] = None
 
     @field_validator("color")
     @classmethod
@@ -135,13 +139,17 @@ class InsertItem(BaseModel):
     when other inserts change. duration_s is always concrete: the tool
     resolves it (image default 3.0s, short clips their full length).
     source_start_s picks WHERE in the source clip the window starts;
-    Optional so pre-round-8 EDLs keep their signatures."""
+    Optional so pre-round-8 EDLs keep their signatures.
+    motion is a Ken Burns move for IMAGE inserts only (a still that slowly
+    zooms or pans instead of sitting frozen); Optional for signatures."""
     id: str
     asset_key: str
     kind: Literal["video", "image"]
     at_output_s: float
     duration_s: float
     source_start_s: Optional[float] = None
+    motion: Optional[Literal["zoom_in", "zoom_out",
+                             "pan_left", "pan_right"]] = None
 
 
 class VoiceoverItem(BaseModel):
@@ -162,22 +170,43 @@ FADE_MAX_S = 5.0
 
 
 class ZoomItem(BaseModel):
-    """A punch-in zoom over a FINAL-program time range (output seconds)."""
+    """A zoom over a FINAL-program time range (output seconds). mode:
+    'punch' (default, instant step in/out), 'ease' (smoothly ramps in and
+    out inside the window), 'push_in' / 'pull_out' (continuous Ken Burns
+    drift across the whole window). Optional so pre-round-9 EDLs keep
+    their signatures."""
     id: str
     start: float
     end: float
     strength: float = 0.25
+    mode: Optional[Literal["punch", "ease", "push_in", "pull_out"]] = None
+
+
+TRANSITION_STYLES = ("dip_black", "dip_white")
+TRANSITION_MIN_S = 0.1
+TRANSITION_MAX_S = 1.0
+
+
+class TransitionSpec(BaseModel):
+    """A quick dip-through-black (or white flash) at EVERY junction between
+    program blocks — cut points and insert boundaries. Duration-preserving
+    (video fades out/in around each junction; audio is untouched), so no
+    timeline math changes anywhere."""
+    style: Literal["dip_black", "dip_white"]
+    duration_s: float = 0.3
 
 
 class Effects(BaseModel):
     """Whole-program visual effects. grade is a color-grade preset applied
-    to all footage (never to burned captions); zooms are punch-in windows;
-    fades are to/from black at the very start/end (video + audio)."""
+    to all footage (never to burned captions); zooms are punch-in/eased/
+    Ken Burns windows; fades are to/from black at the very start/end
+    (video + audio); transition dips through black/white at every cut."""
     grade: Optional[Literal["vibrant", "warm", "cool", "bw", "vintage",
                             "cinematic"]] = None
     zooms: List[ZoomItem] = Field(default_factory=list)
     fade_in_s: Optional[float] = None
     fade_out_s: Optional[float] = None
+    transition: Optional[TransitionSpec] = None
 
 
 class EDL(BaseModel):
@@ -311,6 +340,10 @@ def validate_edl(data, duration):
                     f"inserts[{i}].source_start_s must be >= 0.")
             if ins.kind == "image" or ins.source_start_s == 0.0:
                 ins.source_start_s = None   # meaningless / default
+        if ins.motion is not None and ins.kind != "image":
+            raise EDLValidationError(
+                f"inserts[{i}].motion is only supported on image inserts "
+                "(a Ken Burns move on a still) — video clips already move.")
         nearest = min(bounds, key=lambda b: abs(b - ins.at_output_s))
         if abs(nearest - ins.at_output_s) > 0.02:
             raise EDLValidationError(
@@ -380,7 +413,16 @@ def validate_edl(data, duration):
                 raise EDLValidationError(
                     f"effects.zooms[{i}].strength {z.strength} outside "
                     f"[{ZOOM_STRENGTH_MIN}, {ZOOM_STRENGTH_MAX}].")
+            if z.mode == "punch":
+                z.mode = None       # the default — keep signatures canonical
         fx.zooms.sort(key=lambda z: z.start)
+        if fx.transition is not None:
+            tr = fx.transition
+            tr.duration_s = _r(tr.duration_s)
+            if not (TRANSITION_MIN_S <= tr.duration_s <= TRANSITION_MAX_S):
+                raise EDLValidationError(
+                    f"effects.transition.duration_s {tr.duration_s} outside "
+                    f"[{TRANSITION_MIN_S}, {TRANSITION_MAX_S}].")
         for name in ("fade_in_s", "fade_out_s"):
             val = getattr(fx, name)
             if val is not None:
@@ -394,7 +436,7 @@ def validate_edl(data, duration):
         # all-empty effects is the absence of effects — normalize so old
         # EDLs and cleared-effects EDLs compare identical.
         if fx.grade is None and not fx.zooms and fx.fade_in_s is None \
-                and fx.fade_out_s is None:
+                and fx.fade_out_s is None and fx.transition is None:
             edl.effects = None
 
     return edl
@@ -435,6 +477,8 @@ def _style_desc(style):
         bits.append(s["position"])
     if s.get("dynamic"):
         bits.append("dynamic")
+    if s.get("animation"):
+        bits.append(f"anim {s['animation']}")
     return f" ({', '.join(bits)})" if bits else ""
 
 
@@ -474,6 +518,9 @@ def describe_edl(edl_dict, duration=None):
                                 ("out", fx.fade_out_s)) if v]
         if fades:
             bits.append("fade " + "/".join(fades))
+        if fx.transition:
+            bits.append(f"transitions {fx.transition.style} "
+                        f"{fx.transition.duration_s}s")
         parts.append(", ".join(bits))
     return ", ".join(parts)
 

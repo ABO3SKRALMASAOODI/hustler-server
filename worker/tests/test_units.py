@@ -1234,4 +1234,274 @@ check("real music attachment still produces the context line",
       "User attached music" in
       al._attachment_context(_AttDB(mus), _AttCtx(), msg))
 
+# ─── Round 9: transitions, zoom modes, Ken Burns inserts, caption anim ──────
+
+print("== Round-9 schema: transitions / zoom modes / insert motion ==")
+tr_edl = validate_edl(
+    {"keep": [[0, 5], [10, 20]],
+     "effects": {"transition": {"style": "dip_black",
+                                "duration_s": 0.3}}}, 60).model_dump()
+check("transition survives validation",
+      tr_edl["effects"]["transition"] == {"style": "dip_black",
+                                          "duration_s": 0.3})
+check("describe mentions transitions",
+      "transitions dip_black 0.3s" in describe_edl(tr_edl, 60))
+expect_reject("transition too long",
+              {"keep": [[0, 20]],
+               "effects": {"transition": {"style": "dip_black",
+                                          "duration_s": 3.0}}}, 60)
+expect_reject("unknown transition style",
+              {"keep": [[0, 20]],
+               "effects": {"transition": {"style": "crossfade",
+                                          "duration_s": 0.3}}}, 60)
+zm_edl = validate_edl(
+    {"keep": [[0, 20]],
+     "effects": {"zooms": [{"id": "z1", "start": 1, "end": 4,
+                            "strength": 0.3, "mode": "ease"},
+                           {"id": "z2", "start": 5, "end": 8,
+                            "strength": 0.3, "mode": "punch"}]}},
+    60).model_dump()
+check("zoom mode survives validation and 'punch' normalizes to None",
+      zm_edl["effects"]["zooms"][0]["mode"] == "ease" and
+      zm_edl["effects"]["zooms"][1]["mode"] is None)
+expect_reject("unknown zoom mode",
+              {"keep": [[0, 20]],
+               "effects": {"zooms": [{"id": "z", "start": 0, "end": 2,
+                                      "strength": 0.3,
+                                      "mode": "wobble"}]}}, 60)
+km_edl = validate_edl(
+    {"keep": [[0, 10]],
+     "inserts": [{"id": "i1", "asset_key": "images/1/a.jpg",
+                  "kind": "image", "at_output_s": 0.0, "duration_s": 3.0,
+                  "motion": "zoom_in"}]}, 60).model_dump()
+check("image insert motion survives validation",
+      km_edl["inserts"][0]["motion"] == "zoom_in")
+expect_reject("motion on a video insert",
+              {"keep": [[0, 10]],
+               "inserts": [{"id": "i1", "asset_key": "clips/1/a.mp4",
+                            "kind": "video", "at_output_s": 0.0,
+                            "duration_s": 3.0, "motion": "zoom_in"}]}, 60)
+check("caption animation survives validation",
+      validate_edl({"keep": [[0, 10]],
+                    "captions": {"mode": "from_transcript",
+                                 "style": {"animation": "pop"}}}, 60)
+      .model_dump()["captions"]["style"]["animation"] == "pop")
+expect_reject("unknown caption animation",
+              {"keep": [[0, 10]],
+               "captions": {"mode": "from_transcript",
+                            "style": {"animation": "spin"}}}, 60)
+check("old EDLs keep their signatures (new fields all optional)",
+      schemas.edl_signature(validate_edl(
+          {"keep": [[0.0, 20.0]],
+           "effects": {"zooms": [{"id": "z1", "start": 1.0, "end": 4.0,
+                                  "strength": 0.3}]}}, 60).model_dump())
+      == schemas.edl_signature(validate_edl(
+          {"keep": [[0.0, 20.0]],
+           "effects": {"zooms": [{"id": "z1", "start": 1.0, "end": 4.0,
+                                  "strength": 0.3, "mode": "punch"}]}},
+          60).model_dump()))
+
+print("== Round-9 tools: set_transitions / add_zoom modes / KB inserts ==")
+tctx = ToolCtx({"keep": [[0.0, 5.0], [10.0, 20.0]]})
+r = agent_tools.set_transitions(tctx, "dip_black")
+check("set_transitions writes style + default duration",
+      tctx.written["effects"]["transition"] == {"style": "dip_black",
+                                                "duration_s": 0.3} and
+      "dip-black" in r)
+check("set_transitions counts the junctions", "1 junction" in r)
+check("set_transitions rejects crossfade asks with guidance",
+      agent_tools.set_transitions(ToolCtx({"keep": [[0.0, 5.0]]}),
+                                  "crossfade").startswith("REJECTED"))
+check("clearing transitions when none exist is a NO CHANGE",
+      agent_tools.set_transitions(
+          ToolCtx({"keep": [[0.0, 5.0]]}), "none").startswith("NO CHANGE"))
+tctx2 = ToolCtx({"keep": [[0.0, 5.0]],
+                 "effects": {"transition": {"style": "dip_white",
+                                            "duration_s": 0.5}}})
+agent_tools.set_transitions(tctx2, "none")
+check("set_transitions 'none' clears an existing transition",
+      tctx2.written["effects"]["transition"] is None)
+tctx3 = ToolCtx({"keep": [[0.0, 20.0]]})
+r = agent_tools.add_zoom(tctx3, 2, 6, strength=0.3, mode="push_in")
+check("add_zoom stores non-default modes",
+      tctx3.written["effects"]["zooms"][0]["mode"] == "push_in" and
+      "Ken Burns push-in" in r)
+tctx4 = ToolCtx({"keep": [[0.0, 20.0]]})
+agent_tools.add_zoom(tctx4, 2, 6, strength=0.3, mode="punch")
+check("add_zoom omits mode for the punch default",
+      "mode" not in tctx4.written["effects"]["zooms"][0])
+check("add_zoom rejects unknown modes listing the real ones",
+      agent_tools.add_zoom(ToolCtx({"keep": [[0.0, 20.0]]}), 2, 6,
+                           mode="wobble").startswith("REJECTED"))
+IMG = {"kind": "image_ref", "storage_key": "images/1/logo.jpg",
+       "duration_s": None, "meta": {"filename": "logo.jpg"}, "id": 7}
+ictx_kb = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, IMG, ins_words)
+r = agent_tools.insert_media(ictx_kb, "images/1/logo.jpg", 0.0,
+                             motion="zoom_in")
+check("image insert stores the Ken Burns motion",
+      ictx_kb.written["inserts"][0]["motion"] == "zoom_in" and
+      "Ken Burns zoom_in" in r)
+ictx_kb2 = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
+r = agent_tools.insert_media(ictx_kb2, "clips/1/rec.mp4", 0.0,
+                             duration_s=2.0, clip_start_s=1.0,
+                             motion="zoom_in")
+check("motion on a video clip is refused",
+      r.startswith("REJECTED") and "IMAGE" in r and
+      ictx_kb2.written is None)
+check("style parser accepts animation",
+      agent_tools._parse_partial_style({"animation": "slide_up"})
+      == {"animation": "slide_up"})
+check("style parser still rejects unknown fields, listing animation",
+      "animation" in agent_tools._parse_partial_style({"font": "Arial"}))
+
+print("== Round-9 filtergraph: transitions / zoom modes / insert motion ==")
+tr_tl = Timeline(tr_edl["keep"], [])
+g_tr = build_filtergraph(tr_edl, 60.0, True, tr_tl, None, [], index,
+                         preview=False, W=720, H=720, fps=30.0,
+                         frame_mode=None)
+check("first block fades out only (no fade-in at program start)",
+      "fade=t=out:st=4.70:d=0.30:c=black" in g_tr and
+      "fade=t=in:st=0:d=0.30:c=black[vtr0]" not in g_tr)
+check("second block fades in only (no fade-out at program end)",
+      "fade=t=in:st=0:d=0.30:c=black" in g_tr)
+check("audio is untouched by transitions (no afade at junctions)",
+      g_tr.count("afade") == 0)
+wt_edl = validate_edl(
+    {"keep": [[0, 5], [10, 20]],
+     "effects": {"transition": {"style": "dip_white",
+                                "duration_s": 0.4}}}, 60).model_dump()
+g_wt = build_filtergraph(wt_edl, 60.0, True,
+                         Timeline(wt_edl["keep"], []), None, [], index,
+                         preview=False, W=720, H=720, fps=30.0,
+                         frame_mode=None)
+check("dip_white uses white fades", "c=white" in g_wt)
+zm_tl = Timeline(zm_edl["keep"], [])
+g_zm = build_filtergraph(zm_edl, 60.0, True, zm_tl, None, [], index,
+                         preview=False, W=720, H=720, fps=30.0,
+                         frame_mode=None)
+check("eased zoom uses clip ramps",
+      "clip((on/30.000-1.000)/" in g_zm and
+      "clip((4.000-on/30.000)/" in g_zm)
+check("punch zoom keeps the between step",
+      "0.30*between(on/30.000,5.000,8.000)" in g_zm)
+pi_edl = validate_edl(
+    {"keep": [[0, 20]],
+     "effects": {"zooms": [{"id": "z1", "start": 2, "end": 10,
+                            "strength": 0.4, "mode": "push_in"}]}},
+    60).model_dump()
+g_pi = build_filtergraph(pi_edl, 60.0, True, Timeline(pi_edl["keep"], []),
+                         None, [], index, preview=False, W=720, H=720,
+                         fps=30.0, frame_mode=None)
+check("push_in zoom ramps across the window",
+      "0.40*((on/30.000-2.000)/8.000)*between(on/30.000,2.000,10.000)"
+      in g_pi)
+g_kb = build_filtergraph(km_edl, 60.0, True,
+                         Timeline(km_edl["keep"], km_edl["inserts"]),
+                         None, [], index, preview=False, W=720, H=720,
+                         fps=30.0, frame_mode=None,
+                         insert_inputs=[(2, km_edl["inserts"][0], False)],
+                         silence_idx=1)
+check("image insert motion adds a per-block zoompan",
+      "[v_insn0]zoompan=z='1+0.25*(on/90)'" in g_kb)
+check("motion zoompan feeds the concat block",
+      "[v_ins0]" in g_kb)
+
+print("== Round-9 captions: entrance animations ==")
+anim_events = [{"start": 0.0, "end": 2.0, "text": "HELLO"}]
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.write_ass([dict(e) for e in anim_events],
+                         os.path.join(td, "a.ass"),
+                         {"animation": "fade"}, play_res=(720, 1280))
+    body = open(p).read()
+    check("fade animation emits \\fad", r"\fad(160,120)" in body)
+    p = caplib.write_ass([dict(e) for e in anim_events],
+                         os.path.join(td, "b.ass"),
+                         {"animation": "pop"}, play_res=(720, 1280))
+    body = open(p).read()
+    check("pop animation emits scale transforms",
+          r"\fscx70\fscy70" in body and r"\t(0,120," in body)
+    p = caplib.write_ass([dict(e) for e in anim_events],
+                         os.path.join(td, "c.ass"),
+                         {"animation": "slide_up", "position": "bottom"},
+                         play_res=(720, 1280))
+    body = open(p).read()
+    check("slide_up animation emits \\move at the bottom anchor",
+          r"\move(360," in body)
+    p = caplib.write_ass([dict(e) for e in anim_events],
+                         os.path.join(td, "d.ass"),
+                         {"animation": "fade", "dynamic": True},
+                         play_res=(720, 1280))
+    body = open(p).read()
+    check("dynamic style suppresses entrance animation",
+          r"\fad(" not in body)
+    ov_events = [{"start": 0.0, "end": 2.0, "text": "TITLE",
+                  "item_style": {"animation": "pop"}}]
+    p = caplib.write_ass(ov_events, os.path.join(td, "e.ass"),
+                         None, play_res=(720, 1280))
+    body = open(p).read()
+    check("per-item animation override reaches the event",
+          r"\fscx70" in body)
+
+print("== Round-9 tool notes: animation vs karaoke disclosure ==")
+tctx5 = ToolCtx({"keep": [[0.0, 20.0]]})
+r = agent_tools.add_captions(
+    tctx5, mode="from_transcript",
+    style={"dynamic": True, "animation": "pop"})
+check("add_captions discloses animation is ignored in karaoke mode",
+      "ignored" in r)
+tctx6 = ToolCtx({"keep": [[0.0, 20.0]],
+                 "captions": {"mode": "from_transcript",
+                              "style": {"dynamic": True}}})
+r = agent_tools.set_caption_style(tctx6, {"animation": "fade"})
+check("set_caption_style discloses the karaoke-ignores-animation rule",
+      "ignored" in r)
+
+print("== Round-9 honesty: new effect claims are caught ==")
+for s in ("Added smooth transitions between all the cuts.",
+          "The captions now fade in at the bottom.",
+          "A Ken Burns zoom was applied to the intro.",
+          "Transitions are now added at every cut.",
+          "Animations were applied to your captions."):
+    m = next((mm for mm in al.EDIT_CLAIM.finditer(s)
+              if not al._negated_claim(s, mm)), None)
+    check(f"EDIT_CLAIM catches: {s[:44]!r}", m is not None)
+for s in ("No transitions were added this turn.",
+          "I haven't added any animations yet.",
+          "I can add dip-to-black transitions at every cut if you like."):
+    m = next((mm for mm in al.EDIT_CLAIM.finditer(s)
+              if not al._negated_claim(s, mm)), None)
+    check(f"honest phrasing passes: {s[:44]!r}", m is None)
+check("effects hint mentions transitions and Ken Burns",
+      "transitions" in al._nearest_alternative("add transitions please") and
+      "Ken Burns" in al._nearest_alternative("animate the photo"))
+check("capabilities digest lists set_transitions",
+      "set_transitions(" in agent_tools.capabilities_digest())
+
+print("== Round-9 triage: offers are not claims; hints include animation ==")
+for s in ("I can make the captions fade in if you'd like.",
+          "Want the captions to pop in? I could add that.",
+          "I could have the captions slide in from the bottom."):
+    m = next((mm for mm in al.EDIT_CLAIM.finditer(s)
+              if not al._negated_claim(s, mm)
+              and not al._offered_claim(s, mm)), None)
+    check(f"caption-anim offer passes: {s[:44]!r}", m is None)
+for s in ("The captions now fade in at the bottom.",
+          "Captions pop in on every cut.",
+          "The captions slide in from below now."):
+    m = next((mm for mm in al.EDIT_CLAIM.finditer(s)
+              if not al._negated_claim(s, mm)
+              and not al._offered_claim(s, mm)), None)
+    check(f"caption-anim fabrication caught: {s[:40]!r}", m is not None)
+check("violations: honest alternative offer survives",
+      al._reply_violations("I can't add stickers, but I can make the "
+                           "captions fade in — want that?",
+                           wrote=False, previewed=False) == [])
+v = al._reply_violations("Done — the captions now fade in.",
+                         wrote=False, previewed=False)
+check("violations: caption-anim fabrication still flagged", len(v) == 1)
+check("partial-style empty hint mentions animation",
+      "animation" in agent_tools._parse_partial_style({}))
+check("partial-style pydantic hint mentions animation",
+      "animation" in agent_tools._parse_partial_style({"animation": "bounce"}))
+
 print(f"\nALL {PASS} CHECKS PASSED")

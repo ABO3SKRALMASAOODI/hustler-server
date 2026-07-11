@@ -31,7 +31,8 @@ def update_user_subscription_status(user_id, is_subscribed, expiry_date=None, su
             UPDATE users
             SET is_subscribed = 1, subscription_expiry = %s, subscription_id = %s, plan = %s,
                 credits_monthly_limit = %s, credits_monthly = %s,
-                credits_daily = 20, credits_balance = 20 + %s
+                credits_daily = 20,
+                credits_balance = 20 + COALESCE(credits_bonus, 0) + %s
             WHERE id = %s
         ''', (expiry_date, subscription_id, plan, monthly_credits, monthly_credits, monthly_credits, user_id))
     else:

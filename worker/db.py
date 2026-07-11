@@ -386,6 +386,39 @@ def recent_chat(conn, session_id, limit=24):
         return list(reversed(cur.fetchall()))
 
 
+def pending_user_message(conn, project_id, session_id):
+    """Latest user message that never got an agent turn. A message sent
+    while indexing was still running lands here — the index job replays it
+    automatically instead of asking the user to resend."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT m.id, m.content, m.meta FROM chat_messages m
+            WHERE m.session_id = %s AND m.role = 'user'
+              AND NOT EXISTS (
+                  SELECT 1 FROM video_jobs j
+                  WHERE j.project_id = %s AND j.type = 'agent_turn'
+                    AND j.payload->>'message_id' = m.id::text)
+            ORDER BY m.id DESC LIMIT 1""", (session_id, project_id))
+        return cur.fetchone()
+
+
+def has_active_agent_turn(conn, project_id):
+    with conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND state IN ('queued','running') LIMIT 1""",
+                    (project_id,))
+        return cur.fetchone() is not None
+
+
+def user_credits_balance(conn, user_id):
+    with conn.cursor() as cur:
+        cur.execute("SELECT credits_balance FROM users WHERE id = %s",
+                    (user_id,))
+        row = cur.fetchone()
+        return float(row["credits_balance"] or 0) if row else 0.0
+
+
 # ── Credits ──────────────────────────────────────────────────────────────────
 # 1 credit = $0.01 of model cost (same convention as backend/credits.py).
 # Charged from actual llm_calls usage after each agent turn, spending
@@ -435,4 +468,16 @@ def charge_turn_credits(conn, user_id, job_id):
                        WHERE id = %s""",
                     (spend_daily, spend_bonus, spend_monthly,
                      spend_daily, spend_bonus, spend_monthly, user_id))
+        # Ledger row so admin usage stats cover the video lane too. The
+        # savepoint keeps a ledger hiccup from rolling back the charge.
+        cur.execute("SAVEPOINT ledger")
+        try:
+            cur.execute("""INSERT INTO job_credits (job_id, user_id, turn,
+                                                    tokens_used, credits_used)
+                           VALUES (%s, %s, 1, %s, %s)""",
+                        (f"video:{job_id}"[:16], user_id,
+                         int(row["tin"]) + int(row["tout"]), credits))
+        except Exception as e:
+            cur.execute("ROLLBACK TO SAVEPOINT ledger")
+            print(f"[credits] ledger insert failed: {e}", flush=True)
         return credits

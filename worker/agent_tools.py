@@ -18,7 +18,8 @@ from captions import KARAOKE_HARD_MAX
 from schemas import (CaptionStyle, EDLValidationError, Frame, describe_edl,
                      edl_signature, keep_boundaries, output_duration,
                      program_duration, validate_edl, MAX_INSERT_DURATION_S,
-                     GAIN_MIN_DB, GAIN_MAX_DB, GRADE_PRESETS)
+                     GAIN_MIN_DB, GAIN_MAX_DB, GRADE_PRESETS,
+                     TRANSITION_STYLES, TRANSITION_MIN_S, TRANSITION_MAX_S)
 from timeline import Timeline
 
 
@@ -626,6 +627,12 @@ def add_captions(ctx, mode=None, items=None, style=None,
                             f"most {KARAOKE_HARD_MAX} words per line — "
                             f"using {KARAOKE_HARD_MAX} instead of {mw}.")
             mw = KARAOKE_HARD_MAX
+        if (parsed_style or {}).get("dynamic") \
+                and (parsed_style or {}).get("animation"):
+            karaoke_note += ("\nNote: dynamic karaoke captions animate "
+                             "word-by-word already — the 'animation' "
+                             "entrance style only applies to static "
+                             "captions and is ignored here.")
         edl["captions"] = {"mode": "from_transcript",
                            "max_words_per_caption": mw,
                            "style": parsed_style}
@@ -650,21 +657,25 @@ def _parse_partial_style(style):
         return ('ERR: style must be a non-empty object with any of '
                 '{"color":"#RRGGBB","size":"s|m|l|xl",'
                 '"position":"bottom|top|middle","dynamic":true|false,'
-                '"highlight_color":"#RRGGBB"}')
+                '"highlight_color":"#RRGGBB",'
+                '"animation":"fade|pop|slide_up"}')
     unknown = sorted(set(style) - {"color", "size", "position", "dynamic",
-                                   "highlight_color"})
+                                   "highlight_color", "animation"})
     if unknown:
         return (f"ERR: unknown style field(s) {unknown} — only color, size, "
-                "position, dynamic and highlight_color exist (no fonts or "
-                "outlines; dynamic gives karaoke word-by-word captions, "
-                "highlight_color is the color of the spoken word).")
+                "position, dynamic, highlight_color and animation exist (no "
+                "fonts or outlines; dynamic gives karaoke word-by-word "
+                "captions, highlight_color is the color of the spoken word, "
+                "animation fade|pop|slide_up animates each static caption's "
+                "entrance).")
     try:
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
                 '{"color":"#RRGGBB","size":"s|m|l|xl",'
                 '"position":"bottom|top|middle","dynamic":true|false,'
-                '"highlight_color":"#RRGGBB"}.')
+                '"highlight_color":"#RRGGBB",'
+                '"animation":"fade|pop|slide_up"}.')
     return {k: validated[k] for k in style}
 
 
@@ -714,6 +725,14 @@ def set_caption_style(ctx, style):
                         f"{merged['max_words_per_caption']} to "
                         f"{KARAOKE_HARD_MAX}.")
         merged["max_words_per_caption"] = KARAOKE_HARD_MAX
+    if partial.get("animation"):
+        eff_style = (merged.get("style") or {}) if isinstance(merged, dict) \
+            else {}
+        if eff_style.get("dynamic"):
+            karaoke_note += ("\nNote: dynamic karaoke captions animate "
+                             "word-by-word already — the 'animation' "
+                             "entrance style only applies to static "
+                             "captions and is ignored while dynamic is on.")
     edl["captions"] = merged
     result = ctx.write_edl(
         edl, f"caption style updated: {json.dumps(partial)}")
@@ -867,7 +886,13 @@ def set_color_grade(ctx, preset):
     return ctx.write_edl(edl, f"color grade set to {p or 'none'}")
 
 
-def add_zoom(ctx, start, end, strength=0.25):
+ZOOM_MODES = ("punch", "ease", "push_in", "pull_out")
+ZOOM_MODE_DESC = {"punch": "punch-in", "ease": "eased",
+                  "push_in": "Ken Burns push-in",
+                  "pull_out": "Ken Burns pull-out"}
+
+
+def add_zoom(ctx, start, end, strength=0.25, mode=None):
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     try:
@@ -881,15 +906,23 @@ def add_zoom(ctx, start, end, strength=0.25):
                 "punch-in).")
     if e - s < 0.2:
         return "REJECTED: a zoom needs at least 0.2s."
+    zmode = (mode or "punch").strip().lower()
+    if zmode not in ZOOM_MODES:
+        return (f"REJECTED: mode must be one of {', '.join(ZOOM_MODES)}. "
+                "punch = instant step in/out; ease = smooth ramp in and "
+                "out; push_in / pull_out = continuous Ken Burns drift "
+                "across the window.")
     fx = dict(edl.get("effects") or {})
     zooms = [dict(z) for z in (fx.get("zooms") or [])]
     item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
             "strength": st}
+    if zmode != "punch":
+        item["mode"] = zmode
     zooms.append(item)
     fx["zooms"] = zooms
     edl["effects"] = fx
     return ctx.write_edl(
-        edl, f"punch-in zoom {int(st * 100)}% on {s}-{e}s "
+        edl, f"{ZOOM_MODE_DESC[zmode]} zoom {int(st * 100)}% on {s}-{e}s "
              f"(output time) [{item['id']}]")
 
 
@@ -932,6 +965,38 @@ def set_fades(ctx, fade_in_s=None, fade_out_s=None):
         return "REJECTED: fade_in_s/fade_out_s must be numbers of seconds."
     edl["effects"] = fx
     return ctx.write_edl(edl, "fade to/from black: " + ", ".join(bits))
+
+
+def set_transitions(ctx, style, duration_s=0.3):
+    p = (style or "").strip().lower()
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    if p in ("none", "off"):
+        if not fx.get("transition"):
+            return ("NO CHANGE: there are no transitions to remove. Do NOT "
+                    "tell the user you changed anything.")
+        fx["transition"] = None
+        edl["effects"] = fx
+        return ctx.write_edl(edl, "transitions removed (hard cuts again)")
+    if p not in TRANSITION_STYLES:
+        return (f"REJECTED: style must be one of "
+                f"{', '.join(TRANSITION_STYLES)} — or 'none' to clear. "
+                "dip_black = quick dip through black at every cut; "
+                "dip_white = a white flash. True crossfades (overlapping "
+                "footage) are not supported — say so if asked.")
+    try:
+        d = round(min(max(float(duration_s if duration_s is not None
+                                else 0.3), TRANSITION_MIN_S),
+                      TRANSITION_MAX_S), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: duration_s must be a number of seconds (0.1-1.0)."
+    fx["transition"] = {"style": p, "duration_s": d}
+    edl["effects"] = fx
+    n_cuts = max(0, len(edl.get("keep") or []) - 1) \
+        + len(edl.get("inserts") or [])
+    return ctx.write_edl(
+        edl, f"transitions: {d}s {p.replace('_', '-')} at every cut "
+             f"(~{n_cuts} junction{'s' if n_cuts != 1 else ''})")
 
 
 def _next_item_id(items, prefix):
@@ -985,8 +1050,11 @@ def _asset_media_duration(ctx, asset):
 INSERT_NEEDS_WINDOW_S = 15.0    # clips longer than this need an explicit window
 
 
+INSERT_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
+
+
 def insert_media(ctx, asset_key, at_output_s, duration_s=None,
-                 clip_start_s=None):
+                 clip_start_s=None, motion=None):
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
@@ -999,6 +1067,16 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     except (TypeError, ValueError):
         return ("REJECTED: at_output_s must be a number — a position in the "
                 "FINAL edited video, in seconds.")
+    if motion is not None:
+        motion = str(motion).strip().lower() or None
+    if motion:
+        if kind != "image":
+            return ("REJECTED: motion is only for IMAGE inserts (a Ken "
+                    "Burns move on a still) — video clips already move. "
+                    "Drop the motion argument for clips.")
+        if motion not in INSERT_MOTIONS:
+            return (f"REJECTED: motion must be one of "
+                    f"{', '.join(INSERT_MOTIONS)}.")
     off = 0.0
     if kind == "image":
         try:
@@ -1077,11 +1155,14 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
             "kind": kind, "at_output_s": target_pre, "duration_s": dur}
     if kind == "video" and off:
         item["source_start_s"] = off
+    if motion:
+        item["motion"] = motion
     edl["inserts"] = inserts + [item]
     window = (f" (using clip {off:.1f}-{round(off + dur, 2):.1f}s)"
               if off else "")
-    desc = (f"inserted {kind} '{name}' ({dur}s){window} at {final_at}s of "
-            f"the edited video [{item['id']}]")
+    moved = f" with a Ken Burns {motion} move" if motion else ""
+    desc = (f"inserted {kind} '{name}' ({dur}s){window}{moved} at "
+            f"{final_at}s of the edited video [{item['id']}]")
     if note_bits:
         desc += " — " + "; ".join(note_bits)
     result = ctx.write_edl(edl, desc)
@@ -1373,9 +1454,12 @@ TOOLS = {
                      "max_words_per_caption:3, style:{color:'#FF0000', "
                      "position:'top'}}. Example — one manual title card: "
                      "{items:[{text:'CHAPTER ONE', start:0, end:2.5, "
-                     "style:{size:'l'}}]}. There are NO other style fields — "
-                     "fonts and outline colors are not supported; say so if "
-                     "asked.",
+                     "style:{size:'l'}}]}. animation ('fade', 'pop' or "
+                     "'slide_up') animates each STATIC caption's entrance — "
+                     "dynamic karaoke captions animate word-by-word "
+                     "already, so animation is ignored when dynamic is on. "
+                     "There are NO other style fields — fonts and outline "
+                     "colors are not supported; say so if asked.",
                      {"mode": {"type": "string"},
                       "style": {"type": "object",
                                 "properties": {
@@ -1386,7 +1470,10 @@ TOOLS = {
                                                  "enum": ["bottom", "top",
                                                           "middle"]},
                                     "dynamic": {"type": "boolean"},
-                                    "highlight_color": {"type": "string"}}},
+                                    "highlight_color": {"type": "string"},
+                                    "animation": {"type": "string",
+                                                  "enum": ["fade", "pop",
+                                                           "slide_up"]}}},
                       "max_words_per_caption": {"type": "integer"},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
@@ -1423,7 +1510,9 @@ TOOLS = {
                           "'bigger / more dynamic captions' -> "
                           '{"style":{"size":"xl","dynamic":true}} '
                           "(dynamic = karaoke captions where the spoken "
-                          "word pops and lights up in highlight_color). "
+                          "word pops and lights up in highlight_color; "
+                          "animation fade|pop|slide_up animates static "
+                          "captions' entrance). "
                           "Works for from_transcript and manual captions; "
                           "errors helpfully if no captions exist yet.",
                           {"style": {"type": "object",
@@ -1438,7 +1527,12 @@ TOOLS = {
                                                                "middle"]},
                                          "dynamic": {"type": "boolean"},
                                          "highlight_color": {"type":
-                                                             "string"}}}}),
+                                                             "string"},
+                                         "animation": {"type": "string",
+                                                       "enum": ["fade",
+                                                                "pop",
+                                                                "slide_up"]
+                                                       }}}}),
     "set_volume": (set_volume, "Volume automation on the ORIGINAL footage's "
                    "audio (the speaker) over a SOURCE-time span. NOT for "
                    "music or voiceover loudness — use set_audio_gain for "
@@ -1466,12 +1560,19 @@ TOOLS = {
                      "for clips longer than 15s — never splice a long "
                      "recording whole). clip_start_s: where in the source "
                      "clip the window starts — use look_at_asset to pick "
-                     "the right moment. Inserted media is NOT transcribed — "
-                     "captions cover the main footage only.",
+                     "the right moment. motion (images only): 'zoom_in', "
+                     "'zoom_out', 'pan_left' or 'pan_right' gives the still "
+                     "a slow Ken Burns move instead of sitting frozen — use "
+                     "it whenever the user wants an image to feel animated. "
+                     "Inserted media is NOT transcribed — captions cover "
+                     "the main footage only.",
                      {"asset_key": {"type": "string"},
                       "at_output_s": {"type": "number"},
                       "duration_s": {"type": "number"},
-                      "clip_start_s": {"type": "number"}}),
+                      "clip_start_s": {"type": "number"},
+                      "motion": {"type": "string",
+                                 "enum": ["zoom_in", "zoom_out",
+                                          "pan_left", "pan_right"]}}),
     "remove_insert": (remove_insert, "Remove one spliced insert by its id "
                       "(see get_edl) — the surrounding timing is restored "
                       "exactly. If an insert landed wrong, remove it BEFORE "
@@ -1486,20 +1587,40 @@ TOOLS = {
                                     "enum": ["vibrant", "warm", "cool", "bw",
                                              "vintage", "cinematic",
                                              "none"]}}),
-    "add_zoom": (add_zoom, "Punch-in zoom on a time range of the FINAL "
-                 "edited video (output seconds) — the standard retention "
-                 "effect for emphasis on a key line. strength 0.05-1.0 "
-                 "(default 0.25 = 25% closer). Use 1-3 short zooms at "
+    "add_zoom": (add_zoom, "Zoom on a time range of the FINAL edited video "
+                 "(output seconds) — the standard retention effect for "
+                 "emphasis on a key line. strength 0.05-1.0 (default 0.25 = "
+                 "25% closer). mode: 'punch' (default, instant step), "
+                 "'ease' (smoothly ramps in and out — use when the user "
+                 "wants it subtle/animated), 'push_in' / 'pull_out' "
+                 "(continuous Ken Burns drift across the whole window — "
+                 "use for slow cinematic movement). Use 1-3 short zooms at "
                  "emphatic moments, not wall-to-wall.",
                  {"start": {"type": "number"}, "end": {"type": "number"},
-                  "strength": {"type": "number"}}),
-    "remove_zoom": (remove_zoom, "Remove one punch-in zoom by its id (see "
+                  "strength": {"type": "number"},
+                  "mode": {"type": "string",
+                           "enum": ["punch", "ease", "push_in",
+                                    "pull_out"]}}),
+    "remove_zoom": (remove_zoom, "Remove one zoom by its id (see "
                     "get_edl).", {"id": {"type": "string"}}),
     "set_fades": (set_fades, "Fade from black at the start and/or to black "
                   "at the end (video + audio). Seconds; 0 clears. Example: "
                   "set_fades(fade_in_s=0.5, fade_out_s=0.8).",
                   {"fade_in_s": {"type": "number"},
                    "fade_out_s": {"type": "number"}}),
+    "set_transitions": (set_transitions, "Transitions at EVERY cut point "
+                        "and insert boundary: a quick dip through black "
+                        "(style 'dip_black') or a white flash "
+                        "('dip_white'), duration_s 0.1-1.0 (default 0.3). "
+                        "'none' removes them (hard cuts again). THE tool "
+                        "when the user asks for transitions between "
+                        "clips/cuts. True crossfades (overlapping footage) "
+                        "are NOT supported — offer a dip instead and say "
+                        "so.",
+                        {"style": {"type": "string",
+                                   "enum": ["dip_black", "dip_white",
+                                            "none"]},
+                         "duration_s": {"type": "number"}}),
     "add_voiceover": (add_voiceover, "Lay an uploaded audio file OVER the "
                       "whole program from start_output_s (a position in the "
                       "FINAL edited video, default 0). duck_others (default "
@@ -1539,6 +1660,7 @@ REQUIRED_ARGS = {
     "set_color_grade": ["preset"],
     "add_zoom": ["start", "end"],
     "remove_zoom": ["id"],
+    "set_transitions": ["style"],
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
     "ask_user": ["question"],
@@ -1551,7 +1673,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range", "add_captions",
                "set_audio_gain", "set_volume", "set_frame",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
-               "remove_zoom", "set_fades"}
+               "remove_zoom", "set_fades", "set_transitions"}
 
 
 def capabilities_digest():
