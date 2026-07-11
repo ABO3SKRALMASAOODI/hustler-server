@@ -177,33 +177,16 @@ def video_overview():
         """)
         no_change = cur.fetchone()["n"]
 
-        cur.execute(f"""
-            SELECT COUNT(*) AS n
-            FROM chat_messages cm
-            JOIN projects p ON p.chat_session_id = cm.session_id
-            WHERE cm.role = 'user'
-              AND cm.created_at > NOW() - INTERVAL '14 days'
-              AND {UNSERVED_EXISTS}
-        """)
-        unserved_messages = cur.fetchone()["n"]
-
-        # attention feed: everything that likely needs a human to look at it
-        cur.execute(f"""
+        # attention feed: only things a human can act on (failed/stuck jobs).
+        # Unserved messages are deliberately NOT here — with auto-resume live
+        # they self-heal, and there is no admin action to take on old ones.
+        cur.execute("""
             SELECT * FROM (
-                SELECT 'unserved_message' AS type, p.id AS project_id,
+                SELECT 'failed_job' AS type, p.id AS project_id,
                        p.title AS project_title, u.email,
-                       LEFT(cm.content, 140) AS detail,
-                       cm.created_at AS happened_at
-                FROM chat_messages cm
-                JOIN projects p ON p.chat_session_id = cm.session_id
-                JOIN users u ON u.id = p.user_id
-                WHERE cm.role = 'user'
-                  AND cm.created_at > NOW() - INTERVAL '14 days'
-                  AND {UNSERVED_EXISTS}
-                UNION ALL
-                SELECT 'failed_job', p.id, p.title, u.email,
-                       vj.type || ': ' || LEFT(COALESCE(vj.error, ''), 140),
-                       vj.updated_at
+                       vj.type || ': ' || LEFT(COALESCE(vj.error, ''), 140)
+                           AS detail,
+                       vj.updated_at AS happened_at
                 FROM video_jobs vj
                 JOIN projects p ON p.id = vj.project_id
                 JOIN users u ON u.id = vj.user_id
@@ -276,7 +259,6 @@ def video_overview():
             "corrective_notes": ops["corrective_notes"],
             "fallback_replies": ops["fallback_replies"],
             "no_change_count": no_change,
-            "unserved_messages": unserved_messages,
             "job_failure_rate": round(
                 ops["failed"] / ops["finished"], 4) if ops["finished"] else 0,
             "median_queue_wait_s": round(ops["median_queue_wait_s"], 2)
