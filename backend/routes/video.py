@@ -12,6 +12,8 @@ chat_sessions / chat_messages tables (one session per project, plus an
 import importlib.util
 import json
 import os
+import re
+import threading
 import uuid
 from contextlib import contextmanager
 
@@ -44,6 +46,155 @@ PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "2"))
 
 VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
                "music", "image_ref", "video_clip")
+
+# Concierge chat: before an indexed video exists, replies are REAL LLM
+# calls (same OpenAI-compatible env as the worker) — never canned
+# templates. The template strings survive only as a fallback when the
+# model call fails. Calls are recorded to llm_calls with job_id NULL:
+# visible in admin, never charged (credit charging sums per agent-turn
+# job).
+CONCIERGE_BASE_URL = os.getenv(
+    "OPENAI_BASE_URL",
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL",
+                            os.getenv("AGENT_MODEL", "qwen-plus"))
+CONCIERGE_TIMEOUT_S = float(os.getenv("CONCIERGE_TIMEOUT_S", "14"))
+
+_concierge_client = None
+
+
+def _concierge_llm():
+    global _concierge_client
+    if _concierge_client is None:
+        from openai import OpenAI
+        _concierge_client = OpenAI(base_url=CONCIERGE_BASE_URL,
+                                   api_key=os.getenv("OPENAI_API_KEY", ""),
+                                   timeout=CONCIERGE_TIMEOUT_S,
+                                   max_retries=0)
+    return _concierge_client
+
+
+# A concierge reply that claims work already happened is a lie — nothing
+# has been analyzed or edited yet. Such drafts fall back to the template.
+_CONCIERGE_CLAIM = re.compile(
+    r"(?i)\b(?:i(?:'ve| have| already| just)+ (?:cut|trimmed|edited|"
+    r"rendered|captioned|analyzed)|your video is ready)")
+
+
+def _concierge_stage(idx_state):
+    """Map the latest index job state to what the concierge may claim.
+    A FAILED index is its own stage — telling that user 'no video is
+    uploaded yet' would be a lie about their broken upload."""
+    if idx_state in ("queued", "running"):
+        return "indexing"
+    if idx_state == "failed":
+        return "index_failed"
+    if idx_state is None:
+        return "no_video"
+    return "ready"
+
+
+def _concierge_reply(stage, history, attachments, index_error=None):
+    """LLM-authored reply for chat while no indexed video exists yet.
+    stage: 'indexing' | 'index_failed' | 'no_video'.
+    Returns (text, meta, llm_record); llm_record is None only when no API
+    key is configured."""
+    if stage == "indexing":
+        fallback = ("I'm still analyzing your video — transcribing it and "
+                    "mapping the shots. Your request is saved: I'll start "
+                    "on it automatically the moment analysis finishes, "
+                    "no need to resend it.")
+        state = ("Their video IS uploaded and you are analyzing it right "
+                 "now (transcribing, mapping shots); long videos can take "
+                 "several minutes. It is NOT ready to edit yet.")
+        saved = ("Any editing request they send now is saved, and you "
+                 "start on it automatically the moment their video "
+                 "finishes analyzing — they never need to resend it.")
+    elif stage == "index_failed":
+        fallback = ("I couldn't analyze the video you uploaded, so I "
+                    "can't edit it yet. Please upload it again (or try a "
+                    "different file) and I'll take it from there.")
+        state = ("Their video WAS uploaded but the analysis FAILED"
+                 + (f" (reason: {str(index_error)[:200]})" if index_error
+                    else "")
+                 + ", so you cannot edit it. Be upfront about that and "
+                 "ask them to re-upload the file (or try a different "
+                 "one) using the panel on the right.")
+        saved = ("Their editing requests are saved, but nothing can "
+                 "start until a video is successfully analyzed — "
+                 "re-uploading is the fix.")
+    else:
+        fallback = ("Upload a video first and I'll get to work — drop a "
+                    "file into the panel on the right. Your request is "
+                    "saved: I'll start on it automatically once your "
+                    "video has been analyzed.")
+        state = ("No video is uploaded yet. They upload one by dropping a "
+                 "file into the panel on the right side of the studio.")
+        saved = ("Any editing request they send now is saved, and you "
+                 "start on it automatically the moment their video "
+                 "finishes analyzing — they never need to resend it.")
+    if not os.getenv("OPENAI_API_KEY"):
+        return fallback, {"kind": "canned", "stage": stage}, None
+
+    facts = [
+        state,
+        saved,
+        "You have not edited, rendered, analyzed or looked at anything "
+        "yet — never claim or imply that you did.",
+        "Once a video is ready you can: cut silences and bad takes, add "
+        "word-timed captions (including karaoke word-pop styles), add "
+        "background music or voiceover, zooms (including smooth Ken "
+        "Burns style), dip-to-black/white transitions, fades, color "
+        "grades, vertical/square/portrait reframing, and splice uploaded "
+        "clips or images into the video full-frame. You canNOT: generate "
+        "footage or cartoons from nothing, change playback speed, do "
+        "true crossfades (overlapping footage), overlay logos or "
+        "watermarks on top of the video, or add custom caption fonts, "
+        "outlines or stickers. These two lists are exhaustive — if they "
+        "ask about anything not on them, say you're not sure it's "
+        "supported yet rather than promising it.",
+    ]
+    if attachments:
+        facts.append("Attached to this message and saved for the edit: " +
+                     "; ".join(f"{a['kind']} "
+                               f"'{a.get('filename') or 'file'}'"
+                               for a in attachments) + ".")
+    system = (
+        "You are Valmera, an AI video editor the user chats with inside "
+        "the studio.\nFACTS — every reply must respect all of them:\n- " +
+        "\n- ".join(facts) +
+        "\nReply to the user's last message naturally in 1-3 short "
+        "sentences, plain text only (no markdown, no emoji, no lists). "
+        "Answer what they actually said: greet a greeting, answer "
+        "questions about what you can do, and if they asked for an edit "
+        "confirm it's saved and say what happens next. Never promise a "
+        "specific completion time.")
+    msgs = [{"role": "system", "content": system}]
+    for h in history[-10:]:
+        msgs.append({"role": h["role"],
+                     "content": (h["content"] or "")[:800]})
+    req = {"model": CONCIERGE_MODEL, "messages": msgs}
+    try:
+        resp = _concierge_llm().chat.completions.create(
+            model=CONCIERGE_MODEL, messages=msgs,
+            max_tokens=220, temperature=0.6)
+        text = (resp.choices[0].message.content or "").strip()
+        usage = getattr(resp, "usage", None)
+        rec = {"model": CONCIERGE_MODEL, "request": req,
+               "response": {"reply": text},
+               "prompt_tokens": getattr(usage, "prompt_tokens", None),
+               "completion_tokens": getattr(usage, "completion_tokens",
+                                            None)}
+        if text and not _CONCIERGE_CLAIM.search(text):
+            return text, {"kind": "concierge", "stage": stage}, rec
+        rec["response"] = {"rejected": text or "(empty completion)"}
+        return fallback, {"kind": "canned", "stage": stage}, rec
+    except Exception as e:
+        print(f"[concierge] LLM call failed: {e}", flush=True)
+        return fallback, {"kind": "canned", "stage": stage}, {
+            "model": CONCIERGE_MODEL, "request": req,
+            "response": {"error": str(e)[:300]},
+            "prompt_tokens": None, "completion_tokens": None}
 
 
 @contextmanager
@@ -582,10 +733,13 @@ def post_message(user_id, project_id):
             return jsonify({"error": "The editor is still working on your "
                                      "previous request."}), 409
 
-        # Credits gate: each agent turn spends credits (the worker charges
-        # actual model usage after the turn). Same 402 + code shape as the
-        # legacy generate path so the frontend can offer an upgrade.
-        if not check_and_reserve(conn, user_id, min_credits=1.0):
+        # Credits gate — only when an agent turn will actually run (the
+        # worker charges model usage per turn). Pre-index chat stays free:
+        # concierge replies are cheap, rate-limited, and never charged.
+        original = _active_original(cur, project_id)
+        indexed = bool(original and _index_row(cur, original["sha256"]))
+        if indexed and not check_and_reserve(conn, user_id,
+                                             min_credits=1.0):
             return jsonify({
                 "error": "You're out of credits — they refresh daily, or "
                          "upgrade for a bigger monthly pool.",
@@ -632,43 +786,108 @@ def post_message(user_id, project_id):
             return jsonify({"queued": True, "duplicate": True,
                             "message_id": row["id"] if row else None})
 
-        original = _active_original(cur, project_id)
-        indexed = bool(original and _index_row(cur, original["sha256"]))
+        concierge = None
         if not indexed:
-            cur.execute("""SELECT state FROM video_jobs
+            # Gather context inside the transaction, but make the LLM call
+            # AFTER it commits — a model call must never hold a DB
+            # transaction (and the user's message must survive regardless).
+            cur.execute("""SELECT state, error FROM video_jobs
                            WHERE project_id = %s AND type = 'index'
                            ORDER BY id DESC LIMIT 1""", (project_id,))
             idx_job = cur.fetchone()
-            if idx_job and idx_job["state"] in ("queued", "running"):
-                hint = ("I'm still analyzing your video — transcribing it and "
-                        "mapping the shots. Your request is saved: I'll start "
-                        "on it automatically the moment analysis finishes, "
-                        "no need to resend it.")
-            else:
-                hint = ("Upload a video first and I'll get to work — drop a "
-                        "file into the panel on the right. Your request is "
-                        "saved: I'll start on it automatically once your "
-                        "video has been analyzed.")
-            cur.execute("""INSERT INTO chat_messages (session_id, role, content)
-                           VALUES (%s, 'assistant', %s)""",
-                        (p["chat_session_id"], hint))
-            return jsonify({"queued": False, "message_id": message_id})
-
-        if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
-            return jsonify({"error": "Too many jobs running. "
-                                     "Wait for one to finish."}), 429
-        if not os.getenv("OPENAI_API_KEY"):
-            cur.execute("""INSERT INTO chat_messages (session_id, role, content)
-                           VALUES (%s, 'assistant',
-                                   'The editing agent is not configured yet — hang tight.')""",
+            cur.execute("""SELECT role, content FROM chat_messages
+                           WHERE session_id = %s
+                             AND role IN ('user', 'assistant')
+                           ORDER BY id DESC LIMIT 12""",
                         (p["chat_session_id"],))
-            return jsonify({"queued": False, "message_id": message_id})
+            concierge = {
+                "stage": _concierge_stage(idx_job["state"] if idx_job
+                                          else None),
+                "index_error": idx_job["error"] if idx_job else None,
+                "history": list(reversed(cur.fetchall())),
+                "session_id": p["chat_session_id"],
+            }
 
-        job_id = _enqueue(cur, project_id, user_id, "agent_turn",
-                          {"message_id": message_id})
+        else:
+            if (_running_jobs_count(cur, user_id)
+                    >= MAX_CONCURRENT_JOBS_PER_USER):
+                return jsonify({"error": "Too many jobs running. "
+                                         "Wait for one to finish."}), 429
+            if not os.getenv("OPENAI_API_KEY"):
+                cur.execute("""INSERT INTO chat_messages (session_id, role,
+                                                          content)
+                               VALUES (%s, 'assistant',
+                                       'The editing agent is not configured yet — hang tight.')""",
+                            (p["chat_session_id"],))
+                return jsonify({"queued": False, "message_id": message_id})
+
+            job_id = _enqueue(cur, project_id, user_id, "agent_turn",
+                              {"message_id": message_id})
+
+    if concierge is not None:
+        # The model call runs in a thread with its own DB connection — the
+        # backend has only 3 sync gunicorn workers serving everything, so a
+        # 14s completion must never occupy one. The studio's 2s poll picks
+        # the reply up; "concierge": true lets it show a typing indicator.
+        threading.Thread(
+            target=_concierge_respond,
+            args=(current_app.config["DATABASE_URL"], project_id,
+                  concierge, attachments_meta),
+            daemon=True).start()
+        return jsonify({"queued": False, "concierge": True,
+                        "message_id": message_id})
 
     return jsonify({"queued": True, "message_id": message_id,
                     "job_id": job_id})
+
+
+def _concierge_respond(db_url, project_id, ctx, attachments):
+    """Thread body: LLM call, then reply + llm_calls insert on a fresh
+    connection. _concierge_reply already degrades to the template on any
+    model failure, so only a DB failure can swallow the reply (logged)."""
+    try:
+        reply, reply_meta, llm_rec = _concierge_reply(
+            ctx["stage"], ctx["history"], attachments,
+            index_error=ctx.get("index_error"))
+        conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+        try:
+            cur = conn.cursor()
+            # The model call took up to ~14s. If the index state moved in
+            # that window (analysis finished, failed, or a video arrived),
+            # the drafted reply describes a world that no longer exists —
+            # drop it instead of inserting "I'm still analyzing" under the
+            # ready notice (the auto-resumed agent turn answers instead).
+            cur.execute("""SELECT state FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                           ORDER BY id DESC LIMIT 1""", (project_id,))
+            row = cur.fetchone()
+            stage_now = _concierge_stage(row["state"] if row else None)
+            if stage_now == ctx["stage"]:
+                cur.execute("""INSERT INTO chat_messages (session_id, role,
+                                                          content, meta)
+                               VALUES (%s, 'assistant', %s, %s)""",
+                            (ctx["session_id"], reply, Json(reply_meta)))
+            elif llm_rec:
+                llm_rec["response"] = dict(llm_rec.get("response") or {},
+                                           stale=f"index moved to "
+                                                 f"{stage_now} during "
+                                                 f"reply; not shown")
+            if llm_rec:
+                cur.execute("""INSERT INTO llm_calls (project_id, job_id,
+                                   purpose, model, request, response,
+                                   prompt_tokens, completion_tokens)
+                               VALUES (%s, NULL, 'concierge', %s, %s, %s,
+                                       %s, %s)""",
+                            (project_id, llm_rec["model"],
+                             Json(llm_rec["request"]),
+                             Json(llm_rec["response"]),
+                             llm_rec["prompt_tokens"],
+                             llm_rec["completion_tokens"]))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[concierge] respond thread failed: {e}", flush=True)
 
 
 # ------------------------------------------------------------------ #

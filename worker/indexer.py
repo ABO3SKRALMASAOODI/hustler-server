@@ -7,11 +7,13 @@ assemble VideoIndex.
 """
 
 import os
+import re
 import shutil
 import time
 
 import config
 import db as dbx
+import llm
 import media
 import scenes
 import sheets
@@ -213,6 +215,68 @@ def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
                   height=p["height"], fps=p["fps"], sha256=sha)
 
 
+# A ready-notice claiming edits already happened is a lie — analysis only
+# just finished. Such drafts are discarded for the template fallback.
+_GREET_CLAIM = re.compile(
+    r"(?i)\b(?:i(?:'ve| have| already| just)+ (?:cut|trimmed|edited|"
+    r"rendered|captioned)|i (?:cut|trimmed|edited|rendered)\b)")
+
+
+def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
+                   index):
+    """LLM-authored ready-notice in Valmera's voice — the template in
+    _finish_setup is the fallback. Recorded to llm_calls with job_id NULL
+    (visible in admin, never charged)."""
+    if not config.OPENAI_API_KEY:
+        return None
+    words = index.get("words") or []
+    snippet = " ".join((w.get("w") or "").strip()
+                       for w in words[:50] if isinstance(w, dict)).strip()
+    if pending:
+        branch = ("IMPORTANT: they sent an editing request while you were "
+                  "analyzing; it was saved and you are starting on it "
+                  "right now — tell them that.")
+    elif out_of_credits:
+        branch = ("IMPORTANT: they sent a request while you were "
+                  "analyzing, but they are out of credits (credits "
+                  "refresh daily) — tell them honestly to send it again "
+                  "once credits refresh.")
+    else:
+        branch = ("End by inviting their first editing request, with ONE "
+                  "concrete example — grounded in the transcript opening "
+                  "if it gives you anything to go on.")
+    system = ("You are Valmera, an AI video editor. You just finished "
+              "analyzing the user's uploaded video (transcription, shot "
+              "mapping). Write the short chat message (2-3 sentences, "
+              "plain text, no markdown, no emoji) telling them their "
+              "video is ready to edit. State the real stats you were "
+              "given. You have NOT made any edits yet — never claim or "
+              "imply you did, and never invent facts beyond what is "
+              "given.")
+    user = (f"Real stats to state: {stats}.\n"
+            f"Transcript opening (verbatim, may be empty): \"{snippet}\"\n"
+            f"{branch}")
+    res = llm.ask_text(system, user, max_tokens=220, temperature=0.5,
+                       purpose="index_greet")
+    try:
+        worker_db.run(dbx.insert_llm_call, project_id, None, "index_greet",
+                      config.AGENT_MODEL,
+                      {"system": system, "user": user},
+                      {"text": res["text"]} if res
+                      else {"error": "call failed"},
+                      res["prompt_tokens"] if res else None,
+                      res["completion_tokens"] if res else None)
+    except Exception as e:
+        print(f"[index] greet llm_call record failed: {e}", flush=True)
+    if not res:
+        return None
+    if _GREET_CLAIM.search(res["text"]):
+        print("[index] greet draft claimed edits — using template",
+              flush=True)
+        return None
+    return res["text"]
+
+
 def _finish_setup(worker_db, project_id, session_id, info, index,
                   user_id=None):
     """Seed EDL v1 (keep everything) if none exists, greet in chat, and
@@ -246,10 +310,11 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     n_words = len(index.get("words", []))
     n_sil = len([s for s in index.get("silences", [])
                  if s[1] - s[0] >= 0.7])
-    summary = (f"Your video is ready to edit — {mins:.1f} min, {n_shots} "
-               f"shot{'s' if n_shots != 1 else ''}, "
-               f"{n_words} transcribed words, {n_sil} noticeable "
-               f"silence{'s' if n_sil != 1 else ''}. ")
+    stats = (f"{mins:.1f} min, {n_shots} "
+             f"shot{'s' if n_shots != 1 else ''}, "
+             f"{n_words} transcribed words, {n_sil} noticeable "
+             f"silence{'s' if n_sil != 1 else ''}")
+    summary = f"Your video is ready to edit — {stats}. "
     if pending:
         summary += ("I'm starting on the request you sent while I was "
                     "analyzing — give me a moment.")
@@ -261,9 +326,14 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         summary += ("Tell me what you'd like changed — for example: \"cut "
                     "the dead air, caption every word, and tighten the "
                     "intro.\"")
+    drafted = _greet_via_llm(worker_db, project_id, stats, pending,
+                             out_of_credits, index)
+    if drafted:
+        summary = drafted
     if session_id:
         worker_db.run(dbx.add_message, session_id, "assistant", summary,
-                      {"kind": "index_ready", "auto_resume": bool(pending)})
+                      {"kind": "index_ready", "auto_resume": bool(pending),
+                       "llm_authored": bool(drafted)})
     if pending:
         try:
             worker_db.run(dbx.enqueue_job, project_id, user_id, "agent_turn",

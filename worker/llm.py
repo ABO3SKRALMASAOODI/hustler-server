@@ -93,6 +93,37 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         return None
 
 
+def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text"):
+    """One plain-text completion against AGENT_MODEL. Returns
+    {"text", "model", "prompt_tokens", "completion_tokens"} or None on any
+    failure — callers must keep a non-LLM fallback."""
+    if not config.OPENAI_API_KEY:
+        return None
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": user}]
+    try:
+        resp = client().chat.completions.create(
+            model=config.AGENT_MODEL, messages=messages,
+            max_tokens=max_tokens, temperature=temperature)
+        text = (resp.choices[0].message.content or "").strip()
+        usage = getattr(resp, "usage", None)
+        record(purpose,
+               {"model": config.AGENT_MODEL, "system": system, "user": user},
+               {"text": text}, usage)
+        if not text:
+            return None
+        return {"text": text, "model": config.AGENT_MODEL,
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens",
+                                             None)}
+    except Exception as e:
+        print(f"[llm] ask_text failed: {e}", flush=True)
+        record(purpose,
+               {"model": config.AGENT_MODEL, "system": system, "user": user},
+               {"error": str(e)[:300]}, None)
+        return None
+
+
 def extract_json_array(text):
     """Lenient JSON array extraction from a model reply."""
     if not text:

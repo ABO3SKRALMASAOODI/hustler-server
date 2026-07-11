@@ -1504,4 +1504,79 @@ check("partial-style empty hint mentions animation",
 check("partial-style pydantic hint mentions animation",
       "animation" in agent_tools._parse_partial_style({"animation": "bounce"}))
 
+print("== Concierge round: LLM greetings guard their honesty ==")
+import ast                                                    # noqa: E402
+import config as wconfig                                      # noqa: E402
+import indexer                                                # noqa: E402
+import llm as wllm                                            # noqa: E402
+
+for s in ("I've cut the silences and it's much tighter now.",
+          "I have already trimmed the intro for you.",
+          "I just edited your video and rendered a preview.",
+          "I cut the dead air while analyzing."):
+    check(f"greet claim caught: {s[:44]!r}",
+          indexer._GREET_CLAIM.search(s) is not None)
+for s in ("Your video is ready to edit — 5.0 min, 9 shots.",
+          "Tell me what you'd like — for example: cut the dead air.",
+          "I'll cut the silences as soon as you say the word.",
+          "I'm starting on the request you sent while I was analyzing."):
+    check(f"greet honest draft passes: {s[:44]!r}",
+          indexer._GREET_CLAIM.search(s) is None)
+
+_key_backup = wconfig.OPENAI_API_KEY
+wconfig.OPENAI_API_KEY = ""
+check("ask_text without key returns None",
+      wllm.ask_text("s", "u") is None)
+check("greet without key skips LLM (no DB touched)",
+      indexer._greet_via_llm(None, 1, "5.0 min, 9 shots", None, False,
+                             {"words": []}) is None)
+wconfig.OPENAI_API_KEY = _key_backup
+
+# The backend concierge guard lives in Flask-land (heavy imports) — test
+# the SHIPPED pattern by extracting it from the source with ast.
+_vid_src = os.path.join(os.path.dirname(__file__), "..", "..",
+                        "backend", "routes", "video.py")
+_pattern = None
+for node in ast.walk(ast.parse(open(_vid_src).read())):
+    if (isinstance(node, ast.Assign) and
+            any(getattr(t, "id", "") == "_CONCIERGE_CLAIM"
+                for t in node.targets)):
+        _pattern = node.value.args[0].value
+check("concierge claim pattern found in video.py", _pattern is not None)
+_cc = re.compile(_pattern)
+for s in ("I've already edited your clip.",
+          "I just analyzed the footage you sent.",
+          "Your video is ready — tell me what to change."):
+    check(f"concierge claim caught: {s[:40]!r}", _cc.search(s) is not None)
+for s in ("Hi! Upload a video on the right and I'll get to work.",
+          "Your request is saved — I'll start once analysis finishes.",
+          "I can cut silences, add captions, music and zooms."):
+    check(f"concierge honest draft passes: {s[:40]!r}",
+          _cc.search(s) is None)
+
+# The stage mapper decides what the concierge may claim about the user's
+# upload — a failed index must never be presented as "no video yet".
+# Pure function: extract and exec it from the source.
+_stage_fn = None
+for node in ast.walk(ast.parse(open(_vid_src).read())):
+    if isinstance(node, ast.FunctionDef) and node.name == "_concierge_stage":
+        _ns = {}
+        exec(compile(ast.Module(body=[node], type_ignores=[]),
+                     "<video.py>", "exec"), _ns)
+        _stage_fn = _ns["_concierge_stage"]
+check("concierge stage mapper found in video.py", _stage_fn is not None)
+for st, want in (("queued", "indexing"), ("running", "indexing"),
+                 ("failed", "index_failed"), (None, "no_video"),
+                 ("done", "ready")):
+    check(f"concierge stage {st!r} -> {want}", _stage_fn(st) == want)
+# post_message must fetch the error for the failed stage, and the reply
+# builder must have a dedicated failed-index branch.
+_src_text = open(_vid_src).read()
+check("post_message selects index error",
+      "SELECT state, error FROM video_jobs" in _src_text)
+check("reply builder handles index_failed",
+      'stage == "index_failed"' in _src_text)
+check("capability facts declare themselves exhaustive",
+      "lists are exhaustive" in _src_text)
+
 print(f"\nALL {PASS} CHECKS PASSED")
