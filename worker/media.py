@@ -6,6 +6,8 @@ import json
 import os
 import re
 import subprocess
+import threading
+import time
 
 import config
 
@@ -21,9 +23,36 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
     if progress_cb and expected_out_s:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True)
+        # A stalled encode stops emitting progress but keeps stdout open, so
+        # `for line in proc.stdout` would block forever — the timeout on
+        # communicate() below is never reached (this once wedged the sole
+        # media slot for hours). A watchdog thread enforces both a hard
+        # wall-clock cap and a shorter no-progress stall cap; killing the
+        # process closes the pipe and unblocks the read loop.
+        stall_s = config.FFMPEG_STALL_TIMEOUT_S
+        last = [time.monotonic()]
+        kill_reason = []
+
+        def _watchdog():
+            start = time.monotonic()
+            while proc.poll() is None:
+                now = time.monotonic()
+                if now - start > timeout:
+                    kill_reason.append(f"wall-clock {timeout}s exceeded")
+                    proc.kill()
+                    return
+                if now - last[0] > stall_s:
+                    kill_reason.append(f"no progress for {stall_s}s")
+                    proc.kill()
+                    return
+                time.sleep(2)
+
+        wd = threading.Thread(target=_watchdog, daemon=True)
+        wd.start()
         tail = []
         try:
             for line in proc.stdout:
+                last[0] = time.monotonic()
                 line = line.strip()
                 if line.startswith("out_time_ms="):
                     try:
@@ -31,11 +60,12 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
                         progress_cb(min(0.999, secs / max(0.01, expected_out_s)))
                     except ValueError:
                         pass
-            _, err = proc.communicate(timeout=timeout)
+            _, err = proc.communicate()
             tail = (err or "").splitlines()[-12:]
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            raise MediaError(f"ffmpeg timed out after {timeout}s")
+        finally:
+            wd.join(timeout=3)
+        if kill_reason:
+            raise MediaError(f"ffmpeg killed: {kill_reason[0]}")
         if proc.returncode != 0:
             raise MediaError("ffmpeg failed: " + " | ".join(tail))
         return ""

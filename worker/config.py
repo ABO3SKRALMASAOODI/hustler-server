@@ -73,6 +73,11 @@ SILENCE_MIN_S = 0.6
 SCENE_THRESHOLD = float(os.getenv("SCENE_THRESHOLD", "27.0"))
 
 FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "5400"))
+# A stalled encode stops emitting -progress lines but keeps its stdout pipe
+# open, so the progress reader would block forever (this once froze the only
+# media slot for hours). Kill an encode that goes this long with no progress,
+# well before the full wall-clock cap above.
+FFMPEG_STALL_TIMEOUT_S = int(os.getenv("FFMPEG_STALL_TIMEOUT_S", "300"))
 
 
 def require_core():
