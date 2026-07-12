@@ -1,6 +1,7 @@
 """ffmpeg / ffprobe primitives. The agent never touches pixels — everything
 pixel-shaped funnels through here."""
 
+import collections
 import hashlib
 import json
 import os
@@ -21,14 +22,18 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
     and reports percent of expected_out_s."""
     timeout = timeout or config.FFMPEG_TIMEOUT_S
     if progress_cb and expected_out_s:
+        # ffmpeg logs to stderr for the whole encode. Left as its own
+        # un-drained PIPE it fills the OS buffer, ffmpeg blocks on write,
+        # stops emitting progress, and the reader deadlocks — a font-less
+        # Devanagari caption run spamming "glyph not found" per frame did
+        # exactly this in prod (progress froze ~14% in, slot wedged for
+        # hours). Merge stderr INTO stdout so one continuously-drained
+        # stream carries both; the buffer can never fill.
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True)
-        # A stalled encode stops emitting progress but keeps stdout open, so
-        # `for line in proc.stdout` would block forever — the timeout on
-        # communicate() below is never reached (this once wedged the sole
-        # media slot for hours). A watchdog thread enforces both a hard
-        # wall-clock cap and a shorter no-progress stall cap; killing the
-        # process closes the pipe and unblocks the read loop.
+                                stderr=subprocess.STDOUT, text=True)
+        # A genuine hang emits nothing on either stream, so a watchdog still
+        # enforces a hard wall-clock cap and a shorter no-progress stall cap;
+        # killing the process closes the pipe and unblocks the read loop.
         stall_s = config.FFMPEG_STALL_TIMEOUT_S
         last = [time.monotonic()]
         kill_reason = []
@@ -49,7 +54,12 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
 
         wd = threading.Thread(target=_watchdog, daemon=True)
         wd.start()
-        tail = []
+        # Keep only real log lines for error reporting — the merged stream is
+        # dominated by -progress key=value pairs and ffmpeg's status ticker.
+        tail = collections.deque(maxlen=40)
+        _noise = ("out_time", "frame=", "fps=", "bitrate=", "total_size=",
+                  "speed=", "progress=", "dup_frames=", "drop_frames=",
+                  "stream_", "size=")
         try:
             for line in proc.stdout:
                 last[0] = time.monotonic()
@@ -60,14 +70,15 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
                         progress_cb(min(0.999, secs / max(0.01, expected_out_s)))
                     except ValueError:
                         pass
-            _, err = proc.communicate()
-            tail = (err or "").splitlines()[-12:]
+                elif line and not line.startswith(_noise):
+                    tail.append(line)
+            proc.wait()
         finally:
             wd.join(timeout=3)
         if kill_reason:
             raise MediaError(f"ffmpeg killed: {kill_reason[0]}")
         if proc.returncode != 0:
-            raise MediaError("ffmpeg failed: " + " | ".join(tail))
+            raise MediaError("ffmpeg failed: " + " | ".join(list(tail)[-12:]))
         return ""
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
