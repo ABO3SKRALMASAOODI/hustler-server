@@ -81,6 +81,19 @@ _CONCIERGE_CLAIM = re.compile(
     r"rendered|captioned|analyzed)|your video is ready)")
 
 
+def _image_gen_enabled():
+    """Mirrors the worker's generate_image availability check so the
+    concierge never promises (or denies) AI images out of sync with what
+    the editing agent can actually do."""
+    if not os.getenv("IMAGE_GEN_MODEL", "qwen-image-plus"):
+        return False
+    if os.getenv("IMAGE_API_URL", ""):
+        return True
+    return "dashscope" in os.getenv(
+        "OPENAI_BASE_URL",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+
+
 def _concierge_stage(idx_state):
     """Map the latest index job state to what the concierge may claim.
     A FAILED index is its own stage — telling that user 'no video is
@@ -146,13 +159,21 @@ def _concierge_reply(stage, history, attachments, index_error=None):
         "background music or voiceover, zooms (including smooth Ken "
         "Burns style), dip-to-black/white transitions, fades, color "
         "grades, vertical/square/portrait reframing, and splice uploaded "
-        "clips or images into the video full-frame. You canNOT: generate "
-        "footage or cartoons from nothing, change playback speed, do "
-        "true crossfades (overlapping footage), overlay logos or "
-        "watermarks on top of the video, or add custom caption fonts, "
-        "outlines or stickers. These two lists are exhaustive — if they "
-        "ask about anything not on them, say you're not sure it's "
-        "supported yet rather than promising it.",
+        "clips or images into the video full-frame"
+        + (", and generate images with AI — from a text description, or "
+           "by restyling a frame of their video or an uploaded image "
+           "(e.g. giving a character a new hairstyle) — which get "
+           "spliced in as full-frame still moments. You canNOT: generate "
+           "or alter MOVING footage (AI images land as still-frame "
+           "moments, not tracked effects), change"
+           if _image_gen_enabled() else
+           ". You canNOT: generate footage or images from nothing, "
+           "change")
+        + " playback speed, do true crossfades (overlapping footage), "
+        "overlay logos or watermarks on top of the video, or add custom "
+        "caption fonts, outlines or stickers. These two "
+        "lists are exhaustive — if they ask about anything not on them, "
+        "say you're not sure it's supported yet rather than promising it.",
     ]
     if attachments:
         facts.append("Attached to this message and saved for the edit: " +

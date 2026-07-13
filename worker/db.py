@@ -427,6 +427,9 @@ def user_credits_balance(conn, user_id):
 
 LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "0.4"))
 LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "1.2"))
+# Flat price per successful image generation/edit (no token usage is
+# reported for those calls, so they are priced per image).
+IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.05"))
 MIN_TURN_CREDITS = 1.0
 
 
@@ -437,7 +440,10 @@ def charge_turn_credits(conn, user_id, job_id):
     with conn.cursor() as cur:
         cur.execute("""SELECT COUNT(*) AS n,
                               COALESCE(SUM(prompt_tokens),0) AS tin,
-                              COALESCE(SUM(completion_tokens),0) AS tout
+                              COALESCE(SUM(completion_tokens),0) AS tout,
+                              COUNT(*) FILTER (
+                                  WHERE purpose IN ('image_gen','image_edit')
+                                    AND response ? 'image_url') AS n_images
                        FROM llm_calls WHERE job_id = %s""", (job_id,))
         row = cur.fetchone()
         if not row["n"]:
@@ -445,6 +451,7 @@ def charge_turn_credits(conn, user_id, job_id):
             return 0.0
         cost = (float(row["tin"]) * LLM_PRICE_IN_PER_M +
                 float(row["tout"]) * LLM_PRICE_OUT_PER_M) / 1e6
+        cost += float(row["n_images"] or 0) * IMAGE_PRICE_USD
         credits = max(MIN_TURN_CREDITS, round(cost / 0.01, 1))
         cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
                        FROM users WHERE id = %s FOR UPDATE""", (user_id,))

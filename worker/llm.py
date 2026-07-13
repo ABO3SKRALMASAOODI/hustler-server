@@ -1,11 +1,16 @@
 """LLM access — OpenAI-compatible SDK only, configured entirely by env.
-Swapping DashScope for OpenAI/anything else is an env change, never code."""
+Swapping DashScope for OpenAI/anything else is an env change, never code.
+(The one exception: image generation/editing uses DashScope's native
+multimodal-generation endpoint, because no OpenAI-compatible equivalent
+exists there — it degrades to unavailable on non-DashScope bases.)"""
 
 import base64
 import json
+import mimetypes
 import re
 import threading
 
+import requests
 from openai import OpenAI
 
 import config
@@ -122,6 +127,141 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text"):
                {"model": config.AGENT_MODEL, "system": system, "user": user},
                {"error": str(e)[:300]}, None)
         return None
+
+
+# ------------------------------------------------------------------ #
+#  Image generation / editing (DashScope multimodal-generation)        #
+# ------------------------------------------------------------------ #
+
+# Valid sizes differ between the qwen-image 1.x and 2.x families; an
+# unknown aspect (or an API size rejection) falls back to the model default.
+_IMAGE_SIZES_V1 = {"16:9": "1664*928", "9:16": "928*1664",
+                   "1:1": "1328*1328", "4:3": "1472*1140",
+                   "3:4": "1140*1472"}
+_IMAGE_SIZES_V2 = {"16:9": "2688*1536", "9:16": "1536*2688",
+                   "1:1": "2048*2048", "4:3": "2368*1728",
+                   "3:4": "1728*2368"}
+
+
+def image_api_url():
+    if config.IMAGE_API_URL:
+        return config.IMAGE_API_URL
+    base = (config.OPENAI_BASE_URL or "").split("/compatible-mode")[0]
+    base = base.rstrip("/")
+    if "dashscope" not in base:
+        return None
+    return base + "/api/v1/services/aigc/multimodal-generation/generation"
+
+
+def image_available():
+    return bool(config.IMAGE_GEN_MODEL and config.OPENAI_API_KEY
+                and image_api_url())
+
+
+def image_size_for(aspect, model):
+    table = _IMAGE_SIZES_V2 if "2." in (model or "") else _IMAGE_SIZES_V1
+    return table.get((aspect or "").strip())
+
+
+def _image_data_url(path):
+    mime = mimetypes.guess_type(path)[0] or "image/jpeg"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    return f"data:{mime};base64,{b64}"
+
+
+def _image_call(model, content, purpose, record_request, size=None):
+    """One synchronous DashScope image call. content is the message content
+    list (text and/or image parts). Returns (result_url, None) or
+    (None, short_error). record_request is what gets logged to llm_calls —
+    never the image bytes."""
+    url = image_api_url()
+    body = {"model": model,
+            "input": {"messages": [{"role": "user", "content": content}]},
+            "parameters": {"n": 1, "watermark": False}}
+    if size:
+        body["parameters"]["size"] = size
+    try:
+        resp = requests.post(
+            url, json=body, timeout=config.IMAGE_TIMEOUT_S,
+            headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}",
+                     "Content-Type": "application/json"})
+        data = resp.json()
+    except Exception as e:
+        err = f"image API unreachable: {str(e)[:200]}"
+        record(purpose, record_request, {"error": err}, None)
+        return None, err
+    if data.get("code") or resp.status_code >= 400:
+        err = (f"{data.get('code') or resp.status_code}: "
+               f"{str(data.get('message') or data)[:300]}")
+        # An invalid size for this model family is recoverable — retry once
+        # letting the model pick its default resolution.
+        if size and "size" in err.lower():
+            return _image_call(model, content, purpose, record_request,
+                               size=None)
+        record(purpose, record_request, {"error": err}, None)
+        return None, err
+    try:
+        parts = data["output"]["choices"][0]["message"]["content"]
+        image_url = next(p["image"] for p in parts if p.get("image"))
+    except (KeyError, IndexError, StopIteration, TypeError):
+        err = f"image API returned no image: {str(data)[:300]}"
+        record(purpose, record_request, {"error": err}, None)
+        return None, err
+    usage = data.get("usage") or {}
+    record(purpose, record_request,
+           {"image_url": image_url.split("?")[0][:300],
+            "width": usage.get("width"), "height": usage.get("height")},
+           None)
+    return image_url, None
+
+
+def _download_image(url, out_path):
+    r = requests.get(url, timeout=60, stream=True)
+    r.raise_for_status()
+    with open(out_path, "wb") as f:
+        for chunk in r.iter_content(1 << 16):
+            f.write(chunk)
+
+
+def generate_image(prompt, out_path, aspect=None):
+    """Text-to-image via IMAGE_GEN_MODEL. Saves a PNG to out_path.
+    Returns (True, None) or (False, short_error)."""
+    if not image_available():
+        return False, "no image model configured"
+    model = config.IMAGE_GEN_MODEL
+    size = image_size_for(aspect, model)
+    url, err = _image_call(
+        model, [{"text": prompt}], "image_gen",
+        {"model": model, "prompt": prompt, "size": size}, size=size)
+    if not url:
+        return False, err
+    try:
+        _download_image(url, out_path)
+    except Exception as e:
+        return False, f"could not download the generated image: {str(e)[:200]}"
+    return True, None
+
+
+def edit_image(image_path, instruction, out_path, image_name="image"):
+    """Instruction-based edit of a local image via IMAGE_EDIT_MODEL.
+    Saves the edited PNG to out_path. Returns (True, None) or
+    (False, short_error). image_name is what gets logged, never the bytes."""
+    if not image_available():
+        return False, "no image model configured"
+    model = config.IMAGE_EDIT_MODEL or config.IMAGE_GEN_MODEL
+    url, err = _image_call(
+        model,
+        [{"image": _image_data_url(image_path)}, {"text": instruction}],
+        "image_edit",
+        {"model": model, "instruction": instruction, "image": image_name})
+    if not url:
+        return False, err
+    try:
+        _download_image(url, out_path)
+    except Exception as e:
+        return False, f"could not download the edited image: {str(e)[:200]}"
+    return True, None
 
 
 def extract_json_array(text):

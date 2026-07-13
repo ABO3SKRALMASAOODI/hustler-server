@@ -600,6 +600,8 @@ with tempfile.TemporaryDirectory() as td:
 print("== Capabilities digest (issue 2) ==")
 digest = agent_tools.capabilities_digest()
 for tool_name in agent_tools.WRITE_TOOLS:
+    if agent_tools._tool_disabled(tool_name):
+        continue    # service-gated tools are covered in their own section
     check(f"digest covers {tool_name}", f"- {tool_name}(" in digest)
 check("digest is write-tools only", "get_transcript(" not in digest)
 
@@ -1578,5 +1580,164 @@ check("reply builder handles index_failed",
       'stage == "index_failed"' in _src_text)
 check("capability facts declare themselves exhaustive",
       "lists are exhaustive" in _src_text)
+
+print("== generate_image ==")
+import config as cfg                                          # noqa: E402
+import llm as llmmod                                          # noqa: E402
+import agent_tools as at                                      # noqa: E402
+
+# Endpoint derivation: DashScope bases yield the native image endpoint,
+# anything else disables image features unless IMAGE_API_URL overrides.
+_old = (cfg.IMAGE_API_URL, cfg.OPENAI_BASE_URL, cfg.IMAGE_GEN_MODEL,
+        cfg.OPENAI_API_KEY)
+cfg.IMAGE_API_URL = ""
+cfg.OPENAI_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+check("image endpoint derived from dashscope-intl base",
+      llmmod.image_api_url() == "https://dashscope-intl.aliyuncs.com"
+      "/api/v1/services/aigc/multimodal-generation/generation")
+cfg.OPENAI_BASE_URL = "https://api.openai.com/v1"
+check("non-dashscope base disables image endpoint",
+      llmmod.image_api_url() is None)
+cfg.IMAGE_API_URL = "https://example.com/img"
+check("IMAGE_API_URL overrides derivation",
+      llmmod.image_api_url() == "https://example.com/img")
+cfg.IMAGE_API_URL = ""
+cfg.OPENAI_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+cfg.OPENAI_API_KEY = "test-key"
+cfg.IMAGE_GEN_MODEL = "qwen-image-plus"
+check("image_available true with key+model+dashscope",
+      llmmod.image_available())
+
+check("v1 model gets v1 sizes",
+      llmmod.image_size_for("9:16", "qwen-image-plus") == "928*1664")
+check("2.x model gets 2.x sizes",
+      llmmod.image_size_for("9:16", "qwen-image-2.0-pro") == "1536*2688")
+check("unknown aspect -> None (model default)",
+      llmmod.image_size_for("21:9", "qwen-image-plus") is None)
+
+# Tool visibility: generate_image is hidden everywhere when unavailable.
+check("digest advertises generate_image when available",
+      "generate_image" in at.capabilities_digest())
+check("openai_tools includes generate_image when available",
+      any(t["function"]["name"] == "generate_image"
+          for t in at.openai_tools()))
+cfg.IMAGE_GEN_MODEL = ""
+check("digest hides generate_image when disabled",
+      "generate_image" not in at.capabilities_digest())
+check("openai_tools hides generate_image when disabled",
+      all(t["function"]["name"] != "generate_image"
+          for t in at.openai_tools()))
+cfg.IMAGE_GEN_MODEL = "qwen-image-plus"
+
+
+class GenCtx(ToolCtx):
+    def __init__(self, edl=None):
+        super().__init__(edl or {"keep": [[0.0, 30.0]]})
+        self.images_generated = []
+        self.workdir = tempfile.mkdtemp()
+        self.index = {"video": {"duration": 30.0, "width": 1920,
+                                "height": 1080, "fps": 30.0,
+                                "has_audio": True}}
+        self.duration = 30.0
+
+    def clamp(self, t):
+        return round(min(max(float(t), 0.0), self.duration), 2)
+
+    def run(self, fn, *a, **k):          # actually dispatch, unlike ToolCtx
+        return fn(None, *a, **k)
+
+
+check("empty prompt rejected",
+      at.generate_image(GenCtx(), "  ").startswith("REJECTED"))
+check("both sources rejected",
+      at.generate_image(GenCtx(), "x", from_video_time_s=1,
+                        from_asset_key="images/1/a.png")
+      .startswith("REJECTED"))
+check("bad aspect rejected",
+      at.generate_image(GenCtx(), "x", aspect="21:9")
+      .startswith("REJECTED"))
+_full = GenCtx()
+_full.images_generated = [{}] * cfg.MAX_GENERATED_IMAGES_PER_TURN
+check("per-turn image cap enforced",
+      at.generate_image(_full, "x").startswith("REJECTED"))
+cfg.IMAGE_GEN_MODEL = ""
+check("honest unavailable message when disabled",
+      "unavailable" in at.generate_image(GenCtx(), "x"))
+cfg.IMAGE_GEN_MODEL = "qwen-image-plus"
+
+# Success path with the network + storage stubbed out.
+_calls = {}
+
+
+def _fake_gen(prompt, out_path, aspect=None):
+    _calls["gen"] = (prompt, aspect)
+    with open(out_path, "wb") as f:
+        f.write(b"\x89PNG fake")
+    return True, None
+
+
+def _fake_upload(path, key, content_type):
+    _calls["upload"] = (key, content_type)
+
+
+def _fake_insert_asset(conn, project_id, kind, storage_key, **kw):
+    _calls["asset"] = (project_id, kind, storage_key, kw.get("meta"))
+    return 42
+
+
+_g0 = (llmmod.generate_image, at.storage.upload_file, at.dbx.insert_asset)
+llmmod.generate_image = _fake_gen
+at.storage.upload_file = _fake_upload
+at.dbx.insert_asset = _fake_insert_asset
+try:
+    gctx = GenCtx()
+    r = at.generate_image(gctx, "a cat wearing a crown")
+    check("success result names the storage_key",
+          "storage_key=generated/1/" in r)
+    check("success result says it is NOT in the video yet",
+          "NOT in the video yet" in r)
+    check("success result explains the still-frame mechanics",
+          "still moment" in r)
+    check("aspect defaults to nearest source ratio (16:9 for 1920x1080)",
+          _calls["gen"][1] == "16:9")
+    check("asset row is image_ref with generated meta",
+          _calls["asset"][1] == "image_ref"
+          and _calls["asset"][3]["generated"] is True)
+    check("uploaded as png", _calls["upload"][1] == "image/png")
+    check("ctx tracks the generated image",
+          len(gctx.images_generated) == 1
+          and gctx.images_generated[0]["storage_key"].startswith(
+              "generated/1/"))
+
+    gctx2 = GenCtx({"keep": [[0.0, 30.0]], "frame": {"ratio": "9:16",
+                                                     "mode": "crop"}})
+    at.generate_image(gctx2, "vertical poster")
+    check("aspect defaults to the output frame when set",
+          _calls["gen"][1] == "9:16")
+
+    def _fake_gen_fail(prompt, out_path, aspect=None):
+        return False, "DataInspectionFailed: content policy"
+    llmmod.generate_image = _fake_gen_fail
+    r = at.generate_image(GenCtx(), "something rejected")
+    check("failure result forbids claiming success",
+          "FAILED" in r and "do NOT claim" in r)
+finally:
+    llmmod.generate_image, at.storage.upload_file, at.dbx.insert_asset = _g0
+    (cfg.IMAGE_API_URL, cfg.OPENAI_BASE_URL, cfg.IMAGE_GEN_MODEL,
+     cfg.OPENAI_API_KEY) = _old
+
+# Honesty wiring: a truthful "I made an image" on a zero-EDL-write turn is
+# not a fabrication when acted=True; the denial check still keys on the EDL.
+check("image-only turn: edit-verb sentence passes with acted",
+      _reply_violations("I made a new image of the character and can "
+                        "insert it wherever you like.",
+                        wrote=False, previewed=False, acted=True) == [])
+check("image-only turn: honest 'EDL unchanged' is not a false denial",
+      _reply_violations("The edit is unchanged — I only generated an "
+                        "image so far.",
+                        wrote=False, previewed=False, acted=True) == [])
+check("no action at all still catches fabricated edits",
+      len(_reply_violations("I've added the image at 5s.",
+                            wrote=False, previewed=False, acted=False)) == 1)
 
 print(f"\nALL {PASS} CHECKS PASSED")

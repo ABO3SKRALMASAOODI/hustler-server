@@ -157,11 +157,12 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
             "exist, generated from the tool registry:\n"
             + agent_tools.capabilities_digest()
             + "\nNothing else exists. If the user asks for anything not "
-            "listed (speed changes, stickers/GIF overlays, custom fonts, "
-            "generated motion graphics, ...), say so plainly and offer the "
-            "closest listed alternative — NEVER describe a change these "
-            "tools cannot make, and NEVER claim something is impossible "
-            "when a tool above covers it.")
+            "listed (speed changes, stickers/GIF overlays pinned on top of "
+            "moving footage, custom fonts, generated VIDEO footage or "
+            "motion graphics, ...), say so plainly and offer the closest "
+            "listed alternative — NEVER describe a change these tools "
+            "cannot make, and NEVER claim something is impossible when a "
+            "tool above covers it.")
 
     msgs = [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "system", "content": caps},
@@ -381,16 +382,20 @@ def _offered_claim(draft, m):
     return bool(OFFER_WORDS.search(draft[sent_start:m.start()]))
 
 
-def _reply_violations(draft, wrote, previewed):
+def _reply_violations(draft, wrote, previewed, acted=None):
     """Each violation names the exact fabricated claim it matched, so the
-    regeneration correction (and the logs) point at the offending words."""
+    regeneration correction (and the logs) point at the offending words.
+    acted covers non-EDL actions (a generated image): "I made an image" is
+    a truthful edit-verb sentence on a zero-write turn, while a denial
+    check must still key on the EDL alone."""
+    acted = wrote if acted is None else acted
     v = []
     # An explicit denial ("nothing was changed") dominates — its own words
     # ("changes were made") must not read as a change claim.
     m = next((mm for mm in EDIT_CLAIM.finditer(draft)
               if not _negated_claim(draft, mm)
               and not _offered_claim(draft, mm)), None)
-    if not wrote and m and not DENY_CLAIM.search(draft):
+    if not acted and m and not DENY_CLAIM.search(draft):
         v.append(f'claims edits ("{m.group(0).strip()}"), but no write tool '
                  "succeeded this turn")
     m = RENDER_CLAIM.search(draft)
@@ -412,6 +417,12 @@ def _turn_facts(ctx, start_version):
     else:
         edl_line = f"EDL: unchanged (v{latest['version']})"
     writes = ", ".join(ctx.write_calls) if ctx.write_calls else "none"
+    if ctx.images_generated:
+        images = (", ".join(i["storage_key"] for i in ctx.images_generated)
+                  + " — a generated image is IN the video only if an "
+                    "insert_media write also succeeded")
+    else:
+        images = "none"
     if ctx.last_preview is not None:
         pv = (f"rendered v{ctx.last_preview.get('edl_version')} "
               f"({ctx.last_preview.get('duration_s')}s)")
@@ -422,6 +433,7 @@ def _turn_facts(ctx, start_version):
     return ("TURN FACTS (system-verified):\n"
             f"- {edl_line}\n"
             f"- Successful write tools this turn: {writes}\n"
+            f"- Images generated this turn: {images}\n"
             f"- Preview: {pv}\n"
             "Rules: your reply may not claim any change, render, or setting "
             "that is not present in these facts. If no writes occurred, say "
@@ -454,10 +466,13 @@ ALTERNATIVE_HINTS = [
      "What I CAN do: mix uploaded music under the edit on any time range, "
      "make existing music or narration louder/quieter, remove it, or lay an "
      "uploaded voiceover over the edit (other audio ducks while it speaks)."),
-    (re.compile(r"(?i)insert|splice|b.?roll|logo|image|photo|clip|overlay"),
+    (re.compile(r"(?i)insert|splice|b.?roll|logo|image|photo|clip|overlay|"
+                r"generat|create|draw|ai.?(?:image|art)|hair|face|character"),
      "What I CAN do: splice an uploaded video clip or image in at ANY "
-     "point — even mid-sentence (the take is split at a word edge) — "
-     "attach or upload it and tell me where."),
+     "point — even mid-sentence (the take is split at a word edge) — and "
+     "generate images with AI (from a description, or by restyling a "
+     "frame of your video) that get spliced in as full-frame still "
+     "moments."),
     (re.compile(r"(?i)cut|trim|remove|shorten|tighten|silence|pause"),
      "What I CAN do: cut or restore any time range with word-accurate "
      "boundaries, and remove silences."),
@@ -471,6 +486,12 @@ FALLBACK_REPLY = ("I wasn't able to make that change — it needs a "
 def _nearest_alternative(user_text):
     for rx, hint in ALTERNATIVE_HINTS:
         if rx.search(user_text or ""):
+            if ("generate images with AI" in hint
+                    and not llm.image_available()):
+                return ("What I CAN do: splice an uploaded video clip or "
+                        "image in at ANY point — even mid-sentence (the "
+                        "take is split at a word edge) — attach or upload "
+                        "it and tell me where.")
             return hint
     return None
 
@@ -485,8 +506,9 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     inspection. (A wrote-but-denies redraft keeps the corrective-note path:
     a denial is wrong but not a fabrication worth suppressing.)"""
     wrote = bool(ctx.versions_written)
+    acted = bool(ctx.versions_written or ctx.images_generated)
     previewed = ctx.last_preview is not None
-    viol = _reply_violations(draft, wrote, previewed)
+    viol = _reply_violations(draft, wrote, previewed, acted)
     if not viol:
         return draft
     honesty["false_claims"] += 1
@@ -515,12 +537,12 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
         redraft = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[honesty] regeneration failed: {e}", flush=True)
-    if redraft and not _reply_violations(redraft, wrote, previewed):
+    if redraft and not _reply_violations(redraft, wrote, previewed, acted):
         return redraft
     honesty["false_claims"] += 1
     honesty["corrective_note"] = True
     honesty["discarded_drafts"] = [d for d in (draft, redraft) if d]
-    if wrote:
+    if wrote or ctx.images_generated:
         print(f"[honesty] job {ctx.job['id']}: regeneration still denies "
               "real changes — posting a corrective note", flush=True)
         return ("*(system: this turn DID modify the edit — see the editing "

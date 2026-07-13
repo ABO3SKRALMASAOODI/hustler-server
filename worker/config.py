@@ -23,6 +23,19 @@ VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-plus")
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
+# Image generation / editing (DashScope multimodal-generation API — not part
+# of the OpenAI-compatible surface, so it gets its own endpoint). Empty
+# IMAGE_GEN_MODEL disables the generate_image tool gracefully, same contract
+# as VISION_MODEL. IMAGE_API_URL overrides the endpoint; when empty it is
+# derived from OPENAI_BASE_URL (works for dashscope / dashscope-intl; any
+# non-DashScope base disables image features unless IMAGE_API_URL is set).
+IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "qwen-image-plus")
+IMAGE_EDIT_MODEL = os.getenv("IMAGE_EDIT_MODEL", "qwen-image-edit")
+IMAGE_API_URL = os.getenv("IMAGE_API_URL", "")
+IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
+MAX_GENERATED_IMAGES_PER_TURN = int(
+    os.getenv("MAX_GENERATED_IMAGES_PER_TURN", "4"))
+
 # Bump whenever the index pipeline's OUTPUT changes (segmentation rules,
 # VAD settings, schema...): cached indexes from older pipeline versions are
 # re-built instead of served. Keep in sync with backend/routes/video.py.

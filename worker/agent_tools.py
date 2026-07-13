@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import uuid
 
 import audit
 import config
@@ -49,6 +50,7 @@ class ToolContext:
         self.rendered_versions = set()  # versions with a successful preview
         self.autorendered = False     # loop set: model skipped render_preview
         self.write_calls = []         # successful write tool names this turn
+        self.images_generated = []    # assets created by generate_image
 
     def clamp(self, t):
         try:
@@ -1237,6 +1239,127 @@ def remove_voiceover(ctx, id):
              f"('{os.path.basename(hit['asset_key'])}')")
 
 
+IMAGE_ASPECTS = ("16:9", "9:16", "1:1", "4:3", "3:4")
+
+
+def _default_image_aspect(ctx):
+    """Aspect for a generated image when the model doesn't pass one: the
+    output frame if set (so full-frame inserts fill it), else the nearest
+    supported aspect to the source video."""
+    try:
+        ratio = ((ctx.latest_edl()["json"].get("frame") or {})
+                 .get("ratio"))
+    except Exception:
+        ratio = None
+    if ratio in IMAGE_ASPECTS:
+        return ratio
+    if ratio == "4:5":
+        return "3:4"
+    v = ctx.index["video"]
+    if not v.get("width") or not v.get("height"):
+        return "16:9"
+    r = float(v["width"]) / float(v["height"])
+    return min((("16:9", 16 / 9), ("9:16", 9 / 16), ("1:1", 1.0),
+                ("4:3", 4 / 3), ("3:4", 3 / 4)),
+               key=lambda a: abs(a[1] - r))[0]
+
+
+def generate_image(ctx, prompt, from_video_time_s=None, from_asset_key=None,
+                   aspect=None):
+    """Create an image with AI: pure text-to-image, restyle a frame of the
+    main video, or restyle an uploaded image. The result becomes a project
+    image asset the model must then insert_media to actually use."""
+    if not llm.image_available():
+        return ("Image generation is unavailable (no image model "
+                "configured). Tell the user honestly and offer the "
+                "non-generative alternatives instead.")
+    p = (prompt or "").strip()
+    if not p:
+        return ("REJECTED: prompt is empty — describe the image to create, "
+                "or the change to make to the frame/image.")
+    if from_video_time_s is not None and from_asset_key:
+        return ("REJECTED: pass EITHER from_video_time_s (restyle a frame "
+                "of the main video) OR from_asset_key (restyle an uploaded "
+                "image), not both.")
+    if len(ctx.images_generated) >= config.MAX_GENERATED_IMAGES_PER_TURN:
+        return (f"REJECTED: already generated "
+                f"{config.MAX_GENERATED_IMAGES_PER_TURN} images this turn "
+                "(the per-turn limit). Insert what you have, or continue "
+                "in the next message.")
+    if aspect is not None:
+        aspect = str(aspect).strip()
+        if aspect not in IMAGE_ASPECTS:
+            return (f"REJECTED: aspect must be one of "
+                    f"{', '.join(IMAGE_ASPECTS)}.")
+
+    n = len(ctx.images_generated) + 1
+    out_path = os.path.join(ctx.workdir, f"gen_{n}.png")
+    if from_video_time_s is not None:
+        try:
+            t = ctx.clamp(from_video_time_s)
+        except ValueError as err:
+            return f"REJECTED: {err}"
+        try:
+            frame_path = os.path.join(ctx.workdir, f"gen_src_{n}.jpg")
+            media.frame_at(ctx.proxy_path(), t, frame_path, quality=2)
+        except Exception as e:
+            return f"Could not extract the frame at {t}s ({str(e)[:160]})."
+        ok, err = llm.edit_image(frame_path, p, out_path,
+                                 image_name=f"proxy frame @{t:.2f}s")
+        source_desc = f"made by restyling the source frame at {t}s"
+    elif from_asset_key:
+        asset, err = _resolve_media_asset(ctx, from_asset_key, ("image_ref",))
+        if err:
+            return err
+        try:
+            local = _asset_local_path(ctx, asset)
+        except Exception as e:
+            return f"Cannot fetch that image right now ({str(e)[:160]})."
+        name = (asset.get("meta") or {}).get("filename") or \
+            os.path.basename(from_asset_key)
+        ok, err = llm.edit_image(local, p, out_path, image_name=name)
+        source_desc = f"made by restyling the uploaded image '{name}'"
+    else:
+        aspect = aspect or _default_image_aspect(ctx)
+        ok, err = llm.generate_image(p, out_path, aspect=aspect)
+        source_desc = f"generated from the text prompt ({aspect})"
+    if not ok:
+        return (f"Image generation FAILED: {err}. If this looks like a "
+                "content-policy rejection, reword the prompt; otherwise "
+                "try once more or tell the user it didn't work — do NOT "
+                "claim an image was created.")
+
+    try:
+        from PIL import Image
+        with Image.open(out_path) as im:
+            width, height = im.size
+    except Exception:
+        width = height = None
+    key = f"generated/{ctx.project_id}/{uuid.uuid4().hex[:12]}.png"
+    try:
+        storage.upload_file(out_path, key, "image/png")
+    except Exception as e:
+        return (f"The image was generated but could not be saved to "
+                f"storage ({str(e)[:160]}). Try again.")
+    caption = f"AI-generated image ({source_desc}): {p[:300]}"
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "image_ref", key,
+               bytes_=os.path.getsize(out_path), width=width, height=height,
+               meta={"filename": f"generated-{n}.png", "caption": caption,
+                     "generated": True,
+                     "model": (config.IMAGE_EDIT_MODEL
+                               if (from_video_time_s is not None
+                                   or from_asset_key)
+                               else config.IMAGE_GEN_MODEL)})
+    ctx.images_generated.append({"storage_key": key, "prompt": p[:200]})
+    dims = f" ({width}x{height})" if width else ""
+    return (f"Generated image saved: storage_key={key}{dims} — "
+            f"{source_desc}. It is NOT in the video yet: splice it in with "
+            f"insert_media(asset_key='{key}', at_output_s=..., "
+            "duration_s=2-4, motion='zoom_in'), or check it first with "
+            "look_at_asset. It will appear as a full-frame still moment — "
+            "the moving footage itself is not modified.")
+
+
 # ------------------------------------------------------------------ #
 #  META tools                                                          #
 # ------------------------------------------------------------------ #
@@ -1578,6 +1701,27 @@ TOOLS = {
                       "exactly. If an insert landed wrong, remove it BEFORE "
                       "re-inserting, or the old one stays in the video.",
                       {"id": {"type": "string"}}),
+    "generate_image": (generate_image, "Create an image with AI — from a "
+                       "text prompt alone, by RESTYLING A FRAME of the main "
+                       "video (from_video_time_s, e.g. 'give this character "
+                       "a long Ariana Grande-style ponytail'), or by "
+                       "restyling an uploaded image (from_asset_key). The "
+                       "result is saved as a project image asset; it "
+                       "appears in the video ONLY after you insert_media "
+                       "its storage_key (typically 2-4s with a Ken Burns "
+                       "motion). It lands as a full-frame STILL moment — "
+                       "it does not modify or track the moving footage. "
+                       "For 'put X on the character': pick the best moment "
+                       "(get_shots / look_at), restyle that frame, insert "
+                       "it right there, and tell the user it's a "
+                       "freeze-frame moment. aspect (text-to-image only) "
+                       "defaults to the output frame / source ratio.",
+                       {"prompt": {"type": "string"},
+                        "from_video_time_s": {"type": "number"},
+                        "from_asset_key": {"type": "string"},
+                        "aspect": {"type": "string",
+                                   "enum": ["16:9", "9:16", "1:1",
+                                            "4:3", "3:4"]}}),
     "set_color_grade": (set_color_grade, "Apply a color-grade preset to the "
                         "whole video (captions stay unstyled): vibrant, "
                         "warm, cool, bw, vintage, cinematic — or 'none' to "
@@ -1663,17 +1807,28 @@ REQUIRED_ARGS = {
     "set_transitions": ["style"],
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
+    "generate_image": ["prompt"],
     "ask_user": ["question"],
 }
 
 # The loop uses this to build TURN FACTS: a write "succeeded" when its result
 # is a version diff line (write_edl's "EDL vX -> vY: ..." format).
+# generate_image is here for the capabilities digest; its successes are
+# tracked separately via ctx.images_generated (it never writes the EDL).
 WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range", "add_captions",
                "set_caption_style", "add_music", "remove_music",
                "set_audio_gain", "set_volume", "set_frame",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
-               "remove_zoom", "set_fades", "set_transitions"}
+               "remove_zoom", "set_fades", "set_transitions",
+               "generate_image"}
+
+
+def _tool_disabled(name):
+    """Tools whose backing service is not configured are hidden entirely —
+    the model must never see (or advertise) a capability that would only
+    return 'unavailable'."""
+    return name == "generate_image" and not llm.image_available()
 
 
 def capabilities_digest():
@@ -1682,7 +1837,7 @@ def capabilities_digest():
     can never go stale because nobody maintains it by hand."""
     lines = []
     for name, (_fn, desc, props) in TOOLS.items():
-        if name not in WRITE_TOOLS:
+        if name not in WRITE_TOOLS or _tool_disabled(name):
             continue
         params = ", ".join(props.keys())
         first = desc.split(". ")[0].rstrip(".")
@@ -1693,6 +1848,8 @@ def capabilities_digest():
 def openai_tools():
     out = []
     for name, (_fn, desc, props) in TOOLS.items():
+        if _tool_disabled(name):
+            continue
         out.append({
             "type": "function",
             "function": {
