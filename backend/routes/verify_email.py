@@ -115,16 +115,8 @@ def verify_code():
 
     return jsonify({'message': 'Email verified successfully'}), 200
 
-# ✅ Debug route
-@verify_bp.route('/debug/email-codes')
-def debug_email_codes():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM email_codes")
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return jsonify(rows)
+# (debug email-codes route removed — it let unauthenticated callers dump
+# every pending verification code and hijack signups)
 
 # ✅ Utility (optional)
 def send_code_to_email(email, code):

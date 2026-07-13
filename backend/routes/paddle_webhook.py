@@ -1,3 +1,8 @@
+import hashlib
+import hmac
+import os
+import time
+
 from flask import Blueprint, request
 from models import update_user_subscription_status
 from datetime import datetime
@@ -13,9 +18,41 @@ PLAN_CREDITS = {
     'free':  0,
 }
 
+# Paddle signs every webhook (Paddle-Signature: "ts=...;h1=...", where h1 is
+# HMAC-SHA256 of "ts:raw_body" with the endpoint's secret key from
+# Paddle > Developer tools > Notifications). Without verification anyone who
+# reads the URL can grant themselves any plan. Enforced when
+# PADDLE_WEBHOOK_SECRET is set; until then requests pass with a loud warning
+# so payments don't break before the env var is configured.
+PADDLE_WEBHOOK_SECRET = os.getenv("PADDLE_WEBHOOK_SECRET", "")
+
+
+def _verify_paddle_signature(req):
+    header = req.headers.get("Paddle-Signature", "")
+    parts = dict(p.split("=", 1) for p in header.split(";") if "=" in p)
+    ts, h1 = parts.get("ts"), parts.get("h1")
+    if not ts or not h1:
+        return False
+    try:
+        if abs(time.time() - int(ts)) > 300:   # stale/replayed event
+            return False
+    except ValueError:
+        return False
+    signed = f"{ts}:".encode() + req.get_data()
+    expected = hmac.new(PADDLE_WEBHOOK_SECRET.encode(), signed,
+                        hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, h1)
+
 
 @paddle_webhook.route('/webhook/paddle', methods=['POST'])
 def handle_webhook():
+    if PADDLE_WEBHOOK_SECRET:
+        if not _verify_paddle_signature(request):
+            print("⛔ Paddle webhook rejected: bad or missing signature")
+            return 'Invalid signature', 403
+    else:
+        print("⚠️  PADDLE_WEBHOOK_SECRET is not set — webhook signature "
+              "NOT verified. Set it in the Render env ASAP.")
     payload = request.get_json(force=True)
     print("🔔 Webhook received:", payload.get('event_type'))
 
@@ -38,7 +75,11 @@ def handle_webhook():
     plan = custom_data.get('plan', 'plus')
     billing = custom_data.get('billing', 'monthly')
     subscription_id = data.get('subscription_id') or data.get('id')
-    monthly_credits = PLAN_CREDITS.get(plan, 1000)
+    # Unknown plan names grant nothing (they used to default to 1000
+    # credits, which a forged custom_data string could mint).
+    if plan not in PLAN_CREDITS:
+        print(f"⛔ Webhook with unknown plan '{plan}' — granting 0 credits")
+    monthly_credits = PLAN_CREDITS.get(plan, 0)
 
     if event_type in ('transaction.completed', 'transaction.paid',
                       'subscription.created', 'subscription.updated'):

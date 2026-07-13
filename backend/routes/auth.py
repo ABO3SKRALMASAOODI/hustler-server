@@ -467,11 +467,28 @@ def reset_password():
     data         = request.get_json()
     email        = data.get('email')
     new_password = data.get('password')
+    code         = data.get('code')
     if not email or not new_password:
         return jsonify({'error': 'Email and new password are required'}), 400
-    hashed_pw = generate_password_hash(new_password)
+    if not code:
+        return jsonify({'error': 'Reset code is required'}), 400
     conn      = get_db()
     cursor    = conn.cursor()
+    cursor.execute(
+        "SELECT code, expires_at FROM password_reset_codes WHERE email = %s",
+        (email,)
+    )
+    row = cursor.fetchone()
+    if not row or str(row['code']).strip() != str(code).strip():
+        cursor.close(); conn.close()
+        return jsonify({'error': 'Invalid or missing reset code'}), 403
+    expires_at = row['expires_at']
+    if isinstance(expires_at, str):
+        expires_at = datetime.datetime.fromisoformat(expires_at)
+    if expires_at < datetime.datetime.utcnow():
+        cursor.close(); conn.close()
+        return jsonify({'error': 'Code expired'}), 400
+    hashed_pw = generate_password_hash(new_password)
     cursor.execute("UPDATE users SET password = %s WHERE email = %s", (hashed_pw, email))
     cursor.execute("DELETE FROM password_reset_codes WHERE email = %s", (email,))
     conn.commit()

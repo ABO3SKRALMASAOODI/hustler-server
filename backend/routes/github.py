@@ -9,8 +9,10 @@ from psycopg2.extras import RealDictCursor
 
 github_bp = Blueprint('github', __name__)
 
+# Secret comes from env only — the previous hardcoded fallback is in git
+# history and must be treated as leaked (rotate it in the GitHub OAuth app).
 GITHUB_CLIENT_ID     = os.getenv("GITHUB_CLIENT_ID", "Ov23liUC5tA7pNQbfiWo")
-GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "09bb3bfeb91a83b34200e642ba0a980232d5d7c0")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUTPUTS_DIR  = os.path.join(PROJECT_ROOT, "outputs")
