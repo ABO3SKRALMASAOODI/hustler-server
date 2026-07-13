@@ -97,6 +97,58 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid):
             f"crop={W}:{H},{tail}[{out_label}]")
 
 
+def _region_parts(parts, in_label, out_label, regions, sw, sh,
+                  seg_start, seg_dur, uid):
+    """Censor-region chain for ONE source segment, in SOURCE-frame pixels
+    (the coordinate space the agent measures with look_at). Windowed regions
+    are mapped from program time to segment-local time; regions whose window
+    misses this segment entirely are skipped. Always ends on out_label."""
+    todo = []
+    for rg in regions:
+        if rg.get("start") is not None and rg.get("end") is not None:
+            a = max(0.0, float(rg["start"]) - seg_start)
+            b = min(seg_dur, float(rg["end"]) - seg_start)
+            if b - a < 0.02:
+                continue
+            win = None if (a <= 0.01 and b >= seg_dur - 0.01) else (a, b)
+        else:
+            win = None
+        todo.append((rg, win))
+    if not todo:
+        parts.append(f"[{in_label}]null[{out_label}]")
+        return
+    cur = in_label
+    for k, (rg, win) in enumerate(todo):
+        rx = min(int(round(float(rg["x"]) * sw)), sw - 4)
+        ry = min(int(round(float(rg["y"]) * sh)), sh - 4)
+        rw = min(max(4, int(round(float(rg["w"]) * sw))), sw - rx)
+        rh = min(max(4, int(round(float(rg["h"]) * sh))), sh - ry)
+        enable = (f":enable='between(t,{win[0]:.2f},{win[1]:.2f})'"
+                  if win else "")
+        last = out_label if k == len(todo) - 1 else f"rgc{uid}_{k}"
+        if rg.get("mode") == "black":
+            parts.append(f"[{cur}]drawbox=x={rx}:y={ry}:w={rw}:h={rh}:"
+                         f"color=black:t=fill{enable}[{last}]")
+        else:
+            if rg.get("mode") == "pixelate":
+                pf = max(2, min(rw, rh) // 8)
+                obscure = (f"scale={max(2, rw // pf)}:{max(2, rh // pf)},"
+                           f"scale={rw}:{rh}:flags=neighbor")
+            else:                       # blur
+                # gblur, not boxblur: boxblur's radius must stay under the
+                # CHROMA plane's min(w,h)/2 (half the pixel dims on
+                # yuv420p), which small regions violate; gblur has no such
+                # constraint
+                sigma = max(3, min(min(rw, rh) // 6, 30))
+                obscure = f"gblur=sigma={sigma}:steps=2"
+            parts.append(f"[{cur}]split[rgA{uid}_{k}][rgB{uid}_{k}]")
+            parts.append(f"[rgA{uid}_{k}]crop={rw}:{rh}:{rx}:{ry},"
+                         f"{obscure}[rgF{uid}_{k}]")
+            parts.append(f"[rgB{uid}_{k}][rgF{uid}_{k}]overlay={rx}:{ry}"
+                         f"{enable}[{last}]")
+        cur = last
+
+
 def _speech_spans_out(index, tl):
     spans = []
     for sent in index.get("sentences", []):
@@ -112,7 +164,8 @@ def _speech_spans_out(index, tl):
 def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       music_inputs, index, preview,
                       W=None, H=None, fps=30.0, frame_mode=None,
-                      insert_inputs=None, vo_inputs=None, silence_idx=None):
+                      insert_inputs=None, vo_inputs=None, silence_idx=None,
+                      src_w=None, src_h=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -153,14 +206,47 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # identical dims/fps/audio before concat.
     fx = edl.get("effects") or {}
     zooms = fx.get("zooms") or []
+    regions = fx.get("regions") or []
     do_norm = bool(insert_inputs) or frame_mode is not None or bool(zooms)
     mode = frame_mode or "crop"
 
-    # main segments: trim, then (when needed) normalize to the output frame
+    # Censor regions are burned into each SOURCE segment BEFORE any
+    # reframe/normalization: their fractions are of the SOURCE frame
+    # (exactly what look_at showed the agent), a later crop/pad moves the
+    # censored footage as one, and inserted material is never censored.
+    sw = sh = None
+    seg_prog = []
+    if regions:
+        sw, sh = int(src_w or W), int(src_h or H)
+        # program-time start of every keep segment (inserts included), for
+        # mapping windowed regions into segment-local time — mirrors the
+        # block-order loop below
+        _at = [tl.ins[j][0] for j in range(len(insert_inputs))]
+        _pre = _prog = 0.0
+        _j = 0
+        for s, e in keep:
+            while _j < len(_at) and _at[_j] <= _pre + 1e-6:
+                _prog += float(insert_inputs[_j][1]["duration_s"])
+                _j += 1
+            seg_prog.append(_prog)
+            _pre += e - s
+            _prog += e - s
+
+    def _seg_video(i, in_label, s, e):
+        vlab = f"segv{i}" if do_norm else f"v_seg{i}"
+        if regions:
+            parts.append(f"[{in_label}]trim=start={s:.3f}:end={e:.3f},"
+                         f"setpts=PTS-STARTPTS[segraw{i}]")
+            _region_parts(parts, f"segraw{i}", vlab, regions, sw, sh,
+                          seg_prog[i], e - s, f"s{i}")
+        else:
+            parts.append(f"[{in_label}]trim=start={s:.3f}:end={e:.3f},"
+                         f"setpts=PTS-STARTPTS[{vlab}]")
+
+    # main segments: trim (+ censor regions), then (when needed) normalize
+    # to the output frame
     if n == 1:
-        vlab = "segv0" if do_norm else "v_seg0"
-        parts.append(f"[0:v]trim=start={keep[0][0]:.3f}:end={keep[0][1]:.3f},"
-                     f"setpts=PTS-STARTPTS[{vlab}]")
+        _seg_video(0, "0:v", keep[0][0], keep[0][1])
         parts.append(f"[asrc]atrim=start={keep[0][0]:.3f}:end={keep[0][1]:.3f},"
                      f"asetpts=PTS-STARTPTS"
                      + (f",{AUDIO_NORM}" if do_norm else "") + "[a_seg0]")
@@ -170,9 +256,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append("[asrc]asplit=" + str(n)
                      + "".join(f"[ain{i}]" for i in range(n)))
         for i, (s, e) in enumerate(keep):
-            vlab = f"segv{i}" if do_norm else f"v_seg{i}"
-            parts.append(f"[vin{i}]trim=start={s:.3f}:end={e:.3f},"
-                         f"setpts=PTS-STARTPTS[{vlab}]")
+            _seg_video(i, f"vin{i}", s, e)
             parts.append(f"[ain{i}]atrim=start={s:.3f}:end={e:.3f},"
                          f"asetpts=PTS-STARTPTS"
                          + (f",{AUDIO_NORM}" if do_norm else "")
@@ -453,7 +537,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
                               insert_inputs=insert_inputs,
-                              vo_inputs=vo_inputs, silence_idx=silence_idx)
+                              vo_inputs=vo_inputs, silence_idx=silence_idx,
+                              src_w=info["width"], src_h=info["height"])
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).

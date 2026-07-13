@@ -1740,4 +1740,279 @@ check("no action at all still catches fabricated edits",
       len(_reply_violations("I've added the image at 5s.",
                             wrote=False, previewed=False, acted=False)) == 1)
 
+# ─── Round 12: censor regions + honesty echo guard (user-76 failures) ──────
+
+print("== Round-12 regions: schema validation ==")
+rg_ok = validate_edl(
+    {"keep": [[0, 30]],
+     "effects": {"regions": [{"id": "rg1", "x": 0.6, "y": 0.02,
+                              "w": 0.38, "h": 0.1}]}}, 60)
+check("region EDL passes with blur default and no window",
+      rg_ok.effects.regions[0].mode == "blur" and
+      rg_ok.effects.regions[0].start is None)
+rg_clamp = validate_edl(
+    {"keep": [[0, 30]],
+     "effects": {"regions": [{"id": "rg1", "x": 0.9, "y": -0.2,
+                              "w": 0.5, "h": 0.3}]}}, 60)
+check("region rect is clamped into the frame",
+      rg_clamp.effects.regions[0].y == 0.0 and
+      abs(rg_clamp.effects.regions[0].w - 0.1) < 1e-9)
+expect_reject("region too small",
+              {"keep": [[0, 30]],
+               "effects": {"regions": [{"id": "rg1", "x": 0.5, "y": 0.5,
+                                        "w": 0.005, "h": 0.2}]}}, 60)
+expect_reject("region start without end",
+              {"keep": [[0, 30]],
+               "effects": {"regions": [{"id": "rg1", "x": 0.1, "y": 0.1,
+                                        "w": 0.2, "h": 0.2,
+                                        "start": 1.0}]}}, 60)
+expect_reject("region window beyond the program",
+              {"keep": [[0, 30]],
+               "effects": {"regions": [{"id": "rg1", "x": 0.1, "y": 0.1,
+                                        "w": 0.2, "h": 0.2,
+                                        "start": 0.0, "end": 45.0}]}}, 60)
+expect_reject("duplicate region ids",
+              {"keep": [[0, 30]],
+               "effects": {"regions": [
+                   {"id": "rg1", "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+                   {"id": "rg1", "x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}]}},
+              60)
+check("empty regions list is the absence of regions",
+      validate_edl({"keep": [[0, 30]],
+                    "effects": {"regions": []}}, 60).effects is None)
+rg_old = validate_edl({"keep": [[0, 30]],
+                       "effects": {"grade": "warm"}}, 60).model_dump()
+rg_stored = json.loads(json.dumps(rg_old))
+del rg_stored["effects"]["regions"]     # a pre-round-12 stored row
+check("pre-round-12 effects EDLs keep their signature",
+      edl_signature(rg_stored) == edl_signature(rg_old))
+
+print("== Round-12 regions: filtergraph ==")
+rgn_edl = validate_edl(
+    {"keep": [[0, 20]],
+     "effects": {"regions": [{"id": "rg1", "x": 0.6, "y": 0.02,
+                              "w": 0.38, "h": 0.1}]}}, 60).model_dump()
+g_rg = build_filtergraph(rgn_edl, 60.0, True, Timeline(rgn_edl["keep"]),
+                         None, [], index, preview=False,
+                         W=720, H=720, fps=30.0, frame_mode=None)
+check("blur region crops the rectangle at exact pixels",
+      "crop=274:72:432:14" in g_rg)
+check("blur region blurs and overlays back onto the segment",
+      "gblur=sigma=12:steps=2" in g_rg and "overlay=432:14[v_seg0]" in g_rg)
+check("regions alone do not force normalization",
+      "scale=720:720" not in g_rg)
+rgb_edl = validate_edl(
+    {"keep": [[0, 20]],
+     "effects": {"regions": [{"id": "rg1", "mode": "black", "x": 0.0,
+                              "y": 0.0, "w": 0.5, "h": 0.2,
+                              "start": 1.0, "end": 5.0}]}}, 60).model_dump()
+g_rgb = build_filtergraph(rgb_edl, 60.0, True, Timeline(rgb_edl["keep"]),
+                          None, [], index, preview=False,
+                          W=720, H=720, fps=30.0, frame_mode=None)
+check("black region is a filled drawbox limited to its window",
+      "drawbox=x=0:y=0:w=360:h=144:color=black:t=fill"
+      ":enable='between(t,1.00,5.00)'" in g_rgb)
+rgp_edl = validate_edl(
+    {"keep": [[0, 20]],
+     "effects": {"regions": [{"id": "rg1", "mode": "pixelate", "x": 0.25,
+                              "y": 0.25, "w": 0.5, "h": 0.5}]}},
+    60).model_dump()
+g_rgp = build_filtergraph(rgp_edl, 60.0, True, Timeline(rgp_edl["keep"]),
+                          None, [], index, preview=False,
+                          W=720, H=720, fps=30.0, frame_mode=None)
+check("pixelate region downscales then neighbor-upscales",
+      "flags=neighbor" in g_rgp)
+
+# review round: regions are SOURCE-frame coords applied per segment BEFORE
+# the reframe — a 9:16 pad must not smear the letterbox bar, and inserted
+# material must never be censored
+g_rgf = build_filtergraph(rgn_edl, 60.0, True, Timeline(rgn_edl["keep"]),
+                          None, [], index, preview=False,
+                          W=1080, H=1920, fps=30.0, frame_mode="pad",
+                          src_w=1920, src_h=1080)
+check("region pixels come from the SOURCE dims, not the output canvas",
+      "crop=730:108:1152:22" in g_rgf)
+check("region is burned in before the pad normalization",
+      g_rgf.index("overlay=1152:22") < g_rgf.index("pad=1080:1920"))
+rgw_edl = validate_edl(
+    {"keep": [[0, 2], [3, 5]],
+     "effects": {"regions": [{"id": "rg1", "mode": "black", "x": 0.0,
+                              "y": 0.0, "w": 0.5, "h": 0.2,
+                              "start": 0.5, "end": 3.0}]}}, 60).model_dump()
+g_rgw = build_filtergraph(rgw_edl, 60.0, True, Timeline(rgw_edl["keep"]),
+                          None, [], index, preview=False,
+                          W=720, H=720, fps=30.0, frame_mode=None)
+check("windowed region maps program time into each segment's local time",
+      "enable='between(t,0.50,2.00)'" in g_rgw and
+      "enable='between(t,0.00,1.00)'" in g_rgw)
+rgi_edl = validate_edl(
+    {"keep": [[0, 5], [5, 10]],
+     "inserts": [{"id": "ins1", "asset_key": "clips/1/rec.mp4",
+                  "kind": "video", "at_output_s": 5.0, "duration_s": 2.5}],
+     "effects": {"regions": [{"id": "rg1", "x": 0.6, "y": 0.02,
+                              "w": 0.38, "h": 0.1}]}}, 60).model_dump()
+rgi_tl = Timeline(rgi_edl["keep"], rgi_edl["inserts"])
+g_rgi = build_filtergraph(rgi_edl, 60.0, True, rgi_tl, None, [], index,
+                          preview=False, W=720, H=720, fps=30.0,
+                          frame_mode=None,
+                          insert_inputs=[(2, rgi_edl["inserts"][0], True)],
+                          silence_idx=1)
+check("whole-video region censors each source segment once",
+      g_rgi.count("gblur") == 2)
+check("inserted clips are never censored",
+      "[insv0]scale=" in g_rgi)
+
+print("== Round-12 blur_region / remove_blur tools ==")
+tctx = ToolCtx({"keep": [[0.0, 20.0]]})
+r = agent_tools.blur_region(tctx, 0.6, 0.02, 0.38, 0.1)
+check("blur_region writes a region with an id, blur mode implicit",
+      tctx.written["effects"]["regions"][0]["id"] == "rg1" and
+      "mode" not in tctx.written["effects"]["regions"][0])
+check("blur_region success demands sheet verification",
+      "CHECK the sheet" in r)
+check("blur_region rejects pixel coordinates with guidance",
+      agent_tools.blur_region(ToolCtx({}), 300, 20, 200, 50)
+      .startswith("REJECTED"))
+check("blur_region rejects an unknown mode",
+      agent_tools.blur_region(ToolCtx({}), 0.1, 0.1, 0.2, 0.2,
+                              mode="rainbow").startswith("REJECTED"))
+check("blur_region rejects start without end",
+      agent_tools.blur_region(ToolCtx({}), 0.1, 0.1, 0.2, 0.2, start=1.0)
+      .startswith("REJECTED"))
+RG_EDL = {"keep": [[0.0, 20.0]],
+          "effects": {"regions": [{"id": "rg1", "x": 0.1, "y": 0.1,
+                                   "w": 0.2, "h": 0.2}]}}
+rmctx = ToolCtx(json.loads(json.dumps(RG_EDL)))
+agent_tools.remove_blur(rmctx)
+check("remove_blur with no id clears all regions",
+      rmctx.written["effects"]["regions"] == [])
+check("remove_blur unknown id lists existing ones",
+      "rg1" in agent_tools.remove_blur(
+          ToolCtx(json.loads(json.dumps(RG_EDL))), "zz"))
+check("remove_blur with none present is NO CHANGE",
+      agent_tools.remove_blur(ToolCtx({"keep": [[0.0, 5.0]]}))
+      .startswith("NO CHANGE"))
+check("capabilities digest advertises the censor tool",
+      "blur_region" in agent_tools.capabilities_digest())
+# review round: x=1.0 would clamp to a useless 1% sliver reported as
+# success; an empty-string id must not silently mean 'remove all'
+check("blur_region rejects a box that falls off the frame edge",
+      "TOP-LEFT" in agent_tools.blur_region(ToolCtx({}), 1.0, 0.4,
+                                            0.3, 0.1))
+check("remove_blur rejects an empty-string id",
+      agent_tools.remove_blur(ToolCtx(json.loads(json.dumps(RG_EDL))),
+                              "").startswith("REJECTED"))
+check("schema coerces mode null to blur (TS mirror allows null)",
+      validate_edl({"keep": [[0, 30]],
+                    "effects": {"regions": [{"id": "rg1", "mode": None,
+                                             "x": 0.6, "y": 0.02,
+                                             "w": 0.38, "h": 0.1}]}},
+                   60).effects.regions[0].mode == "blur")
+
+print("== Round-12 honesty: versioned render claims + echo guard ==")
+PROD_ECHO = ("The preview is now clean: no black frames, no distortion, no "
+             "overexposure — just a consistent desert scene with the text "
+             "overlay and an intentional costume change at 0:01–0:02.\n\n"
+             "Final edit:\n- Kept [0.0–1.8s]: stable opening shot\n"
+             "- Dip-black transition masks the jump\n"
+             "- Total duration: 4.06 seconds\n\n"
+             "Preview v6 is attached and ready.")
+check("versioned render claim is caught ('Preview v6 is attached')",
+      al.RENDER_CLAIM.search("Preview v6 is attached and ready."))
+check("the job-135 echoed reply now violates on a zero-render turn",
+      len(al._reply_violations(PROD_ECHO, wrote=False, previewed=False))
+      >= 1)
+check("honest 'no preview was rendered' still passes",
+      al._reply_violations("No preview was rendered because nothing "
+                           "changed.", wrote=False, previewed=False) == [])
+echo_msgs = [{"role": "system", "content": "facts"},
+             {"role": "assistant", "content": PROD_ECHO},
+             {"role": "user", "content": "The edit failed. Start over."}]
+check("verbatim echo of the previous reply is detected",
+      al._echo_violation(PROD_ECHO, echo_msgs) is not None)
+check("near-verbatim echo (whitespace/case drift) is detected",
+      al._echo_violation(PROD_ECHO.upper().replace("\n", "  "),
+                         echo_msgs) is not None)
+check("a fresh reply is not an echo",
+      al._echo_violation(
+          "Understood — I restored the full 15-second video, removed the "
+          "dip-black transitions, and rendered a new preview so you can "
+          "confirm the original footage is back untouched.",
+          echo_msgs) is None)
+check("short repeated answers are exempt",
+      al._echo_violation("Yes.", [{"role": "assistant",
+                                   "content": "Yes."}]) is None)
+check("this turn's tool-call carrier messages are ignored",
+      al._echo_violation(PROD_ECHO,
+                         [{"role": "assistant", "content": PROD_ECHO,
+                           "tool_calls": [{"id": "t1"}]}]) is None)
+# review round: a longer fresh reply sharing a formulaic opener with a
+# short earlier reply must not be clipped to the opener's length and
+# flagged; only a truncated history copy justifies prefix comparison
+OPENER = ("I placed a blur region over the username in the top-right "
+          "corner and rendered a fresh preview for you to check.")
+check("longer fresh reply sharing an opener is NOT an echo",
+      al._echo_violation(
+          OPENER + " This time I widened the box to cover the last two "
+          "characters that were still visible, re-rendered, and the sheet "
+          "now shows the whole tag hidden across every frame I sampled — "
+          "the gameplay around it is untouched and everything else in the "
+          "edit stays exactly as it was.",
+          [{"role": "assistant", "content": OPENER}]) is None)
+LONGPREV = ("the preview shows the full edit with every requested change "
+            "applied and nothing else modified anywhere in the timeline. "
+            ) * 20
+check("echo of a truncation-length reply is still caught by prefix",
+      al._echo_violation(LONGPREV + "and this tail differs completely "
+                         "from anything stored in the history copy",
+                         [{"role": "assistant",
+                           "content": LONGPREV[:2000]}]) is not None)
+
+print("== Round-12 keep_segments large-drop warning ==")
+
+
+class DropCtx(ToolCtx):
+    def __init__(self, edl):
+        super().__init__(edl)
+        self.index = {"words": [], "silences": [],
+                      "video": {"duration": 60.0}}
+        self.duration = 60.0
+
+    def clamp(self, t):
+        return round(min(max(float(t), 0.0), 60.0), 2)
+
+
+r = agent_tools.keep_segments(DropCtx({"keep": [[0.0, 60.0]]}), [[0.0, 4.0]])
+check("dropping 93% of the kept footage warns loudly",
+      "WARNING (large drop)" in r and "EXPLICITLY" in r)
+r2 = agent_tools.keep_segments(DropCtx({"keep": [[0.0, 60.0]]}),
+                               [[0.0, 40.0]])
+check("a modest trim does not warn", "large drop" not in r2)
+# review round: cut_range can destroy just as much footage as keep_segments
+r3 = agent_tools.cut_range(DropCtx({"keep": [[0.0, 60.0]]}), 0, 45)
+check("an equally destructive cut_range warns too",
+      "WARNING (large drop)" in r3)
+
+print("== Round-12 review: shortening clamps region windows ==")
+RGWIN_EDL = {"keep": [[0.0, 60.0]],
+             "effects": {"regions": [{"id": "rg1", "x": 0.6, "y": 0.02,
+                                      "w": 0.38, "h": 0.1,
+                                      "start": 10.0, "end": 40.0}]}}
+wctx = DropCtx(json.loads(json.dumps(RGWIN_EDL)))
+r = agent_tools.keep_segments(wctx, [[0.0, 20.0]])
+check("shortening below a region window succeeds and clamps it",
+      r.startswith("EDL v") and "now ends at 20.0s" in r and
+      wctx.written["effects"]["regions"][0]["end"] == 20.0)
+RGOUT_EDL = {"keep": [[0.0, 60.0]],
+             "effects": {"regions": [{"id": "rg1", "x": 0.6, "y": 0.02,
+                                      "w": 0.38, "h": 0.1,
+                                      "start": 30.0, "end": 50.0}]}}
+octx = DropCtx(json.loads(json.dumps(RGOUT_EDL)))
+r = agent_tools.keep_segments(octx, [[0.0, 20.0]])
+check("a region whose window vanishes is dropped with a note",
+      r.startswith("EDL v") and "was removed" in r and
+      octx.written["effects"]["regions"] == [])
+check("the stored previous version was not mutated in place",
+      wctx._edl["json"]["effects"]["regions"][0]["end"] == 40.0)
+
 print(f"\nALL {PASS} CHECKS PASSED")

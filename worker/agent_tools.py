@@ -506,15 +506,55 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
             {**ins, "at_output_s": min(bounds,
                                        key=lambda b: abs(b - ins["at_output_s"]))}
             for ins in edl["inserts"]]
+    # Windowed censor regions live in program time — clamp them to the new
+    # program length so an unrelated shortening write can't be rejected by
+    # a stale region window (regions left with no window are dropped).
+    region_notes = []
+    fx = edl.get("effects") or {}
+    if fx.get("regions"):
+        prog = output_duration(new_keep) + sum(
+            float(i["duration_s"]) for i in edl.get("inserts") or [])
+        kept_regs = []
+        for r in fx["regions"]:
+            r = dict(r)
+            if r.get("end") is not None and r["end"] > prog:
+                if (r.get("start") or 0.0) >= prog - 0.05:
+                    region_notes.append(
+                        f"note: censor region {r.get('id')} was removed — "
+                        "its time window falls entirely outside the "
+                        "shortened edit.")
+                    continue
+                r["end"] = round(prog, 2)
+                region_notes.append(
+                    f"note: censor region {r.get('id')}'s time window now "
+                    f"ends at {r['end']}s to fit the shortened edit.")
+            kept_regs.append(r)
+        if region_notes:
+            edl["effects"] = {**fx, "regions": kept_regs}
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
         return result
+    if region_notes:
+        result += "\n" + "\n".join(region_notes)
     warn = audit.boundary_warning_lines(new_keep, words, silences,
                                         ctx.duration)
     if snap_to_words:
         warn = []   # snapping guarantees word-clean boundaries
     if check_regression:
         warn += audit.regression_warnings(prev_keep, new_keep, ctx.index)
+    # A write that silently drops most of the kept footage is almost always
+    # the model chasing something the user never asked for — make the scale
+    # of the loss impossible to miss (keep_segments AND cut_range alike).
+    prev_dur = output_duration(prev_keep)
+    new_dur = output_duration(new_keep)
+    if prev_dur > 1.0 and new_dur < prev_dur * 0.5:
+        warn.append(
+            f"WARNING (large drop): this removed "
+            f"{prev_dur - new_dur:.1f}s of the {prev_dur:.1f}s that was "
+            f"kept ({100 - 100 * new_dur / prev_dur:.0f}% of the edit). "
+            "If the user did not EXPLICITLY ask to shorten the video "
+            "this much, put the footage back with keep_segments using "
+            "the previous list from get_edl.")
     if warn:
         result += "\n" + "\n".join(warn)
     return result
@@ -999,6 +1039,92 @@ def set_transitions(ctx, style, duration_s=0.3):
     return ctx.write_edl(
         edl, f"transitions: {d}s {p.replace('_', '-')} at every cut "
              f"(~{n_cuts} junction{'s' if n_cuts != 1 else ''})")
+
+
+REGION_MODES = ("blur", "pixelate", "black")
+
+
+def blur_region(ctx, x, y, w, h, mode="blur", start=None, end=None):
+    p = (mode or "blur").strip().lower()
+    if p not in REGION_MODES:
+        return (f"REJECTED: mode must be one of {', '.join(REGION_MODES)}. "
+                "blur = soft blur (default), pixelate = mosaic, black = "
+                "solid bar.")
+    try:
+        rx, ry = float(x), float(y)
+        rw, rh = float(w), float(h)
+    except (TypeError, ValueError):
+        return ("REJECTED: x, y, w, h must be numbers — FRACTIONS of the "
+                "frame (0-1). x,y is the TOP-LEFT corner: (0,0) is the "
+                "frame's top-left. Example, a username in the top-right "
+                "corner: x=0.6, y=0.02, w=0.38, h=0.1.")
+    if not (0 <= rx <= 1 and 0 <= ry <= 1 and 0 < rw <= 1 and 0 < rh <= 1):
+        return ("REJECTED: x, y, w, h are FRACTIONS of the frame (0-1), "
+                "not pixels or seconds. x=0.6, y=0.02, w=0.38, h=0.1 covers "
+                "the top-right corner.")
+    if min(rw, 1.0 - rx) < 0.02 or min(rh, 1.0 - ry) < 0.02:
+        return ("REJECTED: that rectangle falls (almost) entirely outside "
+                "the frame, so it would censor nothing. x,y is the box's "
+                "TOP-LEFT corner ((0,0) = the frame's top-left) — for a box "
+                "touching the right edge use x = 1 - w; for the bottom, "
+                "y = 1 - h.")
+    if (start is None) != (end is None):
+        return ("REJECTED: pass both start and end (output-timeline "
+                "seconds), or neither to censor the whole video.")
+    item = {"id": None, "x": round(rx, 3), "y": round(ry, 3),
+            "w": round(rw, 3), "h": round(rh, 3)}
+    if p != "blur":
+        item["mode"] = p
+    if start is not None:
+        try:
+            item["start"] = round(float(start), 2)
+            item["end"] = round(float(end), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: start/end must be numbers of seconds."
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    regions = [dict(r) for r in (fx.get("regions") or [])]
+    item["id"] = _next_item_id(regions, "rg")
+    regions.append(item)
+    fx["regions"] = regions
+    edl["effects"] = fx
+    span = (f" from {item['start']}s to {item['end']}s (output time)"
+            if start is not None else " for the whole video")
+    result = ctx.write_edl(
+        edl, f"{p} region at x={item['x']},y={item['y']} "
+             f"size {item['w']}x{item['h']} (frame fractions){span} "
+             f"[{item['id']}]")
+    if result.startswith("EDL v"):
+        result += ("\nThe rectangle is FIXED on screen — render_preview and "
+                   "CHECK the sheet: if the text still shows anywhere, "
+                   "remove_blur this region and place a bigger one.")
+    return result
+
+
+def remove_blur(ctx, id=None):
+    if id is not None and not str(id).strip():
+        return ("REJECTED: id is empty. Pass a real region id from "
+                "get_edl, or omit id entirely to remove ALL regions.")
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    regions = [dict(r) for r in (fx.get("regions") or [])]
+    if not regions:
+        return ("NO CHANGE: there are no censor regions to remove. Do NOT "
+                "tell the user you changed anything.")
+    if id:
+        hit = next((r for r in regions if r.get("id") == id), None)
+        if not hit:
+            have = ", ".join(r.get("id", "?") for r in regions)
+            return (f"REJECTED: no censor region with id '{id}'. Existing: "
+                    f"{have}. Call get_edl to see them, or omit id to "
+                    "remove all.")
+        fx["regions"] = [r for r in regions if r.get("id") != id]
+        desc = f"removed censor region {id}"
+    else:
+        fx["regions"] = []
+        desc = f"removed all {len(regions)} censor region(s)"
+    edl["effects"] = fx
+    return ctx.write_edl(edl, desc)
 
 
 def _next_item_id(items, prefix):
@@ -1765,6 +1891,35 @@ TOOLS = {
                                    "enum": ["dip_black", "dip_white",
                                             "none"]},
                          "duration_s": {"type": "number"}}),
+    "blur_region": (blur_region, "Blur, pixelate or black-out a fixed "
+                    "RECTANGLE of the original footage — THE tool to "
+                    "remove/censor a burned-in username, gamertag, "
+                    "watermark, logo or other on-screen text (pixels can't "
+                    "be erased, but this hides them). x,y = TOP-LEFT corner "
+                    "and w,h = size, all as FRACTIONS (0-1) of the SOURCE "
+                    "frame — exactly the frames look_at shows you; a 9:16 "
+                    "or other output reframe moves the censored footage "
+                    "with it automatically, and spliced-in clips/images are "
+                    "never censored. Example — a username in the top-right "
+                    "corner: x=0.6, y=0.02, w=0.38, h=0.1. FIRST look_at "
+                    "the video asking exactly where the text sits (corner? "
+                    "edge? how big?), then blur_region, then render_preview "
+                    "and CHECK the sheet — if text still shows, remove_blur "
+                    "and place a bigger region. start/end (output seconds) "
+                    "optionally limit when it applies; omit both for the "
+                    "whole video. mode: 'blur' (soft, default), 'pixelate' "
+                    "(mosaic), 'black' (solid bar). The rectangle does NOT "
+                    "track motion — text that moves with the camera may "
+                    "leave it; verify and tell the user honestly.",
+                    {"x": {"type": "number"}, "y": {"type": "number"},
+                     "w": {"type": "number"}, "h": {"type": "number"},
+                     "mode": {"type": "string",
+                              "enum": ["blur", "pixelate", "black"]},
+                     "start": {"type": "number"},
+                     "end": {"type": "number"}}),
+    "remove_blur": (remove_blur, "Remove one censor region by its id (see "
+                    "get_edl), or ALL censor regions when id is omitted.",
+                    {"id": {"type": "string"}}),
     "add_voiceover": (add_voiceover, "Lay an uploaded audio file OVER the "
                       "whole program from start_output_s (a position in the "
                       "FINAL edited video, default 0). duck_others (default "
@@ -1805,6 +1960,7 @@ REQUIRED_ARGS = {
     "add_zoom": ["start", "end"],
     "remove_zoom": ["id"],
     "set_transitions": ["style"],
+    "blur_region": ["x", "y", "w", "h"],
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
     "generate_image": ["prompt"],
@@ -1821,7 +1977,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range", "add_captions",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
-               "generate_image"}
+               "blur_region", "remove_blur", "generate_image"}
 
 
 def _tool_disabled(name):

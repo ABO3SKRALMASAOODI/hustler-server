@@ -196,17 +196,52 @@ class TransitionSpec(BaseModel):
     duration_s: float = 0.3
 
 
+REGION_MODES = ("blur", "pixelate", "black")
+REGION_MIN_FRAC = 0.01
+
+
+def _coerce_mode(v):
+    # the TS mirror allows mode: null for "default"; accept it here too
+    return v or "blur"
+
+
+class RegionItem(BaseModel):
+    """A fixed rectangle of the SOURCE footage that is blurred, pixelated or
+    blacked out — censoring burned-in usernames, watermarks, on-screen text.
+    x/y (top-left corner) and w/h are FRACTIONS of the SOURCE frame (0-1) —
+    the space look_at frames are in — so the same region works on the
+    preview proxy and the full-res final, and an output reframe (crop/pad)
+    carries the censored footage with it. The renderer applies regions per
+    kept source segment; spliced-in clips/images are never censored.
+    start/end optionally limit it to a FINAL-program time window (like
+    zooms); both None means the whole video. The rectangle does not track
+    motion — text that moves with the camera can leave it."""
+    id: str
+    mode: Literal["blur", "pixelate", "black"] = "blur"
+    x: float
+    y: float
+    w: float
+    h: float
+    start: Optional[float] = None
+    end: Optional[float] = None
+
+    _mode = field_validator("mode", mode="before")(_coerce_mode)
+
+
 class Effects(BaseModel):
     """Whole-program visual effects. grade is a color-grade preset applied
     to all footage (never to burned captions); zooms are punch-in/eased/
     Ken Burns windows; fades are to/from black at the very start/end
-    (video + audio); transition dips through black/white at every cut."""
+    (video + audio); transition dips through black/white at every cut;
+    regions censor fixed rectangles (Optional so pre-round-12 EDLs keep
+    their signatures)."""
     grade: Optional[Literal["vibrant", "warm", "cool", "bw", "vintage",
                             "cinematic"]] = None
     zooms: List[ZoomItem] = Field(default_factory=list)
     fade_in_s: Optional[float] = None
     fade_out_s: Optional[float] = None
     transition: Optional[TransitionSpec] = None
+    regions: Optional[List[RegionItem]] = None
 
 
 class EDL(BaseModel):
@@ -433,10 +468,41 @@ def validate_edl(data, duration):
                     raise EDLValidationError(
                         f"effects.{name} {val} outside [0.1, {FADE_MAX_S}].")
                 setattr(fx, name, val)
+        if fx.regions is not None:
+            seen_r = set()
+            for i, rg in enumerate(fx.regions):
+                if not rg.id or rg.id in seen_r:
+                    raise EDLValidationError(
+                        f"effects.regions[{i}].id must be non-empty and "
+                        "unique.")
+                seen_r.add(rg.id)
+                # clamp the rectangle into the frame instead of rejecting —
+                # the agent estimates corners visually and small overshoots
+                # are always safe to trim
+                rg.x = round(min(max(float(rg.x), 0.0), 1.0 - REGION_MIN_FRAC), 3)
+                rg.y = round(min(max(float(rg.y), 0.0), 1.0 - REGION_MIN_FRAC), 3)
+                rg.w = round(min(max(float(rg.w), 0.0), 1.0 - rg.x), 3)
+                rg.h = round(min(max(float(rg.h), 0.0), 1.0 - rg.y), 3)
+                if rg.w < REGION_MIN_FRAC or rg.h < REGION_MIN_FRAC:
+                    raise EDLValidationError(
+                        f"effects.regions[{i}]: the rectangle is too small "
+                        "or falls outside the frame — x/y/w/h are fractions "
+                        "of the frame (0-1), w and h at least 0.01.")
+                if (rg.start is None) != (rg.end is None):
+                    raise EDLValidationError(
+                        f"effects.regions[{i}]: pass both start and end "
+                        "(program seconds), or neither for the whole video.")
+                if rg.start is not None:
+                    rg.start, rg.end = _r(rg.start), _r(rg.end)
+                    _check_span(f"effects.regions[{i}]", rg.start, rg.end,
+                                prog_dur)
+            if not fx.regions:
+                fx.regions = None       # [] is the absence of regions
         # all-empty effects is the absence of effects — normalize so old
         # EDLs and cleared-effects EDLs compare identical.
         if fx.grade is None and not fx.zooms and fx.fade_in_s is None \
-                and fx.fade_out_s is None and fx.transition is None:
+                and fx.fade_out_s is None and fx.transition is None \
+                and fx.regions is None:
             edl.effects = None
 
     return edl
@@ -521,6 +587,8 @@ def describe_edl(edl_dict, duration=None):
         if fx.transition:
             bits.append(f"transitions {fx.transition.style} "
                         f"{fx.transition.duration_s}s")
+        if fx.regions:
+            bits.append("censor region x" + str(len(fx.regions)))
         parts.append(", ".join(bits))
     return ", ".join(parts)
 

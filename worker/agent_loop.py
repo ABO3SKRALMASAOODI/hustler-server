@@ -2,6 +2,7 @@
 chat message. Every tool call is persisted as an 'activity' chat message so
 the frontend shows live progress over the existing polling channel."""
 
+import difflib
 import json
 import os
 import re
@@ -338,8 +339,8 @@ EDIT_CLAIM = re.compile(
     r"|\b(?:lowered|raised|reduced|boosted) (?:the )?(?:volume|music|audio)\b"
     r")")
 RENDER_CLAIM = re.compile(
-    r"(?i)(\b(?<!no )preview (?:is |was |has been )?"
-    r"(?:rendered|ready|updated|attached|refreshed|playing)\b"
+    r"(?i)(\b(?<!no )preview (?:v?\d+ )?(?:is |was |has been )?"
+    r"(?:now )?(?:rendered|ready|updated|attached|refreshed|playing)\b"
     r"|\brendered (?:a |the )?(?:new )?preview\b|\bre-?rendered\b"
     r"|\brendering (?:the |a )?(?:new )?preview\b)")
 DENY_CLAIM = re.compile(
@@ -380,6 +381,43 @@ def _offered_claim(draft, m):
     sent_start = max(draft.rfind(".", 0, m.start()),
                      draft.rfind("\n", 0, m.start())) + 1
     return bool(OFFER_WORDS.search(draft[sent_start:m.start()]))
+
+
+def _norm_text(s):
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+ECHO_MIN_CHARS = 120
+ECHO_RATIO = 0.92
+# _build_messages caps history content at 2000 chars; normalization only
+# shrinks text, so anything at/over this length may be a truncated original
+ECHO_TRUNC_CHARS = 1900
+
+
+def _echo_violation(draft, messages):
+    """A draft that repeats a previous assistant reply nearly verbatim
+    answers nothing — it re-describes an old turn's work as if it just
+    happened (the model regurgitates its last message when the user
+    complains, and every claim in it is stale). Only long replies count:
+    short answers ("Yes, the captions are red.") can legitimately repeat.
+    Compared over FULL strings — a longer fresh reply that merely shares an
+    opener with an old one is not an echo — except when the stored history
+    copy was truncated, where only its length is comparable."""
+    d = _norm_text(draft)
+    if len(d) < ECHO_MIN_CHARS:
+        return None
+    for m in messages:
+        if m.get("role") != "assistant" or m.get("tool_calls"):
+            continue
+        prev = _norm_text(m.get("content"))
+        if len(prev) < ECHO_MIN_CHARS:
+            continue
+        d_cmp = d[:len(prev)] if len(prev) >= ECHO_TRUNC_CHARS else d
+        if difflib.SequenceMatcher(None, d_cmp, prev).ratio() >= ECHO_RATIO:
+            return ("repeats a previous reply nearly verbatim instead of "
+                    "answering the user's LATEST message — everything it "
+                    "describes happened on an earlier turn, not this one")
+    return None
 
 
 def _reply_violations(draft, wrote, previewed, acted=None):
@@ -444,7 +482,18 @@ def _turn_facts(ctx, start_version):
 # Nearest supported alternative for the honest fallback, keyed on what the
 # user asked for. User-facing phrasing (no tool names).
 ALTERNATIVE_HINTS = [
-    # effects first: zoom/filter/fade phrasings often also contain 'animated'
+    # censor requests first: "remove the username/watermark" also contains
+    # 'remove' (the cut hint) and 'logo/overlay' (the insert hint), and the
+    # most specific hint must win the first-match scan
+    (re.compile(r"(?i)username|user.?name|gamertag|nametag|name.?tag|"
+                r"watermark|censor|blur|pixelat|black.?out|"
+                r"(?:remove|hide|cover|get rid of)[^.\n]{0,40}"
+                r"(?:text|logo|name|handle|tag|overlay)"),
+     "What I CAN do: blur, pixelate or black-out a fixed rectangle over a "
+     "burned-in username, watermark, logo or on-screen text — tell me "
+     "roughly where it sits and I'll place the censor box and show you a "
+     "preview."),
+    # effects next: zoom/filter/fade phrasings often also contain 'animated'
     # or 'tiktok', and the most specific hint must win the first-match scan
     (re.compile(r"(?i)effect|filter|grade|zoom|punch|fade|transition|"
                 r"viral|engag|animat|ken.?burns|motion"),
@@ -509,6 +558,12 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     acted = bool(ctx.versions_written or ctx.images_generated)
     previewed = ctx.last_preview is not None
     viol = _reply_violations(draft, wrote, previewed, acted)
+    # Echo detection only polices turns that DID nothing: a working turn's
+    # summary may legitimately resemble the last one (same request repeated),
+    # and its content claims are already checked against the turn facts.
+    echo = None if (acted or previewed) else _echo_violation(draft, messages)
+    if echo:
+        viol.append(echo)
     if not viol:
         return draft
     honesty["false_claims"] += 1
@@ -537,7 +592,9 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
         redraft = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[honesty] regeneration failed: {e}", flush=True)
-    if redraft and not _reply_violations(redraft, wrote, previewed, acted):
+    if redraft and not _reply_violations(redraft, wrote, previewed, acted) \
+            and (acted or previewed
+                 or not _echo_violation(redraft, messages)):
         return redraft
     honesty["false_claims"] += 1
     honesty["corrective_note"] = True
