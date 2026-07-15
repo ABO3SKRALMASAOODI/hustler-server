@@ -289,7 +289,15 @@ def video_projects():
                    (SELECT MAX(v.updated_at) FROM video_jobs v
                     WHERE v.project_id = p.id) AS last_job,
                    (SELECT COUNT(*) FROM edls e
-                    WHERE e.project_id = p.id) AS versions
+                    WHERE e.project_id = p.id) AS versions,
+                   -- Did this customer EXPORT (finish a video)? A successful
+                   -- export = a 'final' render job that reached 'done'.
+                   (SELECT COUNT(*) FROM video_jobs vf
+                    WHERE vf.project_id = p.id AND vf.type='final'
+                      AND vf.state='done') AS exports,
+                   (SELECT MAX(vf.updated_at) FROM video_jobs vf
+                    WHERE vf.project_id = p.id AND vf.type='final'
+                      AND vf.state='done') AS last_export
             FROM projects p JOIN users u ON u.id = p.user_id
             WHERE u.email ILIKE %s OR p.title ILIKE %s
             ORDER BY p.id DESC LIMIT 100
@@ -297,7 +305,8 @@ def video_projects():
         rows = cur.fetchall()
     return jsonify({"projects": [
         {**r, "created_at": r["created_at"].isoformat(),
-         "last_job": r["last_job"].isoformat() if r["last_job"] else None}
+         "last_job": r["last_job"].isoformat() if r["last_job"] else None,
+         "last_export": r["last_export"].isoformat() if r["last_export"] else None}
         for r in rows]})
 
 
@@ -463,9 +472,24 @@ def video_project_detail(project_id):
             "error": t["error"],
         })
 
+    # Export signal for THIS conversation: successful exports = 'final' jobs
+    # that reached 'done'; also surface attempts (incl. failed) to spot a
+    # customer who TRIED to export but the render failed.
+    final_done = [j for j in jobs if j["type"] == "final"
+                  and j["state"] == "done"]
+    final_all = [j for j in jobs if j["type"] == "final"]
+    last_export = max((j["updated_at"] for j in final_done), default=None)
+    exports = {
+        "count": len(final_done),
+        "attempts": len(final_all),
+        "failed": len([j for j in final_all if j["state"] == "failed"]),
+        "last_at": last_export.isoformat() if last_export else None,
+    }
+
     return jsonify({
         "project": {"id": p["id"], "title": p["title"], "email": p["email"],
                     "created_at": p["created_at"].isoformat()},
+        "exports": exports,
         "messages": [
             {"id": m["id"], "role": m["role"], "content": m["content"],
              "meta": m["meta"], "created_at": m["created_at"].isoformat()}
@@ -616,6 +640,7 @@ def video_users():
                    COALESCE(m.msgs, 0) AS messages,
                    COALESCE(m.unserved, 0) AS unserved,
                    COALESCE(j.turns, 0) AS turns,
+                   COALESCE(j.exports, 0) AS exports,
                    COALESCE(a.uploads, 0) AS uploads,
                    COALESCE(a.bytes, 0) AS storage_bytes,
                    COALESCE(l.tokens_in, 0) AS tokens_in,
@@ -636,6 +661,8 @@ def video_users():
             LEFT JOIN (SELECT user_id,
                               COUNT(*) FILTER (WHERE type='agent_turn')
                                   AS turns,
+                              COUNT(*) FILTER (WHERE type='final'
+                                  AND state='done') AS exports,
                               MAX(updated_at) AS last
                        FROM video_jobs GROUP BY user_id) j ON j.user_id = u.id
             LEFT JOIN (SELECT p3.user_id,
@@ -669,7 +696,8 @@ def video_users():
                      "monthly": float(r["credits_monthly"] or 0),
                      "balance": float(r["credits_balance"] or 0)},
          "projects": r["projects"], "messages": r["messages"],
-         "turns": r["turns"], "unserved": r["unserved"],
+         "turns": r["turns"], "exports": r["exports"],
+         "unserved": r["unserved"],
          "uploads": r["uploads"],
          "storage_bytes": int(r["storage_bytes"] or 0),
          "tokens_in": int(r["tokens_in"] or 0),
@@ -777,6 +805,9 @@ def video_user_detail(user_id):
                    (SELECT COUNT(*) FROM video_jobs v
                     WHERE v.project_id = p.id
                       AND v.type='agent_turn') AS turns,
+                   (SELECT COUNT(*) FROM video_jobs vf
+                    WHERE vf.project_id = p.id AND vf.type='final'
+                      AND vf.state='done') AS exports,
                    (SELECT COUNT(*) FROM edls e
                     WHERE e.project_id = p.id) AS versions,
                    (SELECT COUNT(*) FROM chat_messages cm
@@ -824,6 +855,7 @@ def video_user_detail(user_id):
             {"id": p["id"], "title": p["title"],
              "created_at": p["created_at"].isoformat(),
              "messages": p["messages"], "turns": p["turns"],
+             "exports": p["exports"],
              "versions": p["versions"], "unserved": p["unserved"],
              "last_activity": p["last_activity"].isoformat()
                  if p["last_activity"] else None}
