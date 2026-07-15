@@ -26,7 +26,8 @@ ALIGNMENTS = {"bottom": 2, "top": 8, "middle": 5}
 MARGIN_V = {"bottom": 46, "top": 40, "middle": 0}
 
 DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
-                 "dynamic": False, "highlight_color": None, "animation": None}
+                 "dynamic": False, "highlight_color": None, "animation": None,
+                 "size_scale": None}
 
 # Karaoke (dynamic) captions: groups of up to N words; the word being
 # spoken pops and lights up in the highlight color. Groups larger than
@@ -65,12 +66,24 @@ def _norm_style(style):
     if style:
         d = style if isinstance(style, dict) else style.model_dump()
         for k in ("color", "size", "position", "highlight_color",
-                  "animation"):
+                  "animation", "size_scale"):
             if d.get(k):
                 s[k] = d[k]
         if d.get("dynamic") is not None:
             s["dynamic"] = bool(d["dynamic"])
     return s
+
+
+def _size_scale(style):
+    """The continuous caption-size multiplier, defaulting to 1.0 (neutral)
+    and clamped to the schema bounds so a bad stored value can't blow up
+    the font. Applied on top of the coarse `size` bucket everywhere the
+    font size is computed."""
+    try:
+        v = float(style.get("size_scale") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return min(max(v, 0.5), 3.0)
 
 
 def _anim_prefix(anim, style, play_res):
@@ -107,7 +120,7 @@ def style_line(name, style, play_res=BASE_PLAY_RES):
     fx = play_res[0] / BASE_PLAY_RES[0]
     fy = play_res[1] / BASE_PLAY_RES[1]
     f = max(fx, fy)
-    font = max(10, round(FONT_SIZES.get(s["size"], 40) * f))
+    font = max(10, round(FONT_SIZES.get(s["size"], 40) * f * _size_scale(s)))
     margin_lr = max(10, round(60 * fx))
     margin_v = round(MARGIN_V.get(s["position"], 46) * fy)
     outline = max(1.2, round(2.4 * f, 1))
@@ -154,7 +167,7 @@ def line_chars_for(style, play_res=BASE_PLAY_RES):
     s = _norm_style(style)
     fx = play_res[0] / BASE_PLAY_RES[0]
     fy = play_res[1] / BASE_PLAY_RES[1]
-    font = max(10, FONT_SIZES.get(s["size"], 40) * max(fx, fy))
+    font = max(10, FONT_SIZES.get(s["size"], 40) * max(fx, fy) * _size_scale(s))
     usable = play_res[0] - 2 * max(10, round(60 * fx))
     return max(8, min(MAX_LINE_CHARS, int(usable / (0.52 * font))))
 
@@ -265,10 +278,13 @@ def events_dynamic(out_words, style=None, max_words=None,
     return kept
 
 
-def events_from_items(items, tl, line_chars=MAX_LINE_CHARS):
+def events_from_items(items, tl, play_res=BASE_PLAY_RES):
     """Explicit caption items (source time) -> output-time events. A span
     crossing a cut boundary is clipped to its surviving pieces; items whose
-    span is fully cut are dropped. Items may carry a per-item style."""
+    span is fully cut are dropped. Items may carry a per-item style — each is
+    wrapped at the line budget for ITS OWN rendered font (size + size_scale),
+    not the default, so a large item doesn't get chunked at the small-font
+    budget and then re-wrapped by libass into a frame-covering text wall."""
     events = []
     for it in items:
         get = (lambda k, d=None: it.get(k, d)) if isinstance(it, dict) \
@@ -277,7 +293,8 @@ def events_from_items(items, tl, line_chars=MAX_LINE_CHARS):
         if not spans:
             continue
         start, end = spans[0][0], spans[-1][1]
-        lines = _wrap(get("text"), line_chars)[:MAX_LINES]
+        item_chars = line_chars_for(get("style"), play_res)
+        lines = _wrap(get("text"), item_chars)[:MAX_LINES]
         events.append({"start": start, "end": max(end, start + MIN_EVENT_S),
                        "text": r"\N".join(_esc(l) for l in lines),
                        "item_style": get("style")})
@@ -300,7 +317,7 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
             continue
         merged = dict(_norm_style(global_style))
         d = ov if isinstance(ov, dict) else ov.model_dump()
-        for k in ("color", "size", "position", "animation"):
+        for k in ("color", "size", "position", "animation", "size_scale"):
             if d.get(k):
                 merged[k] = d[k]
         key = tuple(sorted(merged.items()))
@@ -354,8 +371,7 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
                 out_words, max_words=captions.get("max_words_per_caption"),
                 line_chars=line_chars_for(global_style, play_res))
     elif isinstance(captions, list):
-        events = events_from_items(captions, tl,
-                                   line_chars=line_chars_for(None, play_res))
+        events = events_from_items(captions, tl, play_res)
         global_style = None
     else:
         return None

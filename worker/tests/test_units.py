@@ -2015,4 +2015,205 @@ check("a region whose window vanishes is dropped with a note",
 check("the stored previous version was not mutated in place",
       wctx._edl["json"]["effects"]["regions"][0]["end"] == 40.0)
 
+print("== Round-13: caption size_scale (continuous magnitude) ==")
+from schemas import CaptionStyle                              # noqa: E402
+check("size_scale 1.0 collapses to None (neutral no-op)",
+      CaptionStyle(size_scale=1.0).size_scale is None)
+check("size_scale clamps above 3.0",
+      CaptionStyle(size_scale=9).size_scale == 3.0)
+check("size_scale clamps below 0.5",
+      CaptionStyle(size_scale=0.1).size_scale == 0.5)
+
+
+def _font_of(style):
+    return int(caplib.style_line("Default", style).split(",")[2])
+
+
+base_font = _font_of({"size": "m"})
+scaled_font = _font_of({"size": "m", "size_scale": 1.5})
+check("size_scale 1.5 makes the font ~50% bigger",
+      scaled_font == round(base_font * 1.5))
+check("size_scale changes line_chars wrapping too",
+      caplib.line_chars_for({"size": "m", "size_scale": 2.0}) <
+      caplib.line_chars_for({"size": "m"}))
+# size_scale survives validate_edl and an edl_signature round-trip
+_ss_edl = validate_edl({"keep": [[0, 60]], "captions": {
+    "mode": "from_transcript", "style": {"size_scale": 1.4}}}, 60).model_dump()
+check("size_scale persists through EDL validation",
+      _ss_edl["captions"]["style"]["size_scale"] == 1.4)
+
+print("== Round-13: compound editing tools ==")
+import agent_tools                                            # noqa: E402
+
+# cut_silences: cuts every gap >= threshold, keeping padding around speech
+_cs = DropCtx({"keep": [[0.0, 60.0]]})
+_cs.index = {"words": [], "video": {"duration": 60.0},
+             "silences": [[10.0, 12.0], [20.0, 25.0], [30.0, 30.3]]}
+r = agent_tools.cut_silences(_cs, min_silence_s=0.5, padding_s=0.12)
+check("cut_silences cut the two long gaps, kept the sub-padding one",
+      r.startswith("EDL v") and "cut 2 silence" in r)
+_kept = output_duration([list(x) for x in _cs.written["keep"]])
+check("cut_silences kept ~53.5s (60 - 1.76 - 4.76)",
+      53.0 < _kept < 54.0)
+_cs2 = DropCtx({"keep": [[0.0, 60.0]]})
+_cs2.index = {"words": [], "video": {"duration": 60.0}, "silences": []}
+check("cut_silences reports nothing to cut when there are no silences",
+      "No silences" in agent_tools.cut_silences(_cs2))
+
+# remove_filler_words: cuts exact word spans for um/uh/etc.
+_fw = DropCtx({"keep": [[0.0, 60.0]]})
+_fw.index = {"video": {"duration": 60.0}, "silences": [], "words": [
+    {"w": "So", "t0": 0.0, "t1": 0.4}, {"w": "um,", "t0": 0.4, "t1": 0.9},
+    {"w": "this", "t0": 0.9, "t1": 1.3}, {"w": "uh", "t0": 5.0, "t1": 5.4},
+    {"w": "works", "t0": 5.4, "t1": 6.0}]}
+r = agent_tools.remove_filler_words(_fw)
+check("remove_filler_words cut the um and uh spans",
+      r.startswith("EDL v") and "'uh'×1" in r and "'um'×1" in r)
+_fw2 = DropCtx({"keep": [[0.0, 60.0]]})
+_fw2.index = {"video": {"duration": 60.0}, "silences": [],
+              "words": [{"w": "clean", "t0": 0.0, "t1": 0.5}]}
+check("remove_filler_words reports none found when transcript is clean",
+      "No filler words" in agent_tools.remove_filler_words(_fw2))
+
+check("both compound tools are registered write tools",
+      {"cut_silences", "remove_filler_words"} <= agent_tools.WRITE_TOOLS and
+      "cut_silences" in agent_tools.capabilities_digest())
+
+print("== Round-13: add_music clamps to FULL program duration ==")
+_mus_asset = {"kind": "music", "storage_key": "music/1/song.mp3"}
+_am_edl = {"keep": [[0.0, 30.0]], "inserts": [
+    {"id": "ins1", "asset_key": "clips/1/b.mp4", "kind": "video",
+     "at_output_s": 30.0, "duration_s": 10.0}]}
+_am = ToolCtx(json.loads(json.dumps(_am_edl)), asset=_mus_asset)
+r = agent_tools.add_music(_am, "music/1/song.mp3", 0, 40)
+check("music end reaches 40s (30s kept + 10s insert), not clamped to 30",
+      _am.written["music"][-1]["end"] == 40.0)
+
+print("== Round-13: full index in context (Q1) ==")
+import agent_loop                                             # noqa: E402
+_short_index = {
+    "video": {"duration": 120.0, "fps": 30, "width": 1920, "height": 1080,
+              "has_audio": True},
+    "sentences": [{"id": "s1", "t0": 0.0, "t1": 3.0, "text": "Hello there."},
+                  {"id": "s2", "t0": 3.0, "t1": 6.0, "text": "Second line."}],
+    "words": [{"w": "Hello", "t0": 0.0, "t1": 0.5}],
+    "shots": [{"id": 1, "start": 0.0, "end": 6.0,
+               "caption": {"setting": "office", "people": "one man",
+                           "action": "talking", "on_screen_text": ""}}],
+    "silences": [], "language": "en"}
+_full = agent_loop._index_summary(_short_index)
+check("short video inlines the COMPLETE transcript + shots + language",
+      "COMPLETE" in _full and "Second line." in _full and
+      "office" in _full and "LANGUAGE (detected): en" in _full)
+_long_index = dict(_short_index, video=dict(_short_index["video"],
+                                            duration=3600.0))
+_elided = agent_loop._index_summary(_long_index)
+check("long video falls back to elided summary + retrieval pointers",
+      "COMPLETE" not in _elided and "get_transcript" in _elided)
+
+print("== Round-13: render verification (duration check) ==")
+import media                                                 # noqa: E402
+import renderer                                               # noqa: E402
+_ok_edl = {"keep": [[0.0, 10.0]]}
+_orig_black = media.black_seconds
+media.black_seconds = lambda *a, **k: 0.0        # keep the check pure (no ffmpeg)
+try:
+    renderer._verify_render(_ok_edl, "x.mp4", 10.0, 1, "preview")
+    check("a correct-length render passes verification", True)
+    try:
+        renderer._verify_render(_ok_edl, "x.mp4", 4.0, 1, "preview")
+        check("a wrong-length render is rejected", False)
+    except media.MediaError as e:
+        check("a wrong-length render raises MediaError",
+              "wrong length" in str(e))
+finally:
+    media.black_seconds = _orig_black
+
+print("== Round-13 review fixes ==")
+# remove_filler_words: multi-word phrases now match consecutive words
+_fwp = DropCtx({"keep": [[0.0, 60.0]]})
+_fwp.index = {"video": {"duration": 60.0}, "silences": [], "words": [
+    {"w": "So", "t0": 0.0, "t1": 0.4}, {"w": "you", "t0": 0.4, "t1": 0.7},
+    {"w": "know", "t0": 0.7, "t1": 1.0}, {"w": "this", "t0": 1.0, "t1": 1.3}]}
+r = agent_tools.remove_filler_words(_fwp, words=["you know"])
+check("remove_filler_words matches a multi-word phrase",
+      r.startswith("EDL v") and "'you know'×1" in r)
+# default list no longer cuts affirmations (uh-huh / mm / hmm)
+_fwa = DropCtx({"keep": [[0.0, 60.0]]})
+_fwa.index = {"video": {"duration": 60.0}, "silences": [], "words": [
+    {"w": "uh-huh", "t0": 0.0, "t1": 0.5}, {"w": "yeah", "t0": 0.5, "t1": 1.0},
+    {"w": "mm", "t0": 1.0, "t1": 1.3}]}
+check("default filler list no longer cuts affirmations",
+      "No filler words" in agent_tools.remove_filler_words(_fwa))
+
+# render verification: black check is relative to the SOURCE, duration clamps
+import media                                                  # noqa: E402
+import renderer                                               # noqa: E402
+_ob = media.black_seconds
+try:
+    media.black_seconds = lambda p, d=None: d      # every frame black
+    try:
+        renderer._verify_render({"keep": [[0.0, 10.0]]}, "out.mp4", 10.0, 1,
+                                "final", src_path="src.mp4", src_dur=10.0)
+        check("mostly-black output passes when the SOURCE is also black", True)
+    except media.MediaError:
+        check("mostly-black output passes when the SOURCE is also black", False)
+    media.black_seconds = lambda p, d=None: (d if "out" in p else 0.0)
+    try:
+        renderer._verify_render({"keep": [[0.0, 10.0]]}, "out.mp4", 10.0, 1,
+                                "final", src_path="src.mp4", src_dur=10.0)
+        check("newly-black output (black where source wasn't) is rejected", False)
+    except media.MediaError as e:
+        check("newly-black output (black where source wasn't) is rejected",
+              "black" in str(e))
+    media.black_seconds = lambda p, d=None: 0.0
+    try:
+        # keep claims 120s but real source is 90s; a 90s output must PASS
+        renderer._verify_render({"keep": [[0.0, 120.0]]}, "out.mp4", 90.0, 1,
+                                "final", src_path="s", src_dur=90.0)
+        check("duration check clamps keep ends to the real source duration", True)
+    except media.MediaError:
+        check("duration check clamps keep ends to the real source duration", False)
+finally:
+    media.black_seconds = _ob
+
+print("== Grok/xAI provider switch ==")
+import config as _cfg                                         # noqa: E402
+import llm as _llm                                           # noqa: E402
+_save = (_cfg.OPENAI_BASE_URL, _cfg.OPENAI_API_KEY,
+         _cfg.IMAGE_GEN_MODEL, _cfg.IMAGE_API_URL)
+try:
+    _cfg.OPENAI_API_KEY = "k"
+    _cfg.IMAGE_GEN_MODEL = "grok-2-image"
+    _cfg.IMAGE_API_URL = ""
+    _cfg.OPENAI_BASE_URL = "https://api.x.ai/v1"
+    check("xAI base -> openai image provider (generate only, no editing)",
+          _llm.image_provider() == "openai" and _llm.image_available()
+          and not _llm.image_edit_available())
+    _cfg.OPENAI_BASE_URL = \
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    check("dashscope base -> dashscope provider (editing available)",
+          _llm.image_provider() == "dashscope" and _llm.image_available()
+          and _llm.image_edit_available())
+    _cfg.IMAGE_GEN_MODEL = ""
+    check("empty IMAGE_GEN_MODEL disables image gen everywhere",
+          not _llm.image_available())
+finally:
+    (_cfg.OPENAI_BASE_URL, _cfg.OPENAI_API_KEY,
+     _cfg.IMAGE_GEN_MODEL, _cfg.IMAGE_API_URL) = _save
+
+print("== Round-13: timeline golden vectors (cross-repo drift tripwire) ==")
+import json as _json                                          # noqa: E402
+with open(os.path.join(os.path.dirname(__file__),
+                       "timeline_golden.json")) as _f:
+    _golden = _json.load(_f)
+for _c in _golden["cases"]:
+    _tl = Timeline(_c["keep"], _c["inserts"])
+    check(f"golden[{_c['name']}] out_duration",
+          _tl.out_duration == _c["out_duration"])
+    check(f"golden[{_c['name']}] src_to_out",
+          all(_tl.src_to_out(t) == exp for t, exp in _c["src_to_out"]))
+    check(f"golden[{_c['name']}] out_to_src",
+          all(_tl.out_to_src(t) == exp for t, exp in _c["out_to_src"]))
+
 print(f"\nALL {PASS} CHECKS PASSED")

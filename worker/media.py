@@ -168,13 +168,38 @@ _SIL_START = re.compile(r"silence_start:\s*([0-9.]+)")
 _SIL_END = re.compile(r"silence_end:\s*([0-9.]+)")
 
 
+def black_seconds(path, duration=None):
+    """Total seconds of (near-)black video via ffmpeg blackdetect on a cheap
+    downscaled/low-fps pass (fast even on a full-res final). Best-effort: any
+    failure returns 0.0 so render verification can never itself fail a good
+    render — a broken render is caught by the duration check regardless."""
+    cmd = ["ffmpeg", "-i", path, "-vf",
+           "fps=4,scale=64:-2,blackdetect=d=0.1:pix_th=0.10",
+           "-an", "-f", "null", "-"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=config.FFMPEG_TIMEOUT_S)
+    except Exception:
+        return 0.0
+    total = 0.0
+    for m in re.finditer(r"black_duration:(\d+(?:\.\d+)?)", p.stderr or ""):
+        total += float(m.group(1))
+    return round(total, 2)
+
+
 def detect_silences(wav_path, duration):
-    """ffmpeg silencedetect -> [[t0, t1], ...] (seconds)."""
+    """ffmpeg silencedetect -> [[t0, t1], ...] (seconds). Raises MediaError on
+    a nonzero ffmpeg exit so a failed detection is distinguishable from a
+    genuinely silence-free clip (the indexer records it as a warning instead
+    of silently degrading to 'no silences')."""
     cmd = ["ffmpeg", "-i", wav_path, "-af",
            f"silencedetect=noise={config.SILENCE_NOISE_DB}:d={config.SILENCE_MIN_S}",
            "-f", "null", "-"]
     p = subprocess.run(cmd, capture_output=True, text=True,
                        timeout=config.FFMPEG_TIMEOUT_S)
+    if p.returncode != 0:
+        tail = "\n".join((p.stderr or "").strip().splitlines()[-6:])
+        raise MediaError(f"silencedetect failed (rc={p.returncode}): {tail}")
     silences, start = [], None
     for line in (p.stderr or "").splitlines():
         ms = _SIL_START.search(line)

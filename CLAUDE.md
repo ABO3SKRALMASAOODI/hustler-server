@@ -235,25 +235,43 @@ Uses a **one-time code exchange** pattern to avoid Safari's query parameter bloc
 
 ---
 
+> **NOTE (product pivot):** Valmera is now an **agentic AI video editor**, not a web-app builder. The "What It Is" / job-pipeline sections above describe the retired app-builder (its `engine/AA.py` + `/auth/generate` routes are still deployed but untouched). The live product is the video studio: `backend/routes/video.py` + `backend/routes/admin_video.py` + the `worker/` service (ffmpeg + faster-whisper + an EDL-editing agent loop). See the `valmera-video-editor-pivot` memory for the full architecture.
+
 ### Credits System
 
-Two pools, completely hidden from users — they see one combined balance:
+Three pools, completely hidden from users — they see one combined balance (`credits_balance` = daily + bonus + monthly):
 
 - **Daily credits (20/day):** Reset every day regardless of usage. Never accumulate. Spent first.
-- **Monthly credits:** Set when user subscribes (1000/2400/5000 depending on plan). Wiped and refreshed on each billing renewal via Paddle webhook. Spent only after daily credits exhausted.
+- **Bonus credits (150 welcome, one-time):** Granted at registration. Spent after daily, before monthly.
+- **Monthly credits:** Set when user subscribes (Plus 800 / Pro 2400, plus retired Ultra 5000 / Titan 10000 / Ace 30000 for grandfathered subs). Wiped and refreshed on each billing renewal via Paddle webhook; **clawed back to 0 on cancel/refund**. Spent last.
 
-Key columns in `users` table: `credits_daily`, `credits_monthly`, `credits_balance` (= daily + monthly, kept in sync), `credits_daily_reset` (date of last reset), `credits_monthly_limit`.
+Key columns in `users` table: `credits_daily`, `credits_bonus`, `credits_monthly`, `credits_balance`, `credits_daily_reset`, `credits_monthly_limit`. The **worker** charges credits after each agent turn (`worker/db.charge_turn_credits`, ~1 credit = $0.01 of model cost, min 1). Values are authoritative in code (`backend/credits.py` `PLAN_MONTHLY_LIMITS`, `backend/routes/paddle_webhook.py` `PLAN_CREDITS`, `worker/config.py`), not here.
 
 ---
 
 ### Subscription Plans
 
-| Plan  | Price | Monthly Credits |
-|-------|-------|-----------------|
-| Free  | $0    | 0 (daily only)  |
-| Plus  | $20   | 1,000           |
-| Pro   | $50   | 2,400           |
-| Ultra | $100  | 5,000           |
+Only **Plus** and **Pro** are purchasable (`PURCHASABLE_PLANS` in `paddle.py`). Ultra/Titan/Ace are retired from the UI and checkout but stay in `PLANS`/`PLAN_CREDITS` so grandfathered subscribers keep working.
+
+| Plan  | Price | Monthly Credits | Status |
+|-------|-------|-----------------|--------|
+| Free  | $0    | 0 (20/day + 150 welcome bonus) | live |
+| Plus  | $20   | 800             | live, purchasable |
+| Pro   | $50   | 2,400           | live, purchasable |
+| Ultra | —     | 5,000           | retired (grandfathered only) |
+| Titan | —     | 10,000          | retired (grandfathered only) |
+| Ace   | —     | 30,000          | retired (grandfathered only) |
+
+---
+
+### Required production env (Render)
+
+- **`PADDLE_WEBHOOK_SECRET`** — MUST be set (Paddle → Developer tools → Notifications). The webhook fails OPEN when unset: an unsigned POST is accepted, so anyone could forge `subscription.created` and grant themselves a plan. Code already HMAC-verifies when present — this is pure config.
+- **`SECRET_KEY`** — MUST be a real secret. Falls back to the literal `"supersecretkey"` if unset, which makes every JWT forgeable → full account takeover. Verify it is set on both Render services; rotate if in doubt.
+- **LLM provider = xAI Grok 4.5 (default).** The whole LLM stack (agent tool-calling, vision, concierge) is OpenAI-compatible. To run Grok you set **only `OPENAI_API_KEY`** (an xAI key) on both the backend web service and the worker — the defaults already select `OPENAI_BASE_URL=https://api.x.ai/v1`, `AGENT_MODEL=grok-4.5`, `VISION_MODEL=grok-4.5` (grok-4.5 is multimodal). To use a different provider set `OPENAI_BASE_URL`/`AGENT_MODEL`/`VISION_MODEL`.
+  - **Credit economics — read this.** Grok 4.5 is **$2 in / $6 out per 1M tokens, ~5× pricier than the old Qwen**, so each agent turn now costs ~5× the credits (1 credit ≈ $0.01 of model cost). The `LLM_PRICE_IN_PER_M`/`LLM_PRICE_OUT_PER_M` defaults are set to `2.0`/`6.0` to keep charges honest — **if you change `AGENT_MODEL`, change these to match** (they live in `worker/config.py`, `worker/db.py`, `backend/routes/admin_video.py`). For Qwen-like economics use `AGENT_MODEL=grok-4.1-fast` and lower prices. Plans stay the same dollar price but users get fewer edits per plan on 4.5.
+  - **Image generation** auto-detects the backend: on xAI it uses the OpenAI-compatible `/images/generations` (`IMAGE_GEN_MODEL=grok-2-image`) — **text-to-image only; the round-11 restyle-a-frame / edit modes are NOT available on xAI** (they need DashScope's native endpoint). The `generate_image` tool rejects restyle modes honestly and the agent falls back to a fresh generation. To keep restyling, set `OPENAI_BASE_URL` back to DashScope + `IMAGE_EDIT_MODEL`.
+- **Other worker envs** (background worker service): `DATABASE_URL`, S3/R2 creds, plus optional tuning — `WORKER_MEDIA_SLOTS`/`WORKER_INDEX_SLOTS` (raise to isolate previews from long finals/indexes), `AGENT_TURN_MAX_CREDITS` (per-turn spend cap), `FULL_INDEX_MAX_DURATION_S` (full-index-in-context threshold), `MAX_VISION_SHEETS` (vision-call cap). The whisper model is baked into the Docker image via `--build-arg WHISPER_MODEL` (default `small`) — keep the build arg in sync with the runtime `WHISPER_MODEL` env.
 
 ---
 

@@ -1,14 +1,18 @@
 """Valmera media+agent worker.
 
 Deployed as a Render Background Worker from worker/Dockerfile. Polls the
-video_jobs table in Postgres (FOR UPDATE SKIP LOCKED) with two lanes:
+video_jobs table in Postgres (FOR UPDATE SKIP LOCKED) with three lanes:
 
-  media lane  — index | preview | final   (CPU-heavy, ffmpeg/whisper)
-  agent lane  — agent_turn                (IO-bound LLM loops)
+  media lane  — preview | final   (interactive ffmpeg encodes)
+  index lane  — index             (multi-minute whisper/scene analysis)
+  agent lane  — agent_turn        (IO-bound LLM loops)
 
-Separate lanes mean an agent turn that enqueues a preview and waits for it
-can never deadlock the worker. Heartbeats keep long jobs claimable-safe;
-stale jobs are retried up to the attempt limit, then failed by the reaper.
+Indexing gets its OWN lane so a long analysis can never wedge interactive
+previews behind it (that starvation was the #1 "I chatted and nothing
+happened" churn cause). Separate agent/media lanes mean an agent turn that
+enqueues a preview and waits for it can never deadlock the worker. Heartbeats
+keep long jobs claimable-safe; stale jobs are retried up to the attempt limit,
+then failed by the reaper.
 """
 
 import os
@@ -23,7 +27,8 @@ import db as dbx
 import indexer
 import renderer
 
-MEDIA_TYPES = ("index", "preview", "final")
+MEDIA_TYPES = ("preview", "final")
+INDEX_TYPES = ("index",)
 AGENT_TYPES = ("agent_turn",)
 
 RUNNERS = {
@@ -88,9 +93,19 @@ FAIL_NOTES = {
               "again, or a different format like mp4."),
 }
 
+# A preview enqueued by a USER edit (not by the agent — the agent reacts to a
+# failed preview inline via the render_preview tool result) has nowhere else
+# to surface a failure, so tell the user their edit is safe and offer a retry.
+USER_PREVIEW_FAIL_NOTE = (
+    "I couldn't render the preview for that edit ({err}). Your change is "
+    "saved — hit retry, or make another edit.")
+
 
 def _notify_failure(worker_db, job, err):
     note = FAIL_NOTES.get(job["type"])
+    if not note and job["type"] == "preview" and \
+            (job.get("payload") or {}).get("source") == "user_edit":
+        note = USER_PREVIEW_FAIL_NOTE
     if not note:
         return
     try:
@@ -158,7 +173,8 @@ def main():
     config.require_core()
     os.makedirs(config.TMP_DIR, exist_ok=True)
     print(f"valmera-worker starting: media_slots={config.MEDIA_SLOTS} "
-          f"agent_slots={config.AGENT_SLOTS} whisper={config.WHISPER_MODEL}/"
+          f"index_slots={config.INDEX_SLOTS} agent_slots={config.AGENT_SLOTS} "
+          f"whisper={config.WHISPER_MODEL}/"
           f"{config.WHISPER_DEVICE} agent_model={config.AGENT_MODEL} "
           f"vision={config.VISION_MODEL or 'off'}", flush=True)
 
@@ -172,6 +188,11 @@ def main():
             target=lane, args=(f"media{i}", MEDIA_TYPES,
                                config.MAX_ATTEMPTS_MEDIA),
             daemon=True, name=f"media{i}"))
+    for i in range(config.INDEX_SLOTS):
+        threads.append(threading.Thread(
+            target=lane, args=(f"index{i}", INDEX_TYPES,
+                               config.MAX_ATTEMPTS_MEDIA),
+            daemon=True, name=f"index{i}"))
     for i in range(config.AGENT_SLOTS):
         threads.append(threading.Thread(
             target=lane, args=(f"agent{i}", AGENT_TYPES,

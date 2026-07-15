@@ -496,6 +496,82 @@ def reset_password():
     return jsonify({'message': 'Password updated successfully'}), 200
 
 
+@auth_bp.route('/account', methods=['DELETE'])
+@token_required
+def delete_account(user_id):
+    """Self-serve account deletion — the legal page promises personal-data
+    deletion within 30 days, and this is how it happens. Wipes every stored
+    object (R2) and every DB row for the user across the video product AND the
+    legacy app-builder tables. Irreversible; requires {"confirm": true}."""
+    if not (request.get_json(silent=True) or {}).get('confirm'):
+        return jsonify({'error': 'Confirmation required to delete your '
+                                 'account (send {"confirm": true}).'}), 400
+
+    # Lazy imports: avoid a module-load cycle (video imports credits/storage).
+    import storage
+    from routes.video import _delete_project_rows
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return jsonify({'error': 'Account not found'}), 404
+    email = row['email']
+
+    cur.execute("""SELECT id, chat_session_id FROM projects
+                   WHERE user_id = %s""", (user_id,))
+    projects = cur.fetchall()
+    project_ids = [p['id'] for p in projects]
+
+    # DB deletion FIRST, committed BEFORE any irreversible R2 delete — a rollback
+    # after wiping storage would leave a live account whose media is destroyed.
+    for p in projects:
+        _delete_project_rows(cur, p['id'], p['chat_session_id'])
+
+    # Legacy chat lane (routes/chat.py) created chat_sessions with no project
+    # and no FK to users, so DELETE FROM users leaves them (and their message
+    # content) orphaned — a hole in the deletion promise. Wipe them too
+    # (messages first — the FK to chat_sessions has no cascade).
+    cur.execute("""DELETE FROM chat_messages WHERE session_id IN
+                   (SELECT id FROM chat_sessions WHERE user_id = %s)""",
+                (user_id,))
+    cur.execute("DELETE FROM chat_sessions WHERE user_id = %s", (user_id,))
+
+    # Legacy app-builder + auth rows keyed by user/email.
+    cur.execute("DELETE FROM job_credits WHERE user_id = %s", (user_id,))
+    cur.execute("DELETE FROM jobs WHERE user_id = %s", (user_id,))
+    for tbl, col, val in (
+            ("email_codes", "email", email),
+            ("code_request_logs", "email", email),
+            ("password_reset_codes", "email", email),
+            ("google_auth_codes", "email", email)):
+        # Savepoint per delete so a missing table on some deployment rolls back
+        # ONLY that statement, never the whole account-deletion transaction.
+        try:
+            cur.execute("SAVEPOINT sp_del")
+            cur.execute(f"DELETE FROM {tbl} WHERE {col} = %s", (val,))
+            cur.execute("RELEASE SAVEPOINT sp_del")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_del")
+    cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+    conn.commit()
+    cur.close(); conn.close()
+
+    # DB is gone and committed. Now wipe storage for each project (best-effort;
+    # any surviving object is orphaned and moppable).
+    objects_deleted = 0
+    if storage.is_configured():
+        for pid in project_ids:
+            try:
+                objects_deleted += storage.delete_project_objects(pid)
+            except Exception as e:
+                print(f"[delete_account] object delete failed for project "
+                      f"{pid}: {e}")
+    return jsonify({'ok': True, 'objects_deleted': objects_deleted}), 200
+
+
 # ------------------------------------------------------------------ #
 #  Internal helper — deduct credits after job completes               #
 # ------------------------------------------------------------------ #

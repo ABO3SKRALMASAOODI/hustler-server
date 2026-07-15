@@ -53,11 +53,9 @@ VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
 # model call fails. Calls are recorded to llm_calls with job_id NULL:
 # visible in admin, never charged (credit charging sums per agent-turn
 # job).
-CONCIERGE_BASE_URL = os.getenv(
-    "OPENAI_BASE_URL",
-    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+CONCIERGE_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
 CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL",
-                            os.getenv("AGENT_MODEL", "qwen-plus"))
+                            os.getenv("AGENT_MODEL", "grok-4.5"))
 CONCIERGE_TIMEOUT_S = float(os.getenv("CONCIERGE_TIMEOUT_S", "14"))
 
 _concierge_client = None
@@ -82,16 +80,26 @@ _CONCIERGE_CLAIM = re.compile(
 
 
 def _image_gen_enabled():
-    """Mirrors the worker's generate_image availability check so the
-    concierge never promises (or denies) AI images out of sync with what
-    the editing agent can actually do."""
-    if not os.getenv("IMAGE_GEN_MODEL", "qwen-image-plus"):
+    """Mirrors the worker's generate_image availability check (worker/llm.
+    image_available) so the concierge never promises (or denies) AI images out
+    of sync with what the editing agent can actually do. Image gen is available
+    on the DashScope native endpoint OR any OpenAI-compatible base (xAI)."""
+    if not os.getenv("IMAGE_GEN_MODEL", "grok-2-image"):
         return False
     if os.getenv("IMAGE_API_URL", ""):
         return True
-    return "dashscope" in os.getenv(
-        "OPENAI_BASE_URL",
-        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+    return bool(os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1"))
+
+
+def _image_edit_enabled():
+    """Restyling an existing frame/image needs DashScope's native endpoint;
+    the OpenAI-compatible /images/generations backend (xAI) can only GENERATE
+    (mirrors worker/llm.image_edit_available)."""
+    if not _image_gen_enabled():
+        return False
+    if os.getenv("IMAGE_API_URL", ""):
+        return True
+    return "dashscope" in os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
 
 
 def _concierge_stage(idx_state):
@@ -162,12 +170,17 @@ def _concierge_reply(stage, history, attachments, index_error=None):
         "black-out a fixed region to censor burned-in usernames, "
         "watermarks or on-screen text, and splice uploaded "
         "clips or images into the video full-frame"
-        + (", and generate images with AI — from a text description, or "
-           "by restyling a frame of their video or an uploaded image "
-           "(e.g. giving a character a new hairstyle) — which get "
-           "spliced in as full-frame still moments. You canNOT: generate "
-           "or alter MOVING footage (AI images land as still-frame "
-           "moments, not tracked effects), change"
+        + ((", and generate images with AI from a text description"
+            + (", or by restyling a frame of their video or an uploaded "
+               "image (e.g. giving a character a new hairstyle)"
+               if _image_edit_enabled() else "")
+            + " — which get spliced in as full-frame still moments. You "
+              "canNOT: "
+            + ("" if _image_edit_enabled() else
+               "restyle or edit an existing frame or photo (only generate a "
+               "fresh image from a description), ")
+            + "generate or alter MOVING footage (AI images land as "
+              "still-frame moments, not tracked effects), change")
            if _image_gen_enabled() else
            ". You canNOT: generate footage or images from nothing, "
            "change")
@@ -403,6 +416,111 @@ def rename_project(user_id, project_id):
     return jsonify({"ok": True})
 
 
+def _delete_project_rows(cur, project_id, session_id):
+    """Delete every DB row for a project (child rows first). The sha-keyed
+    `indexes` row has a NOT NULL project_id with ON DELETE CASCADE, so it is
+    OWNED by whichever project first built it — a plain DELETE-if-unshared is
+    defeated because deleting the owner cascades the row away regardless. So
+    when another project still references the same source file, we RE-POINT the
+    index to a surviving project before the cascade; unshared indexes cascade
+    away naturally (nobody needs them)."""
+    cur.execute("""SELECT DISTINCT sha256 FROM assets
+                   WHERE project_id = %s AND kind = 'original'
+                     AND sha256 IS NOT NULL""", (project_id,))
+    shas = [r["sha256"] for r in cur.fetchall()]
+    cur.execute("SELECT id FROM video_jobs WHERE project_id = %s", (project_id,))
+    job_keys = [f"video:{r['id']}"[:16] for r in cur.fetchall()]
+
+    # Re-point shared indexes to a surviving sharer BEFORE deleting this
+    # project's assets/rows, so the ON DELETE CASCADE can't take a row another
+    # project still needs.
+    for sha in shas:
+        cur.execute("""SELECT project_id FROM assets
+                       WHERE sha256 = %s AND kind = 'original'
+                         AND project_id <> %s LIMIT 1""", (sha, project_id))
+        keeper = cur.fetchone()
+        if keeper:
+            cur.execute("""UPDATE indexes SET project_id = %s
+                           WHERE video_sha256 = %s AND project_id = %s""",
+                        (keeper["project_id"], sha, project_id))
+
+    cur.execute("DELETE FROM llm_calls WHERE project_id = %s", (project_id,))
+    if job_keys:
+        cur.execute("DELETE FROM job_credits WHERE job_id = ANY(%s)",
+                    (job_keys,))
+    cur.execute("DELETE FROM video_jobs WHERE project_id = %s", (project_id,))
+    cur.execute("DELETE FROM edls WHERE project_id = %s", (project_id,))
+    cur.execute("DELETE FROM assets WHERE project_id = %s", (project_id,))
+    if session_id:
+        cur.execute("DELETE FROM chat_messages WHERE session_id = %s",
+                    (session_id,))
+    cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+    if session_id:
+        cur.execute("DELETE FROM chat_sessions WHERE id = %s", (session_id,))
+
+
+@video_bp.route("/projects/<int:project_id>", methods=["DELETE"])
+@token_required
+def delete_project(user_id, project_id):
+    """Delete a project and ALL of its data — every DB row AND every stored
+    object. The DB deletion is committed FIRST, then storage is wiped: an
+    irreversible R2 delete must never run before a transaction that might roll
+    back (that would leave a live project whose media is destroyed). Any object
+    that outlives a failed storage pass is orphaned and moppable — exactly what
+    'DB rows are the source of truth' means."""
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        # A running index/render would re-create R2 objects after the wipe,
+        # leaving orphaned copies of the user's (now 'deleted') media.
+        cur.execute("""SELECT 1 FROM video_jobs WHERE project_id = %s
+                       AND state IN ('queued','running') LIMIT 1""",
+                    (project_id,))
+        if cur.fetchone():
+            return jsonify({"error": "This project has an operation in "
+                                     "progress — try deleting it in a moment.",
+                            "code": "busy"}), 409
+        _delete_project_rows(cur, project_id, p["chat_session_id"])
+    # DB deletion has committed. Now wipe storage (best-effort; orphans moppable).
+    objects_deleted = 0
+    try:
+        if storage.is_configured():
+            objects_deleted = storage.delete_project_objects(project_id)
+    except Exception as e:
+        print(f"[delete_project] object delete failed for {project_id}: {e}")
+    return jsonify({"ok": True, "objects_deleted": objects_deleted})
+
+
+@video_bp.route("/projects/<int:project_id>/messages/<int:message_id>/feedback",
+                methods=["POST"])
+@token_required
+def message_feedback(user_id, project_id, message_id):
+    """Thumbs up/down on an assistant reply — the ground-truth training signal
+    (Q2). Stored on the message meta; polling/admin can read it back. Passing
+    rating=null clears it."""
+    rating = (request.get_json() or {}).get("rating")
+    if rating not in ("up", "down", None):
+        return jsonify({"error": "rating must be 'up', 'down' or null"}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        cur.execute("""SELECT id, role FROM chat_messages
+                       WHERE id = %s AND session_id = %s""",
+                    (message_id, p["chat_session_id"]))
+        m = cur.fetchone()
+        if not m or m["role"] != "assistant":
+            return jsonify({"error": "Message not found"}), 404
+        cur.execute("""UPDATE chat_messages
+                       SET meta = COALESCE(meta, '{}'::jsonb) || %s::jsonb
+                       WHERE id = %s""",
+                    (Json({"feedback": rating}), message_id))
+    return jsonify({"ok": True, "rating": rating})
+
+
 # ------------------------------------------------------------------ #
 #  Uploads — presigned, direct to object storage                       #
 # ------------------------------------------------------------------ #
@@ -480,6 +598,18 @@ def complete_upload(user_id, project_id):
         return jsonify({"error": "Uploaded file not found in storage"}), 400
     if nbytes > storage.max_upload_bytes():
         return jsonify({"error": "File exceeds the upload size limit"}), 400
+
+    # Magic-byte sniff: the extension was validated at presign, but a renamed
+    # file (e.g. a .txt renamed to .mp4) would otherwise sail through and fail
+    # deep inside indexing with a confusing error. Reject the clear mismatches
+    # early with a clean message; ambiguous bytes are allowed.
+    head = storage.get_range(key, 64)
+    if storage.content_matches_kind(head, kind) is False:
+        return jsonify({
+            "error": "That file's contents don't match its type — it may be "
+                     "renamed or corrupted. Please upload a real "
+                     f"{'video' if kind in ('original', 'clip') else kind} "
+                     "file."}), 400
 
     asset_kind = {"original": "original", "music": "music",
                   "image": "image_ref", "clip": "video_clip"}[kind]
@@ -768,6 +898,17 @@ def post_message(user_id, project_id):
                          "upgrade for a bigger monthly pool.",
                 "code": "insufficient_credits"}), 402
 
+        # Job-cap check BEFORE the insert: returning 429 after inserting the
+        # message left it committed with no agent_turn ever enqueued — an
+        # orphaned "unserved" message the user had to resend. Checked here so a
+        # capacity 429 never persists the message; the client can auto-retry.
+        if indexed and (_running_jobs_count(cur, user_id)
+                        >= MAX_CONCURRENT_JOBS_PER_USER):
+            return jsonify({
+                "error": "You have a few edits still processing — I'll take "
+                         "this one as soon as one finishes.",
+                "code": "busy_capacity"}), 429
+
         # Attachments must be this project's chat-attachable assets.
         attachments_meta = []
         if attachment_ids:
@@ -832,10 +973,6 @@ def post_message(user_id, project_id):
             }
 
         else:
-            if (_running_jobs_count(cur, user_id)
-                    >= MAX_CONCURRENT_JOBS_PER_USER):
-                return jsonify({"error": "Too many jobs running. "
-                                         "Wait for one to finish."}), 429
             if not os.getenv("OPENAI_API_KEY"):
                 cur.execute("""INSERT INTO chat_messages (session_id, role,
                                                           content)
@@ -1146,8 +1283,11 @@ def user_edl_write(user_id, project_id):
 
         preview_job = None
         if _running_jobs_count(cur, user_id) < MAX_CONCURRENT_JOBS_PER_USER:
+            # source='user_edit' lets the worker post a chat note if THIS
+            # preview fails (agent-enqueued previews react inline instead).
             preview_job = _enqueue(cur, project_id, user_id, "preview",
-                                   {"edl_version": version})
+                                   {"edl_version": version,
+                                    "source": "user_edit"})
         cur.execute("""INSERT INTO chat_messages (session_id, role, content,
                                                   meta)
                        VALUES (%s, 'activity', %s, %s)""",
@@ -1218,13 +1358,16 @@ def render_final(user_id, project_id):
     """Explicitly user-confirmed: this endpoint IS the confirmation gate.
     The agent can only render previews."""
     data = request.get_json() or {}
-    version = data.get("edl_version")
+    try:
+        version = int(data.get("edl_version"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "edl_version must be an integer"}), 400
     with vdb() as conn:
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
             return jsonify({"error": "Project not found"}), 404
         cur.execute("SELECT version FROM edls WHERE project_id = %s AND version = %s",
-                    (project_id, version if version is not None else -1))
+                    (project_id, version))
         if not cur.fetchone():
             return jsonify({"error": "That EDL version does not exist"}), 400
         cur.execute("""SELECT id FROM video_jobs
@@ -1236,7 +1379,43 @@ def render_final(user_id, project_id):
             return jsonify({"error": "Too many jobs running. "
                                      "Wait for one to finish."}), 429
         job_id = _enqueue(cur, project_id, user_id, "final",
-                          {"edl_version": int(version)})
+                          {"edl_version": version})
+    return jsonify({"job_id": job_id})
+
+
+@video_bp.route("/projects/<int:project_id>/render/preview", methods=["POST"])
+@token_required
+def render_preview_endpoint(user_id, project_id):
+    """Re-render the preview for an EDL version. Used by the studio to retry a
+    preview that failed (or never rendered) without making another edit."""
+    data = request.get_json() or {}
+    try:
+        version = int(data.get("edl_version"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "edl_version must be an integer"}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+        cur.execute("SELECT version FROM edls WHERE project_id = %s AND version = %s",
+                    (project_id, version))
+        if not cur.fetchone():
+            return jsonify({"error": "That EDL version does not exist"}), 400
+        # Don't stack a second preview for a version already rendering.
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'preview'
+                         AND state IN ('queued','running')
+                         AND (payload->>'edl_version')::int = %s""",
+                    (project_id, version))
+        existing = cur.fetchone()
+        if existing:
+            return jsonify({"job_id": existing["id"], "already_running": True})
+        if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
+            return jsonify({"error": "You have a few edits still processing — "
+                                     "try again in a moment.",
+                            "code": "busy_capacity"}), 429
+        job_id = _enqueue(cur, project_id, user_id, "preview",
+                          {"edl_version": version, "source": "user_edit"})
     return jsonify({"job_id": job_id})
 
 

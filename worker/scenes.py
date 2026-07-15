@@ -4,12 +4,21 @@ import config
 from schemas import Shot
 
 
-def detect_shots(proxy_path, duration):
+def detect_shots(proxy_path, duration, warnings=None):
+    """Returns the shot list. When scene detection crashes (missing dep,
+    corrupt proxy) it degrades to one full-length shot — but no longer
+    silently: the failure is logged and, when a `warnings` list is passed,
+    recorded there so a degraded index is visible in admin."""
     try:
         from scenedetect import detect, ContentDetector
         scene_list = detect(proxy_path,
                             ContentDetector(threshold=config.SCENE_THRESHOLD))
-    except Exception:
+    except Exception as e:
+        print(f"[scenes] detection failed, degrading to one shot: {e}",
+              flush=True)
+        if warnings is not None:
+            warnings.append(f"shot detection failed ({str(e)[:120]}) — the "
+                            "whole video is treated as a single shot")
         scene_list = []
 
     shots = []

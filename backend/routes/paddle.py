@@ -26,6 +26,12 @@ PLANS_SANDBOX = {
 
 PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_LIVE
 
+# Only these tiers can be NEWLY purchased or switched to. ultra/titan/ace are
+# retired from the product but stay in PLANS (and PLAN_CREDITS in the webhook)
+# so grandfathered subscribers keep working — they must NOT be reachable via a
+# hand-crafted checkout/change-plan call that mints their live price IDs.
+PURCHASABLE_PLANS = {'plus', 'pro'}
+
 
 def get_paddle_base():
     is_sandbox = os.environ.get('PADDLE_MODE') == 'sandbox'
@@ -78,6 +84,8 @@ def create_checkout_session():
 
     if plan not in PLANS:
         return jsonify({"error": "Invalid plan"}), 400
+    if plan not in PURCHASABLE_PLANS:
+        return jsonify({"error": "That plan is no longer available."}), 400
 
     # Pick the right price ID based on billing interval
     if billing == 'yearly':
@@ -199,6 +207,8 @@ def change_plan():
 
     if new_plan not in PLANS:
         return jsonify({"error": "Invalid plan"}), 400
+    if new_plan not in PURCHASABLE_PLANS:
+        return jsonify({"error": "That plan is no longer available."}), 400
 
     from models import get_user_subscription_id
     subscription_id = get_user_subscription_id(user_id)
@@ -221,6 +231,10 @@ def change_plan():
 
     body = {
         "items": [{"price_id": new_price_id, "quantity": 1}],
+        # Keep the subscription's custom_data.plan in sync with the new price so
+        # it isn't misleading (the webhook now grants off the price, but other
+        # tooling reads this field).
+        "custom_data": {"user_id": user_id, "plan": new_plan, "billing": billing},
         "proration_billing_mode": "do_not_bill"
     }
     res = requests.patch(

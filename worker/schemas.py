@@ -17,6 +17,9 @@ GAIN_MIN_DB = -60.0
 GAIN_MAX_DB = 12.0
 HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 MAX_WORDS_PER_CAPTION = 12
+# Continuous caption-size fine-tune multiplier bounds (see CaptionStyle).
+CAPTION_SIZE_SCALE_MIN = 0.5
+CAPTION_SIZE_SCALE_MAX = 3.0
 
 
 class EDLValidationError(ValueError):
@@ -37,6 +40,12 @@ class CaptionStyle(BaseModel):
     written before styling existed render unchanged."""
     color: str = "#FFFFFF"
     size: Literal["s", "m", "l", "xl"] = "m"
+    # Continuous fine-tune multiplier on top of the `size` bucket (0.5-3.0).
+    # Magnitudes belong on a continuous scale, not a 4-value enum — this is the
+    # knob for "a little bigger" / "way bigger" without jumping buckets. The
+    # `size` enum stays as the coarse curated menu (and as an alias so old
+    # EDLs keep working). Optional so pre-round-13 EDLs keep their signatures.
+    size_scale: Optional[float] = None
     position: Literal["bottom", "top", "middle"] = "bottom"
     # karaoke word-by-word captions; Optional so pre-round-7 EDLs keep their
     # signatures (None-valued keys are stripped by edl_signature).
@@ -68,6 +77,23 @@ class CaptionStyle(BaseModel):
             raise ValueError(
                 f"highlight_color '{v}' must be #RRGGBB hex, e.g. #FFE14D")
         return v.upper()
+
+    @field_validator("size_scale")
+    @classmethod
+    def _size_scale_range(cls, v):
+        if v is None:
+            return v
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("size_scale must be a number between 0.5 and 3.0")
+        # 1.0 is the neutral default — normalize it back to None so it never
+        # shows up as a change in edl_signature (same convention as the other
+        # optional fields whose no-op value collapses to None).
+        if abs(v - 1.0) < 1e-6:
+            return None
+        return round(min(max(v, CAPTION_SIZE_SCALE_MIN),
+                         CAPTION_SIZE_SCALE_MAX), 3)
 
 
 def _coerce_style(v):
@@ -539,6 +565,8 @@ def _style_desc(style):
         bits.append(s["color"])
     if s.get("size") and s["size"] != "m":
         bits.append(f"size {s['size']}")
+    if s.get("size_scale"):
+        bits.append(f"scale {s['size_scale']}x")
     if s.get("position") and s["position"] != "bottom":
         bits.append(s["position"])
     if s.get("dynamic"):
@@ -644,3 +672,11 @@ class VideoIndex(BaseModel):
     sentences: List[Sentence] = Field(default_factory=list)
     silences: List[List[float]] = Field(default_factory=list)
     sheet_keys: List[str] = Field(default_factory=list)
+    # Whisper-detected language code (e.g. "en", "es"). Optional so cached
+    # indexes from before this field render unchanged; used for caption
+    # font/style decisions and admin analytics.
+    language: Optional[str] = None
+    # Non-fatal degradations recorded during indexing (scene/silence/vision
+    # failures, capped vision sampling). Surfaced in admin so a partially
+    # degraded index is visible instead of silently worse.
+    warnings: List[str] = Field(default_factory=list)

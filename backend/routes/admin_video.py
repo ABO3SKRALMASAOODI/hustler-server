@@ -21,10 +21,10 @@ import storage
 
 admin_video_bp = Blueprint("admin_video", __name__)
 
-# Estimated $ per 1M tokens when the API reports usage (qwen-plus ballpark;
-# override via env if the model or pricing changes).
-PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "0.4"))
-PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "1.2"))
+# Estimated $ per 1M tokens when the API reports usage (default = Grok 4.5,
+# $2 in / $6 out; override via env if the model or pricing changes).
+PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
+PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
 
 
 def adb():
@@ -678,6 +678,82 @@ def video_users():
          "last_active": r["last_active"].isoformat()
              if r["last_active"] else None}
         for r in rows]})
+
+
+COHORT_STAGES = [
+    ("signed_up", "Signed up"),
+    ("uploaded", "Uploaded a video"),
+    ("messaged", "Messaged the editor"),
+    ("exported", "Exported a video"),
+    ("paid", "Paid (current)"),
+]
+
+
+@admin_video_bp.route("/admin/video/cohorts", methods=["GET"])
+@admin_required
+def video_cohorts():
+    """Lean-Startup cohort funnel analysis: group users by signup cohort and
+    track what fraction of each cohort reached each activation/monetization
+    stage. Unlike a running total, each signup cohort is measured
+    independently, so product improvements show up as newer cohorts
+    converting better. ?period=week|month|day (default week)."""
+    period = (request.args.get("period") or "week").strip().lower()
+    if period not in ("day", "week", "month"):
+        period = "week"
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            WITH base AS (
+                SELECT u.id,
+                    date_trunc(%s, u.created_at) AS cohort,
+                    EXISTS(SELECT 1 FROM projects p
+                           JOIN assets a ON a.project_id = p.id
+                           WHERE p.user_id = u.id AND a.kind = 'original')
+                        AS uploaded,
+                    EXISTS(SELECT 1 FROM projects p
+                           JOIN chat_messages cm
+                                ON cm.session_id = p.chat_session_id
+                           WHERE p.user_id = u.id AND cm.role = 'user')
+                        AS messaged,
+                    EXISTS(SELECT 1 FROM video_jobs vj
+                           WHERE vj.user_id = u.id AND vj.type = 'final'
+                             AND vj.state = 'done')
+                        AS exported,
+                    (COALESCE(u.is_subscribed, 0) = 1
+                     OR COALESCE(u.plan, 'free') NOT IN ('free', ''))
+                        AS paid
+                FROM users u
+                WHERE u.created_at IS NOT NULL
+            )
+            SELECT cohort,
+                   COUNT(*) AS signed_up,
+                   COUNT(*) FILTER (WHERE uploaded) AS uploaded,
+                   COUNT(*) FILTER (WHERE messaged) AS messaged,
+                   COUNT(*) FILTER (WHERE exported) AS exported,
+                   COUNT(*) FILTER (WHERE paid) AS paid
+            FROM base
+            GROUP BY cohort
+            ORDER BY cohort
+        """, (period,))
+        rows = cur.fetchall()
+    cohorts = [{
+        "cohort": r["cohort"].date().isoformat() if r["cohort"] else None,
+        "signed_up": int(r["signed_up"] or 0),
+        "uploaded": int(r["uploaded"] or 0),
+        "messaged": int(r["messaged"] or 0),
+        "exported": int(r["exported"] or 0),
+        "paid": int(r["paid"] or 0),
+    } for r in rows]
+    return jsonify({
+        "period": period,
+        "stages": [{"key": k, "label": lbl} for k, lbl in COHORT_STAGES],
+        "cohorts": cohorts,
+        "note": ("Each row is the cohort of users who signed up in that "
+                 "period; each stage counts how many of THEM ever reached it "
+                 "(a funnel per cohort, not a running total). \"Paid\" "
+                 "reflects CURRENT subscription state, so a canceled user "
+                 "drops back out of it."),
+    })
 
 
 @admin_video_bp.route("/admin/video/users/<int:user_id>", methods=["GET"])

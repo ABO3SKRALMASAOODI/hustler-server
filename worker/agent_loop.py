@@ -18,13 +18,78 @@ from agent_prompt import SYSTEM_PROMPT, project_state_block
 from schemas import describe_edl
 
 
-def _index_summary(index):
+def _silence_line(index):
+    sil = [s for s in index.get("silences", []) if s[1] - s[0] >= 0.7]
+    return (f"SILENCES >=0.7s: {len(sil)}, "
+            f"totalling {sum(e - s for s, e in sil):.1f}s "
+            "(use find_silences for the exact list with word context).")
+
+
+def _full_shot_line(s):
+    cap = s.get("caption") or {}
+    parts = [cap.get("setting"), cap.get("people"), cap.get("action")]
+    desc = " | ".join(p for p in parts if p)
+    ost = cap.get("on_screen_text")
+    if ost:
+        desc += f'  on-screen text: "{ost}"'
+    return (f"  [#{s['id']} {s['start']:.1f}-{s['end']:.1f}] "
+            f"{desc or '(no visual description)'}")
+
+
+def _full_index_block(index):
+    """For SHORT videos, the ENTIRE index inlined into the turn prompt: every
+    transcript sentence (untruncated) + every shot description + language. The
+    model then never has to remember to call get_transcript/get_shots — the
+    single biggest "it didn't bother to look" failure class. Returns None when
+    the video is too long or the assembled text would exceed the char cap, so
+    the caller falls back to the elided summary + retrieval tools."""
     v = index["video"]
+    if float(v.get("duration") or 0) > config.FULL_INDEX_MAX_DURATION_S:
+        return None
     sentences = index.get("sentences", [])
     words = index.get("words", [])
     shots = index.get("shots", [])
-    sil = [s for s in index.get("silences", []) if s[1] - s[0] >= 0.7]
-    lines = [f"TRANSCRIPT: {len(sentences)} sentences / {len(words)} words."
+    lang = index.get("language")
+    lines = []
+    if sentences:
+        lines.append(
+            f"TRANSCRIPT — COMPLETE ({len(sentences)} sentences / "
+            f"{len(words)} words, every sentence below; you already have the "
+            "whole transcript, do NOT call get_transcript for this video — "
+            "use get_words only for word-exact cut points):")
+        for s in sentences:
+            lines.append(f"  [{s['id']} {s['t0']:.1f}-{s['t1']:.1f}] "
+                         f"{s['text']}")
+    else:
+        lines.append("TRANSCRIPT: none (no speech detected or no audio "
+                     "track).")
+    lines.append(
+        f"SHOTS — COMPLETE ({len(shots)} shots, every visual description "
+        "below; do NOT call get_shots for this video):"
+        if shots else "SHOTS: none detected.")
+    lines += [_full_shot_line(s) for s in shots]
+    lines.append(_silence_line(index))
+    if lang:
+        lines.append(f"LANGUAGE (detected): {lang}.")
+    text = "\n".join(lines)
+    if len(text) > config.FULL_INDEX_MAX_CHARS:
+        return None
+    return text
+
+
+def _index_summary(index):
+    full = _full_index_block(index)
+    if full is not None:
+        return full
+
+    # Long-video fallback: elided head/tail with pointers to the retrieval
+    # tools, which stay available for pulling any range on demand.
+    sentences = index.get("sentences", [])
+    words = index.get("words", [])
+    shots = index.get("shots", [])
+    lines = [f"TRANSCRIPT: {len(sentences)} sentences / {len(words)} words "
+             "(long video — only the head/tail is shown here; call "
+             "get_transcript / search_transcript / get_words for the rest)."
              if sentences else
              "TRANSCRIPT: none (no speech detected or no audio track)."]
 
@@ -57,9 +122,9 @@ def _index_summary(index):
         lines.append(f"  ... {len(shots) - 17} more (use get_shots) ...")
         lines += [shot_line(s) for s in shots[-5:]]
 
-    lines.append(f"SILENCES >=0.7s: {len(sil)}, "
-                 f"totalling {sum(e - s for s, e in sil):.1f}s "
-                 "(use find_silences for the list).")
+    lines.append(_silence_line(index))
+    if index.get("language"):
+        lines.append(f"LANGUAGE (detected): {index['language']}.")
     return "\n".join(lines)
 
 
@@ -236,10 +301,23 @@ def run_agent_job(worker_db, job):
     workdir = os.path.join(config.TMP_DIR, f"agent_{job['id']}")
     os.makedirs(workdir, exist_ok=True)
 
+    ctx = agent_tools.ToolContext(worker_db, job, project,
+                                  index_row["json"], workdir)
+    # Per-turn spend cap: min(hard ceiling, the user's balance + a small
+    # grace). A paying user gets a generous ceiling; a 1-credit user can't run
+    # up an arbitrarily expensive turn that gets written off.
+    balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
+    ctx.credit_budget = min(config.AGENT_TURN_MAX_CREDITS,
+                            float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE)
+
     # Persist every model call this turn (agent, honesty regen, vision) to
-    # llm_calls for the admin inspector. Payloads are capped + redacted in
-    # dbx.insert_llm_call; failures never break the turn.
+    # llm_calls for the admin inspector, and accumulate token usage for the
+    # spend cap. Payloads are capped + redacted in dbx.insert_llm_call;
+    # failures never break the turn.
     def _llm_recorder(purpose, request, response, usage):
+        if usage:
+            ctx.tokens_in += getattr(usage, "prompt_tokens", 0) or 0
+            ctx.tokens_out += getattr(usage, "completion_tokens", 0) or 0
         worker_db.run(dbx.insert_llm_call, job["project_id"], job["id"],
                       purpose, (request or {}).get("model"),
                       request, response,
@@ -247,8 +325,6 @@ def run_agent_job(worker_db, job):
                       getattr(usage, "completion_tokens", None) if usage else None)
     llm.set_recorder(_llm_recorder)
     try:
-        ctx = agent_tools.ToolContext(worker_db, job, project,
-                                      index_row["json"], workdir)
         attachment_note = _attachment_context(worker_db, ctx, user_message)
         return _run_loop(ctx, worker_db, job, session_id, user_message,
                          attachment_note)
@@ -657,6 +733,29 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                           "or break the request into smaller steps.",
                           {"error": "turn_timeout"})
             return {"status": "timeout", "steps": total_steps,
+                    "timings": timings}
+
+        # Graceful spend cap: stop before starting another (expensive) model
+        # call once this turn's model cost has reached the budget. Honest stop
+        # message; the edits already made are saved + previewed.
+        if ctx.over_budget():
+            print(f"[job {job['id']}] spend cap hit: "
+                  f"{ctx.running_credits()} >= {ctx.credit_budget} credits",
+                  flush=True)
+            honesty["budget_stop"] = True
+            if ctx.versions_written:
+                return _finalize(
+                    ctx, worker_db, session_id,
+                    "I've hit my budget for this request, so I'm stopping "
+                    "here — the edits I completed are saved and previewed "
+                    "below. Send a follow-up to keep going.",
+                    "budget", total_steps, timings, honesty)
+            worker_db.run(dbx.add_message, session_id, "assistant",
+                          "This request needed more work than its budget "
+                          "allows, so I stopped before changing anything. "
+                          "Try breaking it into smaller steps.",
+                          {"error": "turn_budget"})
+            return {"status": "budget", "steps": total_steps,
                     "timings": timings}
 
         worker_db.run(dbx.set_progress, job["id"],

@@ -17,10 +17,18 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the whisper model into the image so it is NOT re-downloaded (~0.5GB)
+# on every container start — that download added big latency to the first job
+# after each deploy and compounded media-slot contention. HF_HOME points at an
+# in-image path so faster-whisper reads the baked cache at runtime.
+ENV HF_HOME=/opt/hf
+ARG WHISPER_MODEL=small
+RUN python -c "from faster_whisper import download_model; \
+    download_model('${WHISPER_MODEL}')"
+
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \
-    HF_HOME=/tmp/hf \
     WORKER_TMP_DIR=/tmp/valmera
 
 CMD ["python", "main.py"]

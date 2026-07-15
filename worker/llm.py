@@ -1,8 +1,10 @@
 """LLM access — OpenAI-compatible SDK only, configured entirely by env.
-Swapping DashScope for OpenAI/anything else is an env change, never code.
-(The one exception: image generation/editing uses DashScope's native
-multimodal-generation endpoint, because no OpenAI-compatible equivalent
-exists there — it degrades to unavailable on non-DashScope bases.)"""
+Default provider is xAI Grok (api.x.ai/v1); swapping to any OpenAI-compatible
+provider (DashScope/Qwen, OpenAI, ...) is an env change, never code.
+Image generation supports two backends (auto-detected, see image_provider):
+the OpenAI-compatible /images/generations surface (xAI — text-to-image only)
+and DashScope's native multimodal-generation endpoint (text-to-image AND
+frame/image restyling). Editing is unavailable on the OpenAI/xAI backend."""
 
 import base64
 import json
@@ -143,7 +145,21 @@ _IMAGE_SIZES_V2 = {"16:9": "2688*1536", "9:16": "1536*2688",
                    "3:4": "1728*2368"}
 
 
+def image_provider():
+    """Which image backend to use, inferred from the endpoint:
+      'dashscope' — native multimodal-generation (generate AND restyle/edit);
+      'openai'    — OpenAI-compatible /images/generations (xAI Grok, etc.);
+                    text-to-image ONLY, no editing.
+    Returns None when no image backend is resolvable."""
+    if config.IMAGE_API_URL or "dashscope" in (config.OPENAI_BASE_URL or ""):
+        return "dashscope"
+    if config.OPENAI_BASE_URL:
+        return "openai"
+    return None
+
+
 def image_api_url():
+    """DashScope native endpoint (only meaningful for the dashscope provider)."""
     if config.IMAGE_API_URL:
         return config.IMAGE_API_URL
     base = (config.OPENAI_BASE_URL or "").split("/compatible-mode")[0]
@@ -155,7 +171,13 @@ def image_api_url():
 
 def image_available():
     return bool(config.IMAGE_GEN_MODEL and config.OPENAI_API_KEY
-                and image_api_url())
+                and image_provider())
+
+
+def image_edit_available():
+    """Frame/image restyling needs the DashScope native endpoint — the
+    OpenAI-compatible /images/generations surface (xAI) can only generate."""
+    return image_available() and image_provider() == "dashscope"
 
 
 def image_size_for(aspect, model):
@@ -224,12 +246,46 @@ def _download_image(url, out_path):
             f.write(chunk)
 
 
+def _openai_image_gen(model, prompt, out_path):
+    """Text-to-image via the OpenAI-compatible /images/generations endpoint
+    (xAI Grok). Uses the same pooled client (same base_url + key)."""
+    try:
+        resp = client().images.generate(model=model, prompt=prompt, n=1)
+        d = resp.data[0]
+        b64 = getattr(d, "b64_json", None)
+        url = getattr(d, "url", None)
+    except Exception as e:
+        err = f"image API error: {str(e)[:200]}"
+        record("image_gen", {"model": model, "prompt": prompt},
+               {"error": err}, None)
+        return False, err
+    try:
+        if b64:
+            with open(out_path, "wb") as f:
+                f.write(base64.b64decode(b64))
+        elif url:
+            _download_image(url, out_path)
+        else:
+            err = "image API returned no image"
+            record("image_gen", {"model": model, "prompt": prompt},
+                   {"error": err}, None)
+            return False, err
+    except Exception as e:
+        return False, f"could not save the generated image: {str(e)[:200]}"
+    # response MUST carry an 'image_url' key so charge_turn_credits counts it.
+    record("image_gen", {"model": model, "prompt": prompt},
+           {"image_url": (url.split("?")[0][:300] if url else "b64")}, None)
+    return True, None
+
+
 def generate_image(prompt, out_path, aspect=None):
     """Text-to-image via IMAGE_GEN_MODEL. Saves a PNG to out_path.
     Returns (True, None) or (False, short_error)."""
     if not image_available():
         return False, "no image model configured"
     model = config.IMAGE_GEN_MODEL
+    if image_provider() == "openai":
+        return _openai_image_gen(model, prompt, out_path)
     size = image_size_for(aspect, model)
     url, err = _image_call(
         model, [{"text": prompt}], "image_gen",
@@ -244,11 +300,16 @@ def generate_image(prompt, out_path, aspect=None):
 
 
 def edit_image(image_path, instruction, out_path, image_name="image"):
-    """Instruction-based edit of a local image via IMAGE_EDIT_MODEL.
-    Saves the edited PNG to out_path. Returns (True, None) or
-    (False, short_error). image_name is what gets logged, never the bytes."""
+    """Instruction-based edit of a local image via IMAGE_EDIT_MODEL (DashScope
+    only). Returns (True, None) or (False, short_error). image_name is what
+    gets logged, never the bytes."""
     if not image_available():
         return False, "no image model configured"
+    if not image_edit_available():
+        return (False, "the current image model can only GENERATE images from "
+                       "a text description — it cannot restyle or edit an "
+                       "existing frame/image. Describe the desired image "
+                       "instead and it will be generated fresh.")
     model = config.IMAGE_EDIT_MODEL or config.IMAGE_GEN_MODEL
     url, err = _image_call(
         model,

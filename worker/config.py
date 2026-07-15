@@ -13,24 +13,34 @@ S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "")
 S3_BUCKET = os.getenv("S3_BUCKET", "")
 S3_REGION = os.getenv("S3_REGION", "auto")
 
-# LLM — OpenAI-compatible only. Default: Alibaba DashScope compatible mode.
-OPENAI_BASE_URL = os.getenv(
-    "OPENAI_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+# LLM — OpenAI-compatible only. Default: xAI Grok (api.x.ai/v1). The whole
+# stack (agent tool-calling, vision, concierge) is OpenAI-compatible, so
+# pointing OPENAI_BASE_URL + OPENAI_API_KEY at any compatible provider is all
+# that's needed. To run Grok you ONLY set OPENAI_API_KEY (an xAI key); the
+# defaults below already select Grok 4.5. (To go back to DashScope/Qwen, set
+# OPENAI_BASE_URL, AGENT_MODEL, VISION_MODEL and the LLM_PRICE_* below.)
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-AGENT_MODEL = os.getenv("AGENT_MODEL", "qwen-plus")
-# Empty string disables all vision features gracefully.
-VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-plus")
+AGENT_MODEL = os.getenv("AGENT_MODEL", "grok-4.5")
+# grok-4.5 is multimodal, so it doubles as the vision model. Empty string
+# disables all vision features gracefully. Set to a cheaper vision model if
+# xAI ships one.
+VISION_MODEL = os.getenv("VISION_MODEL", "grok-4.5")
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
-# Image generation / editing (DashScope multimodal-generation API — not part
-# of the OpenAI-compatible surface, so it gets its own endpoint). Empty
-# IMAGE_GEN_MODEL disables the generate_image tool gracefully, same contract
-# as VISION_MODEL. IMAGE_API_URL overrides the endpoint; when empty it is
-# derived from OPENAI_BASE_URL (works for dashscope / dashscope-intl; any
-# non-DashScope base disables image features unless IMAGE_API_URL is set).
-IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "qwen-image-plus")
-IMAGE_EDIT_MODEL = os.getenv("IMAGE_EDIT_MODEL", "qwen-image-edit")
+# Image generation. Two backends are supported and auto-detected from
+# OPENAI_BASE_URL (see worker/llm.image_provider):
+#   * OpenAI-compatible /images/generations (xAI Grok, default) — text-to-image
+#     ONLY; it cannot restyle/edit an existing frame or image.
+#   * DashScope native multimodal-generation — text-to-image AND frame/image
+#     restyling (set OPENAI_BASE_URL back to dashscope, or IMAGE_API_URL).
+# Empty IMAGE_GEN_MODEL disables the generate_image tool everywhere gracefully,
+# same contract as VISION_MODEL.
+IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "grok-2-image")
+# Frame/image restyling model — only used by the DashScope backend. Empty on
+# the OpenAI/xAI backend (which has no image-edit endpoint).
+IMAGE_EDIT_MODEL = os.getenv("IMAGE_EDIT_MODEL", "")
 IMAGE_API_URL = os.getenv("IMAGE_API_URL", "")
 IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
 MAX_GENERATED_IMAGES_PER_TURN = int(
@@ -56,7 +66,13 @@ MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
 # Worker tuning
 TMP_DIR = os.getenv("WORKER_TMP_DIR", "/tmp/valmera")
 POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
+# The media lane runs preview + final encodes. Indexing gets its OWN lane
+# (INDEX_SLOTS) so a multi-minute whisper index can never wedge interactive
+# previews behind it — that starvation was the #1 cause of "I chatted and
+# nothing happened" churn. Raise MEDIA_SLOTS to also stop a long final export
+# from blocking previews (needs the vCPUs for concurrent ffmpeg).
 MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "1"))
+INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "1"))
 AGENT_SLOTS = int(os.getenv("WORKER_AGENT_SLOTS", "2"))
 HEARTBEAT_EVERY_S = 20
 STALE_AFTER_S = 120           # running + no heartbeat for this long => reclaimable
@@ -75,6 +91,31 @@ TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # long video's transcript is how far-apart repetitions go unseen.
 TRANSCRIPT_CHAR_BUDGET = 48000    # ~12000 tokens
 
+# Full-index-in-context (Q1): for short videos, put the ENTIRE sentence-level
+# transcript + every shot caption + all keep spans directly into the per-turn
+# project state so the model never has to "remember to look" — it deletes the
+# whole "never bothered to check the transcript" failure class. Long videos
+# fall back to the elided summary + retrieval tools. Bounded by a char cap so a
+# short-but-dense video can't blow up the prompt.
+FULL_INDEX_MAX_DURATION_S = float(os.getenv("FULL_INDEX_MAX_DURATION_S", "600"))
+FULL_INDEX_MAX_CHARS = int(os.getenv("FULL_INDEX_MAX_CHARS", "40000"))
+
+# Per-turn spend cap: bound one agent turn's model cost so a 1-credit user
+# can't trigger an arbitrarily expensive turn (vision + image calls) that gets
+# written off. The effective budget is min(this hard ceiling, balance + grace)
+# so paying users still get generous turns while free users are capped near
+# what they can actually pay for. Same 1 credit = $0.01 convention as billing.
+AGENT_TURN_MAX_CREDITS = float(os.getenv("AGENT_TURN_MAX_CREDITS", "40"))
+AGENT_TURN_BUDGET_GRACE = float(os.getenv("AGENT_TURN_BUDGET_GRACE", "3"))
+# Model prices ($/1M tokens) for the credit charge — MUST match the model in
+# AGENT_MODEL or credits drift from real cost. Default = Grok 4.5 ($2 in /
+# $6 out). Grok 4.5 is ~5x pricier than Qwen, so a turn costs ~5x the credits;
+# set AGENT_MODEL=grok-4.1-fast + these prices lower for Qwen-like economics.
+# (Must mirror db.charge_turn_credits so the in-turn cap and final charge agree.)
+LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
+LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
+IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.05"))
+
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /
 # screen content and several times faster than the old medium/CRF18.
@@ -84,6 +125,26 @@ FINAL_CRF = int(os.getenv("FINAL_CRF", "20"))
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6
 SCENE_THRESHOLD = float(os.getenv("SCENE_THRESHOLD", "27.0"))
+
+# Vision-call cap during indexing: one contact sheet = 25 shots = one vision
+# call. A 3-hour shot-heavy video would otherwise fire proportionally many
+# calls; beyond this many sheets we sample evenly across the video and record a
+# warning so the cost is bounded and the degradation is visible.
+MAX_VISION_SHEETS = int(os.getenv("MAX_VISION_SHEETS", "12"))
+
+# Render verification: after every encode, the output duration must match the
+# EDL's exact expected program duration (the renderer computes it), and the
+# output must not be almost entirely black. A mismatch beyond the tolerance, or
+# black coverage above the ratio, retries the encode once then surfaces a real
+# error instead of silently shipping a broken video.
+RENDER_DURATION_TOLERANCE_S = float(
+    os.getenv("RENDER_DURATION_TOLERANCE_S", "0.75"))
+RENDER_DURATION_TOLERANCE_FRAC = float(
+    os.getenv("RENDER_DURATION_TOLERANCE_FRAC", "0.03"))
+# Deliberately high so legit dark/moody footage and short dip-to-black
+# transitions never trip it — only a near-fully-black render (a real failure)
+# exceeds it.
+RENDER_BLACK_MAX_RATIO = float(os.getenv("RENDER_BLACK_MAX_RATIO", "0.7"))
 
 FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "5400"))
 # A stalled encode stops emitting -progress lines but keeps its stdout pipe

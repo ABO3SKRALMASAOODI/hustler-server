@@ -51,6 +51,24 @@ class ToolContext:
         self.autorendered = False     # loop set: model skipped render_preview
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
+        # Live per-turn model spend, for the graceful spend cap. tokens are
+        # accumulated by the loop's llm recorder; images are priced flat.
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.credit_budget = None     # set by run_agent_job; None = uncapped
+
+    def running_credits(self):
+        """Model cost spent so far this turn, in credits (1 credit = $0.01),
+        using the same formula as db.charge_turn_credits so the in-turn cap
+        and the final charge agree."""
+        cost = (self.tokens_in * config.LLM_PRICE_IN_PER_M +
+                self.tokens_out * config.LLM_PRICE_OUT_PER_M) / 1e6
+        cost += len(self.images_generated) * config.IMAGE_PRICE_USD
+        return round(cost / 0.01, 2)
+
+    def over_budget(self):
+        return (self.credit_budget is not None and
+                self.running_credits() >= self.credit_budget)
 
     def clamp(self, t):
         try:
@@ -610,6 +628,110 @@ def restore_range(ctx, start, end, snap_to_words=False):
                        snap_to_words=bool(snap_to_words))
 
 
+# Non-lexical hesitation sounds only — safe to remove without changing meaning.
+# Deliberately EXCLUDED from the default: words that are sometimes fillers but
+# often meaningful — "like"/"you know"/"basically" (mangle sentences) and the
+# back-channel affirmations "mm"/"mmm"/"hmm"/"uh-huh" (cutting them deletes a
+# speaker's "yes"). The caller can still target any of these via a custom list.
+FILLER_WORDS_DEFAULT = ("um", "umm", "ummm", "uh", "uhh", "uhm", "er", "err",
+                        "erm", "ah", "ahh")
+
+
+def _norm_word(w):
+    return re.sub(r"[^a-z]", "", str(w or "").lower())
+
+
+def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12):
+    """One-call silence trim: cut every detected pause at least min_silence_s
+    long, keeping padding_s of breathing room around speech, snapped to word
+    edges. Replaces the fragile find_silences -> N× cut_range plan."""
+    try:
+        min_s = max(0.15, float(min_silence_s))
+    except (TypeError, ValueError):
+        return "REJECTED: min_silence_s must be a number of seconds."
+    try:
+        pad = max(0.0, float(padding_s))
+    except (TypeError, ValueError):
+        return "REJECTED: padding_s must be a number of seconds."
+    sil = [s for s in ctx.index.get("silences", []) if s[1] - s[0] >= min_s]
+    if not sil:
+        return (f"No silences of {min_s}s or longer were detected — the video "
+                "is already tight, so nothing was cut.")
+    cuts = []
+    for s, e in sil:
+        cs, ce = round(s + pad, 2), round(e - pad, 2)
+        if ce - cs >= 0.1:
+            cuts.append([cs, ce])
+    if not cuts:
+        return (f"Found {len(sil)} silence(s), but each is too short to trim "
+                f"once {pad}s of padding is kept around speech. Nothing was "
+                "cut (lower padding_s to trim more aggressively).")
+    cur = ctx.latest_edl()["json"]["keep"]
+    new = [list(x) for x in audit.subtract_spans(cur, cuts)]
+    if not new:
+        return ("REJECTED: cutting every detected silence would remove the "
+                "whole video. Inspect find_silences and cut a narrower set.")
+    removed = output_duration(cur) - output_duration(new)
+    return _write_keep(
+        ctx, new,
+        f"cut {len(cuts)} silence gap(s) >= {min_s}s ({removed:.1f}s removed, "
+        f"{pad}s kept around speech)",
+        snap_to_words=True)
+
+
+def remove_filler_words(ctx, words=None):
+    """One-call filler removal: cut every 'um'/'uh'/etc. from the edit using
+    the real word timestamps. Deterministic — no estimation. A custom `words`
+    entry may be a single word OR a multi-word phrase ("you know"), matched as
+    a consecutive run of transcript words."""
+    raw = words if isinstance(words, list) and words \
+        else list(FILLER_WORDS_DEFAULT)
+    singles, phrases = set(), []
+    for entry in raw:
+        toks = [t for t in (_norm_word(t) for t in str(entry).split()) if t]
+        if not toks:
+            continue
+        if len(toks) == 1:
+            singles.add(toks[0])
+        else:
+            phrases.append(toks)
+    if not singles and not phrases:
+        return "REJECTED: provide at least one filler word to remove."
+    all_words = ctx.index.get("words", [])
+    if not all_words:
+        return ("REJECTED: this video has no transcript (no speech detected), "
+                "so there are no filler words to remove.")
+    norm = [_norm_word(w.get("w")) for w in all_words]
+    cuts, hits = [], {}
+    for idx, tok in enumerate(norm):
+        if tok in singles:
+            cuts.append([round(all_words[idx]["t0"], 2),
+                         round(all_words[idx]["t1"], 2)])
+            hits[tok] = hits.get(tok, 0) + 1
+    for ph in phrases:
+        n = len(ph)
+        for start in range(0, len(norm) - n + 1):
+            if norm[start:start + n] == ph:
+                cuts.append([round(all_words[start]["t0"], 2),
+                             round(all_words[start + n - 1]["t1"], 2)])
+                key = " ".join(ph)
+                hits[key] = hits.get(key, 0) + 1
+    if not cuts:
+        wanted = sorted(singles) + [" ".join(p) for p in phrases]
+        return (f"No filler words {wanted} were found in the "
+                "transcript, so nothing was removed.")
+    cuts = _merge_touching(cuts)
+    cur = ctx.latest_edl()["json"]["keep"]
+    new = [list(x) for x in audit.subtract_spans(cur, cuts)]
+    if not new:
+        return ("REJECTED: removing those words would remove the whole "
+                "video — check your custom word list.")
+    summary = ", ".join(f"'{k}'×{v}" for k, v in sorted(hits.items()))
+    return _write_keep(
+        ctx, new,
+        f"removed {len(cuts)} filler-word span(s) ({summary})")
+
+
 def _parse_style(style):
     """Validate a style dict -> normalized dict, None for absent, or an
     error string. Legacy string styles ('default') mean absent."""
@@ -697,19 +819,21 @@ def _parse_partial_style(style):
     fills defaults, so merging cannot reset fields the user didn't mention."""
     if not isinstance(style, dict) or not style:
         return ('ERR: style must be a non-empty object with any of '
-                '{"color":"#RRGGBB","size":"s|m|l|xl",'
+                '{"color":"#RRGGBB","size":"s|m|l|xl","size_scale":0.5-3.0,'
                 '"position":"bottom|top|middle","dynamic":true|false,'
                 '"highlight_color":"#RRGGBB",'
                 '"animation":"fade|pop|slide_up"}')
-    unknown = sorted(set(style) - {"color", "size", "position", "dynamic",
-                                   "highlight_color", "animation"})
+    unknown = sorted(set(style) - {"color", "size", "size_scale", "position",
+                                   "dynamic", "highlight_color", "animation"})
     if unknown:
         return (f"ERR: unknown style field(s) {unknown} — only color, size, "
-                "position, dynamic, highlight_color and animation exist (no "
-                "fonts or outlines; dynamic gives karaoke word-by-word "
-                "captions, highlight_color is the color of the spoken word, "
-                "animation fade|pop|slide_up animates each static caption's "
-                "entrance).")
+                "size_scale, position, dynamic, highlight_color and animation "
+                "exist (no fonts or outlines; size is the coarse bucket "
+                "s|m|l|xl, size_scale is a continuous 0.5-3.0 fine-tune "
+                "multiplier for 'a little/way bigger'; dynamic gives karaoke "
+                "word-by-word captions, highlight_color is the color of the "
+                "spoken word, animation fade|pop|slide_up animates each static "
+                "caption's entrance).")
     try:
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
@@ -805,7 +929,10 @@ def add_music(ctx, storage_key, start, end, gain_db=-18.0, duck=True):
                               "ask the user to upload one.")
         return f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
     edl = dict(ctx.latest_edl()["json"])
-    out_dur = output_duration(edl["keep"])
+    # Clamp against the FINAL program duration (kept footage + inserts), not
+    # just the kept footage — otherwise music can never reach the end of a
+    # video that has clips/images spliced in. Matches add_zoom / add_voiceover.
+    out_dur = program_duration(edl)
     try:
         s = round(min(max(float(start), 0.0), max(0.0, out_dur - 0.1)), 2)
         e = round(min(max(float(end), s + 0.1), out_dur), 2)
@@ -1407,6 +1534,14 @@ def generate_image(ctx, prompt, from_video_time_s=None, from_asset_key=None,
         return ("REJECTED: pass EITHER from_video_time_s (restyle a frame "
                 "of the main video) OR from_asset_key (restyle an uploaded "
                 "image), not both.")
+    if (from_video_time_s is not None or from_asset_key) \
+            and not llm.image_edit_available():
+        return ("REJECTED: the current image model can only GENERATE an image "
+                "from a text description — it cannot restyle an existing frame "
+                "or uploaded image. Either describe the whole image you want "
+                "(no from_video_time_s / from_asset_key) and it'll be created "
+                "fresh, or tell the user restyling isn't available. Be honest "
+                "about the difference.")
     if len(ctx.images_generated) >= config.MAX_GENERATED_IMAGES_PER_TURN:
         return (f"REJECTED: already generated "
                 f"{config.MAX_GENERATED_IMAGES_PER_TURN} images this turn "
@@ -1684,6 +1819,26 @@ TOOLS = {
                       "the rest). Creates a new EDL version.",
                       {"start": {"type": "number"}, "end": {"type": "number"},
                        "snap_to_words": {"type": "boolean"}}),
+    "cut_silences": (cut_silences, "ONE-CALL silence trim — THE tool for "
+                     "'cut the silences' / 'tighten this up' / 'remove the "
+                     "dead air'. Cuts every detected pause at least "
+                     "min_silence_s long (default 0.5s), keeping padding_s "
+                     "(default 0.12s) of breathing room around speech and "
+                     "snapping to word edges so no word is clipped. Do this "
+                     "in one call instead of many cut_range calls; then "
+                     "get_kept_transcript to verify.",
+                     {"min_silence_s": {"type": "number"},
+                      "padding_s": {"type": "number"}}),
+    "remove_filler_words": (remove_filler_words, "ONE-CALL filler removal — "
+                            "THE tool for 'remove the ums' / 'cut the uhs' / "
+                            "'take out the filler words'. Cuts every um, uh, "
+                            "er, hmm, etc. using the exact word timestamps "
+                            "(deterministic, never estimated). Pass a custom "
+                            "`words` list to target different tokens (e.g. "
+                            "[\"like\",\"you know\"]) — the default set is "
+                            "only the safe non-word hesitations.",
+                            {"words": {"type": "array",
+                                       "items": {"type": "string"}}}),
     "add_captions": (add_captions, "Burned captions. mode='from_transcript' "
                      "(word-timed from the real transcript, recommended) or "
                      "mode='off', or items=[{text,start,end,style?}] (source "
@@ -1715,6 +1870,7 @@ TOOLS = {
                                     "color": {"type": "string"},
                                     "size": {"type": "string",
                                              "enum": ["s", "m", "l", "xl"]},
+                                    "size_scale": {"type": "number"},
                                     "position": {"type": "string",
                                                  "enum": ["bottom", "top",
                                                           "middle"]},
@@ -1761,7 +1917,10 @@ TOOLS = {
                           "(dynamic = karaoke captions where the spoken "
                           "word pops and lights up in highlight_color; "
                           "animation fade|pop|slide_up animates static "
-                          "captions' entrance). "
+                          "captions' entrance). For fine size control that "
+                          "the s|m|l|xl buckets can't hit — 'a little bigger', "
+                          "'way bigger' — pass size_scale (0.5-3.0, a "
+                          "multiplier on top of size; 1.5 = 50% bigger). "
                           "Works for from_transcript and manual captions; "
                           "errors helpfully if no captions exist yet.",
                           {"style": {"type": "object",
@@ -1770,6 +1929,7 @@ TOOLS = {
                                          "size": {"type": "string",
                                                   "enum": ["s", "m", "l",
                                                            "xl"]},
+                                         "size_scale": {"type": "number"},
                                          "position": {"type": "string",
                                                       "enum": ["bottom",
                                                                "top",
@@ -1971,7 +2131,8 @@ REQUIRED_ARGS = {
 # is a version diff line (write_edl's "EDL vX -> vY: ..." format).
 # generate_image is here for the capabilities digest; its successes are
 # tracked separately via ctx.images_generated (it never writes the EDL).
-WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range", "add_captions",
+WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
+               "cut_silences", "remove_filler_words", "add_captions",
                "set_caption_style", "add_music", "remove_music",
                "set_audio_gain", "set_volume", "set_frame",
                "insert_media", "remove_insert", "add_voiceover",

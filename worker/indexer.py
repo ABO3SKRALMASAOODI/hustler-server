@@ -96,23 +96,44 @@ def run_index_job(worker_db, job):
         worker_db.run(dbx.set_progress, job_id, 35)
         _mark("wav_s")
 
-        # 4. Transcription
-        words, sentences = [], []
+        # Non-fatal degradations recorded here and stored on the index so a
+        # partially-degraded analysis is visible in admin instead of silently
+        # worse.
+        warnings = []
+
+        # 4. Transcription (retry once — a transient whisper crash shouldn't
+        #    fail the whole job and force a full re-download/re-proxy)
+        words, sentences, language = [], [], None
         if wav_local:
-            words, _lang = transcribe.transcribe(wav_local)
-            sentences = transcribe.group_sentences(words)
+            for attempt in range(2):
+                try:
+                    words, language = transcribe.transcribe(wav_local)
+                    sentences = transcribe.group_sentences(words)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        print(f"[index {job_id}] transcription failed "
+                              f"({str(e)[:120]}); retrying once", flush=True)
+                        continue
+                    raise
         worker_db.run(dbx.set_progress, job_id, 60)
         _mark("whisper_s")
 
-        # 5. Silences
+        # 5. Silences (degrade with a recorded warning, never silently to [])
         silences = []
         if wav_local:
-            silences = media.detect_silences(wav_local, info["duration"])
+            try:
+                silences = media.detect_silences(wav_local, info["duration"])
+            except Exception as e:
+                warnings.append(f"silence detection failed ({str(e)[:120]}) — "
+                                "silence-based trimming may be less accurate")
+                print(f"[index {job_id}] silence detection degraded: {e}",
+                      flush=True)
         worker_db.run(dbx.set_progress, job_id, 65)
         _mark("silences_s")
 
         # 6. Shots + middle-frame thumbnails
-        shots = scenes.detect_shots(proxy_local, info["duration"])
+        shots = scenes.detect_shots(proxy_local, info["duration"], warnings)
         thumb_dir = os.path.join(workdir, "thumbs")
         os.makedirs(thumb_dir, exist_ok=True)
         thumb_paths = {}
@@ -127,11 +148,36 @@ def run_index_job(worker_db, job):
         worker_db.run(dbx.set_progress, job_id, 75)
         _mark("shots_s")
 
-        # 7. Contact sheets + optional vision captions
+        # 7. Contact sheets + optional vision captions. All sheets are built
+        #    (cheap, local) and uploaded, but vision captioning is CAPPED: a
+        #    3-hour shot-heavy video would otherwise fire proportionally many
+        #    vision calls. Beyond the cap we sample sheets evenly and record a
+        #    warning so the cost is bounded and the gap is visible.
         sheet_dir = os.path.join(workdir, "sheets")
         os.makedirs(sheet_dir, exist_ok=True)
         sheet_list = sheets.build_contact_sheets(shots, thumb_paths, sheet_dir)
-        sheets.caption_shots(sheet_list, {s.id: s for s in shots})
+        # Only sample + caption when vision is actually configured — otherwise
+        # caption_shots is a no-op and any "sampled N sheets" warning would
+        # falsely claim captioning happened.
+        if llm.vision_available():
+            cap = max(1, config.MAX_VISION_SHEETS)   # 0/negative would divide by zero
+            to_caption = sheet_list
+            if len(sheet_list) > cap:
+                step = len(sheet_list) / cap
+                picks = sorted({min(len(sheet_list) - 1, int(i * step))
+                                for i in range(cap)})
+                to_caption = [sheet_list[i] for i in picks]
+                warnings.append(
+                    f"visual captioning sampled {len(to_caption)} of "
+                    f"{len(sheet_list)} contact sheets to bound cost — some "
+                    "shots have no visual description")
+            try:
+                sheets.caption_shots(to_caption, {s.id: s for s in shots})
+            except Exception as e:
+                warnings.append(f"visual captioning failed ({str(e)[:120]}) — "
+                                "shots have no visual description")
+                print(f"[index {job_id}] vision captioning degraded: {e}",
+                      flush=True)
         worker_db.run(dbx.set_progress, job_id, 85)
         _mark("sheets_vision_s")
 
@@ -152,6 +198,20 @@ def run_index_job(worker_db, job):
             skey = f"sheets/{project_id}/{sha}/sheet_{i}.jpg"
             storage.upload_file(sp, skey, "image/jpeg")
             sheet_keys.append(skey)
+            # Record contact sheets as assets so admin storage totals count
+            # them and any future DB-driven cleanup finds them (thumbs are
+            # covered by the sheets/ + thumbs/ R2 prefix delete). Guard against
+            # duplicate rows on re-index / job-retry (same key) so totals don't
+            # double-count — mirror the proxy asset_by_key check. Best-effort.
+            try:
+                exists = worker_db.run(
+                    lambda conn: dbx.asset_by_key(conn, project_id, skey))
+                if not exists:
+                    worker_db.run(dbx.insert_asset, project_id, "sheet", skey,
+                                  bytes_=os.path.getsize(sp), sha256=sha,
+                                  meta={"index_artifact": True})
+            except Exception:
+                pass
         worker_db.run(dbx.set_progress, job_id, 92)
 
         proxy_info = media.probe(proxy_local)
@@ -176,6 +236,8 @@ def run_index_job(worker_db, job):
             sentences=sentences,
             silences=silences,
             sheet_keys=sheet_keys,
+            language=language,
+            warnings=warnings,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         _finish_setup(worker_db, project_id, session_id, info, index,
@@ -183,6 +245,7 @@ def run_index_job(worker_db, job):
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "words": len(words), "silences": len(silences),
+                "language": language, "warnings": warnings,
                 "timings": timings}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

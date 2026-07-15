@@ -425,8 +425,11 @@ def user_credits_balance(conn, user_id):
 # daily -> bonus -> monthly, never below zero. Priced with the same env vars
 # the admin cost views use.
 
-LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "0.4"))
-LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "1.2"))
+# Default = Grok 4.5 ($2 in / $6 out per 1M tokens). MUST match AGENT_MODEL
+# and worker/config.py's LLM_PRICE_* — set all three together via env if you
+# change model (e.g. grok-4.1-fast for cheaper credits).
+LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
+LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
 # Flat price per successful image generation/edit (no token usage is
 # reported for those calls, so they are priced per image).
 IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.05"))

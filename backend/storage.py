@@ -175,6 +175,89 @@ def head_bytes(key):
         return None
 
 
+def get_range(key, nbytes=64):
+    """First nbytes of an object (for magic-byte sniffing). None on failure."""
+    try:
+        obj = client().get_object(
+            Bucket=bucket(), Key=key,
+            Range=f"bytes=0-{max(0, int(nbytes) - 1)}")
+        return obj["Body"].read()
+    except Exception:
+        return None
+
+
+def content_matches_kind(head, kind):
+    """Best-effort magic-byte check on the first bytes of an upload. Returns
+    True when the bytes match the declared kind, False on a CLEAR mismatch
+    (e.g. a JPEG renamed to .mp4), and None when undetermined — callers must
+    treat None as 'allow', never blocking on ambiguity."""
+    b = head or b""
+    if len(b) < 12:
+        return None
+    is_iso = b[4:8] == b"ftyp"                    # mp4/mov/m4a container
+    is_riff = b[0:4] == b"RIFF"
+    if kind in ("clip", "original", "video"):
+        if is_iso or b[0:4] == b"\x1aE\xdf\xa3":  # iso-bmff / matroska-webm
+            return True
+        if is_riff and b[8:12] == b"AVI ":
+            return True
+        if b[0:3] == b"FLV" or b[0] == 0x47:      # flv / mpeg-ts
+            return True
+        # A still image or plain text renamed to a video extension: reject.
+        if (b[0:3] == b"\xff\xd8\xff" or b[0:4] == b"\x89PNG"
+                or b[0:3] == b"GIF"):
+            return False
+        return None
+    if kind == "image":
+        if (b[0:3] == b"\xff\xd8\xff" or b[0:4] == b"\x89PNG"
+                or b[0:3] == b"GIF" or (is_riff and b[8:12] == b"WEBP")):
+            return True
+        return False
+    if kind == "music":
+        if b[0:3] == b"ID3" or b[0:2] in (
+                b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xf1",
+                b"\xff\xf9"):                     # mp3 / aac frame sync
+            return True
+        if (is_riff and b[8:12] == b"WAVE") or b[0:4] == b"OggS" \
+                or b[0:4] == b"fLaC" or is_iso:   # wav / ogg / flac / m4a
+            return True
+        return None                              # audio formats vary — allow
+    return None
+
+
+# Every top-level key prefix a project's objects can live under. Used to wipe
+# a project (GDPR/account deletion, storage reclaim) — keys are laid out
+# {prefix}/{project_id}/..., so a full wipe iterates each prefix.
+DELETE_PREFIXES = ("originals", "proxies", "audio", "thumbs", "sheets",
+                   "renders", "music", "images", "clips", "generated")
+
+
+def delete_project_objects(project_id):
+    """Delete every stored object belonging to a project across all prefixes.
+    Returns the number of objects deleted. Idempotent (missing keys are a
+    no-op) so it is safe to re-run."""
+    c = client()
+    b = bucket()
+    total = 0
+    for prefix in DELETE_PREFIXES:
+        token = None
+        while True:
+            kw = {"Bucket": b, "Prefix": f"{prefix}/{project_id}/"}
+            if token:
+                kw["ContinuationToken"] = token
+            resp = c.list_objects_v2(**kw)
+            objs = resp.get("Contents") or []
+            if objs:
+                c.delete_objects(Bucket=b, Delete={
+                    "Objects": [{"Key": o["Key"]} for o in objs]})
+                total += len(objs)
+            if resp.get("IsTruncated"):
+                token = resp.get("NextContinuationToken")
+            else:
+                break
+    return total
+
+
 def presign_get(key, expires=PRESIGN_EXPIRY, download_name=None):
     params = {"Bucket": bucket(), "Key": key}
     if download_name:

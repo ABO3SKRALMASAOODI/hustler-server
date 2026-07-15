@@ -564,6 +564,47 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 #  Job entrypoint (types: preview | final)                             #
 # ------------------------------------------------------------------ #
 
+def _verify_render(edl_json, out_path, out_dur, job_id, variant,
+                   src_path=None, src_dur=None):
+    """Fail a render whose output is the wrong length or newly-black. The EDL
+    gives the expected program duration, but keep spans may legitimately extend
+    past the real source content (render_edl validates against the larger of
+    src_dur / max keep end, and ffmpeg's trim truncates at real content end),
+    so each keep end is clamped to the actual source duration before computing
+    the expectation — otherwise a container whose metadata overstates its
+    content would falsely fail forever. The black check only fails when the
+    output is black where the SOURCE was not, so legitimately-black uploads
+    (podcast audio over a black screen) render fine. Raises media.MediaError on
+    a real defect -> worker retries once, then surfaces."""
+    keep = edl_json["keep"]
+    if src_dur:
+        keep = [[s, min(e, src_dur)] for s, e in keep if s < src_dur]
+        keep = keep or edl_json["keep"]     # never let clamping empty it out
+    expected = Timeline(keep, edl_json.get("inserts") or []).out_duration
+    tol = max(config.RENDER_DURATION_TOLERANCE_S,
+              config.RENDER_DURATION_TOLERANCE_FRAC * expected)
+    if abs(out_dur - expected) > tol:
+        raise media.MediaError(
+            f"{variant} render duration check failed: output is "
+            f"{out_dur:.2f}s but the edit is {expected:.2f}s "
+            f"(tolerance {tol:.2f}s) — the render is the wrong length")
+    if out_dur > 1.0:
+        out_black = media.black_seconds(out_path, out_dur) / out_dur
+        if out_black > config.RENDER_BLACK_MAX_RATIO:
+            # The output is mostly black — but that's only a DEFECT if the
+            # source wasn't. Probe the source (once, only in this rare case).
+            src_black = 0.0
+            if src_path and src_dur and src_dur > 1.0:
+                src_black = media.black_seconds(src_path, src_dur) / src_dur
+            if out_black - src_black > config.RENDER_BLACK_MAX_RATIO:
+                raise media.MediaError(
+                    f"{variant} render black-frame check failed: output is "
+                    f"{100 * out_black:.0f}% black vs {100 * src_black:.0f}% in "
+                    "the source — the render looks broken")
+    print(f"[render {job_id}] verified {variant}: {out_dur:.2f}s "
+          f"(expected {expected:.2f}s)", flush=True)
+
+
 def run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     variant = "preview" if job["type"] == "preview" else "final"
@@ -624,6 +665,18 @@ def run_render_job(worker_db, job):
                              workdir, preview=(variant == "preview"),
                              progress_cb=_prog)
         _mark("encode_s")
+
+        # Render verification: the output must be the expected length and must
+        # not be newly-black vs the source. On failure this raises, so the
+        # worker retries the encode once (MAX_ATTEMPTS_MEDIA) before surfacing a
+        # real error — a visually broken render never uploads silently.
+        try:
+            src_dur = media.duration_of(src_local)
+        except Exception:
+            src_dur = None
+        _verify_render(edl_row["json"], out_local, out_dur, job_id, variant,
+                       src_path=src_local, src_dur=src_dur)
+        _mark("verify_s")
 
         sheet_local = os.path.join(workdir, "result_sheet.jpg")
         try:
