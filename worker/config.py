@@ -28,16 +28,12 @@ AGENT_MODEL = os.getenv("AGENT_MODEL", "grok-4.5")
 VISION_MODEL = os.getenv("VISION_MODEL", "grok-4.5")
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
-# Vision (look_at) calls get a TIGHTER, NON-retrying budget than the text
-# agent. A slow multimodal call on the shared 90s+1-retry client could burn
-# ~180s of a 5-minute turn on a SINGLE look — four of them instantly wall the
-# turn (the real cause of "timed out, nothing changed"). Fail once, fast.
-VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "55"))
-# Hard cap on look_at / look_at_asset calls per agent turn. Beyond this the
-# tool refuses and tells the model to decide from the transcript — vision is a
-# spot-check, not a search strategy, and each call is the most expensive +
-# slowest thing the agent can do.
-AGENT_MAX_VISION_CALLS = int(os.getenv("AGENT_MAX_VISION_CALLS", "4"))
+# Vision (look_at) is the slowest thing the agent does, so it gets a MORE
+# generous per-call timeout than the text agent (grok multimodal latency is
+# spiky) — retries stay at the client default. The agent isn't capped on how
+# many looks it may take; the accurate transcript (so it stops lip-reading)
+# plus the longer turn wall are what keep vision from running away.
+VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "120"))
 
 # Image generation. Two backends are supported and auto-detected from
 # OPENAI_BASE_URL (see worker/llm.image_provider):
@@ -101,10 +97,10 @@ MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resen
 
 AGENT_MAX_ITERATIONS = 30
 AGENT_TEMPERATURE = 0.2
-# Hard wall-clock cap for one agent turn. On expiry the loop stops, posts an
-# assistant error message, and the job terminates visibly — never a silent
-# "Editing…" forever.
-AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "300"))
+# Wall-clock ceiling for one agent turn — a generous final backstop, not a
+# leash. On expiry the loop stops, saves whatever it finished, and posts an
+# honest message — never a silent "Editing…" forever.
+AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "450"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # Transcript tools get a far larger budget: silently dropping the tail of a

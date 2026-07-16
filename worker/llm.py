@@ -79,11 +79,10 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
     content += [image_part(p) for p in image_paths]
     names = image_names or [str(p).rsplit("/", 1)[-1] for p in image_paths]
     try:
-        # Vision gets its OWN tight, non-retrying budget. On the shared client a
-        # slow multimodal call would eat LLM_TIMEOUT_S + a retry (~180s) of the
-        # turn; here it fails once at VISION_TIMEOUT_S so the agent can move on.
+        # Vision gets a MORE generous timeout than the text agent (spiky grok
+        # multimodal latency); retries stay at the client default.
         resp = client().with_options(
-            timeout=config.VISION_TIMEOUT_S, max_retries=0
+            timeout=config.VISION_TIMEOUT_S
         ).chat.completions.create(
             model=config.VISION_MODEL,
             messages=[{"role": "user", "content": content}],

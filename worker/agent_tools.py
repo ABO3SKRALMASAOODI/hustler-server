@@ -56,7 +56,6 @@ class ToolContext:
         self.tokens_in = 0
         self.tokens_out = 0
         self.credit_budget = None     # set by run_agent_job; None = uncapped
-        self.vision_calls = 0         # look_at / look_at_asset used this turn
 
     def running_credits(self):
         """Model cost spent so far this turn, in credits (1 credit = $0.01),
@@ -376,24 +375,10 @@ def list_assets(ctx, kind=None):
     return _cap("\n".join(lines))
 
 
-def _vision_budget_note(ctx):
-    """Refusal text when the per-turn look budget is spent, else None."""
-    if ctx.vision_calls >= config.AGENT_MAX_VISION_CALLS:
-        return (f"You've already used all {config.AGENT_MAX_VISION_CALLS} "
-                "visual look-ups for this turn — vision is a spot-check, not a "
-                "way to read the video. Decide from the transcript, silences "
-                "and shot captions; make the edit and, if a visual detail is "
-                "still unclear, ask the user to confirm it.")
-    return None
-
-
 def look_at(ctx, start, end, question):
     if not llm.vision_available():
         return ("Visual inspection unavailable (no vision model configured). "
                 "Decide from the transcript, silences, and shot captions.")
-    note = _vision_budget_note(ctx)
-    if note:
-        return note
     try:
         s, e = ctx.clamp(start), ctx.clamp(end)
     except ValueError as err:
@@ -428,7 +413,6 @@ def look_at(ctx, start, end, question):
     prompt = (f"{src_note}These are {len(frames)} frames sampled evenly from "
               f"{s:.2f}s to {e:.2f}s of a video. Question from the editor: "
               f"{question}\nAnswer concisely and concretely.")
-    ctx.vision_calls += 1
     answer = llm.ask_vision(prompt, frames, purpose="vision_look",
                             image_names=frame_names)
     return _cap(answer or "The vision model did not return an answer; "
@@ -451,9 +435,6 @@ def look_at_asset(ctx, asset_key, question, start=0, end=None):
     if not llm.vision_available():
         return ("Visual inspection unavailable (no vision model configured). "
                 "Ask the user which part of the clip to use.")
-    note = _vision_budget_note(ctx)
-    if note:
-        return note
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
@@ -465,7 +446,6 @@ def look_at_asset(ctx, asset_key, question, start=0, end=None):
     except Exception as e:
         return f"Cannot fetch that asset right now ({e})."
     if asset["kind"] == "image_ref":
-        ctx.vision_calls += 1
         answer = llm.ask_vision(
             f"This is the uploaded image '{name}'. Question from the "
             f"editor: {question}\nAnswer concisely and concretely.",
@@ -494,7 +474,6 @@ def look_at_asset(ctx, asset_key, question, start=0, end=None):
         return "Could not extract frames from that clip."
     labels = ", ".join(f"{s + (e - s) * (i + 0.5) / n:.1f}s"
                        for i in range(len(frames)))
-    ctx.vision_calls += 1
     answer = llm.ask_vision(
         f"These are {len(frames)} frames sampled from the uploaded clip "
         f"'{name}' ({dur:.0f}s long), at {labels}. Question from the "
@@ -1804,10 +1783,9 @@ TOOLS = {
                     "'render' past renders; 'all' everything.",
                     {"kind": {"type": "string"}}),
     "look_at": (look_at, "Ask the vision model about up to 4 frames from a "
-                "range of the MAIN video. SLOW and rationed (only a few looks "
-                "per turn) — use ONLY for taste/visual questions. The "
-                "transcript is reliable: never use look_at to re-read speech "
-                "or guess a word; trust get_words / the transcript for that.",
+                "range of the MAIN video. Use for taste/visual questions. The "
+                "transcript is accurate, so read speech from get_words / the "
+                "transcript — don't use look_at to lip-read or guess a word.",
                 {"start": {"type": "number"},
                  "end": {"type": "number"},
                  "question": {"type": "string"}}),
