@@ -55,7 +55,7 @@ MAX_GENERATED_IMAGES_PER_TURN = int(
 # Bump whenever the index pipeline's OUTPUT changes (segmentation rules,
 # VAD settings, schema...): cached indexes from older pipeline versions are
 # re-built instead of served. Keep in sync with backend/routes/video.py.
-PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "4"))
+PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "5"))
 
 # Transcription. Defaults tuned for ACCURACY over raw speed — a mangled
 # transcript ("valmera.io" -> "Valmer de laio") poisons captions AND makes the
@@ -76,15 +76,20 @@ WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS", "Valmera, valmera.io")
 WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "")
 # faster-whisper treats a window whose gzip compression ratio exceeds this as a
 # repetition/looping hallucination and forces hot, unstable decodes — which
-# COLLAPSES legitimately repeated takes down to a single copy. That is fatal
-# here: cutting repeated takes is the product's headline feature, so the
-# transcript MUST preserve every repeat the speaker actually said. Measured
-# gzip ratios: normal speech ~1.4; the same 3 sentences repeated 3–5× ~3.0–5.0;
-# a genuine infinite-loop hallucination ~25+. The library default (2.4) sits
-# right in the middle of real repetition and silently eats it. A high threshold
-# keeps real repeats while still catching true loops. "none"/"off"/"" disables
-# the check entirely (VAD + no_speech + logprob still guard hallucination).
-_crt = os.getenv("WHISPER_COMPRESSION_RATIO_THRESHOLD", "10.0").strip().lower()
+# COLLAPSES legitimately repeated takes down to a single copy. DISABLED (None)
+# on purpose: ANY value here is a cap on how many times a user may repeat
+# themselves, and that is unknowable — people upload RAW footage precisely
+# because it has an unpredictable number of repeated takes to cut. (For scale:
+# normal speech ~1.4, the same 3 sentences said 3× ~3.05, 5× ~4.99 — the library
+# default of 2.4 silently eats the second take onward.)
+# The failure modes are asymmetric, which is why turning it off is the safe
+# direction: a hallucinated loop would land VISIBLY in the transcript and the
+# user can edit it out, whereas an eaten repeat is INVISIBLE and silently breaks
+# the headline feature. Hallucination is still guarded by the VAD filter (music/
+# silence never reaches the decoder), no_speech_threshold, log_prob_threshold,
+# and condition_on_previous_text=False (stops loops snowballing across windows).
+# Set a float only if a real looping regression ever shows up.
+_crt = os.getenv("WHISPER_COMPRESSION_RATIO_THRESHOLD", "none").strip().lower()
 WHISPER_COMPRESSION_RATIO_THRESHOLD = (
     None if _crt in ("", "none", "off") else float(_crt))
 

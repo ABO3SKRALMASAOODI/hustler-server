@@ -44,11 +44,12 @@ def transcribe(wav_path):
         # A temperature-fallback ladder + these thresholds are whisper's own
         # anti-hallucination guard: if a window decodes with a bad avg-logprob
         # (garbage) it retries hotter instead of emitting confident nonsense.
-        # NOTE: compression_ratio_threshold is deliberately RELAXED (config
-        # default ~10, vs the library's 2.4). At 2.4 a window where the speaker
-        # repeats a few sentences reads as "too repetitive" -> forced hot decode
-        # -> the repeats collapse to one copy. That destroys the whole point of
-        # a repeated-take editor, so we only trip on genuine loops (ratio ~25+).
+        # NOTE: compression_ratio_threshold is DISABLED by default (None). The
+        # library's 2.4 reads "the speaker repeated themselves" as a looping
+        # hallucination and collapses the repeats — and any replacement number
+        # would just be a cap on how often a user may repeat a take, which is
+        # unknowable for the raw footage this product exists to cut. See the
+        # config note; VAD + no_speech + logprob still guard hallucination.
         temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
         compression_ratio_threshold=config.WHISPER_COMPRESSION_RATIO_THRESHOLD,
         log_prob_threshold=-1.0,
