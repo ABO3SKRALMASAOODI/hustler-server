@@ -2216,4 +2216,106 @@ for _c in _golden["cases"]:
     check(f"golden[{_c['name']}] out_to_src",
           all(_tl.out_to_src(t) == exp for t, exp in _c["out_to_src"]))
 
+print("== Round-16: frame_at never lies about writing a frame ==")
+# Regression: an index died with "[Errno 2] ... thumbs/shot_1.jpg" and the
+# user was told "I couldn't analyze that video. Try a different format like
+# mp4" — for a video that HAD been analyzed fine. Cause: through ffmpeg 6 a
+# seek past the last frame exits 0 without writing the file, so frame_at
+# reported success, the caller kept the path, and the upload blew up. These
+# stub media.run to play each ffmpeg behaviour without invoking ffmpeg.
+import media as mediamod                                      # noqa: E402
+
+_real_run = mediamod.run
+_tmpd = tempfile.mkdtemp()
+
+
+def _stub_run(behaviours):
+    """behaviours: list of 'nothing' | 'empty' | 'frame' | 'fail', one per
+    ffmpeg invocation, so seek-fallback ordering is testable."""
+    calls = {"n": 0}
+
+    def _run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
+        b = behaviours[min(calls["n"], len(behaviours) - 1)]
+        calls["n"] += 1
+        dst = cmd[-1]
+        if b == "fail":
+            raise mediamod.MediaError("ffmpeg failed: synthetic")
+        if b == "empty":
+            open(dst, "wb").close()
+        elif b == "frame":
+            with open(dst, "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0jpegbytes")
+        return ""
+    return _run, calls
+
+
+try:
+    # ffmpeg 5.x flavour: exit 0, no file. MUST raise, not return a bad path.
+    mediamod.run, _c = _stub_run(["nothing", "nothing"])
+    _dst = os.path.join(_tmpd, "a.jpg")
+    try:
+        mediamod.frame_at("p.mp4", 99.0, _dst)
+        check("exit-0-but-no-file raises instead of returning a phantom path",
+              False)
+    except mediamod.MediaError as e:
+        check("exit-0-but-no-file raises instead of returning a phantom path",
+              "no frame at 99.000s" in str(e) and "wrote no frame" in str(e))
+    check("both seek modes are tried before giving up", _c["n"] == 2)
+
+    # A zero-byte file must not pass as a frame, and must not be left behind
+    # to fool the next existence check.
+    mediamod.run, _c = _stub_run(["empty", "empty"])
+    _dst = os.path.join(_tmpd, "b.jpg")
+    try:
+        mediamod.frame_at("p.mp4", 1.0, _dst)
+        check("zero-byte output is rejected", False)
+    except mediamod.MediaError:
+        check("zero-byte output is rejected", True)
+    check("zero-byte leftover is cleaned up", not os.path.exists(_dst))
+
+    # The happy path still returns, and stops after the fast seek.
+    mediamod.run, _c = _stub_run(["frame"])
+    _dst = os.path.join(_tmpd, "c.jpg")
+    check("a real frame returns the path", mediamod.frame_at("p.mp4", 1.0,
+                                                             _dst) == _dst)
+    check("fast input seek alone is enough on the happy path", _c["n"] == 1)
+
+    # Sparse keyframes / edit lists (phone screen recordings): input seek
+    # yields nothing, output seek lands the frame — must recover, not fail.
+    mediamod.run, _c = _stub_run(["nothing", "frame"])
+    _dst = os.path.join(_tmpd, "d.jpg")
+    check("output seek recovers a frame input seek missed",
+          mediamod.frame_at("p.mp4", 5.0, _dst) == _dst and _c["n"] == 2)
+
+    # A hard ffmpeg error on the first mode still gets the second chance.
+    mediamod.run, _c = _stub_run(["fail", "frame"])
+    _dst = os.path.join(_tmpd, "e.jpg")
+    check("a failed input seek still tries output seek",
+          mediamod.frame_at("p.mp4", 5.0, _dst) == _dst)
+finally:
+    mediamod.run = _real_run
+
+# The indexer must treat thumbnails as cosmetic: shipped source is checked
+# so the isolation can't be refactored away silently.
+_idx_src = open(os.path.join(os.path.dirname(__file__), "..",
+                             "indexer.py")).read()
+_thumb_fn = None
+for node in ast.walk(ast.parse(_idx_src)):
+    if isinstance(node, ast.FunctionDef) and node.name == "run_index_job":
+        _thumb_fn = node
+check("index job found", _thumb_fn is not None)
+# every storage.upload_file for a thumb/sheet sits inside a try
+_guarded = []
+for node in ast.walk(_thumb_fn):
+    if isinstance(node, ast.Try):
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call) and
+                    getattr(sub.func, "attr", "") == "upload_file"):
+                _guarded.append(sub.lineno)
+check("thumb + sheet uploads are inside try blocks", len(_guarded) >= 2)
+check("a thumb failure degrades to a warning",
+      "shot thumbnails could not be" in _idx_src)
+check("thumbnail seeks are clamped to the proxy's real duration",
+      "seek_ceiling" in _idx_src and "min(mid, seek_ceiling)" in _idx_src)
+
 print(f"\nALL {PASS} CHECKS PASSED")

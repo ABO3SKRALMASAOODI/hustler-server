@@ -86,6 +86,9 @@ def run_index_job(worker_db, job):
         proxy_local = os.path.join(workdir, "proxy.mp4")
         media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
                          info["has_audio"])
+        # Probed here, not at upload time: step 6 needs the proxy's REAL
+        # duration to keep thumbnail seeks inside it.
+        proxy_info = media.probe(proxy_local)
         worker_db.run(dbx.set_progress, job_id, 30)
         _mark("proxy_s")
 
@@ -137,14 +140,25 @@ def run_index_job(worker_db, job):
         thumb_dir = os.path.join(workdir, "thumbs")
         os.makedirs(thumb_dir, exist_ok=True)
         thumb_paths = {}
+        # Shot times live on the ORIGINAL's timeline (that is what the EDL and
+        # the renderer cut against), but thumbnails are pulled from the PROXY —
+        # so the seek has to be inside the PROXY's own decodable range. The two
+        # can disagree: a source's container duration counts its audio tail and
+        # its edit lists, so a re-encoded proxy is routinely a hair (sometimes a
+        # lot) shorter. Seeking past its last frame yields no frame at all.
+        proxy_dur = proxy_info["duration"]
+        seek_ceiling = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
         for shot in shots:
             mid = (shot.start + shot.end) / 2.0
+            if seek_ceiling is not None:
+                mid = min(mid, seek_ceiling)
             tp = os.path.join(thumb_dir, f"shot_{shot.id}.jpg")
             try:
                 media.frame_at(proxy_local, mid, tp, width=320)
                 thumb_paths[shot.id] = tp
-            except media.MediaError:
-                pass
+            except media.MediaError as e:
+                print(f"[index {job_id}] no thumbnail for shot {shot.id} "
+                      f"@{mid:.2f}s (proxy {proxy_dur}s): {e}", flush=True)
         worker_db.run(dbx.set_progress, job_id, 75)
         _mark("shots_s")
 
@@ -187,16 +201,46 @@ def run_index_job(worker_db, job):
         if wav_local:
             audio_key = f"audio/{project_id}/{sha}.wav"
             storage.upload_file(wav_local, audio_key, "audio/wav")
+        # Thumbnails are a convenience artifact — the transcript, sentences,
+        # shots and silences ARE the analysis and they are already complete by
+        # now. So a thumbnail that can't be made or uploaded degrades to a
+        # warning; it must never fail the job. It used to: one un-extractable
+        # 320px jpeg raised FileNotFoundError here and buried ~200s of good
+        # analysis under "I couldn't analyze that video. Try a different format
+        # like mp4" — advice that could not have helped, for a video that was
+        # in fact analyzed fine.
+        missing = []
         for shot in shots:
             tp = thumb_paths.get(shot.id)
-            if tp:
+            if not tp:
+                missing.append(shot.id)
+                continue
+            try:
                 tkey = f"thumbs/{project_id}/{sha}/shot_{shot.id}.jpg"
                 storage.upload_file(tp, tkey, "image/jpeg")
                 shot.thumb_key = tkey
+            except Exception as e:
+                missing.append(shot.id)
+                print(f"[index {job_id}] thumb upload failed for shot "
+                      f"{shot.id}: {e}", flush=True)
+        if missing:
+            warnings.append(
+                f"{len(missing)} of {len(shots)} shot thumbnails could not be "
+                "made — those shots have no still image (the transcript and "
+                "cut points are unaffected)")
         sheet_keys = []
         for i, (sp, _ids) in enumerate(sheet_list, start=1):
             skey = f"sheets/{project_id}/{sha}/sheet_{i}.jpg"
-            storage.upload_file(sp, skey, "image/jpeg")
+            # Same contract as thumbs: a contact sheet is a convenience the
+            # agent can re-derive, so a failed upload drops the key (never
+            # record one for an object that isn't there) instead of failing.
+            # A real storage outage still fails the job on the proxy above.
+            try:
+                storage.upload_file(sp, skey, "image/jpeg")
+            except Exception as e:
+                print(f"[index {job_id}] sheet upload failed ({skey}): {e}",
+                      flush=True)
+                continue
             sheet_keys.append(skey)
             # Record contact sheets as assets so admin storage totals count
             # them and any future DB-driven cleanup finds them (thumbs are
@@ -214,7 +258,6 @@ def run_index_job(worker_db, job):
                 pass
         worker_db.run(dbx.set_progress, job_id, 92)
 
-        proxy_info = media.probe(proxy_local)
         worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,
                       bytes_=os.path.getsize(proxy_local),
                       duration_s=proxy_info["duration"],

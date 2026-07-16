@@ -216,9 +216,51 @@ def detect_silences(wav_path, duration):
 
 
 def frame_at(src, t, dst, width=None, quality=4):
+    """Write ONE frame from `src` at ~t seconds to `dst`.
+
+    ffmpeg's exit code is NOT a trustworthy success signal here. Seeking at or
+    past the last frame encodes nothing, and through ffmpeg 6 that prints
+    "Output file is empty, nothing was encoded ... this may be an error" and
+    exits ZERO without creating dst (ffmpeg 7+ turned it into a hard error).
+    The worker image is Debian's ffmpeg 5.x — the exit-0 flavour. A caller that
+    trusts rc=0 is then holding a path to a file that does not exist, which is
+    exactly how one missing 320px thumbnail took down an entire index (the
+    upload died on FileNotFoundError and the user was told "I couldn't analyze
+    that video"). So the POSTCONDITION is verified here rather than assumed: a
+    readable frame is on disk or this raises MediaError — the failure every
+    caller already handles.
+
+    Two seek modes are tried before giving up. Input seek (-ss before -i) is
+    the fast path. Output seek (-ss after -i) decodes from the start: slower,
+    but it lands frames that input seek misses on files with sparse keyframes
+    or edit lists (phone screen recordings are full of both).
+    """
     vf = ["-vf", rf"scale={width}:-2"] if width else []
-    run(["ffmpeg", "-y", "-ss", f"{max(0.0, t):.3f}", "-i", src,
-         "-frames:v", "1", *vf, "-q:v", str(quality), dst], timeout=120)
+    ts = f"{max(0.0, t):.3f}"
+    attempts = (
+        ["ffmpeg", "-y", "-ss", ts, "-i", src,
+         "-frames:v", "1", *vf, "-q:v", str(quality), dst],
+        ["ffmpeg", "-y", "-i", src, "-ss", ts,
+         "-frames:v", "1", *vf, "-q:v", str(quality), dst],
+    )
+    last_err = None
+    for cmd in attempts:
+        try:
+            run(cmd, timeout=120)
+        except MediaError as e:
+            last_err = str(e)
+            continue
+        if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+            return dst
+        last_err = "ffmpeg reported success but wrote no frame"
+        # A partial/zero-byte file would otherwise look like a real frame to
+        # the next existence check.
+        try:
+            os.unlink(dst)
+        except OSError:
+            pass
+    raise MediaError(f"no frame at {ts}s of {os.path.basename(src)}: "
+                     f"{last_err}")
 
 
 def duration_of(path):

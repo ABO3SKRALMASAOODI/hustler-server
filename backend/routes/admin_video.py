@@ -765,6 +765,14 @@ COHORT_STAGES = [
     ("paid", "Paid (current)"),
 ]
 
+# Empty periods to draw BEFORE the metrics epoch. Without a run-up the chart
+# opens on the first real cohort's conversion — a line that starts pinned to the
+# top of the axis with nothing behind it to read it against. A short flat-zero
+# lead-in makes the relaunch land as a visible jump. It is not a fudge: the
+# series counts post-relaunch accounts only, and there were genuinely zero of
+# those before the epoch.
+COHORT_LEAD_IN = {"day": 7, "week": 3, "month": 2}
+
 
 @admin_video_bp.route("/admin/video/cohorts", methods=["GET"])
 @admin_required
@@ -805,17 +813,42 @@ def video_cohorts():
                 -- epoch) otherwise pollute every cohort, and a manually-credited
                 -- test account even shows up under "paid".
                 WHERE u.created_at IS NOT NULL AND """ + _scope('u') + """
+            ),
+            agg AS (
+                SELECT cohort,
+                       COUNT(*) AS signed_up,
+                       COUNT(*) FILTER (WHERE uploaded) AS uploaded,
+                       COUNT(*) FILTER (WHERE messaged) AS messaged,
+                       COUNT(*) FILTER (WHERE exported) AS exported,
+                       COUNT(*) FILTER (WHERE paid) AS paid
+                FROM base
+                GROUP BY cohort
+            ),
+            -- Every period from the lead-in through now, so the x-axis is a
+            -- real timeline. GROUP BY alone emits only periods that HAD
+            -- signups, which silently closes the gaps: a dead week vanishes
+            -- and the line jumps straight to the next active one as if the
+            -- week never happened.
+            spine AS (
+                SELECT generate_series(
+                    date_trunc(%s, %s::timestamptz)
+                        - (%s * ('1 ' || %s)::interval),
+                    date_trunc(%s, NOW()),
+                    ('1 ' || %s)::interval) AS cohort
             )
-            SELECT cohort,
-                   COUNT(*) AS signed_up,
-                   COUNT(*) FILTER (WHERE uploaded) AS uploaded,
-                   COUNT(*) FILTER (WHERE messaged) AS messaged,
-                   COUNT(*) FILTER (WHERE exported) AS exported,
-                   COUNT(*) FILTER (WHERE paid) AS paid
-            FROM base
-            GROUP BY cohort
-            ORDER BY cohort
-        """, (period,))
+            SELECT s.cohort,
+                   COALESCE(a.signed_up, 0) AS signed_up,
+                   COALESCE(a.uploaded, 0) AS uploaded,
+                   COALESCE(a.messaged, 0) AS messaged,
+                   COALESCE(a.exported, 0) AS exported,
+                   COALESCE(a.paid, 0) AS paid,
+                   (s.cohort < date_trunc(%s, %s::timestamptz)) AS lead_in
+            FROM spine s
+            LEFT JOIN agg a ON a.cohort = s.cohort
+            ORDER BY s.cohort
+        """, (period, period, METRICS_EPOCH,
+              COHORT_LEAD_IN.get(period, 3), period,
+              period, period, period, METRICS_EPOCH))
         rows = cur.fetchall()
     cohorts = [{
         "cohort": r["cohort"].date().isoformat() if r["cohort"] else None,
@@ -824,6 +857,9 @@ def video_cohorts():
         "messaged": int(r["messaged"] or 0),
         "exported": int(r["exported"] or 0),
         "paid": int(r["paid"] or 0),
+        # Pre-epoch run-up: real zero for this series, but not a cohort that
+        # ever existed — the funnel table below skips these rows.
+        "lead_in": bool(r["lead_in"]),
     } for r in rows]
     return jsonify({
         "period": period,
