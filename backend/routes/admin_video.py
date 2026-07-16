@@ -16,7 +16,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
 
-from routes.admin import admin_required
+from routes.admin import admin_required, _scope, METRICS_EPOCH
 import storage
 
 admin_video_bp = Blueprint("admin_video", __name__)
@@ -800,7 +800,11 @@ def video_cohorts():
                      OR COALESCE(u.plan, 'free') NOT IN ('free', ''))
                         AS paid
                 FROM users u
-                WHERE u.created_at IS NOT NULL
+                -- Only real post-relaunch accounts: old-idea signups and the
+                -- long-lived test accounts (all created before the metrics
+                -- epoch) otherwise pollute every cohort, and a manually-credited
+                -- test account even shows up under "paid".
+                WHERE u.created_at IS NOT NULL AND """ + _scope('u') + """
             )
             SELECT cohort,
                    COUNT(*) AS signed_up,
@@ -823,6 +827,7 @@ def video_cohorts():
     } for r in rows]
     return jsonify({
         "period": period,
+        "metrics_epoch": METRICS_EPOCH,
         "stages": [{"key": k, "label": lbl} for k, lbl in COHORT_STAGES],
         "cohorts": cohorts,
         "note": ("Each row is the cohort of users who signed up in that "

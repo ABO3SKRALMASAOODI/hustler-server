@@ -3,6 +3,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import current_app
 import os
+import re
 from datetime import datetime, timedelta
 
 admin_bp = Blueprint('admin', __name__)
@@ -15,6 +16,41 @@ ADMIN_EMAIL = "thevalmera@gmail.com"
 #  NULLIF ensures empty strings don't count as a valid device_id.
 # ─────────────────────────────────────────────────────────────────────────────
 UNIQUE_VISITOR = "COALESCE(NULLIF(device_id, ''), ip)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Metrics epoch — every account-based metric ignores accounts created before
+#  this date. Everyone who signed up before the product relaunched is either an
+#  old-idea user or one of the long-lived test accounts, and they poison every
+#  number (a manually-credited test account even reads as a "paying subscriber").
+#  Change the date with ADMIN_METRICS_EPOCH=YYYY-MM-DD (e.g. move it earlier to
+#  include more history). For any test account that was created AFTER the epoch,
+#  list its email in ADMIN_EXCLUDE_EMAILS (comma-separated) to drop it too.
+#  Both are operator-set env constants (never user input), so they're inlined
+#  into SQL as validated literals.
+# ─────────────────────────────────────────────────────────────────────────────
+METRICS_EPOCH = os.getenv("ADMIN_METRICS_EPOCH", "2026-07-06").strip()
+if not re.match(r"^\d{4}-\d{2}-\d{2}$", METRICS_EPOCH):
+    METRICS_EPOCH = "2026-07-06"
+# The admin's own account is never a customer, so it's always excluded (even if
+# it was created after the epoch). Any extra test accounts go in
+# ADMIN_EXCLUDE_EMAILS (comma-separated); they're added on top, never replacing
+# the admin exclusion.
+EXCLUDE_EMAILS = [ADMIN_EMAIL.lower()] + [
+    e.strip().lower() for e in os.getenv("ADMIN_EXCLUDE_EMAILS", "").split(",")
+    if e.strip() and e.strip().lower() != ADMIN_EMAIL.lower()]
+
+
+def _scope(alias="u"):
+    """Boolean SQL keeping only real, post-relaunch, non-test accounts. Drop it
+    into any WHERE/AND/JOIN-ON that touches the users table so old-idea signups
+    and test accounts never skew a metric. `alias` is the users-table alias
+    ('' for a bare `users`)."""
+    p = f"{alias}." if alias else ""
+    parts = [f"{p}created_at >= DATE '{METRICS_EPOCH}'"]
+    if EXCLUDE_EMAILS:
+        quoted = ",".join("'" + e.replace("'", "''") + "'" for e in EXCLUDE_EMAILS)
+        parts.append(f"LOWER({p}email) NOT IN ({quoted})")
+    return " AND ".join(parts)
 
 
 def get_db():
@@ -173,29 +209,33 @@ def overview():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            # Every user/subscription count below is scoped to real post-relaunch
+            # accounts — old-idea and test accounts are excluded so the numbers
+            # (especially "paying subscribers") reflect actual customers.
+            scope = _scope('')
             # ── Users ──
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope}")
             total_users = cur.fetchone()['total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at::date = CURRENT_DATE")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at::date = CURRENT_DATE")
             new_users_today = cur.fetchone()['total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '7 days'")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '7 days'")
             new_users_week = cur.fetchone()['total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '30 days'")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '30 days'")
             new_users_month = cur.fetchone()['total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days'")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days'")
             prev_week_users = cur.fetchone()['total']
 
             # ── Subscriptions ──
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND {scope}")
             total_subscribed = cur.fetchone()['total']
 
-            cur.execute("""
+            cur.execute(f"""
                 SELECT plan, COUNT(*) AS count FROM users
-                WHERE is_verified = 1
+                WHERE is_verified = 1 AND {scope}
                 GROUP BY plan
             """)
             plan_breakdown = {r['plan']: r['count'] for r in cur.fetchall()}
@@ -286,6 +326,10 @@ def overview():
             visits_trend = trend(visits_week, prev_week_visits)
 
         return jsonify({
+            'meta': {
+                'metrics_epoch': METRICS_EPOCH,
+                'excluded_emails': len(EXCLUDE_EMAILS),
+            },
             'users': {
                 'total': total_users,
                 'new_today': new_users_today,
@@ -347,11 +391,12 @@ def chart_registrations():
                 FROM generate_series(NOW() - INTERVAL '30 days', NOW(), '1 day') AS d
                 LEFT JOIN (
                     SELECT created_at::date AS dt, COUNT(*) AS count
-                    FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '30 days'
+                    FROM users WHERE is_verified = 1 AND {scope}
+                      AND created_at >= NOW() - INTERVAL '30 days'
                     GROUP BY created_at::date
                 ) c ON c.dt = d::date
                 ORDER BY d
-            """)
+            """.format(scope=_scope('')))
             rows = cur.fetchall()
         return jsonify({'data': [dict(r) for r in rows]}), 200
     finally:
@@ -479,6 +524,7 @@ def chart_mrr():
                 LEFT JOIN users u ON u.is_subscribed = 1
                     AND u.subscription_expiry > d::date
                     AND u.created_at <= d::date + INTERVAL '1 day'
+                    AND """ + _scope('u') + """
                 GROUP BY d
                 ORDER BY d
             """)
@@ -499,12 +545,13 @@ def revenue_analytics():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT plan, COUNT(*) AS count FROM users WHERE is_subscribed = 1 GROUP BY plan")
+            scope = _scope('')  # real post-relaunch customers only
+            cur.execute(f"SELECT plan, COUNT(*) AS count FROM users WHERE is_subscribed = 1 AND {scope} GROUP BY plan")
             plan_counts = {r['plan']: r['count'] for r in cur.fetchall()}
             mrr = sum(plan_prices.get(p, 0) * c for p, c in plan_counts.items())
             arr = mrr * 12
 
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope}")
             total_verified = cur.fetchone()['total']
             arpu = round(mrr / max(1, total_verified), 2)
 
@@ -515,10 +562,10 @@ def revenue_analytics():
             cur.execute(f"SELECT COUNT(DISTINCT ip) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
             unique_visitors_30d = cur.fetchone()['total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND created_at >= NOW() - INTERVAL '30 days'")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '30 days'")
             registered_30d = cur.fetchone()['total']
 
-            cur.execute("SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND created_at >= NOW() - INTERVAL '30 days'")
+            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND {scope} AND created_at >= NOW() - INTERVAL '30 days'")
             subscribed_30d = cur.fetchone()['total']
 
             revenue_by_plan = {}
@@ -685,6 +732,12 @@ def retention_cohorts():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            # Cohorts are gated to real post-relaunch accounts (scope enforces
+            # created_at >= the metrics epoch), so only "last month onward"
+            # shows and old-idea / test accounts are excluded. Activity is read
+            # from video_jobs — the LIVE product — because new users never touch
+            # the retired app-builder `jobs` table; measuring `jobs` would show
+            # every real cohort as 0% retained.
             cur.execute("""
                 WITH cohorts AS (
                     SELECT
@@ -692,14 +745,14 @@ def retention_cohorts():
                         DATE_TRUNC('week', created_at)::date AS cohort_week
                     FROM users
                     WHERE is_verified = 1
-                      AND created_at >= NOW() - INTERVAL '8 weeks'
+                      AND """ + _scope('') + """
                 ),
                 activity AS (
                     SELECT
                         user_id,
                         DATE_TRUNC('week', created_at)::date AS activity_week
-                    FROM jobs
-                    WHERE created_at >= NOW() - INTERVAL '8 weeks'
+                    FROM video_jobs
+                    WHERE created_at >= DATE '""" + METRICS_EPOCH + """'
                     GROUP BY user_id, DATE_TRUNC('week', created_at)::date
                 )
                 SELECT
@@ -747,6 +800,11 @@ def engagement():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            # Engagement reads the LIVE product (video_jobs) and only real
+            # post-relaunch accounts — measuring the retired `jobs` table showed
+            # every current user as dormant, and old-idea/test accounts inflated
+            # the segment counts.
+            scope_u = _scope('u')
             cur.execute("""
                 SELECT
                     CASE
@@ -758,23 +816,23 @@ def engagement():
                     COUNT(*) AS user_count
                 FROM (
                     SELECT u.id,
-                        COUNT(j.job_id) AS job_count
+                        COUNT(j.id) AS job_count
                     FROM users u
-                    LEFT JOIN jobs j ON j.user_id = u.id AND j.created_at >= NOW() - INTERVAL '7 days'
-                    WHERE u.is_verified = 1
+                    LEFT JOIN video_jobs j ON j.user_id = u.id AND j.created_at >= NOW() - INTERVAL '7 days'
+                    WHERE u.is_verified = 1 AND """ + scope_u + """
                     GROUP BY u.id
                 ) sub
                 GROUP BY segment
             """)
             segments = {r['segment']: r['user_count'] for r in cur.fetchall()}
 
-            cur.execute("SELECT COUNT(DISTINCT user_id) AS dau FROM jobs WHERE created_at::date = CURRENT_DATE")
+            cur.execute("SELECT COUNT(DISTINCT j.user_id) AS dau FROM video_jobs j JOIN users u ON u.id = j.user_id WHERE j.created_at::date = CURRENT_DATE AND " + scope_u)
             dau = cur.fetchone()['dau']
 
-            cur.execute("SELECT COUNT(DISTINCT user_id) AS wau FROM jobs WHERE created_at >= NOW() - INTERVAL '7 days'")
+            cur.execute("SELECT COUNT(DISTINCT j.user_id) AS wau FROM video_jobs j JOIN users u ON u.id = j.user_id WHERE j.created_at >= NOW() - INTERVAL '7 days' AND " + scope_u)
             wau = cur.fetchone()['wau']
 
-            cur.execute("SELECT COUNT(DISTINCT user_id) AS mau FROM jobs WHERE created_at >= NOW() - INTERVAL '30 days'")
+            cur.execute("SELECT COUNT(DISTINCT j.user_id) AS mau FROM video_jobs j JOIN users u ON u.id = j.user_id WHERE j.created_at >= NOW() - INTERVAL '30 days' AND " + scope_u)
             mau = cur.fetchone()['mau']
 
             stickiness = round((dau / max(1, mau)) * 100, 1)
@@ -782,9 +840,10 @@ def engagement():
             cur.execute("""
                 SELECT COALESCE(AVG(cnt), 0) AS avg_jobs
                 FROM (
-                    SELECT user_id, COUNT(*) AS cnt
-                    FROM jobs WHERE created_at >= NOW() - INTERVAL '7 days'
-                    GROUP BY user_id
+                    SELECT j.user_id, COUNT(*) AS cnt
+                    FROM video_jobs j JOIN users u ON u.id = j.user_id
+                    WHERE j.created_at >= NOW() - INTERVAL '7 days' AND """ + scope_u + """
+                    GROUP BY j.user_id
                 ) sub
             """)
             avg_jobs_per_user = round(float(cur.fetchone()['avg_jobs']), 1)
@@ -795,9 +854,10 @@ def engagement():
                     COALESCE(a.dau, 0) AS dau
                 FROM generate_series(NOW() - INTERVAL '14 days', NOW(), '1 day') AS d
                 LEFT JOIN (
-                    SELECT created_at::date AS dt, COUNT(DISTINCT user_id) AS dau
-                    FROM jobs WHERE created_at >= NOW() - INTERVAL '14 days'
-                    GROUP BY created_at::date
+                    SELECT j.created_at::date AS dt, COUNT(DISTINCT j.user_id) AS dau
+                    FROM video_jobs j JOIN users u ON u.id = j.user_id
+                    WHERE j.created_at >= NOW() - INTERVAL '14 days' AND """ + scope_u + """
+                    GROUP BY j.created_at::date
                 ) a ON a.dt = d::date
                 ORDER BY d
             """)
@@ -1064,7 +1124,7 @@ def top_users():
                 FROM users u
                 LEFT JOIN jobs j ON j.user_id = u.id
                 LEFT JOIN job_credits jc ON jc.job_id = j.job_id
-                WHERE u.is_verified = 1
+                WHERE u.is_verified = 1 AND """ + _scope('u') + """
                 GROUP BY u.id, u.email, u.plan
                 ORDER BY credits_used DESC
                 LIMIT 15
@@ -1087,7 +1147,7 @@ def recent_activity():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT 'register' AS type, email AS label, created_at AS ts
-                FROM users WHERE is_verified = 1
+                FROM users WHERE is_verified = 1 AND """ + _scope('') + """
                 ORDER BY created_at DESC LIMIT 10
             """)
             regs = cur.fetchall()
@@ -1111,6 +1171,7 @@ def recent_activity():
                        subscription_expiry AS ts
                 FROM users
                 WHERE is_subscribed = 1 AND subscription_expiry IS NOT NULL
+                  AND """ + _scope('') + """
                 ORDER BY subscription_expiry DESC LIMIT 10
             """)
             subs = cur.fetchall()

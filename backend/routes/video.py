@@ -43,7 +43,7 @@ MESSAGES_PER_HOUR = int(os.getenv("MESSAGES_PER_HOUR", "20"))
 # Keep in sync with worker/config.py — indexes built by an older pipeline
 # version are re-indexed automatically when the project is opened. v3 = the
 # accuracy-tuned whisper pass (medium model, beam search, brand hotwords).
-PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "3"))
+PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "4"))
 
 VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
                "music", "image_ref", "video_clip")
