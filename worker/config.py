@@ -57,11 +57,31 @@ MAX_GENERATED_IMAGES_PER_TURN = int(
 # re-built instead of served. Keep in sync with backend/routes/video.py.
 PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "6"))
 
-# Transcription. Defaults tuned for ACCURACY over raw speed — a mangled
+# Transcription provider. faster-whisper runs on the worker's OWN CPU — free and
+# private, but 'medium' at int8 is weak exactly where this product lives (loud
+# music, crowds, one word over a bar) and it is the slowest step of indexing.
+# Deepgram nova-3 is materially better on that audio, returns the word-level
+# timestamps the EDL needs, and takes whisper off the CPU entirely.
+#   DEEPGRAM_API_KEY set  -> deepgram, with whisper as an automatic fallback
+#   unset                 -> whisper, exactly as before
+#   TRANSCRIBER           -> forces either side ('deepgram' | 'whisper')
+# NOTE: switching providers changes the index's OUTPUT, so bump PIPELINE_VERSION
+# (env, both services) at the same time to rebuild existing transcripts —
+# deliberately NOT bumped in code, or every project would re-run whisper for
+# nothing on installs that never set the key.
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "").strip()
+TRANSCRIBER = os.getenv(
+    "TRANSCRIBER", "deepgram" if DEEPGRAM_API_KEY else "whisper").strip().lower()
+DEEPGRAM_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3")
+DEEPGRAM_TIMEOUT_S = int(os.getenv("DEEPGRAM_TIMEOUT_S", "300"))
+
+# Whisper (the fallback, and the default when no Deepgram key is set). Defaults
+# tuned for ACCURACY over raw speed — a mangled
 # transcript ("valmera.io" -> "Valmer de laio") poisons captions AND makes the
 # agent burn its whole turn lip-reading with slow vision calls. 'medium' + a
 # beam search + brand hotwords fixes both. Keep WHISPER_MODEL in sync with the
-# Dockerfile --build-arg (the model is baked into the image); set it back to
+# Dockerfile --build-arg (the model is baked into the image — keep it baked even
+# on Deepgram, it is what the fallback runs on); set it back to
 # 'small' if the worker CPU can't keep up with indexing latency.
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")   # cpu | cuda
@@ -69,7 +89,8 @@ WHISPER_COMPUTE = os.getenv(
     "WHISPER_COMPUTE", "int8" if WHISPER_DEVICE == "cpu" else "float16")
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # Domain vocabulary biased into EVERY decoding window (faster-whisper >=1.0
-# 'hotwords'). Proper nouns / brand terms whisper would otherwise mis-hear.
+# 'hotwords'; Deepgram's 'keyterm' — the same list feeds both). Proper nouns /
+# brand terms an ASR would otherwise mis-hear.
 # Comma/space separated; empty disables.
 WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS", "Valmera, valmera.io")
 # Optional priming context (style/topic) for the first window. Empty disables.

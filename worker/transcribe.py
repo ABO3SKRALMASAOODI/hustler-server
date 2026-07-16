@@ -1,4 +1,8 @@
-"""faster-whisper transcription -> word list + sentence grouping.
+"""Transcription -> word list + sentence grouping.
+
+Two providers behind one function: Deepgram nova-3 (hosted, better on the noisy
+music-over-speech audio this product is full of) and faster-whisper (local CPU,
+the default and the automatic fallback). See config.TRANSCRIBER.
 
 Words are the atomic unit ({w, t0, t1}); sentences are speaker-agnostic
 groups split on terminal punctuation, pauses, or hard length/duration caps
@@ -8,6 +12,9 @@ snap every cut to these word boundaries.
 
 import inspect
 import re
+import time
+
+import requests
 
 import config
 from schemas import Word, Sentence
@@ -31,7 +38,109 @@ def get_model():
     return _model
 
 
-def transcribe(wav_path):
+def _hotword_terms():
+    """The brand vocabulary as discrete terms (Deepgram 'keyterm'); whisper
+    takes the same list as one raw 'hotwords' string."""
+    return [t for t in (x.strip()
+                        for x in re.split(r"[,\n]", config.WHISPER_HOTWORDS))
+            if t]
+
+
+DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
+DEEPGRAM_RETRIES = 2
+_FALLBACK_PREFIX = "speech recognition fell back to the local model"
+
+
+def _parse_deepgram(payload):
+    """Deepgram response -> ([Word], language). Raises on a shape we don't
+    recognise rather than silently returning an empty transcript — an empty
+    transcript is indistinguishable from 'this video has no speech', which is
+    a claim we then make to the user's face."""
+    results = payload.get("results") or {}
+    channels = results.get("channels") or []
+    if not channels:
+        raise ValueError("deepgram response has no channels")
+    ch = channels[0]
+    alts = ch.get("alternatives") or []
+    if not alts:
+        raise ValueError("deepgram response has no alternatives")
+    words = []
+    for w in (alts[0].get("words") or []):
+        # punctuated_word carries the terminal punctuation group_sentences
+        # splits on; plain 'word' is stripped of it.
+        token = str(w.get("punctuated_word") or w.get("word") or "").strip()
+        if not token:
+            continue
+        try:
+            t0, t1 = float(w["start"]), float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("deepgram word is missing start/end timestamps")
+        words.append(Word(w=token, t0=round(t0, 3), t1=round(t1, 3)))
+    lang = ch.get("detected_language") or alts[0].get("language") or "en"
+    return words, str(lang)
+
+
+def _transcribe_deepgram(wav_path):
+    params = {
+        "model": config.DEEPGRAM_MODEL,
+        # punctuation + capitalisation: group_sentences splits on terminal
+        # punctuation, so an unpunctuated transcript would be one long run-on.
+        "smart_format": "true",
+        "punctuate": "true",
+        "detect_language": "true",
+    }
+    terms = _hotword_terms()
+    if terms:
+        params["keyterm"] = terms      # requests repeats the key per term
+    with open(wav_path, "rb") as f:
+        audio = f.read()
+    last = None
+    for attempt in range(DEEPGRAM_RETRIES + 1):
+        try:
+            r = requests.post(
+                DEEPGRAM_URL, params=params, data=audio,
+                headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}",
+                         "Content-Type": "audio/wav"},
+                timeout=config.DEEPGRAM_TIMEOUT_S)
+        except requests.RequestException as e:
+            last = e
+        else:
+            if r.status_code < 300:
+                return _parse_deepgram(r.json())
+            # 4xx (bad key, bad audio) will fail identically forever — only a
+            # 429/5xx is worth waiting on.
+            if r.status_code < 500 and r.status_code != 429:
+                raise ValueError(
+                    f"deepgram {r.status_code}: {r.text[:160]}")
+            last = ValueError(f"deepgram {r.status_code}: {r.text[:160]}")
+        if attempt < DEEPGRAM_RETRIES:
+            time.sleep(1.5 * 2 ** attempt)
+    raise last
+
+
+def transcribe(wav_path, warnings=None):
+    """Returns (words: [Word], language: str)."""
+    if config.TRANSCRIBER == "deepgram":
+        try:
+            return _transcribe_deepgram(wav_path)
+        except Exception as e:
+            # A hosted ASR having a bad day must not fail the whole index — but
+            # the user is then reading a transcript from the WEAKER engine, and
+            # every cut and caption is snapped to it. Say so instead of passing
+            # it off as the good one.
+            print(f"[transcribe] deepgram failed ({str(e)[:160]}); "
+                  "falling back to local whisper", flush=True)
+            # The indexer retries transcribe() once, so guard against saying
+            # this twice in one index.
+            if warnings is not None and not any(
+                    w.startswith(_FALLBACK_PREFIX) for w in warnings):
+                warnings.append(
+                    f"{_FALLBACK_PREFIX} ({str(e)[:100]}) — the transcript "
+                    "may be less accurate than usual on noisy audio")
+    return _transcribe_whisper(wav_path)
+
+
+def _transcribe_whisper(wav_path):
     """Returns (words: [Word], language: str)."""
     global _supports_hotwords
     model = get_model()

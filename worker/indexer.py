@@ -121,7 +121,8 @@ def run_index_job(worker_db, job):
         if wav_local:
             for attempt in range(2):
                 try:
-                    words, language = transcribe.transcribe(wav_local)
+                    words, language = transcribe.transcribe(wav_local,
+                                                            warnings)
                     sentences = transcribe.group_sentences(words)
                     break
                 except Exception as e:

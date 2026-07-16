@@ -2560,4 +2560,145 @@ check("a span straddling an internal cut maps to one contiguous span",
 check("a span wholly inside a removed region maps to nothing",
       remap_program_span(_ot, _nt, 6.0, 9.0) is None)
 
+# ---------------------------------------------------------------- #
+#  Round-18: Deepgram transcription (parsing/dispatch/fallback)      #
+# ---------------------------------------------------------------- #
+# The live call needs a real key and is NOT covered here — everything below is
+# the logic around it, which is where the bugs would be.
+print("== round-18: deepgram transcription ==")
+
+import tempfile                                             # noqa: E402
+import types                                                # noqa: E402
+import transcribe as tr                                     # noqa: E402
+
+
+def _raises(fn):
+    try:
+        fn()
+        return False
+    except Exception:
+        return True
+
+
+_dg_ok = {"results": {"channels": [{
+    "detected_language": "en",
+    "alternatives": [{"words": [
+        {"word": "damn", "punctuated_word": "Damn.", "start": 8.1, "end": 8.5},
+        {"word": "ok", "punctuated_word": "OK", "start": 9.0, "end": 9.24},
+    ]}]}]}}
+_w, _lang = tr._parse_deepgram(_dg_ok)
+check("deepgram words keep the punctuation group_sentences splits on",
+      [x.w for x in _w] == ["Damn.", "OK"])
+check("deepgram word timestamps survive", (_w[0].t0, _w[0].t1) == (8.1, 8.5))
+check("deepgram detected language is used", _lang == "en")
+check("punctuated deepgram words group into sentences",
+      [s.text for s in group_sentences(_w)] == ["Damn.", "OK"])
+check("a deepgram word with no timestamps raises, never a silent gap",
+      _raises(lambda: tr._parse_deepgram({"results": {"channels": [{
+          "alternatives": [{"words": [{"word": "hi"}]}]}]}})))
+# An empty transcript is what the agent turns into "this video has no speech" —
+# a shape we don't understand must never masquerade as that.
+check("an unrecognised deepgram shape raises instead of 'no speech'",
+      _raises(lambda: tr._parse_deepgram({"results": {"channels": []}}))
+      and _raises(lambda: tr._parse_deepgram({})))
+check("deepgram falling back to the bare 'word' still works",
+      [x.w for x in tr._parse_deepgram({"results": {"channels": [{
+          "alternatives": [{"words": [
+              {"word": "hi", "start": 0.0, "end": 0.2}]}]}]}})[0]] == ["hi"])
+
+# --- dispatch + fallback ---
+_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+_wav.write(b"RIFF....WAVEfmt "); _wav.close()
+
+_orig = (wconfig.TRANSCRIBER, wconfig.DEEPGRAM_API_KEY, tr.requests,
+         tr._transcribe_whisper)
+_whisper_hits = []
+tr._transcribe_whisper = lambda p: (_whisper_hits.append(p) or
+                                    ([Word(w="local", t0=0.0, t1=0.1)], "en"))
+
+wconfig.TRANSCRIBER = "whisper"
+_warns = []
+tr.transcribe(_wav.name, _warns)
+check("whisper stays the default when no deepgram key is set",
+      len(_whisper_hits) == 1 and _warns == [])
+
+
+class _Resp:
+    def __init__(self, status, payload=None, text=""):
+        self.status_code, self._p, self.text = status, payload or {}, text
+
+    def json(self):
+        return self._p
+
+
+def _stub_post(responses):
+    calls = []
+
+    def post(url, params=None, data=None, headers=None, timeout=None):
+        calls.append({"url": url, "params": params, "headers": headers})
+        r = responses[min(len(calls) - 1, len(responses) - 1)]
+        if isinstance(r, Exception):
+            raise r
+        return r
+    tr.requests = types.SimpleNamespace(
+        post=post, RequestException=_orig[2].RequestException)
+    return calls
+
+
+wconfig.TRANSCRIBER = "deepgram"
+wconfig.DEEPGRAM_API_KEY = "test-key"
+tr.time.sleep = lambda s: None      # no real backoff in tests
+
+_calls = _stub_post([_Resp(200, _dg_ok)])
+_whisper_hits.clear(); _warns = []
+_words, _lg = tr.transcribe(_wav.name, _warns)
+check("deepgram is used when configured, whisper untouched",
+      [x.w for x in _words] == ["Damn.", "OK"] and _whisper_hits == []
+      and _warns == [])
+check("the request carries the model, key and word-timestamp formatting",
+      _calls[0]["params"]["model"] == wconfig.DEEPGRAM_MODEL
+      and _calls[0]["headers"]["Authorization"] == "Token test-key"
+      and _calls[0]["params"]["smart_format"] == "true")
+check("brand hotwords ride along as deepgram keyterms",
+      "Valmera" in _calls[0]["params"]["keyterm"])
+
+# 5xx is transient -> retry, then fall back rather than fail the index.
+_calls = _stub_post([_Resp(503, text="upstream"), _Resp(200, _dg_ok)])
+_whisper_hits.clear(); _warns = []
+_words, _lg = tr.transcribe(_wav.name, _warns)
+check("a 503 is retried and the retry's transcript is used",
+      len(_calls) == 2 and [x.w for x in _words] == ["Damn.", "OK"]
+      and _whisper_hits == [])
+
+# 4xx (bad key / bad audio) fails identically forever — don't burn retries.
+_calls = _stub_post([_Resp(401, text="bad key")])
+_whisper_hits.clear(); _warns = []
+_words, _lg = tr.transcribe(_wav.name, _warns)
+check("a 401 is not retried — it would fail identically forever",
+      len(_calls) == 1)
+check("deepgram failing falls back to local whisper, index still succeeds",
+      len(_whisper_hits) == 1 and [x.w for x in _words] == ["local"])
+check("the fallback is disclosed, not passed off as the good transcript",
+      len(_warns) == 1 and _warns[0].startswith(tr._FALLBACK_PREFIX)
+      and "less accurate" in _warns[0])
+
+# The indexer retries transcribe() once — one index, one notice.
+_calls = _stub_post([_Resp(401, text="bad key")])
+tr.transcribe(_wav.name, _warns)
+check("the fallback notice is not repeated when the indexer retries",
+      len(_warns) == 1)
+
+_calls = _stub_post([_orig[2].RequestException("connection reset")])
+_whisper_hits.clear(); _warns = []
+tr.transcribe(_wav.name, _warns)
+check("a dead connection retries, then falls back",
+      len(_calls) == tr.DEEPGRAM_RETRIES + 1 and len(_whisper_hits) == 1)
+
+check("transcribe still works with no warnings list to write to",
+      tr.transcribe(_wav.name)[0][0].w == "local")
+
+(wconfig.TRANSCRIBER, wconfig.DEEPGRAM_API_KEY, tr.requests,
+ tr._transcribe_whisper) = _orig
+os.unlink(_wav.name)
+
 print(f"\nALL {PASS} CHECKS PASSED")
