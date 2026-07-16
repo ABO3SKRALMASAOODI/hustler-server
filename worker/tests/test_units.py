@@ -2435,4 +2435,129 @@ _gs = build_filtergraph({"keep": [[0.0, 5.0], [8.0, 16.0]],
 check("multi-segment renders split from the padded source, not the raw one",
       "[vpad]split=2" in _gs)
 
+
+# ---------------------------------------------------------------- #
+#  Round-18: a stale program-time effect can't reject a cut          #
+# ---------------------------------------------------------------- #
+# Regression from production (project 39, EDL v8): the agent tried to trim the
+# screen-recording UI off both ends and BOTH cuts were rejected by a zoom that
+# the cut itself invalidated —
+#   cut_range{"start": 0.0, "end": 2.0}   -> REJECTED: effects.zooms[2]: end
+#                                            14.5 exceeds the limit 13.4s.
+#   cut_range{"start": 13.4, "end": 15.4} -> REJECTED: (same)
+# It then burned 4 calls deleting and re-adding the zooms by hand. Worse, the
+# surviving zoom silently kept its old output time and so landed on DIFFERENT
+# footage after the shift.
+print("== round-18: cuts are not blocked by their own side effects ==")
+
+from agent_tools import _write_keep, cut_range              # noqa: E402
+from timeline import remap_program_span                     # noqa: E402
+
+
+class EdlStubCtx(StubCtx):
+    """Exercises the real _write_keep -> validate_edl path."""
+
+    def __init__(self, index, duration, edl):
+        super().__init__(index, duration)
+        self._rows = [{"version": 8, "json": edl}]
+        self.versions_written = []
+
+    def latest_edl(self):
+        return self._rows[-1]
+
+    def write_edl(self, new_edl_dict, change_desc):
+        prev = self.latest_edl()
+        try:
+            normalized = validate_edl(new_edl_dict, self.duration).model_dump()
+        except EDLValidationError as e:
+            return f"REJECTED (EDL v{prev['version']} unchanged): {e}"
+        if edl_signature(normalized) == edl_signature(prev["json"]):
+            return "NO CHANGE"
+        v = prev["version"] + 1
+        self._rows.append({"version": v, "json": normalized})
+        self.versions_written.append(v)
+        return f"EDL v{prev['version']} -> v{v}: {change_desc}."
+
+
+# The real v8, byte for byte.
+def _v8():
+    return {"keep": [[0.0, 15.4]], "music": [], "volume": [],
+            "effects": {"grade": "cinematic", "zooms": [
+                {"id": "zm1", "start": 0.3, "end": 2.0, "strength": 0.2,
+                 "mode": "push_in"},
+                {"id": "zm2", "start": 8.5, "end": 11.0, "strength": 0.25,
+                 "mode": "ease"},
+                {"id": "zm3", "start": 12.0, "end": 14.5, "strength": 0.2,
+                 "mode": "push_in"}]}}
+
+
+_idx18 = {"words": [], "silences": []}
+ctx18 = EdlStubCtx(_idx18, 16.654, _v8())
+r18 = cut_range(ctx18, 0.0, 2.0)
+check("the production cut that used to be rejected now succeeds",
+      r18.startswith("EDL v8 -> v9") and "REJECTED" not in r18)
+_z18 = {z["id"]: (z["start"], z["end"])
+        for z in ctx18.latest_edl()["json"]["effects"]["zooms"]}
+check("zm1 is dropped — the footage it zoomed on was cut away",
+      "zm1" not in _z18)
+check("zm2 follows its footage 2s earlier (8.5-11.0 -> 6.5-9.0)",
+      _z18["zm2"] == (6.5, 9.0))
+check("zm3 shifts with the cut too (12.0-14.5 -> 10.0-12.5)",
+      _z18["zm3"] == (10.0, 12.5))
+check("every surviving zoom fits the new 13.4s program",
+      all(e <= 13.4 + 0.01 for _, e in _z18.values()))
+check("the agent is told what moved and why",
+      "zm1" in r18 and "no longer in the edit" in r18
+      and "stays on the same footage" in r18)
+
+# The other real call: trimming the TAIL must not disturb what precedes it.
+ctx18b = EdlStubCtx(_idx18, 16.654, _v8())
+r18b = cut_range(ctx18b, 13.4, 15.4)
+_z18b = {z["id"]: (z["start"], z["end"])
+         for z in ctx18b.latest_edl()["json"]["effects"]["zooms"]}
+check("the tail cut that used to be rejected now succeeds",
+      r18b.startswith("EDL v8 -> v9"))
+check("a tail cut leaves earlier zooms exactly where they were",
+      _z18b["zm1"] == (0.3, 2.0) and _z18b["zm2"] == (8.5, 11.0))
+check("a zoom straddling the cut keeps only the surviving part",
+      _z18b["zm3"] == (12.0, 13.4))
+
+# Program-anchored collections clamp instead of following content.
+_mv = {"keep": [[0.0, 15.4]],
+       "music": [{"id": "mus1", "storage_key": "music/1/a.mp3", "start": 0.0,
+                  "end": 15.4, "gain_db": -18.0, "duck": True},
+                 {"id": "mus2", "storage_key": "music/1/b.mp3", "start": 14.0,
+                  "end": 15.4, "gain_db": -18.0, "duck": True}],
+       "voiceover": [{"id": "vo1", "asset_key": "music/1/v.mp3",
+                      "start_output_s": 14.5, "gain_db": 0.0}],
+       "volume": []}
+ctx18c = EdlStubCtx(_idx18, 16.654, _mv)
+r18c = cut_range(ctx18c, 0.0, 2.0)
+_j = ctx18c.latest_edl()["json"]
+check("music under the whole video still covers the shortened program",
+      r18c.startswith("EDL v8 -> v9")
+      and _j["music"][0]["start"] == 0.0 and _j["music"][0]["end"] == 13.4)
+check("music starting past the new end is dropped, not left to reject the cut",
+      all(m["id"] != "mus2" for m in _j["music"]))
+check("voiceover starting past the new end is dropped too",
+      _j["voiceover"] == [])
+check("music/voiceover removals are disclosed",
+      "mus2" in r18c and "vo1" in r18c)
+
+# A cut that touches nothing must stay byte-identical.
+ctx18d = EdlStubCtx(_idx18, 16.654, _v8())
+r18d = cut_range(ctx18d, 15.0, 15.4)
+check("a cut clear of every effect leaves the zooms untouched",
+      r18d.startswith("EDL v8 -> v9")
+      and [(z["start"], z["end"])
+           for z in ctx18d.latest_edl()["json"]["effects"]["zooms"]]
+      == [(0.3, 2.0), (8.5, 11.0), (12.0, 14.5)])
+
+# The mapping itself.
+_ot, _nt = Timeline([[0.0, 15.4]]), Timeline([[0.0, 5.0], [10.0, 15.4]])
+check("a span straddling an internal cut maps to one contiguous span",
+      remap_program_span(_ot, _nt, 3.0, 12.0) == (3.0, 7.0))
+check("a span wholly inside a removed region maps to nothing",
+      remap_program_span(_ot, _nt, 6.0, 9.0) is None)
+
 print(f"\nALL {PASS} CHECKS PASSED")

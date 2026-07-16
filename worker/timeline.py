@@ -102,6 +102,27 @@ class Timeline:
         return out
 
 
+def remap_program_span(old_tl, new_tl, s, e):
+    """Follow a program-time span from an OLD cut to a NEW one via the SOURCE
+    footage underneath it.
+
+    Content-anchored effects (a zoom placed on a moment) must move with that
+    moment when an unrelated cut shifts it earlier — otherwise the zoom silently
+    lands on different footage. Returns (new_s, new_e), None when the footage the
+    span covered was cut away entirely, or None when an endpoint sits inside a
+    spliced insert (which has no source time) and the caller must fall back to
+    clamping. A span straddling an internal cut maps to one contiguous span
+    because the new timeline collapses the removed middle.
+    """
+    a, b = old_tl.out_to_src(s), old_tl.out_to_src(e)
+    if a is None or b is None:
+        return None
+    pieces = new_tl.span_to_out(a, b)
+    if not pieces:
+        return None
+    return round(pieces[0][0], 2), round(pieces[-1][1], 2)
+
+
 def merge_spans(spans, gap=0.3):
     """Merge output spans closer than `gap` — keeps ffmpeg enable expressions
     short when there are hundreds of speech spans."""

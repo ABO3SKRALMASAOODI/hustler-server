@@ -15,6 +15,7 @@ import db as dbx
 import llm
 import media
 import storage
+import timeline as timeline_mod
 from captions import KARAOKE_HARD_MAX
 from schemas import (CaptionStyle, EDLValidationError, Frame, describe_edl,
                      edl_signature, keep_boundaries, output_duration,
@@ -524,14 +525,60 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
             {**ins, "at_output_s": min(bounds,
                                        key=lambda b: abs(b - ins["at_output_s"]))}
             for ins in edl["inserts"]]
-    # Windowed censor regions live in program time — clamp them to the new
-    # program length so an unrelated shortening write can't be rejected by
-    # a stale region window (regions left with no window are dropped).
+    # Everything below lives in PROGRAM time, which this write is changing. A
+    # stale item that no longer fits would fail validation and reject the whole
+    # write — so a pre-existing zoom could make an unrelated cut impossible.
+    # Each collection follows its own anchor:
+    #   zooms      - CONTENT-anchored ("push in on the skyline"): remap through
+    #                the source so the zoom stays on the moment it was placed
+    #                on; drop it when that footage is cut away.
+    #   music /    - PROGRAM-anchored ("music under the whole video", "narrate
+    #   voiceover    at 10s"): clamp to the new program length.
+    #   regions    - PROGRAM-anchored censor window: clamp (drop if outside).
     region_notes = []
-    fx = edl.get("effects") or {}
+    prog = output_duration(new_keep) + sum(
+        float(i["duration_s"]) for i in edl.get("inserts") or [])
+    old_tl = Timeline(prev_keep, prev["json"].get("inserts") or [])
+    new_tl = Timeline(new_keep, edl.get("inserts") or [])
+
+    fx = dict(edl.get("effects") or {})
+    fx_changed = False
+    if fx.get("zooms"):
+        kept_zooms = []
+        for z in fx["zooms"]:
+            z = dict(z)
+            moved = timeline_mod.remap_program_span(
+                old_tl, new_tl, float(z["start"]), float(z["end"]))
+            if moved is None:
+                # Endpoints inside a spliced insert have no source time; only
+                # a genuinely cut-away zoom maps to nothing.
+                if old_tl.out_to_src(float(z["start"])) is None or \
+                        old_tl.out_to_src(float(z["end"])) is None:
+                    kept_zooms.append(z)
+                    continue
+                region_notes.append(
+                    f"note: zoom {z.get('id')} was removed — the footage it "
+                    "was on is no longer in the edit.")
+                fx_changed = True
+                continue
+            ns, ne = moved
+            if ne - ns < 0.2:
+                region_notes.append(
+                    f"note: zoom {z.get('id')} was removed — only "
+                    f"{ne - ns:.2f}s of the footage it was on survives the "
+                    "cut.")
+                fx_changed = True
+                continue
+            if (ns, ne) != (z["start"], z["end"]):
+                region_notes.append(
+                    f"note: zoom {z.get('id')} moved to {ns}-{ne}s (output "
+                    "time) so it stays on the same footage.")
+                z["start"], z["end"] = ns, ne
+                fx_changed = True
+            kept_zooms.append(z)
+        if fx_changed:
+            fx["zooms"] = kept_zooms
     if fx.get("regions"):
-        prog = output_duration(new_keep) + sum(
-            float(i["duration_s"]) for i in edl.get("inserts") or [])
         kept_regs = []
         for r in fx["regions"]:
             r = dict(r)
@@ -541,14 +588,47 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
                         f"note: censor region {r.get('id')} was removed — "
                         "its time window falls entirely outside the "
                         "shortened edit.")
+                    fx_changed = True
                     continue
                 r["end"] = round(prog, 2)
                 region_notes.append(
                     f"note: censor region {r.get('id')}'s time window now "
                     f"ends at {r['end']}s to fit the shortened edit.")
+                fx_changed = True
             kept_regs.append(r)
-        if region_notes:
-            edl["effects"] = {**fx, "regions": kept_regs}
+        if fx_changed:
+            fx["regions"] = kept_regs
+    if fx_changed:
+        edl["effects"] = fx
+
+    if edl.get("music"):
+        kept_music = []
+        for m in edl["music"]:
+            m = dict(m)
+            if m["end"] > prog:
+                if m["start"] >= prog - 0.1:
+                    region_notes.append(
+                        f"note: music {m.get('id')} was removed — it starts "
+                        "after the end of the shortened edit.")
+                    continue
+                m["end"] = round(prog, 2)
+                region_notes.append(
+                    f"note: music {m.get('id')} now ends at {m['end']}s to "
+                    "fit the shortened edit.")
+            kept_music.append(m)
+        edl["music"] = kept_music
+    if edl.get("voiceover"):
+        kept_vo = []
+        for v in edl["voiceover"]:
+            v = dict(v)
+            if v["start_output_s"] > max(0.0, prog - 0.05):
+                region_notes.append(
+                    f"note: voiceover {v.get('id')} was removed — it starts "
+                    "after the end of the shortened edit.")
+                continue
+            kept_vo.append(v)
+        edl["voiceover"] = kept_vo
+
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
         return result
