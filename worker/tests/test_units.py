@@ -2318,4 +2318,121 @@ check("a thumb failure degrades to a warning",
 check("thumbnail seeks are clamped to the proxy's real duration",
       "seek_ceiling" in _idx_src and "min(mid, seek_ceiling)" in _idx_src)
 
+print("== Round-16b: probe describes the video a PLAYER shows ==")
+# Regression: an index claimed 16.654s / 1284x2778 portrait for a clip whose
+# own proxy came out 2.374s / 1558x720 landscape. The agent announced "0.3 min"
+# while the player showed 0:02, and every shot pointed past the last frame —
+# which is what made shot_1's thumbnail unmakeable in the first place.
+_probe_json = {
+    "format": {"duration": "16.654"},
+    "streams": [
+        {"codec_type": "video", "width": 1284, "height": 2778,
+         "duration": "2.374", "r_frame_rate": "600/1",
+         "avg_frame_rate": "14517/250",
+         "side_data_list": [{"side_data_type": "Display Matrix",
+                             "rotation": 90}]},
+        {"codec_type": "audio", "duration": "16.654"},
+    ],
+}
+_real_run2 = mediamod.run
+try:
+    mediamod.run = lambda *a, **k: _json.dumps(_probe_json)
+    _p = mediamod.probe("phone.mp4")
+    # display size, not coded size: ffmpeg auto-rotates before -vf, so the
+    # 1558x720 proxy it produced was landscape while the index said portrait
+    check("rotated source reports DISPLAY size (landscape)",
+          (_p["width"], _p["height"]) == (2778, 1284))
+    check("container duration is still what a player shows",
+          _p["duration"] == 16.654)
+    check("picture track's own length is reported separately",
+          _p["video_duration"] == 2.374)
+    check("fps + vfr unchanged", _p["fps"] == 58.068 and _p["vfr"] is True)
+
+    # 180 must NOT swap; 0/absent must not swap
+    _probe_json["streams"][0]["side_data_list"] = [{"rotation": 180}]
+    check("180 rotation does not swap width/height",
+          (mediamod.probe("x")["width"], mediamod.probe("x")["height"])
+          == (1284, 2778))
+    _probe_json["streams"][0]["side_data_list"] = [{"rotation": -90}]
+    check("-90 rotation swaps too",
+          mediamod.probe("x")["width"] == 2778)
+    del _probe_json["streams"][0]["side_data_list"]
+    _probe_json["streams"][0]["tags"] = {"rotate": "90"}
+    check("older ffprobe 'rotate' tag is honoured",
+          mediamod.probe("x")["width"] == 2778)
+    del _probe_json["streams"][0]["tags"]
+    check("unrotated source keeps coded size",
+          (mediamod.probe("x")["width"], mediamod.probe("x")["height"])
+          == (1284, 2778))
+    # a container with no per-stream duration must not crash or invent one
+    del _probe_json["streams"][0]["duration"]
+    check("missing per-stream duration -> video_duration None",
+          mediamod.probe("x")["video_duration"] is None)
+finally:
+    mediamod.run = _real_run2
+
+# make_proxy holds the last frame when the picture track runs out early.
+_enc_calls = []
+
+
+def _fake_encode(src, dst, fps, vfr, has_audio, pad_s=0.0):
+    _enc_calls.append(round(pad_s, 3))
+
+
+_real_enc, _real_probe = mediamod._encode_proxy, mediamod.probe
+try:
+    mediamod._encode_proxy = _fake_encode
+    # picture ends at 2.374 of a 16.654s recording -> pad the 14.28s remainder
+    mediamod.probe = lambda p: {"duration": 16.672, "video_duration": 2.374}
+    _enc_calls.clear()
+    mediamod.make_proxy("s", "d", 58.068, True, True, duration=16.654)
+    check("short picture track triggers a second, padded encode",
+          len(_enc_calls) == 2 and _enc_calls[0] == 0.0)
+    check("pad exactly covers the gap (14.28s)", _enc_calls[1] == 14.28)
+
+    # a normal video must never be re-encoded
+    mediamod.probe = lambda p: {"duration": 16.67, "video_duration": 16.67}
+    _enc_calls.clear()
+    mediamod.make_proxy("s", "d", 30.0, False, True, duration=16.654)
+    check("normal video encodes once, unpadded", _enc_calls == [0.0])
+
+    # rounding on the last frame must not trip it
+    mediamod.probe = lambda p: {"duration": 16.65, "video_duration": 16.42}
+    _enc_calls.clear()
+    mediamod.make_proxy("s", "d", 30.0, False, True, duration=16.654)
+    check("last-frame rounding is not mistaken for a short track",
+          _enc_calls == [0.0])
+
+    # no duration passed -> caller opted out, single encode, no probe
+    mediamod.probe = lambda p: (_ for _ in ()).throw(AssertionError("probed"))
+    _enc_calls.clear()
+    mediamod.make_proxy("s", "d", 30.0, False, True)
+    check("without an expected duration make_proxy stays a single encode",
+          _enc_calls == [0.0])
+finally:
+    mediamod._encode_proxy, mediamod.probe = _real_enc, _real_probe
+
+# The final render (from the ORIGINAL) must hold the frame exactly like the
+# proxy, or an approved preview and its export disagree.
+_pad_tl = Timeline([[0.0, 16.654]], [])
+_g = build_filtergraph({"keep": [[0.0, 16.654]], "captions": {"enabled": False}},
+                       16.654, True, _pad_tl, None, [], {"words": []}, True,
+                       W=720, H=1280, fps=30.0, src_w=720, src_h=1280,
+                       src_pad=14.28)
+check("render holds the last frame across a short picture track",
+      "tpad=stop_mode=clone:stop_duration=14.280" in _g and "[vpad]" in _g)
+_g0 = build_filtergraph({"keep": [[0.0, 16.654]], "captions": {"enabled": False}},
+                        16.654, True, _pad_tl, None, [], {"words": []}, True,
+                        W=720, H=1280, fps=30.0, src_w=720, src_h=1280)
+check("a normal render graph is untouched (no tpad)",
+      "tpad" not in _g0 and "[vpad]" not in _g0)
+_gs = build_filtergraph({"keep": [[0.0, 5.0], [8.0, 16.0]],
+                         "captions": {"enabled": False}},
+                        16.654, True, Timeline([[0.0, 5.0], [8.0, 16.0]], []),
+                        None, [], {"words": []}, True,
+                        W=720, H=1280, fps=30.0, src_w=720, src_h=1280,
+                        src_pad=14.28)
+check("multi-segment renders split from the padded source, not the raw one",
+      "[vpad]split=2" in _gs)
+
 print(f"\nALL {PASS} CHECKS PASSED")

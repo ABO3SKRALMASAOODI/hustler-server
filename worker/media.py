@@ -108,8 +108,44 @@ def _fps_of(stream):
     return 30.0
 
 
+def rotation_of(stream):
+    """Degrees the display matrix rotates this stream by (0/±90/180).
+
+    A phone writes the sensor's frame and a matrix saying how to turn it, so
+    the coded size is NOT what anyone sees: a clip recorded holding the phone
+    one way is stored the other way round plus a 90° matrix.
+    """
+    for sd in stream.get("side_data_list") or []:
+        if "rotation" in sd:
+            try:
+                return int(round(float(sd["rotation"])))
+            except (TypeError, ValueError):
+                pass
+    try:                                    # older ffprobe: a rotate tag
+        return int(round(float((stream.get("tags") or {}).get("rotate"))))
+    except (TypeError, ValueError):
+        return 0
+
+
 def probe(path):
-    """duration, fps, resolution, has_audio, vfr flag."""
+    """What a PLAYER shows for this file — not what the container claims.
+
+    Two of these fields used to be read straight off the container and were
+    wrong for ordinary phone footage:
+
+    * width/height are the DISPLAY size, i.e. the display matrix applied. The
+      coded size alone said "1284x2778 portrait" for a clip that is landscape
+      on every player and came out of our own proxy encoder at 1558x720 —
+      ffmpeg auto-rotates before -vf, so the index disagreed with the video it
+      described and the agent reasoned about the wrong orientation.
+    * video_duration is the PICTURE track's own length, which can be far
+      shorter than `duration` (the container's). An iOS screen recording stops
+      emitting frames while the screen is static, so a 16.65s clip can hold
+      2.37s of video against a full-length audio track. `duration` stays the
+      container's, because that IS what a player shows — it holds the last
+      frame for the rest — but callers that touch frames need to know the
+      picture runs out early rather than seeking into nothing.
+    """
     out = run(["ffprobe", "-v", "error", "-print_format", "json",
                "-show_format", "-show_streams", path], timeout=120)
     data = json.loads(out)
@@ -123,6 +159,10 @@ def probe(path):
                      or v.get("duration") or 0)
     if duration <= 0:
         raise MediaError("Could not determine video duration")
+    try:
+        video_duration = round(float(v.get("duration")), 3)
+    except (TypeError, ValueError):
+        video_duration = None               # container carries no per-stream length
 
     def _rate(key):
         val = v.get(key) or "0/1"
@@ -132,20 +172,25 @@ def probe(path):
     r, avg = _rate("r_frame_rate"), _rate("avg_frame_rate")
     fps = avg or r or 30.0
     vfr = bool(r and avg and abs(r - avg) > 0.5)
+    w, h = int(v.get("width") or 0), int(v.get("height") or 0)
+    if abs(rotation_of(v)) % 180 == 90:
+        w, h = h, w
     return {
         "duration": round(duration, 3),
+        "video_duration": video_duration,
         "fps": round(fps, 3),
-        "width": int(v.get("width") or 0),
-        "height": int(v.get("height") or 0),
+        "width": w,
+        "height": h,
         "has_audio": a is not None,
         "vfr": vfr,
     }
 
 
-def make_proxy(src, dst, fps, vfr, has_audio):
-    """720p H.264 proxy, +faststart. VFR sources are normalized to CFR here so
-    every downstream timestamp is stable."""
+def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0):
     vf = r"scale=-2:min(720\,floor(ih/2)*2)"
+    if pad_s > 0:
+        # Clone the last frame forward. After scale, so it clones a 720p frame.
+        vf += f",tpad=stop_mode=clone:stop_duration={pad_s:.3f}"
     cmd = ["ffmpeg", "-y", "-i", src, "-vf", vf,
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
            "-pix_fmt", "yuv420p"]
@@ -157,6 +202,47 @@ def make_proxy(src, dst, fps, vfr, has_audio):
         cmd += ["-an"]
     cmd += ["-movflags", "+faststart", dst]
     run(cmd)
+
+
+# A proxy shorter than this fraction/margin of the recording isn't a proxy of
+# the recording. Loose enough that a normal encode's last-frame rounding never
+# trips it.
+PROXY_SHORT_FRAC = 0.02
+PROXY_SHORT_MIN_S = 0.4
+
+
+def make_proxy(src, dst, fps, vfr, has_audio, duration=None):
+    """720p H.264 proxy, +faststart. VFR sources are normalized to CFR here so
+    every downstream timestamp is stable.
+
+    The proxy must be a faithful rendition of what a player shows for `src`,
+    because every timestamp the agent reasons about is checked against it. A
+    picture track can end long before the recording does — an iOS screen
+    recording stops writing frames while the screen is static, so a 16.65s clip
+    carried 2.37s of video against a full-length audio track — and CFR
+    normalization cannot invent frames past the last one it was given. That
+    produced a 2s proxy of a 16s recording: the player showed 0:02 while the
+    agent was told 0.3 min, and every shot/cut pointed at footage the proxy
+    didn't have.
+
+    So the result is MEASURED rather than assumed, and a short picture track is
+    filled by holding the last frame — exactly what a player does with the same
+    file. Measuring (not trusting the container's per-stream metadata) means
+    this covers a genuinely short track and a truncated encode identically,
+    without having to tell them apart.
+    """
+    _encode_proxy(src, dst, fps, vfr, has_audio)
+    if not duration or duration <= 0:
+        return
+    got = probe(dst)
+    have = got["video_duration"] or got["duration"]
+    gap = duration - have
+    if gap <= max(PROXY_SHORT_MIN_S, PROXY_SHORT_FRAC * duration):
+        return
+    print(f"[media] proxy picture track ran {gap:.2f}s short of the "
+          f"{duration:.2f}s recording ({os.path.basename(src)}) — holding the "
+          f"last frame to fill it", flush=True)
+    _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=gap)
 
 
 def extract_wav(src, dst):

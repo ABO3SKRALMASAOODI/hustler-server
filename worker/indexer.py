@@ -82,13 +82,29 @@ def run_index_job(worker_db, job):
                   f"v{config.PIPELINE_VERSION}) for sha {sha[:12]} — "
                   "re-indexing", flush=True)
 
+        # Non-fatal degradations recorded here and stored on the index so a
+        # partially-degraded analysis is visible in admin instead of silently
+        # worse.
+        warnings = []
+
         # 3. Proxy (VFR -> CFR here) + 16k mono wav
         proxy_local = os.path.join(workdir, "proxy.mp4")
         media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
-                         info["has_audio"])
+                         info["has_audio"], duration=info["duration"])
         # Probed here, not at upload time: step 6 needs the proxy's REAL
         # duration to keep thumbnail seeks inside it.
         proxy_info = media.probe(proxy_local)
+        # The index is about to describe this video to the agent, the player
+        # and every cut. If the proxy still doesn't cover the recording, say so
+        # rather than shipping a description of footage that isn't there.
+        proxy_have = proxy_info["video_duration"] or proxy_info["duration"]
+        if info["duration"] - proxy_have > max(
+                media.PROXY_SHORT_MIN_S,
+                media.PROXY_SHORT_FRAC * info["duration"]):
+            warnings.append(
+                f"only the first {proxy_have:.1f}s of this "
+                f"{info['duration']:.1f}s video has picture — the rest has "
+                "sound but no frames")
         worker_db.run(dbx.set_progress, job_id, 30)
         _mark("proxy_s")
 
@@ -98,11 +114,6 @@ def run_index_job(worker_db, job):
             media.extract_wav(src, wav_local)
         worker_db.run(dbx.set_progress, job_id, 35)
         _mark("wav_s")
-
-        # Non-fatal degradations recorded here and stored on the index so a
-        # partially-degraded analysis is visible in admin instead of silently
-        # worse.
-        warnings = []
 
         # 4. Transcription (retry once — a transient whisper crash shouldn't
         #    fail the whole job and force a full re-download/re-proxy)
@@ -312,7 +323,7 @@ def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
         return
     proxy_local = os.path.join(workdir, "proxy.mp4")
     media.make_proxy(src_local, proxy_local, info["fps"], info["vfr"],
-                     info["has_audio"])
+                     info["has_audio"], duration=info["duration"])
     storage.upload_file(proxy_local, proxy_key, "video/mp4")
     p = media.probe(proxy_local)
     worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,

@@ -165,7 +165,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       music_inputs, index, preview,
                       W=None, H=None, fps=30.0, frame_mode=None,
                       insert_inputs=None, vo_inputs=None, silence_idx=None,
-                      src_w=None, src_h=None):
+                      src_w=None, src_h=None, src_pad=0.0):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -173,6 +173,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     insert_inputs: [(input_idx, item, has_audio)] aligned with the sorted
     EDL inserts (same order as tl.insert_positions()).
     vo_inputs: [(input_idx, item, vo_duration_s)].
+    src_pad: seconds of the source whose picture track ran out early (a phone
+    screen recording stops writing frames while the screen is static). The last
+    frame is held across them, matching what a player shows, what the proxy
+    holds and therefore what the user approved in the preview — trimming a keep
+    span that lands in there would otherwise yield no picture at all.
     """
     keep = [(max(0.0, s), min(e, src_dur)) for s, e in edl["keep"]]
     keep = [(s, e) for s, e in keep if e - s > 0.01]
@@ -245,13 +250,18 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
     # main segments: trim (+ censor regions), then (when needed) normalize
     # to the output frame
+    vsrc = "0:v"
+    if src_pad > 0:
+        parts.append(f"[0:v]tpad=stop_mode=clone:"
+                     f"stop_duration={src_pad:.3f}[vpad]")
+        vsrc = "vpad"
     if n == 1:
-        _seg_video(0, "0:v", keep[0][0], keep[0][1])
+        _seg_video(0, vsrc, keep[0][0], keep[0][1])
         parts.append(f"[asrc]atrim=start={keep[0][0]:.3f}:end={keep[0][1]:.3f},"
                      f"asetpts=PTS-STARTPTS"
                      + (f",{AUDIO_NORM}" if do_norm else "") + "[a_seg0]")
     else:
-        parts.append("[0:v]split=" + str(n)
+        parts.append(f"[{vsrc}]split=" + str(n)
                      + "".join(f"[vin{i}]" for i in range(n)))
         parts.append("[asrc]asplit=" + str(n)
                      + "".join(f"[ain{i}]" for i in range(n)))
@@ -533,12 +543,23 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         vo_inputs.append((next_idx, item, vo_dur))
         next_idx += 1
 
+    # Finals render from the ORIGINAL, previews from the proxy — and the proxy
+    # already holds its last frame across a short picture track. Without the
+    # same hold here the two would disagree: the user approves a preview and
+    # exports something else.
+    src_pad = 0.0
+    vdur = info.get("video_duration")
+    if vdur and src_dur - vdur > max(media.PROXY_SHORT_MIN_S,
+                                     media.PROXY_SHORT_FRAC * src_dur):
+        src_pad = src_dur - vdur
+
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
                               insert_inputs=insert_inputs,
                               vo_inputs=vo_inputs, silence_idx=silence_idx,
-                              src_w=info["width"], src_h=info["height"])
+                              src_w=info["width"], src_h=info["height"],
+                              src_pad=src_pad)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).

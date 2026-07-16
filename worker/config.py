@@ -55,7 +55,7 @@ MAX_GENERATED_IMAGES_PER_TURN = int(
 # Bump whenever the index pipeline's OUTPUT changes (segmentation rules,
 # VAD settings, schema...): cached indexes from older pipeline versions are
 # re-built instead of served. Keep in sync with backend/routes/video.py.
-PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "5"))
+PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "6"))
 
 # Transcription. Defaults tuned for ACCURACY over raw speed — a mangled
 # transcript ("valmera.io" -> "Valmer de laio") poisons captions AND makes the
