@@ -6,12 +6,14 @@ so the transcript panel can never show a run-on line. The agent is told to
 snap every cut to these word boundaries.
 """
 
+import inspect
 import re
 
 import config
 from schemas import Word, Sentence
 
 _model = None
+_supports_hotwords = None
 
 SENTENCE_END = re.compile(r"[.!?…]['\")\]]*$")
 MAX_SENTENCE_WORDS = 12
@@ -31,15 +33,38 @@ def get_model():
 
 def transcribe(wav_path):
     """Returns (words: [Word], language: str)."""
+    global _supports_hotwords
     model = get_model()
     # speech_pad_ms keeps VAD from shaving word tails (especially the very
     # last words of the clip); 500ms min-silence keeps short gaps inside
     # sentences from being dropped as non-speech.
-    segments, info = model.transcribe(
-        wav_path, word_timestamps=True, vad_filter=True,
+    kwargs = dict(
+        word_timestamps=True, vad_filter=True,
         beam_size=config.WHISPER_BEAM_SIZE,
+        # A temperature-fallback ladder + these thresholds are whisper's own
+        # anti-hallucination guard: if a window decodes with a bad avg-logprob
+        # or a runaway compression ratio (the classic looping/garbage output),
+        # it retries hotter instead of emitting confident nonsense.
+        temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        # Each window decoded independently — one mis-heard proper noun can't
+        # snowball into the next window's context.
+        condition_on_previous_text=False,
         vad_parameters={"min_silence_duration_ms": 500,
                         "speech_pad_ms": 400})
+    if config.WHISPER_INITIAL_PROMPT.strip():
+        kwargs["initial_prompt"] = config.WHISPER_INITIAL_PROMPT.strip()
+    # 'hotwords' biases every window toward domain vocab (brand names). Guarded
+    # by a signature check so an older faster-whisper can't crash the index.
+    if _supports_hotwords is None:
+        _supports_hotwords = "hotwords" in inspect.signature(
+            model.transcribe).parameters
+    hot = config.WHISPER_HOTWORDS.strip()
+    if hot and _supports_hotwords:
+        kwargs["hotwords"] = hot
+    segments, info = model.transcribe(wav_path, **kwargs)
     words = []
     for seg in segments:
         for w in (seg.words or []):

@@ -28,6 +28,16 @@ AGENT_MODEL = os.getenv("AGENT_MODEL", "grok-4.5")
 VISION_MODEL = os.getenv("VISION_MODEL", "grok-4.5")
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
+# Vision (look_at) calls get a TIGHTER, NON-retrying budget than the text
+# agent. A slow multimodal call on the shared 90s+1-retry client could burn
+# ~180s of a 5-minute turn on a SINGLE look — four of them instantly wall the
+# turn (the real cause of "timed out, nothing changed"). Fail once, fast.
+VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "55"))
+# Hard cap on look_at / look_at_asset calls per agent turn. Beyond this the
+# tool refuses and tells the model to decide from the transcript — vision is a
+# spot-check, not a search strategy, and each call is the most expensive +
+# slowest thing the agent can do.
+AGENT_MAX_VISION_CALLS = int(os.getenv("AGENT_MAX_VISION_CALLS", "4"))
 
 # Image generation. Two backends are supported and auto-detected from
 # OPENAI_BASE_URL (see worker/llm.image_provider):
@@ -49,15 +59,25 @@ MAX_GENERATED_IMAGES_PER_TURN = int(
 # Bump whenever the index pipeline's OUTPUT changes (segmentation rules,
 # VAD settings, schema...): cached indexes from older pipeline versions are
 # re-built instead of served. Keep in sync with backend/routes/video.py.
-PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "2"))
+PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "3"))
 
-# Transcription
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+# Transcription. Defaults tuned for ACCURACY over raw speed — a mangled
+# transcript ("valmera.io" -> "Valmer de laio") poisons captions AND makes the
+# agent burn its whole turn lip-reading with slow vision calls. 'medium' + a
+# beam search + brand hotwords fixes both. Keep WHISPER_MODEL in sync with the
+# Dockerfile --build-arg (the model is baked into the image); set it back to
+# 'small' if the worker CPU can't keep up with indexing latency.
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")   # cpu | cuda
 WHISPER_COMPUTE = os.getenv(
     "WHISPER_COMPUTE", "int8" if WHISPER_DEVICE == "cpu" else "float16")
-WHISPER_BEAM_SIZE = int(os.getenv(
-    "WHISPER_BEAM_SIZE", "1" if WHISPER_DEVICE == "cpu" else "5"))
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+# Domain vocabulary biased into EVERY decoding window (faster-whisper >=1.0
+# 'hotwords'). Proper nouns / brand terms whisper would otherwise mis-hear.
+# Comma/space separated; empty disables.
+WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS", "Valmera, valmera.io")
+# Optional priming context (style/topic) for the first window. Empty disables.
+WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "")
 
 # Quotas / limits
 MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "2"))

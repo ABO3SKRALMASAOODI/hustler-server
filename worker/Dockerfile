@@ -22,7 +22,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # after each deploy and compounded media-slot contention. HF_HOME points at an
 # in-image path so faster-whisper reads the baked cache at runtime.
 ENV HF_HOME=/opt/hf
-ARG WHISPER_MODEL=small
+# Keep in sync with worker/config.py WHISPER_MODEL. 'medium' is the accuracy
+# default; override with --build-arg WHISPER_MODEL=small for a lighter image.
+ARG WHISPER_MODEL=medium
 RUN python -c "from faster_whisper import download_model; \
     download_model('${WHISPER_MODEL}')"
 

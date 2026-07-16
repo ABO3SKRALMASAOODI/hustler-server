@@ -41,8 +41,9 @@ MAX_CONCURRENT_JOBS_PER_USER = int(os.getenv("MAX_CONCURRENT_JOBS_PER_USER", "3"
 MESSAGES_PER_HOUR = int(os.getenv("MESSAGES_PER_HOUR", "20"))
 
 # Keep in sync with worker/config.py — indexes built by an older pipeline
-# version are re-indexed automatically when the project is opened.
-PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "2"))
+# version are re-indexed automatically when the project is opened. v3 = the
+# accuracy-tuned whisper pass (medium model, beam search, brand hotwords).
+PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "3"))
 
 VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
                "music", "image_ref", "video_clip")
@@ -687,6 +688,149 @@ def get_index(user_id, project_id):
         "shots": [{"id": s.get("id"), "start": s.get("start"), "end": s.get("end")}
                   for s in idx.get("shots", [])],
     }})
+
+
+TRANSCRIPT_MAX_CHARS = 400
+_WORD_RE = re.compile(r"\S+")
+
+
+def _retokenize_span(new_text, t0, t1):
+    """Split corrected sentence text into word tokens and lay them across the
+    sentence's [t0,t1] window, proportional to token length. Captions are
+    word-timed, so the corrected words must carry timings or karaoke captions
+    would desync."""
+    toks = _WORD_RE.findall(new_text)
+    if not toks:
+        return []
+    t0 = float(t0)
+    t1 = max(float(t1), t0 + 0.05)
+    span = t1 - t0
+    weights = [max(len(t), 1) for t in toks]
+    total = float(sum(weights))
+    out, cursor = [], t0
+    for i, (tok, w) in enumerate(zip(toks, weights)):
+        wt0 = cursor
+        wt1 = t1 if i == len(toks) - 1 else cursor + span * (w / total)
+        out.append({"w": tok, "t0": round(wt0, 3), "t1": round(wt1, 3)})
+        cursor = wt1
+    return out
+
+
+def _apply_transcript_edit(idx, sentence_id, new_text):
+    """Return (new_index_dict, updated_sentence) or (None, error_msg).
+
+    Rebuilds the whole word list from the sentence partition so every
+    sentence's absolute wi0/wi1 stays consistent after the edited sentence
+    changes its word count. Sentences produced by group_sentences tile the
+    word list contiguously, so slicing each by its own wi0/wi1 is lossless."""
+    sentences = idx.get("sentences") or []
+    words = idx.get("words") or []
+    target = next((s for s in sentences if s.get("id") == sentence_id), None)
+    if not target:
+        return None, "sentence not found"
+
+    def _slice(s):
+        wi0, wi1 = s.get("wi0"), s.get("wi1")
+        if isinstance(wi0, int) and isinstance(wi1, int) \
+                and 0 <= wi0 <= wi1 < len(words):
+            return [{"w": w.get("w"), "t0": w.get("t0"), "t1": w.get("t1")}
+                    for w in words[wi0:wi1 + 1]]
+        return None
+
+    new_words, new_sentences, updated = [], [], None
+    for s in sentences:
+        s2 = dict(s)
+        if s.get("id") == sentence_id:
+            toks = _retokenize_span(new_text, s.get("t0"), s.get("t1"))
+            s2["text"] = new_text
+            updated = s2
+        else:
+            toks = _slice(s)
+            # An un-sliceable neighbour (older index without word indices)
+            # means we can't safely rebuild — fall back to a text-only edit.
+            if toks is None:
+                text_only = [dict(x) for x in sentences]
+                for x in text_only:
+                    if x.get("id") == sentence_id:
+                        x["text"] = new_text
+                        updated = x
+                out = dict(idx)
+                out["sentences"] = text_only
+                return out, updated
+        s2["wi0"] = len(new_words)
+        s2["wi1"] = len(new_words) + len(toks) - 1
+        new_words.extend(toks)
+        new_sentences.append(s2)
+
+    out = dict(idx)
+    out["sentences"] = new_sentences
+    out["words"] = new_words
+    return out, updated
+
+
+@video_bp.route("/projects/<int:project_id>/transcript", methods=["PATCH"])
+@token_required
+def edit_transcript(user_id, project_id):
+    """Correct one transcript sentence (e.g. a mis-heard brand name). Updates
+    the shared index in place so future captions + agent turns use the fix.
+    Body: {sentence_id, text}."""
+    data = request.get_json(silent=True) or {}
+    sentence_id = (data.get("sentence_id") or "").strip()
+    new_text = (data.get("text") or "").strip()
+    if not sentence_id or not new_text:
+        return jsonify({"error": "sentence_id and text are required"}), 400
+    if len(new_text) > TRANSCRIPT_MAX_CHARS:
+        return jsonify({"error": f"text too long (max {TRANSCRIPT_MAX_CHARS} "
+                                 "characters)"}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+        # Block edits mid-index — the worker would overwrite them on completion.
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE project_id = %s AND type = 'index'
+                         AND state IN ('queued','running') LIMIT 1""",
+                    (project_id,))
+        if cur.fetchone():
+            return jsonify({"error": "The video is still being analyzed — "
+                                     "try again in a moment."}), 409
+        original = _active_original(cur, project_id)
+        if not original or not original["sha256"]:
+            return jsonify({"error": "No indexed video"}), 404
+        # The index is content-addressed (one shared row per video_sha256), so
+        # a write would bleed into any OTHER user who uploaded the byte-identical
+        # file. Fail closed if this video's hash is shared across accounts — the
+        # correction must never mutate a stranger's transcript.
+        cur.execute("""SELECT 1 FROM assets a JOIN projects p ON p.id = a.project_id
+                       WHERE a.sha256 = %s AND a.kind = 'original'
+                         AND p.user_id <> %s LIMIT 1""",
+                    (original["sha256"], int(user_id)))
+        if cur.fetchone():
+            return jsonify({"error": "This video is shared with another account, "
+                                     "so its transcript can't be edited here."}), 409
+        cur.execute("SELECT json FROM indexes WHERE video_sha256 = %s FOR UPDATE",
+                    (original["sha256"],))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "No indexed video"}), 404
+        new_index, updated = _apply_transcript_edit(
+            row["json"], sentence_id, new_text)
+        if new_index is None:
+            return jsonify({"error": updated}), 404
+        cur.execute("UPDATE indexes SET json = %s WHERE video_sha256 = %s",
+                    (Json(new_index), original["sha256"]))
+        # Do captions currently pull from the transcript? If so the studio can
+        # offer a one-click re-render so the correction shows on screen. NOTE:
+        # edls.json['captions'] is a 3-way union — dict (from_transcript), None
+        # (off), or a LIST (manual items) — so guard with isinstance before .get.
+        cur.execute("""SELECT json FROM edls WHERE project_id = %s
+                       ORDER BY version DESC LIMIT 1""", (project_id,))
+        edl_row = cur.fetchone()
+        caps = edl_row["json"].get("captions") if edl_row else None
+        captions_active = bool(isinstance(caps, dict)
+                               and caps.get("mode") == "from_transcript")
+    return jsonify({"ok": True, "sentence": updated,
+                    "captions_active": captions_active})
 
 
 # ------------------------------------------------------------------ #

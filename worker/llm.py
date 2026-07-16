@@ -79,7 +79,12 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
     content += [image_part(p) for p in image_paths]
     names = image_names or [str(p).rsplit("/", 1)[-1] for p in image_paths]
     try:
-        resp = client().chat.completions.create(
+        # Vision gets its OWN tight, non-retrying budget. On the shared client a
+        # slow multimodal call would eat LLM_TIMEOUT_S + a retry (~180s) of the
+        # turn; here it fails once at VISION_TIMEOUT_S so the agent can move on.
+        resp = client().with_options(
+            timeout=config.VISION_TIMEOUT_S, max_retries=0
+        ).chat.completions.create(
             model=config.VISION_MODEL,
             messages=[{"role": "user", "content": content}],
             max_tokens=max_tokens,

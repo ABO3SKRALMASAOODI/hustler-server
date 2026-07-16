@@ -227,6 +227,34 @@ def video_overview():
         """)
         totals = cur.fetchone()
 
+        # Which model actually ran for each purpose (ground truth from
+        # llm_calls) — so "am I really on Grok?" is answerable at a glance and
+        # the agent-vs-vision-vs-image split is no longer a mystery.
+        cur.execute("""
+            SELECT purpose,
+                   (ARRAY_AGG(model ORDER BY created_at DESC))[1] AS model,
+                   COUNT(*) AS calls,
+                   MAX(created_at) AS last_at
+            FROM llm_calls
+            WHERE created_at > NOW() - INTERVAL '30 days'
+              AND model IS NOT NULL
+            GROUP BY purpose
+            ORDER BY last_at DESC NULLS LAST
+        """)
+        model_rows = cur.fetchall()
+
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
+
+    def _provider(b):
+        b = (b or "").lower()
+        if "dashscope" in b:
+            return "DashScope (Qwen)"
+        if "x.ai" in b:
+            return "xAI (Grok)"
+        if "openai" in b:
+            return "OpenAI"
+        return "custom"
+
     return jsonify({
         "totals": {
             "users": len(users),
@@ -272,6 +300,27 @@ def video_overview():
              "at": a["happened_at"].isoformat()
                  if a["happened_at"] else None}
             for a in attention],
+        "models": {
+            # Backend service config (concierge/index-greet run here). The
+            # worker service can be pointed elsewhere — trust "observed".
+            "configured": {
+                "provider": _provider(base_url),
+                "base_url": base_url,
+                "agent_model": os.getenv("AGENT_MODEL", "grok-4.5"),
+                "vision_model": os.getenv("VISION_MODEL", "grok-4.5"),
+                "image_gen_model": os.getenv("IMAGE_GEN_MODEL", "grok-2-image"),
+                "image_edit_model": os.getenv("IMAGE_EDIT_MODEL", "") or None,
+                "whisper_model": os.getenv("WHISPER_MODEL", "medium"),
+                "price_in_per_m": PRICE_IN_PER_M,
+                "price_out_per_m": PRICE_OUT_PER_M,
+            },
+            # What each purpose ACTUALLY used, last 30 days, newest first.
+            "observed": [
+                {"purpose": m["purpose"], "model": m["model"],
+                 "calls": int(m["calls"] or 0),
+                 "last_at": m["last_at"].isoformat() if m["last_at"] else None}
+                for m in model_rows],
+        },
     })
 
 
