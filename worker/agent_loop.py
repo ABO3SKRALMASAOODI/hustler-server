@@ -387,7 +387,9 @@ EDIT_CLAIM = re.compile(
     r"(?! not\b| still\b| already\b| currently\b| unchanged\b)[^.\n]{0,60}"
     r"(?:red|blue|green|yellow|white|black|orange|purple|pink|"
     r"#[0-9A-Fa-f]{6}|top|bottom|middle|cent(?:er|re)|bigger|smaller|"
-    r"karaoke|dynamic|pops?|light(?:s|ing)? up|word.by.word|highlight)"
+    r"karaoke|dynamic|pops?|light(?:s|ing)? up|word.by.word|highlight|"
+    r"premium|presets?|podcast|beast|elegant|serif|uppercase|all.caps|"
+    r"emphasi[sz])"
     r"|\bis now (?:red|blue|green|yellow|white|black|orange|purple|pink|"
     r"#[0-9A-Fa-f]{6}|at the top|at the bottom|in the middle|centered|"
     r"cropped|9:16|16:9|1:1|4:5|vertical|square|portrait|landscape|"
@@ -592,9 +594,12 @@ ALTERNATIVE_HINTS = [
      "a center-crop or a padded fit."),
     (re.compile(r"(?i)caption|subtitle|font|outline|middle|"
                 r"cent(?:er|re)"),
-     "What I CAN do with captions: color, size (s/m/l/xl), position "
-     "(top / middle / bottom), karaoke mode where the spoken word pops "
-     "and lights up, and entrance animations (fade / pop / slide up)."),
+     "What I CAN do with captions: premium preset looks with real fonts — "
+     "podcast (keywords light up / get a highlight box, numbers render "
+     "huge), beast (loud all-caps karaoke), karaoke (a box follows the "
+     "spoken word), elegant (serif-accented lower third) — plus color, "
+     "size, position, keyword emphasis words, karaoke mode and entrance "
+     "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
      "What I CAN do: mix uploaded music under the edit on any time range, "
      "make existing music or narration louder/quieter, remove it, or lay an "

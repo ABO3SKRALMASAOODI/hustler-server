@@ -90,7 +90,8 @@ def process_one(worker_db, job):
 
 FAIL_NOTES = {
     # agent_turn posts its own apology inside run_agent_job — not repeated.
-    "final": "The final export failed ({err}). Hit Export to try again.",
+    "final": ("The final export failed ({err}). "
+              "Press Download to try again."),
     "index": ("I couldn't analyze that video ({err}). Try uploading it "
               "again, or a different format like mp4."),
 }
@@ -138,7 +139,7 @@ REAPER_NOTES = {
     "agent_turn": ("I lost my connection while working on that request — "
                    "nothing further was changed. Please send it again."),
     "final": ("The final export was interrupted before it finished. "
-              "Hit Export again to restart it."),
+              "Press Download again to restart it."),
     # An index dying to a dead worker used to say NOTHING — 'index' was in
     # neither this table nor the reaper's "turn and render" framing, and it is
     # the ONE job that runs before the user has any other feedback. A real

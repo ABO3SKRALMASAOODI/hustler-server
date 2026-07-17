@@ -830,11 +830,16 @@ def _parse_style(style):
 
 
 def add_captions(ctx, mode=None, items=None, style=None,
-                 max_words_per_caption=None):
+                 max_words_per_caption=None, emphasis_words=None):
     edl = dict(ctx.latest_edl()["json"])
     parsed_style = _parse_style(style)
     if isinstance(parsed_style, str):
         return "REJECTED: " + parsed_style[5:]
+    if emphasis_words is not None:
+        if not isinstance(emphasis_words, list) \
+                or not all(isinstance(w, str) for w in emphasis_words):
+            return ("REJECTED: emphasis_words must be an array of strings "
+                    "(words from the transcript to emphasize).")
     if items:
         if not isinstance(items, list):
             return "REJECTED: items must be an array of {text,start,end}."
@@ -861,28 +866,61 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 mw = int(max_words_per_caption)
             except (TypeError, ValueError):
                 return "REJECTED: max_words_per_caption must be an integer."
+        preset = (parsed_style or {}).get("preset")
+        premium = preset and preset != "classic"
         # karaoke groups larger than the hard max read as a wall of text —
         # clamp the STORED value so EDL, diff line and reply all match what
-        # actually renders, and disclose the clamp.
+        # actually renders, and disclose the clamp. Premium presets chunk
+        # with their own budgets, so the clamp is legacy-dynamic only.
         karaoke_note = ""
-        if mw and (parsed_style or {}).get("dynamic") \
+        if mw and not premium and (parsed_style or {}).get("dynamic") \
                 and mw > KARAOKE_HARD_MAX:
             karaoke_note = (f"\nNote: dynamic (karaoke) captions group at "
                             f"most {KARAOKE_HARD_MAX} words per line — "
                             f"using {KARAOKE_HARD_MAX} instead of {mw}.")
             mw = KARAOKE_HARD_MAX
-        if (parsed_style or {}).get("dynamic") \
+        if not premium and (parsed_style or {}).get("dynamic") \
                 and (parsed_style or {}).get("animation"):
             karaoke_note += ("\nNote: dynamic karaoke captions animate "
                              "word-by-word already — the 'animation' "
                              "entrance style only applies to static "
                              "captions and is ignored here.")
-        edl["captions"] = {"mode": "from_transcript",
-                           "max_words_per_caption": mw,
-                           "style": parsed_style}
+        if premium and (parsed_style or {}).get("dynamic"):
+            karaoke_note += (f"\nNote: preset '{preset}' drives its own "
+                             "word-by-word animation — the 'dynamic' flag "
+                             "is ignored while a preset is set.")
+        if premium and (parsed_style or {}).get("animation") \
+                and preset != "elegant":
+            karaoke_note += (f"\nNote: preset '{preset}' animates word-by-"
+                             "word — the 'animation' entrance style only "
+                             "applies to static looks and is ignored here.")
+        if emphasis_words and not premium:
+            karaoke_note += ("\nNote: emphasis_words only take effect with "
+                            "a premium preset (podcast/beast/karaoke/"
+                            "elegant) — pass style {preset:'podcast'} to "
+                            "use them.")
+        if (parsed_style or {}).get("uppercase") is not None and not premium:
+            karaoke_note += ("\nNote: uppercase only applies with a premium "
+                             "preset — the classic look renders the "
+                             "transcript as spoken.")
+        if preset == "elegant" \
+                and (parsed_style or {}).get("animation") == "slide_up":
+            karaoke_note += ("\nNote: premium captions place text "
+                             "explicitly, which replaces 'slide_up' with a "
+                             "fade entrance.")
+        cfg = {"mode": "from_transcript",
+               "max_words_per_caption": mw,
+               "style": parsed_style}
+        if emphasis_words:
+            cfg["emphasis_words"] = emphasis_words
+        edl["captions"] = cfg
         desc = "captions from transcript enabled"
+        if premium:
+            desc += f", preset {preset}"
         if mw:
             desc += f", <= {mw} words each"
+        if emphasis_words:
+            desc += f", {len(emphasis_words)} emphasis words"
         if parsed_style:
             desc += f", style {parsed_style}"
         return ctx.write_edl(edl, desc) + karaoke_note
@@ -899,21 +937,24 @@ def _parse_partial_style(style):
     fills defaults, so merging cannot reset fields the user didn't mention."""
     if not isinstance(style, dict) or not style:
         return ('ERR: style must be a non-empty object with any of '
-                '{"color":"#RRGGBB","size":"s|m|l|xl","size_scale":0.5-3.0,'
-                '"position":"bottom|top|middle","dynamic":true|false,'
-                '"highlight_color":"#RRGGBB",'
+                '{"preset":"podcast|beast|karaoke|elegant|classic",'
+                '"color":"#RRGGBB","size":"s|m|l|xl","size_scale":0.5-3.0,'
+                '"position":"bottom|top|middle","uppercase":true|false,'
+                '"dynamic":true|false,"highlight_color":"#RRGGBB",'
                 '"animation":"fade|pop|slide_up"}')
     unknown = sorted(set(style) - {"color", "size", "size_scale", "position",
-                                   "dynamic", "highlight_color", "animation"})
+                                   "dynamic", "highlight_color", "animation",
+                                   "preset", "uppercase"})
     if unknown:
-        return (f"ERR: unknown style field(s) {unknown} — only color, size, "
-                "size_scale, position, dynamic, highlight_color and animation "
-                "exist (no fonts or outlines; size is the coarse bucket "
-                "s|m|l|xl, size_scale is a continuous 0.5-3.0 fine-tune "
-                "multiplier for 'a little/way bigger'; dynamic gives karaoke "
-                "word-by-word captions, highlight_color is the color of the "
-                "spoken word, animation fade|pop|slide_up animates each static "
-                "caption's entrance).")
+        return (f"ERR: unknown style field(s) {unknown} — only preset, color, "
+                "size, size_scale, position, uppercase, dynamic, "
+                "highlight_color and animation exist (preset picks a premium "
+                "look: podcast/beast/karaoke/elegant, classic = plain; size "
+                "is the coarse bucket s|m|l|xl, size_scale a continuous "
+                "0.5-3.0 fine-tune multiplier; highlight_color is the accent "
+                "of emphasized/spoken words; animation fade|pop|slide_up "
+                "animates static captions' entrance; there is no free-form "
+                "font choice beyond the presets).")
     try:
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
@@ -927,11 +968,20 @@ def _parse_partial_style(style):
 
 def merge_caption_style(captions, partial):
     """Merge a partial style into an existing captions value (from_transcript
-    dict or manual item list). Returns the new captions value."""
+    dict or manual item list). Returns the new captions value.
+
+    Applying a premium preset ADOPTS the preset's own placement unless the
+    patch names one: stored styles auto-filled position:'bottom' for as long
+    as styling has existed, and that stale default would pin every preset to
+    the bottom of the frame on existing projects."""
+    drop_pos = partial.get("preset") and partial["preset"] != "classic" \
+        and "position" not in partial
     if isinstance(captions, dict):
         new = dict(captions)
         st = dict(captions.get("style") or {})
         st.update(partial)
+        if drop_pos:
+            st.pop("position", None)
         new["style"] = st
         return new
     out = []
@@ -944,15 +994,27 @@ def merge_caption_style(captions, partial):
         nit = dict(it)
         st = dict(it.get("style") or {})
         st.update(item_partial)
+        if drop_pos:
+            st.pop("position", None)
         nit["style"] = st
         out.append(nit)
     return out
 
 
-def set_caption_style(ctx, style):
-    partial = _parse_partial_style(style)
-    if isinstance(partial, str):
-        return "REJECTED: " + partial[5:]
+def set_caption_style(ctx, style=None, emphasis_words=None):
+    if emphasis_words is not None:
+        if not isinstance(emphasis_words, list) \
+                or not all(isinstance(w, str) for w in emphasis_words):
+            return ("REJECTED: emphasis_words must be an array of strings "
+                    "(words from the transcript to emphasize).")
+    partial = {}
+    if style not in (None, {}):
+        partial = _parse_partial_style(style)
+        if isinstance(partial, str):
+            return "REJECTED: " + partial[5:]
+    elif emphasis_words is None:
+        return ("REJECTED: pass style with the fields to change, "
+                "emphasis_words (with a premium preset), or both.")
     edl = dict(ctx.latest_edl()["json"])
     caps = edl.get("captions")
     if not caps:
@@ -960,10 +1022,29 @@ def set_caption_style(ctx, style):
                 "add_captions(mode='from_transcript') first (you can pass "
                 "a style there directly).")
     merged = merge_caption_style(caps, partial)
+    # the EFFECTIVE premium preset after the patch ('classic' = legacy)
+    eff_preset = None
+    if isinstance(merged, dict):
+        eff_preset = (merged.get("style") or {}).get("preset")
+        if eff_preset == "classic":
+            eff_preset = None
+    emph_note = ""
+    if emphasis_words is not None:
+        if isinstance(merged, dict):
+            merged["emphasis_words"] = emphasis_words or None
+            if emphasis_words and not eff_preset:
+                emph_note = ("\nNote: emphasis_words only take effect with "
+                             "a premium preset (podcast/beast/karaoke/"
+                             "elegant) — set style {preset:'podcast'} to "
+                             "use them.")
+        else:
+            emph_note = ("\nNote: emphasis_words apply to from_transcript "
+                         "captions only — manual caption items ignore them.")
     # turning karaoke on with a stored group size above the render's hard
     # max: clamp the stored value so state and output agree, and say so.
     karaoke_note = ""
     if isinstance(merged, dict) and partial.get("dynamic") \
+            and not eff_preset \
             and (merged.get("max_words_per_caption") or 0) > KARAOKE_HARD_MAX:
         karaoke_note = (f"\nNote: dynamic (karaoke) captions group at most "
                         f"{KARAOKE_HARD_MAX} words per line — "
@@ -974,15 +1055,34 @@ def set_caption_style(ctx, style):
     if partial.get("animation"):
         eff_style = (merged.get("style") or {}) if isinstance(merged, dict) \
             else {}
-        if eff_style.get("dynamic"):
+        if eff_preset and eff_preset != "elegant":
+            karaoke_note += (f"\nNote: preset '{eff_preset}' animates "
+                             "word-by-word — the 'animation' entrance "
+                             "style only applies to static looks and is "
+                             "ignored here.")
+        elif eff_preset == "elegant" \
+                and partial["animation"] == "slide_up":
+            karaoke_note += ("\nNote: premium captions place text "
+                            "explicitly, which replaces 'slide_up' with a "
+                            "fade entrance.")
+        elif not eff_preset and eff_style.get("dynamic"):
             karaoke_note += ("\nNote: dynamic karaoke captions animate "
                              "word-by-word already — the 'animation' "
                              "entrance style only applies to static "
                              "captions and is ignored while dynamic is on.")
+    if partial.get("uppercase") is not None and not eff_preset:
+        karaoke_note += ("\nNote: uppercase only applies with a premium "
+                         "preset — the classic look renders the transcript "
+                         "as spoken.")
+    if partial.get("dynamic") and eff_preset:
+        karaoke_note += (f"\nNote: preset '{eff_preset}' drives its own "
+                         "word-by-word animation — the 'dynamic' flag is "
+                         "ignored while a preset is set.")
     edl["captions"] = merged
-    result = ctx.write_edl(
-        edl, f"caption style updated: {json.dumps(partial)}")
-    result += karaoke_note
+    desc = f"caption style updated: {json.dumps(partial)}" if partial \
+        else f"caption emphasis words set ({len(emphasis_words or [])})"
+    result = ctx.write_edl(edl, desc)
+    result += karaoke_note + emph_note
     if isinstance(caps, list) and ({"dynamic", "highlight_color"}
                                    & set(partial)):
         result += ("\nNote: dynamic karaoke captions (and highlight_color) "
@@ -1923,31 +2023,45 @@ TOOLS = {
     "add_captions": (add_captions, "Burned captions. mode='from_transcript' "
                      "(word-timed from the real transcript, recommended) or "
                      "mode='off', or items=[{text,start,end,style?}] (source "
-                     "seconds) for text the user dictates. Optional style "
-                     "{color:'#RRGGBB', size:'s|m|l|xl', "
-                     "position:'bottom|top|middle', dynamic:true, "
-                     "highlight_color:'#RRGGBB'} "
-                     "and max_words_per_caption (1-12; dynamic mode groups "
-                     "at most 4 per line) to show short, "
-                     "punchy caption chunks. dynamic:true = karaoke "
-                     "captions (modern reels style): short groups where the "
-                     "word being spoken pops and lights up in "
-                     "highlight_color (default warm yellow) — THE choice "
-                     "when the user wants big/dynamic/viral captions; pair "
-                     "with size 'xl'. Example — 'captions 3 words max, red, "
-                     "at the top': {mode:'from_transcript', "
-                     "max_words_per_caption:3, style:{color:'#FF0000', "
-                     "position:'top'}}. Example — one manual title card: "
+                     "seconds) for text the user dictates. "
+                     "PREMIUM PRESETS (style.preset) are the headline "
+                     "feature — professionally designed looks with real "
+                     "fonts: 'podcast' (the viral podcast-reel look: bold "
+                     "white words land on screen as spoken, keywords light "
+                     "up in the accent color, get a highlight box or serif "
+                     "italics, numbers render HUGE — the default choice for "
+                     "premium/viral/TikTok captions), 'beast' (loud "
+                     "MrBeast-style: ALL-CAPS impact font, centered, the "
+                     "spoken word pops in the accent color), 'karaoke' (an "
+                     "accent box follows each spoken word), 'elegant' "
+                     "(calm lower-third, serif-italic accents — "
+                     "interviews/luxury), 'classic' (plain legacy look). "
+                     "With a preset, ALSO pass emphasis_words: 10-25 "
+                     "impact words picked from the REAL transcript (money "
+                     "words: numbers, outcomes, emotional peaks, names — "
+                     "1-2 per sentence, verbatim as spoken); they get the "
+                     "emphasis treatments wherever they appear. "
+                     "highlight_color sets the accent (default warm "
+                     "yellow); uppercase overrides the preset's casing; "
+                     "position bottom/top/middle overrides its placement. "
+                     "Other style fields: color '#RRGGBB', size s|m|l|xl "
+                     "(presets are already big at 'm'), size_scale "
+                     "0.5-3.0, dynamic:true (legacy karaoke, no preset), "
+                     "animation fade|pop|slide_up (static captions only), "
+                     "max_words_per_caption 1-12. Example — premium reel "
+                     "captions: {mode:'from_transcript', style:{preset:"
+                     "'podcast'}, emphasis_words:['money','22','future',"
+                     "'opportunities']}. Example — dictated title card: "
                      "{items:[{text:'CHAPTER ONE', start:0, end:2.5, "
-                     "style:{size:'l'}}]}. animation ('fade', 'pop' or "
-                     "'slide_up') animates each STATIC caption's entrance — "
-                     "dynamic karaoke captions animate word-by-word "
-                     "already, so animation is ignored when dynamic is on. "
-                     "There are NO other style fields — fonts and outline "
-                     "colors are not supported; say so if asked.",
+                     "style:{preset:'beast'}}]}. No free-form font choice "
+                     "beyond the presets; say so if asked.",
                      {"mode": {"type": "string"},
                       "style": {"type": "object",
                                 "properties": {
+                                    "preset": {"type": "string",
+                                               "enum": ["podcast", "beast",
+                                                        "karaoke", "elegant",
+                                                        "classic"]},
                                     "color": {"type": "string"},
                                     "size": {"type": "string",
                                              "enum": ["s", "m", "l", "xl"]},
@@ -1955,12 +2069,15 @@ TOOLS = {
                                     "position": {"type": "string",
                                                  "enum": ["bottom", "top",
                                                           "middle"]},
+                                    "uppercase": {"type": "boolean"},
                                     "dynamic": {"type": "boolean"},
                                     "highlight_color": {"type": "string"},
                                     "animation": {"type": "string",
                                                   "enum": ["fade", "pop",
                                                            "slide_up"]}}},
                       "max_words_per_caption": {"type": "integer"},
+                      "emphasis_words": {"type": "array",
+                                         "items": {"type": "string"}},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
     "add_music": (add_music, "Mix a project music file under the edit as "
@@ -1990,22 +2107,34 @@ TOOLS = {
                         "gain_db": {"type": "number"}}),
     "set_caption_style": (set_caption_style, "Change how existing captions "
                           "LOOK without touching their text or timing. Pass "
-                          "only the fields to change: e.g. 'make it red' -> "
-                          '{"style":{"color":"#FF0000"}}, \'center the '
-                          'captions\' -> {"style":{"position":"middle"}}, '
+                          "only the fields to change: 'make the captions "
+                          "premium/viral' -> {\"style\":{\"preset\":"
+                          "\"podcast\"}} (see add_captions for the preset "
+                          "menu: podcast/beast/karaoke/elegant/classic), "
+                          "'make it red' -> {\"style\":{\"color\":"
+                          "\"#FF0000\"}}, 'center the captions' -> "
+                          '{"style":{"position":"middle"}}, '
                           "'bigger / more dynamic captions' -> "
                           '{"style":{"size":"xl","dynamic":true}} '
-                          "(dynamic = karaoke captions where the spoken "
-                          "word pops and lights up in highlight_color; "
-                          "animation fade|pop|slide_up animates static "
-                          "captions' entrance). For fine size control that "
-                          "the s|m|l|xl buckets can't hit — 'a little bigger', "
-                          "'way bigger' — pass size_scale (0.5-3.0, a "
-                          "multiplier on top of size; 1.5 = 50% bigger). "
-                          "Works for from_transcript and manual captions; "
-                          "errors helpfully if no captions exist yet.",
+                          "(dynamic = legacy karaoke without a preset; "
+                          "presets animate on their own). "
+                          "highlight_color changes the accent of "
+                          "emphasized/spoken words; uppercase forces "
+                          "casing; emphasis_words (top-level arg, with a "
+                          "preset) replaces the emphasized keyword list. "
+                          "For fine size control that the s|m|l|xl buckets "
+                          "can't hit pass size_scale (0.5-3.0; 1.5 = 50% "
+                          "bigger). Works for from_transcript and manual "
+                          "captions; errors helpfully if no captions exist "
+                          "yet.",
                           {"style": {"type": "object",
                                      "properties": {
+                                         "preset": {"type": "string",
+                                                    "enum": ["podcast",
+                                                             "beast",
+                                                             "karaoke",
+                                                             "elegant",
+                                                             "classic"]},
                                          "color": {"type": "string"},
                                          "size": {"type": "string",
                                                   "enum": ["s", "m", "l",
@@ -2015,6 +2144,7 @@ TOOLS = {
                                                       "enum": ["bottom",
                                                                "top",
                                                                "middle"]},
+                                         "uppercase": {"type": "boolean"},
                                          "dynamic": {"type": "boolean"},
                                          "highlight_color": {"type":
                                                              "string"},
@@ -2022,7 +2152,10 @@ TOOLS = {
                                                        "enum": ["fade",
                                                                 "pop",
                                                                 "slide_up"]
-                                                       }}}}),
+                                                       }}},
+                           "emphasis_words": {"type": "array",
+                                              "items": {"type":
+                                                        "string"}}}),
     "set_volume": (set_volume, "Volume automation on the ORIGINAL footage's "
                    "audio (the speaker) over a SOURCE-time span. NOT for "
                    "music or voiceover loudness — use set_audio_gain for "
@@ -2189,7 +2322,7 @@ REQUIRED_ARGS = {
     "keep_segments": ["segments"],
     "cut_range": ["start", "end"],
     "restore_range": ["start", "end"],
-    "set_caption_style": ["style"],
+    "set_caption_style": [],
     "add_music": ["storage_key", "start", "end"],
     "remove_music": ["id"],
     "set_audio_gain": ["kind", "id", "gain_db"],

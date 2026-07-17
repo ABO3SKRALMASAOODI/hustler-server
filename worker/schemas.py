@@ -46,7 +46,18 @@ class CaptionStyle(BaseModel):
     # `size` enum stays as the coarse curated menu (and as an alias so old
     # EDLs keep working). Optional so pre-round-13 EDLs keep their signatures.
     size_scale: Optional[float] = None
-    position: Literal["bottom", "top", "middle"] = "bottom"
+    # None (not 'bottom') so premium presets can apply their own default
+    # placement when the agent didn't choose one; None renders as bottom on
+    # the legacy path. Old EDLs stored an explicit 'bottom' and are untouched.
+    position: Optional[Literal["bottom", "top", "middle"]] = None
+    # Premium caption look (worker/captions.py PRESETS): podcast (reveal
+    # stack with keyword emphasis), beast (loud Anton karaoke), karaoke
+    # (box follows the spoken word), elegant (serif-accented lower third).
+    # 'classic' = the legacy look explicitly. None = legacy (signature-safe).
+    preset: Optional[Literal["podcast", "beast", "karaoke", "elegant",
+                             "classic"]] = None
+    # Force upper/lower case in premium presets; None = the preset's default.
+    uppercase: Optional[bool] = None
     # karaoke word-by-word captions; Optional so pre-round-7 EDLs keep their
     # signatures (None-valued keys are stripped by edl_signature).
     dynamic: Optional[bool] = None
@@ -119,8 +130,23 @@ class CaptionsFromTranscript(BaseModel):
     # comes from the real word timestamps in the index — never invented.
     max_words_per_caption: Optional[int] = None
     style: Optional[CaptionStyle] = None
+    # Keywords the premium presets emphasize (accent color / highlight box /
+    # serif italic) wherever they appear in the transcript. Chosen by the
+    # agent from the REAL transcript; words containing digits are always
+    # emphasized. Ignored without a preset. None/[] = no keyword emphasis.
+    emphasis_words: Optional[List[str]] = None
 
     _style = field_validator("style", mode="before")(_coerce_style)
+
+    @field_validator("emphasis_words")
+    @classmethod
+    def _emph_norm(cls, v):
+        if v is None:
+            return None
+        words = [str(w).strip() for w in v if str(w).strip()]
+        # bounded so a runaway list can't bloat the EDL; [] collapses to
+        # None so it never shows as a change in edl_signature.
+        return words[:60] or None
 
 
 class MusicItem(BaseModel):
@@ -561,6 +587,8 @@ def _style_desc(style):
         return ""
     s = style if isinstance(style, dict) else style.model_dump()
     bits = []
+    if s.get("preset") and s["preset"] != "classic":
+        bits.append(f"preset {s['preset']}")
     if s.get("color") and s["color"] != "#FFFFFF":
         bits.append(s["color"])
     if s.get("size") and s["size"] != "m":
@@ -569,6 +597,8 @@ def _style_desc(style):
         bits.append(f"scale {s['size_scale']}x")
     if s.get("position") and s["position"] != "bottom":
         bits.append(s["position"])
+    if s.get("uppercase") is not None:
+        bits.append("uppercase" if s["uppercase"] else "mixed-case")
     if s.get("dynamic"):
         bits.append("dynamic")
     if s.get("animation"):
@@ -587,6 +617,8 @@ def describe_edl(edl_dict, duration=None):
         d = "captions: transcript"
         if edl.captions.max_words_per_caption:
             d += f" <= {edl.captions.max_words_per_caption} words"
+        if edl.captions.emphasis_words:
+            d += f", {len(edl.captions.emphasis_words)} emphasis words"
         parts.append(d + _style_desc(edl.captions.style))
     elif isinstance(edl.captions, list):
         parts.append(f"captions: {len(edl.captions)} manual")

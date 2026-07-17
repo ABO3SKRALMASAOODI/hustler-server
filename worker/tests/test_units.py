@@ -624,7 +624,8 @@ check("fallback text never claims a change",
 check("alternative hint for aspect requests",
       "output frame" in _nearest_alternative("make the video 9:16"))
 check("alternative hint for caption requests",
-      "middle" in _nearest_alternative("move the captions to the middle"))
+      "podcast" in _nearest_alternative("move the captions to the middle")
+      and "position" in _nearest_alternative("captions in a cool font"))
 check("no hint when nothing matches",
       _nearest_alternative("do the thing") is None)
 
@@ -2865,5 +2866,244 @@ check("whisper deployment: the model stays cached (it is used every index)",
 
 (wconfig.TRANSCRIBER, tr._transcribe_whisper, tr._transcribe_deepgram,
  tr._model) = _ot
+
+# ══ Round 20: premium caption presets ════════════════════════════════════
+print("== premium caption presets ==")
+from agent_tools import add_captions, set_caption_style       # noqa: E402
+
+PWORDS = [{"w": "So", "t0": 0.5, "t1": 0.62},
+          {"w": "I'm", "t0": 0.74, "t1": 0.9},
+          {"w": "22", "t0": 1.0, "t1": 1.2},
+          {"w": "I", "t0": 1.3, "t1": 1.35},
+          {"w": "want", "t0": 1.45, "t1": 1.65},
+          {"w": "to", "t0": 1.75, "t1": 1.85},
+          {"w": "create", "t0": 1.95, "t1": 2.3},
+          {"w": "opportunities.", "t0": 2.4, "t1": 3.0}]
+V916 = (1080, 1920)   # 9:16 vertical; frame factor = 1920/720
+
+pevs = caplib.events_premium(PWORDS, style={"preset": "podcast"},
+                             play_res=V916,
+                             emphasis_words=["create", "Opportunities"])
+check("reveal: one event per word", len(pevs) == len(PWORDS))
+check("reveal: events start on REAL word times (never invented)",
+      abs(pevs[0]["start"] - 0.5) < 1e-6 and
+      abs(pevs[2]["start"] - 1.0) < 1e-6)
+check("reveal: text accumulates word by word",
+      [e["text"].count(r"\fnInter Display ExtraBold") for e in pevs[:3]]
+      == [1, 2, 3])
+check("reveal: explicit anchored geometry (no jumping)",
+      pevs[0]["text"].startswith(r"{\an7\pos("))
+check("reveal: the appearing word pops in",
+      r"\t(0,100,\fscx108\fscy108)" in pevs[0]["text"])
+check("reveal: digits render HUGE in the accent color",
+      r"\1c&H4DE1FF&\fs216" in pevs[2]["text"])
+check("reveal: emphasis matches case-insensitively through punctuation",
+      r"\1c&H4DE1FF&\fs150" in pevs[6]["text"] and    # create -> accent
+      r"\xbord26" in pevs[7]["text"])                 # opportunities. -> box
+check("reveal: box text goes dark on the accent",
+      r"\1c&H101010&\3c&H4DE1FF&" in pevs[7]["text"])
+check("reveal: sentence punctuation is dropped from display",
+      "opportunities." not in pevs[7]["text"].replace(r"\fs", ""))
+check("reveal: last event holds after the final word",
+      abs(pevs[-1]["end"] - (3.0 + 0.9)) < 1e-6)
+check("reveal: events never overlap",
+      all(pevs[i]["end"] <= pevs[i + 1]["start"] + 1e-9
+          for i in range(len(pevs) - 1)))
+check("premium events are flagged (skip legacy anim prefix)",
+      all(e.get("premium") for e in pevs))
+
+bevs = caplib.events_premium(PWORDS, style={"preset": "beast"},
+                             play_res=V916, emphasis_words=["create"])
+check("beast: uppercase by default", "CREATE" in bevs[6]["text"])
+check("beast: centered anchored geometry",
+      bevs[0]["text"].startswith(r"{\an5\pos("))
+check("beast: whole chunk visible from the first event of the chunk",
+      bevs[0]["text"].count(r"\fnAnton") >= 2)
+check("beast karaoke: ONLY the spoken word carries the accent",
+      all(e["text"].count("&H4DE1FF&") <= 1 for e in bevs))
+first_22 = next(e for e in bevs if e["start"] == 1.0)
+check("beast karaoke: inactive digits keep size but not color",
+      r"\fs" in first_22["text"])
+
+kevs = caplib.events_premium(PWORDS, style={"preset": "karaoke"},
+                             play_res=V916)
+active_k = next(e for e in kevs if e["start"] == 1.95)
+check("karaoke preset: the accent box FOLLOWS the spoken word",
+      r"\1c&H101010&\3c&H4DE1FF&\xbord" in active_k["text"])
+
+eevs = caplib.events_premium(PWORDS, style={"preset": "elegant"},
+                             play_res=V916, emphasis_words=["create"])
+check("elegant: static chunks, not per-word events",
+      1 <= len(eevs) < len(PWORDS))
+check("elegant: fade entrance", r"\fad(180,140)" in eevs[0]["text"])
+check("elegant: serif italic accent",
+      any(rf"\fn{caplib.SERIF_FONT}\i1" in e["text"] for e in eevs))
+
+# style overrides
+uevs = caplib.events_premium(PWORDS[:2],
+                             style={"preset": "beast", "uppercase": False,
+                                    "position": "bottom",
+                                    "highlight_color": "#FF0000"},
+                             play_res=V916)
+check("uppercase override respected", "So" in uevs[0]["text"])
+check("highlight_color drives the accent", "&H0000FF&" in uevs[0]["text"])
+
+# premium style lines use the real fonts, no synthetic bold
+sline = caplib.style_line("Default", {"preset": "podcast"}, V916)
+check("podcast style line: Inter Display ExtraBold, Bold=0",
+      "Inter Display ExtraBold" in sline and ",0,0,0,0,100,100," in sline)
+check("legacy style line unchanged without a preset",
+      "DejaVu Sans" in caplib.style_line("Default", None, V916))
+check("'classic' preset = the legacy look",
+      "DejaVu Sans" in caplib.style_line("Default", {"preset": "classic"},
+                                         V916))
+
+# manual premium items: preset look, VERBATIM text (no invented emphasis)
+tl_p = Timeline([[0, 10]])
+mevs = caplib.events_from_items(
+    [{"text": "Chapter 22 begins", "start": 2, "end": 4,
+      "style": {"preset": "beast"}}], tl_p, V916)
+check("manual premium item: uppercase + geometry + flagged",
+      "CHAPTER 22" in mevs[0]["text"] and "BEGINS" in mevs[0]["text"] and
+      r"{\an5\pos(" in mevs[0]["text"] and mevs[0]["premium"])
+check("manual premium item: dictated digits NOT auto-emphasized",
+      "&H4DE1FF&" not in mevs[0]["text"])
+
+# build_ass dispatches presets end-to-end
+with tempfile.TemporaryDirectory() as td:
+    pa = caplib.build_ass(
+        {"captions": {"mode": "from_transcript",
+                      "style": {"preset": "podcast"},
+                      "emphasis_words": ["create"]}},
+        {"words": PWORDS}, Timeline([[0, 10]]),
+        os.path.join(td, "p.ass"), play_res=V916)
+    pcontent = open(pa).read()
+    check("build_ass premium: preset font in styles",
+          "Inter Display ExtraBold" in pcontent)
+    check("build_ass premium: one Dialogue per word",
+          pcontent.count("Dialogue:") == len(PWORDS))
+
+# schema: validation, normalization, signature stability
+okp = validate_edl({"keep": [[0, 10]],
+                    "captions": {"mode": "from_transcript",
+                                 "style": {"preset": "podcast",
+                                           "uppercase": False},
+                                 "emphasis_words": [" create ", "", "22"]}},
+                   60)
+capd = okp.model_dump()["captions"]
+check("schema: preset + uppercase survive validation",
+      capd["style"]["preset"] == "podcast" and
+      capd["style"]["uppercase"] is False)
+check("schema: emphasis_words trimmed and emptied entries dropped",
+      capd["emphasis_words"] == ["create", "22"])
+check("schema: position default is None (presets may place)",
+      capd["style"]["position"] is None)
+sig1 = edl_signature(okp.model_dump())
+sig2 = edl_signature(validate_edl(okp.model_dump(), 60).model_dump())
+check("schema: premium EDL signature stable across re-validation",
+      sig1 == sig2)
+expect_reject("bad preset name",
+              {"keep": [[0, 10]],
+               "captions": {"mode": "from_transcript",
+                            "style": {"preset": "hollywood"}}}, 60)
+ok_empty = validate_edl({"keep": [[0, 10]],
+                         "captions": {"mode": "from_transcript",
+                                      "emphasis_words": []}}, 60)
+check("schema: empty emphasis_words collapses to None (signature-safe)",
+      ok_empty.model_dump()["captions"]["emphasis_words"] is None)
+
+# fontsdir reaches the burn filter
+gfp = build_filtergraph(edl, 60.0, True, tl3, "/tmp/x.ass", [], index,
+                        preview=True)
+check("filtergraph: fontsdir points at the bundled fonts",
+      ":fontsdir='" in gfp and "worker/fonts" in gfp)
+
+# agent tools: presets + emphasis flow through, disclosures fire
+tctx = ToolCtx({"keep": [[0.0, 30.0]]})
+r = add_captions(tctx, mode="from_transcript",
+                 style={"preset": "podcast"},
+                 emphasis_words=["money", "22"])
+check("add_captions: preset + emphasis stored",
+      tctx.written["captions"]["style"]["preset"] == "podcast" and
+      tctx.written["captions"]["emphasis_words"] == ["money", "22"] and
+      "preset podcast" in r)
+tctx = ToolCtx({"keep": [[0.0, 30.0]]})
+r = add_captions(tctx, mode="from_transcript", emphasis_words=["money"])
+check("add_captions: emphasis without a preset disclosed",
+      "only take effect with a premium preset" in r)
+tctx = ToolCtx({"keep": [[0.0, 30.0]]})
+r = add_captions(tctx, mode="from_transcript",
+                 style={"preset": "beast", "dynamic": True},
+                 max_words_per_caption=8)
+check("add_captions: preset+dynamic disclosed, no legacy karaoke clamp",
+      "'dynamic' flag is ignored" in r and
+      tctx.written["captions"]["max_words_per_caption"] == 8)
+check("add_captions: bad emphasis_words rejected",
+      add_captions(ToolCtx({"keep": [[0.0, 30.0]]}),
+                   mode="from_transcript",
+                   emphasis_words="money").startswith("REJECTED"))
+tctx = ToolCtx({"keep": [[0.0, 30.0]],
+                "captions": {"mode": "from_transcript",
+                             "max_words_per_caption": None,
+                             "style": None}})
+r = set_caption_style(tctx, {"preset": "podcast"},
+                      emphasis_words=["future"])
+check("set_caption_style: preset patch + emphasis replace",
+      tctx.written["captions"]["style"]["preset"] == "podcast" and
+      tctx.written["captions"]["emphasis_words"] == ["future"])
+check("_parse_partial_style: preset+uppercase accepted",
+      agent_tools._parse_partial_style({"preset": "beast",
+                                        "uppercase": True})
+      == {"preset": "beast", "uppercase": True})
+check("_parse_partial_style: unknown field still rejected",
+      "ERR" in agent_tools._parse_partial_style({"font": "Arial"}))
+
+# review-round fixes
+tctx = ToolCtx({"keep": [[0.0, 30.0]],
+                "captions": {"mode": "from_transcript",
+                             "max_words_per_caption": None,
+                             "style": {"color": "#FFFFFF", "size": "m",
+                                       "position": "bottom"}}})
+r = set_caption_style(tctx, {"preset": "podcast"})
+check("preset apply DROPS the stale auto-filled bottom position",
+      "position" not in tctx.written["captions"]["style"])
+tctx = ToolCtx({"keep": [[0.0, 30.0]],
+                "captions": {"mode": "from_transcript",
+                             "max_words_per_caption": None,
+                             "style": {"position": "bottom"}}})
+r = set_caption_style(tctx, {"preset": "podcast", "position": "bottom"})
+check("explicitly patched position survives a preset apply",
+      tctx.written["captions"]["style"]["position"] == "bottom")
+tctx = ToolCtx({"keep": [[0.0, 30.0]],
+                "captions": {"mode": "from_transcript",
+                             "max_words_per_caption": 8,
+                             "style": {"preset": "classic"}}})
+r = set_caption_style(tctx, {"dynamic": True})
+check("preset 'classic' still gets the legacy karaoke clamp",
+      tctx.written["captions"]["max_words_per_caption"] == 4 and
+      "at most 4" in r)
+tctx = ToolCtx({"keep": [[0.0, 30.0]],
+                "captions": {"mode": "from_transcript",
+                             "max_words_per_caption": None,
+                             "style": {"preset": "podcast"}}})
+r = set_caption_style(tctx, emphasis_words=["future", "wealth"])
+check("emphasis-only update works without a style arg",
+      tctx.written["captions"]["emphasis_words"] == ["future", "wealth"] and
+      "emphasis words set (2)" in r)
+check("style-less, emphasis-less call rejected helpfully",
+      set_caption_style(ToolCtx({"keep": [[0.0, 30.0]],
+                                 "captions": {"mode": "from_transcript"}}))
+      .startswith("REJECTED"))
+tctx = ToolCtx({"keep": [[0.0, 30.0]],
+                "captions": {"mode": "from_transcript",
+                             "max_words_per_caption": None, "style": None}})
+r = set_caption_style(tctx, emphasis_words=["x"])
+check("emphasis without a preset disclosed in set_caption_style too",
+      "only take effect with a premium preset" in r)
+tctx = ToolCtx({"keep": [[0.0, 30.0]]})
+r = add_captions(tctx, mode="from_transcript",
+                 style={"uppercase": True})
+check("uppercase without a preset disclosed in add_captions",
+      "uppercase only applies with a premium preset" in r)
 
 print(f"\nALL {PASS} CHECKS PASSED")

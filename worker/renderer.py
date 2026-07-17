@@ -400,7 +400,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      f":d=1:s={W}x{H}:fps={fps:.3f}[vzoom]")
         vlabel = "vzoom"
     if ass_path:
-        parts.append(f"[{vlabel}]subtitles=filename='{ass_path}'[vsub]")
+        # fontsdir points libass at the premium fonts bundled with the
+        # worker (worker/fonts) — system fontconfig still supplies DejaVu
+        # and the Noto fallbacks for scripts the bundled fonts lack.
+        parts.append(f"[{vlabel}]subtitles=filename='{ass_path}'"
+                     f":fontsdir='{caplib.FONTS_DIR}'[vsub]")
         vlabel = "vsub"
     fade_in = float(fx.get("fade_in_s") or 0.0)
     fade_out = float(fx.get("fade_out_s") or 0.0)
