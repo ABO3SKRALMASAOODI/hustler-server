@@ -171,6 +171,18 @@ LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
 LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
 IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.05"))
 
+# The index proxy. This is an ANALYSIS + PREVIEW artifact, not a deliverable:
+# shot detection and thumbnails read it, previews render from it (at ~480p),
+# the studio player streams it, and finals always go back to the ORIGINAL. It
+# was encoded at 720p/CRF23, which for the 720p sources people actually upload
+# is a full-quality transcode wearing a proxy's name — 894s of a 19-min video's
+# 47-min index, at 0.77x realtime on one vCPU, for no resolution change at all.
+# 540p is >= what previews render at and what the player needs, and costs about
+# half the pixels. Set PROXY_HEIGHT=720 to restore the old output.
+PROXY_HEIGHT = int(os.getenv("PROXY_HEIGHT", "540"))
+PROXY_PRESET = os.getenv("PROXY_PRESET", "veryfast")
+PROXY_CRF = int(os.getenv("PROXY_CRF", "25"))
+
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /
 # screen content and several times faster than the old medium/CRF18.

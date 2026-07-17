@@ -2375,7 +2375,8 @@ finally:
 _enc_calls = []
 
 
-def _fake_encode(src, dst, fps, vfr, has_audio, pad_s=0.0):
+def _fake_encode(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
+                 expected_out_s=None):
     _enc_calls.append(round(pad_s, 3))
 
 
@@ -2700,5 +2701,105 @@ check("transcribe still works with no warnings list to write to",
 (wconfig.TRANSCRIBER, wconfig.DEEPGRAM_API_KEY, tr.requests,
  tr._transcribe_whisper) = _orig
 os.unlink(_wav.name)
+
+# ------------------------------------------------------------------ #
+# Round-19: a long index must not look frozen (or silently vanish)
+# ------------------------------------------------------------------ #
+# A real 19.3-min upload spent 894s inside the proxy encode reporting NOTHING:
+# the job sat at 12% for 15 minutes while the customer watched a dead bar.
+
+import indexer as idx                                        # noqa: E402
+
+_writes = []
+
+
+class _ProgDb:
+    def run(self, fn, *a, **kw):
+        _writes.append(a)
+
+
+# The throttle is time-based; drive the clock instead of sleeping.
+_clock = [1000.0]
+_real_time = idx.time
+idx.time = types.SimpleNamespace(monotonic=lambda: _clock[0])
+
+_cb = idx._stage_progress(_ProgDb(), 77, 12, 30)
+_cb(0.0)
+check("proxy progress maps 0.0 onto the band's floor",
+      _writes and _writes[-1] == (77, 12))
+
+
+def _force(cb, frac):
+    """Let the throttle through: pretend PROGRESS_EVERY_S elapsed."""
+    _clock[0] += idx.PROGRESS_EVERY_S + 1
+    cb(frac)
+
+
+_force(_cb, 0.5)
+check("proxy progress maps 0.5 to the band's midpoint",
+      _writes[-1] == (77, 21))
+_force(_cb, 1.0)
+check("proxy progress maps 1.0 onto the band's ceiling (never past it)",
+      _writes[-1] == (77, 30))
+_force(_cb, 2.5)
+check("a frac past 1.0 still cannot exceed the band",
+      _writes[-1] == (77, 30))
+
+_n = len(_writes)
+_cb(0.6), _cb(0.7), _cb(0.8)
+check("ffmpeg's ~2/sec progress lines are throttled, not one DB write each",
+      len(_writes) == _n)
+
+
+class _DeadDb:
+    def run(self, fn, *a, **kw):
+        raise RuntimeError("connection reset")
+
+
+_dead = idx._stage_progress(_DeadDb(), 77, 12, 30)
+try:
+    _force(_dead, 0.5)
+    check("a progress write that fails never kills the encode", True)
+except Exception:
+    check("a progress write that fails never kills the encode", False)
+
+idx.time = _real_time
+
+# The proxy is an analysis/preview artifact — encoding it at source resolution
+# was 894s of pure transcode for no resolution change at all.
+_pcmd = []
+_real_run3 = mediamod.run
+try:
+    mediamod.run = lambda cmd, **kw: _pcmd.append((cmd, kw))
+    mediamod._encode_proxy("s", "d", 30.0, False, True,
+                           progress_cb=lambda f: None, expected_out_s=10.0)
+    _cmd, _kw = _pcmd[-1]
+    check("proxy scales to PROXY_HEIGHT, not the source's height",
+          f"min({wconfig.PROXY_HEIGHT}\\," in " ".join(_cmd))
+    check("proxy encode asks ffmpeg for progress when a callback is given",
+          "-progress" in _cmd and "pipe:1" in _cmd)
+    check("proxy encode hands run() the callback (so it gets the stall "
+          "watchdog)", _kw.get("progress_cb") and _kw.get("expected_out_s") == 10.0)
+    _pcmd.clear()
+    mediamod._encode_proxy("s", "d", 30.0, False, True)
+    check("no callback -> no -progress plumbing", "-progress" not in _pcmd[-1][0])
+finally:
+    mediamod.run = _real_run3
+
+# Project 42: index failed, and the reaper said NOTHING because 'index' was
+# missing from its notes. The customer waited 88 minutes on a spinner.
+import main as workermain                                    # noqa: E402
+
+check("a reaper-killed index tells the user (it used to say nothing)",
+      bool(workermain.REAPER_NOTES.get("index")))
+check("a reaper-killed preview tells the user too",
+      bool(workermain.REAPER_NOTES.get("preview")))
+check("every job type the reaper can fail has a note",
+      all(t in workermain.REAPER_NOTES
+          for t in ("index", "preview", "final", "agent_turn")))
+check("the reaper's index note does not blame the user's file",
+      "format" not in workermain.REAPER_NOTES["index"]
+      and "wasn't a problem with your file"
+      in workermain.REAPER_NOTES["index"])
 
 print(f"\nALL {PASS} CHECKS PASSED")

@@ -186,22 +186,31 @@ def probe(path):
     }
 
 
-def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0):
-    vf = r"scale=-2:min(720\,floor(ih/2)*2)"
+def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
+                  expected_out_s=None):
+    h = config.PROXY_HEIGHT
+    vf = rf"scale=-2:min({h}\,floor(ih/2)*2)"
     if pad_s > 0:
-        # Clone the last frame forward. After scale, so it clones a 720p frame.
+        # Clone the last frame forward. After scale, so it clones a proxy frame.
         vf += f",tpad=stop_mode=clone:stop_duration={pad_s:.3f}"
     cmd = ["ffmpeg", "-y", "-i", src, "-vf", vf,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-           "-pix_fmt", "yuv420p"]
+           "-c:v", "libx264", "-preset", config.PROXY_PRESET,
+           "-crf", str(config.PROXY_CRF), "-pix_fmt", "yuv420p"]
     if vfr:
         cmd += ["-fps_mode", "cfr", "-r", f"{max(1.0, min(fps, 60.0)):.3f}"]
     if has_audio:
         cmd += ["-c:a", "aac", "-b:a", "128k"]
     else:
         cmd += ["-an"]
+    # -progress on stdout: without it this encode reports NOTHING for its whole
+    # run — 15 min on a 19-min source — so the job sits at one percentage and
+    # the user watches a frozen bar. It also buys the stall watchdog: the plain
+    # branch of run() has none, so a wedged proxy encode holds the only index
+    # slot for the full 90-min ffmpeg wall clock.
+    if progress_cb and expected_out_s:
+        cmd += ["-progress", "pipe:1", "-nostats"]
     cmd += ["-movflags", "+faststart", dst]
-    run(cmd)
+    run(cmd, progress_cb=progress_cb, expected_out_s=expected_out_s)
 
 
 # A proxy shorter than this fraction/margin of the recording isn't a proxy of
@@ -211,9 +220,9 @@ PROXY_SHORT_FRAC = 0.02
 PROXY_SHORT_MIN_S = 0.4
 
 
-def make_proxy(src, dst, fps, vfr, has_audio, duration=None):
-    """720p H.264 proxy, +faststart. VFR sources are normalized to CFR here so
-    every downstream timestamp is stable.
+def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None):
+    """Downscaled H.264 proxy, +faststart. VFR sources are normalized to CFR
+    here so every downstream timestamp is stable.
 
     The proxy must be a faithful rendition of what a player shows for `src`,
     because every timestamp the agent reasons about is checked against it. A
@@ -231,7 +240,8 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None):
     this covers a genuinely short track and a truncated encode identically,
     without having to tell them apart.
     """
-    _encode_proxy(src, dst, fps, vfr, has_audio)
+    _encode_proxy(src, dst, fps, vfr, has_audio, progress_cb=progress_cb,
+                  expected_out_s=duration)
     if not duration or duration <= 0:
         return
     got = probe(dst)
@@ -242,7 +252,8 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None):
     print(f"[media] proxy picture track ran {gap:.2f}s short of the "
           f"{duration:.2f}s recording ({os.path.basename(src)}) — holding the "
           f"last frame to fill it", flush=True)
-    _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=gap)
+    _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=gap,
+                  progress_cb=progress_cb, expected_out_s=duration)
 
 
 def extract_wav(src, dst):

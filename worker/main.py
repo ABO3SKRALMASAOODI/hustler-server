@@ -16,6 +16,7 @@ then failed by the reaper.
 """
 
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -137,13 +138,28 @@ REAPER_NOTES = {
                    "nothing further was changed. Please send it again."),
     "final": ("The final export was interrupted before it finished. "
               "Hit Export again to restart it."),
+    # An index dying to a dead worker used to say NOTHING — 'index' was in
+    # neither this table nor the reaper's "turn and render" framing, and it is
+    # the ONE job that runs before the user has any other feedback. A real
+    # customer uploaded a 24-min video, waited 88 minutes on a spinner, was
+    # never told her analysis had failed, and left. Note this deliberately does
+    # NOT reuse FAIL_NOTES["index"] ("try a different format like mp4"): the
+    # worker died, her file was never the problem, and sending her off to
+    # re-encode it would be a lie about whose fault this was.
+    "index": ("Analyzing your video was interrupted on our side and didn't "
+              "finish — this wasn't a problem with your file. Please re-open "
+              "the project to try again."),
+    # Same gap for previews: only the in-process path told a user their edit's
+    # preview died. A reaper-failed one left them on 'Rendering…' forever.
+    "preview": ("I couldn't finish rendering the preview for that edit — your "
+                "change is saved. Hit retry, or make another edit."),
 }
 
 
 def reaper():
-    """Every turn and render must terminate VISIBLY: when a stale job's
-    retries are exhausted, tell the user in chat instead of leaving the UI
-    on 'Editing…' forever."""
+    """Every job must terminate VISIBLY: when a stale job's retries are
+    exhausted, tell the user in chat instead of leaving the UI on 'Editing…'
+    (or 'Analyzing…') forever."""
     worker_db = dbx.Db()
     while True:
         time.sleep(60)
@@ -169,9 +185,41 @@ def reaper():
             worker_db.reset()
 
 
+def _sweep_tmp():
+    """Delete work directories left by a previous process.
+
+    Every job cleans its own workdir in a finally — but a finally does not run
+    when the kernel SIGKILLs the process (OOM) or Render replaces the container
+    mid-job. Those workdirs hold the downloaded ORIGINAL: gigabytes each, for
+    jobs that are already dead, that nothing else ever deletes. Safe to do here
+    and only here — this process has just booted, so it owns none of them.
+    """
+    freed = 0
+    try:
+        entries = os.listdir(config.TMP_DIR)
+    except OSError:
+        return
+    for name in entries:
+        path = os.path.join(config.TMP_DIR, name)
+        try:
+            for root, _dirs, files in os.walk(path):
+                for f in files:
+                    try:
+                        freed += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+    if freed:
+        print(f"[startup] swept {freed / 1e9:.2f}GB of work dirs orphaned by a "
+              "previous process", flush=True)
+
+
 def main():
     config.require_core()
     os.makedirs(config.TMP_DIR, exist_ok=True)
+    _sweep_tmp()
     print(f"valmera-worker starting: media_slots={config.MEDIA_SLOTS} "
           f"index_slots={config.INDEX_SLOTS} agent_slots={config.AGENT_SLOTS} "
           f"whisper={config.WHISPER_MODEL}/"

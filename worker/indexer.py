@@ -22,6 +22,33 @@ import transcribe
 from schemas import VideoIndex, VideoInfo, default_edl
 
 
+PROGRESS_EVERY_S = 5.0
+
+
+def _stage_progress(worker_db, job_id, lo, hi):
+    """Map one ffmpeg stage's 0..1 onto the job's lo..hi band.
+
+    Throttled: ffmpeg emits -progress a couple of times a SECOND, and this
+    lane's connection is the same one the stage's own DB work uses — writing
+    every line would be ~1800 UPDATEs for a single long proxy encode.
+    """
+    last = [0.0]
+
+    def cb(frac):
+        now = time.monotonic()
+        if now - last[0] < PROGRESS_EVERY_S:
+            return
+        last[0] = now
+        pct = lo + int(round((hi - lo) * max(0.0, min(1.0, frac))))
+        try:
+            worker_db.run(dbx.set_progress, job_id, pct)
+        except Exception:
+            # Progress is cosmetic; a hiccup here must never kill the encode.
+            pass
+
+    return cb
+
+
 def run_index_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     asset = worker_db.run(dbx.get_asset, job["payload"].get("asset_id"))
@@ -90,7 +117,8 @@ def run_index_job(worker_db, job):
         # 3. Proxy (VFR -> CFR here) + 16k mono wav
         proxy_local = os.path.join(workdir, "proxy.mp4")
         media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
-                         info["has_audio"], duration=info["duration"])
+                         info["has_audio"], duration=info["duration"],
+                         progress_cb=_stage_progress(worker_db, job_id, 12, 30))
         # Probed here, not at upload time: step 6 needs the proxy's REAL
         # duration to keep thumbnail seeks inside it.
         proxy_info = media.probe(proxy_local)
