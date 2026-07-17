@@ -17,6 +17,7 @@ then failed by the reaper.
 
 import os
 import shutil
+import signal
 import threading
 import time
 import traceback
@@ -216,10 +217,29 @@ def _sweep_tmp():
               "previous process", flush=True)
 
 
+def _on_shutdown(signum, _frame):
+    """Render SIGTERMs us before every deploy/restart. Give back whatever we
+    were holding so the next container picks it up instead of the job rotting
+    through its retry budget for a death it did not cause. See db.release_jobs.
+    """
+    ids = dbx.active_job_ids()
+    try:
+        n = dbx.Db().run(dbx.release_jobs, ids)
+        print(f"[shutdown] signal {signum}: handed {n} of {len(ids)} in-flight "
+              "job(s) back to the queue", flush=True)
+    except Exception as e:
+        # Best effort — if we can't reach the DB the reaper still cleans up,
+        # just the slower, attempt-charging way.
+        print(f"[shutdown] could not release jobs: {e}", flush=True)
+    os._exit(0)
+
+
 def main():
     config.require_core()
     os.makedirs(config.TMP_DIR, exist_ok=True)
     _sweep_tmp()
+    signal.signal(signal.SIGTERM, _on_shutdown)
+    signal.signal(signal.SIGINT, _on_shutdown)
     print(f"valmera-worker starting: media_slots={config.MEDIA_SLOTS} "
           f"index_slots={config.INDEX_SLOTS} agent_slots={config.AGENT_SLOTS} "
           f"whisper={config.WHISPER_MODEL}/"

@@ -2802,4 +2802,68 @@ check("the reaper's index note does not blame the user's file",
       and "wasn't a problem with your file"
       in workermain.REAPER_NOTES["index"])
 
+# ------------------------------------------------------------------ #
+# Round-19: a deploy must not spend a job's retry budget
+# ------------------------------------------------------------------ #
+# Job 205's third and final death was the redeploy from setting an env var.
+import db as wdb                                             # noqa: E402
+
+
+class _RelCur:
+    def __init__(self, sink): self.sink = sink
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, sql, params=None): self.sink.append((sql, params))
+    def fetchall(self): return [{"id": 1}, {"id": 2}]
+
+
+class _RelConn:
+    def __init__(self): self.sql = []
+    def cursor(self): return _RelCur(self.sql)
+
+
+_rc = _RelConn()
+check("release_jobs hands back 'n' jobs", wdb.release_jobs(_rc, [1, 2]) == 2)
+_sql = _rc.sql[0][0]
+check("released jobs go back to 'queued', not 'failed'",
+      "state = 'queued'" in _sql and "failed" not in _sql)
+check("a deploy REFUNDS the attempt it cost (this is the whole point)",
+      "attempts = GREATEST(0, attempts - 1)" in _sql)
+check("an agent_turn is NOT released — replaying it would re-apply side effects",
+      "type <> 'agent_turn'" in _sql)
+check("only a job we still hold is released",
+      "state = 'running'" in _sql)
+check("no ids -> no query at all", wdb.release_jobs(_RelConn(), []) == 0)
+
+# The whisper cache is a liability once whisper is only the fallback: 'medium'
+# holds ~1.5GB for the process's life and that resident memory is what
+# OOM-killed the worker mid-customer.
+_ot = (wconfig.TRANSCRIBER, tr._transcribe_whisper, tr._transcribe_deepgram,
+       tr._model)
+_loaded = []
+tr._model = "PRETEND-1.5GB-MODEL"
+
+
+def _fake_whisper(_p):
+    _loaded.append(tr._model)
+    return [Word(w="x", t0=0.0, t1=0.1)], "en"
+
+
+tr._transcribe_whisper = _fake_whisper
+tr._transcribe_deepgram = lambda _p: (_ for _ in ()).throw(RuntimeError("down"))
+
+wconfig.TRANSCRIBER = "deepgram"
+tr.transcribe("/tmp/x.wav")
+check("deepgram deployment: the fallback frees the model after use",
+      tr._model is None)
+
+tr._model = "PRETEND-1.5GB-MODEL"
+wconfig.TRANSCRIBER = "whisper"
+tr.transcribe("/tmp/x.wav")
+check("whisper deployment: the model stays cached (it is used every index)",
+      tr._model == "PRETEND-1.5GB-MODEL")
+
+(wconfig.TRANSCRIBER, tr._transcribe_whisper, tr._transcribe_deepgram,
+ tr._model) = _ot
+
 print(f"\nALL {PASS} CHECKS PASSED")

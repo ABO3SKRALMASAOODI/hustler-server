@@ -10,6 +10,7 @@ so the transcript panel can never show a run-on line. The agent is told to
 snap every cut to these word boundaries.
 """
 
+import gc
 import inspect
 import re
 import time
@@ -118,6 +119,23 @@ def _transcribe_deepgram(wav_path):
     raise last
 
 
+def _release_model():
+    """Drop the cached whisper model and give the memory back.
+
+    `_model` is a process-lifetime cache, which is right when whisper IS the
+    transcriber (every index uses it) and actively harmful when it is only the
+    fallback: 'medium' holds ~1.5GB for the life of the process to save a reload
+    on a path that should almost never run. That resident 1.5GB is what
+    OOM-killed the worker in prod — job 204 transcribed a 19-min video, then the
+    SAME process ran the next index's proxy encode + a preview render + an agent
+    turn, and the box died with no traceback (SIGKILL), taking a customer's
+    video down with it.
+    """
+    global _model
+    _model = None
+    gc.collect()
+
+
 def transcribe(wav_path, warnings=None):
     """Returns (words: [Word], language: str)."""
     if config.TRANSCRIBER == "deepgram":
@@ -137,6 +155,13 @@ def transcribe(wav_path, warnings=None):
                 warnings.append(
                     f"{_FALLBACK_PREFIX} ({str(e)[:100]}) — the transcript "
                     "may be less accurate than usual on noisy audio")
+        # Fallback only: whisper is not this deployment's transcriber, so
+        # holding the model resident afterwards buys nothing and can cost the
+        # whole worker. See _release_model.
+        try:
+            return _transcribe_whisper(wav_path)
+        finally:
+            _release_model()
     return _transcribe_whisper(wav_path)
 
 

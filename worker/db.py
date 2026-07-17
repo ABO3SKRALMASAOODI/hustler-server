@@ -114,6 +114,40 @@ def fail_exhausted_jobs(conn):
         return cur.fetchall()
 
 
+def release_jobs(conn, ids):
+    """Hand in-flight jobs back to the queue WITHOUT charging them an attempt.
+
+    Render SIGTERMs the container before replacing it on every deploy, and an
+    index of a long video is ~16 minutes of work — so a deploy lands on one
+    routinely. claim_job counts EVERY claim as an attempt, including the
+    re-claim after a death the job did nothing to cause, so deploys ate a real
+    customer's 3 attempts and her 24-min video died as "Worker died and retries
+    are exhausted". Her third and final death was literally the redeploy from
+    setting an env var. A planned shutdown is our fault, not the job's.
+
+    agent_turn is deliberately excluded: it is MAX_ATTEMPTS_AGENT=1 on purpose
+    because a turn has side effects (it writes EDL versions), so replaying one
+    could re-apply work. Those still die honestly via the reaper's "I lost my
+    connection — please send it again".
+    """
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET state = 'queued', progress = 0,
+                           attempts = GREATEST(0, attempts - 1),
+                           updated_at = NOW()
+                       WHERE id = ANY(%s) AND state = 'running'
+                         AND type <> 'agent_turn'
+                       RETURNING id""", (list(ids),))
+        return len(cur.fetchall())
+
+
+def active_job_ids():
+    with _ACTIVE_LOCK:
+        return list(ACTIVE_JOBS)
+
+
 def set_progress(conn, job_id, progress):
     with conn.cursor() as cur:
         cur.execute("""UPDATE video_jobs
