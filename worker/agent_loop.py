@@ -303,12 +303,20 @@ def run_agent_job(worker_db, job):
 
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"], workdir)
-    # Per-turn spend cap: min(hard ceiling, the user's balance + a small
-    # grace). A paying user gets a generous ceiling; a 1-credit user can't run
-    # up an arbitrarily expensive turn that gets written off.
+    # A turn spends what the user can PAY FOR — balance + a small grace — and
+    # nothing else bounds it.
+    #
+    # There used to be a flat AGENT_TURN_MAX_CREDITS ceiling on top of this, and
+    # it was a number tuned on 16-60s clips: a real customer's 19-min
+    # documentary hit "spend cap hit: 43.01 >= 40.0" and the agent was switched
+    # off MID-EDIT, leaving an auto-rendered partial v2 that reads to the user
+    # as the agent doing a bad job. The work genuinely scales with the footage
+    # (a 1553-word transcript needs more looking at than a 16s clip), so a flat
+    # ceiling silently punished exactly the long videos real users upload.
+    # Removed by decision, not by accident. What still bounds a turn: the
+    # user's own balance (below), and AGENT_TURN_TIMEOUT_S as a wall clock.
     balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
-    ctx.credit_budget = min(config.AGENT_TURN_MAX_CREDITS,
-                            float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE)
+    ctx.credit_budget = float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE
 
     # Persist every model call this turn (agent, honesty regen, vision) to
     # llm_calls for the admin inspector, and accumulate token usage for the

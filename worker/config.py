@@ -155,12 +155,14 @@ TRANSCRIPT_CHAR_BUDGET = 48000    # ~12000 tokens
 FULL_INDEX_MAX_DURATION_S = float(os.getenv("FULL_INDEX_MAX_DURATION_S", "600"))
 FULL_INDEX_MAX_CHARS = int(os.getenv("FULL_INDEX_MAX_CHARS", "40000"))
 
-# Per-turn spend cap: bound one agent turn's model cost so a 1-credit user
-# can't trigger an arbitrarily expensive turn (vision + image calls) that gets
-# written off. The effective budget is min(this hard ceiling, balance + grace)
-# so paying users still get generous turns while free users are capped near
-# what they can actually pay for. Same 1 credit = $0.01 convention as billing.
-AGENT_TURN_MAX_CREDITS = float(os.getenv("AGENT_TURN_MAX_CREDITS", "40"))
+# A turn's budget is what the user can PAY FOR: balance + this grace. There is
+# deliberately NO flat per-turn ceiling on top — the old AGENT_TURN_MAX_CREDITS
+# was tuned on 16-60s clips and cut a real customer's 19-min documentary off
+# mid-edit ("spend cap hit: 43.01 >= 40.0"), leaving a partial result that read
+# as the agent failing. Model work scales with the footage, so a flat number
+# punished long videos specifically. A free user is still bounded by their own
+# small balance; a paying user gets the turn they paid for. Same 1 credit =
+# $0.01 convention as billing.
 AGENT_TURN_BUDGET_GRACE = float(os.getenv("AGENT_TURN_BUDGET_GRACE", "3"))
 # Model prices ($/1M tokens) for the credit charge — MUST match the model in
 # AGENT_MODEL or credits drift from real cost. Default = Grok 4.5 ($2 in /
