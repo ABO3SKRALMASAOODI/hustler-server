@@ -18,7 +18,13 @@ import uuid
 import boto3
 from botocore.config import Config
 
-PRESIGN_EXPIRY = 900          # 15 min max, per security guardrails
+PRESIGN_EXPIRY = 900          # 15 min for UPLOAD presigns
+# Playback GETs live much longer: the studio fetches ONE url per asset and the
+# user watches/chats across a long session — at 15 min the player's src went
+# dead mid-session and every later play/seek was a silent black frame. The
+# url is still minted per-request behind the user's own auth; 6h only bounds
+# how long a leaked link would work, not who can mint one.
+PRESIGN_GET_EXPIRY = int(os.getenv("PRESIGN_GET_EXPIRY", "21600"))
 PART_SIZE = 64 * 1024 * 1024  # 64 MB multipart parts (min 5 MB on S3/R2)
 SINGLE_PUT_LIMIT = 64 * 1024 * 1024
 
@@ -258,7 +264,8 @@ def delete_project_objects(project_id):
     return total
 
 
-def presign_get(key, expires=PRESIGN_EXPIRY, download_name=None):
+def presign_get(key, expires=None, download_name=None):
+    expires = expires or PRESIGN_GET_EXPIRY
     params = {"Bucket": bucket(), "Key": key}
     if download_name:
         params["ResponseContentDisposition"] = f'attachment; filename="{download_name}"'

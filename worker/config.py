@@ -52,10 +52,13 @@ IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
 MAX_GENERATED_IMAGES_PER_TURN = int(
     os.getenv("MAX_GENERATED_IMAGES_PER_TURN", "4"))
 
-# Bump whenever the index pipeline's OUTPUT changes (segmentation rules,
-# VAD settings, schema...): cached indexes from older pipeline versions are
-# re-built instead of served. Keep in sync with backend/routes/video.py.
-PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "6"))
+# The index pipeline version is a CODE CONSTANT in schemas.py, shared with
+# the backend (which loads worker/schemas.py directly) — bump it there, by
+# commit, whenever index output changes. It is deliberately NOT an env var:
+# the env-per-service version drifted between backend and worker for a day
+# (Jul 16-17 2026), which re-indexed every project on every open in an
+# infinite loop and starved two real customers' jobs off the box.
+from schemas import PIPELINE_VERSION  # noqa: E402,F401
 
 # Transcription provider. faster-whisper runs on the worker's OWN CPU — free and
 # private, but 'medium' at int8 is weak exactly where this product lives (loud
@@ -65,10 +68,8 @@ PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "6"))
 #   DEEPGRAM_API_KEY set  -> deepgram, with whisper as an automatic fallback
 #   unset                 -> whisper, exactly as before
 #   TRANSCRIBER           -> forces either side ('deepgram' | 'whisper')
-# NOTE: switching providers changes the index's OUTPUT, so bump PIPELINE_VERSION
-# (env, both services) at the same time to rebuild existing transcripts —
-# deliberately NOT bumped in code, or every project would re-run whisper for
-# nothing on installs that never set the key.
+# NOTE: switching providers changes the index's OUTPUT, so bump
+# schemas.PIPELINE_VERSION in the same commit to rebuild existing transcripts.
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "").strip()
 TRANSCRIBER = os.getenv(
     "TRANSCRIBER", "deepgram" if DEEPGRAM_API_KEY else "whisper").strip().lower()

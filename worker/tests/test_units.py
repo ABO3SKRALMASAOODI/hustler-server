@@ -662,12 +662,15 @@ from agent_tools import (set_audio_gain, remove_music,        # noqa: E402
 
 
 class ToolCtx:
-    def __init__(self, edl, asset=None):
+    def __init__(self, edl, asset=None, index=None):
         self._edl = {"version": 1, "json": edl}
         self.written = None
         self.db = self
         self.project_id = 1
         self._asset = asset
+        # Real ctx always carries the video index; tests default to an empty
+        # transcript (so caption honesty warnings fire — asserted below).
+        self.index = index if index is not None else {"words": []}
 
     def latest_edl(self):
         return self._edl
@@ -3105,5 +3108,60 @@ r = add_captions(tctx, mode="from_transcript",
                  style={"uppercase": True})
 check("uppercase without a preset disclosed in add_captions",
       "uppercase only applies with a premium preset" in r)
+
+print("== Round-21 reliability: caption honesty + word-time clamp + "
+      "pipeline version ==")
+# A real music-heavy upload transcribed to ONE hallucinated word that the
+# edit then cut; the agent claimed captions were on and the user saw nothing.
+r = add_captions(ToolCtx({"keep": [[0.0, 30.0]]}),
+                 mode="from_transcript", style={"preset": "podcast"})
+check("empty transcript => explicit no-captions warning",
+      "WARNING" in r and "EMPTY" in r and "NO text" in r)
+_IDX_OUT = {"words": [{"w": "hey", "t0": 20.0, "t1": 20.4}]}
+r = add_captions(ToolCtx({"keep": [[0.0, 10.0]]}, index=_IDX_OUT),
+                 mode="from_transcript", style={"preset": "podcast"})
+check("all words cut => 'not be visible' warning",
+      "WARNING" in r and "not be visible" in r)
+_IDX_SPARSE = {"words": [{"w": "so", "t0": 1.0, "t1": 1.2},
+                         {"w": "yeah", "t0": 2.0, "t1": 2.3}]}
+r = add_captions(ToolCtx({"keep": [[0.0, 30.0]]}, index=_IDX_SPARSE),
+                 mode="from_transcript", style={"preset": "podcast"})
+check("sparse transcript => sparse note, not a false success",
+      "very sparse" in r)
+_IDX_RICH = {"words": [{"w": f"w{i}", "t0": i * 1.0, "t1": i * 1.0 + 0.4}
+                       for i in range(12)]}
+r = add_captions(ToolCtx({"keep": [[0.0, 30.0]]}, index=_IDX_RICH),
+                 mode="from_transcript", style={"preset": "podcast"})
+check("healthy transcript => no caption-visibility warning",
+      "WARNING" not in r and "very sparse" not in r)
+
+# clamp_word_times: ASR on music produced a 'word' spanning 15.36-34.72s on a
+# 16.65s file — ends clamp to the video, words past the end drop entirely.
+_cw = schemas.clamp_word_times(
+    [{"w": "ok", "t0": 15.36, "t1": 34.72},
+     {"w": "ghost", "t0": 17.0, "t1": 18.0},
+     {"w": "fine", "t0": 1.0, "t1": 1.5}], 16.65)
+check("word ending past the video is clamped to the duration",
+      any(w["w"] == "ok" and w["t1"] == 16.65 for w in _cw))
+check("word starting past the video is dropped",
+      not any(w["w"] == "ghost" for w in _cw))
+check("in-range words come through untouched",
+      any(w["w"] == "fine" and w["t0"] == 1.0 and w["t1"] == 1.5
+          for w in _cw))
+_cwm = schemas.clamp_word_times(
+    [schemas.Word(w="tail", t0=10.0, t1=99.0)], 16.65)
+check("Word models clamp too and stay models",
+      _cwm[0].t1 == 16.65 and isinstance(_cwm[0], schemas.Word))
+check("no duration => words returned unchanged",
+      schemas.clamp_word_times([{"w": "x", "t0": 0, "t1": 99}], None)
+      [0]["t1"] == 99)
+
+# The pipeline version is a single shared constant — the env-per-service
+# split re-indexed every project on every open for a day when the two
+# drifted. config must re-export schemas' value verbatim.
+import config as wconfig                                       # noqa: E402
+check("pipeline version: config re-exports the schemas constant",
+      wconfig.PIPELINE_VERSION == schemas.PIPELINE_VERSION
+      and isinstance(schemas.PIPELINE_VERSION, int))
 
 print(f"\nALL {PASS} CHECKS PASSED")

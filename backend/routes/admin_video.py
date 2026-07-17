@@ -50,7 +50,9 @@ def _presign(key):
     if not storage.is_configured():
         return None
     try:
-        return storage.presign_get(key)
+        # Admin inspection links stay on the short 15-min expiry (the long
+        # PRESIGN_GET_EXPIRY exists for the studio player, not for admin).
+        return storage.presign_get(key, expires=storage.PRESIGN_EXPIRY)
     except Exception:
         return None
 
@@ -618,7 +620,8 @@ def video_project_llm_calls(project_id):
         for n in names:
             if isinstance(n, str) and "/" in n:
                 try:
-                    urls[n] = storage.presign_get(n)
+                    urls[n] = storage.presign_get(
+                        n, expires=storage.PRESIGN_EXPIRY)
                 except Exception:
                     urls[n] = None
         return urls or None

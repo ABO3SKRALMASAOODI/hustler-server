@@ -19,7 +19,7 @@ import scenes
 import sheets
 import storage
 import transcribe
-from schemas import VideoIndex, VideoInfo, default_edl
+from schemas import VideoIndex, VideoInfo, clamp_word_times, default_edl
 
 
 PROGRESS_EVERY_S = 5.0
@@ -97,7 +97,8 @@ def run_index_job(worker_db, job):
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                           workdir)
             _finish_setup(worker_db, project_id, session_id, info,
-                          cached["json"], job["user_id"])
+                          cached["json"], job["user_id"],
+                          reindex=bool(job["payload"].get("reindex")))
             _mark("cache_hit_s")
             return {"sha256": sha, "cached": True,
                     "shots": len(cached["json"].get("shots", [])),
@@ -151,6 +152,10 @@ def run_index_job(worker_db, job):
                 try:
                     words, language = transcribe.transcribe(wav_local,
                                                             warnings)
+                    # ASR on music invents timings past the end of the file
+                    # (a real 16.65s clip got a 'word' ending at 34.72s) —
+                    # clamp before sentences inherit the bad spans.
+                    words = clamp_word_times(words, info["duration"])
                     sentences = transcribe.group_sentences(words)
                     break
                 except Exception as e:
@@ -324,7 +329,8 @@ def run_index_job(worker_db, job):
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         _finish_setup(worker_db, project_id, session_id, info, index,
-                      job["user_id"])
+                      job["user_id"],
+                      reindex=bool(job["payload"].get("reindex")))
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "words": len(words), "silences": len(silences),
@@ -424,10 +430,17 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
 
 
 def _finish_setup(worker_db, project_id, session_id, info, index,
-                  user_id=None):
+                  user_id=None, reindex=False):
     """Seed EDL v1 (keep everything) if none exists, greet in chat, and
     auto-start the agent on any request the user sent while indexing was
-    still running (instead of asking them to resend it — nobody does)."""
+    still running (instead of asking them to resend it — nobody does).
+
+    reindex=True marks a background pipeline refresh of an already-greeted
+    project (the /state self-heal sets it on the job payload) — those stay
+    QUIET: a real customer got a second "Your video is ready to edit ... I
+    haven't made any edits" over a session where the agent had already cut
+    her video. A replacement upload or a heal of a never-successful index is
+    NOT a reindex and greets normally."""
     if not worker_db.run(dbx.latest_edl, project_id):
         worker_db.run(dbx.insert_edl, project_id,
                       default_edl(info["duration"]), "agent")
@@ -472,14 +485,33 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         summary += ("Tell me what you'd like changed — for example: \"cut "
                     "the dead air, caption every word, and tighten the "
                     "intro.\"")
-    drafted = _greet_via_llm(worker_db, project_id, stats, pending,
-                             out_of_credits, index)
-    if drafted:
-        summary = drafted
-    if session_id:
-        worker_db.run(dbx.add_message, session_id, "assistant", summary,
-                      {"kind": "index_ready", "auto_resume": bool(pending),
-                       "llm_authored": bool(drafted)})
+    if reindex:
+        # Quiet refresh: only speak when there is something the user needs —
+        # a saved request auto-starting, or the reason it CAN'T start.
+        # Staying silent on the out-of-credits case would break the
+        # concierge's "I'll start on it automatically" promise invisibly.
+        if session_id and pending:
+            worker_db.run(dbx.add_message, session_id, "assistant",
+                          "Analysis refreshed — I'm starting on the request "
+                          "you sent. Give me a moment.",
+                          {"kind": "index_ready", "auto_resume": True,
+                           "reindex": True})
+        elif session_id and out_of_credits:
+            worker_db.run(dbx.add_message, session_id, "assistant",
+                          "I found the request you sent earlier, but you're "
+                          "out of credits — they refresh daily, so send it "
+                          "again once they do.",
+                          {"kind": "index_ready", "auto_resume": False,
+                           "reindex": True})
+    else:
+        drafted = _greet_via_llm(worker_db, project_id, stats, pending,
+                                 out_of_credits, index)
+        if drafted:
+            summary = drafted
+        if session_id:
+            worker_db.run(dbx.add_message, session_id, "assistant", summary,
+                          {"kind": "index_ready", "auto_resume": bool(pending),
+                           "llm_authored": bool(drafted)})
     if pending:
         try:
             worker_db.run(dbx.enqueue_job, project_id, user_id, "agent_turn",

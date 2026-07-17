@@ -12,6 +12,16 @@ from typing import List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
+# SINGLE source of truth for the index pipeline version — bump it HERE, by
+# commit, whenever index OUTPUT changes (transcriber switch, segmentation
+# rules). The backend loads this module (see backend/routes/video.py) and the
+# worker's config re-exports it, so the two services can never disagree. It
+# used to be an env var set separately on each service: the two drifted for a
+# full day (Jul 16-17 2026) and every project open triggered a 30-90 min
+# re-index that STILL wrote the old version — an infinite loop that starved
+# two real customers' jobs. Constants deploy atomically; env vars don't.
+PIPELINE_VERSION = 7
+
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0
 GAIN_MAX_DB = 12.0
@@ -661,6 +671,37 @@ class Word(BaseModel):
     w: str
     t0: float
     t1: float
+
+
+def clamp_word_times(words, duration):
+    """Clamp transcription word timings into [0, duration].
+
+    ASR on music-heavy audio hallucinates timings past the end of the file —
+    a real 16.65s upload produced one 'word' spanning 15.36-34.72s. Captions
+    built from such a word can never render (the program ends first), cuts
+    snapped to it point at footage that doesn't exist, and the transcript
+    panel shows a timestamp the player can't seek to. Words starting at or
+    beyond the end are dropped; ends are clamped. Accepts Word models or
+    plain {w,t0,t1} dicts and returns the same shape it was given."""
+    if not duration or duration <= 0:
+        return list(words)
+    out = []
+    for w in words:
+        is_model = hasattr(w, "t0")
+        t0 = float(w.t0 if is_model else w["t0"])
+        t1 = float(w.t1 if is_model else w["t1"])
+        if t0 >= duration - 0.01:
+            continue
+        t0 = max(0.0, t0)
+        t1 = min(t1, float(duration))
+        if t1 <= t0:
+            t1 = min(float(duration), t0 + 0.05)
+        if is_model:
+            w = w.model_copy(update={"t0": round(t0, 3), "t1": round(t1, 3)})
+        else:
+            w = dict(w, t0=round(t0, 3), t1=round(t1, 3))
+        out.append(w)
+    return out
 
 
 class Sentence(BaseModel):

@@ -683,7 +683,17 @@ def run_render_job(worker_db, job):
 
         out_local = os.path.join(workdir, f"{variant}_v{version}.mp4")
 
+        # Throttled: ffmpeg emits -progress a couple of times a second, and
+        # unthrottled that was ~2 UPDATE/s against the shared DB for the
+        # whole encode (a long final = ~1700 writes). set_progress also
+        # refreshes the job heartbeat, so a few seconds apart is plenty.
+        _last_prog = [0.0]
+
         def _prog(frac):
+            now = time.monotonic()
+            if now - _last_prog[0] < 3.0 and frac < 0.99:
+                return
+            _last_prog[0] = now
             worker_db.run(dbx.set_progress, job_id, 10 + int(frac * 80))
 
         out_dur = render_edl(edl_row["json"], index, src_local, out_local,

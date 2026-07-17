@@ -40,10 +40,12 @@ video_bp = Blueprint("video", __name__)
 MAX_CONCURRENT_JOBS_PER_USER = int(os.getenv("MAX_CONCURRENT_JOBS_PER_USER", "3"))
 MESSAGES_PER_HOUR = int(os.getenv("MESSAGES_PER_HOUR", "20"))
 
-# Keep in sync with worker/config.py — indexes built by an older pipeline
-# version are re-indexed automatically when the project is opened. v3 = the
-# accuracy-tuned whisper pass (medium model, beam search, brand hotwords).
-PIPELINE_VERSION = int(os.getenv("PIPELINE_VERSION", "6"))
+# Single source of truth: worker/schemas.py (loaded above as wschemas), so
+# the backend and worker can NEVER disagree. This used to be an env var set
+# separately on each service; the two drifted for a day (Jul 16-17 2026) and
+# every project open triggered a full 30-90 min re-index that still wrote the
+# old version — an infinite loop that starved real customers' jobs.
+PIPELINE_VERSION = wschemas.PIPELINE_VERSION
 
 VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
                "music", "image_ref", "video_clip")
@@ -582,6 +584,28 @@ def complete_upload(user_id, project_id):
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
             return jsonify({"error": "Project not found"}), 404
+
+        # Idempotency FIRST: this POST is the single point where a finished
+        # multi-GB upload becomes a real asset, so the client retries it on
+        # network blips. A retry of a complete that already succeeded (its
+        # response was lost) must return the original result — not 400 on
+        # the consumed multipart id, and never a duplicate asset + second
+        # index job.
+        cur.execute("""SELECT id, kind FROM assets
+                       WHERE project_id = %s AND storage_key = %s
+                       ORDER BY id DESC LIMIT 1""", (project_id, key))
+        dup = cur.fetchone()
+        if dup:
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                             AND (payload->>'asset_id')::int = %s
+                           ORDER BY id DESC LIMIT 1""",
+                        (project_id, dup["id"]))
+            ij = cur.fetchone()
+            return jsonify({"asset_id": dup["id"],
+                            "index_job_id": ij["id"] if ij else None,
+                            "kind": dup["kind"], "duplicate": True})
+
         if kind == "original" and \
                 _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
             return jsonify({"error": "Too many jobs running. "
@@ -591,8 +615,13 @@ def complete_upload(user_id, project_id):
         try:
             storage.complete_multipart(key, upload_id, parts)
         except Exception as e:
-            storage.abort_multipart(key, upload_id)
-            return jsonify({"error": f"Upload could not be finalized: {e}"}), 400
+            # A retried complete can hit an already-consumed upload_id. If
+            # the assembled object EXISTS, the first complete succeeded and
+            # this is that retry — proceed. Only abort when it truly failed.
+            if storage.head_bytes(key) is None:
+                storage.abort_multipart(key, upload_id)
+                return jsonify({"error": f"Upload could not be "
+                                         f"finalized: {e}"}), 400
 
     nbytes = storage.head_bytes(key)
     if nbytes is None:
@@ -622,6 +651,28 @@ def complete_upload(user_id, project_id):
 
     with vdb() as conn:
         cur = conn.cursor()
+        # The early dedupe ran in its OWN transaction, so two overlapping
+        # completes (a proxy-timeout retry racing the still-running original
+        # request) could both pass it. assets has no unique constraint on
+        # storage_key to lean on, so serialize per project: lock the project
+        # row and re-check under the lock before inserting — otherwise the
+        # race lands a duplicate asset AND a duplicate 16-45 min index job.
+        cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                    (project_id,))
+        cur.execute("""SELECT id, kind FROM assets
+                       WHERE project_id = %s AND storage_key = %s
+                       ORDER BY id DESC LIMIT 1""", (project_id, key))
+        dup = cur.fetchone()
+        if dup:
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                             AND (payload->>'asset_id')::int = %s
+                           ORDER BY id DESC LIMIT 1""",
+                        (project_id, dup["id"]))
+            ij = cur.fetchone()
+            return jsonify({"asset_id": dup["id"],
+                            "index_job_id": ij["id"] if ij else None,
+                            "kind": dup["kind"], "duplicate": True})
         cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
                                            bytes, duration_s, meta)
                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
@@ -867,18 +918,68 @@ def project_state(user_id, project_id):
             "error": r["error"], "updated_at": r["updated_at"].isoformat(),
         } for r in cur.fetchall()}
 
-        # Self-heal: an index built by an older pipeline version is stale —
-        # re-index in the background (the old index keeps serving meanwhile,
-        # so the workspace stays usable).
+        # Self-heal on open, two cases, both BOUNDED to 2 index jobs per
+        # project per 6 hours so no condition can ever loop the worker:
+        #  1. stale index — built by an older pipeline version; re-index in
+        #     the background (the old index keeps serving meanwhile).
+        #  2. dead project — the last index job FAILED (worker death, OOM)
+        #     and nothing would ever retry it. The failure note tells users
+        #     "re-open the project to try again"; this makes that true —
+        #     before, a failed analysis left the project dead forever.
+        ij = jobs.get("index")
+        idx_active = bool(ij and ij["state"] in ("queued", "running"))
+        heal_reason = None
+        # is_reindex distinguishes the cases for the worker: a stale-pipeline
+        # refresh must stay QUIET in chat (the project already greeted and may
+        # have edits), while a heal of a never-successful index is the user's
+        # FIRST analysis and should greet normally when it lands.
+        is_reindex = False
         if idx_row and idx_row.get("pipeline_version", 1) != PIPELINE_VERSION:
-            ij = jobs.get("index")
-            if not ij or ij["state"] not in ("queued", "running"):
-                current_app.logger.info(
-                    "project %s: index pipeline v%s != v%s — refreshing",
-                    project_id, idx_row.get("pipeline_version"),
-                    PIPELINE_VERSION)
+            heal_reason = (f"pipeline v{idx_row.get('pipeline_version')} != "
+                           f"v{PIPELINE_VERSION}")
+            is_reindex = True
+        elif original and not idx_row and ij and ij["state"] == "failed":
+            heal_reason = "last index job failed"
+        elif original and idx_row and ij and ij["state"] == "failed":
+            # A shared-sha index row (another project indexed the same file)
+            # can exist while THIS project's setup died mid-cache-hit — sha
+            # set, "indexed" true, but no proxy/EDL of its own, so its player
+            # never loads. Re-running the job is a fast cache-hit that
+            # finishes the per-project setup.
+            cur.execute("""SELECT 1 FROM assets
+                           WHERE project_id = %s AND kind = 'proxy'
+                             AND sha256 = %s LIMIT 1""",
+                        (project_id, original["sha256"]))
+            if not cur.fetchone():
+                heal_reason = "index cache-hit setup incomplete (no proxy)"
+        if heal_reason and not idx_active:
+            # Serialize with concurrent polls (two tabs on one project): both
+            # could pass the checks above and burn the whole heal budget on
+            # duplicate enqueues. Lock the project row, re-check under it.
+            cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                        (project_id,))
+            cur.execute("""SELECT 1 FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                             AND state IN ('queued','running') LIMIT 1""",
+                        (project_id,))
+            still_idle = cur.fetchone() is None
+            cur.execute("""SELECT COUNT(*) AS n FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                             AND created_at > NOW() - INTERVAL '6 hours'""",
+                        (project_id,))
+            # < 3: the upload's own index job counts too, so this allows the
+            # original attempt plus two heals per 6h — bounded, but "re-open
+            # the project to try again" stays true on the first re-open.
+            if still_idle and cur.fetchone()["n"] < 3:
+                current_app.logger.info("project %s: re-indexing (%s)",
+                                        project_id, heal_reason)
                 _enqueue(cur, project_id, user_id, "index",
-                         {"asset_id": original["id"]})
+                         {"asset_id": original["id"],
+                          "reindex": is_reindex})
+            elif still_idle:
+                current_app.logger.warning(
+                    "project %s: NOT re-indexing (%s) — hit the "
+                    "3-jobs-per-6h self-heal bound", project_id, heal_reason)
 
         cur.execute("""SELECT id, role, content, meta, created_at
                        FROM chat_messages
@@ -1587,4 +1688,4 @@ def asset_url(user_id, asset_id):
         meta = a.get("meta") or {}
         name = meta.get("filename") or f"valmera_{a['kind']}_{a['id']}.mp4"
     url = storage.presign_get(a["storage_key"], download_name=name)
-    return jsonify({"url": url, "expires_in": storage.PRESIGN_EXPIRY})
+    return jsonify({"url": url, "expires_in": storage.PRESIGN_GET_EXPIRY})

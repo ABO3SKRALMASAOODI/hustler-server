@@ -908,6 +908,35 @@ def add_captions(ctx, mode=None, items=None, style=None,
             karaoke_note += ("\nNote: premium captions place text "
                              "explicitly, which replaces 'slide_up' with a "
                              "fade entrance.")
+        # Honesty gate: from_transcript captions can only show words that
+        # exist AND survive the cut. A real music-heavy upload transcribed to
+        # ONE hallucinated word that the edit then cut — the agent told the
+        # user captions were on and the render showed nothing.
+        all_words = ctx.index.get("words") or []
+        keep_spans = edl.get("keep") or []
+        visible = sum(
+            1 for w in all_words
+            if any(s - 0.05 <= (float(w["t0"]) + float(w["t1"])) / 2 <= e + 0.05
+                   for s, e in keep_spans))
+        if not all_words:
+            karaoke_note += (
+                "\nWARNING: the transcript is EMPTY — nothing was "
+                "transcribed from this video, so these captions will show NO "
+                "text at all. Tell the user honestly that no clear speech "
+                "was detected (music-only videos transcribe to nothing) "
+                "instead of claiming captions were added.")
+        elif visible == 0:
+            karaoke_note += (
+                f"\nWARNING: none of the transcript's {len(all_words)} "
+                "word(s) fall inside the kept footage — these captions will "
+                "not be visible in this cut. Either the speech was cut out, "
+                "or the video has almost no transcribable speech. Tell the "
+                "user honestly.")
+        elif visible < 5:
+            karaoke_note += (
+                f"\nNote: only {visible} transcribed word(s) fall inside the "
+                "kept footage, so captions will be very sparse — if this "
+                "video is mostly music, say so to the user.")
         cfg = {"mode": "from_transcript",
                "max_words_per_caption": mw,
                "style": parsed_style}
@@ -1830,10 +1859,24 @@ def render_preview(ctx):
             ctx.last_preview = result
             ctx.rendered_versions.add(version)
             out_dur = result.get("duration_s")
-            note = (f"Preview v{version} rendered: {out_dur}s "
-                    f"(source {ctx.duration}s). It is attached to the chat "
-                    f"and playing in the user's workspace.")
-            check = _self_check(ctx, result)
+            if result.get("cached"):
+                # Nothing new was encoded and no new file appeared — saying
+                # "rendered and playing" here made the agent re-claim success
+                # to a user who was reporting the player NOT updating.
+                note = (f"Preview v{version} was ALREADY rendered — the "
+                        f"existing {out_dur}s file is current and unchanged. "
+                        "Re-rendering cannot change what the user sees; if "
+                        "they say the video looks wrong or missing, the EDL "
+                        "itself needs to change (or the problem is on their "
+                        "screen, not in the render).")
+            else:
+                note = (f"Preview v{version} rendered: {out_dur}s "
+                        f"(source {ctx.duration}s). It is attached to the "
+                        "chat and the player updates to it automatically.")
+            # A cached result is byte-identical to a render that was already
+            # self-checked — re-running the paid vision call would bill the
+            # user's turn for confirming an unchanged file.
+            check = None if result.get("cached") else _self_check(ctx, result)
             if check:
                 ctx.last_selfcheck = check
                 note += f" Visual self-check: {check}"
@@ -1842,6 +1885,25 @@ def render_preview(ctx):
                 note += (" MID-WORD AUDIT: " + "; ".join(mw[:5])
                          + " — snap these boundaries to word edges "
                            "(get_words) and re-render.")
+            # Caption audit on what actually survived the cut: captions are
+            # usually enabled BEFORE later cuts, so the add-time warning
+            # can't see speech that a later keep_segments removed. A real
+            # edit shipped "podcast captions" whose only transcribed word
+            # was cut — the user saw an unchanged video.
+            try:
+                caps = row["json"].get("captions")
+                if isinstance(caps, dict) \
+                        and caps.get("mode") == "from_transcript":
+                    _ctl = Timeline(row["json"]["keep"],
+                                    row["json"].get("inserts") or [])
+                    if not _ctl.kept_words(ctx.index.get("words", [])):
+                        note += (" CAPTION AUDIT: captions are ON but ZERO "
+                                 "transcribed words survive this cut — the "
+                                 "render shows no caption text. Tell the "
+                                 "user honestly (music-only videos "
+                                 "transcribe to almost nothing).")
+            except Exception:
+                pass
             # Repetition audit on what actually survived the cut — the agent
             # must not tell the user repetitions are gone when they are not.
             try:
