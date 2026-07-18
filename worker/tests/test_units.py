@@ -3318,4 +3318,122 @@ try:
 finally:
     _rnd.storage.exists = _orig_exists
 
+
+
+# ── Round-24: the caption composer ───────────────────────────────────────
+import schemas                                                # noqa: E402
+import agent_tools                                            # noqa: E402
+
+print("== round-24: caption composition engine ==")
+
+_CW = [{"w": w, "t0": a, "t1": b} for w, a, b in
+       [("Your", 0.0, 0.34), ("videos", 0.34, 0.86), ("don't", 0.86, 1.20),
+        ("get", 1.20, 1.46), ("views", 1.46, 1.98)]]
+_CE = ["videos", "views"]
+
+
+def _stack(**style):
+    st = {"preset": "stacked"}
+    st.update(style)
+    return caplib.events_premium(_CW, style=st, play_res=(1080, 1920),
+                                 emphasis_words=_CE)
+
+
+# The three-layer consistency guard. A style field declared in only some of
+# these places is DROPPED SILENTLY: pydantic ignores undeclared fields, so the
+# EDL signature never changes, write_edl reports "NO CHANGE", no render runs —
+# and the agent reports success. This test is the reason that cannot recur.
+_schema_fields = set(schemas.CaptionStyle.model_fields)
+check("composer: every STYLE_KEY is a real CaptionStyle field",
+      set(caplib.STYLE_KEYS) <= _schema_fields)
+_tool_props = set(agent_tools.TOOLS["add_captions"][2]["style"]["properties"])
+check("composer: every STYLE_KEY is offered to the agent",
+      set(caplib.STYLE_KEYS) <= _tool_props)
+check("composer: add_captions and set_caption_style expose the SAME style",
+      agent_tools.TOOLS["add_captions"][2]["style"]["properties"]
+      is agent_tools.TOOLS["set_caption_style"][2]["style"]["properties"])
+_bad = agent_tools._parse_partial_style({"leading": 0.8})
+check("composer: the partial-style allowlist accepts composer fields",
+      isinstance(_bad, dict) and _bad.get("leading") == 0.8)
+check("composer: every preset name is accepted by the schema",
+      set(agent_tools.CAPTION_PRESETS) - {"classic"}
+      <= set(caplib.PRESETS) | {"classic"})
+check("composer: numeric style fields survive a falsy-looking value",
+      caplib._norm_style({"preset": "stacked", "leading": 0.5})["leading"]
+      == 0.5)
+
+_ev = _stack()
+check("stack: each LINE is its own Dialogue (never \\N-joined)",
+      all(r"\N" not in e["text"] for e in _ev))
+check("stack: every line carries explicit \\pos geometry",
+      all(re.search(r"\\(pos|move)\(", e["text"]) for e in _ev))
+check("stack: timing still comes ONLY from real transcript words",
+      {round(e["start"], 4) for e in _ev}
+      <= {round(w["t0"], 4) for w in _CW})
+
+# The defect that motivated the whole treatment rewrite: making a word bigger
+# used to force a colour change too, so the reference frame (one WHITE word at
+# 2x its white neighbours) could not be expressed at all.
+_big = [e for e in _ev if r"\fs" in e["text"]]
+_accent = caplib._inline_hl(caplib.DEFAULT_HIGHLIGHT)
+check("stack: 'big' emphasis scales a word WITHOUT recolouring it",
+      any(r"\fs" in e["text"] and _accent not in e["text"] for e in _ev))
+check("stack: emphasis_scale actually changes the rendered size",
+      _stack(emphasis_scale=1.2)[0]["text"] != _stack(emphasis_scale=2.8)[0]["text"])
+
+
+def _ys(evs):
+    return [int(m.group(1)) for e in evs
+            for m in [re.search(r"\\pos\(-?\d+,(-?\d+)\)", e["text"])] if m]
+
+
+check("stack: tighter leading pulls the lines closer together",
+      (max(_ys(_stack(leading=1.6))) - min(_ys(_stack(leading=1.6))))
+      > (max(_ys(_stack(leading=0.6))) - min(_ys(_stack(leading=0.6)))))
+
+# Width-aware layout. If a line's real rendered width exceeds the usable box,
+# libass re-wraps it — and a wrapped row is positioned by libass, not by the
+# composer, so leading/stagger/\pos silently stop applying to it.
+_p = caplib.PRESETS["stacked"]
+_s = caplib._norm_style({"preset": "stacked"})
+_px = caplib._premium_font_px(_p, _s, (1080, 1920))
+_usable = 1080 - 2 * caplib.PREMIUM_MARGIN_X[_p["align"]] * 1080
+_disp = [w["w"] for w in _CW]
+_treats, _ = caplib._assign_treatments(_CW, {"videos", "views"}, _p, 0)
+_mults = caplib._stack_mults(_disp, _treats, _p, _s, _px, _usable)
+_lines = caplib._stack_layout(_disp, _mults, _p, _px, _usable)
+check("stack: no laid-out line can overflow and trigger a libass re-wrap",
+      all(sum(len(_disp[i]) * _p["char_w"] * _px * _mults[i] for i in ln)
+          <= _usable + 1 for ln in _lines))
+check("stack: an over-wide word is shrunk rather than allowed to wrap",
+      all(len(_disp[i]) * _p["char_w"] * _px * _mults[i] <= _usable + 1
+          for i in range(len(_disp))))
+
+# Layered effects, verified against real libass before being built on.
+_ir = caplib.events_premium(_CW, style={"preset": "iridescent"},
+                            play_res=(1080, 1920), emphasis_words=_CE)
+check("chroma: draws offset colour copies UNDER the text",
+      {e.get("layer", 0) for e in _ir} == {1, 5}
+      and any(r"\1c&H0000FF&" in e["text"] for e in _ir))
+_chr = caplib.events_premium(_CW, style={"preset": "chrome"},
+                             play_res=(1080, 1920), emphasis_words=_CE)
+check("chrome: emits \\clip'd metal bands plus a shadow backing",
+      any(r"\clip(" in e["text"] for e in _chr)
+      and {e.get("layer", 0) for e in _chr} == {3, 4, 5})
+
+# ASS override tags PERSIST across segments and _base_tags does not restate
+# \alpha, so the mask used to hide non-target words leaked forward and made
+# every later word invisible — the chrome word vanished entirely.
+check("effects: the visibility mask never leaks past the word it hides",
+      all(e["text"].count(r"\alpha&HFF&") == 0
+          or r"\alpha&H00&" in e["text"]
+          for e in _chr if r"\alpha&HFF&" in e["text"]))
+
+check("stack: states never overlap (no stacked duplicate phrases)",
+      all(_ev[i]["end"] <= _ev[i + 1]["start"] + 1e-9
+          for i in range(len(_ev) - 1)
+          if _ev[i]["start"] != _ev[i + 1]["start"]))
+check("composer: an explicit font overrides the preset's family",
+      r"\fnPoppins Black" in _stack(font="Poppins Black")[0]["text"])
+
 print(f"\nALL {PASS} CHECKS PASSED")

@@ -25,6 +25,7 @@ relative to the 1280x720 the base numbers were tuned on.
 """
 
 import os
+import re
 
 FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
@@ -48,7 +49,26 @@ MARGIN_V = {"bottom": 46, "top": 40, "middle": 0}
 
 DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
                  "dynamic": False, "highlight_color": None, "animation": None,
-                 "size_scale": None, "preset": None, "uppercase": None}
+                 "size_scale": None, "preset": None, "uppercase": None,
+                 # composer fields (premium presets only; see the composer
+                 # section below). None everywhere = "use the preset's own".
+                 "font": None, "effect": None, "layout": None,
+                 "leading": None, "emphasis": None, "emphasis_scale": None}
+
+# Every style key that flows from the EDL into a render. Kept as ONE tuple
+# because it has to be applied in three places (_norm_style, write_ass's
+# per-item merge, and the schema/tool allowlists mirror it) and the previous
+# hand-copied lists were exactly how a new field got silently dropped: pydantic
+# ignores undeclared fields, so the EDL signature never changed, write_edl
+# reported "NO CHANGE", no version was created, no render ran — and the agent
+# told the user their new look had been applied. Add a field HERE and to
+# DEFAULT_STYLE, then to schemas.CaptionStyle and the tool allowlist.
+STYLE_KEYS = ("color", "size", "position", "highlight_color", "animation",
+              "size_scale", "preset", "font", "effect", "layout", "leading",
+              "emphasis", "emphasis_scale")
+# Keys whose value is meaningful when falsy (0, 0.0) and so must NOT be copied
+# with a truthiness test.
+STYLE_KEYS_NUMERIC = ("leading", "emphasis_scale", "size_scale")
 
 # ── Premium presets ──────────────────────────────────────────────────────
 # Every preset is one coherent, opinionated look. base_size is the 'm'
@@ -63,6 +83,62 @@ PRESET_SIZE_MULT = {"s": 0.8, "m": 1.0, "l": 1.3, "xl": 1.6}
 PREMIUM_MAX_LINES = 3
 SERIF_FONT = "DM Serif Display"
 DARK_TEXT = "&H101010&"          # text color inside highlight boxes
+
+# ── Composable per-word treatments ───────────────────────────────────────
+# A treatment is a set of INDEPENDENT properties. The first engine welded
+# size to colour — the only way to enlarge a word was to also recolour it —
+# so the most common look in the reference reels (ONE WHITE WORD at ~2x its
+# white neighbours, no colour change at all) could not be expressed. Scale,
+# colour, font, box and effect are now orthogonal; a preset composes them.
+#
+#   scale  — multiplier on the base font px (None = preset emph_scale)
+#   color  — "accent" | "dark" | None (keep the caption colour)
+#   font   — font family override
+#   italic — synthetic italic
+#   box    — draw the accent as a filled box behind dark text
+#   effect — layered treatment from EFFECTS (chrome/chroma/glow)
+TREATMENTS = {
+    "none":   {},
+    # size-only emphasis: the reference look, and the reason this table exists
+    "big":    {"scale": "emph"},
+    "huge":   {"scale": "num"},
+    "accent": {"scale": "emph", "color": "accent"},
+    "pop":    {"scale": "num", "color": "accent"},
+    "box":    {"box": True},
+    "serif":  {"scale": "emph", "color": "accent", "font": SERIF_FONT,
+               "italic": True, "serif_bump": True},
+    "chrome": {"scale": "emph", "effect": "chrome"},
+    "glow":   {"scale": "emph", "color": "accent", "effect": "glow"},
+    "chroma": {"scale": "emph", "effect": "chroma"},
+    # numbers keep their size but not the accent in karaoke modes, where the
+    # accent belongs to the word being SPOKEN or the read falls apart.
+    "num_plain": {"scale": "num"},
+}
+
+# ── Layered text effects ─────────────────────────────────────────────────
+# libass cannot gradient-fill or blur-shadow a glyph, but it CAN draw the
+# same run several times on different layers with independent colour, alpha,
+# offset and \clip. Each effect is a list of extra copies drawn UNDER the
+# real text (or, for chrome, INSTEAD of it), as
+# (dx_frac, dy_frac, tags) where the offsets are fractions of the font px.
+# Verified against real libass, not assumed.
+EFFECTS = {
+    # RGB split — the purple/cyan fringe of the reference "could see".
+    "chroma": {"under": [(-0.030, 0.0, r"\1c&H0000FF&\3a&HFF&\shad0\alpha&H40&"),
+                         (0.030, 0.0, r"\1c&HFFFF00&\3a&HFF&\shad0\alpha&H40&")]},
+    # Soft halo in the accent colour.
+    "glow": {"under": [(0.0, 0.0, r"\blur{blur}\3a&HFF&\shad0\alpha&H70&")]},
+    # Metallic ramp: horizontal bands of graduated grey, each \clip'd to its
+    # own slice of the line box. Colours are &HBBGGRR&, so B >= G >= R reads
+    # as COOL steel rather than muddy bronze. The sequence is a real chrome
+    # profile, not a linear fade — bright crown, a dark "horizon" line about
+    # 40% down, a hot specular bounce just under it, then a mid falloff. That
+    # horizon is what makes it read as polished metal instead of grey text.
+    "chrome": {"bands": ("&HFFFFFF&", "&HFAF7F2&", "&HEFEAE2&", "&HD6CEC2&",
+                         "&H8F857A&", "&H6E645A&", "&HFFFEFB&", "&HF2EDE6&",
+                         "&HD2CAC0&", "&HAAA096&", "&H8C8278&")},
+}
+CHROME_BAND_MIN_PX = 26   # below this the bands alias into mush
 PRESETS = {
     "podcast": {
         # The reference reel look: bold white grotesque, left-aligned stack,
@@ -102,7 +178,106 @@ PRESETS = {
         "treatments": ("serif", "accent"),
         "active": None, "position": "bottom", "animation": "fade",
     },
+
+    # ── Composed looks (layout "stack") ──────────────────────────────
+    # These use the per-line composer: every line is its own Dialogue with
+    # its own \pos, which is what makes tight/overlapping leading and
+    # per-line horizontal stagger possible. The four presets above keep the
+    # original single-Dialogue emission byte-for-byte ("flow").
+    "stacked": {
+        # THE reference reel look: one phrase broken into 2-3 lines whose
+        # sizes differ wildly ("Your" small / "VIDEOS" huge / "don't" small),
+        # set tight enough to interlock. All one colour — the emphasis is
+        # pure SCALE, which is why treatments had to stop implying colour.
+        "font": "Inter Display Black", "char_w": 0.56, "base_size": 46,
+        "mode": "reveal", "align": "center", "uppercase": False,
+        "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.4,
+        "emph_scale": 2.05, "num_scale": 2.2,
+        "treatments": ("big",), "emphasis": "big",
+        "active": "pop", "position": "middle",
+        "layout": "stack", "leading": 0.86, "stagger": 0.055,
+        "word_anim": "punch",
+    },
+    "iridescent": {
+        # Same architecture, with the RGB-split fringe of the reference
+        # "could see" / "even built" frames.
+        "font": "Inter Display Black", "char_w": 0.56, "base_size": 44,
+        "mode": "reveal", "align": "center", "uppercase": False,
+        "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.0,
+        "emph_scale": 1.85, "num_scale": 2.0,
+        "treatments": ("chroma",), "emphasis": "chroma",
+        "active": "pop", "position": "middle",
+        "layout": "stack", "leading": 0.84, "stagger": 0.06,
+        "word_anim": "blur_in",
+    },
+    "chrome": {
+        # Liquid-metal hero word over a small connector line — the "Love"
+        # frame. Bands are \clip'd greys; see EFFECTS["chrome"].
+        "font": "Inter Display Black", "char_w": 0.56, "base_size": 48,
+        "mode": "reveal", "align": "center", "uppercase": False,
+        "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.6,
+        "emph_scale": 2.0, "num_scale": 2.1,
+        "treatments": ("chrome",), "emphasis": "chrome",
+        "active": "pop", "position": "middle",
+        "layout": "stack", "leading": 0.88, "stagger": 0.05,
+        "word_anim": "punch",
+    },
+    "editorial": {
+        # The light, quiet counterpoint: thin high-contrast serif, generous
+        # air, no outline. For luxury/interior/fashion footage where a heavy
+        # grotesque would look cheap.
+        "font": "Instrument Serif", "char_w": 0.44, "base_size": 46,
+        "mode": "reveal", "align": "center", "uppercase": False,
+        "max_words": 5, "wpl": 3, "outline": 0.0, "shadow": 1.4,
+        "emph_scale": 1.5, "num_scale": 1.7,
+        "treatments": ("big",), "emphasis": "big",
+        "active": "fade", "position": "middle",
+        "layout": "stack", "leading": 1.06, "stagger": 0.0,
+        "word_anim": "fade",
+    },
+    "fashion": {
+        # Wide, editorial, all-caps — magazine cover energy.
+        "font": "Archivo Black", "char_w": 0.62, "base_size": 40,
+        "mode": "reveal", "align": "center", "uppercase": True,
+        "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.0,
+        "emph_scale": 1.6, "num_scale": 1.8,
+        "treatments": ("big", "accent"), "emphasis": "big",
+        "active": "pop", "position": "middle",
+        "layout": "stack", "leading": 0.98, "stagger": 0.04,
+        "word_anim": "rise",
+    },
+    "luxe": {
+        # High-contrast Playfair display serif with gold accents — the
+        # "expensive" ask, without shouting.
+        "font": "Playfair Display Black", "char_w": 0.50, "base_size": 44,
+        "mode": "reveal", "align": "center", "uppercase": False,
+        "max_words": 5, "wpl": 3, "outline": 0.0, "shadow": 1.8,
+        "emph_scale": 1.55, "num_scale": 1.75,
+        "treatments": ("accent", "big"), "emphasis": "accent",
+        "active": "fade", "position": "middle",
+        "layout": "stack", "leading": 1.0, "stagger": 0.0,
+        "word_anim": "fade",
+    },
+    "impact": {
+        # Bebas condensed caps, stacked tight — sports/hype without Anton's
+        # width, so longer words still fit a vertical frame.
+        "font": "Bebas Neue", "char_w": 0.40, "base_size": 58,
+        "mode": "karaoke", "align": "center", "uppercase": True,
+        "max_words": 4, "wpl": 2, "outline": 2.2, "shadow": 2.4,
+        "emph_scale": 1.5, "num_scale": 1.7,
+        "treatments": ("accent",), "emphasis": "accent",
+        "active": "accent", "position": "middle",
+        "layout": "stack", "leading": 0.9, "stagger": 0.0,
+        "word_anim": "punch",
+    },
 }
+# Composer defaults for presets that don't set them (the four "flow" looks).
+PRESET_DEFAULTS = {"layout": "flow", "leading": 1.34, "stagger": 0.0,
+                   "emphasis": None, "word_anim": None, "effect": None}
+
+
+def _pget(p, key):
+    return p.get(key, PRESET_DEFAULTS.get(key))
 # Block-center anchor as a fraction of frame height, per position.
 PREMIUM_ANCHOR_Y = {"top": 0.16, "middle": 0.50, "bottom": 0.80}
 # Side margin as a fraction of frame width (left-aligned vs centered).
@@ -145,10 +320,12 @@ def _norm_style(style):
     s["_pos_set"] = False
     if style:
         d = style if isinstance(style, dict) else style.model_dump()
-        for k in ("color", "size", "position", "highlight_color",
-                  "animation", "size_scale", "preset"):
-            if d.get(k):
-                s[k] = d[k]
+        for k in STYLE_KEYS:
+            v = d.get(k)
+            # Numeric fields are meaningful at 0 (leading 0 = full overlap), so
+            # they are copied on presence, not truthiness.
+            if v is not None if k in STYLE_KEYS_NUMERIC else bool(v):
+                s[k] = v
         if d.get("position"):
             # remember an EXPLICIT position so presets only apply their own
             # default placement when the agent didn't choose one.
@@ -426,7 +603,7 @@ def _premium_style_line(name, s, play_res):
     margin = round(PREMIUM_MARGIN_X[p["align"]] * play_res[0])
     outline = round(p["outline"] * f, 1)
     shadow = round(p["shadow"] * f, 1)
-    return (f"Style: {name},{p['font']},{px},"
+    return (f"Style: {name},{_font_of(p, s)},{px},"
             f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
             f"0,0,0,0,100,100,0,0,1,{outline},{shadow},5,{margin},{margin},"
             f"0,1")
@@ -438,27 +615,90 @@ def _base_tags(p, s, px, f):
     which also resets alignment in some renderers)."""
     outline = round(p["outline"] * f, 1)
     shadow = round(p["shadow"] * f, 1)
-    return (rf"\fn{p['font']}\fs{px}\b0\i0\1c{_inline_hl(s['color'])}"
+    return (rf"\fn{_font_of(p, s)}\fs{px}\b0\i0\1c{_inline_hl(s['color'])}"
             rf"\3c&H101010&\bord{outline}\shad{shadow}\fscx100\fscy100")
 
 
-def _treat_tags(kind, p, px, accent):
-    if kind == "accent":
-        return rf"\1c{accent}\fs{round(px * p['emph_scale'])}"
-    if kind == "num":
+def _emph_scale(s, p):
+    """Emphasis size multiplier: the style's override, else the preset's."""
+    v = s.get("emphasis_scale")
+    if v is None:
+        return p["emph_scale"]
+    try:
+        return min(max(float(v), 1.0), 3.0)
+    except (TypeError, ValueError):
+        return p["emph_scale"]
+
+
+def _treat_props(name, p, s):
+    """A treatment name -> its concrete, ORTHOGONAL properties, with the
+    symbolic scale ("emph"/"num") resolved to a real multiplier."""
+    t = dict(TREATMENTS.get(name or "none", {}))
+    sc = t.get("scale")
+    mult = (_emph_scale(s, p) if sc == "emph"
+            else p["num_scale"] if sc == "num" else 1.0)
+    if t.get("serif_bump"):
+        mult *= 1.05
+    t["mult"] = mult
+    return t
+
+
+def _treat_tags(kind, p, px, accent, s=None, mult=None):
+    """Inline overrides for one treated word. Legacy names still resolve, so
+    the four original presets emit exactly what they always did."""
+    s = s if s is not None else {}
+    if kind == "num":               # legacy alias: accent + number scale
         return rf"\1c{accent}\fs{round(px * p['num_scale'])}"
-    if kind == "num_plain":
-        # karaoke modes: numbers keep their size but not the accent —
-        # the accent belongs to the word being SPOKEN, or the karaoke
-        # read ("where are we?") falls apart.
-        return rf"\fs{round(px * p['num_scale'])}"
-    if kind == "box":
+    t = _treat_props(kind, p, s)
+    if not t:
+        return ""
+    # Tag ORDER is preserved from the original hand-written emitter (font,
+    # italic, colour, then size) so the four "flow" presets keep producing
+    # byte-identical .ass output — libass does not care, but the regression
+    # tests pin exact substrings, and that pinning is what proves this
+    # refactor changed nothing for existing EDLs.
+    out = ""
+    if t.get("font"):
+        out += rf"\fn{t['font']}"
+    if t.get("italic"):
+        out += r"\i1"
+    if t.get("box"):
         bx, by = max(2, round(0.22 * px)), max(2, round(0.13 * px))
-        return rf"\1c{DARK_TEXT}\3c{accent}\xbord{bx}\ybord{by}\shad0"
-    if kind == "serif":
-        return (rf"\fn{SERIF_FONT}\i1\1c{accent}"
-                rf"\fs{round(px * p['emph_scale'] * 1.05)}")
-    return ""
+        out += rf"\1c{DARK_TEXT}\3c{accent}\xbord{bx}\ybord{by}\shad0"
+    elif t.get("color") == "accent":
+        out += rf"\1c{accent}"
+    m = t.get("mult", 1.0) if mult is None else mult
+    if m != 1.0:
+        out += rf"\fs{round(px * m)}"
+    return out
+
+
+# ── Entrance animations ──────────────────────────────────────────────────
+# Applied to the word being spoken (reveal) or the whole line (static). Each
+# is pure ASS override tags, verified rendering under real libass. "rise" and
+# "drop" are absent here on purpose: they need \move, which cannot coexist
+# with the \pos the composer relies on, so they are handled as LINE-level
+# geometry in _stack_positions instead of pretending to be per-word.
+WORD_ANIMS = {
+    "none": "",
+    "pop": (r"\fscx62\fscy62\t(0,100,\fscx108\fscy108)"
+            r"\t(100,180,\fscx100\fscy100)"),
+    "punch": (r"\fscx44\fscy44\t(0,90,\fscx113\fscy113)"
+              r"\t(90,190,\fscx100\fscy100)"),
+    "fade": r"\alpha&HFF&\t(0,170,\alpha&H00&)",
+    "blur_in": r"\blur{b}\fscx88\fscy88\t(0,220,\blur0\fscx100\fscy100)",
+    "whip": (r"\frz14\fscx66\fscy66"
+             r"\t(0,150,\frz0\fscx104\fscy104)\t(150,220,\fscx100\fscy100)"),
+    "flash": r"\1c&HFFFFFF&\fscx70\fscy70\t(0,110,\fscx100\fscy100)",
+}
+LINE_ANIMS = ("rise", "drop")
+
+
+def _word_anim_tags(name, px):
+    a = WORD_ANIMS.get(name or "none", "")
+    if "{b}" in a:
+        a = a.replace("{b}", str(max(2, round(px * 0.13))))
+    return a
 
 
 # entrance of the word being spoken (reveal mode / karaoke accent)
@@ -566,6 +806,210 @@ def _geom_prefix(p, s, play_res, lines, treats, px):
     return rf"{{\an5\pos({x},{round(y)})}}"
 
 
+# \clip takes absolute frame coords. The composer only ever bands horizontally
+# across a whole line, so the x extent just has to exceed any frame we render
+# (8K is 7680) — the meaningful bounds are the y ones.
+_CLIP_W = 16384
+
+
+def _font_of(p, s):
+    """The family to set: an explicit style.font wins over the preset's."""
+    return (s or {}).get("font") or p["font"]
+
+
+def _line_top(geom, height):
+    """Top edge of a line box from its \\pos/\\move prefix, for \\clip bands."""
+    m = re.search(r"\\(?:pos|move)\((-?\d+),(-?\d+)", geom)
+    cy = int(m.group(2)) if m else 0
+    return cy - height / 2.0
+
+
+def _shift(text, dx, dy):
+    """Offset a rendered line's anchor — used to separate the RGB copies of
+    the chroma effect without re-deriving the geometry."""
+    def bump(m):
+        return (f"\\{m.group(1)}({int(round(int(m.group(2)) + dx))},"
+                f"{int(round(int(m.group(3)) + dy))}")
+    return re.sub(r"\\(pos|move)\((-?\d+),(-?\d+)", bump, text, count=1)
+
+
+def _leading(s, p):
+    v = s.get("leading")
+    if v is None:
+        return _pget(p, "leading")
+    try:
+        # Below ~0.5 lines collapse onto each other illegibly; above ~2.2 the
+        # block stops reading as one phrase.
+        return min(max(float(v), 0.5), 2.2)
+    except (TypeError, ValueError):
+        return _pget(p, "leading")
+
+
+def _line_mults(lines, mults):
+    """Largest size multiplier on each line — what its height must clear."""
+    return [max([mults[i] for i in ln] or [1.0]) for ln in lines]
+
+
+def _stack_positions(p, s, play_res, lines, mults, px, anim):
+    """One \\pos (or \\move) prefix per LINE.
+
+    This is what the single-Dialogue "flow" emission cannot do. With every
+    line independently placed, leading becomes a free parameter — including
+    values below 1.0, where consecutive lines deliberately OVERLAP, which is
+    how the reference frames interlock a small connector word into the
+    negative space of the huge word above it.
+    """
+    W, H = play_res
+    lead = _leading(s, p)
+    lmults = _line_mults(lines, mults)
+    line_hs = [lead * px * m for m in lmults]
+    block_h = sum(line_hs)
+    pos_name = s["position"] if s.get("_pos_set") else p["position"]
+    anchor = PREMIUM_ANCHOR_Y.get(pos_name, 0.5) * H
+    edge = 0.03 * H
+    y0 = max(edge, min(anchor - block_h / 2, H - block_h - edge))
+    stag = (_pget(p, "stagger") or 0.0) * W
+    big = max(lmults) if lmults else 1.0
+    out, acc = [], 0.0
+    for i in range(len(lines)):
+        y = y0 + acc + line_hs[i] / 2
+        acc += line_hs[i]
+        # Only lines SMALLER than the block's hero line are pushed off-axis;
+        # the hero stays centred. That is the reference composition — "Your"
+        # and "don't" set against a centred "VIDEOS" — and it keeps the eye
+        # on the big word instead of scattering the whole block.
+        dx = stag * (-1 if i % 2 == 0 else 1) \
+            if (stag and lmults[i] < big - 0.01) else 0.0
+        x = round(W / 2 + dx)
+        if anim in LINE_ANIMS:
+            off = max(10, int(0.045 * H)) * (1 if anim == "rise" else -1)
+            out.append(rf"{{\an5\move({x},{round(y + off)},{x},{round(y)}"
+                       rf",0,180)\fad(120,0)}}")
+        else:
+            out.append(rf"{{\an5\pos({x},{round(y)})}}")
+    return out
+
+
+def _stack_mults(disp, treats, p, s, px, usable):
+    """Per-word size multipliers, clamped so no single word can overflow.
+
+    A word wide enough to exceed the usable width makes libass WRAP the line
+    — and a wrapped row is positioned by libass, not by us, so the leading,
+    stagger and \\pos geometry the composer just computed silently stop
+    applying to it. Shrinking the offending word instead keeps the composer
+    authoritative over its own layout.
+    """
+    out = []
+    for i, t in enumerate(disp):
+        m = _treat_props(treats[i], p, s).get("mult", 1.0)
+        w = max(1, len(t)) * p["char_w"] * px
+        if w * m > usable:
+            m = max(1.0, usable / w) if w <= usable else usable / w
+        out.append(m)
+    return out
+
+
+def _stack_layout(disp, mults, p, px, usable):
+    """Break words into lines by REAL rendered width (per-word scale
+    included), not by character count at the base size."""
+    space = p["char_w"] * px * 0.4
+    lines, cur, w = [], [], 0.0
+    for i, t in enumerate(disp):
+        ww = max(1, len(t)) * p["char_w"] * px * mults[i]
+        add = ww + (space if cur else 0.0)
+        if cur and (len(cur) >= p["wpl"] or w + add > usable):
+            lines.append(cur)
+            cur, w, add = [], 0.0, ww
+        cur.append(i)
+        w += add
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _effect_of(name, p, s, global_effect):
+    return _treat_props(name, p, s).get("effect") or global_effect
+
+
+def _stack_state_events(disp, treats, mults, lines, geoms, p, s, px, accent, base,
+                        last_i, active_i, active_tags, global_effect,
+                        word_anim):
+    """One visual state (a moment in time) -> [(layer, text)].
+
+    Layered effects work by drawing the SAME line again underneath with every
+    word that isn't the target made fully transparent. Because the copy is
+    laid out identically, the visible word lands in exactly the right place —
+    so a fringe or a metal ramp can be applied to ONE word without disturbing
+    the line's spacing, which offsetting a standalone run could never do.
+    """
+    out = []
+    for li, ln in enumerate(lines):
+        idxs = [i for i in ln if i <= last_i]
+        if not idxs:
+            continue
+        geom = geoms[li]
+
+        def render(sel, extra="", drop_active=False):
+            """The whole line, with words outside `sel` made invisible."""
+            segs = []
+            for i in idxs:
+                tags = base + _treat_tags(treats[i], p, px, accent, s,
+                                          mult=mults[i])
+                if (active_i == "all" or i == active_i) and not drop_active:
+                    tags += active_tags
+                if i in sel:
+                    # Reset alpha EXPLICITLY. ASS override tags persist across
+                    # segments and _base_tags does not restate \alpha, so the
+                    # mask below leaked forward and made every word after the
+                    # first masked one invisible — the chrome word vanished
+                    # entirely. `extra` is appended after, so an effect's own
+                    # alpha still wins.
+                    tags += r"\alpha&H00&" + extra
+                else:
+                    tags += r"\alpha&HFF&"
+                segs.append("{" + tags + "}" + _esc(disp[i]))
+            return geom + " ".join(segs)
+
+        groups = {}
+        for i in idxs:
+            e = _effect_of(treats[i], p, s, global_effect)
+            if e:
+                groups.setdefault(e, set()).add(i)
+
+        chrome_words = groups.get("chrome", set())
+        for name, sel in sorted(groups.items()):
+            spec = EFFECTS.get(name)
+            if not spec:
+                continue
+            if name == "chrome":
+                # Bands REPLACE the fill, so the main pass hides these words.
+                # They also carry \shad0 (a shadow per band would print eleven
+                # offset copies), which would leave chrome text with no
+                # separation at all on bright footage — so one dark backing
+                # copy is drawn underneath purely for its shadow and outline.
+                out.append((3, render(sel, r"\1c&H1A1A1A&")))
+                bands = spec["bands"]
+                h = px * max([mults[i] for i in sel] or [1.0]) * 1.25
+                top = _line_top(geoms[li], h)
+                step = h / len(bands)
+                for bi, col in enumerate(bands):
+                    y0 = round(top + bi * step)
+                    y1 = round(top + (bi + 1) * step) + 1
+                    out.append((4, render(
+                        sel, rf"\1c{col}\3a&HFF&\shad0"
+                             rf"\clip(0,{y0},{_CLIP_W},{y1})",
+                        drop_active=False)))
+                continue
+            for dx, dy, tags in spec["under"]:
+                t = tags.replace("{blur}", str(max(2, round(px * 0.09))))
+                out.append((1, _shift(render(sel, t, drop_active=True),
+                                      dx * px, dy * px)))
+        main_sel = set(idxs) - chrome_words
+        if main_sel:
+            out.append((5, render(main_sel)))
+    return out
+
+
 def events_premium(out_words, style=None, max_words=None,
                    play_res=BASE_PLAY_RES, emphasis_words=None):
     """from_transcript events for a premium preset. Timing comes ONLY from
@@ -589,7 +1033,20 @@ def events_premium(out_words, style=None, max_words=None,
     anim = _premium_anim_prefix(s.get("animation") or p.get("animation")) \
         if mode == "static" else ""
 
-    events, rot = [], 0
+    # The composed looks place every LINE independently; the original four
+    # presets keep the single-Dialogue emission they always had, so their
+    # output is unchanged to the byte.
+    layout = s.get("layout") or _pget(p, "layout")
+    stack = layout == "stack"
+    global_effect = s.get("effect") or _pget(p, "effect")
+    word_anim = s.get("animation") or _pget(p, "word_anim")
+
+    # Build the timeline of VISUAL STATES first, emit pixels second. The
+    # no-overlap rule has to hold over states, not over Dialogue lines: in
+    # stack mode one state legitimately emits several same-time Dialogues
+    # (one per line, plus effect layers), so de-duplicating raw events would
+    # delete parts of a caption instead of resolving an overlap.
+    segs, ctx, rot = [], [], 0
     for ci, chunk in enumerate(chunks):
         disp = [_display_word(w["w"], upper) for w in chunk]
         treats, rot = _assign_treatments(chunk, emph, p, rot)
@@ -599,26 +1056,21 @@ def events_premium(out_words, style=None, max_words=None,
             treats = ["num_plain" if t in ("num", "accent") and
                       _word_has_digit(c["w"]) else None
                       for t, c in zip(treats, chunk)]
-        lines = _premium_layout(disp, p["wpl"], line_chars)
-        geom = _geom_prefix(p, s, play_res, lines, treats, px)
+        if stack:
+            # Lay out by REAL rendered width so libass never re-wraps a line
+            # behind the composer's back (see _stack_mults / _stack_layout).
+            usable = play_res[0] - 2 * PREMIUM_MARGIN_X[p["align"]] * play_res[0]
+            mults = _stack_mults(disp, treats, p, s, px, usable)
+            lines = _stack_layout(disp, mults, p, px, usable)
+            geom = _stack_positions(p, s, play_res, lines, mults, px,
+                                    word_anim)
+        else:
+            mults = None
+            lines = _premium_layout(disp, p["wpl"], line_chars)
+            geom = _geom_prefix(p, s, play_res, lines, treats, px)
+        ctx.append({"disp": disp, "treats": treats, "lines": lines,
+                    "geom": geom, "mults": mults})
         nxt_t0 = chunks[ci + 1][0]["t0"] if ci + 1 < len(chunks) else None
-
-        def text_upto(last_i, active_i=None, active_tags=""):
-            """Chunk text; words after last_i omitted (reveal), active_i
-            gets active_tags appended to its overrides."""
-            out_lines = []
-            for ln in lines:
-                segs = []
-                for i in ln:
-                    if i > last_i:
-                        continue
-                    tags = base + _treat_tags(treats[i], p, px, accent)
-                    if i == active_i:
-                        tags += active_tags
-                    segs.append("{" + tags + "}" + _esc(disp[i]))
-                if segs:
-                    out_lines.append(" ".join(segs))
-            return geom + anim + r"\N".join(out_lines)
 
         def hold_end(w):
             if nxt_t0 is not None:
@@ -628,11 +1080,14 @@ def events_premium(out_words, style=None, max_words=None,
 
         if mode == "static":
             start = chunk[0]["t0"]
-            events.append({"start": start,
-                           "end": max(hold_end(chunk[-1]),
-                                      start + MIN_EVENT_S),
-                           "text": text_upto(len(chunk) - 1),
-                           "premium": True})
+            segs.append({"ci": ci, "start": start,
+                         "end": max(hold_end(chunk[-1]), start + MIN_EVENT_S),
+                         "last_i": len(chunk) - 1,
+                         # stack+static has no single "spoken" word, so the
+                         # entrance plays on the whole block at once.
+                         "active_i": "all" if stack else None,
+                         "active": _word_anim_tags(word_anim, px)
+                         if stack else ""})
             continue
         for i, w in enumerate(chunk):
             start = w["t0"]
@@ -643,7 +1098,9 @@ def events_premium(out_words, style=None, max_words=None,
             if end <= start:
                 end = start + 0.12
             if mode == "reveal":
-                text = text_upto(i, i, _POP_IN)
+                act = _word_anim_tags(word_anim, px) if stack else _POP_IN
+                segs.append({"ci": ci, "start": start, "end": end,
+                             "last_i": i, "active_i": i, "active": act})
             else:  # karaoke: whole chunk visible, spoken word lights up
                 if p["active"] == "box" and treats[i] != "box":
                     bx = max(2, round(0.22 * px))
@@ -654,21 +1111,51 @@ def events_premium(out_words, style=None, max_words=None,
                     act = _POP_ACTIVE
                 else:
                     act = rf"\1c{accent}" + _POP_ACTIVE
-                text = text_upto(len(chunk) - 1, i, act)
-            events.append({"start": start, "end": end, "text": text,
-                           "premium": True})
+                segs.append({"ci": ci, "start": start, "end": end,
+                             "last_i": len(chunk) - 1, "active_i": i,
+                             "active": act})
 
-    # never overlap the next event (same rationale + logic as
-    # events_dynamic: same-layer overlap stacks two copies of the phrase).
+    # Never overlap the next STATE. Same rationale as events_dynamic — a
+    # same-layer overlap makes libass stack two copies of the phrase — but
+    # applied to visual states, because one state can emit several Dialogue
+    # lines at the same instant and de-duplicating those would erase parts of
+    # a caption rather than resolve an overlap.
     kept = []
-    for i, ev in enumerate(events):
-        nxt = events[i + 1] if i + 1 < len(events) else None
-        if nxt and nxt["start"] <= ev["start"] + 0.01:
+    for i, sg in enumerate(segs):
+        nxt = segs[i + 1] if i + 1 < len(segs) else None
+        if nxt and nxt["start"] <= sg["start"] + 0.01:
             continue
-        if nxt and ev["end"] > nxt["start"]:
-            ev["end"] = nxt["start"]
-        kept.append(ev)
-    return kept
+        if nxt and sg["end"] > nxt["start"]:
+            sg["end"] = nxt["start"]
+        kept.append(sg)
+
+    events = []
+    for sg in kept:
+        c = ctx[sg["ci"]]
+        if stack:
+            for layer, text in _stack_state_events(
+                    c["disp"], c["treats"], c["mults"], c["lines"], c["geom"],
+                    p, s, px, accent, base, sg["last_i"], sg["active_i"],
+                    sg["active"], global_effect, word_anim):
+                events.append({"start": sg["start"], "end": sg["end"],
+                               "text": text, "layer": layer, "premium": True})
+            continue
+        out_lines = []
+        for ln in c["lines"]:
+            parts = []
+            for i in ln:
+                if i > sg["last_i"]:
+                    continue
+                tags = base + _treat_tags(c["treats"][i], p, px, accent, s)
+                if i == sg["active_i"]:
+                    tags += sg["active"]
+                parts.append("{" + tags + "}" + _esc(c["disp"][i]))
+            if parts:
+                out_lines.append(" ".join(parts))
+        events.append({"start": sg["start"], "end": sg["end"],
+                       "text": c["geom"] + anim + r"\N".join(out_lines),
+                       "premium": True})
+    return events
 
 
 def events_from_items(items, tl, play_res=BASE_PLAY_RES):
@@ -731,10 +1218,12 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
             continue
         merged = dict(_norm_style(global_style))
         d = ov if isinstance(ov, dict) else ov.model_dump()
-        for k in ("color", "size", "position", "animation", "size_scale",
-                  "preset", "uppercase"):
-            if d.get(k):
-                merged[k] = d[k]
+        for k in STYLE_KEYS:
+            v = d.get(k)
+            if v is not None if k in STYLE_KEYS_NUMERIC else bool(v):
+                merged[k] = v
+        if d.get("uppercase") is not None:
+            merged["uppercase"] = bool(d["uppercase"])
         if merged.get("preset") == "classic":
             merged["preset"] = None
         key = tuple(sorted(merged.items()))
@@ -763,7 +1252,11 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
             f.write(style_line(name, st, play_res) + "\n")
         f.write(EVENTS_HEADER)
         for ev in events:
-            f.write(f"Dialogue: 0,{_ass_time(ev['start'])},"
+            # Layer matters now: the composer draws effect copies UNDER the
+            # real text (chroma fringes, chrome bands), and libass composites
+            # by ascending layer.
+            f.write(f"Dialogue: {int(ev.get('layer', 0))},"
+                    f"{_ass_time(ev['start'])},"
                     f"{_ass_time(ev['end'])},{ev.get('style_name', 'Default')}"
                     f",,0,0,0,,{ev['text']}\n")
     return path

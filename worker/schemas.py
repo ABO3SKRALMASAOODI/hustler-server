@@ -64,8 +64,14 @@ class CaptionStyle(BaseModel):
     # stack with keyword emphasis), beast (loud Anton karaoke), karaoke
     # (box follows the spoken word), elegant (serif-accented lower third).
     # 'classic' = the legacy look explicitly. None = legacy (signature-safe).
-    preset: Optional[Literal["podcast", "beast", "karaoke", "elegant",
-                             "classic"]] = None
+    preset: Optional[Literal[
+        # original four (single-Dialogue "flow" emission)
+        "podcast", "beast", "karaoke", "elegant",
+        # composed looks (per-line "stack" emission): scale-led hierarchy,
+        # tight/overlapping leading, layered text effects
+        "stacked", "iridescent", "chrome", "editorial", "fashion", "luxe",
+        "impact",
+        "classic"]] = None
     # Force upper/lower case in premium presets; None = the preset's default.
     uppercase: Optional[bool] = None
     # karaoke word-by-word captions; Optional so pre-round-7 EDLs keep their
@@ -77,7 +83,59 @@ class CaptionStyle(BaseModel):
     # entrance animation for STATIC captions (fade/pop/slide_up); dynamic
     # karaoke captions animate word-by-word already, so animation is ignored
     # there. Optional so pre-round-9 EDLs keep their signatures.
-    animation: Optional[Literal["fade", "pop", "slide_up"]] = None
+    animation: Optional[Literal["fade", "pop", "slide_up", "punch",
+                                "blur_in", "whip", "flash", "rise",
+                                "drop"]] = None
+
+    # ── Composer fields (premium presets only) ───────────────────────────
+    # Each MUST also appear in captions.STYLE_KEYS and in agent_tools'
+    # _parse_partial_style allowlist. A field declared in only some of those
+    # places is dropped silently: pydantic ignores undeclared fields, so the
+    # EDL signature never changes, write_edl reports "NO CHANGE", no render
+    # runs — and the agent tells the user the new look was applied.
+    # Explicit font family. Must be one of the families bundled in
+    # worker/fonts (their INTERNAL name — Google ships heavy weights as
+    # separate families, so it is "Poppins Black", not "Poppins").
+    font: Optional[Literal[
+        "Inter Display Black", "Inter Display ExtraBold", "Inter Display Bold",
+        "Anton", "Bebas Neue", "Archivo Black", "Poppins Black",
+        "Syne ExtraBold", "Playfair Display Black", "Instrument Serif",
+        "DM Serif Display"]] = None
+    # Layered text effect applied to emphasised words (or all words when the
+    # preset sets it globally).
+    effect: Optional[Literal["chroma", "chrome", "glow"]] = None
+    # "stack" gives every line its own position (enables leading < 1, i.e.
+    # deliberately overlapping lines, and per-line horizontal stagger).
+    layout: Optional[Literal["stack", "flow"]] = None
+    # Line spacing multiplier, 0.5-2.2. Below 1.0 consecutive lines OVERLAP.
+    leading: Optional[float] = None
+    # Which treatment emphasis words receive. "big" is size-only — the
+    # reference look, where one white word is twice its white neighbours.
+    emphasis: Optional[Literal["big", "huge", "accent", "pop", "box", "serif",
+                               "chrome", "glow", "chroma", "none"]] = None
+    # How much larger an emphasised word renders, 1.0-3.0.
+    emphasis_scale: Optional[float] = None
+
+    @field_validator("leading")
+    @classmethod
+    def _leading_range(cls, v):
+        if v is None:
+            return v
+        if not (0.5 <= float(v) <= 2.2):
+            raise ValueError(
+                f"leading {v} must be between 0.5 and 2.2 (below 1.0 the "
+                "lines deliberately overlap)")
+        return float(v)
+
+    @field_validator("emphasis_scale")
+    @classmethod
+    def _emph_scale_range(cls, v):
+        if v is None:
+            return v
+        if not (1.0 <= float(v) <= 3.0):
+            raise ValueError(
+                f"emphasis_scale {v} must be between 1.0 and 3.0")
+        return float(v)
 
     @field_validator("color")
     @classmethod

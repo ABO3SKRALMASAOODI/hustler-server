@@ -966,32 +966,44 @@ def _parse_partial_style(style):
     fills defaults, so merging cannot reset fields the user didn't mention."""
     if not isinstance(style, dict) or not style:
         return ('ERR: style must be a non-empty object with any of '
-                '{"preset":"podcast|beast|karaoke|elegant|classic",'
+                '{"preset":"podcast|beast|karaoke|elegant|stacked|iridescent|chrome|editorial|fashion|luxe|impact|classic",'
                 '"color":"#RRGGBB","size":"s|m|l|xl","size_scale":0.5-3.0,'
                 '"position":"bottom|top|middle","uppercase":true|false,'
                 '"dynamic":true|false,"highlight_color":"#RRGGBB",'
-                '"animation":"fade|pop|slide_up"}')
+                '"animation":"fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop",'
+                '"font":"<bundled family>","effect":"chroma|chrome|glow",'
+                '"layout":"stack|flow","leading":0.5-2.2,'
+                '"emphasis":"big|huge|accent|pop|box|serif|chrome|glow|chroma",'
+                '"emphasis_scale":1.0-3.0}')
+    # Mirrors captions.STYLE_KEYS (+ dynamic/uppercase, which are booleans
+    # handled separately there). A field missing HERE is rejected outright;
+    # a field missing from STYLE_KEYS is accepted and then silently ignored.
     unknown = sorted(set(style) - {"color", "size", "size_scale", "position",
                                    "dynamic", "highlight_color", "animation",
-                                   "preset", "uppercase"})
+                                   "preset", "uppercase", "font", "effect",
+                                   "layout", "leading", "emphasis",
+                                   "emphasis_scale"})
     if unknown:
-        return (f"ERR: unknown style field(s) {unknown} — only preset, color, "
-                "size, size_scale, position, uppercase, dynamic, "
-                "highlight_color and animation exist (preset picks a premium "
-                "look: podcast/beast/karaoke/elegant, classic = plain; size "
-                "is the coarse bucket s|m|l|xl, size_scale a continuous "
-                "0.5-3.0 fine-tune multiplier; highlight_color is the accent "
-                "of emphasized/spoken words; animation fade|pop|slide_up "
-                "animates static captions' entrance; there is no free-form "
-                "font choice beyond the presets).")
+        return (f"ERR: unknown style field(s) {unknown} — the style fields are "
+                "preset, color, size, size_scale, position, uppercase, "
+                "dynamic, highlight_color, animation, font, effect, layout, "
+                "leading, emphasis and emphasis_scale. preset picks a look "
+                "(podcast/beast/karaoke/elegant/stacked/iridescent/chrome/editorial/fashion/luxe/impact/classic); "
+                "font names a bundled family (e.g. 'Playfair Display Black'); "
+                "effect layers chroma/chrome/glow onto emphasised words; "
+                "layout 'stack' gives each line its own position, which is "
+                "what lets leading go below 1.0 so lines overlap; emphasis "
+                "chooses what emphasis words get ('big' = size only, no "
+                "colour change); emphasis_scale is how much bigger they go.")
     try:
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
-                '{"color":"#RRGGBB","size":"s|m|l|xl",'
+                '{"preset":"podcast|beast|karaoke|elegant|stacked|iridescent|chrome|editorial|fashion|luxe|impact|classic",'
+                '"color":"#RRGGBB","size":"s|m|l|xl",'
                 '"position":"bottom|top|middle","dynamic":true|false,'
-                '"highlight_color":"#RRGGBB",'
-                '"animation":"fade|pop|slide_up"}.')
+                '"highlight_color":"#RRGGBB","leading":0.5-2.2,'
+                '"emphasis_scale":1.0-3.0,"animation":"fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop"}.')
     return {k: validated[k] for k in style}
 
 
@@ -1987,6 +1999,41 @@ def _seg_schema():
                       "minItems": 2, "maxItems": 2}}
 
 
+# ONE definition of the caption-style properties, shared by every tool that
+# accepts a style. These used to be duplicated per tool, which is exactly how
+# a field could reach add_captions' schema but not set_caption_style's — the
+# agent would then be told a field does not exist on the very tool it uses to
+# restyle EXISTING captions. Keep in step with captions.STYLE_KEYS,
+# schemas.CaptionStyle and _parse_partial_style's allowlist.
+CAPTION_PRESETS = ["podcast", "beast", "karaoke", "elegant",
+                   "stacked", "iridescent", "chrome", "editorial",
+                   "fashion", "luxe", "impact", "classic"]
+CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
+                 "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
+                 "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
+                 "Instrument Serif", "DM Serif Display"]
+CAPTION_ANIMS = ["fade", "pop", "slide_up", "punch", "blur_in", "whip",
+                 "flash", "rise", "drop"]
+_STYLE_PROPS = {
+    "preset": {"type": "string", "enum": CAPTION_PRESETS},
+    "color": {"type": "string"},
+    "size": {"type": "string", "enum": ["s", "m", "l", "xl"]},
+    "size_scale": {"type": "number"},
+    "position": {"type": "string", "enum": ["bottom", "top", "middle"]},
+    "uppercase": {"type": "boolean"},
+    "dynamic": {"type": "boolean"},
+    "highlight_color": {"type": "string"},
+    "animation": {"type": "string", "enum": CAPTION_ANIMS},
+    "font": {"type": "string", "enum": CAPTION_FONTS},
+    "effect": {"type": "string", "enum": ["chroma", "chrome", "glow"]},
+    "layout": {"type": "string", "enum": ["stack", "flow"]},
+    "leading": {"type": "number"},
+    "emphasis": {"type": "string",
+                 "enum": ["big", "huge", "accent", "pop", "box", "serif",
+                          "chrome", "glow", "chroma", "none"]},
+    "emphasis_scale": {"type": "number"},
+}
+
 TOOLS = {
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
                        "summary. Call this first.", {}),
@@ -2115,28 +2162,15 @@ TOOLS = {
                      "'podcast'}, emphasis_words:['money','22','future',"
                      "'opportunities']}. Example — dictated title card: "
                      "{items:[{text:'CHAPTER ONE', start:0, end:2.5, "
-                     "style:{preset:'beast'}}]}. No free-form font choice "
-                     "beyond the presets; say so if asked.",
+                     "style:{preset:'beast'}}]}. Stack presets (stacked/"
+                     "iridescent/chrome/fashion/luxe/editorial/impact) compose "
+                     "the phrase across lines of very different SIZES; font "
+                     "picks a bundled family, emphasis 'big' enlarges keywords "
+                     "WITHOUT recolouring them, leading below 1.0 overlaps "
+                     "the lines, effect adds chroma/chrome/glow.",
                      {"mode": {"type": "string"},
                       "style": {"type": "object",
-                                "properties": {
-                                    "preset": {"type": "string",
-                                               "enum": ["podcast", "beast",
-                                                        "karaoke", "elegant",
-                                                        "classic"]},
-                                    "color": {"type": "string"},
-                                    "size": {"type": "string",
-                                             "enum": ["s", "m", "l", "xl"]},
-                                    "size_scale": {"type": "number"},
-                                    "position": {"type": "string",
-                                                 "enum": ["bottom", "top",
-                                                          "middle"]},
-                                    "uppercase": {"type": "boolean"},
-                                    "dynamic": {"type": "boolean"},
-                                    "highlight_color": {"type": "string"},
-                                    "animation": {"type": "string",
-                                                  "enum": ["fade", "pop",
-                                                           "slide_up"]}}},
+                                 "properties": _STYLE_PROPS},
                       "max_words_per_caption": {"type": "integer"},
                       "emphasis_words": {"type": "array",
                                          "items": {"type": "string"}},
@@ -2190,31 +2224,7 @@ TOOLS = {
                           "captions; errors helpfully if no captions exist "
                           "yet.",
                           {"style": {"type": "object",
-                                     "properties": {
-                                         "preset": {"type": "string",
-                                                    "enum": ["podcast",
-                                                             "beast",
-                                                             "karaoke",
-                                                             "elegant",
-                                                             "classic"]},
-                                         "color": {"type": "string"},
-                                         "size": {"type": "string",
-                                                  "enum": ["s", "m", "l",
-                                                           "xl"]},
-                                         "size_scale": {"type": "number"},
-                                         "position": {"type": "string",
-                                                      "enum": ["bottom",
-                                                               "top",
-                                                               "middle"]},
-                                         "uppercase": {"type": "boolean"},
-                                         "dynamic": {"type": "boolean"},
-                                         "highlight_color": {"type":
-                                                             "string"},
-                                         "animation": {"type": "string",
-                                                       "enum": ["fade",
-                                                                "pop",
-                                                                "slide_up"]
-                                                       }}},
+                                     "properties": _STYLE_PROPS},
                            "emphasis_words": {"type": "array",
                                               "items": {"type":
                                                         "string"}}}),
