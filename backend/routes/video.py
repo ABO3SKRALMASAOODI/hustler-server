@@ -1004,21 +1004,36 @@ def project_state(user_id, project_id):
 
     renders = [a for a in extra if a["kind"] == "render"]
     by_version = {}
-    latest_preview = None
+    # `extra` is ordered id DESC, so the FIRST render seen per (version, variant)
+    # is the NEWEST asset for it — keep that one. Overwriting on every row (the
+    # old behaviour) left the OLDEST re-render of a version as its pointer.
     for a in renders:
         m = a.get("meta") or {}
         v, variant = m.get("edl_version"), m.get("variant")
         if v is not None:
-            by_version.setdefault(int(v), {})[variant] = a["id"]
-        if variant == "preview" and latest_preview is None:
-            latest_preview = {"asset_id": a["id"],
-                              "edl_version": v,
-                              "created_at": a["created_at"].isoformat()}
+            bv = by_version.setdefault(int(v), {})
+            if variant not in bv:
+                bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
+    # The preview the player should show is the render of the NEWEST edl version
+    # — NOT merely the newest render asset id. A late re-render of an OLDER
+    # version (a version-picker tap, a retried/redelivered job) inserts a higher
+    # asset id for a lower version; picking "newest id" then flips the player
+    # back to that older cut/caption state. Pick by max version, and expose the
+    # newest-asset id per version to the version list.
+    latest_preview = None
+    preview_versions = [v for v, d in by_version.items() if d.get("preview")]
+    if preview_versions:
+        vmax = max(preview_versions)
+        pv = by_version[vmax]["preview"]
+        latest_preview = {"asset_id": pv["id"], "edl_version": vmax,
+                          "created_at": pv["created_at"].isoformat()}
     music = [a for a in extra if a["kind"] == "music"]
     proxies = [a for a in extra if a["kind"] == "proxy"]
+    # Only ever hand back a proxy that belongs to the ACTIVE original. The
+    # proxies[0] fallback could serve a previous upload's proxy (a different
+    # video) in the window after a re-upload before its own proxy is built.
     proxy = next((a for a in proxies
-                  if original and a["sha256"] == original["sha256"]),
-                 proxies[0] if proxies else None)
+                  if original and a["sha256"] == original["sha256"]), None)
 
     return jsonify({
         "project": {"id": p["id"], "title": p["title"]},
@@ -1036,8 +1051,10 @@ def project_state(user_id, project_id):
         "edl_versions": [
             {"version": v["version"], "created_by": v["created_by"],
              "created_at": v["created_at"].isoformat(),
-             "preview_asset_id": by_version.get(v["version"], {}).get("preview"),
-             "final_asset_id": by_version.get(v["version"], {}).get("final")}
+             "preview_asset_id":
+                 (by_version.get(v["version"], {}).get("preview") or {}).get("id"),
+             "final_asset_id":
+                 (by_version.get(v["version"], {}).get("final") or {}).get("id")}
             for v in versions],
         "latest_preview": latest_preview,
         "music_assets": [
@@ -1569,7 +1586,11 @@ def list_edls(user_id, project_id):
         m = r.get("meta") or {}
         v, variant = m.get("edl_version"), m.get("variant")
         if v is not None:
-            by_version.setdefault(int(v), {})[variant] = r["id"]
+            bv = by_version.setdefault(int(v), {})
+            # Keep the NEWEST asset id per (version, variant): a version can be
+            # re-rendered, and the version list must point at the latest encode.
+            if r["id"] > bv.get(variant, 0):
+                bv[variant] = r["id"]
 
     return jsonify({"edls": [
         {"version": v["version"], "created_by": v["created_by"],

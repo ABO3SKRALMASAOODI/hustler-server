@@ -3164,4 +3164,96 @@ check("pipeline version: config re-exports the schemas constant",
       wconfig.PIPELINE_VERSION == schemas.PIPELINE_VERSION
       and isinstance(schemas.PIPELINE_VERSION, int))
 
+print("== Round-22: the opening frame carries a caption (paused player) ==")
+# A mobile player loads paused at t=0 and never autoplays. Reveal captions
+# otherwise start at the first spoken word, so that frame was blank and the
+# user concluded "captions didn't apply". build_ass now carries the first
+# from_transcript caption back to t=0 when speech starts within the lead-in.
+_lead_edl = validate_edl(
+    {"keep": [[0, 60]],
+     "captions": {"mode": "from_transcript",
+                  "style": {"preset": "podcast"}}}, 60).model_dump()
+_lead_index = {"video": {"duration": 60}, "sentences": [],
+               "words": [{"w": "hey", "t0": 0.16, "t1": 0.5},
+                         {"w": "there", "t0": 0.5, "t1": 0.9},
+                         {"w": "friends", "t0": 0.9, "t1": 1.4}]}
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(_lead_edl, _lead_index,
+                         Timeline(_lead_edl["keep"]),
+                         os.path.join(td, "lead.ass"), play_res=(1080, 1920))
+    first = next(l for l in open(p).read().splitlines()
+                 if l.startswith("Dialogue:"))
+    check("first caption starts at 0:00:00.00 (no blank opening frame)",
+          first.split(",")[1].strip() == "0:00:00.00")
+
+# A genuine silent intro (first word well past the lead-in) is NOT pulled to
+# 0 — a caption held over real silence would misrepresent the timing.
+_intro_index = {"video": {"duration": 60}, "sentences": [],
+                "words": [{"w": "later", "t0": 5.0, "t1": 5.4},
+                          {"w": "words", "t0": 5.4, "t1": 5.9}]}
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(_lead_edl, _intro_index,
+                         Timeline(_lead_edl["keep"]),
+                         os.path.join(td, "intro.ass"), play_res=(1080, 1920))
+    first = next(l for l in open(p).read().splitlines()
+                 if l.startswith("Dialogue:"))
+    check("a long silent intro keeps the real first-word time",
+          first.split(",")[1].strip() != "0:00:00.00")
+
+# An inserted clip opening the program is NOT overwritten: the clamp must not
+# pull a main-footage word back over an untranscribed title card / b-roll.
+_ins_edl = validate_edl(
+    {"keep": [[0, 60]],
+     "inserts": [{"id": "i0", "kind": "image", "asset_key": "img/x.png",
+                  "at_output_s": 0, "duration_s": 1.0}],
+     "captions": {"mode": "from_transcript", "style": {"preset": "podcast"}}},
+    60).model_dump()
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(_ins_edl, _lead_index,
+                         Timeline(_ins_edl["keep"], _ins_edl["inserts"]),
+                         os.path.join(td, "ins.ass"), play_res=(1080, 1920))
+    first = next(l for l in open(p).read().splitlines()
+                 if l.startswith("Dialogue:"))
+    check("clamp skipped when an inserted clip opens the program",
+          first.split(",")[1].strip() != "0:00:00.00")
+
+# Non-preset (legacy transcript) captions get the same opening-frame fix.
+_lead_legacy = validate_edl(
+    {"keep": [[0, 60]], "captions": {"mode": "from_transcript"}}, 60
+).model_dump()
+with tempfile.TemporaryDirectory() as td:
+    p = caplib.build_ass(_lead_legacy, _lead_index,
+                         Timeline(_lead_legacy["keep"]),
+                         os.path.join(td, "leg.ass"), play_res=(1080, 1920))
+    first = next(l for l in open(p).read().splitlines()
+                 if l.startswith("Dialogue:"))
+    check("legacy transcript captions also fill the opening frame",
+          first.split(",")[1].strip() == "0:00:00.00")
+
+print("== Round-22: render cache invalidates on transcript change ==")
+# from_transcript captions burn from the mutable index, so the render cache
+# must key on a caption fingerprint too — otherwise a caption-less render is
+# served forever after the index gains words (a re-render becomes a no-op).
+import renderer as _rnd                                        # noqa: E402
+_fp_edl = {"keep": [[0, 10]],
+           "captions": {"mode": "from_transcript", "style": {"preset": "podcast"}}}
+_fp_a = _rnd._caption_index_fp(
+    _fp_edl, {"words": [{"w": "hi", "t0": 0.1, "t1": 0.4}]})
+_fp_b = _rnd._caption_index_fp(
+    _fp_edl, {"words": [{"w": "hi", "t0": 0.1, "t1": 0.4},
+                        {"w": "there", "t0": 0.5, "t1": 0.9}]})
+check("caption fingerprint is stable for identical words",
+      _fp_a == _rnd._caption_index_fp(
+          _fp_edl, {"words": [{"w": "hi", "t0": 0.1, "t1": 0.4}]}))
+check("caption fingerprint changes when the transcript changes",
+      _fp_a != _fp_b and _fp_a and _fp_b)
+check("caption-off render keeps the cheap (version, sha) cache — no fingerprint",
+      _rnd._caption_index_fp({"keep": [[0, 10]], "captions": None},
+                             {"words": [{"w": "hi", "t0": 0.1, "t1": 0.4}]})
+      is None)
+check("explicit-item captions don't get a transcript fingerprint",
+      _rnd._caption_index_fp(
+          {"keep": [[0, 10]], "captions": [{"text": "x", "start": 1, "end": 2}]},
+          {"words": [{"w": "hi", "t0": 0.1, "t1": 0.4}]}) is None)
+
 print(f"\nALL {PASS} CHECKS PASSED")

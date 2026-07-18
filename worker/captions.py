@@ -31,6 +31,14 @@ FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 MAX_LINE_CHARS = 42
 MAX_LINES = 2
 MIN_EVENT_S = 0.6
+# A paused player (mobile never autoplays) shows the frame at t=0. Reveal /
+# karaoke / transcript captions otherwise start at the FIRST spoken word, so
+# that opening frame is caption-LESS — a user who never hits play sees no text
+# and concludes "captions didn't apply" (a real, repeated founder report). When
+# speech begins within this lead-in, carry the first caption back to t=0 so the
+# very first frame already shows text. A longer silent intro is left alone — a
+# caption held over real silence would misrepresent the timing.
+FIRST_CAPTION_LEAD_IN_S = 2.0
 
 BASE_PLAY_RES = (1280, 720)
 FONT_SIZES = {"s": 30, "m": 40, "l": 52, "xl": 68}
@@ -787,6 +795,16 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
             events = events_from_transcript(
                 out_words, max_words=captions.get("max_words_per_caption"),
                 line_chars=line_chars_for(global_style, play_res))
+        # Make the opening frame carry a caption so a paused player isn't blank
+        # (see FIRST_CAPTION_LEAD_IN_S). from_transcript only — dictated caption
+        # items keep their authored timing. NOT when an inserted clip opens the
+        # program: inserts aren't transcribed, their opening frames aren't blank,
+        # and a main-footage word doesn't belong burned over someone's title card.
+        opens_on_insert = any(fs <= 0.01 and fs + d > 0.01
+                              for fs, d in tl.insert_positions())
+        if events and not opens_on_insert \
+                and 0.0 < events[0]["start"] <= FIRST_CAPTION_LEAD_IN_S:
+            events[0]["start"] = 0.0
     elif isinstance(captions, list):
         events = events_from_items(captions, tl, play_res)
         global_style = None

@@ -14,6 +14,7 @@ previews read the 720p PROXY and encode fast at 480p with dense keyframes
 Every render also emits a 3x3 contact sheet for the agent's self-check.
 """
 
+import hashlib
 import os
 import shutil
 import time
@@ -630,6 +631,28 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
           f"(expected {expected:.2f}s)", flush=True)
 
 
+def _caption_index_fp(edl_json, index):
+    """Fingerprint of the inputs that decide from_transcript caption TEXT.
+
+    from_transcript captions are burned from the index words at render time, and
+    the index row is mutable (self-heal re-index, Deepgram heal, transcript
+    edits all upsert it in place). The render cache is otherwise keyed only by
+    (version, sha), so a version once rendered against an empty/old transcript
+    was served forever — a re-render was a silent no-op and captions never
+    updated. Mixing this fingerprint into the cache guard invalidates exactly
+    those renders. Returns None when captions don't depend on the transcript, so
+    caption-off and explicit-item renders keep the cheap (version, sha) cache.
+    """
+    caps = edl_json.get("captions")
+    if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
+        return None
+    h = hashlib.sha256()
+    for w in (index.get("words") or []):
+        h.update(f"{w.get('w', '')}|{w.get('t0')}|{w.get('t1')};"
+                 .encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 def run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     variant = "preview" if job["type"] == "preview" else "final"
@@ -642,17 +665,35 @@ def run_render_job(worker_db, job):
     if not original or not original["sha256"]:
         raise RuntimeError("No indexed original video for this project")
 
-    # Cache: this exact EDL version was already rendered in this variant
-    # against this exact source file — serve the stored asset instead of
-    # re-encoding the same output. (EDL versions are append-only, so version
-    # N's content can never change; the sha guard covers video replacement.)
+    # Cache: this exact EDL version was already rendered in this variant against
+    # this exact source file — serve the stored asset instead of re-encoding.
+    # (EDL versions are append-only, so version N's geometry can never change;
+    # the sha guard covers video replacement.) For from_transcript captions the
+    # burned TEXT also depends on the mutable index, so a caption fingerprint
+    # must match too (see _caption_index_fp) — otherwise a caption-less render
+    # is served forever after the transcript gains words.
     cached = worker_db.run(dbx.find_render_asset, project_id, variant, version)
     if cached and (cached.get("meta") or {}).get("src_sha256") == \
             original["sha256"] and storage.exists(cached["storage_key"]):
-        return {"render_asset_id": cached["id"],
-                "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
-                "duration_s": cached["duration_s"], "edl_version": version,
-                "variant": variant, "cached": True}
+        caps = edl_row["json"].get("captions")
+        needs_fp = isinstance(caps, dict) and caps.get("mode") == "from_transcript"
+        stored_fp = (cached.get("meta") or {}).get("caption_fp")
+        fp_ok = True
+        # Grandfather renders made before fingerprinting existed (stored_fp is
+        # None): trust them rather than force-re-encode every cached preview AND
+        # final on this box (a long final re-render is minutes on ~1 vCPU). New
+        # renders all carry a fingerprint, so the stale-transcript guard applies
+        # going forward; only a PRESENT fingerprint that no longer matches busts.
+        if needs_fp and stored_fp is not None:
+            idx_c = worker_db.run(dbx.get_index_by_sha, original["sha256"])
+            want_fp = _caption_index_fp(edl_row["json"],
+                                        (idx_c or {}).get("json") or {})
+            fp_ok = (want_fp == stored_fp)
+        if fp_ok:
+            return {"render_asset_id": cached["id"],
+                    "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
+                    "duration_s": cached["duration_s"], "edl_version": version,
+                    "variant": variant, "cached": True}
     index_row = worker_db.run(dbx.get_index_by_sha, original["sha256"])
     if not index_row:
         raise RuntimeError("Video index missing — re-run indexing")
@@ -736,7 +777,8 @@ def run_render_job(worker_db, job):
             width=out_info["width"], height=out_info["height"],
             fps=out_info["fps"],
             meta={"variant": variant, "edl_version": version,
-                  "sheet_key": sheet_key, "src_sha256": original["sha256"]})
+                  "sheet_key": sheet_key, "src_sha256": original["sha256"],
+                  "caption_fp": _caption_index_fp(edl_row["json"], index)})
         # Deterministic mid-word audit: keep boundaries that clip a word,
         # computed straight from the index — visible in logs and to the
         # agent even if it ignored the write-time warnings.
