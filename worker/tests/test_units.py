@@ -154,7 +154,7 @@ check("yuv420p output", "format=yuv420p" in g)
 
 g2 = build_filtergraph(edl, 60.0, True, tl3, None,
                        [(1, {"storage_key": "music/1/a.mp3", "start": 0.0,
-                             "end": 15.0, "gain_db": -18, "duck": True})],
+                             "end": 15.0, "gain_db": -18, "duck": True}, 120.0)],
                        index, preview=False)
 check("music at t=0 has no adelay (portability)", "adelay" not in g2)
 check("ducking windows present", "volume=-12.0dB:enable=" in g2)
@@ -162,7 +162,7 @@ check("amix normalize off", "amix=inputs=2:duration=first:normalize=0" in g2)
 
 g2b = build_filtergraph(edl, 60.0, True, tl3, None,
                         [(1, {"storage_key": "music/1/a.mp3", "start": 3.0,
-                              "end": 15.0, "gain_db": -18, "duck": False})],
+                              "end": 15.0, "gain_db": -18, "duck": False}, 120.0)],
                         index, preview=False)
 check("music at t=3 delayed into the output timeline",
       ",adelay=3000:all=1" in g2b)
@@ -274,7 +274,7 @@ speech_index = {"video": {"duration": 60}, "words": [],
                 "sentences": [{"t0": 41.0, "t1": 43.0}]}   # out: 11..13
 g_r = build_filtergraph(remap_edl2, 60.0, True, tl_r, None,
                         [(1, {"storage_key": "music/1/a.mp3", "start": 5.0,
-                              "end": 18.0, "gain_db": -18, "duck": True})],
+                              "end": 18.0, "gain_db": -18, "duck": True}, 120.0)],
                         speech_index, preview=False)
 check("volume stays in SOURCE time (pre-trim)",
       "volume=-6.0dB:enable='between(t,12.00,14.00)'" in g_r)
@@ -651,8 +651,11 @@ check("honest offer to change music is clean",
 check("music claim fine after a real write",
       _reply_violations("The music is now lowered to -12dB.",
                         wrote=True, previewed=True) == [])
+_audio_hint = _nearest_alternative("lower the music volume")
+# Assert the CAPABILITY is offered, not one phrasing of it — the previous
+# literal "louder/quieter" broke on a reword that still advertised gain.
 check("audio hint mentions gain control",
-      "louder/quieter" in _nearest_alternative("lower the music volume"))
+      "louder" in _audio_hint and "quieter" in _audio_hint)
 
 print("== Round-6 music tools ==")
 import json                                                   # noqa: E402
@@ -3435,5 +3438,230 @@ check("stack: states never overlap (no stacked duplicate phrases)",
           if _ev[i]["start"] != _ev[i + 1]["start"]))
 check("composer: an explicit font overrides the preset's family",
       r"\fnPoppins Black" in _stack(font="Poppins Black")[0]["text"])
+
+print("== Round-25: music library + fitting ==")
+import agent_prompt                                           # noqa: E402
+import music_library                                          # noqa: E402
+from agent_tools import (swap_music, set_music_fit,           # noqa: E402
+                         list_music_library, _resolve_music)
+
+# --- the silent-drop guard (round-24's lesson, applied to music) ---
+# A fitting field declared in only SOME layers is dropped without a trace:
+# signature unchanged -> write_edl says NO CHANGE -> no render -> and the
+# agent still reports success. Pin every layer to the same field set.
+FIT_FIELDS = {"offset_s", "fade_in_s", "fade_out_s", "loop"}
+_mus_fields = set(schemas.MusicItem.model_fields)
+check("music: every fitting field is a real MusicItem field",
+      FIT_FIELDS <= _mus_fields)
+check("music: add_music offers every fitting field to the agent",
+      FIT_FIELDS <= set(agent_tools.TOOLS["add_music"][2]))
+check("music: set_music_fit offers every fitting field",
+      FIT_FIELDS <= set(agent_tools.TOOLS["set_music_fit"][2]))
+check("music: the fit tools mutate the EDL (tracked for honesty)",
+      {"swap_music", "set_music_fit"} <= agent_tools.WRITE_TOOLS)
+
+# --- back-compat: a pre-library EDL must hash IDENTICALLY ---
+# write_edl compares a fresh validated dump against the RAW stored json, so a
+# non-None default on any new field would mint a phantom version and re-render
+# every project that has music.
+_old = {"keep": [[0.0, 30.0]],
+        "music": [{"id": "mus1", "storage_key": "music/1/a.mp3",
+                   "start": 0.0, "end": 30.0, "gain_db": -18.0,
+                   "duck": True}]}
+_fresh = schemas.validate_edl(json.loads(json.dumps(_old)), 30.0).model_dump()
+check("music: pre-library EDLs keep their exact signature",
+      schemas.edl_signature(_fresh) == schemas.edl_signature(_old))
+check("music: unset fitting fields normalize to None",
+      all(_fresh["music"][0][f] is None for f in FIT_FIELDS))
+
+# loop is opt-IN: defaulting it on would change existing renders with no new
+# version, so a cached render and a fresh one would disagree.
+_lp = json.loads(json.dumps(_old))
+_lp["music"][0]["loop"] = False
+check("music: loop=False normalizes to None (no phantom version)",
+      schemas.validate_edl(_lp, 30.0).model_dump()["music"][0]["loop"] is None)
+_lp["music"][0]["loop"] = True
+check("music: loop=True is preserved",
+      schemas.validate_edl(_lp, 30.0).model_dump()["music"][0]["loop"] is True)
+
+# fades clamp to half the span so a sting cannot fade in past its own end
+_fd = json.loads(json.dumps(_old))
+_fd["music"][0].update({"start": 0.0, "end": 4.0, "fade_in_s": 10.0})
+check("music: a fade longer than half the span is clamped",
+      schemas.validate_edl(_fd, 30.0).model_dump()["music"][0]["fade_in_s"] == 2.0)
+for _bad, _f in ((-1.0, "offset_s"), (-1.0, "fade_out_s")):
+    _b = json.loads(json.dumps(_old))
+    _b["music"][0][_f] = _bad
+    try:
+        schemas.validate_edl(_b, 30.0)
+        _ok = False
+    except schemas.EDLValidationError:
+        _ok = True
+    check(f"music: negative {_f} is rejected", _ok)
+
+# --- the diff line must SHOW a fit change, or the agent reads back nothing ---
+_d1 = schemas.describe_edl(_fresh, 30.0)
+_d2s = json.loads(json.dumps(_old))
+_d2s["music"][0]["loop"] = True
+_d2 = schemas.describe_edl(schemas.validate_edl(_d2s, 30.0).model_dump(), 30.0)
+check("music: a fit-only change looks different in the diff line", _d1 != _d2)
+check("music: the diff line names the fit", "looped" in _d2)
+
+# --- library resolution is a WHITELIST, not a prefix match ---
+# renderer._fetch downloads whatever key it is handed with no project scoping,
+# so a loose test here would be a read primitive over the whole bucket.
+check("library: a non-library key is not a library ref",
+      not music_library.is_library_ref("music/1/a.mp3"))
+check("library: an unknown slug does not resolve",
+      music_library.resolve("library:no-such-track-xyz") is None)
+check("library: path traversal does not resolve",
+      music_library.resolve("library:../../../etc/passwd") is None
+      and music_library.local_path("library:../../etc/passwd") is None)
+check("library: a plain 'library'-prefixed key is not a ref",
+      music_library.resolve("library/music/../secret.mp4") is None)
+check("library: every catalogued track resolves to a file inside music/",
+      all(music_library.local_path(music_library.ref(t["slug"]))
+          .startswith(music_library.MUSIC_DIR)
+          for t in music_library.CATALOG))
+check("library: every catalogued track declares a CC0/public-domain licence",
+      all(str(t.get("license", "")).upper().replace("-", "").startswith(
+          ("CC0", "PUBLICDOMAIN", "PD")) for t in music_library.CATALOG))
+check("library: every catalogued mood is a known mood",
+      all(t.get("mood") in music_library.MOODS
+          for t in music_library.CATALOG))
+
+_bad_ref = _resolve_music(ToolCtx(json.loads(json.dumps(_old))),
+                          "library:definitely-not-real")
+check("library: add_music rejects an invented slug",
+      _bad_ref[0] is None and _bad_ref[1].startswith("REJECTED"))
+
+# --- swap / refit behaviour the user asked for by name ---
+_sc = ToolCtx(json.loads(json.dumps(_old)))
+r = swap_music(_sc, "nope", "music/1/a.mp3")
+check("swap_music rejects an unknown id", r.startswith("REJECTED"))
+
+_fc = ToolCtx(json.loads(json.dumps(_old)))
+r = set_music_fit(_fc, "mus1", start=5.0, fade_out_s=3.0, loop=True)
+check("set_music_fit retimes in place",
+      _fc.written["music"][0]["start"] == 5.0
+      and _fc.written["music"][0]["fade_out_s"] == 3.0
+      and _fc.written["music"][0]["loop"] is True)
+check("set_music_fit leaves untouched fields alone",
+      _fc.written["music"][0]["gain_db"] == -18.0
+      and _fc.written["music"][0]["duck"] is True)
+_fc2 = ToolCtx(json.loads(json.dumps(_old)))
+r2 = set_music_fit(_fc2, "mus1")
+check("set_music_fit reports NO CHANGE rather than a phantom edit",
+      r2.startswith("NO CHANGE") and _fc2.written is None)
+_fc3 = ToolCtx(json.loads(json.dumps(_old)))
+r3 = set_music_fit(_fc3, "nope", start=1.0)
+check("set_music_fit rejects an unknown id", r3.startswith("REJECTED"))
+
+# An offset past the end of the track renders SILENCE, and the renderer
+# discards it — so storing one would make get_edl report a setting the audio
+# does not have. Both writers must refuse it up front.
+_oc = ToolCtx(json.loads(json.dumps(_old)),
+              asset={"kind": "music", "duration_s": 30.0})
+_ro = add_music(_oc, "music/1/a.mp3", offset_s=45.0)
+check("add_music rejects an offset past the end of the track",
+      _ro.startswith("REJECTED") and _oc.written is None)
+_oc2 = ToolCtx(json.loads(json.dumps(_old)),
+               asset={"kind": "music", "duration_s": 30.0})
+_ro2 = set_music_fit(_oc2, "mus1", offset_s=45.0)
+check("set_music_fit rejects an offset past the end of the track",
+      _ro2.startswith("REJECTED") and _oc2.written is None)
+_oc3 = ToolCtx(json.loads(json.dumps(_old)),
+               asset={"kind": "music", "duration_s": 30.0})
+_ro3 = add_music(_oc3, "music/1/a.mp3", offset_s=8.0)
+check("add_music accepts an offset inside the track",
+      _oc3.written is not None
+      and _oc3.written["music"][-1]["offset_s"] == 8.0)
+
+# --- the renderer must actually ACT on the fit ---
+# The nastiest variant of the silent-drop bug: the field reaches the EDL, the
+# signature moves, a version IS written and a render DOES happen — and the
+# audio is byte-identical. Pin the filters themselves.
+_mf_edl = schemas.validate_edl({"keep": [[0.0, 30.0]]}, 30.0).model_dump()
+_mf_item = {"storage_key": "library:demo", "start": 0.0, "end": 30.0,
+            "gain_db": -18.0, "duck": False, "offset_s": 12.0,
+            "fade_in_s": 1.0, "fade_out_s": 2.0, "loop": True}
+_gf = build_filtergraph(_mf_edl, 30.0, True, Timeline(_mf_edl["keep"]), None,
+                        [(1, _mf_item, 20.0)], {"words": []}, preview=False)
+check("renderer: offset seeks INTO the track",
+      "atrim=start=12.000:end=42.000" in _gf)
+check("renderer: the item's own fade-in is applied",
+      "afade=t=in:st=0:d=1.00" in _gf)
+check("renderer: the fade-out lands at the END of the span",
+      "afade=t=out:st=28.00:d=2.00" in _gf)
+check("renderer: fades come BEFORE adelay (t=0 is the music's own start)",
+      _gf.index("afade=t=in") < _gf.index("volume=-18.0dB"))
+# An offset past the end of the track would render pure silence.
+_mf_bad = dict(_mf_item, offset_s=999.0)
+_gb = build_filtergraph(_mf_edl, 30.0, True, Timeline(_mf_edl["keep"]), None,
+                        [(1, _mf_bad, 20.0)], {"words": []}, preview=False)
+check("renderer: an offset past the track end falls back to 0",
+      "atrim=start=0.000" in _gb)
+# A legacy item (no fitting fields at all) must render as it always did.
+_mf_old = {"storage_key": "music/1/a.mp3", "start": 0.0, "end": 15.0,
+           "gain_db": -18, "duck": False}
+_go = build_filtergraph(_mf_edl, 30.0, True, Timeline(_mf_edl["keep"]), None,
+                        [(1, _mf_old, 120.0)], {"words": []}, preview=False)
+check("renderer: a pre-fitting music item gains no fades",
+      "afade" not in _go and "atrim=start=0.000:end=15.000" in _go)
+
+# --- the WIRING a filtergraph test cannot see ---
+# A library ref must never be handed to object storage as a key: it is not an
+# object, and every render using one would fail. This is the branch that was
+# actually broken while every filtergraph assertion above still passed.
+from renderer import music_source                              # noqa: E402
+_fetched = []
+check("renderer: a normal music key is fetched from storage",
+      music_source("music/1/a.mp3", lambda k: (_fetched.append(k), "/tmp/x")[1])
+      == "/tmp/x" and _fetched == ["music/1/a.mp3"])
+_never = []
+try:
+    music_source("library:not-in-catalog", lambda k: _never.append(k))
+    _lib_raised = False
+except Exception:
+    _lib_raised = True
+check("renderer: a missing library track fails loudly, not silently",
+      _lib_raised and _never == [])
+
+# --- honesty: the prompt must no longer send users to the paperclip ---
+check("prompt: music no longer requires an upload",
+      "do not attempt anything else" not in agent_prompt.system_prompt())
+check("prompt: the library is offered to the agent",
+      ("list_music_library" in agent_prompt.system_prompt())
+      == bool(music_library.CATALOG))
+
+# The system prompt is the LAST ungated surface: the tool hides itself, the
+# state block omits the library and the fallback hint drops it — but a
+# constant prompt would still swear a library exists while giving the agent
+# no way to reach one, and forbid it from asking for an upload. Then it
+# invents a track or stalls. Assert the claim tracks reality BOTH ways.
+_sp_on = agent_prompt.system_prompt()
+_saved_catalog = music_library.CATALOG
+try:
+    music_library.CATALOG = []
+    _sp_off = agent_prompt.system_prompt()
+finally:
+    music_library.CATALOG = _saved_catalog
+check("prompt: with no tracks shipped it makes NO library claim",
+      "list_music_library" not in _sp_off
+      and "built-in library" not in _sp_off
+      and "royalty-free library" not in _sp_off)
+check("prompt: with no tracks shipped it asks for an upload instead",
+      "paperclip" in _sp_off)
+check("prompt: the gate only changes the music wording",
+      abs(len(_sp_on) - len(_sp_off)) < 900)
+# The hint must track what this deployment can ACTUALLY do: offer the library
+# when tracks shipped, and say nothing about one when they didn't. An empty
+# image promising a music library is the exact shape of a round-22 lie.
+_hint = _nearest_alternative("add some background music")
+check("audio hint matches whether the library actually shipped",
+      ("library" in _hint.lower()) == bool(music_library.CATALOG))
+check("library tool is hidden when no tracks shipped",
+      agent_tools._tool_disabled("list_music_library")
+      == (not music_library.CATALOG))
 
 print(f"\nALL {PASS} CHECKS PASSED")

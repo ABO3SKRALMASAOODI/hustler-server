@@ -13,8 +13,9 @@ import agent_tools
 import config
 import db as dbx
 import llm
+import music_library
 import storage
-from agent_prompt import SYSTEM_PROMPT, project_state_block
+from agent_prompt import project_state_block, system_prompt
 from schemas import describe_edl
 
 
@@ -230,7 +231,9 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
             "cannot make, and NEVER claim something is impossible when a "
             "tool above covers it.")
 
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT},
+    # system_prompt(), not the raw constant: it drops the built-in-library
+    # claims when this image shipped no tracks.
+    msgs = [{"role": "system", "content": system_prompt()},
             {"role": "system", "content": caps},
             {"role": "system", "content": state}]
     chat = worker_db.run(dbx.recent_chat, ctx.session_id, 20)
@@ -601,9 +604,12 @@ ALTERNATIVE_HINTS = [
      "size, position, keyword emphasis words, karaoke mode and entrance "
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
-     "What I CAN do: mix uploaded music under the edit on any time range, "
-     "make existing music or narration louder/quieter, remove it, or lay an "
-     "uploaded voiceover over the edit (other audio ducks while it speaks)."),
+     "What I CAN do: score the edit with music on any time range — a track "
+     "from the built-in royalty-free library or the user's own upload — "
+     "loop it to fill the video, fade it in and out, start it partway in, "
+     "swap one track for another, make it louder or quieter, or remove it. "
+     "I can also lay an uploaded voiceover over the edit (other audio ducks "
+     "while it speaks)."),
     (re.compile(r"(?i)insert|splice|b.?roll|logo|image|photo|clip|overlay|"
                 r"generat|create|draw|ai.?(?:image|art)|hair|face|character"),
      "What I CAN do: splice an uploaded video clip or image in at ANY "
@@ -624,6 +630,14 @@ FALLBACK_REPLY = ("I wasn't able to make that change — it needs a "
 def _nearest_alternative(user_text):
     for rx, hint in ALTERNATIVE_HINTS:
         if rx.search(user_text or ""):
+            # A deployment that shipped no tracks must not offer a library.
+            if "built-in royalty-free library" in hint \
+                    and not music_library.CATALOG:
+                return ("What I CAN do: mix music you upload under the edit "
+                        "on any time range, loop it to fill the video, fade "
+                        "it in and out, make it louder or quieter, or remove "
+                        "it. I can also lay an uploaded voiceover over the "
+                        "edit (other audio ducks while it speaks).")
             if ("generate images with AI" in hint
                     and not llm.image_available()):
                 return ("What I CAN do: splice an uploaded video clip or "

@@ -228,6 +228,15 @@ class MusicItem(BaseModel):
     end: float
     gain_db: float = -18.0
     duck: bool = True
+    # Round 25 — music FITTING. Every one of these defaults to None on
+    # purpose: _sig_canon drops nested None keys, so an EDL written before
+    # these fields existed hashes identically to a fresh dump that carries
+    # them. A non-None default (e.g. loop: bool = True) would change the
+    # signature of every music item ever written and re-render them all.
+    offset_s: Optional[float] = None    # seek INTO the track (start on the drop)
+    fade_in_s: Optional[float] = None   # the item's own fade, not the program's
+    fade_out_s: Optional[float] = None
+    loop: Optional[bool] = None         # opt-IN; None/False both mean "don't"
 
 
 class VolumeItem(BaseModel):
@@ -542,6 +551,34 @@ def validate_edl(data, duration):
             raise EDLValidationError(
                 f"music[{i}].gain_db {m.gain_db} outside "
                 f"[{GAIN_MIN_DB}, {GAIN_MAX_DB}].")
+        # Fitting fields. Normalize to None when they carry no meaning, so a
+        # zero fade and an absent fade produce the SAME signature instead of
+        # looking like an edit that renders nothing different.
+        #
+        # loop is OFF unless explicitly set. Making it default-on would change
+        # the audio of EDLs written before it existed WITHOUT a new version —
+        # so a cached render and a fresh render of the same version would
+        # disagree. add_music turns it on for new music instead, where the
+        # change is attached to a version the user can see.
+        if not m.loop:
+            m.loop = None
+        if m.offset_s is not None:
+            if m.offset_s < 0:
+                raise EDLValidationError(
+                    f"music[{i}].offset_s {m.offset_s} must be >= 0.")
+            m.offset_s = _r(m.offset_s) or None
+        span = max(0.0, m.end - m.start)
+        for fname in ("fade_in_s", "fade_out_s"):
+            fv = getattr(m, fname)
+            if fv is None:
+                continue
+            if fv < 0:
+                raise EDLValidationError(
+                    f"music[{i}].{fname} {fv} must be >= 0.")
+            # A fade longer than half the span would still be rendered (the
+            # renderer clamps), but storing the clamped value keeps the EDL
+            # honest about what the viewer will actually hear.
+            setattr(m, fname, _r(min(fv, span / 2)) or None)
 
     for i, v in enumerate(edl.volume):
         v.start, v.end = _r(v.start), _r(v.end)
@@ -698,7 +735,27 @@ def describe_edl(edl_dict, duration=None):
     if edl.voiceover:
         parts.append(f"voiceover x{len(edl.voiceover)}")
     if edl.music:
-        parts.append(f"music x{len(edl.music)}")
+        # Spell out the fit, not just the count. This string is the diff the
+        # agent reads back and paraphrases to the user, so a fit-only change
+        # (loop / offset / fade / level) that renders differently must LOOK
+        # different here — otherwise the agent sees an identical before and
+        # after, and either doubts a change that really happened or reports
+        # one it cannot see.
+        bits = []
+        for m in edl.music:
+            f = []
+            if m.loop:
+                f.append("looped")
+            if m.offset_s:
+                f.append(f"from {m.offset_s}s in")
+            if m.fade_in_s or m.fade_out_s:
+                f.append("faded")
+            if m.gain_db != -18.0:
+                f.append(f"{m.gain_db:g}dB")
+            if not m.duck:
+                f.append("no duck")
+            bits.append("/".join(f) or "plain")
+        parts.append(f"music x{len(edl.music)} ({', '.join(bits)})")
     if edl.volume:
         parts.append(f"volume x{len(edl.volume)}")
     if edl.effects:

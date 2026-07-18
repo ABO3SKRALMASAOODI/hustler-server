@@ -14,6 +14,7 @@ import config
 import db as dbx
 import llm
 import media
+import music_library
 import storage
 import timeline as timeline_mod
 from captions import KARAOKE_HARD_MAX
@@ -363,8 +364,11 @@ def list_assets(ctx, kind=None):
     rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, sel)
     if not rows:
         if sel == kinds["music"]:
-            return ("No music files in this project. Ask the user to attach "
-                    "one with the paperclip button in chat (mp3/wav/m4a).")
+            return ("No music uploaded to this project — but the built-in "
+                    "library is always available: call list_music_library(). "
+                    "Only ask the user to attach one (paperclip button in "
+                    "chat, mp3/wav/m4a) if they want a specific track the "
+                    "library does not have.")
         return f"No {kind} assets in this project."
     lines = []
     for a in rows:
@@ -1132,28 +1136,86 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
     return result
 
 
-def add_music(ctx, storage_key, start, end, gain_db=-18.0, duck=True):
+def _resolve_music(ctx, storage_key):
+    """(track, error) for a music reference.
+
+    Two disjoint doors. A `library:` reference is looked up in the bundled
+    CC0 catalog by EXACT membership and never touches the assets table;
+    anything else falls through to the project-asset guard below, which is
+    unchanged — including the check that catches the pipeline's own extracted
+    speech track, the cause of the original inaudible-music bug."""
+    if music_library.is_library_ref(storage_key):
+        t = music_library.resolve(storage_key)
+        if not t:
+            have = ", ".join(x["slug"] for x in music_library.CATALOG[:10])
+            return None, (
+                f"REJECTED: '{storage_key}' is not a track in the built-in "
+                f"library. Call list_music_library() and use a slug it "
+                f"returns — never invent one. Known slugs: {have or 'none'}.")
+        return {"name": t["title"], "duration_s": t.get("duration_s"),
+                "library": True}, None
+
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
     if asset and asset["kind"] == "audio":
-        return ("REJECTED: that file is the video's OWN extracted audio "
-                "track (a transcription artifact), not background music — "
-                "mixing it in would only double the speaker's voice under "
-                "itself, near-inaudibly. Tell the user honestly that no "
-                "music has been uploaded and ask them to attach a music "
-                "file (paperclip button).")
+        return None, (
+            "REJECTED: that file is the video's OWN extracted audio "
+            "track (a transcription artifact), not background music — "
+            "mixing it in would only double the speaker's voice under "
+            "itself, near-inaudibly. Use a real music file instead: "
+            "list_music_library() for a built-in track, or "
+            "list_assets(kind='music') for the user's own uploads.")
     if not asset or asset["kind"] != "music":
         avail = ctx.db.run(
             lambda conn: _music_assets(conn, ctx.project_id))
         hint = ("Available music storage_keys: " +
                 "; ".join(a["storage_key"] for a in avail)
-                if avail else "No music files uploaded to this project yet — "
-                              "ask the user to upload one.")
-        return f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
+                if avail else "No music uploaded to this project — call "
+                              "list_music_library() for built-in tracks.")
+        return None, f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
+    return {"name": os.path.basename(storage_key),
+            "duration_s": asset.get("duration_s"), "library": False}, None
+
+
+def list_music_library(ctx, mood=None):
+    """Browse the built-in CC0 tracks. Every one is cleared for use in an
+    exported video, so no upload is needed to score an edit."""
+    if not music_library.CATALOG:
+        return ("The built-in music library is empty in this deployment. "
+                "Use list_assets(kind='music') for the user's own uploads, "
+                "or ask them to attach a file.")
+    m = (mood or "").strip().lower()
+    if m and m not in music_library.MOODS:
+        return (f"REJECTED: unknown mood '{mood}'. Available moods: "
+                + ", ".join(music_library.MOODS))
+    hits = music_library.browse(m or None)
+    if not hits:
+        return (f"No '{m}' tracks. Available moods: "
+                + ", ".join(sorted({t['mood'] for t in music_library.CATALOG})))
+    head = (f"{len(hits)} built-in track(s)"
+            + (f" for mood '{m}'" if m else "") +
+            ". Pass the library: reference to add_music.\n")
+    return head + "\n".join(
+        f"  library:{t['slug']} — {music_library.describe(t)}" for t in hits)
+
+
+def add_music(ctx, storage_key, start=None, end=None, gain_db=-18.0,
+              duck=True, offset_s=None, fade_in_s=None, fade_out_s=None,
+              loop=True):
+    track, err = _resolve_music(ctx, storage_key)
+    if err:
+        return err
     edl = dict(ctx.latest_edl()["json"])
     # Clamp against the FINAL program duration (kept footage + inserts), not
     # just the kept footage — otherwise music can never reach the end of a
     # video that has clips/images spliced in. Matches add_zoom / add_voiceover.
     out_dur = program_duration(edl)
+    # "Add some music" usually means UNDER THE WHOLE THING. Defaulting to the
+    # full program means the agent doesn't have to invent numbers for the
+    # commonest request, and can't quietly score only the first 15 seconds.
+    if start is None:
+        start = 0.0
+    if end is None:
+        end = out_dur
     try:
         s = round(min(max(float(start), 0.0), max(0.0, out_dur - 0.1)), 2)
         e = round(min(max(float(end), s + 0.1), out_dur), 2)
@@ -1163,14 +1225,52 @@ def add_music(ctx, storage_key, start, end, gain_db=-18.0, duck=True):
         g = float(gain_db)
     except (TypeError, ValueError):
         return "REJECTED: gain_db must be a number."
+    span = e - s
+    try:
+        off = max(0.0, float(offset_s)) if offset_s is not None else None
+    except (TypeError, ValueError):
+        return "REJECTED: offset_s must be a number (seconds into the track)."
+    # An offset past the end of the track would render pure silence, so the
+    # renderer ignores it. Reject rather than store a number we know will be
+    # discarded — otherwise get_edl shows an offset the render never applies.
+    _td = track.get("duration_s")
+    if off and _td and off >= _td - 0.05:
+        return (f"REJECTED: offset_s {off:.1f}s is at or past the end of "
+                f"'{track['name']}' ({_td:.0f}s) — it would play silence. "
+                f"Pick an offset below {_td:.0f}s.")
+    # Music that starts and stops dead sounds like a mistake. Fade by default;
+    # the agent can pass 0 to defeat it.
+    try:
+        fi = 1.0 if fade_in_s is None else max(0.0, float(fade_in_s))
+        fo = 2.0 if fade_out_s is None else max(0.0, float(fade_out_s))
+    except (TypeError, ValueError):
+        return "REJECTED: fade_in_s/fade_out_s must be numbers (seconds)."
+    fi, fo = min(fi, span / 2), min(fo, span / 2)
+
     music = [dict(m) for m in (edl.get("music") or [])]
     item = {"id": _next_item_id(music, "mus"), "storage_key": storage_key,
-            "start": s, "end": e, "gain_db": g, "duck": bool(duck)}
+            "start": s, "end": e, "gain_db": g, "duck": bool(duck),
+            "offset_s": off, "fade_in_s": fi or None,
+            "fade_out_s": fo or None, "loop": True if loop else None}
     music.append(item)
     edl["music"] = music
     res = ctx.write_edl(
-        edl, f"music '{os.path.basename(storage_key)}' at {s}-{e}s "
+        edl, f"music '{track['name']}' at {s}-{e}s "
              f"(output timeline), {g}dB, duck={bool(duck)} [{item['id']}]")
+
+    # Tell the agent what the track can actually cover, so it reports the
+    # truth rather than assuming the span got filled.
+    tdur = track.get("duration_s")
+    if tdur and not str(res).startswith("REJECTED"):
+        covered = tdur - (off or 0.0)
+        if covered < span - 0.05:
+            res += (f"\nNote: the track is {tdur:.0f}s"
+                    + (f" ({covered:.0f}s from the {off:.0f}s offset)"
+                       if off else "")
+                    + f" but the span is {span:.0f}s — "
+                    + ("it will repeat to fill it." if loop else
+                       "it will fall SILENT for the rest. Pass loop=true "
+                       "to fill the span."))
     dup_vo = [v.get("id") for v in (edl.get("voiceover") or [])
               if v.get("asset_key") == storage_key]
     if dup_vo and not str(res).startswith("REJECTED"):
@@ -1191,8 +1291,123 @@ def remove_music(ctx, id):
     edl["music"] = [m for m in items if m.get("id") != id]
     return ctx.write_edl(
         edl, f"removed music {id} "
-             f"('{os.path.basename(hit['storage_key'])}', "
+             f"('{_music_name(hit['storage_key'])}', "
              f"{hit['start']}-{hit['end']}s)")
+
+
+def _music_name(key):
+    """Display name for a music reference. Library refs aren't paths, so
+    basename() would print the raw 'library:slug' at the user."""
+    t = music_library.resolve(key)
+    if t:
+        return t["title"]
+    return os.path.basename(key or "?")
+
+
+def swap_music(ctx, id, storage_key):
+    """Change WHICH track plays, keeping its position, level and fit —
+    'no, use a different song'."""
+    track, err = _resolve_music(ctx, storage_key)
+    if err:
+        return err
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(m) for m in (edl.get("music") or [])]
+    hit = next((m for m in items if m.get("id") == id), None)
+    if not hit:
+        have = ", ".join(m.get("id") or "?" for m in items) or "none"
+        return (f"REJECTED: no music with id '{id}'. Existing music ids: "
+                f"{have}. Call get_edl to see them.")
+    if hit.get("storage_key") == storage_key:
+        return (f"NO CHANGE — music {id} is already '{track['name']}'. "
+                "Do NOT tell the user you changed the track.")
+    old = _music_name(hit.get("storage_key"))
+    hit["storage_key"] = storage_key
+    # An offset was measured into the OLD track — "start at the chorus" points
+    # somewhere meaningless in a different song. Drop it rather than carry a
+    # number that silently means something else now.
+    dropped_offset = hit.get("offset_s")
+    hit["offset_s"] = None
+    edl["music"] = items
+    res = ctx.write_edl(edl, f"music {id}: '{old}' -> '{track['name']}'")
+    if dropped_offset and not str(res).startswith("REJECTED"):
+        res += (f"\nNote: the {dropped_offset}s start-offset was cleared — it "
+                "pointed into the old track. Set it again if you want one.")
+    tdur, span = track.get("duration_s"), (hit["end"] - hit["start"])
+    if tdur and tdur < span - 0.05 and not hit.get("loop") \
+            and not str(res).startswith("REJECTED"):
+        res += (f"\nNote: '{track['name']}' is {tdur:.0f}s but the span is "
+                f"{span:.0f}s — it will fall silent for the rest unless you "
+                "set loop=true with set_music_fit.")
+    return res
+
+
+def set_music_fit(ctx, id, start=None, end=None, offset_s=None,
+                  fade_in_s=None, fade_out_s=None, loop=None, duck=None):
+    """Retime or refit EXISTING music in place. Anything left unset is left
+    alone — this is the tool for 'start the music later', 'make it fade out',
+    'loop it to the end', without remove + re-add losing the other settings."""
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(m) for m in (edl.get("music") or [])]
+    hit = next((m for m in items if m.get("id") == id), None)
+    if not hit:
+        have = ", ".join(m.get("id") or "?" for m in items) or "none"
+        return (f"REJECTED: no music with id '{id}'. Existing music ids: "
+                f"{have}. Call get_edl to see them.")
+    out_dur = program_duration(edl)
+    before = dict(hit)
+    try:
+        if start is not None:
+            hit["start"] = round(
+                min(max(float(start), 0.0), max(0.0, out_dur - 0.1)), 2)
+        if end is not None:
+            hit["end"] = round(
+                min(max(float(end), hit["start"] + 0.1), out_dur), 2)
+        if hit["end"] <= hit["start"]:
+            return "REJECTED: end must be after start."
+        span = hit["end"] - hit["start"]
+        if offset_s is not None:
+            _o = max(0.0, float(offset_s))
+            # Same rule as add_music: never store an offset the renderer will
+            # throw away, or get_edl reports a setting the audio doesn't have.
+            _tk, _ = _resolve_music(ctx, hit["storage_key"])
+            _td = (_tk or {}).get("duration_s")
+            if _o and _td and _o >= _td - 0.05:
+                return (f"REJECTED: offset_s {_o:.1f}s is at or past the end "
+                        f"of the track ({_td:.0f}s) — it would play silence. "
+                        f"Pick an offset below {_td:.0f}s.")
+            hit["offset_s"] = _o or None
+        if fade_in_s is not None:
+            hit["fade_in_s"] = min(max(0.0, float(fade_in_s)), span / 2) or None
+        if fade_out_s is not None:
+            hit["fade_out_s"] = min(max(0.0, float(fade_out_s)), span / 2) or None
+    except (TypeError, ValueError):
+        return ("REJECTED: start/end/offset_s/fade_in_s/fade_out_s must be "
+                "numbers (seconds).")
+    if loop is not None:
+        hit["loop"] = True if loop else None
+    if duck is not None:
+        hit["duck"] = bool(duck)
+    if hit == before:
+        return (f"NO CHANGE — music {id} already has those settings. Do NOT "
+                "tell the user you changed anything.")
+    edl["music"] = items
+    changed = ", ".join(
+        f"{k}={hit.get(k)}" for k in
+        ("start", "end", "offset_s", "fade_in_s", "fade_out_s", "loop", "duck")
+        if hit.get(k) != before.get(k))
+    res = ctx.write_edl(
+        edl, f"music {id} ('{_music_name(hit['storage_key'])}') refit: "
+             f"{changed}")
+    track, _ = _resolve_music(ctx, hit["storage_key"])
+    tdur = (track or {}).get("duration_s")
+    span = hit["end"] - hit["start"]
+    covered = (tdur - (hit.get("offset_s") or 0.0)) if tdur else None
+    if covered is not None and covered < span - 0.05 and not hit.get("loop") \
+            and not str(res).startswith("REJECTED"):
+        res += (f"\nNote: the track only covers {covered:.0f}s of the "
+                f"{span:.0f}s span and will fall SILENT for the rest — pass "
+                "loop=true if you want it to fill.")
+    return res
 
 
 def set_audio_gain(ctx, kind, id, gain_db):
@@ -2176,18 +2391,53 @@ TOOLS = {
                                          "items": {"type": "string"}},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
-    "add_music": (add_music, "Mix a project music file under the edit as "
-                  "BACKGROUND MUSIC (default -18dB, ducked under speech). "
-                  "Call list_assets(kind='music') first and pass the exact "
-                  "storage_key it returns — if none exist, ask the user to "
-                  "attach a file instead of guessing. start/end are "
-                  "OUTPUT-timeline seconds (position in the finished video). "
-                  "duck=true lowers music 12dB under speech.",
+    "list_music_library": (list_music_library, "Browse the BUILT-IN "
+                           "royalty-free music library — tracks that are "
+                           "always available with nothing uploaded. Returns "
+                           "'library:<slug>' references to pass to "
+                           "add_music. Optionally filter by mood: "
+                           + ", ".join(music_library.MOODS) + ".",
+                           {"mood": {"type": "string",
+                                     "enum": list(music_library.MOODS)}}),
+    "add_music": (add_music, "Mix music under the edit as BACKGROUND MUSIC "
+                  "(default -18dB, ducked under speech). storage_key is "
+                  "either a 'library:<slug>' from list_music_library() or an "
+                  "exact key from list_assets(kind='music') (the user's own "
+                  "uploads) — never invent one. start/end are OUTPUT-timeline "
+                  "seconds and DEFAULT TO THE WHOLE VIDEO, so omit them for "
+                  "'add some music'. Fades in/out by default. loop=true (the "
+                  "default) repeats a short track to fill the span; "
+                  "offset_s starts partway into the track, e.g. to skip a "
+                  "slow intro. duck=true lowers music 12dB under speech.",
                   {"storage_key": {"type": "string"},
                    "start": {"type": "number"},
                    "end": {"type": "number"},
                    "gain_db": {"type": "number"},
-                   "duck": {"type": "boolean"}}),
+                   "duck": {"type": "boolean"},
+                   "offset_s": {"type": "number"},
+                   "fade_in_s": {"type": "number"},
+                   "fade_out_s": {"type": "number"},
+                   "loop": {"type": "boolean"}}),
+    "swap_music": (swap_music, "Replace the TRACK of an existing music item "
+                   "while keeping its position, level and fit — THE tool for "
+                   "'use a different song' / 'try something more upbeat'. "
+                   "id from get_edl; storage_key as for add_music.",
+                   {"id": {"type": "string"},
+                    "storage_key": {"type": "string"}}),
+    "set_music_fit": (set_music_fit, "Retime or refit EXISTING music in "
+                      "place — 'start the music later', 'let it run to the "
+                      "end', 'fade it out', 'loop it', 'stop it ducking'. "
+                      "Anything you omit is left alone. Use this instead of "
+                      "remove+re-add, which loses the other settings. For "
+                      "loudness use set_audio_gain.",
+                      {"id": {"type": "string"},
+                       "start": {"type": "number"},
+                       "end": {"type": "number"},
+                       "offset_s": {"type": "number"},
+                       "fade_in_s": {"type": "number"},
+                       "fade_out_s": {"type": "number"},
+                       "loop": {"type": "boolean"},
+                       "duck": {"type": "boolean"}}),
     "remove_music": (remove_music, "Remove one background-music item by its "
                      "id (see get_edl). Use this to cut the music entirely "
                      "or before re-adding it with a different range.",
@@ -2395,7 +2645,12 @@ REQUIRED_ARGS = {
     "cut_range": ["start", "end"],
     "restore_range": ["start", "end"],
     "set_caption_style": [],
-    "add_music": ["storage_key", "start", "end"],
+    # start/end default to the whole program, so "add some music" needs only
+    # a track.
+    "add_music": ["storage_key"],
+    "list_music_library": [],
+    "swap_music": ["id", "storage_key"],
+    "set_music_fit": ["id"],
     "remove_music": ["id"],
     "set_audio_gain": ["kind", "id", "gain_db"],
     "set_volume": ["start", "end", "gain_db"],
@@ -2420,6 +2675,7 @@ REQUIRED_ARGS = {
 WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "set_caption_style", "add_music", "remove_music",
+               "swap_music", "set_music_fit",
                "set_audio_gain", "set_volume", "set_frame",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
@@ -2431,7 +2687,14 @@ def _tool_disabled(name):
     """Tools whose backing service is not configured are hidden entirely —
     the model must never see (or advertise) a capability that would only
     return 'unavailable'."""
-    return name == "generate_image" and not llm.image_available()
+    if name == "generate_image":
+        return not llm.image_available()
+    # Same rule for the music library: a deployment whose image shipped no
+    # tracks must not advertise one, or the agent offers music it cannot
+    # deliver and then has to walk it back.
+    if name == "list_music_library":
+        return not music_library.CATALOG
+    return False
 
 
 def capabilities_digest():

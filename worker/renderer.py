@@ -25,6 +25,7 @@ import captions as caplib
 import config
 import db as dbx
 import media
+import music_library
 import sheets
 import storage
 from schemas import EDLValidationError, validate_edl
@@ -161,6 +162,29 @@ def _speech_spans_out(index, tl):
         gap *= 2
         merged = merge_spans(merged, gap)
     return merged
+
+
+def music_source(key, fetch):
+    """Local path for a music item's audio.
+
+    Built-in library tracks ship inside the image, so there is nothing to
+    download — and handing "library:<slug>" to object storage as a key would
+    fail every render that used one. Everything else is a real bucket object.
+    Module-level (not a closure) so this branch is unit-testable: the wiring
+    is exactly what a filtergraph test cannot see."""
+    if music_library.is_library_ref(key):
+        local = music_library.local_path(key)
+        if not local or not os.path.exists(local):
+            # Only reachable if a track was withdrawn from the catalog while
+            # an older EDL still referenced it. Fail loudly — the alternative
+            # is rendering with the music silently missing, after the agent
+            # already told the user it added some.
+            raise media.MediaError(
+                f"Music track '{key}' is no longer in the built-in library, "
+                f"so this edit cannot be rendered as saved. Swap it for "
+                f"another track and re-render.")
+        return local
+    return fetch(key)
 
 
 def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
@@ -437,21 +461,40 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     mix_labels = []
     if music_inputs:
         speech = _speech_spans_out(index, tl)
-        for j, (input_idx, item) in enumerate(music_inputs):
+        for j, (input_idx, item, track_dur) in enumerate(music_inputs):
             m_start = max(0.0, min(item["start"], tl.out_duration - 0.05))
             m_end = max(m_start + 0.05, min(item["end"], tl.out_duration))
             dur = m_end - m_start
+            # Offset seeks INTO the track — start on the drop instead of the
+            # intro. With -stream_loop the trim window runs straight across
+            # repeats, so this one atrim expresses both "seek in" and
+            # "loop until the span is full".
+            off = max(0.0, float(item.get("offset_s") or 0.0))
+            if track_dur and off >= track_dur - 0.05:
+                off = 0.0          # past the end would render pure silence
             duck = ""
             if item.get("duck", True) and speech:
                 win = [(max(s, m_start), min(e, m_end)) for s, e in speech
                        if min(e, m_end) - max(s, m_start) > 0.05]
                 if win:
                     duck = f",volume={DUCK_DB}dB:enable='{_enable_expr(win)}'"
+            # Fades are the music item's OWN, and must land before adelay
+            # while t=0 still means "the music's first sample". Clamped to
+            # half the span so a 2s sting can't fade in past its own end.
+            fades = ""
+            fi = min(max(0.0, float(item.get("fade_in_s") or 0.0)), dur / 2)
+            fo = min(max(0.0, float(item.get("fade_out_s") or 0.0)), dur / 2)
+            if fi > 0.01:
+                fades += f",afade=t=in:st=0:d={fi:.2f}"
+            if fo > 0.01:
+                fades += (f",afade=t=out:st={max(0.0, dur - fo):.2f}"
+                          f":d={fo:.2f}")
             delay_ms = int(m_start * 1000)
             delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""
             parts.append(
-                f"[{input_idx}:a]atrim=start=0:end={dur:.3f},"
-                f"asetpts=PTS-STARTPTS,volume={item.get('gain_db', -18)}dB,"
+                f"[{input_idx}:a]atrim=start={off:.3f}:end={off + dur:.3f},"
+                f"asetpts=PTS-STARTPTS{fades},"
+                f"volume={item.get('gain_db', -18)}dB,"
                 f"aresample=48000{delay}{duck}[mus{j}]")
             mix_labels.append(f"[mus{j}]")
     for j, (input_idx, vo, vd) in enumerate(vo_inputs):
@@ -526,8 +569,30 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         next_idx += 1
 
     for item in edl.get("music", []):
-        extra_inputs += ["-i", _fetch(item["storage_key"], "music", next_idx)]
-        music_inputs.append((next_idx, item))
+        local = music_source(item["storage_key"],
+                             lambda k: _fetch(k, "music", next_idx))
+        try:
+            track_dur = media.probe_audio_duration(local)
+        except Exception:
+            track_dur = None      # unknown: never loop, just play what's there
+        span = max(0.05, float(item.get("end") or 0.0)
+                   - float(item.get("start") or 0.0))
+        offset = max(0.0, float(item.get("offset_s") or 0.0))
+        # -stream_loop repeats the file at the demuxer, so a short track can
+        # fill a long span. Only ask for it when the track genuinely cannot
+        # cover the span from its offset: looping is a MUSICAL compromise (the
+        # seam lands wherever the phrase happens to end), so we never pay it
+        # when the track is long enough. Deliberately not aloop, which buffers
+        # the whole track in RAM — this worker has OOM-crashed before, and
+        # measured output was identical (no gaps, no seam discontinuity).
+        # Opt-IN, never defaulted on: an EDL written before loop existed must
+        # render exactly as it always did, or a cached render and a fresh one
+        # of the SAME version would differ. add_music opts new music in.
+        if (item.get("loop") and track_dur
+                and (track_dur - offset) < span - 0.05):
+            extra_inputs += ["-stream_loop", "-1"]
+        extra_inputs += ["-i", local]
+        music_inputs.append((next_idx, item, track_dur))
         next_idx += 1
 
     for item in inserts:                      # sorted by validate_edl = tl.ins order
