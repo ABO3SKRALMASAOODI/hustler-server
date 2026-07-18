@@ -13,3 +13,6 @@ itest_*.mp4
 test_clip.mp4
 test_image.png
 test_clip_long.mp4
+
+# build-tool font cache (fetched on demand, only rendered pixels ship)
+worker/tools/PJS.ttf

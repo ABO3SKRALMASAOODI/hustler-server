@@ -14,6 +14,7 @@ import config
 import db as dbx
 import llm
 import music_library
+import sfx_library
 import storage
 from agent_prompt import project_state_block, system_prompt
 from schemas import describe_edl
@@ -406,7 +407,9 @@ EDIT_CLAIM = re.compile(
     r"|\b(?<!n't )(?<!n’t )(?<!not )(?<!never )(?<!no )"
     r"(?:added|applied|enabled)\b[^.\n]{0,60}"
     r"\b(?:grades?|color.?grades?|zooms?|punch.?ins?|fades?|filters?|"
-    r"karaoke|highlights?|transitions?|dips?|ken.?burns|animations?)\b"
+    r"karaoke|highlights?|transitions?|dips?|ken.?burns|animations?|"
+    r"sound.?effects?|sfx|whoosh(?:es)?|swipes?|risers?|impacts?|"
+    r"booms?|sub.?drops?|glitch(?:es)?|zaps?|dings?|chimes?|stingers?)\b"
     r"|\b(?<!no )(?:color.?grade|grade|zoom|punch.?in|"
     r"fades?(?:[- ]?(?:in|out)| to black)?|filter|transitions?|"
     r"ken.?burns|animations?) "
@@ -582,6 +585,17 @@ ALTERNATIVE_HINTS = [
      "burned-in username, watermark, logo or on-screen text — tell me "
      "roughly where it sits and I'll place the censor box and show you a "
      "preview."),
+    # sfx BEFORE effects: the effects regex matches the bare word
+    # 'effect', so "add some sound effects" was answered with colour
+    # grades and zooms. Most specific wins the first-match scan.
+    (re.compile(r"(?i)sound.?effects?|\bsfx\b|whoosh|swoosh|swipe|riser|"
+                r"impact|boom|braam|sub.?drop|glitch|zap|ding|chime|buzz|"
+                r"\bclick\b|\bstinger\b|shutter|\bhit\b"),
+     "What I CAN do: drop one-shot sound effects on exact moments — "
+     "whooshes and swipes on cuts, impacts, booms and sub-drops on reveals, "
+     "risers into a transition, plus clicks, pops, glitches, zaps, dings and "
+     "camera shutters — from the built-in sound pack, at any volume, and I "
+     "can move or remove them afterwards."),
     # effects next: zoom/filter/fade phrasings often also contain 'animated'
     # or 'tiktok', and the most specific hint must win the first-match scan
     (re.compile(r"(?i)effect|filter|grade|zoom|punch|fade|transition|"
@@ -638,6 +652,10 @@ def _nearest_alternative(user_text):
                         "it in and out, make it louder or quieter, or remove "
                         "it. I can also lay an uploaded voiceover over the "
                         "edit (other audio ducks while it speaks).")
+            if "built-in sound pack" in hint and not sfx_library.CATALOG:
+                return ("What I CAN do: place a sound file you upload at an "
+                        "exact moment in the edit, set how loud it is, and "
+                        "move or remove it afterwards.")
             if ("generate images with AI" in hint
                     and not llm.image_available()):
                 return ("What I CAN do: splice an uploaded video clip or "

@@ -173,7 +173,9 @@ def _concierge_reply(stage, history, attachments, index_error=None):
         "yet — never claim or imply that you did.",
         "Once a video is ready you can: cut silences and bad takes, add "
         "word-timed captions (including karaoke word-pop styles), add "
-        "background music or voiceover, zooms (including smooth Ken "
+        "background music or voiceover, drop one-shot sound effects "
+        "(whooshes, impacts, risers, clicks, dings) on exact moments "
+        "from a built-in pack, zooms (including smooth Ken "
         "Burns style), dip-to-black/white transitions, fades, color "
         "grades, vertical/square/portrait reframing, blur/pixelate/"
         "black-out a fixed region to censor burned-in usernames, "
@@ -1024,6 +1026,8 @@ def project_state(user_id, project_id):
         except (TypeError, ValueError):
             continue
         bv = by_version.setdefault(v, {})
+        if variant == "final" and not _final_is_current(m):
+            continue                       # pre-end-card export: not current
         if variant not in bv:
             bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
     # The preview the player should show is the render of the NEWEST edl version
@@ -1415,6 +1419,12 @@ def _apply_edl_op(edl, op, args, assets_by_id):
         edl["inserts"] = [i for i in before if i.get("id") != args.get("id")]
         if len(edl["inserts"]) == len(before):
             return edl, "insert already gone"
+        # Removing an insert shortens the program, but sfx are bounded by the
+        # OLD length — validate_edl would reject the whole op, so clicking x
+        # on an insert would fail over an unrelated sound effect.
+        prog = wschemas.program_duration(edl)
+        edl["sfx"] = [s for s in (edl.get("sfx") or [])
+                      if float(s.get("at") or 0.0) <= max(0.0, prog - 0.05)]
         return edl, f"removed insert {args.get('id')}"
 
     if op == "add_voiceover":
@@ -1475,6 +1485,24 @@ def _apply_edl_op(edl, op, args, assets_by_id):
         if len(edl["music"]) == len(before):
             return edl, "music already gone"
         return edl, f"removed music {args.get('id')}"
+
+    if op == "remove_sfx":
+        before = edl.get("sfx") or []
+        edl["sfx"] = [s for s in before if s.get("id") != args.get("id")]
+        if len(edl["sfx"]) == len(before):
+            return edl, "sound effect already gone"
+        return edl, f"removed sfx {args.get('id')}"
+
+    if op == "move_sfx":
+        # A point event, so it clamps to the program end rather than
+        # preserving a length the way move_music does.
+        prog = wschemas.program_duration(edl)
+        at = max(0.0, min(float(args.get("at") or 0.0), max(0.0, prog - 0.05)))
+        for s in (edl.get("sfx") or []):
+            if s.get("id") == args.get("id"):
+                s["at"] = round(at, 2)
+                return edl, f"moved sfx {s['id']} to {s['at']}s"
+        return edl, "sound effect already gone"
 
     if op == "move_voiceover":
         prog = wschemas.program_duration(edl)
@@ -1577,6 +1605,29 @@ def user_edl_write(user_id, project_id):
 #  EDL versions + renders                                              #
 # ------------------------------------------------------------------ #
 
+# A final rendered before the branded end card existed is no longer a
+# deliverable export: it is missing the card every new export carries. The
+# worker's render cache already busts on a stale stamp, but nothing would ever
+# ASK it to — the studio short-circuits straight to presigning an existing
+# final_asset_id and never posts /render/final. So a stale final is simply not
+# reported as one; the studio then takes its existing "no final yet" path,
+# enqueues a render, and the worker re-encodes with the card.
+#
+# Previews are exempt: they carry no card, so their absent stamp is correct.
+OUTRO_VERSION = 1
+
+
+def _final_is_current(meta):
+    # PRESENCE of the stamp, not its value. The worker legitimately writes
+    # outro_v=0 when it rendered without a card (OUTRO_DURATION_S=0, or an
+    # image built without brand/endcard.png). Comparing to OUTRO_VERSION would
+    # hide that final forever while the worker's cache keeps serving it as
+    # current — Download becomes a permanent no-op with no error anywhere.
+    # Renders predating the card carry no key at all, so they still re-export,
+    # and this converges after exactly one re-render either way.
+    return "outro_v" in (meta or {})
+
+
 @video_bp.route("/projects/<int:project_id>/edls", methods=["GET"])
 @token_required
 def list_edls(user_id, project_id):
@@ -1602,6 +1653,8 @@ def list_edls(user_id, project_id):
         except (TypeError, ValueError):
             continue
         bv = by_version.setdefault(v, {})
+        if variant == "final" and not _final_is_current(m):
+            continue                       # pre-end-card export: not current
         # Keep the NEWEST asset id per (version, variant): a version can be
         # re-rendered, and the version list must point at the latest encode.
         if r["id"] > bv.get(variant, 0):

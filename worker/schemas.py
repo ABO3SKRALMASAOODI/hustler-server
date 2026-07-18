@@ -239,6 +239,30 @@ class MusicItem(BaseModel):
     loop: Optional[bool] = None         # opt-IN; None/False both mean "don't"
 
 
+class SfxItem(BaseModel):
+    """A one-shot sound effect at a POINT in the output timeline.
+
+    Deliberately not a MusicItem with a short span. Music is a bed: it has a
+    duration, it loops, and it ducks under speech. An sfx is a transient — it
+    plays for exactly as long as the file is, it must never duck (a whoosh
+    that dips under the very word it is punctuating is not an accent), and it
+    has no meaningful end the agent could set.
+
+    id is REQUIRED, unlike MusicItem.id. That field is Optional only to keep
+    pre-round-6 EDLs (whose music items predate ids) valid and
+    signature-compatible; there is no legacy sfx EDL, so there is no reason to
+    inherit the escape hatch.
+    """
+    id: str
+    storage_key: str
+    at: float        # position in the OUTPUT (edited) timeline
+    # -6dB is the pack's house level: sounds are normalized to -16 LUFS, so
+    # this sits an accent clearly above a -18dB music bed without fighting
+    # speech. It must match add_sfx's default AND the renderer's fallback —
+    # three layers, one number, or the EDL and the render disagree.
+    gain_db: float = -6.0
+
+
 class VolumeItem(BaseModel):
     start: float   # source-timeline seconds
     end: float
@@ -377,6 +401,7 @@ class EDL(BaseModel):
     keep: List[List[float]]
     captions: Optional[Union[CaptionsFromTranscript, List[CaptionItem]]] = None
     music: List[MusicItem] = Field(default_factory=list)
+    sfx: List[SfxItem] = Field(default_factory=list)
     volume: List[VolumeItem] = Field(default_factory=list)
     frame: Optional[Frame] = None
     inserts: List[InsertItem] = Field(default_factory=list)
@@ -580,6 +605,37 @@ def validate_edl(data, duration):
             # honest about what the viewer will actually hear.
             setattr(m, fname, _r(min(fv, span / 2)) or None)
 
+    seen_sfx_ids = set()
+    for i, s in enumerate(edl.sfx):
+        if not s.id or s.id in seen_sfx_ids:
+            raise EDLValidationError(
+                f"sfx[{i}].id must be non-empty and unique.")
+        seen_sfx_ids.add(s.id)
+        if not s.storage_key:
+            raise EDLValidationError(f"sfx[{i}].storage_key is empty.")
+        s.at = _r(s.at)
+        # A point event, so NOT _check_span: that helper requires a two-ended
+        # span of at least MIN_SPAN_S and would reject every sfx ever written
+        # with "span [x, x] is shorter than 0.05s".
+        if s.at < 0:
+            raise EDLValidationError(
+                f"sfx[{i}].at {s.at} is negative. Times are seconds from 0.")
+        # Bounded by the FINAL program (incl. inserts), like voiceover and
+        # music — not by the source duration, which a heavily-cut edit is far
+        # shorter than. An sfx past the end renders to nothing while the EDL
+        # goes on claiming it exists.
+        if s.at > max(0.0, prog_dur - 0.05):
+            raise EDLValidationError(
+                f"sfx[{i}].at {s.at} is past the end of the program "
+                f"({round(prog_dur, 2)}s).")
+        if not (GAIN_MIN_DB <= s.gain_db <= GAIN_MAX_DB):
+            raise EDLValidationError(
+                f"sfx[{i}].gain_db {s.gain_db} outside "
+                f"[{GAIN_MIN_DB}, {GAIN_MAX_DB}].")
+    # Canonical order, so re-emitting the same set of sounds in a different
+    # order is not a new signature (and therefore not a pointless re-render).
+    edl.sfx.sort(key=lambda x: (x.at, x.id))
+
     for i, v in enumerate(edl.volume):
         v.start, v.end = _r(v.start), _r(v.end)
         _check_span(f"volume[{i}]", v.start, v.end, duration)
@@ -756,6 +812,16 @@ def describe_edl(edl_dict, duration=None):
                 f.append("no duck")
             bits.append("/".join(f) or "plain")
         parts.append(f"music x{len(edl.music)} ({', '.join(bits)})")
+    if edl.sfx:
+        # Per-item, for the same reason as music above: "sfx x3" is identical
+        # before and after moving one of them, so the agent would read its own
+        # successful edit as a no-op.
+        bits = []
+        for s in edl.sfx:
+            key = s.storage_key.split(":")[-1].split("/")[-1]
+            g = f" {s.gain_db:+g}dB" if s.gain_db else ""
+            bits.append(f"{key}@{s.at:g}s{g}")
+        parts.append(f"sfx x{len(edl.sfx)} ({', '.join(bits)})")
     if edl.volume:
         parts.append(f"volume x{len(edl.volume)}")
     if edl.effects:

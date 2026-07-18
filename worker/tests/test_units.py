@@ -2158,17 +2158,20 @@ import media                                                  # noqa: E402
 import renderer                                               # noqa: E402
 _ob = media.black_seconds
 try:
+    # Finals carry the branded end card, so the rendered file is longer than
+    # the EDL by exactly that much. Every expectation below is programme+outro.
+    _OUT = renderer.outro_seconds(False)
     media.black_seconds = lambda p, d=None: d      # every frame black
     try:
-        renderer._verify_render({"keep": [[0.0, 10.0]]}, "out.mp4", 10.0, 1,
-                                "final", src_path="src.mp4", src_dur=10.0)
+        renderer._verify_render({"keep": [[0.0, 10.0]]}, "out.mp4", 10.0 + _OUT,
+                                1, "final", src_path="src.mp4", src_dur=10.0)
         check("mostly-black output passes when the SOURCE is also black", True)
     except media.MediaError:
         check("mostly-black output passes when the SOURCE is also black", False)
     media.black_seconds = lambda p, d=None: (d if "out" in p else 0.0)
     try:
-        renderer._verify_render({"keep": [[0.0, 10.0]]}, "out.mp4", 10.0, 1,
-                                "final", src_path="src.mp4", src_dur=10.0)
+        renderer._verify_render({"keep": [[0.0, 10.0]]}, "out.mp4", 10.0 + _OUT,
+                                1, "final", src_path="src.mp4", src_dur=10.0)
         check("newly-black output (black where source wasn't) is rejected", False)
     except media.MediaError as e:
         check("newly-black output (black where source wasn't) is rejected",
@@ -2176,8 +2179,8 @@ try:
     media.black_seconds = lambda p, d=None: 0.0
     try:
         # keep claims 120s but real source is 90s; a 90s output must PASS
-        renderer._verify_render({"keep": [[0.0, 120.0]]}, "out.mp4", 90.0, 1,
-                                "final", src_path="s", src_dur=90.0)
+        renderer._verify_render({"keep": [[0.0, 120.0]]}, "out.mp4", 90.0 + _OUT,
+                                1, "final", src_path="s", src_dur=90.0)
         check("duration check clamps keep ends to the real source duration", True)
     except media.MediaError:
         check("duration check clamps keep ends to the real source duration", False)
@@ -3663,5 +3666,442 @@ check("audio hint matches whether the library actually shipped",
 check("library tool is hidden when no tracks shipped",
       agent_tools._tool_disabled("list_music_library")
       == (not music_library.CATALOG))
+
+print("== Round-26: sound effects + the branded end card ==")
+import sfx_library                                            # noqa: E402
+import bundled_library                                        # noqa: E402
+from agent_tools import (add_sfx, move_sfx, remove_sfx,       # noqa: E402
+                         list_sfx_library, _resolve_sfx, _track_name)
+
+# --- the silent-drop guard, applied to sfx ---------------------------------
+# Same lesson as FIT_FIELDS above: a field declared in only SOME layers is
+# dropped without a trace and the agent still reports success.
+SFX_FIELDS = {"id", "storage_key", "at", "gain_db"}
+check("sfx: the item model declares exactly the intended fields",
+      SFX_FIELDS == set(schemas.SfxItem.model_fields))
+check("sfx: the EDL model carries an sfx list",
+      "sfx" in schemas.EDL.model_fields)
+check("sfx: add_sfx offers storage_key/at/gain_db to the agent",
+      {"storage_key", "at", "gain_db"} == set(agent_tools.TOOLS["add_sfx"][2]))
+check("sfx: the write tools are tracked for honesty",
+      {"add_sfx", "move_sfx", "remove_sfx"} <= agent_tools.WRITE_TOOLS)
+check("sfx: set_audio_gain accepts kind 'sfx'",
+      "sfx" in agent_tools.TOOLS["set_audio_gain"][2]["kind"]["enum"])
+# id is REQUIRED — MusicItem's Optional id is a legacy escape hatch that sfx
+# must not inherit, or two sounds can share an id and remove_sfx picks one.
+check("sfx: id is required (no legacy escape hatch)",
+      schemas.SfxItem.model_fields["id"].is_required())
+
+# --- back-compat: a pre-sfx EDL must hash IDENTICALLY ----------------------
+_pre = {"keep": [[0.0, 30.0]], "captions": None, "music": [], "volume": []}
+_post = validate_edl(dict(_pre), 30.0).model_dump()
+check("sfx: an EDL written before sfx existed hashes identically",
+      edl_signature(_pre) == edl_signature(_post))
+check("sfx: an empty sfx list is dropped from the signature",
+      edl_signature({**_pre, "sfx": []}) == edl_signature(_pre))
+
+# --- validation ------------------------------------------------------------
+_base = {"keep": [[0.0, 30.0]], "captions": None}
+_ok = validate_edl({**_base, "sfx": [
+    {"id": "sx1", "storage_key": "sfx:whoosh", "at": 5.0}]}, 30.0)
+check("sfx: a valid one-shot validates", _ok.sfx[0].at == 5.0)
+check("sfx: gain defaults to -6dB", _ok.sfx[0].gain_db == -6.0)
+# Three layers, one number. A default that drifts between the schema, the tool
+# and the renderer means the stored EDL and the rendered audio disagree.
+import inspect as _insp                                       # noqa: E402
+check("sfx: schema, tool and renderer agree on the default gain",
+      schemas.SfxItem.model_fields["gain_db"].default == -6.0
+      and _insp.signature(agent_tools.add_sfx)
+          .parameters["gain_db"].default == -6.0
+      and "item.get('gain_db', -6.0)" in _insp.getsource(
+          renderer.build_filtergraph))
+expect_reject("sfx past the end of the program",
+              {**_base, "sfx": [{"id": "s", "storage_key": "sfx:whoosh",
+                                 "at": 99.0}]}, 30.0)
+expect_reject("sfx at a negative time",
+              {**_base, "sfx": [{"id": "s", "storage_key": "sfx:whoosh",
+                                 "at": -1.0}]}, 30.0)
+expect_reject("sfx with a duplicate id",
+              {**_base, "sfx": [{"id": "s", "storage_key": "sfx:whoosh", "at": 1.0},
+                                {"id": "s", "storage_key": "sfx:pop", "at": 2.0}]},
+              30.0)
+expect_reject("sfx with an empty storage_key",
+              {**_base, "sfx": [{"id": "s", "storage_key": "", "at": 1.0}]}, 30.0)
+expect_reject("sfx with an out-of-range gain",
+              {**_base, "sfx": [{"id": "s", "storage_key": "sfx:whoosh",
+                                 "at": 1.0, "gain_db": 99.0}]}, 30.0)
+# A point event must NOT be routed through _check_span, whose MIN_SPAN_S rule
+# would reject every sfx ever written.
+_pt = validate_edl({**_base, "sfx": [
+    {"id": "sx1", "storage_key": "sfx:whoosh", "at": 0.0}]}, 30.0)
+check("sfx: at=0 is valid (a point, not a zero-length span)",
+      _pt.sfx[0].at == 0.0)
+# canonical order, so re-emitting the same sounds is not a phantom version
+_sorted = validate_edl({**_base, "sfx": [
+    {"id": "b", "storage_key": "sfx:pop", "at": 9.0},
+    {"id": "a", "storage_key": "sfx:whoosh", "at": 2.0}]}, 30.0).model_dump()
+check("sfx: items are sorted by time",
+      [x["at"] for x in _sorted["sfx"]] == [2.0, 9.0])
+check("sfx: reordering the same set is NOT a new signature",
+      edl_signature(_sorted) == edl_signature(validate_edl({**_base, "sfx": [
+          {"id": "a", "storage_key": "sfx:whoosh", "at": 2.0},
+          {"id": "b", "storage_key": "sfx:pop", "at": 9.0}]}, 30.0).model_dump()))
+
+# --- the diff the agent reads back must DIVERGE when a sound moves ---------
+_d1 = describe_edl(validate_edl({**_base, "sfx": [
+    {"id": "a", "storage_key": "sfx:whoosh", "at": 2.0}]}, 30.0).model_dump())
+_d2 = describe_edl(validate_edl({**_base, "sfx": [
+    {"id": "a", "storage_key": "sfx:whoosh", "at": 7.0}]}, 30.0).model_dump())
+check("sfx: moving a sound changes the summary the agent reads", _d1 != _d2)
+check("sfx: the summary names the sound, not just a count", "whoosh" in _d1)
+
+# --- library security: identical shape to the music catalog ---------------
+check("sfx library: a real slug resolves", bool(sfx_library.resolve("sfx:whoosh")))
+check("sfx library: an unknown slug does not resolve",
+      sfx_library.resolve("sfx:not-a-real-sound") is None)
+check("sfx library: path traversal does not resolve",
+      sfx_library.resolve("sfx:../../../etc/passwd") is None
+      and sfx_library.local_path("sfx:../../../etc/passwd") is None)
+check("sfx library: a bare bucket key is not a library ref",
+      not sfx_library.is_library_ref("media/1/secret.mp4"))
+# The two packs share one resolver but must NOT share a namespace: an sfx is
+# not valid music (it would loop and duck) and vice versa.
+check("sfx library: music refs do not resolve as sfx",
+      sfx_library.resolve("library:hiphop-abducted") is None)
+check("music library: sfx refs do not resolve as music",
+      music_library.resolve("sfx:whoosh") is None)
+check("both packs resolve through the one shared whitelist",
+      isinstance(sfx_library._LIB, bundled_library.Library)
+      and isinstance(music_library._LIB, bundled_library.Library))
+for _t in sfx_library.CATALOG:
+    assert str(_t.get("license", "")).upper().startswith("CC0"), _t.get("slug")
+check("sfx library: every shipped sound is CC0", True)
+check("sfx library: every shipped sound has a real file",
+      all(os.path.exists(sfx_library.local_path("sfx:" + t["slug"]))
+          for t in sfx_library.CATALOG))
+check("sfx library: every category is one the agent can filter by",
+      {t["category"] for t in sfx_library.CATALOG} <= set(sfx_library.CATEGORIES))
+check("_track_name resolves BOTH packs to a title, not a raw ref",
+      _track_name("sfx:whoosh") == "Whoosh"
+      and not _track_name("library:hiphop-abducted").startswith("library:"))
+
+# --- the WIRING a filtergraph test cannot see ------------------------------
+# The round-25 bug: music_library was imported into the renderer and never
+# called, so every library ref went to S3 and failed EVERY render, after the
+# tool had already reported success. Pin the branch itself.
+from renderer import sfx_source                               # noqa: E402
+_fetched = []
+check("renderer: an sfx library ref resolves from the bundle, NOT storage",
+      sfx_source("sfx:whoosh",
+                 lambda k: _fetched.append(k)).endswith("whoosh.wav")
+      and not _fetched)
+check("renderer: a normal storage key IS fetched",
+      sfx_source("media/1/boom.wav", lambda k: f"/tmp/{k}") == "/tmp/media/1/boom.wav")
+try:
+    sfx_source("sfx:not-in-this-image", lambda k: "/tmp/x")
+    check("renderer: an unknown sfx ref fails honestly", False)
+except media.MediaError as e:
+    check("renderer: an unknown sfx ref fails honestly",
+          "built-in pack" in str(e))
+
+print("== Round-26: sfx in the filtergraph ==")
+_tl_sfx = Timeline([[0.0, 20.0]], [])
+_g_sfx = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]], "sfx": [{"id": "a", "storage_key": "sfx:whoosh",
+                                     "at": 4.0, "gain_db": -6.0}]},
+    20.0, True, _tl_sfx, None, [], {"words": []}, True,
+    W=1080, H=1920, fps=30.0,
+    sfx_inputs=[(1, {"id": "a", "storage_key": "sfx:whoosh", "at": 4.0,
+                     "gain_db": -6.0}, 0.72)])
+check("sfx: delayed to its program-time position",
+      "adelay=4000:all=1" in _g_sfx)
+check("sfx: its gain is applied", "volume=-6.0dB" in _g_sfx)
+check("sfx: it is mixed in", "[sfx0]" in _g_sfx and "amix=inputs=2" in _g_sfx)
+# The two things that make it an ACCENT rather than a bed.
+check("sfx: never ducked under speech",
+      "[sfx0]" in _g_sfx and _g_sfx.split("[sfx0]")[0].split("[1:a]")[-1]
+      .count("enable=") == 0)
+check("sfx: never trimmed — a one-shot plays its full length",
+      "atrim" not in _g_sfx.split("[1:a]")[-1].split("[sfx0]")[0])
+# No limiter: alimiter's 5ms lookahead would delay the whole programme audio
+# against the picture, measured by differencing two renders.
+check("sfx: no limiter is inserted (it would shift A/V by its lookahead)",
+      "alimiter" not in _g_sfx)
+
+print("== Round-26: the end card ==")
+_tl_o = Timeline([[0.0, 20.0]], [])
+_g_out = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]]}, 20.0, True, _tl_o, None, [], {"words": []}, False,
+    W=1080, H=1920, fps=30.0, outro_s=2.5, card_idx=7)
+check("outro: the programme and the card are concatenated",
+      "concat=n=2:v=1:a=1[vout][aout]" in _g_out)
+check("outro: the card is composited over black at the output geometry",
+      "color=c=black:s=1080x1920" in _g_out and "overlay=(W-w)/2:(H-h)/2" in _g_out)
+check("outro: the card input is the one the renderer allocated",
+      "[7:v]scale=" in _g_out)
+check("outro: geometry is forced before concat (the cheap graph guarantees none)",
+      "scale=1080:1920,setsar=1" in _g_out)
+check("outro: the card fades in and out", "fade=t=in:st=0" in _g_out
+      and "fade=t=out:st=2.15" in _g_out)
+check("outro: its audio is real silence, not the music mix",
+      "anullsrc=r=48000:cl=stereo:d=2.500" in _g_out)
+# The card must NOT be routed through amix: that mix is duration=first, keyed
+# to the programme, so appending silence there extends every music item.
+check("outro: the silence is concatenated, never mixed",
+      "[osil]" in _g_out and "amix" not in _g_out.split("[osil]")[1])
+check("outro: the programme audio fades so it does not cut dead into silence",
+      "afade=t=out:st=19.75" in _g_out)
+# A graph with no outro must be byte-identical to what it always was.
+_g_none = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]]}, 20.0, True, _tl_o, None, [], {"words": []}, False,
+    W=1080, H=1920, fps=30.0)
+# NB the base graph always joins its segments with concat=n=1, so absence of
+# "concat" is the wrong probe — pin the outro's own filters instead.
+check("outro: an un-branded render's graph gains nothing",
+      "concat=n=2" not in _g_none and "[ovid]" not in _g_none
+      and "[osil]" not in _g_none and "color=c=black" not in _g_none
+      and "[vout]" in _g_none and "[aout]" in _g_none)
+
+# The preview downscale must survive the concat. Applying it BEFORE the card
+# and then forcing the programme back to WxH for concat compatibility scaled a
+# 480p preview back UP to full resolution — a preview slower to encode and
+# larger than the final it stands in for.
+_g_pv = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]]}, 20.0, True, _tl_o, None, [], {"words": []}, True,
+    W=1080, H=1920, fps=30.0, outro_s=2.5, card_idx=7)
+check("outro: on a preview the 480p downscale happens AFTER the concat",
+      "concat=n=2:v=1:a=1[vcat]" in _g_pv
+      and "[vcat]scale=-2:min(480" in _g_pv)
+check("outro: the programme is not pre-downscaled before the card",
+      _g_pv.index("scale=1080:1920") < _g_pv.index("[vcat]scale=-2:min(480"))
+
+# --- the outro is NOT in the EDL ------------------------------------------
+check("outro: it never appears in the programme duration",
+      schemas.program_duration({"keep": [[0.0, 20.0]]}) == 20.0)
+check("outro: it never changes an EDL signature",
+      edl_signature(validate_edl({"keep": [[0.0, 20.0]]}, 20.0).model_dump())
+      == edl_signature({"keep": [[0.0, 20.0]]}))
+check("outro: no tool can add or remove it",
+      not any("outro" in t or "end_card" in t for t in agent_tools.TOOLS))
+check("outro: previews carry no card, finals do",
+      renderer.outro_seconds(True) == 0.0 and renderer.outro_seconds(False) > 0)
+check("outro: the shipped image is really in the build",
+      bool(renderer.endcard_path()))
+
+# --- render verification must expect programme + card ---------------------
+_ob2 = media.black_seconds
+try:
+    media.black_seconds = lambda p, d=None: 0.0
+    _OS = renderer.outro_seconds(False)
+    renderer._verify_render({"keep": [[0.0, 10.0]]}, "o.mp4", 10.0 + _OS, 1,
+                            "final", src_path="s", src_dur=10.0)
+    check("outro: a final of programme+card passes verification", True)
+    try:
+        renderer._verify_render({"keep": [[0.0, 10.0]]}, "o.mp4", 10.0, 1,
+                                "final", src_path="s", src_dur=10.0)
+        check("outro: a final MISSING the card fails verification", False)
+    except media.MediaError:
+        check("outro: a final MISSING the card fails verification", True)
+    # The black check must measure the PROGRAMME window only, or every short
+    # export reads as newly-black against a source that has no card.
+    _win = []
+    media.black_seconds = lambda p, d=None: (_win.append(d) or 0.0)
+    renderer._verify_render({"keep": [[0.0, 10.0]]}, "o.mp4", 10.0 + _OS, 1,
+                            "final", src_path="s", src_dur=10.0)
+    check("outro: the black check excludes the card's seconds",
+          _win and abs(_win[0] - 10.0) < 0.01)
+finally:
+    media.black_seconds = _ob2
+
+# black_seconds must actually HONOUR that window — it accepted and ignored
+# `duration` for a long time, so passing it used to be a silent no-op.
+import inspect                                                # noqa: E402
+check("media.black_seconds actually applies its duration window",
+      '"-t"' in inspect.getsource(media.black_seconds))
+
+# --- cache grandfathering: absent stamp means "no card", not "unknown" ----
+_OV = wconfig.OUTRO_VERSION
+check("outro: a pre-card FINAL is NOT served from cache (it must re-encode)",
+      not renderer.outro_current({"src_sha256": "x"}, "final"))
+check("outro: a current FINAL still IS served from cache",
+      renderer.outro_current({"outro_v": _OV}, "final"))
+check("outro: a pre-card PREVIEW still IS served from cache "
+      "(re-rendering every preview would starve the box)",
+      renderer.outro_current({"src_sha256": "x"}, "preview")
+      and renderer.outro_current(None, "preview"))
+check("outro: bumping the card version busts every stale final",
+      not renderer.outro_current({"outro_v": _OV - 1}, "final"))
+# The backend mirrors this rule so a stale final is never even reported as
+# downloadable; the two constants must agree or exports silently stay stale.
+_bev = open(os.path.join(os.path.dirname(__file__),
+                         "../../backend/routes/video.py")).read()
+check("outro: the backend's OUTRO_VERSION matches the worker's",
+      f"OUTRO_VERSION = {_OV}" in _bev)
+
+# --- honesty: the agent is told the card exists ---------------------------
+_sp = agent_prompt.system_prompt()
+check("outro: the agent is told exports carry the card",
+      "end card" in _sp.lower())
+check("outro: the agent is told NOT to cut footage to remove it",
+      "cut_range the last seconds" in _sp)
+
+# --- prompt gating, both directions ---------------------------------------
+check("sfx pack is claimed when it shipped",
+      ("list_sfx_library" in _sp) == bool(sfx_library.CATALOG))
+_saved_sfx = list(sfx_library.CATALOG)
+try:
+    sfx_library.CATALOG.clear()
+    _sp0 = agent_prompt.system_prompt()
+    check("sfx: no pack shipped -> the prompt asks for an upload instead",
+          "list_sfx_library" not in _sp0
+          and "ask them to attach the sound" in _sp0)
+    check("sfx: the browse tool is hidden when no pack shipped",
+          agent_tools._tool_disabled("list_sfx_library"))
+    check("sfx: the fallback hint stops offering a pack that isn't there",
+          "built-in sound pack" not in
+          agent_loop._nearest_alternative("add a whoosh please"))
+finally:
+    sfx_library.CATALOG.extend(_saved_sfx)
+check("sfx: the browse tool is offered when the pack shipped",
+      not agent_tools._tool_disabled("list_sfx_library"))
+check("sfx: every claim pair in the gate still matches the prompt",
+      all(left in agent_prompt.SYSTEM_PROMPT
+          for left, _ in agent_prompt._SFX_CLAIMS))
+print("== Round-26: sfx through the real tool path ==")
+# The layer the schema tests do not reach: tools -> _write_keep -> validate_edl.
+_sctx = EdlStubCtx({"video": {"duration": 60.0}, "words": [], "silences": [],
+                    "sentences": []}, 60.0,
+                   {"keep": [[0.0, 40.0]], "captions": None})
+_r = agent_tools.add_sfx(_sctx, storage_key="sfx:whoosh", at=10.0)
+check("add_sfx writes a version", _r.startswith("EDL v"))
+check("add_sfx stored the sound", _sctx.latest_edl()["json"]["sfx"][0]["at"] == 10.0)
+_r2 = agent_tools.add_sfx(_sctx, storage_key="sfx:boom", at=25.0)
+_ids = [x["id"] for x in _sctx.latest_edl()["json"]["sfx"]]
+check("add_sfx mints unique ids", len(set(_ids)) == 2, )
+check("move_sfx retimes it",
+      agent_tools.move_sfx(_sctx, id=_ids[0], at=12.0).startswith("EDL v"))
+check("set_audio_gain works on kind 'sfx'",
+      agent_tools.set_audio_gain(_sctx, kind="sfx", id=_ids[1],
+                                 gain_db=-12.0).startswith("EDL v"))
+check("remove_sfx deletes it",
+      agent_tools.remove_sfx(_sctx, id=_ids[0]).startswith("EDL v")
+      and len(_sctx.latest_edl()["json"]["sfx"]) == 1)
+check("remove_sfx on an unknown id is REJECTED, not a silent no-op",
+      agent_tools.remove_sfx(_sctx, id="nope").startswith("REJECTED"))
+check("add_sfx refuses an invented library slug",
+      agent_tools.add_sfx(_sctx, storage_key="sfx:airhorn",
+                          at=1.0).startswith("REJECTED"))
+check("add_sfx refuses a position past the program",
+      agent_tools.add_sfx(_sctx, storage_key="sfx:pop",
+                          at=999.0).startswith("REJECTED"))
+# A cut that shortens the program must DROP orphaned sounds, not reject the cut.
+_before = len(_sctx.latest_edl()["json"]["sfx"])
+_cut = agent_tools.cut_range(_sctx, start=5.0, end=39.0)
+check("cutting the program drops orphaned sfx instead of rejecting the cut",
+      _cut.startswith("EDL v") and "sound effect" in _cut.lower()
+      and len(_sctx.latest_edl()["json"]["sfx"]) < _before)
+
+print("== Round-26 review fixes ==")
+# (1) HIGH: sfx is CONTENT-anchored. The prompt tells the agent to land a
+# whoosh ON a cut, so a later cut must carry the sound with its moment —
+# treating it as program-anchored drifted it by the length of every earlier cut.
+_rctx = EdlStubCtx({"video": {"duration": 60.0}, "words": [], "silences": [],
+                    "sentences": []}, 60.0,
+                   {"keep": [[0.0, 60.0]], "captions": None,
+                    "effects": {"zooms": [{"id": "z1", "start": 40.0,
+                                           "end": 42.0, "scale": 1.2}]},
+                    "sfx": [{"id": "sx1", "storage_key": "sfx:boom",
+                             "at": 40.0, "gain_db": -6.0}]})
+_rres = agent_tools.cut_range(_rctx, start=10.0, end=20.0)
+_rj = _rctx.latest_edl()["json"]
+_rtl = Timeline(_rj["keep"], [])
+check("sfx follows its moment through a cut, like a zoom",
+      abs(_rtl.out_to_src(_rj["sfx"][0]["at"])
+          - _rtl.out_to_src(_rj["effects"]["zooms"][0]["start"])) < 0.02)
+check("sfx lands back on the ORIGINAL source moment after a cut",
+      abs(_rtl.out_to_src(_rj["sfx"][0]["at"]) - 40.0) < 0.02)
+check("the agent is TOLD the sound moved (a silent remap is still a lie)",
+      "sound effect" in _rres and "moved to" in _rres)
+# and a sound whose footage is cut away is dropped, with a note
+_dctx = EdlStubCtx({"video": {"duration": 60.0}, "words": [], "silences": [],
+                    "sentences": []}, 60.0,
+                   {"keep": [[0.0, 60.0]], "captions": None,
+                    "sfx": [{"id": "sx1", "storage_key": "sfx:boom",
+                             "at": 30.0, "gain_db": -6.0}]})
+_dres = agent_tools.cut_range(_dctx, start=25.0, end=40.0)
+check("a sound whose moment is cut away is dropped, not left drifting",
+      not _dctx.latest_edl()["json"].get("sfx")
+      and "no longer in the edit" in _dres)
+
+# (2) removing an INSERT shortens the program without touching sfx — the
+# bounds check would reject the whole op, so clicking x on an insert failed
+# over an unrelated sound.
+_ins = {"keep": [[0.0, 10.0]], "captions": None,
+        "inserts": [{"id": "ins1", "asset_key": "media/1/b.mp4",
+                     "kind": "clip", "at_output_s": 10.0, "duration_s": 6.0}],
+        "sfx": [{"id": "sx1", "storage_key": "sfx:ding", "at": 13.0,
+                 "gain_db": -6.0}]}
+check("remove_insert drops sfx orphaned by the shorter program",
+      agent_tools._drop_orphaned_sfx(dict(_ins, inserts=[]))
+      and not dict(_ins, inserts=[], sfx=[]).get("sfx"))
+_i2 = {"keep": [[0.0, 10.0]], "captions": None, "inserts": [],
+       "sfx": [{"id": "sx1", "storage_key": "sfx:ding", "at": 13.0,
+                "gain_db": -6.0}]}
+agent_tools._drop_orphaned_sfx(_i2)
+check("the orphan is actually removed, so validate_edl accepts the write",
+      _i2["sfx"] == []
+      and validate_edl(_i2, 60.0).sfx == [])
+
+# (3) a card-less final must not be permanently undownloadable: the worker
+# legitimately stamps outro_v=0, and comparing to OUTRO_VERSION would hide it
+# forever while the worker's cache kept serving it as current.
+check("backend treats the PRESENCE of the stamp as current, not its value",
+      '"outro_v" in (meta or {})' in _bev)
+
+# (4) the sfx fallback hint must not be swallowed by the effects hint, whose
+# regex matches the bare word "effect".
+check("'add some sound effects' reaches the sfx hint, not the effects hint",
+      "built-in sound pack" in agent_loop._nearest_alternative(
+          "add some sound effects"))
+check("'make the captions pop' still reaches the captions hint",
+      "captions" in agent_loop._nearest_alternative("make the captions pop"))
+check("'make it engaging and viral' still reaches the effects hint",
+      "color-grade" in agent_loop._nearest_alternative(
+          "make it engaging and viral"))
+
+# (5)+(6) the end card must not change geometry or frame rate that the render
+# would otherwise have kept. Both were measured as real regressions.
+_g_anam = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]]}, 20.0, True, _tl_o, None, [], {"words": []}, False,
+    W=1280, H=720, fps=30.0, outro_s=2.5, card_idx=7,
+    src_sar=2.0, src_fps=30.0)
+check("outro: an anamorphic source is widened, not squashed",
+      "scale=2560:720,setsar=1" in _g_anam
+      and "color=c=black:s=2560x720" in _g_anam)
+_g_fast = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]]}, 20.0, True, _tl_o, None, [], {"words": []}, False,
+    W=640, H=360, fps=60.0, outro_s=2.5, card_idx=7,
+    src_sar=1.0, src_fps=120.0)
+check("outro: a high-fps source keeps its own rate",
+      "r=120.000" in _g_fast and "fps=60.000[vprog]" not in _g_fast)
+# ...but when the pipeline already normalized, those ARE the right targets.
+_g_norm = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]], "frame": {"ratio": "9:16", "mode": "crop"}},
+    20.0, True, _tl_o, None, [], {"words": []}, False,
+    W=1080, H=1920, fps=30.0, frame_mode="crop", outro_s=2.5, card_idx=7,
+    src_sar=2.0, src_fps=120.0, src_w=1280, src_h=720)
+check("outro: a normalized render ignores the source's sar/fps",
+      "scale=1080:1920,setsar=1" in _g_norm and "r=30.000" in _g_norm)
+
+# The description the model actually reads must list what the enum accepts —
+# a tool whose prose says "music or voiceover" while its enum takes sfx is a
+# capability the agent may never discover.
+_sag = agent_tools.TOOLS["set_audio_gain"]
+check("set_audio_gain's description matches its own enum",
+      all(k in _sag[1] for k in ("music", "sfx", "voiceover")))
+
+check("sfx: the honesty layer recognises a sound-effect claim",
+      bool(agent_loop.EDIT_CLAIM.search("Added a whoosh on the first cut."))
+      and not agent_loop.EDIT_CLAIM.search("I have not added any whoosh."))
 
 print(f"\nALL {PASS} CHECKS PASSED")

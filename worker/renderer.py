@@ -26,6 +26,7 @@ import config
 import db as dbx
 import media
 import music_library
+import sfx_library
 import sheets
 import storage
 from schemas import EDLValidationError, validate_edl
@@ -164,6 +165,74 @@ def _speech_spans_out(index, tl):
     return merged
 
 
+ENDCARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "brand", "endcard.png")
+
+
+def endcard_path():
+    """The bundled end-card image, or None if this image does not carry one.
+
+    Returning None (rather than raising) is deliberate. A missing brand asset
+    means a broken build, and the two ways to react are: ship exports without
+    branding, or ship no exports at all. Failing every export takes the product
+    down over a cosmetic asset, and main.py's failure notes would tell the user
+    to "press Download to try again" — advice that could not possibly help,
+    which that module's own rule forbids. So the render proceeds and the
+    caller logs loudly instead; the miss is visible in logs and in the job
+    result, not buried in a customer's confusing failure.
+    """
+    return ENDCARD_PATH if os.path.exists(ENDCARD_PATH) else None
+
+
+def outro_seconds(preview):
+    """How much time the end card adds to a render of this variant.
+
+    The single source of truth for the outro's length. Everything that must
+    agree — the duration check, the progress estimate, the result-sheet
+    sampling window, the filtergraph — reads it from here, because these have
+    to move together or the render fails verification.
+    """
+    if preview and not config.OUTRO_ON_PREVIEW:
+        return 0.0
+    return config.OUTRO_DURATION_S if endcard_path() else 0.0
+
+
+def outro_current(meta, variant):
+    """Does this cached render carry the end card this variant should have?
+
+    An ABSENT stamp means 0 — "no card baked in" — not "unknown". That
+    distinction is the whole grandfathering rule: a pre-card FINAL (wants 1)
+    busts and re-encodes, while a pre-card PREVIEW (wants 0) still matches and
+    is served. Treating absent as unknown would re-render every cached preview
+    on the platform for nothing, which on a ~1 vCPU box is exactly how real
+    customers got starved before.
+
+    A module-level function, not an inline comparison, so the rule is
+    testable — the same reason sfx_source/music_source exist.
+    """
+    want = config.OUTRO_VERSION if outro_seconds(variant == "preview") else 0
+    return ((meta or {}).get("outro_v") or 0) == want
+
+
+def sfx_source(key, fetch):
+    """Resolve an sfx item's storage_key to a local file.
+
+    Module-level (not a closure) for the same reason as music_source: this
+    branch is exactly the wiring a filtergraph test cannot see. The music
+    version of this function was once imported and never called, so every
+    library reference went to S3 and failed EVERY render — after the tool had
+    reported success and minted a version.
+    """
+    if sfx_library.is_library_ref(key):
+        local = sfx_library.local_path(key)
+        if not local or not os.path.exists(local):
+            raise media.MediaError(
+                f"Sound effect '{key}' is no longer in the built-in pack, so "
+                "this render cannot be produced. Remove it and pick another.")
+        return local
+    return fetch(key)
+
+
 def music_source(key, fetch):
     """Local path for a music item's audio.
 
@@ -191,7 +260,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       music_inputs, index, preview,
                       W=None, H=None, fps=30.0, frame_mode=None,
                       insert_inputs=None, vo_inputs=None, silence_idx=None,
-                      src_w=None, src_h=None, src_pad=0.0):
+                      src_w=None, src_h=None, src_pad=0.0,
+                      sfx_inputs=None, outro_s=0.0, card_idx=None,
+                      src_sar=1.0, src_fps=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -441,10 +512,65 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         st = max(0.0, tl.out_duration - fade_out)
         parts.append(f"[{vlabel}]fade=t=out:st={st:.2f}:d={fade_out:.2f}[vfo]")
         vlabel = "vfo"
-    if preview:
+    # ---- branded end card ---------------------------------------------
+    # Placed AFTER the grade, captions and fades. Upstream of the grade it
+    # would be recoloured (GRADE_FILTERS['bw'] desaturates the brand red,
+    # 'vintage' tints it); upstream of fade_out a user's fade-to-black would
+    # swallow the branding instead of ending the programme. It is deliberately
+    # NOT routed through the music amix: that mix is `duration=first`, keyed to
+    # the programme stream, so appending the card's silence there would
+    # silently extend every music item's span.
+    #
+    # The preview downscale happens AFTER the concat, not before. Doing it
+    # first and then forcing the programme back to WxH for concat compatibility
+    # would scale a 480p preview back UP to full resolution — a preview that is
+    # slower to encode and larger than the final it is standing in for.
+    outro_here = outro_s > 0.0 and card_idx is not None
+    v_final = "vout"
+    if not outro_here and preview:
         parts.append(rf"[{vlabel}]scale=-2:min(480\,floor(ih/2)*2)[vsc]")
         vlabel = "vsc"
-    parts.append(f"[{vlabel}]format=yuv420p[vout]")
+    if outro_here:
+        # Force exact geometry before concat. concat demands identical
+        # dimensions, SAR and pixel format across segments, and the cheap
+        # graph (no inserts, no reframe, no zoom) makes no such guarantee.
+        #
+        # But "exact" must not mean "different from what this render would
+        # otherwise have produced". Two properties the cheap graph passes
+        # through untouched, both measured as regressions before this:
+        #
+        #  * SAR. Anamorphic sources (a 16:9 picture stored in 4:3 pixels)
+        #    carry a non-1 pixel aspect. A blanket setsar=1 at the coded width
+        #    squashes the picture, so the width is widened to the DISPLAY
+        #    width first and the result genuinely is square-pixel.
+        #  * Frame rate. `fps` is capped at 60 for the normalized path; the
+        #    cheap path keeps the source's own rate. Forcing the cap turned a
+        #    120fps export into 60fps only because it gained an end card.
+        #
+        # When do_norm already ran, the programme is W x H, SAR 1, at `fps` —
+        # so those are the right targets and no correction applies.
+        sar = 1.0 if do_norm else (float(src_sar) or 1.0)
+        oW = W if abs(sar - 1.0) < 0.001 else _even(W * sar)
+        ofps = fps if (do_norm or not src_fps) else float(src_fps)
+        parts.append(f"[{vlabel}]scale={oW}:{H},setsar=1,"
+                     f"format=yuv420p[vprog]")
+        cw, ch = _even(oW * 0.62), _even(H * 0.55)
+        parts.append(f"color=c=black:s={oW}x{H}:r={ofps:.3f}:d={outro_s:.3f},"
+                     f"format=rgba[obg]")
+        # One square-ish card fits every aspect ratio: scaled to fit inside a
+        # box that is a fraction of BOTH dimensions, it lands proportionate on
+        # 9:16, 16:9, 1:1 and 4:5 without a per-ratio asset.
+        parts.append(f"[{card_idx}:v]scale={cw}:{ch}:"
+                     f"force_original_aspect_ratio=decrease,format=rgba[ocard]")
+        parts.append("[obg][ocard]overlay=(W-w)/2:(H-h)/2:shortest=0[ocomp]")
+        fi = min(config.OUTRO_FADE_IN_S, outro_s / 3)
+        fo = min(config.OUTRO_FADE_OUT_S, outro_s / 3)
+        parts.append(f"[ocomp]fade=t=in:st=0:d={fi:.2f},"
+                     f"fade=t=out:st={outro_s - fo:.2f}:d={fo:.2f},"
+                     f"format=yuv420p,setsar=1[ovid]")
+        v_final = "vprog"
+    else:
+        parts.append(f"[{vlabel}]format=yuv420p[vout]")
 
     # program audio: duck under active voiceover, then mix music + voiceover
     alabel = "ac"
@@ -503,8 +629,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{input_idx}:a]volume={vo.get('gain_db', 0.0)}dB,"
                      f"aresample=48000{delay}[vo{j}]")
         mix_labels.append(f"[vo{j}]")
+    for j, (input_idx, item, _sdur) in enumerate(sfx_inputs or []):
+        at = max(0.0, min(float(item.get("at") or 0.0), tl.out_duration))
+        delay_ms = int(at * 1000)
+        delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""
+        # No ducking and no atrim, unlike music. An accent that dips under the
+        # very word it is punctuating is not an accent, and a one-shot plays
+        # for exactly as long as the file is — amix's duration=first already
+        # stops a late boom from running past the end of the programme.
+        parts.append(f"[{input_idx}:a]volume={item.get('gain_db', -6.0)}dB,"
+                     f"aresample=48000{delay}[sfx{j}]")
+        mix_labels.append(f"[sfx{j}]")
 
-    a_final = "apre" if (fade_in or fade_out) else "aout"
+    outro_on = outro_here          # one predicate, so the video and audio
+    a_prog = "aprog" if outro_on else "aout"
+    a_final = "apre" if (fade_in or fade_out or outro_on) else a_prog
     if mix_labels:
         parts.append(f"[{alabel}]" + "".join(mix_labels) +
                      f"amix=inputs={1 + len(mix_labels)}:duration=first:"
@@ -512,13 +651,40 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     else:
         parts.append(f"[{alabel}]anull[{a_final}]")
     if a_final == "apre":
+        # Deliberately NO limiter on the sfx mix. The obvious guard against a
+        # one-shot summing past 0 dBFS is an alimiter, but alimiter has 5ms of
+        # lookahead and therefore DELAYS the whole programme audio by 5ms
+        # against the picture — measured, by differencing two renders that
+        # should have been identical outside the sfx. Trading a global A/V
+        # offset for a hypothetical transient clip is a bad deal, and the
+        # pipeline already sums voiceover at 0 dB with no limiter. Headroom is
+        # handled where it belongs instead: the pack is normalized to -16 LUFS
+        # and sfx default to -6 dB, so the loudest one peaks near -7 dBFS.
         chain = []
         if fade_in:
             chain.append(f"afade=t=in:st=0:d={fade_in:.2f}")
         if fade_out:
             st = max(0.0, tl.out_duration - fade_out)
             chain.append(f"afade=t=out:st={st:.2f}:d={fade_out:.2f}")
-        parts.append(f"[apre]{','.join(chain)}[aout]")
+        elif outro_on:
+            # Without this the programme's music or speech cuts dead into the
+            # card's silence. Skipped when the EDL sets its own fade_out,
+            # which already lands the programme in silence.
+            d = min(config.OUTRO_AUDIO_TAIL_FADE_S, tl.out_duration / 2)
+            if d > 0.01:
+                chain.append(f"afade=t=out:st={tl.out_duration - d:.2f}"
+                             f":d={d:.2f}")
+        parts.append(f"[apre]{','.join(chain) or 'anull'}[{a_prog}]")
+
+    if outro_on:
+        parts.append(f"anullsrc=r=48000:cl=stereo:d={outro_s:.3f},"
+                     "aformat=sample_fmts=fltp:channel_layouts=stereo[osil]")
+        cat_v = "vcat" if preview else "vout"
+        parts.append(f"[{v_final}][{a_prog}][ovid][osil]"
+                     f"concat=n=2:v=1:a=1[{cat_v}][aout]")
+        if preview:
+            parts.append(rf"[vcat]scale=-2:min(480\,floor(ih/2)*2),"
+                         r"format=yuv420p[vout]")
 
     return ";".join(parts)
 
@@ -553,7 +719,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         storage.download_to(key, local)
         return local
 
-    music_inputs, insert_inputs, vo_inputs = [], [], []
+    music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
     extra_inputs = []
     next_idx = 1
 
@@ -595,6 +761,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         music_inputs.append((next_idx, item, track_dur))
         next_idx += 1
 
+    for item in edl.get("sfx", []):
+        local = sfx_source(item["storage_key"],
+                           lambda k: _fetch(k, "sfx", next_idx))
+        # No duration probe, unlike music: nothing in the graph needs it (a
+        # one-shot is never trimmed or looped, and amix's duration=first
+        # already stops a late tail overrunning the programme). Probing would
+        # spawn an ffprobe per sound per render on a ~1 vCPU box for a number
+        # that is then discarded. add_sfx warns about an over-long tail at
+        # write time, where the duration is already known.
+        extra_inputs += ["-i", local]
+        sfx_inputs.append((next_idx, item, None))
+        next_idx += 1
+
     for item in inserts:                      # sorted by validate_edl = tl.ins order
         local = _fetch(item["asset_key"], "insert", next_idx)
         if item["kind"] == "image" or local.endswith(IMAGE_EXTS):
@@ -624,13 +803,27 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                      media.PROXY_SHORT_FRAC * src_dur):
         src_pad = src_dur - vdur
 
+    # The end card is its own ffmpeg input — no filter conjures a bundled PNG
+    # out of nothing. -loop 1 -t gives it a real duration and framerate so the
+    # overlay does not depend on eof_action to hold a single frame.
+    outro_s = outro_seconds(preview)
+    card_idx = None
+    if outro_s > 0.0:
+        extra_inputs += ["-loop", "1", "-t", f"{outro_s:.3f}",
+                         "-r", f"{fps:.3f}", "-i", endcard_path()]
+        card_idx = next_idx
+        next_idx += 1
+
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
                               insert_inputs=insert_inputs,
                               vo_inputs=vo_inputs, silence_idx=silence_idx,
                               src_w=info["width"], src_h=info["height"],
-                              src_pad=src_pad)
+                              src_pad=src_pad, sfx_inputs=sfx_inputs,
+                              outro_s=outro_s, card_idx=card_idx,
+                              src_sar=info.get("sar") or 1.0,
+                              src_fps=float(info["fps"]) or fps)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).
@@ -648,7 +841,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
            *encode, "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
-    media.run(cmd, progress_cb=progress_cb, expected_out_s=tl.out_duration)
+    # Progress is percent-of-expected, so it must be the RENDERED length. Left
+    # at the programme duration the bar hits 99.9% at programme end and then
+    # flatlines through the whole end card.
+    media.run(cmd, progress_cb=progress_cb,
+              expected_out_s=tl.out_duration + outro_s)
     return media.duration_of(out_path)
 
 
@@ -672,7 +869,13 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
     if src_dur:
         keep = [[s, min(e, src_dur)] for s, e in keep if s < src_dur]
         keep = keep or edl_json["keep"]     # never let clamping empty it out
-    expected = Timeline(keep, edl_json.get("inserts") or []).out_duration
+    program = Timeline(keep, edl_json.get("inserts") or []).out_duration
+    # The rendered file is the programme PLUS the branded end card. The
+    # tolerance does not absorb it: 2.5s exceeds max(0.75s, 3%) for anything
+    # under ~83s, so without this every short export fails verification and
+    # retries forever.
+    outro = outro_seconds(variant == "preview")
+    expected = program + outro
     tol = max(config.RENDER_DURATION_TOLERANCE_S,
               config.RENDER_DURATION_TOLERANCE_FRAC * expected)
     if abs(out_dur - expected) > tol:
@@ -681,7 +884,11 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
             f"{out_dur:.2f}s but the edit is {expected:.2f}s "
             f"(tolerance {tol:.2f}s) — the render is the wrong length")
     if out_dur > 1.0:
-        out_black = media.black_seconds(out_path, out_dur) / out_dur
+        # Measure the PROGRAMME only. The end card is black by design, and the
+        # source it is compared against has none, so counting it is pure
+        # unmatched numerator in the out_black - src_black comparison below.
+        prog_dur = max(0.1, out_dur - outro)
+        out_black = media.black_seconds(out_path, prog_dur) / prog_dur
         if out_black > config.RENDER_BLACK_MAX_RATIO:
             # The output is mostly black — but that's only a DEFECT if the
             # source wasn't. Probe the source (once, only in this rare case).
@@ -781,7 +988,13 @@ def run_render_job(worker_db, job):
             want_fp = _caption_index_fp(edl_row["json"],
                                         (idx_c or {}).get("json") or {})
             fp_ok = (want_fp == stored_fp)
-        if fp_ok:
+        # The end card is a render-pipeline constant, so nothing about adding
+        # it moves the EDL version or the source sha — every already-rendered
+        # version would keep serving un-branded bytes forever. Grandfathering
+        # here must therefore be the OPPOSITE of caption_fp's above: a MISSING
+        # stamp means the render predates the card and must be re-encoded,
+        # where a missing caption fingerprint is trusted.
+        if fp_ok and outro_current(cached.get("meta"), variant):
             return {"render_asset_id": cached["id"],
                     "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
                     "duration_s": cached["duration_s"], "edl_version": version,
@@ -829,6 +1042,13 @@ def run_render_job(worker_db, job):
             _last_prog[0] = now
             worker_db.run(dbx.set_progress, job_id, 10 + int(frac * 80))
 
+        if variant == "final" and not endcard_path():
+            # Exports keep working, but this must never be silent: it means a
+            # build shipped without its brand asset, and nobody downstream
+            # would otherwise notice that every export lost its end card.
+            print(f"[render {job_id}] BRAND CARD MISSING at {ENDCARD_PATH} — "
+                  "exporting WITHOUT the Valmera end card", flush=True)
+
         out_dur = render_edl(edl_row["json"], index, src_local, out_local,
                              workdir, preview=(variant == "preview"),
                              progress_cb=_prog)
@@ -848,7 +1068,15 @@ def run_render_job(worker_db, job):
 
         sheet_local = os.path.join(workdir, "result_sheet.jpg")
         try:
-            sheets.build_result_sheet(out_local, sheet_local, out_dur)
+            # The PROGRAMME duration, not the file duration. build_result_sheet
+            # samples at duration*(i+0.5)/9, so with the file duration the last
+            # tile of any render under ~45s lands on the end card — and the
+            # vision self-check that reads this sheet is told to flag
+            # unexpected black frames. It would report the branding as a defect
+            # and the agent would tell the user their video is broken.
+            sheets.build_result_sheet(
+                out_local, sheet_local,
+                max(0.1, out_dur - outro_seconds(variant == "preview")))
         except Exception:
             sheet_local = None
         _mark("sheet_s")
@@ -871,7 +1099,9 @@ def run_render_job(worker_db, job):
             fps=out_info["fps"],
             meta={"variant": variant, "edl_version": version,
                   "sheet_key": sheet_key, "src_sha256": original["sha256"],
-                  "caption_fp": _caption_index_fp(edl_row["json"], index)})
+                  "caption_fp": _caption_index_fp(edl_row["json"], index),
+                  "outro_v": (config.OUTRO_VERSION
+                              if outro_seconds(variant == "preview") else 0)})
         # Reclaim the renders this one just replaced. Unique-per-render keys
         # made recovery possible but left every superseded object in the bucket
         # forever; only this exact (variant, version) is pruned, so pinned older

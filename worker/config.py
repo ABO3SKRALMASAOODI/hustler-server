@@ -216,6 +216,31 @@ RENDER_DURATION_TOLERANCE_FRAC = float(
 # exceeds it.
 RENDER_BLACK_MAX_RATIO = float(os.getenv("RENDER_BLACK_MAX_RATIO", "0.7"))
 
+# ---------------------------------------------------------------- end card --
+# Every EXPORT closes on a branded card: black, the Valmera robot, the
+# wordmark, "Edited by Valmera agent". It is a render-pipeline constant, NOT
+# part of the EDL — no tool adds or removes it, and it never appears in
+# program_duration, so nothing the agent places can land on top of it.
+#
+# FINALS ONLY, by default. Previews are program-time everywhere in the studio
+# (timeline ruler, playhead, scrub mapping, the "N s program" label), so a
+# preview that is 2.5s longer than its own timeline would put a permanent lie
+# in the scrubber. Finals are also the only artifact that leaves the platform:
+# downloads always go through a final render, previews never do. Set
+# OUTRO_ON_PREVIEW=1 to show it in previews too — the renderer supports it and
+# the tests cover both — but fix the studio's time base first.
+OUTRO_DURATION_S = float(os.getenv("OUTRO_DURATION_S", "2.5"))
+OUTRO_FADE_IN_S = 0.45
+OUTRO_FADE_OUT_S = 0.35
+# The program's last 0.25s is faded so music/speech does not cut dead into the
+# card's silence. Skipped when the EDL already sets its own fade_out.
+OUTRO_AUDIO_TAIL_FADE_S = 0.25
+OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
+# Bumped whenever the card's LOOK changes. It is stored on every render asset
+# and busts the render cache, so an existing export re-encodes with the new
+# card instead of serving pre-outro bytes forever.
+OUTRO_VERSION = 1
+
 FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "5400"))
 # A stalled encode stops emitting -progress lines but keeps its stdout pipe
 # open, so the progress reader would block forever (this once froze the only

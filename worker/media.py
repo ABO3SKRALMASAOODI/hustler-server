@@ -175,7 +175,21 @@ def probe(path):
     w, h = int(v.get("width") or 0), int(v.get("height") or 0)
     if abs(rotation_of(v)) % 180 == 90:
         w, h = h, w
+    # Pixel aspect ratio. Almost always 1, but anamorphic material (old DV,
+    # some broadcast sources) stores a 16:9 picture in 4:3 pixels, and any
+    # filter chain that forces setsar=1 without widening the frame squashes
+    # it. 1.0 on anything unparseable — a wrong non-1 value distorts every
+    # frame, where a wrong 1.0 only reverts to today's behaviour.
+    sar = 1.0
+    try:
+        sn, sd = (str(v.get("sample_aspect_ratio") or "1:1").split(":") + ["1"])[:2]
+        sar = float(sn) / float(sd) if float(sd or 0) else 1.0
+    except (TypeError, ValueError):
+        sar = 1.0
+    if not (0.1 <= sar <= 10.0):
+        sar = 1.0
     return {
+        "sar": round(sar, 6),
         "duration": round(duration, 3),
         "video_duration": video_duration,
         "fps": round(fps, 3),
@@ -269,10 +283,20 @@ def black_seconds(path, duration=None):
     """Total seconds of (near-)black video via ffmpeg blackdetect on a cheap
     downscaled/low-fps pass (fast even on a full-res final). Best-effort: any
     failure returns 0.0 so render verification can never itself fail a good
-    render — a broken render is caught by the duration check regardless."""
-    cmd = ["ffmpeg", "-i", path, "-vf",
-           "fps=4,scale=64:-2,blackdetect=d=0.1:pix_th=0.10",
-           "-an", "-f", "null", "-"]
+    render — a broken render is caught by the duration check regardless.
+
+    `duration` limits the scan to the first N seconds. It exists so the render
+    check can measure the PROGRAMME only: every export now ends on a black
+    branded card, and counting those seconds would inflate the black ratio of
+    every short video against a source that has no card. (This parameter was
+    accepted and silently ignored for a long time — passing it used to be a
+    no-op, so a caller that "fixed" the ratio by passing it changed nothing.)
+    """
+    cmd = ["ffmpeg", "-i", path]
+    if duration and duration > 0:
+        cmd += ["-t", f"{float(duration):.3f}"]
+    cmd += ["-vf", "fps=4,scale=64:-2,blackdetect=d=0.1:pix_th=0.10",
+            "-an", "-f", "null", "-"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=config.FFMPEG_TIMEOUT_S)

@@ -15,6 +15,7 @@ import db as dbx
 import llm
 import media
 import music_library
+import sfx_library
 import storage
 import timeline as timeline_mod
 from captions import KARAOKE_HARD_MAX
@@ -364,11 +365,12 @@ def list_assets(ctx, kind=None):
     rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, sel)
     if not rows:
         if sel == kinds["music"]:
-            return ("No music uploaded to this project — but the built-in "
-                    "library is always available: call list_music_library(). "
-                    "Only ask the user to attach one (paperclip button in "
-                    "chat, mp3/wav/m4a) if they want a specific track the "
-                    "library does not have.")
+            return ("No audio uploaded to this project — but the built-in "
+                    "libraries are always available: list_music_library() "
+                    "for background tracks, list_sfx_library() for one-shot "
+                    "sound effects. Only ask the user to attach a file "
+                    "(paperclip button in chat, mp3/wav/m4a) if they want a "
+                    "specific sound the libraries do not have.")
         return f"No {kind} assets in this project."
     lines = []
     for a in rows:
@@ -536,6 +538,11 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     #   zooms      - CONTENT-anchored ("push in on the skyline"): remap through
     #                the source so the zoom stays on the moment it was placed
     #                on; drop it when that footage is cut away.
+    #   sfx        - CONTENT-anchored one-shot ("a whoosh on that cut"): remap
+    #                the POINT through the source; drop it when that moment is
+    #                cut away. Output-time units do NOT decide the anchor —
+    #                zoom start/end are output time too. What the item is
+    #                attached to decides it.
     #   music /    - PROGRAM-anchored ("music under the whole video", "narrate
     #   voiceover    at 10s"): clamp to the new program length.
     #   regions    - PROGRAM-anchored censor window: clamp (drop if outside).
@@ -632,6 +639,48 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
                 continue
             kept_vo.append(v)
         edl["voiceover"] = kept_vo
+    if edl.get("sfx"):
+        # CONTENT-anchored, like a zoom — NOT program-anchored like music. The
+        # prompt tells the agent to land a whoosh ON a cut point and an impact
+        # ON the reveal, so the sound belongs to a moment in the footage and
+        # has to follow it. Left in program time it silently drifts by the
+        # length of every cut made before it: trim 10s off the front and the
+        # whoosh that was on the cut now fires 10s into the next take, with no
+        # note, while write_edl still reports success.
+        #
+        # A point, not a span, so remap_program_span is no use here — a
+        # zero-length span maps to no output pieces and returns None. Map the
+        # point itself through the source.
+        kept_sfx = []
+        for s in edl["sfx"]:
+            s = dict(s)
+            at = float(s["at"])
+            src = old_tl.out_to_src(at)
+            # No source time means the point sits inside a spliced insert;
+            # those keep their program position.
+            new_at = new_tl.src_to_out(src) if src is not None else at
+            if new_at is None:
+                region_notes.append(
+                    f"note: sound effect {s.get('id')} was removed — the "
+                    "moment it was placed on is no longer in the edit.")
+                continue
+            if abs(new_at - at) > 0.01:
+                region_notes.append(
+                    f"note: sound effect {s.get('id')} moved to "
+                    f"{round(new_at, 2)}s so it stays on the same moment.")
+            s["at"] = round(new_at, 2)
+            # A point past the end of a shortened edit is dropped, not
+            # clamped: clamping would pile every orphan onto the last frame.
+            # Without this the sfx bounds check in validate_edl rejects the
+            # whole CUT — the user asks to trim the end and is told the edit
+            # is invalid, over a sound they never mentioned.
+            if s["at"] > max(0.0, prog - 0.05):
+                region_notes.append(
+                    f"note: sound effect {s.get('id')} was removed — it sits "
+                    "after the end of the shortened edit.")
+                continue
+            kept_sfx.append(s)
+        edl["sfx"] = kept_sfx
 
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
@@ -1304,6 +1353,160 @@ def _music_name(key):
     return os.path.basename(key or "?")
 
 
+def _track_name(key):
+    """Display name for ANY audio reference — music, sfx or upload. Both
+    bundled schemes resolve to a real title; everything else is a path."""
+    for lib in (music_library, sfx_library):
+        t = lib.resolve(key)
+        if t:
+            return t["title"]
+    return os.path.basename(key or "?")
+
+
+def _resolve_sfx(ctx, storage_key):
+    """(sound, error) for an sfx reference.
+
+    A structural twin of _resolve_music, and deliberately just as strict. Two
+    disjoint doors: an `sfx:` reference is EXACT-membership lookup in the
+    bundled pack and never touches the assets table; anything else must be a
+    project-owned audio asset. There is no third door, and no prefix matching:
+    the renderer downloads whatever key it is handed with no project scoping,
+    so a loose check here is a read primitive over the whole bucket.
+
+    Uploaded sounds arrive as kind 'music' — an uploaded audio file is just an
+    audio file, and whether it is a bed or a one-shot is an EDL decision, not
+    an asset kind. So there is no separate 'sfx' upload kind to keep in sync.
+    """
+    if sfx_library.is_library_ref(storage_key):
+        s = sfx_library.resolve(storage_key)
+        if not s:
+            have = ", ".join(x["slug"] for x in sfx_library.CATALOG[:12])
+            return None, (
+                f"REJECTED: '{storage_key}' is not a sound in the built-in "
+                f"pack. Call list_sfx_library() and use a slug it returns — "
+                f"never invent one. Known slugs: {have or 'none'}.")
+        return {"name": s["title"], "duration_s": s.get("duration_s"),
+                "library": True}, None
+
+    asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
+    if asset and asset["kind"] == "audio":
+        return None, (
+            "REJECTED: that file is the video's OWN extracted audio track "
+            "(a transcription artifact), not a sound effect. Use "
+            "list_sfx_library() for a built-in sound, or "
+            "list_assets(kind='music') for the user's own uploads.")
+    if not asset or asset["kind"] != "music":
+        return None, (
+            f"REJECTED: '{storage_key}' is not an audio asset in this "
+            "project. Call list_sfx_library() for the built-in pack, or "
+            "list_assets(kind='music') for the user's uploads.")
+    return {"name": os.path.basename(storage_key),
+            "duration_s": asset.get("duration_s"), "library": False}, None
+
+
+def list_sfx_library(ctx, category=None):
+    """Browse the built-in sound-effects pack — the clicks, whooshes, impacts
+    and risers that carry short-form video. Every one is ours outright, so no
+    upload is needed."""
+    if not sfx_library.CATALOG:
+        return ("The built-in sound-effects pack is empty in this "
+                "deployment. Use list_assets(kind='music') for the user's own "
+                "uploads, or ask them to attach a sound.")
+    c = (category or "").strip().lower()
+    if c and c not in sfx_library.CATEGORIES:
+        return (f"REJECTED: unknown category '{category}'. Available: "
+                + ", ".join(sfx_library.CATEGORIES))
+    hits = sfx_library.browse(c or None)
+    if not hits:
+        return (f"No '{c}' sounds. Available categories: "
+                + ", ".join(sorted({t["category"] for t in sfx_library.CATALOG})))
+    head = (f"{len(hits)} built-in sound(s)"
+            + (f" in category '{c}'" if c else "") +
+            ". Pass the sfx: reference to add_sfx.\n")
+    return head + "\n".join(
+        f"  sfx:{t['slug']} — {sfx_library.describe(t)}" for t in hits)
+
+
+def add_sfx(ctx, storage_key, at, gain_db=-6.0):
+    """Place a one-shot sound at a point in the program timeline."""
+    sound, err = _resolve_sfx(ctx, storage_key)
+    if err:
+        return err
+    try:
+        at = float(at)
+    except (TypeError, ValueError):
+        return f"REJECTED: at must be a number of seconds, got {at!r}."
+    try:
+        gain_db = float(gain_db)
+    except (TypeError, ValueError):
+        return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    if at < 0 or at > max(0.0, prog - 0.05):
+        return (f"REJECTED: at={at}s is outside the program "
+                f"(0 to {round(prog, 2)}s). Sound effects are placed in "
+                "program time — the edited timeline, not source time.")
+    items = [dict(s) for s in (edl.get("sfx") or [])]
+    # Lowest free index, not len+1: after removing sx1 from [sx1, sx2], len+1
+    # is "sx2" — already taken — and a suffix loop would mint "sx2x".
+    taken = {s.get("id") for s in items}
+    n = 1
+    while f"sx{n}" in taken:
+        n += 1
+    sid = f"sx{n}"
+    items.append({"id": sid, "storage_key": storage_key,
+                  "at": round(at, 2), "gain_db": gain_db})
+    edl["sfx"] = items
+    note = ""
+    dur = sound.get("duration_s")
+    # An honest heads-up rather than a silent truncation: the renderer's amix
+    # is duration=first, so a tail running past the program end is simply cut.
+    if dur and at + dur > prog + 0.05:
+        note = (f" NOTE: '{sound['name']}' is {dur:.2f}s and the program ends "
+                f"at {round(prog, 2)}s, so its tail will be cut short.")
+    return ctx.write_edl(
+        edl, f"added sfx '{sound['name']}' at {round(at, 2)}s "
+             f"({gain_db:+g}dB) as {sid}") + note
+
+
+def remove_sfx(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(s) for s in (edl.get("sfx") or [])]
+    hit = next((s for s in items if s.get("id") == id), None)
+    if not hit:
+        have = ", ".join(s.get("id") or "?" for s in items) or "none"
+        return (f"REJECTED: no sfx with id '{id}'. Existing sfx ids: {have}. "
+                "Call get_edl to see them.")
+    edl["sfx"] = [s for s in items if s.get("id") != id]
+    return ctx.write_edl(
+        edl, f"removed sfx {id} ('{_track_name(hit['storage_key'])}' "
+             f"at {hit['at']}s)")
+
+
+def move_sfx(ctx, id, at):
+    """Retime a sound without changing which sound it is or how loud."""
+    try:
+        at = float(at)
+    except (TypeError, ValueError):
+        return f"REJECTED: at must be a number of seconds, got {at!r}."
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(s) for s in (edl.get("sfx") or [])]
+    hit = next((s for s in items if s.get("id") == id), None)
+    if not hit:
+        have = ", ".join(s.get("id") or "?" for s in items) or "none"
+        return (f"REJECTED: no sfx with id '{id}'. Existing sfx ids: {have}.")
+    prog = program_duration(edl)
+    if at < 0 or at > max(0.0, prog - 0.05):
+        return (f"REJECTED: at={at}s is outside the program "
+                f"(0 to {round(prog, 2)}s).")
+    old = hit["at"]
+    hit["at"] = round(at, 2)
+    edl["sfx"] = items
+    return ctx.write_edl(
+        edl, f"moved sfx {id} ('{_track_name(hit['storage_key'])}') "
+             f"{old}s -> {hit['at']}s")
+
+
 def swap_music(ctx, id, storage_key):
     """Change WHICH track plays, keeping its position, level and fit —
     'no, use a different song'."""
@@ -1411,9 +1614,9 @@ def set_music_fit(ctx, id, start=None, end=None, offset_s=None,
 
 
 def set_audio_gain(ctx, kind, id, gain_db):
-    """Change the loudness of an EXISTING music or voiceover item."""
-    if kind not in ("music", "voiceover"):
-        return "REJECTED: kind must be 'music' or 'voiceover'."
+    """Change the loudness of an EXISTING music, sfx or voiceover item."""
+    if kind not in ("music", "sfx", "voiceover"):
+        return "REJECTED: kind must be 'music', 'sfx' or 'voiceover'."
     try:
         g = round(float(gain_db), 1)
     except (TypeError, ValueError):
@@ -1431,7 +1634,7 @@ def set_audio_gain(ctx, kind, id, gain_db):
     edl[kind] = items
     key = hit.get("storage_key") or hit.get("asset_key") or "?"
     return ctx.write_edl(
-        edl, f"{kind} {id} ('{os.path.basename(key)}') gain "
+        edl, f"{kind} {id} ('{_track_name(key)}') gain "
              f"{old:+.1f}dB -> {g:+.1f}dB")
 
 
@@ -1863,6 +2066,29 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     return result
 
 
+def _drop_orphaned_sfx(edl):
+    """Drop sound effects that no longer fit the program, returning notes.
+
+    Shrinking the program by any route other than a keep change — removing a
+    spliced insert, shortening one — leaves sfx bounded by the OLD program
+    length. validate_edl then rejects the whole write, so a user clicking x on
+    an insert is told their edit is invalid over a sound they never mentioned.
+    """
+    items = edl.get("sfx") or []
+    if not items:
+        return []
+    prog = program_duration(edl)
+    kept, notes = [], []
+    for s in items:
+        if float(s["at"]) > max(0.0, prog - 0.05):
+            notes.append(f"note: sound effect {s.get('id')} was removed — it "
+                         "sits after the end of the shortened edit.")
+            continue
+        kept.append(s)
+    edl["sfx"] = kept
+    return notes
+
+
 def remove_insert(ctx, id):
     edl = dict(ctx.latest_edl()["json"])
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
@@ -1872,10 +2098,14 @@ def remove_insert(ctx, id):
         return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
                 f"{have}. Call get_edl to see them.")
     edl["inserts"] = [i for i in inserts if i.get("id") != id]
-    return ctx.write_edl(
+    notes = _drop_orphaned_sfx(edl)
+    res = ctx.write_edl(
         edl, f"removed insert {id} "
              f"('{os.path.basename(hit['asset_key'])}', {hit['duration_s']}s) "
              "— prior timing restored")
+    if notes and res.startswith("EDL v"):
+        res += "\n" + "\n".join(notes)
+    return res
 
 
 def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
@@ -2418,6 +2648,31 @@ TOOLS = {
                    "fade_in_s": {"type": "number"},
                    "fade_out_s": {"type": "number"},
                    "loop": {"type": "boolean"}}),
+    "list_sfx_library": (list_sfx_library, "Browse the BUILT-IN sound-effects "
+                        "pack — clicks, whooshes, impacts, risers, stings. "
+                        "Always available with nothing uploaded. Returns "
+                        "'sfx:<slug>' references to pass to add_sfx. "
+                        "Optionally filter by category: "
+                        + ", ".join(sfx_library.CATEGORIES) + ".",
+                        {"category": {"type": "string",
+                                      "enum": list(sfx_library.CATEGORIES)}}),
+    "add_sfx": (add_sfx, "Punctuate a MOMENT with a one-shot sound effect — a "
+                "whoosh on a cut, a click on a beat, an impact on a reveal. "
+                "storage_key is either an 'sfx:<slug>' from "
+                "list_sfx_library() or an exact key from "
+                "list_assets(kind='music') — never invent one. `at` is an "
+                "OUTPUT-timeline second (the edited program, not source "
+                "time). This is NOT background music: it plays once, for as "
+                "long as the sound is, and never ducks. Default -6dB.",
+                {"storage_key": {"type": "string"},
+                 "at": {"type": "number"},
+                 "gain_db": {"type": "number"}}),
+    "move_sfx": (move_sfx, "Retime an existing sound effect — 'the whoosh is "
+                 "too early'. Keeps which sound and how loud. id from "
+                 "get_edl.",
+                 {"id": {"type": "string"}, "at": {"type": "number"}}),
+    "remove_sfx": (remove_sfx, "Delete a sound effect by id (from get_edl).",
+                   {"id": {"type": "string"}}),
     "swap_music": (swap_music, "Replace the TRACK of an existing music item "
                    "while keeping its position, level and fit — THE tool for "
                    "'use a different song' / 'try something more upbeat'. "
@@ -2443,12 +2698,13 @@ TOOLS = {
                      "or before re-adding it with a different range.",
                      {"id": {"type": "string"}}),
     "set_audio_gain": (set_audio_gain, "Change the loudness of an EXISTING "
-                       "music or voiceover item without re-adding it — THE "
-                       "tool for 'lower the music' / 'make the narration "
-                       "quieter'. kind: 'music' or 'voiceover'; id from "
+                       "music, sound-effect or voiceover item without "
+                       "re-adding it — THE tool for 'lower the music' / "
+                       "'make the narration quieter' / 'that whoosh is too "
+                       "loud'. kind: 'music', 'sfx' or 'voiceover'; id from "
                        "get_edl; gain_db e.g. -12.",
                        {"kind": {"type": "string",
-                                 "enum": ["music", "voiceover"]},
+                                 "enum": ["music", "sfx", "voiceover"]},
                         "id": {"type": "string"},
                         "gain_db": {"type": "number"}}),
     "set_caption_style": (set_caption_style, "Change how existing captions "
@@ -2649,6 +2905,10 @@ REQUIRED_ARGS = {
     # a track.
     "add_music": ["storage_key"],
     "list_music_library": [],
+    "list_sfx_library": [],
+    "add_sfx": ["storage_key", "at"],
+    "move_sfx": ["id", "at"],
+    "remove_sfx": ["id"],
     "swap_music": ["id", "storage_key"],
     "set_music_fit": ["id"],
     "remove_music": ["id"],
@@ -2676,6 +2936,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "set_caption_style", "add_music", "remove_music",
                "swap_music", "set_music_fit",
+               "add_sfx", "move_sfx", "remove_sfx",
                "set_audio_gain", "set_volume", "set_frame",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
@@ -2694,6 +2955,8 @@ def _tool_disabled(name):
     # deliver and then has to walk it back.
     if name == "list_music_library":
         return not music_library.CATALOG
+    if name == "list_sfx_library":
+        return not sfx_library.CATALOG
     return False
 
 
