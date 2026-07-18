@@ -807,6 +807,25 @@ def run_render_job(worker_db, job):
             meta={"variant": variant, "edl_version": version,
                   "sheet_key": sheet_key, "src_sha256": original["sha256"],
                   "caption_fp": _caption_index_fp(edl_row["json"], index)})
+        # Reclaim the renders this one just replaced. Unique-per-render keys
+        # made recovery possible but left every superseded object in the bucket
+        # forever; only this exact (variant, version) is pruned, so pinned older
+        # VERSIONS still play. Best-effort — never fail a finished render over
+        # cleanup.
+        try:
+            old = worker_db.run(dbx.superseded_renders, project_id, variant,
+                                version, asset_id)
+            if old:
+                keys = []
+                for a in old:
+                    keys.append(a["storage_key"])
+                    keys.append((a.get("meta") or {}).get("sheet_key"))
+                storage.delete_keys(keys)
+                worker_db.run(dbx.delete_assets, [a["id"] for a in old])
+                print(f"[render {job_id}] pruned {len(old)} superseded "
+                      f"render(s) for v{version}", flush=True)
+        except Exception as e:
+            print(f"[render {job_id}] prune skipped: {e}", flush=True)
         # Deterministic mid-word audit: keep boundaries that clip a word,
         # computed straight from the index — visible in logs and to the
         # agent even if it ignored the write-time warnings.

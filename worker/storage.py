@@ -41,3 +41,19 @@ def exists(key):
         return True
     except Exception:
         return False
+
+
+def delete_keys(keys):
+    """Best-effort delete. Returns how many were requested; never raises —
+    callers use this to reclaim superseded artifacts, and failing to free
+    space must never fail the job that produced the new one."""
+    keys = [k for k in (keys or []) if k]
+    if not keys:
+        return 0
+    try:
+        client().delete_objects(
+            Bucket=config.S3_BUCKET,
+            Delete={"Objects": [{"Key": k} for k in keys], "Quiet": True})
+    except Exception:
+        return 0
+    return len(keys)

@@ -38,6 +38,12 @@ _spec.loader.exec_module(wschemas)
 video_bp = Blueprint("video", __name__)
 
 MAX_CONCURRENT_JOBS_PER_USER = int(os.getenv("MAX_CONCURRENT_JOBS_PER_USER", "3"))
+# Forced (cache-skipping) preview re-renders per EDL version per hour. The
+# studio's own 2-per-visit bound lives in a ref that a page reload clears, so
+# this is the one that actually holds. See render_preview_endpoint.
+MAX_FORCED_RENDERS_PER_HOUR = int(os.getenv("MAX_FORCED_RENDERS_PER_HOUR", "4"))
+# Beacons accepted per user per hour (see client_event).
+MAX_CLIENT_EVENTS_PER_HOUR = int(os.getenv("MAX_CLIENT_EVENTS_PER_HOUR", "60"))
 MESSAGES_PER_HOUR = int(os.getenv("MESSAGES_PER_HOUR", "20"))
 
 # Single source of truth: worker/schemas.py (loaded above as wschemas), so
@@ -1708,6 +1714,28 @@ def render_preview_endpoint(user_id, project_id):
             if existing:
                 return jsonify({"job_id": existing["id"], "already_running": True,
                                 "forced": True})
+            # ...and a DURABLE cap on top of it. The studio also limits itself to
+            # 2 escalations per visit, but that counter lives in a ref: a reload
+            # resets it, and "reload and hit retry again" is exactly what a user
+            # with an unplayable render does. Forced renders skip the render
+            # cache by design, so each one is a full re-encode of the ORIGINAL —
+            # on a 1-vCPU box with MEDIA_SLOTS=1 an unbounded sequence of them
+            # occupies the single global media slot and starves every other
+            # customer's preview (the round-19 churn cause, self-inflicted).
+            cur.execute("""SELECT COUNT(*) AS n FROM video_jobs
+                           WHERE project_id = %s AND type = 'preview'
+                             AND (payload->>'edl_version')::int = %s
+                             AND payload->>'force' = 'true'
+                             AND created_at > NOW() - INTERVAL '1 hour'""",
+                        (project_id, version))
+            if (cur.fetchone() or {}).get("n", 0) >= MAX_FORCED_RENDERS_PER_HOUR:
+                # Honest: re-encoding again genuinely will not help them, and
+                # saying so beats silently queueing work that changes nothing.
+                return jsonify({
+                    "error": "We've already rebuilt this preview a few times and "
+                             "it still won't play in this browser. Download the "
+                             "edit, or try opening the project in another browser.",
+                    "code": "forced_render_limit"}), 429
         if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
             return jsonify({"error": "You have a few edits still processing — "
                                      "try again in a moment.",
@@ -1742,18 +1770,47 @@ def client_event(user_id, project_id):
     if not isinstance(detail, dict):
         detail = {}
     # Cap what a client can write: this is user-controlled input landing in a
-    # table an admin will read. Scalars only, bounded count and length.
+    # table an admin will read. Scalars only, bounded count and length. Numbers
+    # are range-checked rather than trusted — JSON has no integer bound, so a
+    # bare `{"n": <4000-digit number>}` passed an isinstance(int) check and
+    # landed in the row at full length, sailing past the 300-char cap that
+    # exists precisely to stop that.
     clean = {}
     for k, v in list(detail.items())[:20]:
-        if isinstance(v, (int, float, bool)) or v is None:
-            clean[str(k)[:40]] = v
+        key = str(k)[:40]
+        if v is None or isinstance(v, bool):
+            clean[key] = v
+        elif isinstance(v, (int, float)):
+            clean[key] = v if -1e15 < v < 1e15 else str(v)[:300]
         else:
-            clean[str(k)[:40]] = str(v)[:300]
+            clean[key] = str(v)[:300]
     try:
         with vdb() as conn:
             cur = conn.cursor()
             if not _project_for_user(cur, project_id, user_id):
                 return jsonify({"ok": True, "ignored": True})
+            # Telemetry must never become a write amplifier: this endpoint is
+            # cheap to call in a loop from a page the user already controls.
+            cur.execute("""SELECT COUNT(*) AS n FROM client_events
+                           WHERE user_id = %s
+                             AND created_at > NOW() - INTERVAL '1 hour'""",
+                        (int(user_id),))
+            if (cur.fetchone() or {}).get("n", 0) >= MAX_CLIENT_EVENTS_PER_HOUR:
+                return jsonify({"ok": True, "throttled": True})
+            # An asset_id from the client is a claim, not a fact. Storing an
+            # unverified one lets a forensics row point at another tenant's
+            # asset — and this table exists to be TRUSTED during an incident.
+            if asset_id is not None:
+                cur.execute("""SELECT 1 FROM assets
+                               WHERE id = %s AND project_id = %s""",
+                            (asset_id, project_id))
+                if not cur.fetchone():
+                    # Keep the claim rather than lose it: a render that has
+                    # since been pruned as superseded is EXACTLY the kind of
+                    # asset a failure beacon is about, and "unverified" is more
+                    # useful to an incident than a silent NULL.
+                    clean["asset_id_unverified"] = asset_id
+                    asset_id = None
             cur.execute("""INSERT INTO client_events
                                (user_id, project_id, kind, asset_id, detail)
                            VALUES (%s, %s, %s, %s, %s)""",

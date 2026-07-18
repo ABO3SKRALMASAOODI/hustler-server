@@ -276,6 +276,35 @@ def find_render_asset(conn, project_id, variant, edl_version):
         return cur.fetchone()
 
 
+def superseded_renders(conn, project_id, variant, edl_version, keep_asset_id):
+    """Render assets for this exact (project, variant, version) that an id
+    newer than keep_asset_id has replaced.
+
+    Renders used to live at one fixed key per version, so a re-render simply
+    overwrote the bytes and storage stayed bounded. Unique-per-render keys
+    (see renderer._render_stamp) fixed recovery but made every superseded
+    object immortal — a slow, permanent R2 leak paid for monthly. Scoped to a
+    single version so version HISTORY is never touched: the studio lets users
+    pin and replay older versions, and those renders must survive.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id, storage_key, meta FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = %s
+                         AND (meta->>'edl_version')::int = %s
+                         AND id < %s""",
+                    (project_id, variant, int(edl_version), int(keep_asset_id)))
+        return cur.fetchall()
+
+
+def delete_assets(conn, asset_ids):
+    if not asset_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM assets WHERE id = ANY(%s)", (list(asset_ids),))
+        return cur.rowcount
+
+
 def assets_by_kinds(conn, project_id, kinds, limit=40):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
