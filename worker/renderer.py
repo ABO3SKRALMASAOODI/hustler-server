@@ -18,6 +18,7 @@ import hashlib
 import os
 import shutil
 import time
+import uuid
 
 import audit
 import captions as caplib
@@ -653,10 +654,35 @@ def _caption_index_fp(edl_json, index):
     return h.hexdigest()[:16]
 
 
+def _render_stamp(job_id):
+    """Name fragment for a render object. Unique PER RENDER, and carrying no
+    word a client-side content blocker can pattern-match. Both properties are
+    load-bearing:
+
+    (1) The old key was `renders/{pid}/{variant}_v{version}.mp4` — the SAME key
+        for every re-render of a version. Bytes mutated behind live 6h
+        presigned URLs, and a re-render meant to FIX an object the user could
+        not play simply overwrote it at the same address, so recovery could
+        never produce genuinely new bytes at a new URL.
+    (2) `renders/` and `preview_` are ad-blocker / AV-shield bait; the proxy key
+        (an opaque sha) is not — and proxies have played in sessions where a
+        render did not. Nothing anywhere parses these keys (they are only
+        stored on the asset row and presigned), so opacity is free.
+
+    job_id keeps the object traceable back to the job that wrote it.
+    """
+    return f"{job_id}-{uuid.uuid4().hex[:12]}"
+
+
 def run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     variant = "preview" if job["type"] == "preview" else "final"
     version = int(job["payload"].get("edl_version"))
+    # A render the USER could not play is the one case where re-encoding the
+    # same EDL is the point: the stored object is what failed them, so serving
+    # it back from cache makes every retry a guaranteed no-op. force=1 (set by
+    # the studio's "couldn't load" recovery) re-encodes to a FRESH key.
+    force = bool(job["payload"].get("force"))
 
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
@@ -672,7 +698,8 @@ def run_render_job(worker_db, job):
     # burned TEXT also depends on the mutable index, so a caption fingerprint
     # must match too (see _caption_index_fp) — otherwise a caption-less render
     # is served forever after the transcript gains words.
-    cached = worker_db.run(dbx.find_render_asset, project_id, variant, version)
+    cached = (None if force else
+              worker_db.run(dbx.find_render_asset, project_id, variant, version))
     if cached and (cached.get("meta") or {}).get("src_sha256") == \
             original["sha256"] and storage.exists(cached["storage_key"]):
         caps = edl_row["json"].get("captions")
@@ -761,11 +788,12 @@ def run_render_job(worker_db, job):
             sheet_local = None
         _mark("sheet_s")
 
-        render_key = f"renders/{project_id}/{variant}_v{version}.mp4"
+        stamp = _render_stamp(job_id)
+        render_key = f"media/{project_id}/{stamp}.mp4"
         storage.upload_file(out_local, render_key, "video/mp4")
         sheet_key = None
         if sheet_local and os.path.exists(sheet_local):
-            sheet_key = f"renders/{project_id}/{variant}_v{version}_sheet.jpg"
+            sheet_key = f"media/{project_id}/{stamp}_s.jpg"
             storage.upload_file(sheet_local, sheet_key, "image/jpeg")
         worker_db.run(dbx.set_progress, job_id, 96)
         _mark("upload_s")

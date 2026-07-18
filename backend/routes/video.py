@@ -1010,10 +1010,16 @@ def project_state(user_id, project_id):
     for a in renders:
         m = a.get("meta") or {}
         v, variant = m.get("edl_version"), m.get("variant")
-        if v is not None:
-            bv = by_version.setdefault(int(v), {})
-            if variant not in bv:
-                bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
+        # int(v) on a malformed meta value used to raise straight out of the
+        # request — and /state is polled every 2s, so one bad asset row bricked
+        # the whole project's studio forever. Skip the row instead.
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            continue
+        bv = by_version.setdefault(v, {})
+        if variant not in bv:
+            bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
     # The preview the player should show is the render of the NEWEST edl version
     # — NOT merely the newest render asset id. A late re-render of an OLDER
     # version (a version-picker tap, a retried/redelivered job) inserts a higher
@@ -1585,12 +1591,15 @@ def list_edls(user_id, project_id):
     for r in renders:
         m = r.get("meta") or {}
         v, variant = m.get("edl_version"), m.get("variant")
-        if v is not None:
-            bv = by_version.setdefault(int(v), {})
-            # Keep the NEWEST asset id per (version, variant): a version can be
-            # re-rendered, and the version list must point at the latest encode.
-            if r["id"] > bv.get(variant, 0):
-                bv[variant] = r["id"]
+        try:                      # a malformed meta value must not 500 the list
+            v = int(v)
+        except (TypeError, ValueError):
+            continue
+        bv = by_version.setdefault(v, {})
+        # Keep the NEWEST asset id per (version, variant): a version can be
+        # re-rendered, and the version list must point at the latest encode.
+        if r["id"] > bv.get(variant, 0):
+            bv[variant] = r["id"]
 
     return jsonify({"edls": [
         {"version": v["version"], "created_by": v["created_by"],
@@ -1653,12 +1662,18 @@ def render_final(user_id, project_id):
 @token_required
 def render_preview_endpoint(user_id, project_id):
     """Re-render the preview for an EDL version. Used by the studio to retry a
-    preview that failed (or never rendered) without making another edit."""
+    preview that failed (or never rendered) without making another edit.
+
+    force=true additionally bypasses the worker's render cache. That is the
+    ONLY way out of "the render exists but this browser will not play it":
+    without it the worker serves the stored asset straight back and the user
+    retries forever against the same unplayable object."""
     data = request.get_json() or {}
     try:
         version = int(data.get("edl_version"))
     except (TypeError, ValueError):
         return jsonify({"error": "edl_version must be an integer"}), 400
+    force = bool(data.get("force"))
     with vdb() as conn:
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
@@ -1667,22 +1682,87 @@ def render_preview_endpoint(user_id, project_id):
                     (project_id, version))
         if not cur.fetchone():
             return jsonify({"error": "That EDL version does not exist"}), 400
-        # Don't stack a second preview for a version already rendering.
-        cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'preview'
-                         AND state IN ('queued','running')
-                         AND (payload->>'edl_version')::int = %s""",
-                    (project_id, version))
-        existing = cur.fetchone()
-        if existing:
-            return jsonify({"job_id": existing["id"], "already_running": True})
+        # Don't stack a second preview for a version already rendering — EXCEPT
+        # for a forced re-render: an in-flight normal job for this version will
+        # serve the very asset the user is telling us they cannot play, so
+        # joining it would report success and change nothing on their screen.
+        if not force:
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'preview'
+                             AND state IN ('queued','running')
+                             AND (payload->>'edl_version')::int = %s""",
+                        (project_id, version))
+            existing = cur.fetchone()
+            if existing:
+                return jsonify({"job_id": existing["id"], "already_running": True})
+        else:
+            # Bound the escape hatch: one forced re-render per version at a
+            # time, so a user leaning on Retry can't queue an encode per press.
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'preview'
+                             AND state IN ('queued','running')
+                             AND (payload->>'edl_version')::int = %s
+                             AND payload->>'force' = 'true'""",
+                        (project_id, version))
+            existing = cur.fetchone()
+            if existing:
+                return jsonify({"job_id": existing["id"], "already_running": True,
+                                "forced": True})
         if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
             return jsonify({"error": "You have a few edits still processing — "
                                      "try again in a moment.",
                             "code": "busy_capacity"}), 429
-        job_id = _enqueue(cur, project_id, user_id, "preview",
-                          {"edl_version": version, "source": "user_edit"})
-    return jsonify({"job_id": job_id})
+        payload = {"edl_version": version, "source": "user_edit"}
+        if force:
+            payload["force"] = True
+        job_id = _enqueue(cur, project_id, user_id, "preview", payload)
+    return jsonify({"job_id": job_id, "forced": force})
+
+
+# Client-side failures (a <video> that will not decode, a presign that never
+# resolves) are invisible to us: media bytes go browser <-> R2 directly, so the
+# API sees nothing but a user who says "it's broken". This records them.
+# Best-effort by contract — a beacon must NEVER surface an error to the user or
+# block the UI it is reporting on.
+CLIENT_EVENT_KINDS = {"player_error", "player_recovered", "attach_failed"}
+
+
+@video_bp.route("/projects/<int:project_id>/client-event", methods=["POST"])
+@token_required
+def client_event(user_id, project_id):
+    data = request.get_json(silent=True) or {}
+    kind = str(data.get("kind") or "")[:40]
+    if kind not in CLIENT_EVENT_KINDS:
+        return jsonify({"ok": True, "ignored": True})
+    try:
+        asset_id = int(data.get("asset_id"))
+    except (TypeError, ValueError):
+        asset_id = None
+    detail = data.get("detail")
+    if not isinstance(detail, dict):
+        detail = {}
+    # Cap what a client can write: this is user-controlled input landing in a
+    # table an admin will read. Scalars only, bounded count and length.
+    clean = {}
+    for k, v in list(detail.items())[:20]:
+        if isinstance(v, (int, float, bool)) or v is None:
+            clean[str(k)[:40]] = v
+        else:
+            clean[str(k)[:40]] = str(v)[:300]
+    try:
+        with vdb() as conn:
+            cur = conn.cursor()
+            if not _project_for_user(cur, project_id, user_id):
+                return jsonify({"ok": True, "ignored": True})
+            cur.execute("""INSERT INTO client_events
+                               (user_id, project_id, kind, asset_id, detail)
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        (int(user_id), project_id, kind, asset_id,
+                         json.dumps(clean)))
+    except Exception as exc:      # never let telemetry break the studio
+        print(f"[client_event] dropped ({kind}): {exc}", flush=True)
+        return jsonify({"ok": True, "stored": False})
+    return jsonify({"ok": True, "stored": True})
 
 
 # ------------------------------------------------------------------ #

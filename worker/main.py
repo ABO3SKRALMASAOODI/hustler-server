@@ -102,13 +102,26 @@ FAIL_NOTES = {
 USER_PREVIEW_FAIL_NOTE = (
     "I couldn't render the preview for that edit ({err}). Your change is "
     "saved — hit retry, or make another edit.")
+# A FORCED re-render is a playback recovery, not a fresh edit: that version
+# already rendered successfully once and the user's browser simply would not
+# play the file. Reusing the note above would misdirect them completely —
+# "your change is saved, make another edit" points at the edit, when the edit
+# was never the problem. Same rule as the index note: never hand the user
+# advice that could not have helped.
+FORCED_PREVIEW_FAIL_NOTE = (
+    "I couldn't rebuild that preview for playback ({err}). Your edit itself is "
+    "intact — you can still download it, or try opening the project in another "
+    "browser.")
 
 
 def _notify_failure(worker_db, job, err):
     note = FAIL_NOTES.get(job["type"])
-    if not note and job["type"] == "preview" and \
-            (job.get("payload") or {}).get("source") == "user_edit":
-        note = USER_PREVIEW_FAIL_NOTE
+    payload = job.get("payload") or {}
+    if not note and job["type"] == "preview":
+        if payload.get("force"):
+            note = FORCED_PREVIEW_FAIL_NOTE
+        elif payload.get("source") == "user_edit":
+            note = USER_PREVIEW_FAIL_NOTE
     if not note:
         return
     try:
@@ -171,6 +184,12 @@ def reaper():
                 print(f"[reaper] failed exhausted job {row['id']} "
                       f"({row['type']})", flush=True)
                 note = REAPER_NOTES.get(row["type"])
+                # Same distinction as _notify_failure: a died forced re-render
+                # is a playback recovery, and the generic preview note would
+                # send the user off to re-edit something that was never wrong.
+                if row["type"] == "preview" and (row.get("payload") or {}).get("force"):
+                    note = FORCED_PREVIEW_FAIL_NOTE.format(
+                        err="the render was interrupted on our side")
                 if not note:
                     continue
                 try:

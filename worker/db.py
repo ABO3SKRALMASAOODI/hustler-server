@@ -108,7 +108,7 @@ def fail_exhausted_jobs(conn):
             WHERE state = 'running'
               AND heartbeat_at < NOW() - make_interval(secs => %s)
               AND attempts >= CASE WHEN type = 'agent_turn' THEN %s ELSE %s END
-            RETURNING id, type, project_id, error
+            RETURNING id, type, project_id, error, payload
         """, (config.STALE_AFTER_S, config.MAX_ATTEMPTS_AGENT,
               config.MAX_ATTEMPTS_MEDIA))
         return cur.fetchall()

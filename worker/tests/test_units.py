@@ -3256,4 +3256,66 @@ check("explicit-item captions don't get a transcript fingerprint",
           {"keep": [[0, 10]], "captions": [{"text": "x", "start": 1, "end": 2}]},
           {"words": [{"w": "hi", "t0": 0.1, "t1": 0.4}]}) is None)
 
+print("== Round-23: a render the user can't play must be re-creatable ==")
+# The incident: a captioned render sat correct in R2 but would not play in the
+# user's browser. Every recovery path led back to the SAME object — the cache
+# served it, and a re-render overwrote the same key — so the studio's Retry
+# button was structurally incapable of changing anything.
+
+# (a) Render keys are unique per render and free of blocker-bait words.
+_k1 = _rnd._render_stamp(252)
+_k2 = _rnd._render_stamp(252)
+check("two renders of the same job never share a key", _k1 != _k2)
+check("the key is traceable to its job", _k1.startswith("252-") and _k2.startswith("252-"))
+_full = f"media/51/{_k1}.mp4"
+check("no 'preview'/'render' substrings for a content blocker to match",
+      "preview" not in _full and "render" not in _full)
+
+# (b) force=1 bypasses the render cache. Proven by where the job DIES: with a
+# cache hit available it returns the cached asset; forced, it walks past the
+# cache and fails at the next step (index lookup stubbed missing).
+class _FakeDB:
+    def __init__(self, calls): self.calls = calls
+    def run(self, fn, *a, **kw):
+        name = getattr(fn, "__name__", str(fn))
+        self.calls.append(name)
+        if name == "get_edl_version":
+            return {"json": {"keep": [[0, 10]], "captions": None}, "version": 2}
+        if name == "latest_asset":
+            return {"sha256": "abc123", "storage_key": "originals/51/x.mp4"}
+        if name == "find_render_asset":
+            return {"id": 248, "storage_key": "media/51/252-deadbeef.mp4",
+                    "duration_s": 56.8,
+                    "meta": {"src_sha256": "abc123", "variant": "preview",
+                             "edl_version": 2, "sheet_key": None}}
+        if name == "get_index_by_sha":
+            return None          # forces the post-cache RuntimeError
+        return None
+
+_orig_exists = _rnd.storage.exists
+_rnd.storage.exists = lambda k: True
+try:
+    _calls = []
+    _job = {"id": 300, "project_id": 51, "type": "preview",
+            "payload": {"edl_version": 2}}
+    _res = _rnd.run_render_job(_FakeDB(_calls), _job)
+    check("without force, the cached render is served",
+          _res.get("cached") is True and _res.get("render_asset_id") == 248)
+    check("without force, the cache is consulted", "find_render_asset" in _calls)
+
+    _calls2 = []
+    _job2 = {"id": 301, "project_id": 51, "type": "preview",
+             "payload": {"edl_version": 2, "force": True}}
+    try:
+        _rnd.run_render_job(_FakeDB(_calls2), _job2)
+        _forced_past_cache = False
+    except RuntimeError as e:
+        _forced_past_cache = "index missing" in str(e).lower()
+    check("force walks PAST the cache instead of serving the dead render",
+          _forced_past_cache)
+    check("force never even queries the cache",
+          "find_render_asset" not in _calls2)
+finally:
+    _rnd.storage.exists = _orig_exists
+
 print(f"\nALL {PASS} CHECKS PASSED")

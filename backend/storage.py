@@ -9,7 +9,10 @@ Key layout:
     audio/{project_id}/{sha}.wav
     thumbs/{project_id}/{sha}/shot_{n}.jpg
     sheets/{project_id}/{sha}/sheet_{n}.jpg
-    renders/{project_id}/{preview|final}_v{version}.mp4
+    renders/{project_id}/{preview|final}_v{version}.mp4   (legacy, pre-2026-07-18)
+    media/{project_id}/{job_id}-{rand}.mp4                (renders; opaque + unique
+                                                           per render — see
+                                                           worker/renderer.py)
 """
 
 import os
@@ -234,8 +237,10 @@ def content_matches_kind(head, kind):
 # Every top-level key prefix a project's objects can live under. Used to wipe
 # a project (GDPR/account deletion, storage reclaim) — keys are laid out
 # {prefix}/{project_id}/..., so a full wipe iterates each prefix.
+# "renders" stays for objects written before 2026-07-18; "media" is where every
+# render lands now. A prefix missing here silently orphans bytes on delete.
 DELETE_PREFIXES = ("originals", "proxies", "audio", "thumbs", "sheets",
-                   "renders", "music", "images", "clips", "generated")
+                   "renders", "media", "music", "images", "clips", "generated")
 
 
 def delete_project_objects(project_id):
