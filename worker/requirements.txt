@@ -8,3 +8,9 @@ opencv-python-headless==4.10.0.84
 numpy<2
 pillow==10.4.0
 requests==2.32.3
+# Media extraction from page links (YouTube, TikTok, Vimeo, SoundCloud) for
+# worker/url_media.py. NEEDS REGULAR BUMPING: sites change their players
+# constantly and a months-old yt-dlp starts failing on the biggest ones first.
+# A failure here is honest (the tool reports the extractor's own reason) but it
+# is still a broken feature, so treat a stale pin as a bug, not as drift.
+yt-dlp==2026.7.4

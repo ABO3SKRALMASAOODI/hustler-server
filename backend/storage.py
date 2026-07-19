@@ -240,7 +240,8 @@ def content_matches_kind(head, kind):
 # "renders" stays for objects written before 2026-07-18; "media" is where every
 # render lands now. A prefix missing here silently orphans bytes on delete.
 DELETE_PREFIXES = ("originals", "proxies", "audio", "thumbs", "sheets",
-                   "renders", "media", "music", "images", "clips", "generated")
+                   "renders", "media", "music", "images", "clips", "generated",
+                   "fetched")
 
 
 def delete_project_objects(project_id):

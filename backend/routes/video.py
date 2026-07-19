@@ -100,6 +100,19 @@ def _image_gen_enabled():
     return bool(os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1"))
 
 
+def _url_fetch_enabled():
+    """Mirrors the worker's fetch_url gate (worker/config.URL_FETCH_ENABLED).
+
+    Same contract as _image_gen_enabled above, and the same reason: the
+    concierge's capability list tells the user it is EXHAUSTIVE, so a
+    capability missing from it is actively denied. Without this mirror, a user
+    who pastes a link while their first video is still indexing is told link
+    fetching probably is not supported — and then the agent turns round and
+    does it, which is the two-surfaces-disagreeing failure the deployment
+    gates exist to prevent."""
+    return os.getenv("URL_FETCH_ENABLED", "1") == "1"
+
+
 def _image_edit_enabled():
     """Restyling an existing frame/image needs DashScope's native endpoint;
     the OpenAI-compatible /images/generations backend (xAI) can only GENERATE
@@ -181,6 +194,10 @@ def _concierge_reply(stage, history, attachments, index_error=None):
         "black-out a fixed region to censor burned-in usernames, "
         "watermarks or on-screen text, and splice uploaded "
         "clips or images into the video full-frame"
+        + (", and download a video, song or image from a LINK they paste "
+           "(direct file links and YouTube/TikTok/Vimeo/SoundCloud pages) "
+           "and put it straight into the edit"
+           if _url_fetch_enabled() else "")
         + ((", and generate images with AI from a text description"
             + (", or by restyling a frame of their video or an uploaded "
                "image (e.g. giving a character a new hairstyle)"

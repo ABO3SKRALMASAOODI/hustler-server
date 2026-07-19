@@ -6,6 +6,7 @@ import difflib
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 
@@ -18,6 +19,7 @@ import music_library
 import sfx_library
 import storage
 import timeline as timeline_mod
+import url_media
 from captions import KARAOKE_HARD_MAX
 from schemas import (CaptionStyle, EDLValidationError, Frame, describe_edl,
                      edl_signature, keep_boundaries, output_duration,
@@ -54,6 +56,7 @@ class ToolContext:
         self.autorendered = False     # loop set: model skipped render_preview
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
+        self.urls_fetched = []        # assets created by fetch_url
         # Live per-turn model spend, for the graceful spend cap. tokens are
         # accumulated by the loop's llm recorder; images are priced flat.
         self.tokens_in = 0
@@ -2287,6 +2290,150 @@ def generate_image(ctx, prompt, from_video_time_s=None, from_asset_key=None,
             "the moving footage itself is not modified.")
 
 
+# ── Fetching media from a link ───────────────────────────────────────────────
+
+# What the model may pass as as_kind, and the asset kind each maps to. The
+# hint only steers the DOWNLOAD (it is cheaper to pull audio-only when a song
+# was asked for); ffprobe still decides what the file actually is, because a
+# hint that overrode the decoder would let the agent file a video as music and
+# hand the renderer something it cannot use.
+_FETCH_KIND_HINTS = {
+    "clip": url_media.KIND_VIDEO, "video": url_media.KIND_VIDEO,
+    "music": url_media.KIND_AUDIO, "audio": url_media.KIND_AUDIO,
+    "song": url_media.KIND_AUDIO, "image": url_media.KIND_IMAGE,
+    "photo": url_media.KIND_IMAGE, "picture": url_media.KIND_IMAGE,
+}
+
+# How to actually USE each kind once it has landed. Returned to the model so
+# the fetch and the placement are one thought — the round-26 lesson from
+# generate_image, whose result string had to spell out "it is NOT in the video
+# yet" before the agent stopped reporting a generated image as an edit.
+_FETCH_NEXT_STEP = {
+    url_media.KIND_VIDEO:
+        "splice it in with insert_media(asset_key='{key}', at_output_s=..., "
+        "duration_s=...), or look at it first with look_at_asset",
+    url_media.KIND_AUDIO:
+        "score the edit with add_music(storage_key='{key}')",
+    url_media.KIND_IMAGE:
+        "splice it in with insert_media(asset_key='{key}', at_output_s=..., "
+        "duration_s=2-4, motion='zoom_in'), or check it with look_at_asset",
+}
+
+
+def _clean_url(raw):
+    """Pull a bare URL out of what a model typically passes.
+
+    Models hand over `<https://x>`, `[title](https://x)` and trailing
+    punctuation from the sentence they copied it out of. Stripping these is
+    not politeness — a URL with a stray `)` on the end 404s, and the user is
+    told their working link is broken."""
+    u = (raw or "").strip()
+    if u.startswith("[") and "](" in u:                 # markdown link
+        u = u.split("](", 1)[1]
+    u = u.strip("<>").strip()
+    u = u.rstrip(").,;'\"")
+    return u.strip()
+
+
+def fetch_url(ctx, url, as_kind=None):
+    """Download media from a link and register it as a project asset."""
+    if not config.URL_FETCH_ENABLED:
+        return ("REJECTED: this deployment cannot download media from links. "
+                "Ask the user to upload the file instead.")
+    url = _clean_url(url)
+    if not url:
+        return "REJECTED: fetch_url needs a url."
+
+    prefer = None
+    if as_kind is not None:
+        prefer = _FETCH_KIND_HINTS.get(str(as_kind).strip().lower())
+        if prefer is None:
+            return ("REJECTED: as_kind must be one of clip, music, image — "
+                    "or omit it and the file type is detected.")
+
+    n = len(ctx.urls_fetched) + 1
+    if n > config.MAX_FETCHED_URLS_PER_TURN:
+        return (f"REJECTED: {config.MAX_FETCHED_URLS_PER_TURN} links already "
+                "fetched this turn, which is the limit. Use what you have, or "
+                "ask the user to send the rest in another message.")
+
+    # A fresh directory per ATTEMPT, not per success. Numbering it by
+    # len(urls_fetched) meant a FAILED fetch (rejected for size or duration,
+    # or killed mid-download) left its bytes behind and the next attempt in
+    # the same turn reused the very same directory — where _extract's
+    # "largest file in the folder" pick would then hand back the PREVIOUS
+    # link's media, registered under this link's title. Silently returning
+    # someone the wrong video is the one failure the honesty layer cannot see.
+    workdir = os.path.join(ctx.workdir, f"fetch_{uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        got = url_media.fetch(url, workdir, prefer=prefer)
+    except url_media.FetchMediaError as e:
+        # Every failure here is a sentence written to be shown to a user
+        # ("Private video", "over the 50 MB limit"). The instruction to not
+        # claim success matters: a download failure is the exact shape of
+        # turn where the model is most tempted to say "added your song".
+        #
+        # Clean up on the way out. A failed fetch leaves partial yt-dlp
+        # fragments behind, and because a failure does NOT increment the
+        # counter, the next attempt this turn reuses this very directory —
+        # where a stale fragment would then be a candidate for the
+        # largest-file pick.
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f"Could not download that link — {e}. Tell the user that "
+                "plainly and suggest they upload the file instead. Do NOT "
+                "claim anything was added.")
+    except Exception as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f"Could not download that link ({str(e)[:200]}). Tell the "
+                "user it did not work. Do NOT claim anything was added.")
+
+    kind, path = got["kind"], got["path"]
+    key = url_media.storage_key(ctx.project_id, kind, path)
+    try:
+        storage.upload_file(path, key, url_media.content_type(path))
+    except Exception as e:
+        return (f"Downloaded that {url_media.KIND_LABEL[kind]} but could not "
+                f"save it to storage ({str(e)[:160]}). Do NOT claim it was "
+                "added; try again.")
+    finally:
+        # Reclaim the bytes immediately. Four 500 MB fetches in one turn would
+        # otherwise sit on the worker's ephemeral disk alongside the proxy and
+        # every render temp — and this box has run out of disk before.
+        #
+        # The whole per-fetch directory, not just the file we uploaded: when
+        # yt-dlp cannot merge, it leaves the separate audio and video streams
+        # behind, and those are the two biggest files of the lot.
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
+               bytes_=got.get("bytes"), duration_s=got.get("duration_s"),
+               width=got.get("width"), height=got.get("height"),
+               fps=got.get("fps"),
+               meta={"filename": got["filename"],
+                     "fetched": True,
+                     "source_url": got["source_url"],
+                     "extractor": got.get("extractor"),
+                     "title": got.get("title"),
+                     "uploader": got.get("uploader")})
+    ctx.urls_fetched.append({"storage_key": key, "kind": kind,
+                             "url": got["source_url"],
+                             "filename": got["filename"]})
+
+    bits = []
+    if got.get("duration_s"):
+        bits.append(f"{got['duration_s']:.0f}s")
+    if got.get("width") and got.get("height"):
+        bits.append(f"{got['width']}x{got['height']}")
+    if kind == url_media.KIND_VIDEO and got.get("has_audio") is False:
+        bits.append("no audio")
+    detail = f" ({', '.join(bits)})" if bits else ""
+    nxt = _FETCH_NEXT_STEP[kind].format(key=key)
+    return (f"Downloaded \"{got['filename']}\"{detail} as a "
+            f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
+            f"the project but NOT in the video yet — {nxt}.")
+
+
 # ------------------------------------------------------------------ #
 #  META tools                                                          #
 # ------------------------------------------------------------------ #
@@ -2800,6 +2947,21 @@ TOOLS = {
                         "aspect": {"type": "string",
                                    "enum": ["16:9", "9:16", "1:1",
                                             "4:3", "3:4"]}}),
+    "fetch_url": (fetch_url, "Download media from a LINK the user gave you "
+                  "and save it as a project asset — a video, a song, or an "
+                  "image. Works with direct file links (Dropbox, Drive, a "
+                  "CDN, a stock library) and with page links (YouTube, "
+                  "TikTok, Vimeo, SoundCloud). Use this whenever the user "
+                  "pastes a URL for something they want in the edit; never "
+                  "tell them to upload a file you could have fetched. The "
+                  "file type is detected automatically — pass as_kind only "
+                  "to force audio-only from a video page ('music'). The "
+                  "result is saved to the project but is NOT in the video "
+                  "until you add it with insert_media (clip/image) or "
+                  "add_music (audio).",
+                  {"url": {"type": "string"},
+                   "as_kind": {"type": "string",
+                               "enum": ["clip", "music", "image"]}}),
     "set_color_grade": (set_color_grade, "Apply a color-grade preset to the "
                         "whole video (captions stay unstyled): vibrant, "
                         "warm, cool, bw, vintage, cinematic — or 'none' to "
@@ -2925,13 +3087,15 @@ REQUIRED_ARGS = {
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
     "generate_image": ["prompt"],
+    "fetch_url": ["url"],
     "ask_user": ["question"],
 }
 
 # The loop uses this to build TURN FACTS: a write "succeeded" when its result
 # is a version diff line (write_edl's "EDL vX -> vY: ..." format).
-# generate_image is here for the capabilities digest; its successes are
-# tracked separately via ctx.images_generated (it never writes the EDL).
+# generate_image and fetch_url are here for the capabilities digest; their
+# successes are tracked separately via ctx.images_generated / ctx.urls_fetched
+# (neither writes the EDL — they create an ASSET the agent then places).
 WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "set_caption_style", "add_music", "remove_music",
@@ -2941,7 +3105,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
-               "blur_region", "remove_blur", "generate_image"}
+               "blur_region", "remove_blur", "generate_image", "fetch_url"}
 
 
 def _tool_disabled(name):
@@ -2950,6 +3114,8 @@ def _tool_disabled(name):
     return 'unavailable'."""
     if name == "generate_image":
         return not llm.image_available()
+    if name == "fetch_url":
+        return not config.URL_FETCH_ENABLED
     # Same rule for the music library: a deployment whose image shipped no
     # tracks must not advertise one, or the agent offers music it cannot
     # deliver and then has to walk it back.

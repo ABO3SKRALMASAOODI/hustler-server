@@ -539,6 +539,31 @@ def _reply_violations(draft, wrote, previewed, acted=None):
     return v
 
 
+def _assets_made_note(ctx):
+    """', but <what> was saved to your project' — or '' when nothing was.
+
+    Used by every system-authored 'nothing changed' message. Those all key on
+    ctx.versions_written, which is true of the EDL and NOT of the project: a
+    turn can download a file or generate an image and then time out, and
+    reporting that as 'nothing was changed' sends the user off to re-paste a
+    link whose media is already in their media picker."""
+    def _n(count, singular, plural):
+        return f"{count} {singular if count == 1 else plural}"
+
+    made = []
+    if getattr(ctx, "urls_fetched", None):
+        made.append(_n(len(ctx.urls_fetched),
+                       "file downloaded from your link",
+                       "files downloaded from your links"))
+    if getattr(ctx, "images_generated", None):
+        made.append(_n(len(ctx.images_generated),
+                       "generated image", "generated images"))
+    if not made:
+        return ""
+    return (" — but " + " and ".join(made)
+            + " is saved to your project and ready to use")
+
+
 def _turn_facts(ctx, start_version):
     latest = ctx.latest_edl()
     if ctx.versions_written:
@@ -553,6 +578,16 @@ def _turn_facts(ctx, start_version):
                     "insert_media write also succeeded")
     else:
         images = "none"
+    if ctx.urls_fetched:
+        # Same caveat as generated images, for the same reason: downloading a
+        # song is not scoring the video with it, and a turn that fetched but
+        # never placed the file must not be reported as an edit.
+        fetched = (", ".join(f"{f['filename']} ({f['storage_key']})"
+                             for f in ctx.urls_fetched)
+                   + " — downloaded media is IN the video only if an "
+                     "insert_media/add_music write also succeeded")
+    else:
+        fetched = "none"
     if ctx.last_preview is not None:
         pv = (f"rendered v{ctx.last_preview.get('edl_version')} "
               f"({ctx.last_preview.get('duration_s')}s)")
@@ -564,6 +599,7 @@ def _turn_facts(ctx, start_version):
             f"- {edl_line}\n"
             f"- Successful write tools this turn: {writes}\n"
             f"- Images generated this turn: {images}\n"
+            f"- Media downloaded from links this turn: {fetched}\n"
             f"- Preview: {pv}\n"
             "Rules: your reply may not claim any change, render, or setting "
             "that is not present in these facts. If no writes occurred, say "
@@ -574,6 +610,21 @@ def _turn_facts(ctx, start_version):
 # Nearest supported alternative for the honest fallback, keyed on what the
 # user asked for. User-facing phrasing (no tool names).
 ALTERNATIVE_HINTS = [
+    # A pasted link is the most specific signal there is — it beats every
+    # keyword hint below, because "here's a song: <youtube link>" also matches
+    # the music hint, which would answer with the built-in library and never
+    # mention that we could simply have fetched the link.
+    # Every alternative must match a URL-SHAPED string, never a bare word.
+    # A plain `youtu\.?be` also matched the word "youtube" in ordinary prose
+    # ("make it look like a youtube video"), and being first in the scan it
+    # stole those messages from the aspect-ratio and caption hints.
+    (re.compile(r"(?i)https?://\S+|\bwww\.\S+\.\w|\byoutu\.be/|"
+                r"\byoutube\.com/|\btiktok\.com/|\bvimeo\.com/|"
+                r"\bsoundcloud\.com/|\bdrive\.google\.com|\bdropbox\.com/"),
+     "What I CAN do with a link: download the video, song or image behind it "
+     "and put it straight into the edit — direct file links (Dropbox, Drive, "
+     "a CDN) and page links (YouTube, TikTok, Vimeo, SoundCloud) both work. "
+     "Paste the URL and say what you want done with it."),
     # censor requests first: "remove the username/watermark" also contains
     # 'remove' (the cut hint) and 'logo/overlay' (the insert hint), and the
     # most specific hint must win the first-match scan
@@ -644,6 +695,12 @@ FALLBACK_REPLY = ("I wasn't able to make that change — it needs a "
 def _nearest_alternative(user_text):
     for rx, hint in ALTERNATIVE_HINTS:
         if rx.search(user_text or ""):
+            # A deployment with link fetching switched off must not offer it.
+            # Falling through to the next matching hint (rather than returning
+            # nothing) keeps a pasted music link answered by the music hint.
+            if "What I CAN do with a link" in hint \
+                    and not config.URL_FETCH_ENABLED:
+                continue
             # A deployment that shipped no tracks must not offer a library.
             if "built-in royalty-free library" in hint \
                     and not music_library.CATALOG:
@@ -676,7 +733,8 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     inspection. (A wrote-but-denies redraft keeps the corrective-note path:
     a denial is wrong but not a fabrication worth suppressing.)"""
     wrote = bool(ctx.versions_written)
-    acted = bool(ctx.versions_written or ctx.images_generated)
+    acted = bool(ctx.versions_written or ctx.images_generated
+                 or ctx.urls_fetched)
     previewed = ctx.last_preview is not None
     viol = _reply_violations(draft, wrote, previewed, acted)
     # Echo detection only polices turns that DID nothing: a working turn's
@@ -720,11 +778,28 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     honesty["false_claims"] += 1
     honesty["corrective_note"] = True
     honesty["discarded_drafts"] = [d for d in (draft, redraft) if d]
-    if wrote or ctx.images_generated:
-        print(f"[honesty] job {ctx.job['id']}: regeneration still denies "
-              "real changes — posting a corrective note", flush=True)
-        return ("*(system: this turn DID modify the edit — see the editing "
-                "steps above)*\n\n" + (redraft or draft))
+    if wrote or ctx.images_generated or ctx.urls_fetched:
+        # Real work happened, so the reply is corrected rather than discarded.
+        # The note has to say WHICH work, though: routing a fetch-only turn
+        # into the fallback below told the user nothing happened and that we
+        # cannot fetch links, while their downloaded file sat in the project —
+        # a lie in the opposite direction to the one being guarded against.
+        # Equally, "DID modify the edit" is false when only an asset was
+        # created, so each case gets its own wording.
+        if wrote:
+            note = ("this turn DID modify the edit — see the editing steps "
+                    "above")
+        else:
+            made = []
+            if ctx.urls_fetched:
+                made.append("the linked media WAS downloaded")
+            if ctx.images_generated:
+                made.append("an image WAS generated")
+            note = ("this turn did NOT change the edit, but "
+                    + " and ".join(made) + " and saved to the project")
+        print(f"[honesty] job {ctx.job['id']}: regeneration still misreports "
+              "real work — posting a corrective note", flush=True)
+        return f"*(system: {note})*\n\n" + (redraft or draft)
     # Zero-write fabrication that survived regeneration: never publish it.
     honesty["fallback_reply"] = True
     print(f"[honesty] job {ctx.job['id']}: regeneration still fabricates — "
@@ -772,10 +847,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "I'm stopping here — the edits I completed are saved "
                     "and previewed below. Send a follow-up to continue.",
                     "timeout", total_steps, timings, honesty)
+            # "nothing was changed" is true of the EDL but not of the project:
+            # a turn can time out after downloading a file, and telling the
+            # user nothing happened would leave them re-pasting a link whose
+            # media is already sitting in their media picker.
+            saved = _assets_made_note(ctx)
             worker_db.run(dbx.add_message, session_id, "assistant",
                           "That request timed out before I could finish "
-                          "anything — nothing was changed. Please try again, "
-                          "or break the request into smaller steps.",
+                          "anything — the edit itself was not changed"
+                          f"{saved}. Please try again, or break the request "
+                          "into smaller steps.",
                           {"error": "turn_timeout"})
             return {"status": "timeout", "steps": total_steps,
                     "timings": timings}
@@ -831,9 +912,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                                        session_id, timings)
             draft = (msg.content or "").strip()
             if not draft:
-                draft = ("Done — check the preview on the right."
-                         if ctx.versions_written or ctx.last_preview else
-                         "I only reviewed the video — nothing was changed.")
+                if ctx.versions_written or ctx.last_preview:
+                    draft = "Done — check the preview on the right."
+                else:
+                    draft = ("I only reviewed the video — the edit was not "
+                             f"changed{_assets_made_note(ctx)}.")
             final = _enforce_honesty(ctx, client, messages, tools, draft,
                                      start_version, honesty,
                                      user_text=user_message["content"] or "")

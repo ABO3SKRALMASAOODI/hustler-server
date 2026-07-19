@@ -1,5 +1,6 @@
 """System prompt for the editing agent."""
 
+import config
 import music_library
 import sfx_library
 
@@ -40,8 +41,9 @@ EDITING CRAFT
 - Inserting media: insert_media splices an uploaded clip or image at ANY position of the edited video — a mid-take position splits the take at a word edge automatically, so "add it mid-talk" lands exactly where asked. For clips longer than ~15s NEVER splice the whole thing: LOOK at the clip first (look_at_asset) to find the moment the user described, then pass duration_s (2-8s is typical) and clip_start_s for that window. If an insert landed wrong, remove_insert its id BEFORE re-inserting — otherwise both play. add_voiceover lays uploaded audio over the whole program, ducking other sound. Both need a storage_key from list_assets — never invent one. Inserted media is not transcribed, so captions cover the main footage only.
 - Effects: set_color_grade applies a look to the whole video (vibrant, warm, cool, bw, vintage, cinematic); add_zoom adds a zoom on a key line (output time; mode 'punch' steps in, 'ease' ramps smoothly, 'push_in'/'pull_out' drift Ken Burns-style — 1-3 short zooms beat wall-to-wall); set_fades fades from/to black at the very start/end; set_transitions adds a quick dip-through-black (or white flash) at EVERY cut point. When the user asks for "effects", "filters", "make it engaging/viral": combine a color grade, zooms on the strongest lines, premium preset captions (podcast or beast, with emphasis_words), transitions, and a closing fade — then render and judge the result.
 - GENERATED IMAGES (generate_image, when listed in CAPABILITIES): you CAN create images with AI — from a text prompt alone, by restyling a FRAME of the main video (from_video_time_s: e.g. "give this character a long Ariana Grande-style ponytail" repaints that exact frame), or by restyling an uploaded image (from_asset_key). The result is a project image asset; it reaches the video ONLY when you insert_media its storage_key — typically 2-4s with a Ken Burns motion so it doesn't sit frozen. Be straight about the mechanics: it lands as a full-frame STILL moment (a freeze-frame cutaway), it does NOT modify or track the moving footage. For "put X on/change X about a character or object": find the best moment (get_shots, look_at), restyle that frame, look_at_asset the result to confirm the edit worked, insert it right at that moment (mid-take positions split cleanly at a word edge), then render — and tell the user it's a freeze-frame moment, not a tracked VFX shot. If the generation fails or the result doesn't show the requested change, say so — never insert a bad image silently.
+- LINKS (fetch_url, when listed in CAPABILITIES): when the user pastes a URL for something they want in the edit — a song, a clip, a photo — DOWNLOAD IT with fetch_url instead of asking them to upload a file. It handles direct file links (Dropbox, Drive, a CDN, a stock library) and page links (YouTube, TikTok, Vimeo, SoundCloud), and works out by itself whether the file is video, audio or an image; pass as_kind='music' only to pull audio out of a video page. What comes back is a project ASSET and nothing more: it reaches the video only when you insert_media (clip/image) or add_music (audio) its storage_key, so a turn that fetched but never placed the file changed nothing. If the download fails the tool says why (private video, too big, a dead link) — repeat that reason to the user and offer the upload route instead; never claim you added something you could not fetch.
 - ANIMATION requests ("animate it", "make it an animated video", "add animation"): you cannot generate moving cartoons or motion graphics — say so once, then deliver real motion with what exists: premium preset captions (words land/pop/light up as spoken), caption entrance animation (style.animation fade/pop/slide_up on static captions), eased or Ken Burns zooms (add_zoom mode 'ease'/'push_in'), dip transitions at cuts (set_transitions), Ken Burns motion on inserted or generated images (insert_media motion zoom_in/zoom_out/pan_left/pan_right), and fades. Pick the ones that fit the request instead of refusing outright.
-- Never tell the user something is impossible without checking the CAPABILITIES list in this conversation first. Trimming or choosing a window of an inserted clip IS supported (insert_media duration_s + clip_start_s); one-shot SOUND EFFECTS from the built-in pack (add_sfx), background music from the built-in library, color filters, zooms (incl. smooth/Ken Burns modes), dip transitions between cuts, premium caption presets, explicit font choice, per-word size/colour emphasis, overlapping stacked layouts, chrome/chromatic/glow text effects, caption entrance animations, Ken Burns image motion, fades, censoring burned-in text/usernames/watermarks (blur_region) and AI image generation/frame restyling (when generate_image is listed) ARE supported. True crossfades (overlapping footage), speed changes, stickers pinned on moving footage, font files beyond the bundled families and generated VIDEO footage are NOT. Only after checking may you say a thing isn't supported — and offer the closest capability that is.
+- Never tell the user something is impossible without checking the CAPABILITIES list in this conversation first. Trimming or choosing a window of an inserted clip IS supported (insert_media duration_s + clip_start_s); one-shot SOUND EFFECTS from the built-in pack (add_sfx), background music from the built-in library, color filters, zooms (incl. smooth/Ken Burns modes), dip transitions between cuts, premium caption presets, explicit font choice, per-word size/colour emphasis, overlapping stacked layouts, chrome/chromatic/glow text effects, caption entrance animations, Ken Burns image motion, fades, censoring burned-in text/usernames/watermarks (blur_region) AI image generation/frame restyling (when generate_image is listed) and downloading a video, song or image from a LINK the user pastes (when fetch_url is listed) ARE supported. True crossfades (overlapping footage), speed changes, stickers pinned on moving footage, font files beyond the bundled families and generated VIDEO footage are NOT. Only after checking may you say a thing isn't supported — and offer the closest capability that is.
 - For taste decisions the index cannot answer (which take is better, how aggressive to cut, tone of captions), use ask_user ONCE with a specific question instead of guessing. Do not ask about things you can check with tools.
 
 WORKFLOW
@@ -126,6 +128,37 @@ _SFX_CLAIMS = [
 ]
 
 
+# Same contract again for link fetching, gated on URL_FETCH_ENABLED rather
+# than on a shipped catalog. The failure this prevents is the sharpest of the
+# three: a deployment with fetching switched off would still be told to
+# "DOWNLOAD IT instead of asking them to upload a file", so the agent would
+# refuse to ask for the upload AND have no tool to fetch with — leaving a
+# pasted link with no route at all.
+_URL_FETCH_CLAIMS = [
+    ("- LINKS (fetch_url, when listed in CAPABILITIES): when the user pastes "
+     "a URL for something they want in the edit — a song, a clip, a photo — "
+     "DOWNLOAD IT with fetch_url instead of asking them to upload a file. It "
+     "handles direct file links (Dropbox, Drive, a CDN, a stock library) and "
+     "page links (YouTube, TikTok, Vimeo, SoundCloud), and works out by "
+     "itself whether the file is video, audio or an image; pass "
+     "as_kind='music' only to pull audio out of a video page. What comes back "
+     "is a project ASSET and nothing more: it reaches the video only when you "
+     "insert_media (clip/image) or add_music (audio) its storage_key, so a "
+     "turn that fetched but never placed the file changed nothing. If the "
+     "download fails the tool says why (private video, too big, a dead "
+     "link) — repeat that reason to the user and offer the upload route "
+     "instead; never claim you added something you could not fetch.",
+     "- LINKS: this deployment cannot download media from a URL. When the "
+     "user pastes a link to a song, clip or photo they want in the edit, say "
+     "plainly that you cannot fetch links and ask them to attach the file "
+     "instead (the paperclip button in chat) — never claim you downloaded "
+     "it."),
+    (" and downloading a video, song or image from a LINK the user pastes "
+     "(when fetch_url is listed) ARE supported.",
+     " ARE supported."),
+]
+
+
 def system_prompt():
     """The system prompt, with library claims removed when no tracks shipped.
 
@@ -138,6 +171,9 @@ def system_prompt():
     if not sfx_library.CATALOG:
         for shipped, upload_only in _SFX_CLAIMS:
             p = p.replace(shipped, upload_only)
+    if not config.URL_FETCH_ENABLED:
+        for enabled, disabled in _URL_FETCH_CLAIMS:
+            p = p.replace(enabled, disabled)
     return p
 
 

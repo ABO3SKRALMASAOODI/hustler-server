@@ -4104,4 +4104,297 @@ check("sfx: the honesty layer recognises a sound-effect claim",
       bool(agent_loop.EDIT_CLAIM.search("Added a whoosh on the first cut."))
       and not agent_loop.EDIT_CLAIM.search("I have not added any whoosh."))
 
+# ── Fetching media from a link ───────────────────────────────────────────────
+# The security half of these is the point. net_fetch is the only thing between
+# a URL the USER chose and a worker holding DATABASE_URL and S3 credentials on
+# a network with no egress policy, so each address class gets its own check —
+# a regression that re-admits one of them is not visible any other way.
+
+import net_fetch                                              # noqa: E402
+import url_media                                              # noqa: E402
+
+
+def _fetch_refused(url):
+    try:
+        net_fetch.check_url(url)
+    except net_fetch.FetchError:
+        return True
+    return False
+
+
+for _bad, _why in [
+        ("http://127.0.0.1/x", "loopback"),
+        ("http://localhost/x", "loopback by name"),
+        ("http://10.0.0.5/x", "RFC1918 10/8"),
+        ("http://192.168.1.1/x", "RFC1918 192.168/16"),
+        ("http://172.16.0.1/x", "RFC1918 172.16/12"),
+        ("http://169.254.169.254/latest/meta-data/", "cloud metadata"),
+        ("http://[::1]/x", "IPv6 loopback"),
+        ("http://0.0.0.0/x", "unspecified"),
+        ("file:///etc/passwd", "file scheme"),
+        ("gopher://x/y", "non-HTTP scheme"),
+        ("ftp://example.com/x", "non-HTTP scheme"),
+        ("notaurl", "no scheme"),
+        ("", "empty")]:
+    check(f"fetch refuses {_why}: {_bad[:40] or '(empty)'}",
+          _fetch_refused(_bad))
+
+# The all-or-nothing rule. A hostname answering with one public AND one
+# private address must be refused outright — we do not get to choose which
+# address the connect path picks, so accepting it on the strength of the
+# public one leaves the decision to whoever controls the DNS.
+_real_getaddrinfo = net_fetch.socket.getaddrinfo
+
+
+def _fake_gai(addrs):
+    def gai(host, *a, **k):
+        return [(2, 1, 6, "", (ip, 0)) for ip in addrs]
+    return gai
+
+
+try:
+    net_fetch.socket.getaddrinfo = _fake_gai(["93.184.216.34"])
+    check("a purely public hostname resolves fine",
+          net_fetch.check_url("https://example.com/a.mp4") == "example.com")
+    net_fetch.socket.getaddrinfo = _fake_gai(["93.184.216.34", "127.0.0.1"])
+    check("one private address among public ones refuses the whole host",
+          _fetch_refused("https://example.com/a.mp4"))
+    net_fetch.socket.getaddrinfo = _fake_gai(["10.1.2.3"])
+    check("a hostname resolving only to RFC1918 is refused",
+          _fetch_refused("https://internal.example.com/a.mp4"))
+finally:
+    net_fetch.socket.getaddrinfo = _real_getaddrinfo
+
+# The dot-anchoring that keeps an allowlist an allowlist. Still exercised
+# because callers may pass allowed_hosts, and `endswith("archive.org")`
+# accepting `evil-archive.org` is the classic way this breaks.
+check("allowlist is dot-anchored, not a suffix match",
+      net_fetch._host_ok("ia801.archive.org", ["archive.org"])
+      and net_fetch._host_ok("archive.org", ["archive.org"])
+      and not net_fetch._host_ok("evil-archive.org", ["archive.org"]))
+
+check("a private address is rejected even when allowlisted",
+      not net_fetch._ip_is_public(net_fetch._parse_ip("127.0.0.1"))
+      and not net_fetch._ip_is_public(net_fetch._parse_ip("169.254.169.254"))
+      and net_fetch._ip_is_public(net_fetch._parse_ip("8.8.8.8")))
+
+# URLs as models actually pass them.
+check("a markdown link is unwrapped",
+      agent_tools._clean_url("[my song](https://x.com/a.mp3)")
+      == "https://x.com/a.mp3")
+check("angle brackets are stripped",
+      agent_tools._clean_url("<https://x.com/a.mp4>") == "https://x.com/a.mp4")
+check("trailing sentence punctuation is stripped",
+      agent_tools._clean_url("https://x.com/a.mp4).") == "https://x.com/a.mp4")
+check("a bare url survives untouched",
+      agent_tools._clean_url(" https://x.com/a.mp4 ")
+      == "https://x.com/a.mp4")
+
+check("a media extension routes straight to a direct download",
+      url_media.looks_direct("https://x.com/a/b.MP4")
+      and url_media.looks_direct("https://x.com/a.mp3?token=1")
+      and not url_media.looks_direct("https://youtube.com/watch?v=abc"))
+
+# Every kind classify() can return needs a byte ceiling and a next step, or a
+# fetched file lands with no limit applied / the agent is told nothing about
+# how to use it.
+for _k in (url_media.KIND_VIDEO, url_media.KIND_AUDIO, url_media.KIND_IMAGE):
+    check(f"kind '{_k}' has a byte ceiling, a label and a next step",
+          _k in url_media.KIND_MAX_BYTES and _k in url_media.KIND_LABEL
+          and _k in agent_tools._FETCH_NEXT_STEP)
+
+# Fetched media reuses the EXISTING asset kinds, so it shows up in the studio
+# with no frontend change. A new kind here would need a DB migration and a
+# branch in every surface that already renders these.
+check("fetched media uses kinds the schema already allows",
+      {url_media.KIND_VIDEO, url_media.KIND_AUDIO, url_media.KIND_IMAGE}
+      == {"video_clip", "music", "image_ref"})
+
+check("fetched objects live under their own prefix",
+      url_media.storage_key(7, url_media.KIND_VIDEO, "x.mp4")
+      .startswith("fetched/7/"))
+check("the fetched prefix keeps the file extension",
+      url_media.storage_key(7, url_media.KIND_AUDIO, "x.mp3").endswith(".mp3"))
+
+# The honesty layer is where a side-effect tool silently breaks: a truthful
+# "I downloaded your song" on a zero-EDL-write turn must not be deleted as a
+# fabrication, and the turn facts must still say it is not IN the video.
+# Same sentence, same zero-write turn, opposite verdicts — the ONLY
+# difference is whether a fetch happened. This is the check that would have
+# caught forgetting to OR ctx.urls_fetched into `acted`, which silently
+# deletes a correctly-working tool's truthful summary.
+_claim = "I added your song to the project."
+check("a fetch counts as having acted, so a truthful report survives",
+      not agent_loop._reply_violations(
+          _claim, wrote=False, previewed=False, acted=True))
+check("with nothing fetched, the same sentence is caught as fabrication",
+      agent_loop._reply_violations(
+          _claim, wrote=False, previewed=False, acted=False))
+
+check("a pasted link reaches the link hint, not the music hint",
+      "What I CAN do with a link" in
+      (agent_loop._nearest_alternative(
+          "add this song https://youtube.com/watch?v=x") or ""))
+check("a music request with no link still reaches the music hint",
+      "What I CAN do:" in
+      (agent_loop._nearest_alternative("add some music") or "")
+      and "with a link" not in
+      (agent_loop._nearest_alternative("add some music") or ""))
+
+# Deployment gating. These string pairs are applied by literal str.replace, so
+# editing a gated sentence in SYSTEM_PROMPT without updating the left column
+# turns the replace into a silent no-op — the prompt then claims a capability
+# the deployment does not have. That is the round-22 failure shape and nothing
+# else in the suite catches it, so every gate list is asserted here.
+for _label, _claims in (("music library", agent_prompt._LIBRARY_CLAIMS),
+                        ("sfx pack", agent_prompt._SFX_CLAIMS),
+                        ("link fetching", agent_prompt._URL_FETCH_CLAIMS)):
+    for _i, (_shipped, _fallback) in enumerate(_claims):
+        check(f"{_label} gate {_i} still matches the prompt verbatim",
+              _shipped in agent_prompt.SYSTEM_PROMPT)
+
+check("with fetching off, the prompt claims no link capability",
+      "DOWNLOAD IT with fetch_url" not in
+      agent_prompt.SYSTEM_PROMPT.replace(
+          agent_prompt._URL_FETCH_CLAIMS[0][0],
+          agent_prompt._URL_FETCH_CLAIMS[0][1]))
+
+# A URL can LOOK direct and not be one — Wikipedia and many CMSes serve HTML
+# at a path ending ".webm"/".mp4". Found by smoke-testing a real Commons file
+# page: the direct GET 404'd and the extractor was never tried, so a link that
+# works fine was reported to the user as broken.
+_real_direct, _real_extract = url_media._download_direct, url_media._extract
+_real_avail = url_media._ytdlp_available
+_real_check = net_fetch.check_url
+
+
+def _boom(*a, **k):
+    raise net_fetch.FetchError("HTTP 404")
+
+
+try:
+    # These hosts do not resolve, and the address policy would (correctly)
+    # refuse them before any of the routing below is reached.
+    net_fetch.check_url = lambda url, allowed_hosts=None: "site.example"
+    url_media._ytdlp_available = lambda: True
+    url_media._download_direct = _boom
+    _calls = []
+
+    def _fake_extract(url, workdir, prefer=None):
+        _calls.append(url)
+        raise url_media.FetchMediaError("Private video")
+
+    url_media._extract = _fake_extract
+    try:
+        url_media.fetch("https://site.example/page/thing.webm", "/tmp")
+        _err = None
+    except url_media.FetchMediaError as e:
+        _err = str(e)
+    check("a direct URL that 404s still falls through to the extractor",
+          _calls == ["https://site.example/page/thing.webm"])
+    # ...and when BOTH fail, the HTTP error is the one the user can act on.
+    check("both routes failing reports the actionable HTTP error",
+          _err == "HTTP 404")
+
+    # A page URL that never looked direct must report the EXTRACTOR's reason,
+    # not a fabricated HTTP one.
+    _calls.clear()
+    try:
+        url_media.fetch("https://site.example/watch?v=abc", "/tmp")
+        _err2 = None
+    except url_media.FetchMediaError as e:
+        _err2 = str(e)
+    check("a page link reports the extractor's own reason",
+          _err2 == "Private video")
+finally:
+    url_media._download_direct = _real_direct
+    url_media._extract = _real_extract
+    url_media._ytdlp_available = _real_avail
+    net_fetch.check_url = _real_check
+
+check("a title carrying its own extension does not get a doubled one",
+      url_media._title_from("https://x/", {"title": "My Song.mp3"}, "music")
+      == "My Song.mp3"
+      and url_media._title_from("https://x/", {"title": "clip.webm"},
+                                "video_clip") == "clip.mp4")
+check("a missing title falls back to the URL's last segment",
+      url_media._title_from("https://x.com/a/track.mp3", {}, "music")
+      == "track.mp3")
+
+# The link hint is FIRST in the scan, so an over-broad pattern steals every
+# message it touches. `youtu\.?be` used to match the bare word "youtube".
+check("a bare mention of youtube is not treated as a link",
+      "with a link" not in
+      (agent_loop._nearest_alternative(
+          "make it look like a youtube video") or "")
+      and "with a link" not in
+      (agent_loop._nearest_alternative("crop it for tiktok") or ""))
+check("a real link is still treated as one",
+      "with a link" in
+      (agent_loop._nearest_alternative(
+          "use this https://vimeo.com/12345") or "")
+      and "with a link" in
+      (agent_loop._nearest_alternative("grab youtu.be/abc123") or ""))
+
+# yt-dlp's stderr reaches the user, and the URL is attacker-chosen — so an
+# unredacted message is a port scanner with a readable oracle. The prose is
+# what makes an error actionable, so only addresses are removed.
+check("an extractor error keeps its reason but loses the address",
+      url_media._safe_detail(
+          "ERROR: [generic] Connection refused http://10.0.0.5:8080/x")
+      == "[generic] Connection refused …"
+      and url_media._safe_detail("ERROR: [youtube] abc: Private video.")
+      == "[youtube] abc: Private video."
+      and "fd00" not in url_media._safe_detail("connect [fd00::1]:9200 failed"))
+check("an empty extractor error still says something",
+      url_media._safe_detail("") == "no media found at that link")
+
+
+class _FakeCtx:
+    def __init__(self, urls=(), images=()):
+        self.urls_fetched = list(urls)
+        self.images_generated = list(images)
+
+
+# Every system-authored "nothing changed" message keys on the EDL, which is
+# not the same as the project: a turn can download a file and THEN time out,
+# and telling the user nothing happened sends them off to re-paste a link
+# whose media is already in their picker.
+check("a timed-out turn that downloaded something says so",
+      "1 file downloaded from your link" in
+      agent_loop._assets_made_note(_FakeCtx(urls=[{"a": 1}])))
+check("plurals read correctly",
+      "2 files downloaded from your links" in
+      agent_loop._assets_made_note(_FakeCtx(urls=[1, 2])))
+check("a turn that made nothing adds no note",
+      agent_loop._assets_made_note(_FakeCtx()) == "")
+check("downloads and generated images are both reported",
+      "downloaded" in agent_loop._assets_made_note(
+          _FakeCtx(urls=[1], images=[1]))
+      and "generated image" in agent_loop._assets_made_note(
+          _FakeCtx(urls=[1], images=[1])))
+
+check("a fetched file keeps the extension it was actually saved with",
+      url_media._title_from("https://x/", {"title": "clip"}, "music",
+                            "/tmp/dl.wav") == "clip.wav"
+      and url_media._title_from("https://x/", {"title": "clip"}, "video_clip",
+                                "/tmp/dl.mov") == "clip.mov")
+
+check("fetch_url is visible while the deployment enables it",
+      agent_tools._tool_disabled("fetch_url") is False
+      and wconfig.URL_FETCH_ENABLED)
+
+# ...and actually disappears when it does not. Asserting the flag flips the
+# tool is the point: a gate that is declared but never consulted reads exactly
+# like a working one until a deployment turns it off.
+try:
+    wconfig.URL_FETCH_ENABLED = False
+    check("fetch_url disappears from the schema when disabled",
+          agent_tools._tool_disabled("fetch_url") is True
+          and "fetch_url" not in
+          [t["function"]["name"] for t in agent_tools.openai_tools()]
+          and "- fetch_url(" not in agent_tools.capabilities_digest())
+finally:
+    wconfig.URL_FETCH_ENABLED = True
+
 print(f"\nALL {PASS} CHECKS PASSED")

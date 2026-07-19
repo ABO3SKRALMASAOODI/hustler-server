@@ -119,6 +119,39 @@ WHISPER_COMPRESSION_RATIO_THRESHOLD = (
 MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "2"))
 MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
 
+# Fetching media from a URL the user pasted (worker/url_media.py).
+#
+# URL_FETCH_ENABLED is the kill switch for the whole capability — set it to 0
+# and the fetch_url tool disappears from the schema AND from the prompt's
+# capability claims, so the agent stops offering something it cannot do.
+#
+# URL_FETCH_EXTRACTOR gates only the yt-dlp PAGE path (YouTube, TikTok,
+# Vimeo, SoundCloud...). It is separate on purpose: downloading a direct file
+# link the user owns and extracting media from a platform page are the same
+# feature technically and very different legally — a platform's terms
+# generally forbid the latter, and it is Valmera's IP doing the fetching. Turn
+# this off and direct links keep working while pages are refused honestly.
+URL_FETCH_ENABLED = os.getenv("URL_FETCH_ENABLED", "1") == "1"
+URL_FETCH_EXTRACTOR = os.getenv("URL_FETCH_EXTRACTOR", "1") == "1"
+# Download ceiling before we know what the file is — we cannot apply a
+# per-kind limit until ffprobe has seen the bytes, so this is the largest of
+# them and the real ceilings are enforced after classification.
+FETCH_MAX_BYTES = int(os.getenv("FETCH_MAX_BYTES", str(500 << 20)))
+# Per-kind ceilings, matching backend/storage.py's upload limits so a pasted
+# link and a drag-and-drop of the same file behave identically.
+FETCH_CLIP_MAX_BYTES = int(os.getenv("FETCH_CLIP_MAX_BYTES", str(500 << 20)))
+FETCH_AUDIO_MAX_BYTES = int(os.getenv("FETCH_AUDIO_MAX_BYTES", str(50 << 20)))
+FETCH_IMAGE_MAX_BYTES = int(os.getenv("FETCH_IMAGE_MAX_BYTES", str(10 << 20)))
+# Wall-clock for one fetch. Bounded well under AGENT_TURN_TIMEOUT_S so a slow
+# link fails inside the turn with an honest message instead of eating the
+# whole turn and timing it out.
+FETCH_TIMEOUT_S = float(os.getenv("FETCH_TIMEOUT_S", "180"))
+FETCH_MAX_DURATION_S = float(os.getenv("FETCH_MAX_DURATION_S", "3600"))
+# Resolution cap for extracted video. A 4K source is a ~10x bigger download
+# and a slower render for a clip that gets composited into a 1080p timeline.
+FETCH_MAX_HEIGHT = int(os.getenv("FETCH_MAX_HEIGHT", "1080"))
+MAX_FETCHED_URLS_PER_TURN = int(os.getenv("MAX_FETCHED_URLS_PER_TURN", "4"))
+
 # Worker tuning
 TMP_DIR = os.getenv("WORKER_TMP_DIR", "/tmp/valmera")
 POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
