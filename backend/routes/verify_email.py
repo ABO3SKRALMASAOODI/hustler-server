@@ -42,32 +42,20 @@ def send_code():
         ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, created_at = NOW()
     """, (email, code))
 
-    # ✅ Log the request for rate limiting
+    conn.commit()
+
+    # ✅ Send BEFORE counting the request against the 5/day limit — a send that
+    # Brevo rejects (e.g. the "unrecognised IP" 401 that took email delivery
+    # down) must not burn the user's quota or pretend a code went out.
+    if not send_code_to_email(email, code):
+        cursor.close()
+        conn.close()
+        return jsonify({'error': 'We could not send your verification email. Please try again shortly.'}), 502
+
     cursor.execute("INSERT INTO code_request_logs (email) VALUES (%s)", (email,))
     conn.commit()
     cursor.close()
     conn.close()
-
-    # ✅ Send email
-    payload = {
-        "sender": {
-            "name": os.getenv("FROM_NAME"),
-            "email": os.getenv("FROM_EMAIL")
-        },
-        "to": [{"email": email}],
-        "subject": "Your Verification Code",
-        "htmlContent": f"<p>Your code is: <strong>{code}</strong></p>"
-    }
-
-    headers = {
-        "accept": "application/json",
-        "api-key": os.getenv("BREVO_API_KEY"),
-        "content-type": "application/json"
-    }
-
-    res = requests.post("https://api.brevo.com/v3/smtp/email", json=payload, headers=headers)
-    if res.status_code != 201:
-        return jsonify({'error': 'Failed to send email'}), 500
 
     return jsonify({'message': 'Verification code sent'}), 200
 
@@ -118,12 +106,25 @@ def verify_code():
 # (debug email-codes route removed — it let unauthenticated callers dump
 # every pending verification code and hijack signups)
 
-# ✅ Utility (optional)
+# ✅ Utility — the single place a code email is actually sent.
 def send_code_to_email(email, code):
+    """Send a 6-digit code via Brevo. Returns True on success, False on failure.
+
+    On failure it logs the REAL Brevo response (status + body) so an outage is
+    diagnosable from the Render logs instead of silent. The classic failure —
+    which once took email delivery down for weeks — is HTTP 401 "unrecognised
+    IP address": Brevo's Authorised-IPs wall blocking Render's egress IP. Fix at
+    app.brevo.com/security/authorised_ips (disable the wall, or add Render's
+    outbound IPs). Callers must honour the return value and NOT tell the user a
+    code was sent when this returns False.
+    """
+    # Default to the authenticated domain. thehustlerbot.com is NOT DKIM/SPF
+    # authenticated in Brevo, so codes sent from it get spam-foldered even
+    # though the API returns 201; valmera.io is authenticated → inbox-grade.
     payload = {
         "sender": {
-            "name": os.getenv("FROM_NAME"),
-            "email": os.getenv("FROM_EMAIL")
+            "name": os.getenv("FROM_NAME", "Valmera"),
+            "email": os.getenv("FROM_EMAIL", "support@valmera.io")
         },
         "to": [{"email": email}],
         "subject": "Your Verification Code",
@@ -136,7 +137,20 @@ def send_code_to_email(email, code):
         "content-type": "application/json"
     }
 
-    requests.post("https://api.brevo.com/v3/smtp/email", json=payload, headers=headers)
+    try:
+        res = requests.post("https://api.brevo.com/v3/smtp/email",
+                            json=payload, headers=headers, timeout=15)
+    except requests.RequestException as e:
+        current_app.logger.error("Brevo send to %s failed (network): %s", email, e)
+        return False
+
+    if res.status_code != 201:
+        current_app.logger.error(
+            "Brevo send to %s failed: HTTP %s %s",
+            email, res.status_code, (res.text or "")[:500])
+        return False
+
+    return True
 
 @verify_bp.route('/cleanup-old-code-logs')
 def cleanup_old_code_logs():

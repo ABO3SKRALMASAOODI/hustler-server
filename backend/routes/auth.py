@@ -347,8 +347,10 @@ def register():
                 ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code
             """, (email, code))
             conn.commit()
-            send_code_to_email(email, code)
+            ok = send_code_to_email(email, code)
             cursor.close(); conn.close()
+            if not ok:
+                return jsonify({'error': "We couldn't send your verification email. Please try again in a moment."}), 502
             return jsonify({'message': 'Verification code re-sent. Please verify your email.'}), 200
         else:
             cursor.close(); conn.close()
@@ -363,8 +365,10 @@ def register():
         ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code
     """, (email, code))
     conn.commit()
-    send_code_to_email(email, code)
+    ok = send_code_to_email(email, code)
     cursor.close(); conn.close()
+    if not ok:
+        return jsonify({'error': "We couldn't send your verification email. Please try again in a moment."}), 502
     return jsonify({'message': 'User registered. Verification code sent.'}), 201
 
 
@@ -423,7 +427,8 @@ def send_reset_code():
     """, (email, code, expires_at))
     conn.commit()
     cursor.close(); conn.close()
-    send_code_to_email(email, code)
+    if not send_code_to_email(email, code):
+        return jsonify({'error': "We couldn't send your reset email. Please try again in a moment."}), 502
     return jsonify({'message': 'Reset code sent to your email'}), 200
 
 
