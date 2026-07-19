@@ -509,7 +509,14 @@ def charge_turn_credits(conn, user_id, job_id):
                               COALESCE(SUM(completion_tokens),0) AS tout,
                               COUNT(*) FILTER (
                                   WHERE purpose IN ('image_gen','image_edit')
-                                    AND response ? 'image_url') AS n_images
+                                    AND response ? 'image_url') AS n_images,
+                              COALESCE(SUM(
+                                  (response->>'cost_usd')::numeric) FILTER (
+                                  WHERE purpose = 'music_gen'
+                                    AND response ? 'cost_usd'
+                                    AND response->>'cost_usd'
+                                        ~ '^[0-9]+(\\.[0-9]+)?$'), 0)
+                                  AS music_usd
                        FROM llm_calls WHERE job_id = %s""", (job_id,))
         row = cur.fetchone()
         if not row["n"]:
@@ -518,6 +525,12 @@ def charge_turn_credits(conn, user_id, job_id):
         cost = (float(row["tin"]) * LLM_PRICE_IN_PER_M +
                 float(row["tout"]) * LLM_PRICE_OUT_PER_M) / 1e6
         cost += float(row["n_images"] or 0) * IMAGE_PRICE_USD
+        # Music is priced per call by the VENDOR's own meter (per-minute on
+        # ElevenLabs, flat on Stability), so music_gen records the actual
+        # dollar cost and this SUMs it — unlike images, which are a flat
+        # count x constant. A failed generation records {'error': ...} with
+        # no cost_usd and is therefore free, by construction.
+        cost += float(row["music_usd"] or 0)
         credits = max(MIN_TURN_CREDITS, round(cost / 0.01, 1))
         cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
                        FROM users WHERE id = %s FOR UPDATE""", (user_id,))

@@ -3,6 +3,7 @@
 Run from the worker/ directory:  python tests/test_units.py
 """
 
+import inspect
 import os
 import re
 import sys
@@ -674,6 +675,11 @@ class ToolCtx:
         # Real ctx always carries the video index; tests default to an empty
         # transcript (so caption honesty warnings fire — asserted below).
         self.index = index if index is not None else {"words": []}
+        # Round-27: every music write records what was asked for against what
+        # was used, so the stub needs the same fields the real ToolContext has.
+        self.music_generated = []
+        self.music_billed = []
+        self.music_choices = []
 
     def latest_edl(self):
         return self._edl
@@ -720,7 +726,7 @@ check("remove_music unknown id lists existing",
 
 tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
 tctx._asset = {"kind": "music", "storage_key": "music/1/a.mp3", "meta": {}}
-r = add_music(tctx, "music/1/a.mp3", 0, 15)
+r = add_music(tctx, "music/1/a.mp3", 0, 15, requested="some music")
 check("add_music assigns the next id",
       any(m.get("id") == "mus2" for m in tctx.written["music"]))
 check("add_music warns when the file is also a voiceover",
@@ -899,7 +905,7 @@ print("== Round-8 source-audio can never masquerade as music ==")
 tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
 tctx._asset = {"kind": "audio", "storage_key": "audio/1/deadbeef.wav",
                "meta": {}, "id": 5}
-r = add_music(tctx, "audio/1/deadbeef.wav", 0, 15)
+r = add_music(tctx, "audio/1/deadbeef.wav", 0, 15, requested="some music")
 check("add_music rejects the extracted source audio, explaining why",
       r.startswith("REJECTED") and "OWN extracted audio" in r
       and tctx.written is None)
@@ -2092,7 +2098,8 @@ _am_edl = {"keep": [[0.0, 30.0]], "inserts": [
     {"id": "ins1", "asset_key": "clips/1/b.mp4", "kind": "video",
      "at_output_s": 30.0, "duration_s": 10.0}]}
 _am = ToolCtx(json.loads(json.dumps(_am_edl)), asset=_mus_asset)
-r = agent_tools.add_music(_am, "music/1/song.mp3", 0, 40)
+r = agent_tools.add_music(_am, "music/1/song.mp3", 0, 40,
+                          requested="some music")
 check("music end reaches 40s (30s kept + 10s insert), not clamped to 30",
       _am.written["music"][-1]["end"] == 40.0)
 
@@ -3540,7 +3547,7 @@ check("library: add_music rejects an invented slug",
 
 # --- swap / refit behaviour the user asked for by name ---
 _sc = ToolCtx(json.loads(json.dumps(_old)))
-r = swap_music(_sc, "nope", "music/1/a.mp3")
+r = swap_music(_sc, "nope", "music/1/a.mp3", requested="something else")
 check("swap_music rejects an unknown id", r.startswith("REJECTED"))
 
 _fc = ToolCtx(json.loads(json.dumps(_old)))
@@ -3565,7 +3572,7 @@ check("set_music_fit rejects an unknown id", r3.startswith("REJECTED"))
 # does not have. Both writers must refuse it up front.
 _oc = ToolCtx(json.loads(json.dumps(_old)),
               asset={"kind": "music", "duration_s": 30.0})
-_ro = add_music(_oc, "music/1/a.mp3", offset_s=45.0)
+_ro = add_music(_oc, "music/1/a.mp3", offset_s=45.0, requested="music")
 check("add_music rejects an offset past the end of the track",
       _ro.startswith("REJECTED") and _oc.written is None)
 _oc2 = ToolCtx(json.loads(json.dumps(_old)),
@@ -3575,7 +3582,7 @@ check("set_music_fit rejects an offset past the end of the track",
       _ro2.startswith("REJECTED") and _oc2.written is None)
 _oc3 = ToolCtx(json.loads(json.dumps(_old)),
                asset={"kind": "music", "duration_s": 30.0})
-_ro3 = add_music(_oc3, "music/1/a.mp3", offset_s=8.0)
+_ro3 = add_music(_oc3, "music/1/a.mp3", offset_s=8.0, requested="music")
 check("add_music accepts an offset inside the track",
       _oc3.written is not None
       and _oc3.written["music"][-1]["offset_s"] == 8.0)
@@ -4103,5 +4110,388 @@ check("set_audio_gain's description matches its own enum",
 check("sfx: the honesty layer recognises a sound-effect claim",
       bool(agent_loop.EDIT_CLAIM.search("Added a whoosh on the first cut."))
       and not agent_loop.EDIT_CLAIM.search("I have not added any whoosh."))
+
+# ===================================================================== #
+#  Round 27: music the user actually asked for                          #
+# ===================================================================== #
+# Two defects, one symptom. (1) list_music_library(mood=<enum of 8>) had NO
+# representation for "the library cannot serve this" — an unknown mood was
+# REJECTED back into the same 8 buckets, so a miss was indistinguishable
+# from a hit and the agent could not disclose a gap it could not perceive.
+# (2) TURN FACTS carried no CONTENT: "Successful write tools this turn:
+# add_music" made "I added epic trailer music" over a lofi track a
+# VERIFIED-HONEST reply, because every check asked did-it-happen and none
+# asked did-it-match.
+print("== Round-27 music search: a miss is now representable ==")
+import music_search
+import music_gen
+
+_hits, _rep = music_search.search("epic movie trailer music")
+check("search reports NO MATCH for trailer music",
+      _rep["matched"] is False and not _hits)
+# Grounded in measurement, not taste: features.json records a median dynamic
+# range of 6.6 dB across the catalog against the 25-40 dB a real trailer cue
+# runs, and not one track has a rising arc.
+check("every track is vetoed for a trailer request, not merely outranked",
+      _rep["vetoed"] == len(music_library.CATALOG))
+check("the unserved part of the request is reported back",
+      set(_rep["unmatched"]) >= {"epic", "trailer"})
+
+# A compound veto is a claim about a COMBINATION. Tokenizing "epic-cinematic"
+# into loose words leaked a bare `cinematic` veto onto all 24 tracks and made
+# the three cinematic-scored tracks unreachable by the word that describes
+# them — caught by this case, not by review.
+_ch, _cr = music_search.search("a cinematic score")
+check("'cinematic' alone does not fire the epic-cinematic veto",
+      _cr["matched"] and _cr["vetoed"] == 0)
+check("a cinematic request returns the cinematic-mood tracks",
+      any(h["track"]["mood"] == "cinematic" for h in _ch))
+check("'epic cinematic' together still vetoes",
+      music_search.search("epic cinematic")[1]["matched"] is False)
+
+# "Just add music" must never be treated as an unservable request.
+check("an unspecific request matches everything",
+      music_search.search("some background music")[1]["matched"] is True)
+
+# Mono safety is measured, and three tracks are phase-inverted. The catalog's
+# most fragile bed used to be the default answer for 'cinematic'.
+_mono_bad = [s for s in music_library.CATALOG
+             if music_search._mono_penalty(s)]
+check("phase-inverted tracks are demoted, not excluded",
+      _mono_bad and all(
+          any(h["track"]["slug"] == t["slug"] for h in
+              music_search.search(t["mood"], limit=99)[0])
+          for t in _mono_bad))
+
+print("== Round-27: the substitution check runs at WRITE time ==")
+# Anchoring disclosure to the SEARCH would let an agent search for something
+# sensible and then add a different track. can_serve re-asks the question
+# about the track that was actually chosen.
+_lib_key = music_library.ref(music_library.CATALOG[0]["slug"])
+check("a library track is not servable for a request it cannot match",
+      music_search.can_serve("epic movie trailer", _lib_key)[0] is False)
+check("a library track IS servable for a request it matches",
+      music_search.can_serve(
+          music_library.CATALOG[0]["mood"], _lib_key)[0] is True)
+check("an upload is never called a substitution",
+      music_search.can_serve("epic movie trailer",
+                             "music/1/theirs.mp3")[0] is True)
+check("an empty request is never called a substitution",
+      music_search.can_serve("", _lib_key)[0] is True)
+
+_sctx = ToolCtx(dict(MUS_EDL))
+_r = add_music(_sctx, _lib_key, requested="epic movie trailer music")
+check("add_music records what was asked against what was used",
+      len(_sctx.music_choices) == 1
+      and _sctx.music_choices[0]["substituted"] is True
+      and _sctx.music_choices[0]["source"] == "built-in library")
+check("the tool result tells the agent it substituted",
+      "SUBSTITUTION" in _r)
+_sctx2 = ToolCtx(dict(MUS_EDL))
+add_music(_sctx2, _lib_key,
+          requested=music_library.CATALOG[0]["mood"])
+check("a defensible pick is not flagged",
+      _sctx2.music_choices[0]["substituted"] is False)
+
+# `requested` is keyword-only. Had it been added as the second POSITIONAL
+# parameter — where it reads best — a positional caller's `start` would have
+# been absorbed into it and the music would have been laid across the whole
+# video with a timestamp recorded as the user's request. Keyword-only makes
+# that misfile impossible: a positional third argument lands in `start` and
+# is rejected loudly as a non-number instead.
+_pos = add_music(ToolCtx(dict(MUS_EDL)), _lib_key, "epic trailer")
+check("a positional request string is rejected, never taken as `requested`",
+      _pos.startswith("REJECTED") and "requested" in _pos)
+check("requested is keyword-only in both music writers",
+      all("requested" in inspect.getfullargspec(fn).kwonlyargs
+          for fn in (agent_tools.add_music, agent_tools.swap_music)))
+check("requested is required of add_music and swap_music",
+      "requested" in agent_tools.REQUIRED_ARGS["add_music"]
+      and "requested" in agent_tools.REQUIRED_ARGS["swap_music"])
+
+print("== Round-27 honesty: did-it-MATCH, not just did-it-happen ==")
+_subs = [{"requested": "epic movie trailer music", "track": "Cute Melodies 1",
+          "source": "built-in library", "substituted": True,
+          "item_id": "mus1", "storage_key": "music/1/a.mp3"}]
+check("a reply that hides the substitution is a violation",
+      bool(agent_loop._unnamed_substitution(
+          "I added epic cinematic trailer music under your video.", _subs)))
+check("naming the track clears the violation",
+      agent_loop._unnamed_substitution(
+          "The library has no trailer music, so I used 'Cute Melodies 1' "
+          "as the closest thing.", _subs) is None)
+check("a defensible pick is never a violation",
+      agent_loop._unnamed_substitution(
+          "I added some music.",
+          [dict(_subs[0], substituted=False)]) is None)
+check("the substitution check is wired into the reply gate",
+      bool(agent_loop._reply_violations(
+          "I added epic trailer music.", True, True, True, _subs))
+      and not agent_loop._reply_violations(
+          "I used 'Cute Melodies 1'.", True, True, True, _subs))
+
+class _FactCtx(ToolCtx):
+    def __init__(self):
+        super().__init__(dict(MUS_EDL))
+        self.versions_written = []
+        self.write_calls = ["add_music"]
+        self.images_generated = []
+        self.last_preview = None
+        self.last_selfcheck = None
+
+_fc = _FactCtx()
+_fc.music_choices = list(_subs)
+_facts = agent_loop._turn_facts(_fc, 1)
+check("TURN FACTS names the track that was actually placed",
+      "Cute Melodies 1" in _facts and "epic movie trailer music" in _facts)
+check("TURN FACTS marks the substitution for the model",
+      "NOT what was asked for" in _facts)
+_fc2 = _FactCtx()
+check("TURN FACTS says 'none' when no music was placed",
+      "Music placed this turn: none" in agent_loop._turn_facts(_fc2, 1))
+
+print("== Round-27 music generation: gated, honest, billed ==")
+check("generate_music is hidden when no backend is configured",
+      agent_tools._tool_disabled("generate_music")
+      == (not music_gen.available()))
+check("generate_music is registered everywhere a tool must be",
+      "generate_music" in agent_tools.TOOLS
+      and "generate_music" in agent_tools.WRITE_TOOLS
+      and agent_tools.REQUIRED_ARGS["generate_music"] == ["prompt"])
+check("the tool warns the agent off naming artists (a provider ToS term)",
+      "never name an artist" in agent_tools.TOOLS["generate_music"][1].lower()
+      or "NEVER name an artist" in agent_tools.TOOLS["generate_music"][1])
+check("generate_music refuses honestly with no backend",
+      music_gen.available()
+      or "unavailable" in agent_tools.generate_music(
+          ToolCtx(dict(MUS_EDL)), "epic"))
+check("no backend means no provider and zero capacity",
+      music_gen.available()
+      or (music_gen.provider() is None
+          and music_gen.max_duration_s() == 0.0
+          and music_gen.describe() is None))
+
+# The credit path: a generation's real vendor cost must reach running_credits
+# the same way db.charge_turn_credits SUMs it, or the in-turn cap and the
+# final bill disagree.
+_cctx = agent_tools.ToolContext.__new__(agent_tools.ToolContext)
+_cctx.tokens_in = _cctx.tokens_out = 0
+_cctx.images_generated = []
+_cctx.music_generated = [{"storage_key": "k"}]
+_cctx.music_billed = [{"cost_usd": 0.20}]
+check("a generated track's vendor cost lands on the turn's bill",
+      abs(_cctx.running_credits() - 20.0) < 0.01)
+# Spend follows the PAID call, not the successful placement: a vendor charge
+# followed by a storage failure must still bill and must still arm the cap,
+# or the loop can pay again without limit.
+_cctx.music_generated = []
+check("a paid call that never became an asset is still billed",
+      abs(_cctx.running_credits() - 20.0) < 0.01)
+
+print("== Round-27 prompt gating: three independent capability gates ==")
+_sp_gen_on = agent_prompt.SYSTEM_PROMPT
+_saved_cat = music_library.CATALOG
+try:
+    _sp_nogen = agent_prompt.system_prompt()   # gen is off in tests
+    music_library.CATALOG = []
+    _sp_neither = agent_prompt.system_prompt()
+finally:
+    music_library.CATALOG = _saved_cat
+check("with no music backend the prompt never mentions generate_music",
+      music_gen.available() or "generate_music" not in _sp_nogen)
+check("with neither library nor backend it still asks for an upload",
+      "paperclip" in _sp_neither and "generate_music" not in _sp_neither)
+check("with neither, no library claim survives either",
+      "list_music_library" not in _sp_neither
+      and "royalty-free library" not in _sp_neither)
+# The two gates rewrite neighbouring sentences. If either owned a string
+# spanning the other's, whichever ran second would match nothing and leave a
+# capability claim silently ungated — which is how this class of bug ships.
+check("the library and generation gates are strictly disjoint",
+      all(l not in g and g not in l
+          for l, _ in agent_prompt._LIBRARY_CLAIMS
+          for g, _ in agent_prompt._MUSIC_GEN_CLAIMS))
+check("every gated claim actually appears in the prompt it gates",
+      all(l in _sp_gen_on for l, _ in agent_prompt._LIBRARY_CLAIMS)
+      and all(g in _sp_gen_on for g, _ in agent_prompt._MUSIC_GEN_CLAIMS))
+
+print("== Round-27 renderer: a short track no longer cuts dead ==")
+# afade was anchored to the SPAN. An un-looped track shorter than its span
+# ends at the file's real length, so the fade landed in the silence AFTER it
+# and never fired — the music stopped at full volume. Generated tracks make
+# this the common case: a vendor asked for 45s can return 43s.
+_tl_m = Timeline([[0.0, 60.0]])
+_short = {"keep": [[0.0, 60.0]],
+          "music": [{"id": "mus1", "storage_key": "music/1/a.mp3",
+                     "start": 0.0, "end": 60.0, "gain_db": -18.0,
+                     "duck": False, "fade_out_s": 2.0, "loop": None}]}
+_g_short = renderer.build_filtergraph(
+    _short, 60.0, False, _tl_m, None, [(3, _short["music"][0], 30.0)],
+    {"words": []}, False, W=1920, H=1080, fps=30.0)
+check("the fade-out lands at the end of the AUDIBLE track, not the span",
+      "afade=t=out:st=28.00" in _g_short)
+_looped = json.loads(json.dumps(_short))
+_looped["music"][0]["loop"] = True
+_g_loop = renderer.build_filtergraph(
+    _looped, 60.0, False, _tl_m, None, [(3, _looped["music"][0], 30.0)],
+    {"words": []}, False, W=1920, H=1080, fps=30.0)
+check("a looped track still fades at the end of the span",
+      "afade=t=out:st=58.00" in _g_loop)
+_long = json.loads(json.dumps(_short))
+_g_long = renderer.build_filtergraph(
+    _long, 60.0, False, _tl_m, None, [(3, _long["music"][0], 200.0)],
+    {"words": []}, False, W=1920, H=1080, fps=30.0)
+check("a track longer than its span is unaffected",
+      "afade=t=out:st=58.00" in _g_long)
+
+# ===================================================================== #
+#  Round 27 review: 12 confirmed defects, each pinned                   #
+# ===================================================================== #
+print("== Round-27 review: `requested` is enforced, not merely declared ==")
+# THE BIG ONE. REQUIRED_ARGS was read in exactly one place — openai_tools(),
+# where it becomes the schema's `required` array — and function calling does
+# not run in strict mode, so it was advisory. `requested` is the first
+# required arg with a Python default, so omitting it raised nothing and the
+# whole substitution check silently no-opped: can_serve("") is vacuously
+# True. The round-27 churn bug was fully restored on a path the model could
+# take at will.
+_ectx = ToolCtx(dict(MUS_EDL))
+_er = agent_tools.execute(_ectx, "add_music", {"storage_key": _lib_key})
+check("dispatch rejects add_music with `requested` omitted",
+      _er.startswith("REJECTED") and "requested" in _er)
+check("the rejected call wrote nothing and recorded no choice",
+      _ectx.written is None and not _ectx.music_choices)
+check("a blank `requested` is rejected too",
+      add_music(ToolCtx(dict(MUS_EDL)), _lib_key,
+                requested="   ").startswith("REJECTED"))
+# ...but a genuinely unspecific request must still work: "add some music"
+# reduces to zero search terms, and treating that as a refusal would break
+# the commonest request in the product.
+_vague = ToolCtx(dict(MUS_EDL))
+check("an unspecific request is accepted and not called a substitution",
+      not add_music(_vague, _lib_key,
+                    requested="add some music").startswith("REJECTED")
+      and _vague.music_choices[0]["substituted"] is False)
+# The general fix, not just the music-shaped one: every required arg now
+# binds at dispatch, whether or not its parameter has a default.
+check("REQUIRED_ARGS binds at dispatch for every tool",
+      agent_tools.execute(ToolCtx(dict(MUS_EDL)), "swap_music",
+                          {"id": "mus1"}).startswith("REJECTED"))
+
+print("== Round-27 review: a CORRECTED substitution stops demanding disclosure ==")
+# ctx.music_choices is append-only. An agent that added the wrong track and
+# then fixed it still carried the original substitution, so the gate demanded
+# it be named and the corrective note described music that is not in the
+# video — a system-authored falsehood.
+class _LiveCtx:
+    def __init__(self, edl, choices):
+        self._edl = {"version": 2, "json": edl}
+        self.music_choices = choices
+    def latest_edl(self):
+        return self._edl
+
+_gone = _LiveCtx({"music": []}, list(_subs))
+check("a choice whose item was removed is no longer live",
+      agent_loop._live_music_choices(_gone) == [])
+check("removing the wrong track clears the disclosure obligation",
+      agent_loop._unnamed_substitution(
+          "I added some music.",
+          agent_loop._live_music_choices(_gone)) is None)
+_swapped = _LiveCtx(
+    {"music": [{"id": "mus1", "storage_key": "library:other-track"}]},
+    list(_subs))
+check("a swap retires the old choice (same id, different key)",
+      agent_loop._live_music_choices(_swapped) == [])
+_still = _LiveCtx(
+    {"music": [{"id": "mus1", "storage_key": "music/1/a.mp3"}]}, list(_subs))
+check("a substitution still in the edit is still live",
+      len(agent_loop._live_music_choices(_still)) == 1)
+
+print("== Round-27 review: the other exits disclose too ==")
+# _enforce_honesty guards ONE exit. ask_user and the timeout/budget/step-limit
+# paths through _finalize post assistant text without it, so a substitution
+# could ship undisclosed purely because the turn ended another way.
+check("ask_user / _finalize text gains a system disclosure",
+      "closest available match" in agent_loop._substitution_note(
+          _still, "Which of these did you want?"))
+check("a reply that already names the track gets no extra note",
+      agent_loop._substitution_note(
+          _still, "I used 'Cute Melodies 1' — the library has no trailer "
+          "music.") == "")
+check("no substitution means no note",
+      agent_loop._substitution_note(
+          _LiveCtx({"music": []}, []), "All done.") == "")
+
+print("== Round-27 review: search reads the request as written ==")
+# Negation INVERTED the veto: not_for lists what a track CANNOT be, so an
+# attribute the user EXCLUDED vetoed exactly the tracks that satisfied the
+# exclusion, while tracks carrying it as a positive tag scored and rose.
+# "nothing dark" returned the darkest beats in the catalog.
+_nd, _ndr = music_search.search("nothing dark")
+check("a negated attribute is parsed as an exclusion",
+      _ndr["negated"] == ["dark"] and _ndr["matched"])
+check("tracks carrying the excluded attribute are dropped",
+      _ndr["vetoed"] > 0 and all(
+          "dark" not in (music_search.FEATURES.get(
+              h["track"]["slug"], {}).get("tags") or [])
+          for h in _nd))
+check("a mixed request keeps the positive and honours the negative",
+      music_search.search("chill but not sad")[1]["negated"] == ["sad"])
+# Non-Latin scripts and emoji reduced to ZERO terms under [a-z0-9'], so
+# search fell through to "just add music" and can_serve returned vacuously
+# True — the entire honesty layer off for those users.
+_ru = "эпическая музыка для трейлера"
+check("a non-Latin request produces real terms",
+      len(music_search.terms(_ru)) >= 3)
+check("a non-Latin request the library cannot serve reports NO MATCH",
+      music_search.search(_ru)[1]["matched"] is False)
+check("a non-Latin request is not vacuously servable",
+      music_search.can_serve(_ru, _lib_key)[0] is False)
+
+print("== Round-27 review: generation is bounded, verified and redacted ==")
+check("the download is bounded by size and by wall clock",
+      music_gen.MAX_TRACK_BYTES > 0
+      and "MAX_TRACK_BYTES" in inspect.getsource(music_gen._write)
+      and "monotonic" in inspect.getsource(music_gen._write))
+# Size alone is not audio: a 200 carrying an HTML error page sailed past the
+# 2048-byte floor and was uploaded, billed, and reported as a composed track.
+check("the audio probe gates the SUCCESS record, not just the duration",
+      "probe_audio_duration" in inspect.getsource(music_gen.generate))
+_saved_keys = (wconfig.MUSIC_ELEVENLABS_API_KEY,
+               wconfig.MUSIC_STABILITY_API_KEY)
+try:
+    wconfig.MUSIC_STABILITY_API_KEY = "sk-supersecret-abcdef123456"
+    check("an API key is never echoed back to the model",
+          "sk-supersecret" not in music_gen._redact(
+              "InvalidHeader: Bearer sk-supersecret-abcdef123456\\n"))
+finally:
+    (wconfig.MUSIC_ELEVENLABS_API_KEY,
+     wconfig.MUSIC_STABILITY_API_KEY) = _saved_keys
+
+print("== Round-27 review: tool descriptions degrade with capability ==")
+# _tool_disabled correctly hid generate_music, but add_music's DESCRIPTION
+# still told the agent to use it — a capability claim outliving its
+# capability, on the shipped default deployment.
+_descs = {t["function"]["name"]: t["function"]["description"]
+          for t in agent_tools.openai_tools()}
+check("add_music stops advertising generate_music when it is disabled",
+      music_gen.available()
+      or "generate_music()" not in _descs.get("add_music", ""))
+check("add_music still advertises the library, which IS available",
+      not music_library.CATALOG
+      or "list_music_library()" in _descs.get("add_music", ""))
+# A generated track placed in a LATER turn: ctx.music_generated is per-turn
+# and empty by then, so the durable meta.generated flag is the authority.
+# Keying on the per-turn list alone reported it as a "user upload" — telling
+# the model the user supplied a file they never supplied.
+_gctx = ToolCtx(dict(MUS_EDL),
+                asset={"kind": "music", "storage_key": "generated/1/x.mp3",
+                       "duration_s": 40.0, "meta": {"generated": True,
+                                                    "filename": "gen.mp3"}})
+add_music(_gctx, "generated/1/x.mp3", requested="epic movie trailer music")
+check("a track generated in an earlier turn is not called a user upload",
+      _gctx.music_choices[0]["source"] == "generated")
+check("a generated track is never flagged as a substitution",
+      _gctx.music_choices[0]["substituted"] is False)
 
 print(f"\nALL {PASS} CHECKS PASSED")

@@ -13,6 +13,7 @@ import agent_tools
 import config
 import db as dbx
 import llm
+import music_gen
 import music_library
 import sfx_library
 import storage
@@ -512,7 +513,80 @@ def _echo_violation(draft, messages):
     return None
 
 
-def _reply_violations(draft, wrote, previewed, acted=None):
+def _live_music_choices(ctx):
+    """The music choices still present in the edit, newest decision wins.
+
+    ctx.music_choices is append-only, so an agent that added the wrong track
+    and then FIXED it — swap_music, or remove_music and add the right one —
+    still carried the original substitution. The reply gate would demand it
+    be named, and the corrective note would then tell the user about music
+    that is not in their video. Correcting a mistake within the turn must
+    clear the obligation; only what actually ships has to be disclosed."""
+    items = {m.get("id"): m.get("storage_key")
+             for m in ((ctx.latest_edl() or {}).get("json") or {}).get(
+                 "music") or []}
+    live = {}
+    for c in (ctx.music_choices or []):
+        iid = c.get("item_id")
+        # Keep an entry only while its item exists AND still points at the
+        # track this choice was recorded for — a swap replaces the key under
+        # the same id, which retires the old choice and records a new one.
+        if iid in items and items[iid] == c.get("storage_key"):
+            live[iid] = c
+    return list(live.values())
+
+
+def _substitution_note(ctx, text):
+    """A system-authored disclosure for any substitution `text` fails to own.
+
+    _enforce_honesty guards ONE exit — the no-tool-calls branch. Three others
+    post assistant text without it: ask_user, and the timeout / budget /
+    step-limit paths through _finalize. Music written earlier in the same turn
+    reaches the user's timeline and their preview through all of them, so a
+    substitution could ship undisclosed simply because the turn happened to
+    end another way. This is a deterministic string build with no model call,
+    which is what makes it safe on the timeout and budget exits."""
+    if not _unnamed_substitution(text, _live_music_choices(ctx)):
+        return ""
+    subs = [c for c in _live_music_choices(ctx) if c.get("substituted")]
+    named = "; ".join(f'"{c["requested"]}" -> \'{c["track"]}\'' for c in subs)
+    return ("\n\n*(system: the built-in music library had nothing matching "
+            f"{named}. That track is the closest available match, not what "
+            "was asked for.)*")
+
+
+def _unnamed_substitution(draft, music_choices):
+    """A music substitution the reply does not own up to.
+
+    Every other check in this module asks DID IT HAPPEN. This one asks DID IT
+    MATCH, and it exists because a substitution is the one lie the old gate
+    structurally could not see: the agent asserts an action that genuinely
+    DID occur and misrepresents its CONTENT, so every did-it-happen check
+    passes. "I added epic cinematic trailer music" over a lofi track was a
+    verified-honest reply.
+
+    The requirement is deliberately objective — NAME THE TRACK YOU USED —
+    rather than an attempt to detect apologetic phrasing. Naming it is
+    checkable without heuristics, and it hands the user the one fact they
+    need to judge the substitution themselves. It does NOT prove the reply
+    frames the gap honestly; the blunt SUBSTITUTION note in the tool result
+    and the substituted=yes fact carry that. Verifying sincerity by regex is
+    not something this layer can honestly claim to do.
+    """
+    low = (draft or "").lower()
+    for c in music_choices or []:
+        if not c.get("substituted"):
+            continue
+        name = (c.get("track") or "").strip()
+        if name and name.lower() not in low:
+            return (f'used "{name}" for a request it does not match '
+                    f'("{c.get("requested", "")[:80]}") without naming it '
+                    "in the reply — the user cannot see the substitution")
+    return None
+
+
+def _reply_violations(draft, wrote, previewed, acted=None,
+                      music_choices=None):
     """Each violation names the exact fabricated claim it matched, so the
     regeneration correction (and the logs) point at the offending words.
     acted covers non-EDL actions (a generated image): "I made an image" is
@@ -520,6 +594,9 @@ def _reply_violations(draft, wrote, previewed, acted=None):
     check must still key on the EDL alone."""
     acted = wrote if acted is None else acted
     v = []
+    sub = _unnamed_substitution(draft, music_choices)
+    if sub:
+        v.append(sub)
     # An explicit denial ("nothing was changed") dominates — its own words
     # ("changes were made") must not read as a change claim.
     m = next((mm for mm in EDIT_CLAIM.finditer(draft)
@@ -553,6 +630,26 @@ def _turn_facts(ctx, start_version):
                     "insert_media write also succeeded")
     else:
         images = "none"
+    # The first CONTENT-carrying fact line. "Successful write tools this
+    # turn: add_music" said an action happened and nothing about what was
+    # written, so a wrong track was indistinguishable from a right one and
+    # any description of it passed the gate.
+    live_music = _live_music_choices(ctx)
+    if live_music:
+        music = "; ".join(
+            f"'{c['track']}' ({c['source']}) for the request "
+            f"\"{c['requested']}\""
+            + (" — NOT what was asked for; your reply MUST name this track "
+               "and say the library doesn't have what they wanted"
+               if c["substituted"] else "")
+            for c in live_music)
+    else:
+        music = "none"
+    if ctx.music_generated:
+        music += (" | composed this turn: "
+                  + ", ".join(m["storage_key"] for m in ctx.music_generated)
+                  + " — a generated track is IN the video only if an "
+                    "add_music write also succeeded")
     if ctx.last_preview is not None:
         pv = (f"rendered v{ctx.last_preview.get('edl_version')} "
               f"({ctx.last_preview.get('duration_s')}s)")
@@ -564,6 +661,7 @@ def _turn_facts(ctx, start_version):
             f"- {edl_line}\n"
             f"- Successful write tools this turn: {writes}\n"
             f"- Images generated this turn: {images}\n"
+            f"- Music placed this turn: {music}\n"
             f"- Preview: {pv}\n"
             "Rules: your reply may not claim any change, render, or setting "
             "that is not present in these facts. If no writes occurred, say "
@@ -618,9 +716,10 @@ ALTERNATIVE_HINTS = [
      "size, position, keyword emphasis words, karaoke mode and entrance "
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
-     "What I CAN do: score the edit with music on any time range — a track "
-     "from the built-in royalty-free library or the user's own upload — "
-     "loop it to fill the video, fade it in and out, start it partway in, "
+     "What I CAN do: score the edit with music on any time range — an "
+     "original track composed for your request, a track from the built-in "
+     "royalty-free library, or your own upload — loop it to fill the video, "
+     "fade it in and out, start it partway in, "
      "swap one track for another, make it louder or quieter, or remove it. "
      "I can also lay an uploaded voiceover over the edit (other audio ducks "
      "while it speaks)."),
@@ -644,9 +743,27 @@ FALLBACK_REPLY = ("I wasn't able to make that change — it needs a "
 def _nearest_alternative(user_text):
     for rx, hint in ALTERNATIVE_HINTS:
         if rx.search(user_text or ""):
-            # A deployment that shipped no tracks must not offer a library.
+            # A deployment that shipped no tracks must not offer a library,
+            # and one with no music backend must not offer to compose. Both
+            # degrade by REMOVING the clause, so the hint never advertises a
+            # capability this deployment cannot deliver.
+            if "composed for your request" in hint \
+                    and not music_gen.available():
+                hint = hint.replace(
+                    "an original track composed for your request, a track "
+                    "from the built-in royalty-free library, or your own "
+                    "upload", "a track from the built-in royalty-free "
+                    "library or your own upload")
             if "built-in royalty-free library" in hint \
                     and not music_library.CATALOG:
+                if music_gen.available():
+                    return ("What I CAN do: compose an original track for "
+                            "whatever you describe and score the edit with "
+                            "it on any time range — loop it, fade it in and "
+                            "out, make it louder or quieter, or remove it. "
+                            "I can also mix in music you upload, and lay an "
+                            "uploaded voiceover over the edit (other audio "
+                            "ducks while it speaks).")
                 return ("What I CAN do: mix music you upload under the edit "
                         "on any time range, loop it to fill the video, fade "
                         "it in and out, make it louder or quieter, or remove "
@@ -676,9 +793,11 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     inspection. (A wrote-but-denies redraft keeps the corrective-note path:
     a denial is wrong but not a fabrication worth suppressing.)"""
     wrote = bool(ctx.versions_written)
-    acted = bool(ctx.versions_written or ctx.images_generated)
+    acted = bool(ctx.versions_written or ctx.images_generated
+                 or ctx.music_generated)
     previewed = ctx.last_preview is not None
-    viol = _reply_violations(draft, wrote, previewed, acted)
+    live_music = _live_music_choices(ctx)
+    viol = _reply_violations(draft, wrote, previewed, acted, live_music)
     # Echo detection only polices turns that DID nothing: a working turn's
     # summary may legitimately resemble the last one (same request repeated),
     # and its content claims are already checked against the turn facts.
@@ -713,16 +832,29 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
         redraft = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[honesty] regeneration failed: {e}", flush=True)
-    if redraft and not _reply_violations(redraft, wrote, previewed, acted) \
+    if redraft and not _reply_violations(redraft, wrote, previewed, acted,
+                                         live_music) \
             and (acted or previewed
                  or not _echo_violation(redraft, messages)):
         return redraft
     honesty["false_claims"] += 1
     honesty["corrective_note"] = True
     honesty["discarded_drafts"] = [d for d in (draft, redraft) if d]
-    if wrote or ctx.images_generated:
+    if wrote or ctx.images_generated or ctx.music_generated:
         print(f"[honesty] job {ctx.job['id']}: regeneration still denies "
               "real changes — posting a corrective note", flush=True)
+        # If the surviving fault is an unnamed substitution, the note must
+        # supply the fact the model kept omitting. Prepending the generic
+        # "the edit DID change" would leave the user with exactly the wrong
+        # impression this check exists to prevent.
+        subs = [c for c in live_music if c.get("substituted")]
+        if subs and _unnamed_substitution(redraft or draft, live_music):
+            named = "; ".join(
+                f'"{c["requested"]}" -> \'{c["track"]}\'' for c in subs)
+            return ("*(system: the built-in music library had nothing "
+                    f"matching {named}. That track is the closest available "
+                    "match, not what was asked for.)*\n\n"
+                    + (redraft or draft))
         return ("*(system: this turn DID modify the edit — see the editing "
                 "steps above)*\n\n" + (redraft or draft))
     # Zero-write fabrication that survived regeneration: never publish it.
@@ -742,6 +874,9 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
                                                timings)
     if fail_note:
         final_text += fail_note
+    # These exits post fixed text ("the edits I completed are saved"), which
+    # can never disclose a substitution on its own.
+    final_text += _substitution_note(ctx, final_text)
     worker_db.run(dbx.add_message, session_id, "assistant", final_text,
                   {"edl_version": latest["version"],
                    "preview": ctx.last_preview})
@@ -876,7 +1011,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     _activity(worker_db, session_id, name, args,
                               f"asked: {q.question}")
                     worker_db.run(dbx.add_message, session_id, "assistant",
-                                  q.question, {"ask_user": True})
+                                  q.question + _substitution_note(
+                                      ctx, q.question),
+                                  {"ask_user": True})
                     return {"status": "awaiting_user", "steps": total_steps,
                             "timings": timings}
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})

@@ -100,6 +100,17 @@ def _image_gen_enabled():
     return bool(os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1"))
 
 
+def _music_gen_enabled():
+    """Whether the worker can compose original music, mirroring
+    worker/music_gen.provider(). The concierge runs in the BACKEND process
+    and cannot import the worker's modules, so this reads the same env the
+    worker does — and must be updated alongside it. A concierge that
+    promises composed music a keyless worker cannot deliver is the same
+    shape of lie the library gating already exists to prevent."""
+    return bool(os.getenv("MUSIC_ELEVENLABS_API_KEY", "").strip()
+                or os.getenv("MUSIC_STABILITY_API_KEY", "").strip())
+
+
 def _image_edit_enabled():
     """Restyling an existing frame/image needs DashScope's native endpoint;
     the OpenAI-compatible /images/generations backend (xAI) can only GENERATE
@@ -175,7 +186,11 @@ def _concierge_reply(stage, history, attachments, index_error=None):
         "word-timed captions (including karaoke word-pop styles), add "
         "background music or voiceover, drop one-shot sound effects "
         "(whooshes, impacts, risers, clicks, dings) on exact moments "
-        "from a built-in pack, zooms (including smooth Ken "
+        "from a built-in pack, "
+        + ("compose an ORIGINAL music track for whatever they describe "
+           "(\"epic movie-trailer music\", \"sad piano\") when the built-in "
+           "library doesn't have it, " if _music_gen_enabled() else "")
+        + "zooms (including smooth Ken "
         "Burns style), dip-to-black/white transitions, fades, color "
         "grades, vertical/square/portrait reframing, blur/pixelate/"
         "black-out a fixed region to censor burned-in usernames, "
