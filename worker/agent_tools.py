@@ -14,10 +14,7 @@ import config
 import db as dbx
 import llm
 import media
-import music_fetch
-import music_gen
 import music_library
-import music_search
 import sfx_library
 import storage
 import timeline as timeline_mod
@@ -57,23 +54,6 @@ class ToolContext:
         self.autorendered = False     # loop set: model skipped render_preview
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
-        self.music_generated = []     # assets created by generate_music
-        self.music_fetched = []       # assets created by fetch_music
-        # PAID vendor calls, appended the instant the vendor bills us — before
-        # the probe/upload/insert that can still fail. music_generated only
-        # records tracks that made it all the way to an asset, so pricing and
-        # the per-turn cap off THAT list meant a transient storage or DB
-        # failure left the user billed with every counter still at zero, and
-        # the cap could be re-armed indefinitely by failing late.
-        self.music_billed = []
-        # Every music track this turn put into the edit, with WHAT THE USER
-        # ASKED FOR and where the track came from. TURN FACTS renders this,
-        # and the honesty layer asserts on it — the codebase's first
-        # content-carrying fact. Until this existed, TURN FACTS said only
-        # "Successful write tools this turn: add_music", so "I added epic
-        # trailer music" over a lofi track was a VERIFIED-HONEST reply: the
-        # gate could see that a write happened, never what was written.
-        self.music_choices = []
         # Live per-turn model spend, for the graceful spend cap. tokens are
         # accumulated by the loop's llm recorder; images are priced flat.
         self.tokens_in = 0
@@ -87,10 +67,6 @@ class ToolContext:
         cost = (self.tokens_in * config.LLM_PRICE_IN_PER_M +
                 self.tokens_out * config.LLM_PRICE_OUT_PER_M) / 1e6
         cost += len(self.images_generated) * config.IMAGE_PRICE_USD
-        # Music is metered by the vendor (per-minute or per-call), so each
-        # generation carries its own real cost — mirroring the SUM in
-        # db.charge_turn_credits rather than a flat count x constant.
-        cost += sum(float(m.get("cost_usd") or 0) for m in self.music_billed)
         return round(cost / 0.01, 2)
 
     def over_budget(self):
@@ -1245,58 +1221,21 @@ def _resolve_music(ctx, storage_key):
                 if avail else "No music uploaded to this project — call "
                               "list_music_library() for built-in tracks.")
         return None, f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
-    # Prefer the stored filename over the storage key's basename: a generated
-    # track's key is a random hex stub, and "a1b2c3d4e5f6.mp3" is what the
-    # user would otherwise see quoted back as the name of their music.
-    meta = asset.get("meta") or {}
-    return {"name": meta.get("filename") or os.path.basename(storage_key),
-            "duration_s": asset.get("duration_s"),
-            "generated": bool(meta.get("generated")),
-            "library": False}, None
+    return {"name": os.path.basename(storage_key),
+            "duration_s": asset.get("duration_s"), "library": False}, None
 
 
-def list_music_library(ctx, mood=None, query=None):
-    """Browse or SEARCH the built-in CC0 tracks — and find out honestly when
-    the library has nothing like what the user asked for.
-
-    `query` takes the user's own words. It exists because `mood` alone could
-    not express a miss: it was an 8-value enum, so an unknown mood bounced
-    back to the same 8 buckets and every valid one returned tracks. There was
-    no way for this tool to say "we don't have that", which is why specific
-    requests were silently answered with the nearest bucket."""
+def list_music_library(ctx, mood=None):
+    """Browse the built-in CC0 tracks. Every one is cleared for use in an
+    exported video, so no upload is needed to score an edit."""
     if not music_library.CATALOG:
         return ("The built-in music library is empty in this deployment. "
-                + (_gen_music_hint() or
-                   "Use list_assets(kind='music') for the user's own "
-                   "uploads, or ask them to attach a file."))
+                "Use list_assets(kind='music') for the user's own uploads, "
+                "or ask them to attach a file.")
     m = (mood or "").strip().lower()
-    q = (query or "").strip()
-    # An unknown mood is no longer an error — it is a search term. Rejecting
-    # it taught the model nothing except to retry inside the same 8 buckets.
     if m and m not in music_library.MOODS:
-        q = f"{m} {q}".strip()
-        m = ""
-    if q:
-        hits, rep = music_search.search(q)
-        if not rep["matched"]:
-            return _no_match(q, rep)
-        head = (f"{len(hits)} built-in track(s) matching '{q}'"
-                + (f" (no match for: {', '.join(rep['unmatched'])})"
-                   if rep["unmatched"] else "")
-                + ". Pass the library: reference to add_music.\n")
-        body = "\n".join(
-            f"  library:{h['track']['slug']} — "
-            f"{music_library.describe(h['track'])}"
-            + (f" [matches: {', '.join(h['hit_terms'])}]"
-               if h["hit_terms"] else "")
-            for h in hits)
-        tail = ""
-        if rep["unmatched"]:
-            tail = ("\nThe part of the request these tracks do NOT cover is "
-                    f"'{' '.join(rep['unmatched'])}' — say so when you report "
-                    "back, and offer the alternative.")
-            tail += "\n" + (_gen_music_hint() or "")
-        return head + body + tail
+        return (f"REJECTED: unknown mood '{mood}'. Available moods: "
+                + ", ".join(music_library.MOODS))
     hits = music_library.browse(m or None)
     if not hits:
         return (f"No '{m}' tracks. Available moods: "
@@ -1308,118 +1247,9 @@ def list_music_library(ctx, mood=None, query=None):
         f"  library:{t['slug']} — {music_library.describe(t)}" for t in hits)
 
 
-def _gen_music_hint():
-    """What to offer when the library cannot serve a request. Returns None
-    when generation is not configured, so callers never advertise it."""
-    if not music_gen.available():
-        return None
-    return (f"You CAN still deliver this: generate_music(prompt=..., "
-            f"duration_s=...) composes an original track to order "
-            f"(up to {int(music_gen.max_duration_s())}s). "
-            "Describe the SOUND — instruments, tempo, mood, energy arc — "
-            "never an artist, band, song or album name.")
-
-
-def _no_match(q, rep):
-    """The honest empty result. Names what the library IS, what part of the
-    request it cannot serve, and every real alternative — so the agent has
-    something concrete to tell the user instead of quietly picking the
-    nearest bucket, which is what it did before this path existed."""
-    lines = [f"NO MATCH — the built-in library has nothing for '{q}'."]
-    if rep.get("vetoed"):
-        lines.append(f"({rep['vetoed']} track(s) were excluded as actively "
-                     "wrong for this request, not merely imperfect.)")
-    lines.append(music_search.summarize_catalog())
-    hint = _gen_music_hint()
-    if hint:
-        lines.append(hint)
-    lines.append("Otherwise: use the user's own upload "
-                 "(list_assets(kind='music')), or ask them for one. Do NOT "
-                 "add a library track and describe it as what they asked "
-                 "for — tell them plainly the library doesn't have it.")
-    return "\n".join(lines)
-
-
-def _need_requested(requested):
-    """Reject a blank `requested`, or None.
-
-    Dispatch now enforces PRESENCE (execute checks REQUIRED_ARGS), so this
-    catches the remaining dodge: sending the key with an empty value.
-    A request that reduces to zero SEARCH terms is deliberately still fine —
-    "add some music" is genuinely unspecific, and treating that as a refusal
-    would break the commonest request in the product."""
-    if requested is None or not str(requested).strip():
-        return ("REJECTED: `requested` must carry the user's own words for "
-                "the music they asked for (e.g. 'epic movie trailer music', "
-                "or 'add some music' if they were not specific). The track "
-                "you picked is checked against it so a substitution can be "
-                "disclosed rather than passed off as a match.")
-    return None
-
-
-def _record_music_choice(ctx, requested, storage_key, track_name,
-                         track=None, item_id=None):
-    """Record WHAT WAS ASKED FOR against WHAT WAS USED, and whether the
-    library could honestly serve it.
-
-    Called from every tool that decides which track plays. The check runs at
-    WRITE time, deliberately, and not inside list_music_library: an agent
-    that searched for something sensible and then added a different track
-    would otherwise launder the substitution past any check anchored to the
-    search. Here there is no path to a music item that skips it.
-
-    Returns a note to append to the tool result, or "" when the choice is
-    defensible."""
-    served, wrong = music_search.can_serve(requested, storage_key)
-    # The DURABLE flag (assets.meta.generated, resolved by _resolve_music)
-    # is the authority, with the per-turn list only as a same-turn fallback.
-    # ctx.music_generated is empty on every turn AFTER the one that composed
-    # the track, so keying on it alone reported a generated track placed in a
-    # later turn ("put that music back") as a "user upload" — telling the
-    # model the user supplied a file they never supplied.
-    source = ("built-in library" if music_library.is_library_ref(storage_key)
-              else "generated" if ((track or {}).get("generated") or any(
-                  m["storage_key"] == storage_key
-                  for m in ctx.music_generated))
-              else "user upload")
-    ctx.music_choices.append({
-        "requested": (requested or "").strip()[:200],
-        "track": track_name, "source": source, "substituted": not served,
-        # Recorded so the honesty layer can tell whether this choice is STILL
-        # in the edit. The list is append-only; a substitution the agent then
-        # corrected must stop demanding disclosure, or the corrective note
-        # describes music that is not in the video.
-        "item_id": item_id, "storage_key": storage_key,
-    })
-    if served:
-        return ""
-    # The library was asked for something it does not have and a library
-    # track went in anyway. That is the exact churn mechanism, so the note is
-    # blunt and the fact is in TURN FACTS for the honesty layer to enforce.
-    note = (f"\nSUBSTITUTION — the user asked for "
-            f"'{(requested or '').strip()[:120]}' and '{track_name}' is NOT "
-            "that; it is the closest thing in the built-in library. You MUST "
-            "say so in your reply: name the track you used and state plainly "
-            "that the library doesn't have what they asked for. Do not "
-            "describe it as what they wanted.")
-    hint = _gen_music_hint()
-    if hint:
-        note += ("\nBefore settling for it, consider composing the real "
-                 "thing instead — " + hint)
-    return note
-
-
 def add_music(ctx, storage_key, start=None, end=None, gain_db=-18.0,
               duck=True, offset_s=None, fade_in_s=None, fade_out_s=None,
-              loop=True, *, requested=None):
-    # `requested` is KEYWORD-ONLY on purpose. Adding it as the second
-    # positional parameter (where it reads best) would silently shift
-    # start/end for any positional caller — the argument would absorb the
-    # start time and the music would land across the whole video with a
-    # timestamp as its "request". A TypeError is the right failure here.
-    err = _need_requested(requested)
-    if err:
-        return err
+              loop=True):
     track, err = _resolve_music(ctx, storage_key)
     if err:
         return err
@@ -1496,10 +1326,6 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=-18.0,
         res += (f"\nWARNING: this same file is also active as voiceover "
                 f"{', '.join(dup_vo)} — it will play TWICE. If you meant to "
                 f"replace it, call remove_voiceover('{dup_vo[0]}').")
-    if not str(res).startswith("REJECTED"):
-        res += _record_music_choice(ctx, requested, storage_key,
-                                    track["name"], track=track,
-                                    item_id=item["id"])
     return res
 
 
@@ -1681,7 +1507,7 @@ def move_sfx(ctx, id, at):
              f"{old}s -> {hit['at']}s")
 
 
-def swap_music(ctx, id, storage_key, *, requested=None):
+def swap_music(ctx, id, storage_key):
     """Change WHICH track plays, keeping its position, level and fit —
     'no, use a different song'."""
     track, err = _resolve_music(ctx, storage_key)
@@ -1715,9 +1541,6 @@ def swap_music(ctx, id, storage_key, *, requested=None):
         res += (f"\nNote: '{track['name']}' is {tdur:.0f}s but the span is "
                 f"{span:.0f}s — it will fall silent for the rest unless you "
                 "set loop=true with set_music_fit.")
-    if not str(res).startswith("REJECTED"):
-        res += _record_music_choice(ctx, requested, storage_key,
-                                    track["name"], track=track, item_id=id)
     return res
 
 
@@ -2464,218 +2287,6 @@ def generate_image(ctx, prompt, from_video_time_s=None, from_asset_key=None,
             "the moving footage itself is not modified.")
 
 
-def generate_music(ctx, prompt, duration_s=None, instrumental=True):
-    """Compose an original track to order. The result becomes a project music
-    asset the model must then add_music to actually use — same two-step
-    contract as generate_image/insert_media, so a generation that is never
-    placed can never be reported as music the user will hear."""
-    if not music_gen.available():
-        return ("Music generation is unavailable (no music backend "
-                "configured). Tell the user honestly and offer what does "
-                "exist: the built-in library (list_music_library) or their "
-                "own upload.")
-    p = (prompt or "").strip()
-    if not p:
-        return ("REJECTED: prompt is empty — describe the music to compose: "
-                "instruments, tempo, mood, and how the energy should move.")
-    # Cap on PAID calls, not on successful placements — otherwise a failure
-    # after the vendor bills us leaves the cap un-armed and the loop can pay
-    # again, without limit.
-    if len(ctx.music_billed) >= config.MAX_GENERATED_MUSIC_PER_TURN:
-        return (f"REJECTED: already generated "
-                f"{config.MAX_GENERATED_MUSIC_PER_TURN} tracks this turn. "
-                "Use one of them, or continue in the next message.")
-    cap = music_gen.max_duration_s()
-    if duration_s is None:
-        # Default to covering the whole edit, so the commonest case needs no
-        # number and the track does not have to loop (a looped bed repeats
-        # audibly, and an un-looped short one used to cut dead — see the
-        # fade fix in renderer.py).
-        prog = program_duration(ctx.latest_edl()["json"])
-        duration_s = min(cap, max(15.0, (prog or config.MUSIC_DEFAULT_DURATION_S) + 2.0))
-    try:
-        d = float(duration_s)
-    except (TypeError, ValueError):
-        return "REJECTED: duration_s must be a number of seconds."
-    if d > cap + 0.01:
-        return (f"REJECTED: {d:.0f}s is longer than this music backend can "
-                f"compose ({cap:.0f}s max). Ask for {cap:.0f}s or less — for "
-                "a longer edit, add it with loop=true.")
-    d = max(5.0, d)
-
-    n = len(ctx.music_generated) + 1
-    out_path = os.path.join(ctx.workdir, f"genmusic_{n}.mp3")
-    ok, err = music_gen.generate(p, out_path, d, instrumental=instrumental)
-    if not ok:
-        return (f"Music generation FAILED: {err}. Do NOT claim a track was "
-                "created. If this reads as a content rejection, reword the "
-                "prompt to describe only the SOUND (never an artist, band, "
-                "song or album name); otherwise try once more, or fall back "
-                "to the built-in library and say what happened.")
-    # The vendor has now billed us. Record that BEFORE the probe/upload/insert
-    # below, any of which can fail on a transient network or DB error — those
-    # paths return early, and the charge is already in llm_calls either way.
-    ctx.music_billed.append({"cost_usd": music_gen.price_usd(d)})
-    # Probe the REAL file — probe_audio_duration, not probe(), which raises
-    # MediaError on audio-only inputs. The vendor's actual output length can
-    # differ from what we asked for, and a wrong duration_s silently disables
-    # the agent-facing fit guards in add_music/set_music_fit.
-    try:
-        real_dur = media.probe_audio_duration(out_path)
-    except Exception:
-        real_dur = None
-
-    key = f"generated/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
-    try:
-        storage.upload_file(out_path, key, "audio/mpeg")
-    except Exception as e:
-        return (f"The track was composed but could not be saved to storage "
-                f"({str(e)[:160]}). Try again.")
-    ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
-               bytes_=os.path.getsize(out_path), duration_s=real_dur,
-               meta={"filename": f"generated-music-{n}.mp3",
-                     "caption": f"AI-generated music: {p[:300]}",
-                     "generated": True, "prompt": p[:500],
-                     "provider": music_gen.provider()})
-    # No cost_usd here — music_billed is the single source of truth for
-    # spend, so carrying a second copy would risk double-counting if a future
-    # change summed both.
-    ctx.music_generated.append({"storage_key": key, "prompt": p[:200]})
-    dur_txt = f"{real_dur:.0f}s" if real_dur else f"~{d:.0f}s"
-    return (f"Composed a {dur_txt} track: storage_key={key}. It is NOT in "
-            f"the video yet — call add_music(storage_key='{key}', "
-            "requested='<what the user asked for>') to place it. This is an "
-            "ORIGINAL track made for this request, so say that plainly "
-            "rather than implying it came from a library.")
-
-
-def _log_music_request(ctx, query, outcome, detail=None):
-    """Record what was asked for and what happened.
-
-    This is the POINT of the experiment: nobody currently knows whether users
-    ask for named commercial songs, genres, or moods, and that single fact
-    decides whether the answer is a bigger library, a generation API or a
-    licensed catalog. It rides on llm_calls (purpose='music_request') rather
-    than a new table so it needs no migration; the rows carry no tokens, so
-    they cost nothing and cannot move a bill.
-
-    Query the experiment with:
-      SELECT request->>'query', response->>'outcome', COUNT(*)
-      FROM llm_calls WHERE purpose='music_request' GROUP BY 1,2;
-    """
-    try:
-        llm.record("music_request",
-                   {"query": str(query or "")[:300]},
-                   {"outcome": outcome,
-                    "detail": str(detail or "")[:300]}, None)
-    except Exception:
-        # Telemetry must never break the feature it is measuring.
-        pass
-
-
-def fetch_music(ctx, query):
-    """Find a track on the open web and bring it into the project.
-
-    Two-step like generate_image/generate_music: this mints the asset, and
-    add_music is what actually puts it in the video."""
-    if not music_fetch.available():
-        return ("Fetching music from the web is switched off in this "
-                "deployment. Use list_music_library() or the user's own "
-                "uploads.")
-    q = (query or "").strip()
-    if not q:
-        return ("REJECTED: query is empty — pass what the user actually "
-                "asked for ('st louis blues', 'ragtime piano', 'jazz').")
-    if len(ctx.music_fetched) >= config.MAX_FETCHED_MUSIC_PER_TURN:
-        return (f"REJECTED: already fetched "
-                f"{config.MAX_FETCHED_MUSIC_PER_TURN} tracks this turn. Use "
-                "one of them, or continue in the next message.")
-
-    n = len(ctx.music_fetched) + 1
-    out_path = os.path.join(ctx.workdir, f"fetched_{n}.audio")
-    cand, others, notes, err = music_fetch.fetch_best(q, out_path)
-    if not cand:
-        _log_music_request(ctx, q, "not_found", err or "; ".join(notes))
-        return _fetch_miss(q, err, notes)
-    # The bytes must be audio before anything downstream believes they are,
-    # and normalizing is also what makes the -18dB music default MEAN the
-    # same thing for a 1924 transfer as for a bundled track (measured 15dB
-    # apart before this). ffmpeg failing here is the honest "not audio" test:
-    # an HTML error page cannot be loudness-normalized.
-    norm_path = os.path.join(ctx.workdir, f"fetched_{n}.mp3")
-    try:
-        media.normalize_audio(out_path, norm_path,
-                              timeout=config.MUSIC_FETCH_TIMEOUT_S)
-        dur = media.probe_audio_duration(norm_path)
-    except Exception:
-        _log_music_request(ctx, q, "not_audio", cand.get("page_url"))
-        return (f"Downloaded '{cand['title']}' but it is not playable audio. "
-                "Tell the user that one was broken and try a different "
-                "wording, or offer the built-in library.")
-    out_path = norm_path
-
-    key = f"generated/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
-    try:
-        storage.upload_file(out_path, key, "audio/mpeg")
-    except Exception as e:
-        _log_music_request(ctx, q, "storage_failed", str(e)[:120])
-        return (f"Found '{cand['title']}' but could not save it "
-                f"({str(e)[:140]}). Try again.")
-    prov = (f"{cand['source']}: {cand['licence']} — {cand['licence_basis']}. "
-            f"Source page: {cand['page_url']}")
-    ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
-               bytes_=os.path.getsize(out_path), duration_s=dur,
-               meta={"filename": f"{cand['title'][:60]}.mp3",
-                     "caption": f"Fetched from the web — {prov}",
-                     "fetched": True, "query": q[:200],
-                     "provenance": prov, "source_url": cand["page_url"],
-                     "licence": cand["licence"]})
-    ctx.music_fetched.append({"storage_key": key, "query": q[:200],
-                              "title": cand["title"], "provenance": prov})
-    _log_music_request(ctx, q, "fetched", cand["page_url"])
-
-    alts = ""
-    if others:
-        alts = ("\nOther matches, if this one is wrong: "
-                + "; ".join(music_fetch.describe(o)[:90] for o in others[:3]))
-    return (f"Found {music_fetch.describe(cand)}\n"
-            f"Downloaded ({dur:.0f}s), storage_key={key}. It is NOT in the "
-            f"video yet — add_music(storage_key='{key}', requested='{q[:60]}').\n"
-            "WHEN YOU REPORT BACK you must say WHAT IT IS and WHERE IT CAME "
-            f"FROM: it is a {cand.get('year') or 'historical'} recording, "
-            f"{cand['licence']}. This is a real archival recording, not a "
-            "modern studio track, and it will sound like its era — say so "
-            "rather than letting the user expect a polished master."
-            + alts)
-
-
-def _fetch_miss(q, err, notes):
-    """The honest empty result.
-
-    Worth spelling out for the model, because the temptation here is to
-    substitute: the catalogs cover public-domain recordings, so a miss for a
-    modern song is not a search that went wrong, it is the correct answer."""
-    lines = [f"NOT FOUND — nothing matching '{q}' in the public-domain "
-             "catalogs."]
-    if err:
-        lines.append(f"(Candidates were found but would not download: "
-                     f"{err[:200]})")
-    lines.extend(notes or [])
-    lines.append(
-        "These catalogs hold PUBLIC-DOMAIN recordings — vintage jazz, blues, "
-        "ragtime, dance bands, classical and opera recorded up to 1925 — so "
-        "any modern or commercially released song will NOT be there, and "
-        "that is expected rather than a failure to search properly.")
-    lines.append(
-        "REPLY IN ONE LINE. Something like: \"I can't pull that one in — "
-        "attach it with the paperclip and I'll drop it straight under the "
-        "video.\" Do NOT explain the catalogs, the licensing, or what you "
-        "searched; the user asked for a song, not a status report. If they "
-        "attach it, place it immediately. Do NOT substitute a different "
-        "song and present it as what they asked for.")
-    return "\n".join(lines)
-
-
 # ------------------------------------------------------------------ #
 #  META tools                                                          #
 # ------------------------------------------------------------------ #
@@ -3010,39 +2621,25 @@ TOOLS = {
                                          "items": {"type": "string"}},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
-    "list_music_library": (list_music_library, "Search or browse the "
-                           "BUILT-IN royalty-free music library — tracks "
+    "list_music_library": (list_music_library, "Browse the BUILT-IN "
+                           "royalty-free music library — tracks that are "
                            "always available with nothing uploaded. Returns "
                            "'library:<slug>' references to pass to "
-                           "add_music. Pass `query` with the USER'S OWN "
-                           "WORDS ('epic movie trailer', 'sad piano') "
-                           "whenever they asked for something specific: it "
-                           "searches properly and, crucially, answers NO "
-                           "MATCH when the library genuinely has nothing "
-                           "like it — believe that answer instead of "
-                           "settling for the nearest mood. `mood` browses "
-                           "one bucket: " + ", ".join(music_library.MOODS)
-                           + ".",
-                           {"query": {"type": "string"},
-                            "mood": {"type": "string"}}),
+                           "add_music. Optionally filter by mood: "
+                           + ", ".join(music_library.MOODS) + ".",
+                           {"mood": {"type": "string",
+                                     "enum": list(music_library.MOODS)}}),
     "add_music": (add_music, "Mix music under the edit as BACKGROUND MUSIC "
                   "(default -18dB, ducked under speech). storage_key is "
-                  "either a 'library:<slug>' from list_music_library(), a "
-                  "key from generate_music(), a key from fetch_music(), or "
-                  "an exact key from "
-                  "list_assets(kind='music') (the user's own "
-                  "uploads) — never invent one. ALWAYS pass `requested` "
-                  "with what the user actually asked for, verbatim — it is "
-                  "checked against the track you chose, and a mismatch you "
-                  "then describe as a fulfilment is the single fastest way "
-                  "to lose this user. start/end are OUTPUT-timeline "
+                  "either a 'library:<slug>' from list_music_library() or an "
+                  "exact key from list_assets(kind='music') (the user's own "
+                  "uploads) — never invent one. start/end are OUTPUT-timeline "
                   "seconds and DEFAULT TO THE WHOLE VIDEO, so omit them for "
                   "'add some music'. Fades in/out by default. loop=true (the "
                   "default) repeats a short track to fill the span; "
                   "offset_s starts partway into the track, e.g. to skip a "
                   "slow intro. duck=true lowers music 12dB under speech.",
                   {"storage_key": {"type": "string"},
-                   "requested": {"type": "string"},
                    "start": {"type": "number"},
                    "end": {"type": "number"},
                    "gain_db": {"type": "number"},
@@ -3079,12 +2676,9 @@ TOOLS = {
     "swap_music": (swap_music, "Replace the TRACK of an existing music item "
                    "while keeping its position, level and fit — THE tool for "
                    "'use a different song' / 'try something more upbeat'. "
-                   "id from get_edl; storage_key as for add_music. Pass "
-                   "`requested` with the user's own words — same check as "
-                   "add_music.",
+                   "id from get_edl; storage_key as for add_music.",
                    {"id": {"type": "string"},
-                    "storage_key": {"type": "string"},
-                    "requested": {"type": "string"}}),
+                    "storage_key": {"type": "string"}}),
     "set_music_fit": (set_music_fit, "Retime or refit EXISTING music in "
                       "place — 'start the music later', 'let it run to the "
                       "end', 'fade it out', 'loop it', 'stop it ducking'. "
@@ -3185,54 +2779,6 @@ TOOLS = {
                       "exactly. If an insert landed wrong, remove it BEFORE "
                       "re-inserting, or the old one stays in the video.",
                       {"id": {"type": "string"}}),
-    "fetch_music": (fetch_music, "Find a specific song on the open web and "
-                    "bring it into the project — THE tool for 'add the song "
-                    "<name>' or 'put some jazz under this'. It searches "
-                    "public-domain catalogs (the Internet Archive's 78rpm "
-                    "collection, Wikimedia Commons) and downloads the best "
-                    "match. Pass the user's own words as the query. "
-                    "COVERAGE IS NARROW AND YOU MUST NOT PRETEND OTHERWISE: "
-                    "these are historical recordings up to 1925 — jazz, "
-                    "blues, ragtime, dance bands, classical, opera — so a "
-                    "modern or chart song will NOT be found, and a NOT FOUND "
-                    "for one is the correct answer, not a reason to search "
-                    "again with different words. Whatever comes back is a "
-                    "period recording and sounds like it. When it succeeds, "
-                    "tell the user what the track IS (title, performer, "
-                    "year) and that it is public domain. The result becomes "
-                    "a project music asset; it is in the video ONLY after "
-                    "add_music with its storage_key.",
-                    {"query": {"type": "string"}}),
-    "generate_music": (generate_music, "Compose an ORIGINAL music track to "
-                       "order — the answer whenever the user names music the "
-                       "built-in library does not have ('epic movie-trailer "
-                       "music', 'sad piano', 'lo-fi drill beat'). Describe "
-                       "the SOUND in the prompt: instruments, tempo, mood, "
-                       "and how the energy moves ('slow build from soft "
-                       "strings to wide brass and taiko hits at 0:20'). "
-                       "NEVER name an artist, band, songwriter, song or "
-                       "album — the provider's terms forbid it and the "
-                       "request will be rejected. instrumental=true (the "
-                       "default) keeps it wordless so it sits under speech. "
-                       "The track becomes a project music asset; it is in "
-                       "the video ONLY after add_music with its "
-                       "storage_key. "
-                       "For a TRAILER, compose the BED here and place the "
-                       "HITS yourself with add_sfx — do not expect one "
-                       "generation to land its drop on the user's cut. "
-                       "Worked example: generate_music('slow-building "
-                       "cinematic trailer bed, sparse low piano and airy "
-                       "strings opening, massed low brass swells entering "
-                       "halfway, deep taiko drums, wide reverb, rising "
-                       "tension') for the bed, then a riser into each cut "
-                       "and an impact or sub-drop on the reveals. The big "
-                       "brass blast people mean by 'the trailer horn' — "
-                       "often described as a foghorn or a ship's horn — is "
-                       "a BRAAAM: massed low brass, long, slow swell. Say "
-                       "that, rather than naming a film.",
-                       {"prompt": {"type": "string"},
-                        "duration_s": {"type": "number"},
-                        "instrumental": {"type": "boolean"}}),
     "generate_image": (generate_image, "Create an image with AI — from a "
                        "text prompt alone, by RESTYLING A FRAME of the main "
                        "video (from_video_time_s, e.g. 'give this character "
@@ -3357,20 +2903,13 @@ REQUIRED_ARGS = {
     "set_caption_style": [],
     # start/end default to the whole program, so "add some music" needs only
     # a track.
-    # `requested` is REQUIRED, and that is the whole mechanism. Making it
-    # optional would leave the substitution check on a path the agent can
-    # skip — which is exactly the hole the old design had: the disclosure
-    # depended on a search call nothing forced it to make, so it went
-    # straight from the catalog in its context to add_music and no miss was
-    # ever recorded. Asking "what did the user ask for?" at the point of
-    # writing is not a leash on the agent; it is the tool's contract.
-    "add_music": ["storage_key", "requested"],
+    "add_music": ["storage_key"],
     "list_music_library": [],
     "list_sfx_library": [],
     "add_sfx": ["storage_key", "at"],
     "move_sfx": ["id", "at"],
     "remove_sfx": ["id"],
-    "swap_music": ["id", "storage_key", "requested"],
+    "swap_music": ["id", "storage_key"],
     "set_music_fit": ["id"],
     "remove_music": ["id"],
     "set_audio_gain": ["kind", "id", "gain_db"],
@@ -3386,8 +2925,6 @@ REQUIRED_ARGS = {
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
     "generate_image": ["prompt"],
-    "generate_music": ["prompt"],
-    "fetch_music": ["query"],
     "ask_user": ["question"],
 }
 
@@ -3404,8 +2941,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
-               "blur_region", "remove_blur", "generate_image",
-               "generate_music", "fetch_music"}
+               "blur_region", "remove_blur", "generate_image"}
 
 
 def _tool_disabled(name):
@@ -3414,10 +2950,6 @@ def _tool_disabled(name):
     return 'unavailable'."""
     if name == "generate_image":
         return not llm.image_available()
-    if name == "generate_music":
-        return not music_gen.available()
-    if name == "fetch_music":
-        return not music_fetch.available()
     # Same rule for the music library: a deployment whose image shipped no
     # tracks must not advertise one, or the agent offers music it cannot
     # deliver and then has to walk it back.
@@ -3442,30 +2974,6 @@ def capabilities_digest():
     return "\n".join(lines)
 
 
-# Tool DESCRIPTIONS reference other tools, and were shipped verbatim — so a
-# deployment with no music backend still read "a key from generate_music()"
-# in add_music's description while _tool_disabled correctly hid the tool
-# itself. The three prompt gates in agent_prompt.py are airtight; this is the
-# same contract for the one surface they don't cover. Degrade by REMOVAL, so
-# a claim can never outlive its capability.
-_DESC_CLAIMS = [
-    (lambda: not music_gen.available(),
-     [("a key from generate_music(), ", "")]),
-    (lambda: not music_fetch.available(),
-     [("a key from fetch_music(), ", "")]),
-    (lambda: not music_library.CATALOG,
-     [("a 'library:<slug>' from list_music_library(), ", "")]),
-]
-
-
-def _gated_desc(desc):
-    for unavailable, pairs in _DESC_CLAIMS:
-        if unavailable():
-            for claim, without in pairs:
-                desc = desc.replace(claim, without)
-    return desc
-
-
 def openai_tools():
     out = []
     for name, (_fn, desc, props) in TOOLS.items():
@@ -3475,7 +2983,7 @@ def openai_tools():
             "type": "function",
             "function": {
                 "name": name,
-                "description": _gated_desc(desc),
+                "description": desc,
                 "parameters": {"type": "object", "properties": props,
                                "required": REQUIRED_ARGS.get(name, [])},
             },
@@ -3491,19 +2999,6 @@ def execute(ctx, name, args):
         return (f"Unknown tool '{name}'. Available: "
                 + ", ".join(TOOLS))
     fn = entry[0]
-    # REQUIRED_ARGS must bind HERE, not only in the JSON schema. It was read
-    # in exactly one place — openai_tools(), where it becomes the schema's
-    # `required` array — and function calling does not run in strict mode, so
-    # that array is advisory. Every other required arg happened to be a
-    # defaultless parameter, so omitting one raised TypeError and was caught
-    # below; `requested` is the first required arg with a Python default, and
-    # omitting it raised nothing. The substitution check then silently
-    # no-opped (can_serve("") is vacuously True) and the round-27 churn bug
-    # was fully restored on a path the model could take at will.
-    missing = [a for a in REQUIRED_ARGS.get(name, []) if a not in (args or {})]
-    if missing:
-        return (f"REJECTED: {name} requires {', '.join(missing)}. "
-                "Call it again with the missing argument(s).")
     try:
         return fn(ctx, **(args or {}))
     except AskUser:

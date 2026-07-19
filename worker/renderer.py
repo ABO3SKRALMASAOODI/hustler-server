@@ -606,31 +606,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     duck = f",volume={DUCK_DB}dB:enable='{_enable_expr(win)}'"
             # Fades are the music item's OWN, and must land before adelay
             # while t=0 still means "the music's first sample". Clamped to
-            # half the AUDIBLE length so a 2s sting can't fade in past its
-            # own end.
-            #
-            # audible != span whenever a track shorter than its span is NOT
-            # looped: the audio simply stops at the file's real end and amix
-            # (duration=first) fills the rest with silence. Anchoring the
-            # fade-out to the span, as this did, put it in that silence — so
-            # the fade never fired and the music CUT DEAD at full volume.
-            # Measured before the fix: the un-looped tail sat at -39.07 dBFS,
-            # identical to the mid-file baseline, against -63.86 dBFS looped.
-            # Generated tracks make this the common case, not the rare one:
-            # a vendor asked for 45s can return 43s, and that 2s shortfall
-            # was an abrupt stop on every export.
-            audible = dur
-            if track_dur and not item.get("loop"):
-                audible = max(0.0, min(dur, track_dur - off))
+            # half the span so a 2s sting can't fade in past its own end.
             fades = ""
-            fi = min(max(0.0, float(item.get("fade_in_s") or 0.0)),
-                     audible / 2)
-            fo = min(max(0.0, float(item.get("fade_out_s") or 0.0)),
-                     audible / 2)
+            fi = min(max(0.0, float(item.get("fade_in_s") or 0.0)), dur / 2)
+            fo = min(max(0.0, float(item.get("fade_out_s") or 0.0)), dur / 2)
             if fi > 0.01:
                 fades += f",afade=t=in:st=0:d={fi:.2f}"
             if fo > 0.01:
-                fades += (f",afade=t=out:st={max(0.0, audible - fo):.2f}"
+                fades += (f",afade=t=out:st={max(0.0, dur - fo):.2f}"
                           f":d={fo:.2f}")
             delay_ms = int(m_start * 1000)
             delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""

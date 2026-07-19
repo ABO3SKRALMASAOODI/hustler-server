@@ -52,65 +52,6 @@ IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
 MAX_GENERATED_IMAGES_PER_TURN = int(
     os.getenv("MAX_GENERATED_IMAGES_PER_TURN", "4"))
 
-# ------------------------------------------------------- music generation --
-# The agent can compose a track to order ("epic trailer, low brass, taiko
-# hits, rising strings") instead of being confined to the 24 bundled CC0
-# tracks. DISABLED until a key is set: with neither key present the
-# generate_music tool removes itself and the agent falls back to the library
-# and the user's uploads, honestly. Set ONE of these to switch it on — the
-# backend is inferred from which one (see worker/music_gen.provider).
-#
-# Read worker/music_gen.py's docstring before enabling. The short version:
-# output rights vest in the ACCOUNT HOLDER (Valmera), not automatically in
-# Valmera's end users, so enabling this is a licensing posture the operator
-# takes deliberately — hence a key, not a code default.
-MUSIC_ELEVENLABS_API_KEY = os.getenv("MUSIC_ELEVENLABS_API_KEY", "").strip()
-MUSIC_STABILITY_API_KEY = os.getenv("MUSIC_STABILITY_API_KEY", "").strip()
-MUSIC_ELEVENLABS_MODEL = os.getenv("MUSIC_ELEVENLABS_MODEL", "music_v2")
-# Vendor prices, for the credit charge. MUST match the vendor's current rate
-# or music silently costs the user the wrong number of credits — the same
-# contract LLM_PRICE_* and IMAGE_PRICE_USD carry (1 credit = $0.01).
-MUSIC_ELEVENLABS_USD_PER_MIN = float(
-    os.getenv("MUSIC_ELEVENLABS_USD_PER_MIN", "0.15"))
-MUSIC_STABILITY_USD_PER_CALL = float(
-    os.getenv("MUSIC_STABILITY_USD_PER_CALL", "0.20"))
-# Generation is the slowest tool call the agent makes (~30s typical), so it
-# gets a generous timeout — but well under AGENT_TURN_TIMEOUT_S so a hung
-# vendor cannot eat the whole turn.
-MUSIC_TIMEOUT_S = float(os.getenv("MUSIC_TIMEOUT_S", "180"))
-# Cost bound per turn, mirroring MAX_GENERATED_IMAGES_PER_TURN. Not a leash on
-# the agent's judgement — a stop on a retry loop burning $0.20 a go.
-MAX_GENERATED_MUSIC_PER_TURN = int(
-    os.getenv("MAX_GENERATED_MUSIC_PER_TURN", "3"))
-# Default length when the agent does not say. Long enough to cover a typical
-# short-form edit without looping, short enough not to overbill a 15s reel.
-MUSIC_DEFAULT_DURATION_S = float(os.getenv("MUSIC_DEFAULT_DURATION_S", "45"))
-
-# ------------------------------------------------------ music fetch (web) --
-# "Add this song" -> the agent SEARCHES public catalogs, downloads a track and
-# puts it in the edit. EXPERIMENTAL, and deliberately scoped: only catalogs
-# that expose a machine-readable licence, and only works whose licence reads
-# CC0 or public domain. That scope is the whole safety story — the audio ends
-# up burned into a customer's exported, possibly monetized video, where a
-# Content ID claim lands on THEM, weeks later, with no idea why.
-#
-# Provenance is recorded on every fetched asset and stated to the user,
-# because a catalog licence field is UPLOADER-DECLARED, not verified. We can
-# honestly say "the uploader declared this CC0, here is where it came from";
-# we cannot say "this is cleared". Do not let the wording drift toward the
-# second.
-MUSIC_FETCH_ENABLED = os.getenv("MUSIC_FETCH_ENABLED", "1") == "1"
-MUSIC_FETCH_TIMEOUT_S = float(os.getenv("MUSIC_FETCH_TIMEOUT_S", "45"))
-# A 10-minute 320kbps MP3 is ~24 MB. 60 MB is generous for a long PD
-# recording and still far under anything that threatens the worker's
-# ephemeral disk, which is shared with every concurrent render on the box.
-MUSIC_FETCH_MAX_BYTES = int(os.getenv("MUSIC_FETCH_MAX_BYTES",
-                                      str(60 << 20)))
-MUSIC_FETCH_MAX_RESULTS = int(os.getenv("MUSIC_FETCH_MAX_RESULTS", "6"))
-# Bound on downloads per turn — these are free, but each is a multi-second
-# network round trip and a retry loop should not be able to spend the turn.
-MAX_FETCHED_MUSIC_PER_TURN = int(os.getenv("MAX_FETCHED_MUSIC_PER_TURN", "4"))
-
 # The index pipeline version is a CODE CONSTANT in schemas.py, shared with
 # the backend (which loads worker/schemas.py directly) — bump it there, by
 # commit, whenever index output changes. It is deliberately NOT an env var:

@@ -33,26 +33,9 @@ def adb():
 
 
 def _cost_expr():
-    """Dollar cost of a set of llm_calls rows.
-
-    Music generation is metered by the VENDOR (per-minute on ElevenLabs, flat
-    on Stability), so worker/music_gen records the real dollar cost on the row
-    and both this and db.charge_turn_credits SUM it — unlike images, which are
-    a flat count x constant. Without this term every admin cost figure would
-    undercount by exactly the music spend the moment a key is configured,
-    while the users' credit balances (which DO count it) told a different
-    story. Keep in sync with worker/db.charge_turn_credits."""
     return (f"(COALESCE(SUM(prompt_tokens),0) * {PRICE_IN_PER_M} + "
             f"COALESCE(SUM(completion_tokens),0) * {PRICE_OUT_PER_M}) "
-            "/ 1000000.0 + COALESCE(SUM((response->>'cost_usd')::numeric) "
-            "FILTER (WHERE purpose = 'music_gen' "
-            "AND response ? 'cost_usd' "
-            # The regex is not paranoia about our own writer — it bounds the
-            # blast radius. An unparseable value would make the cast raise
-            # and take down EVERY admin cost query (and, in the mirrored
-            # expression, credit charging for the whole turn) rather than
-            # mis-stating one row.
-            "AND response->>'cost_usd' ~ '^[0-9]+(\\.[0-9]+)?$'), 0)")
+            "/ 1000000.0")
 
 
 # A user message is "unserved" when no agent_turn job ever picked it up —

@@ -388,34 +388,6 @@ def duration_of(path):
     return probe(path)["duration"]
 
 
-def normalize_audio(src, dst, lufs=-16.0, timeout=None):
-    """Re-encode audio to MP3 at a consistent perceived loudness.
-
-    Fetched material arrives at wildly different levels: a Great 78 Project
-    transfer measured -31.8 dBFS against the bundled library's -16.9, a ~15 dB
-    gap. Since every music item then gets the SAME default -18 dB gain (and
-    -12 dB more while ducking under speech), an un-normalized archival track
-    lands far below where the user expects and reads as "I can't hear the
-    music" — a failure the prompt already has a whole bullet about. The
-    bundled library was normalized to -16 LUFS on ingest for exactly this
-    reason; anything fetched has to meet the same bar or the gain defaults
-    mean different things for different sources.
-
-    Re-encoding also drops two nuisances for free: the embedded mjpeg
-    cover-art stream IA MP3s carry, and whatever container the source used
-    (ogg/flac/wav) — the output is always a plain MP3.
-
-    Single-pass loudnorm. The two-pass form is more accurate but doubles the
-    decode of a file we are normalizing for background use, and the error a
-    second pass removes is a fraction of a dB.
-    """
-    run(["ffmpeg", "-v", "error", "-y", "-i", src,
-         "-map", "0:a:0", "-af", f"loudnorm=I={lufs}:TP=-1.5:LRA=11",
-         "-c:a", "libmp3lame", "-q:a", "4", "-ar", "48000", dst],
-        timeout=timeout)
-    return dst
-
-
 def probe_audio_duration(path):
     """Duration of an audio-only file (probe() requires a video stream)."""
     out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration",

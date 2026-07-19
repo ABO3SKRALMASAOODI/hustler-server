@@ -7,8 +7,7 @@ decoded PCM with numpy.
 import json, os, subprocess, sys, math
 import numpy as np
 
-MUSIC_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "music")
+MUSIC_DIR = "/Users/muslimshmary/Documents/hustler-server/worker/music"
 SR = 22050
 N_FFT = 2048
 HOP = 512
