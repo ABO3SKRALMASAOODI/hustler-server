@@ -13,6 +13,7 @@ import agent_tools
 import config
 import db as dbx
 import llm
+import music_fetch
 import music_gen
 import music_library
 import sfx_library
@@ -158,8 +159,20 @@ def _attachment_context(worker_db, ctx, user_message):
             # the inaudible-music bug started
             dur = (f" ({asset['duration_s']:.0f}s)"
                    if asset.get("duration_s") else "")
-            notes.append(f'[User attached music "{name}"{dur} — '
-                         f'storage_key: {asset["storage_key"]}]')
+            # ACTIONABLE, not just informational. A user who attaches an
+            # audio file has already told you what they want done with it —
+            # asking "shall I add this?" costs them a whole extra round trip
+            # for a decision they already made. This is the path that lets
+            # them use ANY song they hold rights to, so it has to be the
+            # smoothest thing in the product.
+            notes.append(
+                f'[User attached music "{name}"{dur} — storage_key: '
+                f'{asset["storage_key"]}. UNLESS they said otherwise, place '
+                f'it NOW: add_music(storage_key="{asset["storage_key"]}", '
+                'requested="<what they asked for>") puts it under the whole '
+                'video, ducked under speech and faded. Do not ask permission '
+                'first — they attached it because they want it in. If they '
+                'named this song in an earlier message, this is that song.]')
         elif asset["kind"] == "video_clip":
             dur = (f" ({asset['duration_s']:.0f}s)"
                    if asset.get("duration_s") else "")
@@ -716,7 +729,8 @@ ALTERNATIVE_HINTS = [
      "size, position, keyword emphasis words, karaoke mode and entrance "
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
-     "What I CAN do: score the edit with music on any time range — an "
+     "What I CAN do: score the edit with music on any time range — a "
+     "public-domain recording I find for you by name, an "
      "original track composed for your request, a track from the built-in "
      "royalty-free library, or your own upload — loop it to fill the video, "
      "fade it in and out, start it partway in, "
@@ -747,6 +761,12 @@ def _nearest_alternative(user_text):
             # and one with no music backend must not offer to compose. Both
             # degrade by REMOVING the clause, so the hint never advertises a
             # capability this deployment cannot deliver.
+            if "public-domain recording I find for you by name" in hint \
+                    and not music_fetch.available():
+                hint = hint.replace(
+                    "a public-domain recording I find for you by name, an "
+                    "original track composed for your request", "an original "
+                    "track composed for your request")
             if "composed for your request" in hint \
                     and not music_gen.available():
                 hint = hint.replace(
@@ -754,6 +774,10 @@ def _nearest_alternative(user_text):
                     "from the built-in royalty-free library, or your own "
                     "upload", "a track from the built-in royalty-free "
                     "library or your own upload")
+                hint = hint.replace(
+                    "a public-domain recording I find for you by name, a "
+                    "track from the built-in", "a public-domain recording I "
+                    "find for you by name, a track from the built-in")
             if "built-in royalty-free library" in hint \
                     and not music_library.CATALOG:
                 if music_gen.available():

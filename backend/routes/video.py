@@ -100,6 +100,13 @@ def _image_gen_enabled():
     return bool(os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1"))
 
 
+def _music_fetch_enabled():
+    """Whether the worker can fetch a named song from public-domain
+    catalogs, mirroring worker/music_fetch.available(). Same cross-process
+    mirror caveat as _music_gen_enabled below."""
+    return os.getenv("MUSIC_FETCH_ENABLED", "1") == "1"
+
+
 def _music_gen_enabled():
     """Whether the worker can compose original music, mirroring
     worker/music_gen.provider(). The concierge runs in the BACKEND process
@@ -187,6 +194,10 @@ def _concierge_reply(stage, history, attachments, index_error=None):
         "background music or voiceover, drop one-shot sound effects "
         "(whooshes, impacts, risers, clicks, dings) on exact moments "
         "from a built-in pack, "
+        + ("find a specific song by name in public-domain archives and put "
+           "it under the video — historical recordings up to 1925 (jazz, "
+           "blues, ragtime, classical), NOT modern or chart songs, "
+           if _music_fetch_enabled() else "")
         + ("compose an ORIGINAL music track for whatever they describe "
            "(\"epic movie-trailer music\", \"sad piano\") when the built-in "
            "library doesn't have it, " if _music_gen_enabled() else "")

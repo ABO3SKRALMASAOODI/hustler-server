@@ -86,6 +86,31 @@ MAX_GENERATED_MUSIC_PER_TURN = int(
 # short-form edit without looping, short enough not to overbill a 15s reel.
 MUSIC_DEFAULT_DURATION_S = float(os.getenv("MUSIC_DEFAULT_DURATION_S", "45"))
 
+# ------------------------------------------------------ music fetch (web) --
+# "Add this song" -> the agent SEARCHES public catalogs, downloads a track and
+# puts it in the edit. EXPERIMENTAL, and deliberately scoped: only catalogs
+# that expose a machine-readable licence, and only works whose licence reads
+# CC0 or public domain. That scope is the whole safety story — the audio ends
+# up burned into a customer's exported, possibly monetized video, where a
+# Content ID claim lands on THEM, weeks later, with no idea why.
+#
+# Provenance is recorded on every fetched asset and stated to the user,
+# because a catalog licence field is UPLOADER-DECLARED, not verified. We can
+# honestly say "the uploader declared this CC0, here is where it came from";
+# we cannot say "this is cleared". Do not let the wording drift toward the
+# second.
+MUSIC_FETCH_ENABLED = os.getenv("MUSIC_FETCH_ENABLED", "1") == "1"
+MUSIC_FETCH_TIMEOUT_S = float(os.getenv("MUSIC_FETCH_TIMEOUT_S", "45"))
+# A 10-minute 320kbps MP3 is ~24 MB. 60 MB is generous for a long PD
+# recording and still far under anything that threatens the worker's
+# ephemeral disk, which is shared with every concurrent render on the box.
+MUSIC_FETCH_MAX_BYTES = int(os.getenv("MUSIC_FETCH_MAX_BYTES",
+                                      str(60 << 20)))
+MUSIC_FETCH_MAX_RESULTS = int(os.getenv("MUSIC_FETCH_MAX_RESULTS", "6"))
+# Bound on downloads per turn — these are free, but each is a multi-second
+# network round trip and a retry loop should not be able to spend the turn.
+MAX_FETCHED_MUSIC_PER_TURN = int(os.getenv("MAX_FETCHED_MUSIC_PER_TURN", "4"))
+
 # The index pipeline version is a CODE CONSTANT in schemas.py, shared with
 # the backend (which loads worker/schemas.py directly) — bump it there, by
 # commit, whenever index output changes. It is deliberately NOT an env var:

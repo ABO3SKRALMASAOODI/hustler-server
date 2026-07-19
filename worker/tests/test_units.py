@@ -4,6 +4,7 @@ Run from the worker/ directory:  python tests/test_units.py
 """
 
 import inspect
+import itertools
 import os
 import re
 import sys
@@ -4493,5 +4494,192 @@ check("a track generated in an earlier turn is not called a user upload",
       _gctx.music_choices[0]["source"] == "generated")
 check("a generated track is never flagged as a substitution",
       _gctx.music_choices[0]["substituted"] is False)
+
+print("== Round-28 net_fetch: the worker is not a confused deputy ==")
+import net_fetch
+
+_ALLOW = ["archive.org", "openverse.org"]
+for _u in ("https://archive.org/download/x/y.mp3",
+           "https://ia800.us.archive.org/1/items/x/y.mp3",
+           "http://api.openverse.org/v1/audio/"):
+    check(f"allows {_u.split('/')[2]}",
+          bool(net_fetch.check_url(_u, _ALLOW)))
+# Each of these is a real way an allowlist stops being one.
+_BLOCKED = [
+    ("http://169.254.169.254/latest/meta-data/", "cloud metadata endpoint"),
+    ("https://127.0.0.1/x", "loopback"),
+    ("http://[::1]/x", "ipv6 loopback"),
+    ("http://10.0.0.5/x", "RFC1918"),
+    ("file:///etc/passwd", "non-HTTP scheme"),
+    ("https://evil-archive.org/x", "suffix match without a dot anchor"),
+    ("https://archive.org.evil.com/x", "allowed host as a subdomain prefix"),
+]
+for _u, _why in _BLOCKED:
+    try:
+        net_fetch.check_url(_u, _ALLOW)
+        _blocked = False
+    except net_fetch.FetchError:
+        _blocked = True
+    check(f"blocks {_why}", _blocked)
+check("redirect hops are checked, not just the first URL",
+      "allow_redirects=False" in inspect.getsource(net_fetch.download))
+check("the download is bounded by size AND wall clock",
+      "max_bytes" in inspect.getsource(net_fetch.download)
+      and "monotonic" in inspect.getsource(net_fetch.download))
+# requests/urllib3 has no Happy Eyeballs: a host with an AAAA record on a
+# network with broken IPv6 stalls for the whole timeout before falling back.
+# Measured 46s against commons.wikimedia.org vs 0.4s from curl.
+check("connect timeout is separate from read timeout",
+      "CONNECT_TIMEOUT_S, timeout_s" in inspect.getsource(net_fetch.download)
+      and "CONNECT_TIMEOUT_S, timeout_s" in inspect.getsource(
+          net_fetch.get_json))
+
+print("== Round-28 music_fetch: licence by evidence, not by checkbox ==")
+import music_fetch
+
+# The whole reason the obvious implementation is wrong: IA's licenceurl is
+# uploader-asserted, and the top publicdomain-tagged hit for "lofi hip hop
+# beat" is a YouTube rip laundered through a yt-to-mp3 site. So the gate is
+# the COLLECTION plus the recording's AGE, never the tag.
+_gate = music_fetch._IA_GATE
+check("archive78 is gated on the curated collection, not a licence tag",
+      "collection:(78rpm)" in _gate and "licenseurl" not in _gate)
+check("archive78 is gated on public-domain-by-age",
+      f"year:[* TO {music_fetch.PD_YEAR_MAX}]" in _gate)
+# A literal, reviewed constant — never a rolling `now().year - 100`, which
+# would silently widen what we call "public domain" while nobody is looking.
+check("the PD year is a reviewed constant, not a rolling computation",
+      music_fetch.PD_YEAR_MAX == 1925
+      and not hasattr(music_fetch, "datetime")
+      and not hasattr(music_fetch, "date"))
+# A malformed Lucene query returns an EMPTY result set, which would read to
+# the agent as "that song does not exist" and be reported to the user as fact.
+check("lucene syntax in a song title cannot malform the query",
+      music_fetch._clean('AC/DC "Back" (in) black: 1+1') ==
+      "AC DC Back in black 1 1")
+check("an all-punctuation query reduces to nothing rather than exploding",
+      music_fetch._clean("?*:[]") == ""
+      and music_fetch._search_archive78("?*:[]", 3) == [])
+
+# Commons: only CC0/PD is admitted. CC-BY is commercially usable but carries
+# an attribution obligation this product cannot enforce once the audio is
+# inside someone's exported video; NC/ND are outright wrong for a monetized
+# export.
+_lic = music_fetch._commons_licence
+check("CC0 and public domain are admitted",
+      _lic({"LicenseShortName": {"value": "CC0"}})
+      and _lic({"LicenseShortName": {"value": "Public domain"}}))
+check("CC-BY / BY-SA / NC / ND are all refused",
+      not any(_lic({"LicenseShortName": {"value": v}})
+              for v in ("CC BY 3.0", "CC BY-SA 4.0", "CC BY-NC 2.0",
+                        "CC BY-ND 4.0", "GFDL", "")))
+
+# A catalogued-but-empty IA item is real: the top hit for "st louis blues"
+# lists ZERO files. Stopping there would report "not found" for a query the
+# catalog answers well.
+_calls = {"n": 0}
+_fake = [{"source": "archive78", "id": "dead", "title": "Dead Item",
+          "artist": "x", "year": 1924, "licence": "public domain (US, by age)",
+          "licence_basis": "b", "page_url": "u"},
+         {"source": "archive78", "id": "live", "title": "Live Item",
+          "artist": "y", "year": 1925, "licence": "public domain (US, by age)",
+          "licence_basis": "b", "page_url": "u"}]
+_real_search, _real_dl = music_fetch.search, music_fetch.download
+try:
+    music_fetch.search = lambda q, limit=None: (list(_fake), [])
+    def _dl(c, p):
+        _calls["n"] += 1
+        return (False, "no audio") if c["id"] == "dead" else (True, None)
+    music_fetch.download = _dl
+    _c, _alts, _n, _e = music_fetch.fetch_best("x", "/tmp/x")
+    check("a dead catalog entry falls through to the next candidate",
+          _c and _c["id"] == "live" and _calls["n"] == 2)
+    check("the working candidate reports the others as alternatives",
+          len(_alts) == 1 and _alts[0]["id"] == "dead")
+    music_fetch.download = lambda c, p: (False, "no audio")
+    _c2, _, _, _e2 = music_fetch.fetch_best("x", "/tmp/x")
+    check("all-dead reports an error rather than a silent miss",
+          _c2 is None and "no audio" in (_e2 or ""))
+    music_fetch.search = lambda q, limit=None: ([], ["source down"])
+    _c3, _, _n3, _e3 = music_fetch.fetch_best("x", "/tmp/x")
+    check("a genuine miss is distinguishable from a download failure",
+          _c3 is None and _e3 is None and _n3 == ["source down"])
+finally:
+    music_fetch.search, music_fetch.download = _real_search, _real_dl
+
+check("provenance is part of every result line, never just a title",
+      "public domain" in music_fetch.describe(_fake[0])
+      and "u" in music_fetch.describe(_fake[0]))
+
+print("== Round-28 fetch_music: registered, honest, measured ==")
+check("fetch_music is registered everywhere a tool must be",
+      "fetch_music" in agent_tools.TOOLS
+      and agent_tools.REQUIRED_ARGS["fetch_music"] == ["query"]
+      and "fetch_music" in agent_tools.WRITE_TOOLS)
+check("fetch_music is hidden when web fetching is switched off",
+      agent_tools._tool_disabled("fetch_music")
+      == (not music_fetch.available()))
+check("its description states the narrow coverage, not just the capability",
+      "1925" in agent_tools.TOOLS["fetch_music"][1]
+      and "NOT be found" in agent_tools.TOOLS["fetch_music"][1])
+_miss = agent_tools._fetch_miss("Blinding Lights", None, [])
+check("a miss says plainly it was not found",
+      _miss.startswith("NOT FOUND"))
+check("a miss explains WHY a modern song is absent, not 'search failed'",
+      "public-domain" in _miss.lower() and "expected" in _miss.lower())
+check("a miss offers the upload path and forbids substituting",
+      "paperclip" in _miss and "Do NOT substitute" in _miss)
+# Fetched audio is loudness-normalized on ingest: a Great 78 transfer
+# measured -31.8 dBFS against the bundled library's -16.9, so at the shared
+# -18dB music default it would have been inaudible under speech.
+check("fetched audio is loudness-normalized like the bundled library",
+      "loudnorm" in inspect.getsource(media.normalize_audio)
+      and "normalize_audio" in inspect.getsource(agent_tools.fetch_music))
+check("normalization re-encodes audio only, dropping IA's cover-art stream",
+      "0:a:0" in inspect.getsource(media.normalize_audio))
+check("every request is logged with its outcome, for the demand data",
+      "music_request" in inspect.getsource(agent_tools._log_music_request))
+check("telemetry can never break the feature it measures",
+      "except Exception" in inspect.getsource(agent_tools._log_music_request))
+
+_sp = agent_prompt.SYSTEM_PROMPT
+check("all four capability gates are mutually disjoint",
+      all(l not in m and m not in l
+          for a, b in itertools.combinations(
+              [agent_prompt._LIBRARY_CLAIMS, agent_prompt._MUSIC_GEN_CLAIMS,
+               agent_prompt._MUSIC_FETCH_CLAIMS, agent_prompt._SFX_CLAIMS], 2)
+          for l, _ in a for m, _ in b))
+check("every fetch claim actually appears in the prompt it gates",
+      all(l in _sp for l, _ in agent_prompt._MUSIC_FETCH_CLAIMS))
+_saved_fetch = wconfig.MUSIC_FETCH_ENABLED
+try:
+    wconfig.MUSIC_FETCH_ENABLED = False
+    _sp_nofetch = agent_prompt.system_prompt()
+    check("with fetching off the prompt never mentions fetch_music",
+          "fetch_music" not in _sp_nofetch)
+    check("with fetching off it still offers the upload path for a named song",
+          "paperclip" in _sp_nofetch)
+finally:
+    wconfig.MUSIC_FETCH_ENABLED = _saved_fetch
+
+print("== Round-28 attach flow: any song the user holds, in one tap ==")
+# The path that works for EVERY song in existence. A user who attached a file
+# has already decided; asking "shall I add this?" costs a whole round trip.
+_am = agent_loop._attachment_context.__doc__ or ""
+_note_src = inspect.getsource(agent_loop._attachment_context)
+check("an attached music file tells the agent to place it immediately",
+      "place " in _note_src and "add_music(storage_key=" in _note_src)
+check("the agent is told NOT to ask permission first",
+      "Do not ask permission" in _note_src)
+check("it links the attachment to a song named in an earlier message",
+      "named this song in an earlier message" in _note_src)
+_miss2 = agent_tools._fetch_miss("Blinding Lights", None, [])
+check("a miss instructs a ONE-LINE reply, not a status report",
+      "ONE LINE" in _miss2 and "not a status report" in _miss2)
+check("a miss still forbids substituting another song",
+      "Do NOT substitute" in _miss2)
+check("the prompt makes the attach path the headline fallback",
+      "ONE TAP AWAY" in agent_prompt.SYSTEM_PROMPT
+      and "paperclip" in agent_prompt.SYSTEM_PROMPT)
 
 print(f"\nALL {PASS} CHECKS PASSED")

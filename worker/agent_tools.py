@@ -14,6 +14,7 @@ import config
 import db as dbx
 import llm
 import media
+import music_fetch
 import music_gen
 import music_library
 import music_search
@@ -57,6 +58,7 @@ class ToolContext:
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
         self.music_generated = []     # assets created by generate_music
+        self.music_fetched = []       # assets created by fetch_music
         # PAID vendor calls, appended the instant the vendor bills us — before
         # the probe/upload/insert that can still fail. music_generated only
         # records tracks that made it all the way to an asset, so pricing and
@@ -2547,6 +2549,133 @@ def generate_music(ctx, prompt, duration_s=None, instrumental=True):
             "rather than implying it came from a library.")
 
 
+def _log_music_request(ctx, query, outcome, detail=None):
+    """Record what was asked for and what happened.
+
+    This is the POINT of the experiment: nobody currently knows whether users
+    ask for named commercial songs, genres, or moods, and that single fact
+    decides whether the answer is a bigger library, a generation API or a
+    licensed catalog. It rides on llm_calls (purpose='music_request') rather
+    than a new table so it needs no migration; the rows carry no tokens, so
+    they cost nothing and cannot move a bill.
+
+    Query the experiment with:
+      SELECT request->>'query', response->>'outcome', COUNT(*)
+      FROM llm_calls WHERE purpose='music_request' GROUP BY 1,2;
+    """
+    try:
+        llm.record("music_request",
+                   {"query": str(query or "")[:300]},
+                   {"outcome": outcome,
+                    "detail": str(detail or "")[:300]}, None)
+    except Exception:
+        # Telemetry must never break the feature it is measuring.
+        pass
+
+
+def fetch_music(ctx, query):
+    """Find a track on the open web and bring it into the project.
+
+    Two-step like generate_image/generate_music: this mints the asset, and
+    add_music is what actually puts it in the video."""
+    if not music_fetch.available():
+        return ("Fetching music from the web is switched off in this "
+                "deployment. Use list_music_library() or the user's own "
+                "uploads.")
+    q = (query or "").strip()
+    if not q:
+        return ("REJECTED: query is empty — pass what the user actually "
+                "asked for ('st louis blues', 'ragtime piano', 'jazz').")
+    if len(ctx.music_fetched) >= config.MAX_FETCHED_MUSIC_PER_TURN:
+        return (f"REJECTED: already fetched "
+                f"{config.MAX_FETCHED_MUSIC_PER_TURN} tracks this turn. Use "
+                "one of them, or continue in the next message.")
+
+    n = len(ctx.music_fetched) + 1
+    out_path = os.path.join(ctx.workdir, f"fetched_{n}.audio")
+    cand, others, notes, err = music_fetch.fetch_best(q, out_path)
+    if not cand:
+        _log_music_request(ctx, q, "not_found", err or "; ".join(notes))
+        return _fetch_miss(q, err, notes)
+    # The bytes must be audio before anything downstream believes they are,
+    # and normalizing is also what makes the -18dB music default MEAN the
+    # same thing for a 1924 transfer as for a bundled track (measured 15dB
+    # apart before this). ffmpeg failing here is the honest "not audio" test:
+    # an HTML error page cannot be loudness-normalized.
+    norm_path = os.path.join(ctx.workdir, f"fetched_{n}.mp3")
+    try:
+        media.normalize_audio(out_path, norm_path,
+                              timeout=config.MUSIC_FETCH_TIMEOUT_S)
+        dur = media.probe_audio_duration(norm_path)
+    except Exception:
+        _log_music_request(ctx, q, "not_audio", cand.get("page_url"))
+        return (f"Downloaded '{cand['title']}' but it is not playable audio. "
+                "Tell the user that one was broken and try a different "
+                "wording, or offer the built-in library.")
+    out_path = norm_path
+
+    key = f"generated/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
+    try:
+        storage.upload_file(out_path, key, "audio/mpeg")
+    except Exception as e:
+        _log_music_request(ctx, q, "storage_failed", str(e)[:120])
+        return (f"Found '{cand['title']}' but could not save it "
+                f"({str(e)[:140]}). Try again.")
+    prov = (f"{cand['source']}: {cand['licence']} — {cand['licence_basis']}. "
+            f"Source page: {cand['page_url']}")
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
+               bytes_=os.path.getsize(out_path), duration_s=dur,
+               meta={"filename": f"{cand['title'][:60]}.mp3",
+                     "caption": f"Fetched from the web — {prov}",
+                     "fetched": True, "query": q[:200],
+                     "provenance": prov, "source_url": cand["page_url"],
+                     "licence": cand["licence"]})
+    ctx.music_fetched.append({"storage_key": key, "query": q[:200],
+                              "title": cand["title"], "provenance": prov})
+    _log_music_request(ctx, q, "fetched", cand["page_url"])
+
+    alts = ""
+    if others:
+        alts = ("\nOther matches, if this one is wrong: "
+                + "; ".join(music_fetch.describe(o)[:90] for o in others[:3]))
+    return (f"Found {music_fetch.describe(cand)}\n"
+            f"Downloaded ({dur:.0f}s), storage_key={key}. It is NOT in the "
+            f"video yet — add_music(storage_key='{key}', requested='{q[:60]}').\n"
+            "WHEN YOU REPORT BACK you must say WHAT IT IS and WHERE IT CAME "
+            f"FROM: it is a {cand.get('year') or 'historical'} recording, "
+            f"{cand['licence']}. This is a real archival recording, not a "
+            "modern studio track, and it will sound like its era — say so "
+            "rather than letting the user expect a polished master."
+            + alts)
+
+
+def _fetch_miss(q, err, notes):
+    """The honest empty result.
+
+    Worth spelling out for the model, because the temptation here is to
+    substitute: the catalogs cover public-domain recordings, so a miss for a
+    modern song is not a search that went wrong, it is the correct answer."""
+    lines = [f"NOT FOUND — nothing matching '{q}' in the public-domain "
+             "catalogs."]
+    if err:
+        lines.append(f"(Candidates were found but would not download: "
+                     f"{err[:200]})")
+    lines.extend(notes or [])
+    lines.append(
+        "These catalogs hold PUBLIC-DOMAIN recordings — vintage jazz, blues, "
+        "ragtime, dance bands, classical and opera recorded up to 1925 — so "
+        "any modern or commercially released song will NOT be there, and "
+        "that is expected rather than a failure to search properly.")
+    lines.append(
+        "REPLY IN ONE LINE. Something like: \"I can't pull that one in — "
+        "attach it with the paperclip and I'll drop it straight under the "
+        "video.\" Do NOT explain the catalogs, the licensing, or what you "
+        "searched; the user asked for a song, not a status report. If they "
+        "attach it, place it immediately. Do NOT substitute a different "
+        "song and present it as what they asked for.")
+    return "\n".join(lines)
+
+
 # ------------------------------------------------------------------ #
 #  META tools                                                          #
 # ------------------------------------------------------------------ #
@@ -2899,7 +3028,8 @@ TOOLS = {
     "add_music": (add_music, "Mix music under the edit as BACKGROUND MUSIC "
                   "(default -18dB, ducked under speech). storage_key is "
                   "either a 'library:<slug>' from list_music_library(), a "
-                  "key from generate_music(), or an exact key from "
+                  "key from generate_music(), a key from fetch_music(), or "
+                  "an exact key from "
                   "list_assets(kind='music') (the user's own "
                   "uploads) — never invent one. ALWAYS pass `requested` "
                   "with what the user actually asked for, verbatim — it is "
@@ -3055,6 +3185,24 @@ TOOLS = {
                       "exactly. If an insert landed wrong, remove it BEFORE "
                       "re-inserting, or the old one stays in the video.",
                       {"id": {"type": "string"}}),
+    "fetch_music": (fetch_music, "Find a specific song on the open web and "
+                    "bring it into the project — THE tool for 'add the song "
+                    "<name>' or 'put some jazz under this'. It searches "
+                    "public-domain catalogs (the Internet Archive's 78rpm "
+                    "collection, Wikimedia Commons) and downloads the best "
+                    "match. Pass the user's own words as the query. "
+                    "COVERAGE IS NARROW AND YOU MUST NOT PRETEND OTHERWISE: "
+                    "these are historical recordings up to 1925 — jazz, "
+                    "blues, ragtime, dance bands, classical, opera — so a "
+                    "modern or chart song will NOT be found, and a NOT FOUND "
+                    "for one is the correct answer, not a reason to search "
+                    "again with different words. Whatever comes back is a "
+                    "period recording and sounds like it. When it succeeds, "
+                    "tell the user what the track IS (title, performer, "
+                    "year) and that it is public domain. The result becomes "
+                    "a project music asset; it is in the video ONLY after "
+                    "add_music with its storage_key.",
+                    {"query": {"type": "string"}}),
     "generate_music": (generate_music, "Compose an ORIGINAL music track to "
                        "order — the answer whenever the user names music the "
                        "built-in library does not have ('epic movie-trailer "
@@ -3239,6 +3387,7 @@ REQUIRED_ARGS = {
     "remove_voiceover": ["id"],
     "generate_image": ["prompt"],
     "generate_music": ["prompt"],
+    "fetch_music": ["query"],
     "ask_user": ["question"],
 }
 
@@ -3256,7 +3405,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
                "blur_region", "remove_blur", "generate_image",
-               "generate_music"}
+               "generate_music", "fetch_music"}
 
 
 def _tool_disabled(name):
@@ -3267,6 +3416,8 @@ def _tool_disabled(name):
         return not llm.image_available()
     if name == "generate_music":
         return not music_gen.available()
+    if name == "fetch_music":
+        return not music_fetch.available()
     # Same rule for the music library: a deployment whose image shipped no
     # tracks must not advertise one, or the agent offers music it cannot
     # deliver and then has to walk it back.
@@ -3300,6 +3451,8 @@ def capabilities_digest():
 _DESC_CLAIMS = [
     (lambda: not music_gen.available(),
      [("a key from generate_music(), ", "")]),
+    (lambda: not music_fetch.available(),
+     [("a key from fetch_music(), ", "")]),
     (lambda: not music_library.CATALOG,
      [("a 'library:<slug>' from list_music_library(), ", "")]),
 ]
