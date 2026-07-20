@@ -1025,6 +1025,15 @@ def list_users():
             cur.execute(f"SELECT COUNT(*) AS total FROM users u {where}", params)
             total = cur.fetchone()['total']
 
+            # Second count: real post-relaunch customers only. Same _scope the
+            # dashboards use — drops pre-epoch old-idea signups and the excluded
+            # test/admin accounts — so the header can show "everyone" next to
+            # "real customers" instead of one inflated number.
+            cur.execute(
+                f"SELECT COUNT(*) AS n FROM users u {where} AND {_scope('u')}",
+                params)
+            real_total = cur.fetchone()['n']
+
             sort_col = f"u.{sort}" if sort != 'job_count' else 'job_count'
 
             cur.execute(f"""
@@ -1046,6 +1055,7 @@ def list_users():
         return jsonify({
             'users': [dict(r) for r in rows],
             'total': total,
+            'real_total': real_total,
             'page': page,
             'per_page': per_page,
         }), 200

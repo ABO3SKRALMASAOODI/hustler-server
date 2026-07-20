@@ -432,6 +432,28 @@ def video_project_detail(project_id):
                            ORDER BY id DESC LIMIT 1)""", (project_id,))
         idx_row = cur.fetchone()
 
+    # Who triggered each render? A render asset carries no trigger of its own —
+    # that lives on the render JOB's payload (`source: 'user_edit'` for a studio
+    # timeline edit; absent for an agent-initiated render). Map the job back to
+    # the asset it produced (result.render_asset_id) so the admin card can say
+    # "USER edited" vs "AGENT rendered" instead of blaming the agent for the
+    # customer's own edits, and flag `force` re-encodes (the studio's
+    # "couldn't load" recovery) so a burst of identical re-renders reads clearly.
+    render_trigger = {}
+    for j in jobs:
+        if j["type"] not in ("preview", "final"):
+            continue
+        res = j.get("result") if isinstance(j.get("result"), dict) else {}
+        pay = j.get("payload") if isinstance(j.get("payload"), dict) else {}
+        aid = res.get("render_asset_id")
+        if aid is None:
+            continue
+        render_trigger[aid] = {
+            "source": "user_edit" if pay.get("source") == "user_edit"
+                      else "agent",
+            "forced": bool(pay.get("force")),
+        }
+
     out_assets = []
     for a in assets:
         row = {"id": a["id"], "kind": a["kind"],
@@ -439,6 +461,8 @@ def video_project_detail(project_id):
                "duration_s": a["duration_s"], "width": a["width"],
                "height": a["height"], "meta": a.get("meta") or {},
                "created_at": a["created_at"].isoformat()}
+        if a["id"] in render_trigger:
+            row["trigger"] = render_trigger[a["id"]]
         if a["kind"] in PREVIEWABLE:
             row["url"] = _presign(a["storage_key"])
         out_assets.append(row)
