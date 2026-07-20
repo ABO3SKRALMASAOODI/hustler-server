@@ -1039,6 +1039,7 @@ def list_users():
             cur.execute(f"""
                 SELECT
                     u.id, u.email, u.plan, u.is_subscribed,
+                    u.is_verified, u.auth_provider,
                     u.credits_balance, u.credits_daily, u.credits_monthly,
                     u.created_at, u.subscription_expiry,
                     (SELECT COUNT(*) FROM jobs WHERE jobs.user_id = u.id) AS job_count,

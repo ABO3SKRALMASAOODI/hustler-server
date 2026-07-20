@@ -356,7 +356,7 @@ def register():
             cursor.close(); conn.close()
             return jsonify({'error': 'User already exists'}), 409
 
-    cursor.execute("INSERT INTO users (email, password) VALUES (%s, %s)", (email, hashed_pw))
+    cursor.execute("INSERT INTO users (email, password, auth_provider) VALUES (%s, %s, 'email')", (email, hashed_pw))
     conn.commit()
     code = str(random.randint(100000, 999999))
     cursor.execute("""

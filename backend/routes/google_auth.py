@@ -126,8 +126,8 @@ def google_callback():
                 dummy_pw = generate_password_hash(os.urandom(32).hex())
                 cur.execute(
                     """
-                    INSERT INTO users (email, password, is_verified, credits_daily, credits_balance)
-                    VALUES (%s, %s, 1, 20, 20)
+                    INSERT INTO users (email, password, is_verified, credits_daily, credits_balance, auth_provider)
+                    VALUES (%s, %s, 1, 20, 20, 'google')
                     RETURNING id
                     """,
                     (email, dummy_pw)
