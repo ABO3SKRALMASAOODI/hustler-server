@@ -124,10 +124,16 @@ def google_callback():
                 plan    = user.get("plan", "free") or "free"
             else:
                 dummy_pw = generate_password_hash(os.urandom(32).hex())
+                # Let the credit columns take their table defaults — same as an
+                # email signup (credits_daily 20 + credits_bonus 150 => balance
+                # 170). Previously this hard-coded credits_balance=20, so Google
+                # users' shown balance ignored the 150 welcome bonus until their
+                # first credits poll recomputed daily+bonus+monthly. The bonus was
+                # always present and spendable; only the stored balance was wrong.
                 cur.execute(
                     """
-                    INSERT INTO users (email, password, is_verified, credits_daily, credits_balance, auth_provider)
-                    VALUES (%s, %s, 1, 20, 20, 'google')
+                    INSERT INTO users (email, password, is_verified, auth_provider)
+                    VALUES (%s, %s, 1, 'google')
                     RETURNING id
                     """,
                     (email, dummy_pw)
