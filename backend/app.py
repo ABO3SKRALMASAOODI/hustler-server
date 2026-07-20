@@ -15,7 +15,7 @@ from routes.supabase_mgmt import supabase_bp
 from routes.stripe_mgmt import stripe_bp
 from routes.ai_proxy import ai_proxy_bp
 from routes.planner import planner_bp
-from routes.newsletter import newsletter_bp
+from routes.newsletter import newsletter_bp, start_newsletter_scheduler
 from routes.video import video_bp
 from routes.admin_video import admin_video_bp
 
@@ -71,6 +71,15 @@ def create_app():
     app.register_blueprint(newsletter_bp, url_prefix='/newsletter')
     app.register_blueprint(video_bp)
     app.register_blueprint(admin_video_bp)
+
+    # ── Automated newsletter / lifecycle emails ───────────────────────
+    # Started once per gunicorn worker; the advisory lock inside the tick
+    # guarantees only one worker actually sends on any fire.
+    try:
+        start_newsletter_scheduler(app)
+    except Exception as e:
+        app.logger.error("could not start newsletter scheduler: %s", e)
+
     return app
 
 
