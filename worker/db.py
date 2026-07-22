@@ -495,7 +495,7 @@ LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
 LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
 # Flat price per successful image generation/edit (no token usage is
 # reported for those calls, so they are priced per image).
-IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.05"))
+IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.07"))
 MIN_TURN_CREDITS = 1.0
 
 

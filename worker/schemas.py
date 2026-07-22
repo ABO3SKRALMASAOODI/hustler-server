@@ -100,7 +100,7 @@ class CaptionStyle(BaseModel):
         "Inter Display Black", "Inter Display ExtraBold", "Inter Display Bold",
         "Anton", "Bebas Neue", "Archivo Black", "Poppins Black",
         "Syne ExtraBold", "Playfair Display Black", "Instrument Serif",
-        "DM Serif Display"]] = None
+        "DM Serif Display", "Montserrat"]] = None
     # Layered text effect applied to emphasised words (or all words when the
     # preset sets it globally).
     effect: Optional[Literal["chroma", "chrome", "glow"]] = None

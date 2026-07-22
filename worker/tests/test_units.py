@@ -2049,6 +2049,36 @@ _ss_edl = validate_edl({"keep": [[0, 60]], "captions": {
 check("size_scale persists through EDL validation",
       _ss_edl["captions"]["style"]["size_scale"] == 1.4)
 
+print("== Jul-22: Montserrat font bundled + wired end-to-end ==")
+check("Montserrat is offered in CAPTION_FONTS",
+      "Montserrat" in agent_tools.CAPTION_FONTS)
+check("schema accepts font='Montserrat'",
+      CaptionStyle(font="Montserrat").font == "Montserrat")
+# A font in the allowlist with no bundled .ttf makes libass SILENTLY fall back
+# to a default while the agent tells the user the font was applied — the same
+# silent-drop class the composer comment warns about. Assert the file exists.
+_ttfs = [f.lower() for f in os.listdir(caplib.FONTS_DIR)
+         if f.lower().endswith(".ttf")]
+check("a Montserrat .ttf is bundled in FONTS_DIR",
+      any("montserrat" in f for f in _ttfs))
+# Drift guard: the schema Literal and the tool enum MUST list the same fonts,
+# or a font offered in one place is unstyleable through the other.
+import typing as _typing                                      # noqa: E402
+_font_ann = CaptionStyle.model_fields["font"].annotation
+_font_lit = next((a for a in _typing.get_args(_font_ann)
+                  if a is not type(None)), None)
+_schema_fonts = set(_typing.get_args(_font_lit)) if _font_lit else set()
+check("CAPTION_FONTS matches the schema font Literal exactly",
+      _schema_fonts == set(agent_tools.CAPTION_FONTS))
+# A bare font override (no preset) must render the requested family — it used
+# to hardcode DejaVu Sans, silently dropping the font while the agent claimed
+# it was applied. Montserrat's ONLY path is a bare override, so this matters.
+check("bare font override renders the requested family (not DejaVu)",
+      caplib.style_line("Default", {"size": "m", "font": "Montserrat"})
+      .split(",")[1] == "Montserrat")
+check("no font override still defaults to DejaVu Sans",
+      caplib.style_line("Default", {"size": "m"}).split(",")[1] == "DejaVu Sans")
+
 print("== Round-13: compound editing tools ==")
 import agent_tools                                            # noqa: E402
 

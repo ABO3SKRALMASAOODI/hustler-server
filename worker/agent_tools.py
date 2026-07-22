@@ -2603,7 +2603,7 @@ CAPTION_PRESETS = ["podcast", "beast", "karaoke", "elegant",
 CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
                  "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
                  "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
-                 "Instrument Serif", "DM Serif Display"]
+                 "Instrument Serif", "DM Serif Display", "Montserrat"]
 CAPTION_ANIMS = ["fade", "pop", "slide_up", "punch", "blur_in", "whip",
                  "flash", "rise", "drop"]
 _STYLE_PROPS = {

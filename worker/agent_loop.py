@@ -810,16 +810,19 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
 
 
 def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
-              timings, honesty=None):
+              timings, honesty=None, extra_meta=None):
     """Post a system-authored assistant reply (timeout/step-limit paths),
-    auto-rendering first when the EDL changed without a preview."""
+    auto-rendering first when the EDL changed without a preview. extra_meta is
+    merged into the message meta so the studio can react to it (e.g. render an
+    Upgrade CTA on the out-of-credits stop instead of a dead-end 402 later)."""
     latest, fail_note = _auto_render_if_needed(ctx, worker_db, session_id,
                                                timings)
     if fail_note:
         final_text += fail_note
-    worker_db.run(dbx.add_message, session_id, "assistant", final_text,
-                  {"edl_version": latest["version"],
-                   "preview": ctx.last_preview})
+    meta = {"edl_version": latest["version"], "preview": ctx.last_preview}
+    if extra_meta:
+        meta.update(extra_meta)
+    worker_db.run(dbx.add_message, session_id, "assistant", final_text, meta)
     return {"status": status, "edl_version": latest["version"],
             "steps": total_steps, "auto_render": ctx.autorendered,
             "honesty": honesty, "timings": timings}
@@ -869,18 +872,48 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                   f"{ctx.running_credits()} >= {ctx.credit_budget} credits",
                   flush=True)
             honesty["budget_stop"] = True
+            # credit_budget = balance + grace, so over_budget() can only fire
+            # when the turn tried to spend essentially the whole wallet. For a
+            # free user that IS "out of credits" — and the next message WILL
+            # 402 — so say so honestly with an upgrade path instead of the old
+            # "send a follow-up" that dead-ends. exhausted is ~always true here
+            # today; the funded-user "send a follow-up" branch only matters if
+            # a flat per-turn cap is ever reintroduced (see config.py notes).
+            start_balance = (ctx.credit_budget or 0.0) \
+                - config.AGENT_TURN_BUDGET_GRACE
+            exhausted = (start_balance - ctx.running_credits()) < 1.0
             if ctx.versions_written:
+                if exhausted:
+                    return _finalize(
+                        ctx, worker_db, session_id,
+                        "That used up your available credits — the edits I "
+                        "finished are saved and previewed below. Credits "
+                        "refresh on your plan's cycle (daily on the free "
+                        "plan); you can also upgrade for a bigger monthly "
+                        "pool to keep editing now.",
+                        "budget", total_steps, timings, honesty,
+                        extra_meta={"credits_exhausted": True})
                 return _finalize(
                     ctx, worker_db, session_id,
                     "I've hit my budget for this request, so I'm stopping "
                     "here — the edits I completed are saved and previewed "
                     "below. Send a follow-up to keep going.",
                     "budget", total_steps, timings, honesty)
-            worker_db.run(dbx.add_message, session_id, "assistant",
-                          "This request needed more work than its budget "
-                          "allows, so I stopped before changing anything. "
-                          "Try breaking it into smaller steps.",
-                          {"error": "turn_budget"})
+            if exhausted:
+                worker_db.run(dbx.add_message, session_id, "assistant",
+                              "You're out of credits, so I stopped before "
+                              "changing anything. Credits refresh on your "
+                              "plan's cycle (daily on the free plan); you can "
+                              "also upgrade for a bigger monthly pool to keep "
+                              "editing now.",
+                              {"error": "turn_budget",
+                               "credits_exhausted": True})
+            else:
+                worker_db.run(dbx.add_message, session_id, "assistant",
+                              "This request needed more work than its budget "
+                              "allows, so I stopped before changing anything. "
+                              "Try breaking it into smaller steps.",
+                              {"error": "turn_budget"})
             return {"status": "budget", "steps": total_steps,
                     "timings": timings}
 

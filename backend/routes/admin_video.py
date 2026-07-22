@@ -310,7 +310,7 @@ def video_overview():
                 "base_url": base_url,
                 "agent_model": os.getenv("AGENT_MODEL", "grok-4.5"),
                 "vision_model": os.getenv("VISION_MODEL", "grok-4.5"),
-                "image_gen_model": os.getenv("IMAGE_GEN_MODEL", "grok-2-image"),
+                "image_gen_model": os.getenv("IMAGE_GEN_MODEL", "grok-2-image-1212"),
                 "image_edit_model": os.getenv("IMAGE_EDIT_MODEL", "") or None,
                 "whisper_model": os.getenv("WHISPER_MODEL", "medium"),
                 "price_in_per_m": PRICE_IN_PER_M,

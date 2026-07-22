@@ -93,7 +93,7 @@ def _image_gen_enabled():
     image_available) so the concierge never promises (or denies) AI images out
     of sync with what the editing agent can actually do. Image gen is available
     on the DashScope native endpoint OR any OpenAI-compatible base (xAI)."""
-    if not os.getenv("IMAGE_GEN_MODEL", "grok-2-image"):
+    if not os.getenv("IMAGE_GEN_MODEL", "grok-2-image-1212"):
         return False
     if os.getenv("IMAGE_API_URL", ""):
         return True
@@ -1822,7 +1822,8 @@ def render_preview_endpoint(user_id, project_id):
 # API sees nothing but a user who says "it's broken". This records them.
 # Best-effort by contract — a beacon must NEVER surface an error to the user or
 # block the UI it is reporting on.
-CLIENT_EVENT_KINDS = {"player_error", "player_recovered", "attach_failed"}
+CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
+                      "player_recovered", "attach_failed"}
 
 
 @video_bp.route("/projects/<int:project_id>/client-event", methods=["POST"])

@@ -399,7 +399,12 @@ def style_line(name, style, play_res=BASE_PLAY_RES):
     margin_lr = max(10, round(60 * fx))
     margin_v = round(MARGIN_V.get(s["position"], 46) * fy)
     outline = max(1.2, round(2.4 * f, 1))
-    return (f"Style: {name},DejaVu Sans,{font},"
+    # Honour an explicit font on the plain (non-preset) path too. Without this
+    # a bare `font` override rendered DejaVu Sans while the agent reported the
+    # requested family — a silent font-drop. Montserrat's only application path
+    # is a bare override (no preset uses it), so this closes a real honesty gap.
+    fam = s.get("font") or "DejaVu Sans"
+    return (f"Style: {name},{fam},{font},"
             f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
             f"-1,0,0,0,100,100,0,0,1,{outline},0,"
             f"{ALIGNMENTS.get(s['position'], 2)},{margin_lr},{margin_lr},"
