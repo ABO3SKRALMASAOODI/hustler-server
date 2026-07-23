@@ -13,19 +13,23 @@ import uuid
 import audit
 import config
 import db as dbx
+import eleven
 import llm
 import media
 import music_library
 import sfx_library
 import storage
+import videogen
 import timeline as timeline_mod
 import url_media
 from captions import KARAOKE_HARD_MAX
-from schemas import (CaptionStyle, EDLValidationError, Frame, describe_edl,
-                     edl_signature, keep_boundaries, output_duration,
-                     program_duration, validate_edl, MAX_INSERT_DURATION_S,
-                     GAIN_MIN_DB, GAIN_MAX_DB, GRADE_PRESETS,
-                     TRANSITION_STYLES, TRANSITION_MIN_S, TRANSITION_MAX_S)
+from schemas import (CANVAS_DIMS, CaptionStyle, EDLValidationError, Frame,
+                     canvas_edl, describe_edl, DEFAULT_CANVAS_FPS,
+                     edl_signature, is_canvas_program, keep_boundaries,
+                     output_duration, program_duration, validate_edl,
+                     MAX_INSERT_DURATION_S, GAIN_MIN_DB, GAIN_MAX_DB,
+                     GRADE_PRESETS, TRANSITION_STYLES, TRANSITION_MIN_S,
+                     TRANSITION_MAX_S)
 from timeline import Timeline
 
 
@@ -44,8 +48,18 @@ class ToolContext:
         self.project = project
         self.project_id = project["id"]
         self.session_id = project["chat_session_id"]
-        self.index = index
-        self.duration = float(index["video"]["duration"])
+        # index is None for a canvas program (no main video): the project holds
+        # only images/clips/audio, or nothing yet. has_main_video gates every
+        # tool that reads the source footage; duration is the master clock for
+        # main-video edits (0 when there is none — placement tools bound
+        # themselves against program_duration instead).
+        self.index = index or {}
+        self.has_main_video = bool(index and index.get("video"))
+        self.duration = (float(index["video"]["duration"])
+                         if self.has_main_video else 0.0)
+        # Default output aspect for a no-main-video program; refined from the
+        # first asset actually placed (see insert_media / _canvas_for_asset).
+        self.canvas_ratio = "16:9"
         self.workdir = workdir
         self._proxy_local = None
         self._asset_locals = {}       # asset id -> downloaded local path
@@ -56,7 +70,12 @@ class ToolContext:
         self.autorendered = False     # loop set: model skipped render_preview
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
+        self.sfx_generated = []       # sounds created by generate_sfx
+        self.videos_generated = []    # clips created by generate_video
         self.urls_fetched = []        # assets created by fetch_url
+        # USD cost of non-LLM generations this turn (sfx flat, video per-second)
+        # — added to running_credits so the in-turn spend cap sees them.
+        self.gen_extra_cost_usd = 0.0
         # Live per-turn model spend, for the graceful spend cap. tokens are
         # accumulated by the loop's llm recorder; images are priced flat.
         self.tokens_in = 0
@@ -70,6 +89,7 @@ class ToolContext:
         cost = (self.tokens_in * config.LLM_PRICE_IN_PER_M +
                 self.tokens_out * config.LLM_PRICE_OUT_PER_M) / 1e6
         cost += len(self.images_generated) * config.IMAGE_PRICE_USD
+        cost += self.gen_extra_cost_usd     # generated sfx + video (real $)
         return round(cost / 0.01, 2)
 
     def over_budget(self):
@@ -81,7 +101,12 @@ class ToolContext:
             t = float(t)
         except (TypeError, ValueError):
             raise ValueError(f"'{t}' is not a number of seconds")
-        return round(min(max(t, 0.0), self.duration), 2)
+        # With no main video there is no source clock to clamp against; the
+        # placement tools bound program positions against program_duration
+        # themselves, so keep a generous upper here rather than collapsing
+        # every time to 0.
+        upper = self.duration if self.duration > 0 else 1e7
+        return round(min(max(t, 0.0), upper), 2)
 
     def proxy_path(self):
         if self._proxy_local is None:
@@ -97,8 +122,9 @@ class ToolContext:
         row = self.db.run(dbx.latest_edl, self.project_id)
         if not row:
             from schemas import default_edl
-            v = self.db.run(dbx.insert_edl, self.project_id,
-                            default_edl(self.duration), "agent")
+            base = (default_edl(self.duration) if self.has_main_video
+                    else canvas_edl(self.canvas_ratio))
+            v = self.db.run(dbx.insert_edl, self.project_id, base, "agent")
             row = self.db.run(dbx.get_edl_version, self.project_id, v)
         return row
 
@@ -142,6 +168,16 @@ def _fmt_t(t):
 # ------------------------------------------------------------------ #
 
 def get_video_info(ctx):
+    if not ctx.has_main_video:
+        edl = ctx.latest_edl()
+        ins = edl["json"].get("inserts") or []
+        return ("No main video in this project — this is a blank canvas. Build "
+                "the program from generated or uploaded images/clips: create "
+                "with generate_image / generate_video, then place with "
+                "insert_media. "
+                f"Current EDL v{edl['version']}: {len(ins)} placed "
+                f"clip{'s' if len(ins) != 1 else ''}, "
+                f"{program_duration(edl['json'])}s total.")
     v = ctx.index["video"]
     sil = [s for s in ctx.index.get("silences", []) if s[1] - s[0] >= 0.7]
     total_sil = sum(e - s for s, e in sil)
@@ -2007,6 +2043,32 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
 
     edl = dict(ctx.latest_edl()["json"])
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
+
+    if not ctx.has_main_video or is_canvas_program(edl):
+        # Canvas program: there is no keep timeline to splice into — the clip/
+        # image IS program content. Append it at the requested program position;
+        # validate_edl lays all inserts end-to-end in at_output_s order. The
+        # FIRST placed asset fixes the output frame (canvas) to match its
+        # aspect, replacing the seeded default — otherwise a vertical short on a
+        # no-video project would render pillar-boxed on the 16:9 default.
+        if not inserts or not edl.get("canvas"):
+            edl["keep"] = []
+            edl["canvas"] = _canvas_for_asset(ctx, asset)
+        item = {"id": _next_item_id(inserts, "ins"), "asset_key": asset_key,
+                "kind": kind, "at_output_s": round(max(0.0, at), 2),
+                "duration_s": dur}
+        if kind == "video" and off:
+            item["source_start_s"] = off
+        if motion:
+            item["motion"] = motion
+        edl["inserts"] = inserts + [item]
+        window = (f" (using clip {off:.1f}-{round(off + dur, 2):.1f}s)"
+                  if off else "")
+        moved = f" with a Ken Burns {motion} move" if motion else ""
+        desc = (f"placed {kind} '{name}' ({dur}s){window}{moved} on the "
+                f"canvas [{item['id']}]")
+        return ctx.write_edl(edl, desc)
+
     keep = [list(x) for x in edl["keep"]]
     tl = Timeline(keep, inserts)
     at = round(min(max(at, 0.0), tl.out_duration), 2)
@@ -2164,25 +2226,66 @@ def remove_voiceover(ctx, id):
 IMAGE_ASPECTS = ("16:9", "9:16", "1:1", "4:3", "3:4")
 
 
+def _nearest_image_aspect(w, h):
+    if not (w and h):
+        return "16:9"
+    r = float(w) / float(h)
+    return min((("16:9", 16 / 9), ("9:16", 9 / 16), ("1:1", 1.0),
+                ("4:3", 4 / 3), ("3:4", 3 / 4)),
+               key=lambda a: abs(a[1] - r))[0]
+
+
 def _default_image_aspect(ctx):
     """Aspect for a generated image when the model doesn't pass one: the
-    output frame if set (so full-frame inserts fill it), else the nearest
-    supported aspect to the source video."""
+    output frame if set (so full-frame inserts fill it), else the canvas of a
+    no-main-video program, else the nearest supported aspect to the source
+    video."""
+    edl = None
     try:
-        ratio = ((ctx.latest_edl()["json"].get("frame") or {})
-                 .get("ratio"))
+        edl = ctx.latest_edl()["json"]
+        ratio = (edl.get("frame") or {}).get("ratio")
     except Exception:
         ratio = None
     if ratio in IMAGE_ASPECTS:
         return ratio
     if ratio == "4:5":
         return "3:4"
+    if not ctx.has_main_video:
+        # match the canvas the program will render on
+        cv = (edl or {}).get("canvas") or {}
+        if cv.get("width") and cv.get("height"):
+            return _nearest_image_aspect(cv["width"], cv["height"])
+        return ctx.canvas_ratio if ctx.canvas_ratio in IMAGE_ASPECTS else "16:9"
     v = ctx.index["video"]
-    if not v.get("width") or not v.get("height"):
-        return "16:9"
-    r = float(v["width"]) / float(v["height"])
+    return _nearest_image_aspect(v.get("width"), v.get("height"))
+
+
+def _canvas_for_asset(ctx, asset):
+    """Canvas geometry (width/height/fps/bg_color) derived from the first asset
+    placed on a no-main-video program, so the output frame matches its content.
+    Falls back to probing the file, then to the context's default aspect."""
+    w = asset.get("width") or (asset.get("meta") or {}).get("width")
+    h = asset.get("height") or (asset.get("meta") or {}).get("height")
+    fps = DEFAULT_CANVAS_FPS
+    if not (w and h) or asset["kind"] != "image_ref":
+        try:
+            info = media.probe(_asset_local_path(ctx, asset))
+            w, h = w or info.get("width"), h or info.get("height")
+            if asset["kind"] != "image_ref" and info.get("fps"):
+                fps = max(1.0, min(float(info["fps"]), 60.0))
+        except Exception:
+            pass
+    ratio = (_nearest_canvas_ratio(w, h) if (w and h)
+             else (ctx.canvas_ratio or "16:9"))
+    cw, ch = CANVAS_DIMS.get(ratio, CANVAS_DIMS["16:9"])
+    return {"width": cw, "height": ch, "fps": round(fps, 2),
+            "bg_color": "#000000"}
+
+
+def _nearest_canvas_ratio(w, h):
+    r = float(w) / float(h)
     return min((("16:9", 16 / 9), ("9:16", 9 / 16), ("1:1", 1.0),
-                ("4:3", 4 / 3), ("3:4", 3 / 4)),
+                ("4:5", 4 / 5), ("4:3", 4 / 3)),
                key=lambda a: abs(a[1] - r))[0]
 
 
@@ -2221,6 +2324,9 @@ def generate_image(ctx, prompt, from_video_time_s=None, from_asset_key=None,
         if aspect not in IMAGE_ASPECTS:
             return (f"REJECTED: aspect must be one of "
                     f"{', '.join(IMAGE_ASPECTS)}.")
+    over = _gen_budget_reject(ctx, config.IMAGE_PRICE_USD, "generate an image")
+    if over:
+        return over
 
     n = len(ctx.images_generated) + 1
     out_path = os.path.join(ctx.workdir, f"gen_{n}.png")
@@ -2282,12 +2388,199 @@ def generate_image(ctx, prompt, from_video_time_s=None, from_asset_key=None,
                                else config.IMAGE_GEN_MODEL)})
     ctx.images_generated.append({"storage_key": key, "prompt": p[:200]})
     dims = f" ({width}x{height})" if width else ""
+    if not ctx.has_main_video:
+        # No main video: the image becomes program content itself, not an
+        # overlay on footage — place it to build the canvas program.
+        return (f"Generated image saved: storage_key={key}{dims} — "
+                f"{source_desc}. It is NOT in your program yet: place it with "
+                f"insert_media(asset_key='{key}', at_output_s=0, "
+                "duration_s=3, motion='zoom_in') to make it a full-frame "
+                "moment on the canvas, or check it first with look_at_asset.")
     return (f"Generated image saved: storage_key={key}{dims} — "
             f"{source_desc}. It is NOT in the video yet: splice it in with "
             f"insert_media(asset_key='{key}', at_output_s=..., "
             "duration_s=2-4, motion='zoom_in'), or check it first with "
             "look_at_asset. It will appear as a full-frame still moment — "
             "the moving footage itself is not modified.")
+
+
+def _log_generation(ctx, purpose, model, prompt, key, cost_usd):
+    """Record an external (non-LLM) generation to llm_calls so the final credit
+    charge (db.charge_turn_credits sums response.cost_usd) and the admin Model
+    I/O tab both see it. Returns True iff the row persisted — the caller only
+    adds to gen_extra_cost_usd on success, so the in-turn cap (running_credits)
+    and the final charge can never disagree. Never breaks the turn."""
+    try:
+        ctx.db.run(dbx.insert_llm_call, ctx.project_id, ctx.job["id"], purpose,
+                   model, {"model": model, "prompt": (prompt or "")[:500]},
+                   {"storage_key": key, "cost_usd": round(float(cost_usd), 4)},
+                   None, None)
+        return True
+    except Exception:
+        return False
+
+
+def _gen_budget_reject(ctx, projected_usd, what):
+    """Refuse a PAID external generation the user cannot afford, BEFORE spending
+    real money at the provider. running_credits + this generation's cost must
+    fit the turn's credit budget (balance + grace). Returns a REJECTED string
+    or None. Unlike token spend (which the loop self-corrects between calls),
+    fal/ElevenLabs charges are irreversible real USD, so they need a pre-check."""
+    if ctx.credit_budget is None:
+        return None
+    projected = round(float(projected_usd) / 0.01, 2)
+    if ctx.running_credits() + projected > ctx.credit_budget:
+        return (f"REJECTED: not enough credits to {what} (it costs about "
+                f"{projected:.0f} credits and the balance won't cover it). Tell "
+                "the user honestly they're out of credits — they refresh daily, "
+                "or upgrading adds a bigger monthly pool.")
+    return None
+
+
+def generate_sfx(ctx, prompt, at, duration_s=None, gain_db=-6.0):
+    """Generate a one-shot sound effect from a text description and place it at
+    a moment in the program (program-time seconds)."""
+    if not eleven.sound_gen_available():
+        return ("Sound generation is unavailable (no sound provider "
+                "configured). You can still drop a sound from the built-in "
+                "pack with add_sfx / list_sfx_library. Tell the user honestly.")
+    p = (prompt or "").strip()
+    if not p:
+        return "REJECTED: prompt is empty — describe the sound to create."
+    if len(ctx.sfx_generated) >= config.MAX_GENERATED_SFX_PER_TURN:
+        return (f"REJECTED: already generated {config.MAX_GENERATED_SFX_PER_TURN} "
+                "sounds this turn (the per-turn limit). Place what you have.")
+    try:
+        at = float(at)
+    except (TypeError, ValueError):
+        return f"REJECTED: at must be a number of seconds, got {at!r}."
+    try:
+        gain_db = float(gain_db)
+    except (TypeError, ValueError):
+        return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    # Nothing to place a sound onto yet — reject BEFORE spending money at the
+    # provider (validate_edl would reject the write afterwards, orphaning a
+    # paid-for sound and charging the user for it).
+    if prog <= 0:
+        return ("REJECTED: there's no program yet to place a sound on. Add or "
+                "generate a clip or image first, then add the sound.")
+    if at < 0 or at > max(0.0, prog - 0.05):
+        return (f"REJECTED: at={at}s is outside the program (0 to "
+                f"{round(prog, 2)}s). Sounds are placed in program time — the "
+                "edited timeline.")
+    over = _gen_budget_reject(ctx, config.SFX_PRICE_USD, "generate a sound")
+    if over:
+        return over
+    n = len(ctx.sfx_generated) + 1
+    out_path = os.path.join(ctx.workdir, f"gensfx_{n}.mp3")
+    ok, err = eleven.generate_sfx(p, out_path, duration_s=duration_s)
+    if not ok:
+        return (f"Sound generation FAILED: {err}. Reword the prompt or tell the "
+                "user it didn't work — do NOT claim a sound was created.")
+    key = f"generated_sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
+    try:
+        storage.upload_file(out_path, key, "audio/mpeg")
+    except Exception as e:
+        return (f"The sound was generated but could not be saved to storage "
+                f"({str(e)[:140]}). Try again.")
+    items = [dict(s) for s in (edl.get("sfx") or [])]
+    taken = {s.get("id") for s in items}
+    k = 1
+    while f"sx{k}" in taken:
+        k += 1
+    sid = f"sx{k}"
+    items.append({"id": sid, "storage_key": key, "at": round(at, 2),
+                  "gain_db": gain_db})
+    edl["sfx"] = items
+    result = ctx.write_edl(
+        edl, f"generated + placed AI sound '{p[:40]}' at {round(at, 2)}s "
+             f"({gain_db:+g}dB) as {sid}")
+    # Only bill once the sound is actually in the edit. Tie the in-turn cap and
+    # the final charge to the SAME success boundary so they never diverge.
+    if result.startswith("EDL v"):
+        ctx.sfx_generated.append({"storage_key": key, "prompt": p[:200]})
+        if _log_generation(ctx, "sfx_gen",
+                           config.ELEVEN_SFX_MODEL or "elevenlabs-sfx",
+                           p, key, config.SFX_PRICE_USD):
+            ctx.gen_extra_cost_usd += config.SFX_PRICE_USD
+    return result
+
+
+def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
+    """Generate a video clip with AI (text-to-video, or animate an existing
+    image via from_image_asset_key). Saved as a project clip the model then
+    places with insert_media — like generate_image, it is NOT in the program
+    until inserted."""
+    if not videogen.video_gen_available():
+        return ("Video generation is unavailable (no video provider "
+                "configured). Offer the honest alternatives instead: an "
+                "uploaded clip, or a generated IMAGE placed as a full-frame "
+                "moment (generate_image + insert_media).")
+    p = (prompt or "").strip()
+    if not p:
+        return "REJECTED: prompt is empty — describe the video to create."
+    if len(ctx.videos_generated) >= config.MAX_GENERATED_VIDEOS_PER_TURN:
+        return (f"REJECTED: already generated "
+                f"{config.MAX_GENERATED_VIDEOS_PER_TURN} videos this turn "
+                "(the per-turn limit). Place what you have.")
+    try:
+        est_seconds = min(max(float(duration_s or 5), 1.0),
+                          config.VIDEO_MAX_SECONDS)
+    except (TypeError, ValueError):
+        est_seconds = 5.0
+    over = _gen_budget_reject(ctx, videogen.price_for(est_seconds),
+                              "generate a video")
+    if over:
+        return over
+    image_url = None
+    if from_image_asset_key:
+        asset, err = _resolve_media_asset(ctx, from_image_asset_key,
+                                          ("image_ref",))
+        if err:
+            return err
+        try:
+            image_url = storage.presign_get(asset["storage_key"], expires=3600)
+        except Exception as e:
+            return (f"Could not prepare the source image for animation "
+                    f"({str(e)[:140]}). Try again.")
+    n = len(ctx.videos_generated) + 1
+    out_path = os.path.join(ctx.workdir, f"genvid_{n}.mp4")
+    ok, err, seconds = videogen.generate_video(p, out_path, image_url=image_url,
+                                               duration_s=duration_s)
+    if not ok:
+        return (f"Video generation FAILED: {err}. Try again or tell the user it "
+                "didn't work — do NOT claim a clip was created.")
+    key = f"generated_video/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp4"
+    try:
+        storage.upload_file(out_path, key, "video/mp4")
+    except Exception as e:
+        return (f"The video was generated but could not be saved to storage "
+                f"({str(e)[:140]}). Try again.")
+    try:
+        dur = media.probe(out_path).get("duration") or seconds
+    except Exception:
+        dur = seconds
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "video_clip", key,
+               bytes_=os.path.getsize(out_path), duration_s=dur,
+               meta={"filename": f"generated-video-{n}.mp4",
+                     "caption": f"AI-generated video: {p[:300]}",
+                     "generated": True, "model": config.VIDEO_GEN_MODEL})
+    cost = videogen.price_for(seconds)
+    ctx.videos_generated.append({"storage_key": key, "prompt": p[:200],
+                                 "seconds": seconds})
+    # Bill only if the cost row persisted, so running_credits (in-turn cap) and
+    # charge_turn_credits (final charge, which reads that row) stay in lockstep.
+    if _log_generation(ctx, "video_gen", config.VIDEO_GEN_MODEL, p, key, cost):
+        ctx.gen_extra_cost_usd += cost
+    animated = (" (animated from the source image)" if from_image_asset_key
+                else "")
+    return (f"Generated {seconds:.0f}s video saved{animated}: storage_key={key} "
+            f"({round(dur, 1)}s). It is NOT in your program yet: place it with "
+            f"insert_media(asset_key='{key}', at_output_s=...), trimming with "
+            "duration_s/clip_start_s if you only want part, or check it first "
+            "with look_at_asset.")
 
 
 # ── Fetching media from a link ───────────────────────────────────────────────
@@ -2947,6 +3240,32 @@ TOOLS = {
                         "aspect": {"type": "string",
                                    "enum": ["16:9", "9:16", "1:1",
                                             "4:3", "3:4"]}}),
+    "generate_sfx": (generate_sfx, "Create a one-shot sound effect with AI "
+                     "from a text description ('a deep cinematic whoosh', 'an "
+                     "old camera shutter', 'glass shattering') and place it at "
+                     "a MOMENT in the program. Use this when the built-in pack "
+                     "(list_sfx_library) has nothing close — otherwise prefer "
+                     "the pack, it's instant and free. `at` is an OUTPUT-"
+                     "timeline second. duration_s is optional (0.5-22s; omit "
+                     "to let it pick a natural length). Costs credits per "
+                     "sound. Default -6dB.",
+                     {"prompt": {"type": "string"},
+                      "at": {"type": "number"},
+                      "duration_s": {"type": "number"},
+                      "gain_db": {"type": "number"}}),
+    "generate_video": (generate_video, "Generate a VIDEO clip with AI — real "
+                       "moving footage — from a text prompt, or animate an "
+                       "existing image by passing from_image_asset_key (a "
+                       "generated or uploaded image's storage_key). The clip "
+                       "is saved as a project asset; it reaches the program "
+                       "ONLY after you insert_media its storage_key. This is "
+                       "the tool for 'make me a video of X' / 'bring this "
+                       "photo to life'. It is SLOW (tens of seconds to a few "
+                       "minutes) and costs credits per second, so use it "
+                       "deliberately. duration_s ~5s is typical.",
+                       {"prompt": {"type": "string"},
+                        "from_image_asset_key": {"type": "string"},
+                        "duration_s": {"type": "number"}}),
     "fetch_url": (fetch_url, "Download media from a LINK the user gave you "
                   "and save it as a project asset — a video, a song, or an "
                   "image. Works with direct file links (Dropbox, Drive, a "
@@ -3087,6 +3406,8 @@ REQUIRED_ARGS = {
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
     "generate_image": ["prompt"],
+    "generate_sfx": ["prompt", "at"],
+    "generate_video": ["prompt"],
     "fetch_url": ["url"],
     "ask_user": ["question"],
 }
@@ -3105,7 +3426,8 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
-               "blur_region", "remove_blur", "generate_image", "fetch_url"}
+               "blur_region", "remove_blur", "generate_image",
+               "generate_sfx", "generate_video", "fetch_url"}
 
 
 def _tool_disabled(name):
@@ -3114,6 +3436,10 @@ def _tool_disabled(name):
     return 'unavailable'."""
     if name == "generate_image":
         return not llm.image_available()
+    if name == "generate_sfx":
+        return not eleven.sound_gen_available()
+    if name == "generate_video":
+        return not videogen.video_gen_available()
     if name == "fetch_url":
         return not config.URL_FETCH_ENABLED
     # Same rule for the music library: a deployment whose image shipped no

@@ -29,7 +29,7 @@ import music_library
 import sfx_library
 import sheets
 import storage
-from schemas import EDLValidationError, validate_edl
+from schemas import EDLValidationError, is_canvas_program, validate_edl
 from timeline import Timeline, merge_spans
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -278,20 +278,24 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     """
     keep = [(max(0.0, s), min(e, src_dur)) for s, e in edl["keep"]]
     keep = [(s, e) for s, e in keep if e - s > 0.01]
-    if not keep:
+    # A canvas program (image/clip-only, no main video) has no keep segments and
+    # no input [0]: its program is the inserts alone, concatenated on the canvas.
+    canvas_prog = not (edl.get("keep") or []) and bool(edl.get("canvas"))
+    if not keep and not canvas_prog:
         raise EDLValidationError("All keep segments fall outside the video.")
     insert_inputs = insert_inputs or []
     vo_inputs = vo_inputs or []
     n = len(keep)
     parts = []
-    asrc = f"0:a" if has_audio else f"{silence_idx}:a"
 
-    # Source-time volume automation runs before trimming, so between(t,a,b)
-    # windows are in source seconds — exactly what the agent wrote.
-    vol_filters = "".join(
-        f",volume={v['gain_db']}dB:enable='between(t,{v['start']:.2f},{v['end']:.2f})'"
-        for v in edl.get("volume", []))
-    parts.append(f"[{asrc}]anull{vol_filters}[asrc]")
+    if n > 0:
+        asrc = "0:a" if has_audio else f"{silence_idx}:a"
+        # Source-time volume automation runs before trimming, so between(t,a,b)
+        # windows are in source seconds — exactly what the agent wrote.
+        vol_filters = "".join(
+            f",volume={v['gain_db']}dB:enable='between(t,{v['start']:.2f},{v['end']:.2f})'"
+            for v in edl.get("volume", []))
+        parts.append(f"[{asrc}]anull{vol_filters}[asrc]")
 
     # anullsrc slices for silent blocks (image inserts / clips without audio)
     n_silent_blocks = sum(1 for _idx, _it, hs in insert_inputs if not hs)
@@ -346,18 +350,23 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f"setpts=PTS-STARTPTS[{vlab}]")
 
     # main segments: trim (+ censor regions), then (when needed) normalize
-    # to the output frame
-    vsrc = "0:v"
-    if src_pad > 0:
-        parts.append(f"[0:v]tpad=stop_mode=clone:"
-                     f"stop_duration={src_pad:.3f}[vpad]")
-        vsrc = "vpad"
+    # to the output frame. Skipped entirely for a canvas program (no [0]).
     if n == 1:
+        vsrc = "0:v"
+        if src_pad > 0:
+            parts.append(f"[0:v]tpad=stop_mode=clone:"
+                         f"stop_duration={src_pad:.3f}[vpad]")
+            vsrc = "vpad"
         _seg_video(0, vsrc, keep[0][0], keep[0][1])
         parts.append(f"[asrc]atrim=start={keep[0][0]:.3f}:end={keep[0][1]:.3f},"
                      f"asetpts=PTS-STARTPTS"
                      + (f",{AUDIO_NORM}" if do_norm else "") + "[a_seg0]")
-    else:
+    elif n > 1:
+        vsrc = "0:v"
+        if src_pad > 0:
+            parts.append(f"[0:v]tpad=stop_mode=clone:"
+                         f"stop_duration={src_pad:.3f}[vpad]")
+            vsrc = "vpad"
         parts.append(f"[{vsrc}]split=" + str(n)
                      + "".join(f"[vin{i}]" for i in range(n)))
         parts.append("[asrc]asplit=" + str(n)
@@ -692,9 +701,129 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
+def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None):
+    """Render a canvas program (round 34): a timeline with NO main video, where
+    the ordered inserts (clips/images) are concatenated on the canvas, plus
+    music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
+    assembles the ffmpeg inputs with NO input [0] main video — every input
+    (silence, music, sfx, inserts, voiceover, end card) starts at index 0 — and
+    takes the output geometry from the canvas rather than probing a source."""
+    edl = validate_edl(edl_dict).model_dump()
+    canvas = edl["canvas"]
+    W, H = int(canvas["width"]), int(canvas["height"])
+    fps = max(1.0, min(float(canvas.get("fps") or 30.0), 60.0))
+
+    inserts = edl.get("inserts") or []
+    voiceover = edl.get("voiceover") or []
+    # keep=[] -> Timeline.out_duration == sum of insert durations (the program).
+    tl = Timeline(edl["keep"], inserts)
+    ass_path = caplib.build_ass(edl, {}, tl,
+                                os.path.join(workdir, "captions.ass"),
+                                play_res=(W, H))
+
+    def _fetch(key, tag, idx):
+        local = os.path.join(workdir, f"{tag}_{idx}"
+                             + os.path.splitext(key)[1].lower())
+        storage.download_to(key, local)
+        return local
+
+    music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
+    extra_inputs = []
+    next_idx = 0                       # no main video: inputs start at [0]
+
+    # Shared anullsrc: the program audio base and the silence under image
+    # inserts / silent clips. Always present on a canvas program.
+    max_len = tl.out_duration + 1
+    extra_inputs += ["-f", "lavfi", "-t", f"{max_len:.2f}",
+                     "-i", "anullsrc=r=48000:cl=stereo"]
+    silence_idx = next_idx
+    next_idx += 1
+
+    for item in edl.get("music", []):
+        local = music_source(item["storage_key"],
+                             lambda k: _fetch(k, "music", next_idx))
+        try:
+            track_dur = media.probe_audio_duration(local)
+        except Exception:
+            track_dur = None
+        span = max(0.05, float(item.get("end") or 0.0)
+                   - float(item.get("start") or 0.0))
+        offset = max(0.0, float(item.get("offset_s") or 0.0))
+        if (item.get("loop") and track_dur
+                and (track_dur - offset) < span - 0.05):
+            extra_inputs += ["-stream_loop", "-1"]
+        extra_inputs += ["-i", local]
+        music_inputs.append((next_idx, item, track_dur))
+        next_idx += 1
+
+    for item in edl.get("sfx", []):
+        local = sfx_source(item["storage_key"],
+                           lambda k: _fetch(k, "sfx", next_idx))
+        extra_inputs += ["-i", local]
+        sfx_inputs.append((next_idx, item, None))
+        next_idx += 1
+
+    for item in inserts:               # sorted by validate_edl = tl.ins order
+        local = _fetch(item["asset_key"], "insert", next_idx)
+        if item["kind"] == "image" or local.endswith(IMAGE_EXTS):
+            extra_inputs += ["-loop", "1", "-t", f"{item['duration_s']:.3f}",
+                             "-r", f"{fps:.3f}", "-i", local]
+            has_ins_audio = False
+        else:
+            extra_inputs += ["-i", local]
+            has_ins_audio = media.probe(local)["has_audio"]
+        insert_inputs.append((next_idx, item, has_ins_audio))
+        next_idx += 1
+
+    for item in voiceover:
+        local = _fetch(item["asset_key"], "vo", next_idx)
+        extra_inputs += ["-i", local]
+        vo_dur = media.probe_audio_duration(local)
+        vo_inputs.append((next_idx, item, vo_dur))
+        next_idx += 1
+
+    outro_s = outro_seconds(preview)
+    card_idx = None
+    if outro_s > 0.0:
+        extra_inputs += ["-loop", "1", "-t", f"{outro_s:.3f}",
+                         "-r", f"{fps:.3f}", "-i", endcard_path()]
+        card_idx = next_idx
+        next_idx += 1
+
+    graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
+                              music_inputs, {}, preview,
+                              W=W, H=H, fps=fps, frame_mode=None,
+                              insert_inputs=insert_inputs,
+                              vo_inputs=vo_inputs, silence_idx=silence_idx,
+                              src_w=W, src_h=H, src_pad=0.0,
+                              sfx_inputs=sfx_inputs, outro_s=outro_s,
+                              card_idx=card_idx, src_sar=1.0, src_fps=fps)
+
+    if preview:
+        encode = ["-c:v", "libx264", "-preset", config.PREVIEW_PRESET,
+                  "-crf", "27", "-g", "48", "-keyint_min", "24",
+                  "-c:a", "aac", "-b:a", "128k"]
+    else:
+        encode = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
+                  "-crf", str(config.FINAL_CRF), "-g", "120",
+                  "-c:a", "aac", "-b:a", "192k"]
+
+    cmd = ["ffmpeg", "-y", *extra_inputs,
+           "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
+           *encode, "-movflags", "+faststart",
+           "-progress", "pipe:1", "-nostats", out_path]
+    media.run(cmd, progress_cb=progress_cb,
+              expected_out_s=tl.out_duration + outro_s)
+    return media.duration_of(out_path)
+
+
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                progress_cb=None):
     """Render an EDL against a source file. Returns output duration (s)."""
+    if is_canvas_program(edl_dict):
+        # No main video: the program is built on the canvas from inserts alone.
+        return _render_canvas_edl(edl_dict, out_path, workdir, preview,
+                                  progress_cb)
     info = media.probe(src_path)
     src_dur = info["duration"]
     edl = validate_edl(edl_dict, max(src_dur, max(e for _, e in edl_dict["keep"]))
@@ -895,6 +1024,11 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
             src_black = 0.0
             if src_path and src_dur and src_dur > 1.0:
                 src_black = media.black_seconds(src_path, src_dur) / src_dur
+            elif src_dur is None and out_black < 0.98:
+                # Canvas program (no source to compare): a lyric/caption or dark
+                # program can be legitimately black. Only a near-total black
+                # frame is a real defect, so treat anything less as intended.
+                src_black = out_black
             if out_black - src_black > config.RENDER_BLACK_MAX_RATIO:
                 raise media.MediaError(
                     f"{variant} render black-frame check failed: output is "
@@ -960,8 +1094,12 @@ def run_render_job(worker_db, job):
     if not edl_row:
         raise RuntimeError(f"EDL version {version} not found")
     original = worker_db.run(dbx.latest_asset, project_id, "original")
-    if not original or not original["sha256"]:
+    # A canvas program (no main video) renders purely from its inserts on the
+    # canvas — there is no original/proxy/index to require or download.
+    is_canvas = is_canvas_program(edl_row["json"])
+    if not is_canvas and (not original or not original["sha256"]):
         raise RuntimeError("No indexed original video for this project")
+    src_sha = original["sha256"] if original else "canvas"
 
     # Cache: this exact EDL version was already rendered in this variant against
     # this exact source file — serve the stored asset instead of re-encoding.
@@ -973,7 +1111,7 @@ def run_render_job(worker_db, job):
     cached = (None if force else
               worker_db.run(dbx.find_render_asset, project_id, variant, version))
     if cached and (cached.get("meta") or {}).get("src_sha256") == \
-            original["sha256"] and storage.exists(cached["storage_key"]):
+            src_sha and storage.exists(cached["storage_key"]):
         caps = edl_row["json"].get("captions")
         needs_fp = isinstance(caps, dict) and caps.get("mode") == "from_transcript"
         stored_fp = (cached.get("meta") or {}).get("caption_fp")
@@ -999,16 +1137,20 @@ def run_render_job(worker_db, job):
                     "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
                     "duration_s": cached["duration_s"], "edl_version": version,
                     "variant": variant, "cached": True}
-    index_row = worker_db.run(dbx.get_index_by_sha, original["sha256"])
-    if not index_row:
-        raise RuntimeError("Video index missing — re-run indexing")
-    index = index_row["json"]
+    if is_canvas:
+        index = {}
+        src_asset = None
+    else:
+        index_row = worker_db.run(dbx.get_index_by_sha, original["sha256"])
+        if not index_row:
+            raise RuntimeError("Video index missing — re-run indexing")
+        index = index_row["json"]
 
-    src_asset = original
-    if variant == "preview":
-        proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
-        if proxy:
-            src_asset = proxy
+        src_asset = original
+        if variant == "preview":
+            proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
+            if proxy:
+                src_asset = proxy
 
     workdir = os.path.join(config.TMP_DIR, f"render_{job_id}")
     os.makedirs(workdir, exist_ok=True)
@@ -1020,10 +1162,13 @@ def run_render_job(worker_db, job):
         t0 = time.monotonic()
 
     try:
-        src_local = os.path.join(
-            workdir, "src" + os.path.splitext(src_asset["storage_key"])[1])
-        worker_db.run(dbx.set_progress, job_id, 5)
-        storage.download_to(src_asset["storage_key"], src_local)
+        if src_asset:
+            src_local = os.path.join(
+                workdir, "src" + os.path.splitext(src_asset["storage_key"])[1])
+            worker_db.run(dbx.set_progress, job_id, 5)
+            storage.download_to(src_asset["storage_key"], src_local)
+        else:
+            src_local = None            # canvas program: nothing to download
         worker_db.run(dbx.set_progress, job_id, 10)
         _mark("download_s")
 
@@ -1059,7 +1204,7 @@ def run_render_job(worker_db, job):
         # worker retries the encode once (MAX_ATTEMPTS_MEDIA) before surfacing a
         # real error — a visually broken render never uploads silently.
         try:
-            src_dur = media.duration_of(src_local)
+            src_dur = media.duration_of(src_local) if src_local else None
         except Exception:
             src_dur = None
         _verify_render(edl_row["json"], out_local, out_dur, job_id, variant,
@@ -1098,7 +1243,7 @@ def run_render_job(worker_db, job):
             width=out_info["width"], height=out_info["height"],
             fps=out_info["fps"],
             meta={"variant": variant, "edl_version": version,
-                  "sheet_key": sheet_key, "src_sha256": original["sha256"],
+                  "sheet_key": sheet_key, "src_sha256": src_sha,
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
                   "outro_v": (config.OUTRO_VERSION
                               if outro_seconds(variant == "preview") else 0)})
@@ -1123,10 +1268,11 @@ def run_render_job(worker_db, job):
             print(f"[render {job_id}] prune skipped: {e}", flush=True)
         # Deterministic mid-word audit: keep boundaries that clip a word,
         # computed straight from the index — visible in logs and to the
-        # agent even if it ignored the write-time warnings.
-        mw = audit.midword_audit(edl_row["json"]["keep"],
-                                 index.get("words", []),
-                                 index["video"]["duration"])
+        # agent even if it ignored the write-time warnings. Meaningless (and
+        # unsafe: index is {} with no ['video']) for a canvas program.
+        mw = [] if is_canvas else audit.midword_audit(
+            edl_row["json"]["keep"], index.get("words", []),
+            index["video"]["duration"])
         if mw:
             print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
                   flush=True)

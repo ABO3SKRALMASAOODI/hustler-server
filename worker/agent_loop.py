@@ -296,7 +296,10 @@ def run_agent_job(worker_db, job):
     original = worker_db.run(dbx.latest_asset, job["project_id"], "original")
     index_row = original and original["sha256"] and \
         worker_db.run(dbx.get_index_by_sha, original["sha256"])
-    if not index_row:
+    if original and not index_row:
+        # A main video WAS uploaded but hasn't finished indexing — wait. (With
+        # no original at all we run a canvas turn: the user is building from
+        # generated / uploaded images and clips, no main video required.)
         worker_db.run(dbx.add_message, session_id, "assistant",
                       "I can't edit yet — the video hasn't finished "
                       "indexing. Give it a moment and resend your request.")
@@ -306,7 +309,8 @@ def run_agent_job(worker_db, job):
     os.makedirs(workdir, exist_ok=True)
 
     ctx = agent_tools.ToolContext(worker_db, job, project,
-                                  index_row["json"], workdir)
+                                  index_row["json"] if index_row else None,
+                                  workdir)
     # A turn spends what the user can PAY FOR — balance + a small grace — and
     # nothing else bounds it.
     #

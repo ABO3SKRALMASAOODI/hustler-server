@@ -29,6 +29,16 @@ def upload_file(path, key, content_type):
                          ExtraArgs={"ContentType": content_type})
 
 
+def presign_get(key, expires=3600):
+    """A temporary public GET URL for one object — used to hand an asset to an
+    external generation provider (e.g. fal.ai image-to-video) that must fetch
+    it directly. Short-lived by default; the provider downloads it immediately."""
+    return client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": config.S3_BUCKET, "Key": key},
+        ExpiresIn=int(expires))
+
+
 def copy_object(src_key, dst_key):
     client().copy_object(Bucket=config.S3_BUCKET,
                          CopySource={"Bucket": config.S3_BUCKET, "Key": src_key},

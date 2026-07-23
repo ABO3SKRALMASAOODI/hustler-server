@@ -397,8 +397,44 @@ class Effects(BaseModel):
     regions: Optional[List[RegionItem]] = None
 
 
+# Canvas (round 34) — output geometry for a program that has NO main source
+# video to probe: an image-only / clip-only / generated timeline. When a
+# project HAS a main video, its geometry comes from probing that video and
+# `canvas` stays None; the `keep` list is the program. When there is no main
+# video, `keep` is empty and `canvas` supplies the output frame — the program
+# is then the ordered `inserts` (clips/images) laid end-to-end on that canvas,
+# reusing the existing insert-concat machinery. Optional everywhere so every
+# EDL ever written (which had no `canvas` key) hashes identically.
+CANVAS_MIN_PX = 16
+CANVAS_MAX_PX = 4096
+CANVAS_FPS_MIN = 1.0
+CANVAS_FPS_MAX = 60.0
+DEFAULT_CANVAS_FPS = 30.0
+# Canonical pixel frames per output ratio, used when a canvas program is born
+# from a chosen aspect (a generated image / a first clip). 1080 on the long
+# edge is the render target the proxy/finals already assume.
+CANVAS_DIMS = {
+    "16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080),
+    "4:5": (1080, 1350), "4:3": (1440, 1080),
+}
+
+
+class Canvas(BaseModel):
+    """Output frame for a no-main-video program. width/height are the final
+    pixel dimensions; fps the output rate; bg_color the fill behind gaps and
+    letterboxing. Present iff the EDL's program is built purely from
+    inserts/overlays on a synthetic base (keep is empty)."""
+    width: int
+    height: int
+    fps: float = DEFAULT_CANVAS_FPS
+    bg_color: str = "#000000"
+
+
 class EDL(BaseModel):
+    # keep is empty ONLY for a canvas program (image/clip-only, no main video);
+    # otherwise it is the non-empty cut list of the one main video.
     keep: List[List[float]]
+    canvas: Optional[Canvas] = None
     captions: Optional[Union[CaptionsFromTranscript, List[CaptionItem]]] = None
     music: List[MusicItem] = Field(default_factory=list)
     sfx: List[SfxItem] = Field(default_factory=list)
@@ -411,6 +447,19 @@ class EDL(BaseModel):
 
 def default_edl(duration):
     return EDL(keep=[[0.0, _r(duration)]]).model_dump()
+
+
+def canvas_edl(ratio="16:9", fps=DEFAULT_CANVAS_FPS, bg_color="#000000"):
+    """The minimal EDL for a program with no main video: an empty keep list and
+    a canvas of the chosen aspect. Visual content arrives as inserts."""
+    w, h = CANVAS_DIMS.get(ratio, CANVAS_DIMS["16:9"])
+    return EDL(keep=[], canvas=Canvas(width=w, height=h, fps=_r(fps),
+                                      bg_color=bg_color)).model_dump()
+
+
+def is_canvas_program(edl_dict):
+    """True when this EDL is a no-main-video program (empty keep + a canvas)."""
+    return not (edl_dict.get("keep") or []) and bool(edl_dict.get("canvas"))
 
 
 def output_duration(keep):
@@ -447,44 +496,102 @@ def _check_span(name, s, e, max_end, min_len=MIN_SPAN_S):
             f"{name}: end {e} exceeds the limit {round(max_end, 2)}s.")
 
 
-def validate_edl(data, duration):
-    """Parse + validate an EDL dict against the video duration.
+def validate_edl(data, duration=None):
+    """Parse + validate an EDL dict.
 
-    Returns a normalized EDL (times rounded to 0.01s). Raises
-    EDLValidationError with a message the agent can act on.
+    Two shapes are valid: a MAIN-VIDEO program (non-empty `keep`, validated
+    against `duration` = the source video's length) or a CANVAS program (empty
+    `keep` + a `canvas`, for an image/clip-only timeline with no main video —
+    `duration` is then ignored). Returns a normalized EDL (times rounded to
+    0.01s). Raises EDLValidationError with a message the agent can act on.
     """
     try:
         edl = EDL.model_validate(data)
     except Exception as e:
         raise EDLValidationError(f"EDL shape invalid: {str(e)[:300]}")
 
-    if not edl.keep:
-        raise EDLValidationError("keep must contain at least one [start, end] span.")
-
-    keep = []
-    for i, span in enumerate(edl.keep):
-        if len(span) != 2:
+    canvas_prog = not edl.keep
+    if canvas_prog:
+        # No main video: the program is built on a canvas from inserts alone.
+        if edl.canvas is None:
             raise EDLValidationError(
-                f"keep[{i}] must be [start, end], got {span}.")
-        s, e = _r(span[0]), _r(span[1])
-        _check_span(f"keep[{i}]", s, e, duration)
-        keep.append([s, e])
-
-    keep.sort(key=lambda x: x[0])
-    for i in range(1, len(keep)):
-        if keep[i][0] < keep[i - 1][1] - 0.001:
+                "keep must contain at least one [start, end] span "
+                "(or provide a canvas for an image/clip-only program).")
+        c = edl.canvas
+        c.width, c.height = int(c.width), int(c.height)
+        if not (CANVAS_MIN_PX <= c.width <= CANVAS_MAX_PX) or \
+           not (CANVAS_MIN_PX <= c.height <= CANVAS_MAX_PX):
             raise EDLValidationError(
-                f"keep segments overlap: [{keep[i-1][0]}, {keep[i-1][1]}] and "
-                f"[{keep[i][0]}, {keep[i][1]}]. Segments must be sorted and "
-                "non-overlapping.")
-    edl.keep = keep
-    out_dur = output_duration(keep)
+                f"canvas width/height must be within "
+                f"[{CANVAS_MIN_PX}, {CANVAS_MAX_PX}] px.")
+        c.fps = round(float(c.fps), 2)
+        if not (CANVAS_FPS_MIN <= c.fps <= CANVAS_FPS_MAX):
+            raise EDLValidationError(
+                f"canvas fps {c.fps} outside [{CANVAS_FPS_MIN}, {CANVAS_FPS_MAX}].")
+        if not HEX_COLOR.match(c.bg_color or ""):
+            raise EDLValidationError(
+                f"canvas bg_color {c.bg_color!r} must be #RRGGBB.")
+        if not edl.inserts:
+            raise EDLValidationError(
+                "a canvas program needs at least one insert (a clip or image) "
+                "— add visual content before music/sfx/captions.")
+        # Source-timeline-only features are meaningless without a main video.
+        if edl.volume:
+            raise EDLValidationError(
+                "volume automation needs a main video (it addresses source "
+                "time); not available on an image/clip-only program.")
+        if isinstance(edl.captions, CaptionsFromTranscript):
+            raise EDLValidationError(
+                "from_transcript captions need a transcribed main video; on an "
+                "image/clip-only program pass explicit caption items instead.")
+        if edl.effects and edl.effects.regions:
+            raise EDLValidationError(
+                "censor regions address the source frame of a main video; not "
+                "available on an image/clip-only program.")
+        if edl.frame is not None and edl.frame.ratio != "source":
+            raise EDLValidationError(
+                "the output aspect of a canvas program is fixed by its canvas, "
+                "not set_frame — choose the aspect when you place content "
+                "instead.")
+        edl.keep = keep = []
+        out_dur = 0.0
+    else:
+        # A keep list is present: this is a main-video program; a stray canvas
+        # never coexists with one.
+        if duration is None:
+            raise EDLValidationError(
+                "internal: a main-video EDL (non-empty keep) must be validated "
+                "against the source video duration.")
+        edl.canvas = None
+        keep = []
+        for i, span in enumerate(edl.keep):
+            if len(span) != 2:
+                raise EDLValidationError(
+                    f"keep[{i}] must be [start, end], got {span}.")
+            s, e = _r(span[0]), _r(span[1])
+            _check_span(f"keep[{i}]", s, e, duration)
+            keep.append([s, e])
+
+        keep.sort(key=lambda x: x[0])
+        for i in range(1, len(keep)):
+            if keep[i][0] < keep[i - 1][1] - 0.001:
+                raise EDLValidationError(
+                    f"keep segments overlap: [{keep[i-1][0]}, {keep[i-1][1]}] and "
+                    f"[{keep[i][0]}, {keep[i][1]}]. Segments must be sorted and "
+                    "non-overlapping.")
+        edl.keep = keep
+        out_dur = output_duration(keep)
+
+    # Captions on a canvas program are positioned in PROGRAM time (bounded by
+    # the concatenated inserts); on a main-video program they are source time.
+    cap_bound = (round(sum(max(0.0, float(i.duration_s)) for i in edl.inserts), 2)
+                 if canvas_prog else duration)
 
     if isinstance(edl.captions, list):
         norm = []
         for i, c in enumerate(edl.captions):
             s, e = _r(c.start), _r(c.end)
-            _check_span(f"captions[{i}]", s, e, duration)
+            _check_span(f"captions[{i}]", s, e, cap_bound)
             if not c.text.strip():
                 raise EDLValidationError(f"captions[{i}] has empty text.")
             norm.append(CaptionItem(text=c.text.strip(), start=s, end=e,
@@ -533,14 +640,27 @@ def validate_edl(data, duration):
             raise EDLValidationError(
                 f"inserts[{i}].motion is only supported on image inserts "
                 "(a Ken Burns move on a still) — video clips already move.")
-        nearest = min(bounds, key=lambda b: abs(b - ins.at_output_s))
-        if abs(nearest - ins.at_output_s) > 0.02:
+        if ins.at_output_s < 0:
             raise EDLValidationError(
-                f"inserts[{i}].at_output_s {ins.at_output_s} is not on a "
-                f"keep-segment boundary — nearest boundary is {nearest}. "
-                "Inserts splice BETWEEN kept segments (or at the start/end).")
-        ins.at_output_s = nearest
+                f"inserts[{i}].at_output_s {ins.at_output_s} must be >= 0.")
+        if not canvas_prog:
+            # Main-video program: an insert splices at a keep-segment boundary.
+            nearest = min(bounds, key=lambda b: abs(b - ins.at_output_s))
+            if abs(nearest - ins.at_output_s) > 0.02:
+                raise EDLValidationError(
+                    f"inserts[{i}].at_output_s {ins.at_output_s} is not on a "
+                    f"keep-segment boundary — nearest boundary is {nearest}. "
+                    "Inserts splice BETWEEN kept segments (or at the start/end).")
+            ins.at_output_s = nearest
     edl.inserts.sort(key=lambda x: x.at_output_s)
+    if canvas_prog:
+        # No keep boundaries — the ordered inserts ARE the program. Lay them
+        # end-to-end (gapless concat) so the timeline is deterministic; the
+        # agent reorders by choosing at_output_s.
+        acc = 0.0
+        for ins in edl.inserts:
+            ins.at_output_s = _r(acc)
+            acc += ins.duration_s
 
     prog_dur = out_dur + sum(x.duration_s for x in edl.inserts)
 
@@ -770,10 +890,18 @@ def _style_desc(style):
 def describe_edl(edl_dict, duration=None):
     """One-line human summary used in diffs and activity messages."""
     edl = EDL.model_validate(edl_dict)
-    parts = [f"{len(edl.keep)} segment{'s' if len(edl.keep) != 1 else ''}",
-             f"{output_duration(edl.keep)}s kept"]
-    if duration:
-        parts[-1] += f" of {round(duration, 1)}s"
+    if not edl.keep and edl.canvas is not None:
+        # Canvas program (no main video): the program IS the inserts on the
+        # canvas, so "0 segments kept" would misdescribe it to the agent.
+        n_ins = len(edl.inserts)
+        parts = [f"canvas {edl.canvas.width}x{edl.canvas.height}",
+                 f"{n_ins} clip{'s' if n_ins != 1 else ''} "
+                 f"({round(program_duration(edl_dict), 1)}s)"]
+    else:
+        parts = [f"{len(edl.keep)} segment{'s' if len(edl.keep) != 1 else ''}",
+                 f"{output_duration(edl.keep)}s kept"]
+        if duration:
+            parts[-1] += f" of {round(duration, 1)}s"
     if isinstance(edl.captions, CaptionsFromTranscript):
         d = "captions: transcript"
         if edl.captions.max_words_per_caption:

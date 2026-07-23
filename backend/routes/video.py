@@ -85,7 +85,8 @@ def _concierge_llm():
 # has been analyzed or edited yet. Such drafts fall back to the template.
 _CONCIERGE_CLAIM = re.compile(
     r"(?i)\b(?:i(?:'ve| have| already| just)+ (?:cut|trimmed|edited|"
-    r"rendered|captioned|analyzed)|your video is ready)")
+    r"rendered|captioned|analyzed|generated|made|created)|"
+    r"your video is ready)")
 
 
 def _image_gen_enabled():
@@ -124,6 +125,22 @@ def _image_edit_enabled():
     return "dashscope" in os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
 
 
+def _sound_gen_enabled():
+    """Mirrors the worker's generate_sfx availability (worker/eleven.
+    sound_gen_available) — a dedicated ElevenLabs key, independent of the LLM
+    stack. Empty key: the concierge must not offer AI sound generation (the
+    built-in pack still works once a video/program exists)."""
+    return bool(os.getenv("ELEVENLABS_API_KEY", ""))
+
+
+def _video_gen_enabled():
+    """Mirrors the worker's generate_video availability (worker/videogen.
+    video_gen_available) — a fal.ai key + the fal provider. Empty key: the
+    concierge must keep saying moving-video generation isn't available."""
+    return (bool(os.getenv("FAL_KEY", ""))
+            and os.getenv("VIDEO_PROVIDER", "fal") == "fal")
+
+
 def _concierge_stage(idx_state):
     """Map the latest index job state to what the concierge may claim.
     A FAILED index is its own stage — telling that user 'no video is
@@ -137,11 +154,45 @@ def _concierge_stage(idx_state):
     return "ready"
 
 
-def _concierge_reply(stage, history, attachments, index_error=None):
-    """LLM-authored reply for chat while no indexed video exists yet.
+def _parse_act(raw):
+    """Parse the concierge's {act, reply} JSON. Falls back to treating the
+    whole output as a chat reply (act=False) when it isn't valid JSON — so a
+    model that ignored the format instruction still produces a sane chat turn."""
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        s = s.strip("`").strip()
+        if s[:4].lower() == "json":
+            s = s[4:].strip()
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict) and "reply" in obj:
+            return str(obj.get("reply") or "").strip(), bool(obj.get("act"))
+    except Exception:
+        pass
+    return raw, False
+
+
+def _concierge_reply(stage, history, attachments, index_error=None,
+                     can_act=False):
+    """LLM-authored reply for chat while no indexed main video exists yet.
     stage: 'indexing' | 'index_failed' | 'no_video'.
-    Returns (text, meta, llm_record); llm_record is None only when no API
-    key is configured."""
+
+    Returns (text, meta, llm_record, act). `act` is True only when can_act (the
+    'no_video' blank-canvas stage) AND the model judged the user's message to be
+    a request to CREATE/ADD/BUILD/EDIT something a canvas agent turn should run
+    now — the caller then enqueues that turn instead of posting `text`.
+    llm_record is None only when no API key is configured."""
+    want_act = can_act and stage == "no_video"
+    # What can be generated with no video, from the live provider gates.
+    gen_now = []
+    if _image_gen_enabled():
+        gen_now.append("generate images from a text description")
+    if _video_gen_enabled():
+        gen_now.append("generate short video clips from a description, or "
+                       "animate a still image into a moving clip")
+    if _sound_gen_enabled():
+        gen_now.append("generate custom sound effects from a description")
+
     if stage == "indexing":
         fallback = ("I'm still analyzing your video — transcribing it and "
                     "mapping the shots. Your request is saved: I'll start "
@@ -166,58 +217,90 @@ def _concierge_reply(stage, history, attachments, index_error=None):
         saved = ("Their editing requests are saved, but nothing can "
                  "start until a video is successfully analyzed — "
                  "re-uploading is the fix.")
-    else:
-        fallback = ("Upload a video first and I'll get to work — drop a "
-                    "file into the panel on the right. Your request is "
-                    "saved: I'll start on it automatically once your "
-                    "video has been analyzed.")
-        state = ("No video is uploaded yet. They upload one by dropping a "
-                 "file into the panel on the right side of the studio.")
-        saved = ("Any editing request they send now is saved, and you "
-                 "start on it automatically the moment their video "
-                 "finishes analyzing — they never need to resend it.")
+    else:  # no_video — a blank CapCut-style canvas, no main video required
+        if gen_now:
+            fallback = ("Tell me what to make and I'll start on it now — you "
+                        "don't need to upload a video first. You can also drop "
+                        "images, clips or audio into the panel on the right.")
+        else:
+            fallback = ("Drop a video — or images, clips or audio — into the "
+                        "panel on the right and I'll build your edit from them.")
+        state = ("No main video is uploaded yet — but they do NOT need one to "
+                 "start. The studio is a blank canvas: they build a program "
+                 "from AI-generated and/or uploaded images, clips and sounds, "
+                 "in any order, and can add a main video whenever they want "
+                 "(or never).")
+        if gen_now:
+            saved = ("RIGHT NOW, with no video, you can: " + ", ".join(gen_now)
+                     + ", and arrange generated or uploaded images / clips / "
+                     "sounds into an edit — images and clips become full-frame "
+                     "moments on the canvas. When they ask you to create, "
+                     "generate or add something, it happens NOW; you never tell "
+                     "them to upload a video first.")
+        else:
+            saved = ("RIGHT NOW you can accept uploaded images, clips and audio "
+                     "and arrange them into an edit. AI generation of images, "
+                     "video or sound is NOT enabled on this deployment, so do "
+                     "not offer or promise it.")
     if not os.getenv("OPENAI_API_KEY"):
-        return fallback, {"kind": "canned", "stage": stage}, None
+        return fallback, {"kind": "canned", "stage": stage}, None, False
 
     facts = [
         state,
         saved,
         "You have not edited, rendered, analyzed or looked at anything "
         "yet — never claim or imply that you did.",
-        "Once a video is ready you can: cut silences and bad takes, add "
-        "word-timed captions (including karaoke word-pop styles), add "
-        "background music or voiceover, drop one-shot sound effects "
-        "(whooshes, impacts, risers, clicks, dings) on exact moments "
-        "from a built-in pack, zooms (including smooth Ken "
-        "Burns style), dip-to-black/white transitions, fades, color "
-        "grades, vertical/square/portrait reframing, blur/pixelate/"
-        "black-out a fixed region to censor burned-in usernames, "
-        "watermarks or on-screen text, and splice uploaded "
-        "clips or images into the video full-frame"
-        + (", and download a video, song or image from a LINK they paste "
-           "(direct file links and YouTube/TikTok/Vimeo/SoundCloud pages) "
-           "and put it straight into the edit"
-           if _url_fetch_enabled() else "")
-        + ((", and generate images with AI from a text description"
-            + (", or by restyling a frame of their video or an uploaded "
-               "image (e.g. giving a character a new hairstyle)"
-               if _image_edit_enabled() else "")
-            + " — which get spliced in as full-frame still moments. You "
-              "canNOT: "
-            + ("" if _image_edit_enabled() else
-               "restyle or edit an existing frame or photo (only generate a "
-               "fresh image from a description), ")
-            + "generate or alter MOVING footage (AI images land as "
-              "still-frame moments, not tracked effects), change")
-           if _image_gen_enabled() else
-           ". You canNOT: generate footage or images from nothing, "
-           "change")
-        + " playback speed, do true crossfades (overlapping footage), "
-        "overlay logos or watermarks on top of the video, or add custom "
-        "caption fonts, outlines or stickers. These two "
-        "lists are exhaustive — if they ask about anything not on them, "
-        "say you're not sure it's supported yet rather than promising it.",
     ]
+    if stage == "no_video":
+        # Transcript-based editing is the one thing that genuinely needs a
+        # video; everything else is either available now or never.
+        facts.append(
+            "Once a video WITH SPEECH is in the program, transcript-based "
+            "editing also unlocks: cutting silences and bad takes, word-timed "
+            "captions (including karaoke), and censoring on-screen text. "
+            "Regardless, you canNOT change playback speed, do true crossfades "
+            "(overlapping footage), overlay logos/watermarks, or add custom "
+            "caption fonts, outlines or stickers"
+            + ("" if _video_gen_enabled() else
+               ", and you canNOT generate moving VIDEO footage")
+            + ". If they ask about something not covered here, say you're not "
+            "sure it's supported rather than promising it.")
+    else:
+        facts.append(
+            "Once a video is ready you can: cut silences and bad takes, add "
+            "word-timed captions (including karaoke word-pop styles), add "
+            "background music or voiceover, drop one-shot sound effects "
+            "(whooshes, impacts, risers, clicks, dings) on exact moments "
+            "from a built-in pack, zooms (including smooth Ken "
+            "Burns style), dip-to-black/white transitions, fades, color "
+            "grades, vertical/square/portrait reframing, blur/pixelate/"
+            "black-out a fixed region to censor burned-in usernames, "
+            "watermarks or on-screen text, and splice uploaded "
+            "clips or images into the video full-frame"
+            + (", and download a video, song or image from a LINK they paste "
+               "(direct file links and YouTube/TikTok/Vimeo/SoundCloud pages) "
+               "and put it straight into the edit"
+               if _url_fetch_enabled() else "")
+            + ((", and generate images with AI from a text description"
+                + (", or by restyling a frame of their video or an uploaded "
+                   "image (e.g. giving a character a new hairstyle)"
+                   if _image_edit_enabled() else "")
+                + " — which get spliced in as full-frame still moments. You "
+                  "canNOT: "
+                + ("" if _image_edit_enabled() else
+                   "restyle or edit an existing frame or photo (only generate a "
+                   "fresh image from a description), ")
+                + ("generate or alter MOVING footage (AI images land as "
+                   "still-frame moments, not tracked effects), change"
+                   if not _video_gen_enabled() else "change"))
+               if _image_gen_enabled() else
+               ". You canNOT: generate footage or images from nothing, "
+               "change")
+            + " playback speed, do true crossfades (overlapping footage), "
+            "overlay logos or watermarks on top of the video, or add custom "
+            "caption fonts, outlines or stickers. These two "
+            "lists are exhaustive — if they ask about anything not on them, "
+            "say you're not sure it's supported yet rather than promising it.")
     if attachments:
         facts.append("Attached to this message and saved for the edit: " +
                      "; ".join(f"{a['kind']} "
@@ -226,39 +309,71 @@ def _concierge_reply(stage, history, attachments, index_error=None):
     system = (
         "You are Valmera, an AI video editor the user chats with inside "
         "the studio.\nFACTS — every reply must respect all of them:\n- " +
-        "\n- ".join(facts) +
-        "\nReply to the user's last message naturally in 1-3 short "
-        "sentences, plain text only (no markdown, no emoji, no lists). "
-        "Answer what they actually said: greet a greeting, answer "
-        "questions about what you can do, and if they asked for an edit "
-        "confirm it's saved and say what happens next. Never promise a "
-        "specific completion time.")
+        "\n- ".join(facts))
+    if want_act:
+        system += (
+            "\n\nDecide whether the user's latest message is a REQUEST to "
+            "create / generate / add / place / build / edit something you can "
+            "actually start now (per the FACTS), versus small talk or a "
+            "question. Reply with ONLY a JSON object and nothing else: "
+            "{\"act\": <true|false>, \"reply\": <string>}. Set act=true when "
+            "they want you to DO something now (e.g. 'generate an image of X', "
+            "'make a video of Y', 'add a whoosh', 'put these together') — then "
+            "`reply` is a short one-line acknowledgement of what you're "
+            "starting (plain text, no markdown). Set act=false for greetings, "
+            "thanks or questions — then `reply` answers them in 1-2 sentences. "
+            "NEVER set act=true for something the FACTS say is unavailable.")
+    else:
+        system += (
+            "\nReply to the user's last message naturally in 1-3 short "
+            "sentences, plain text only (no markdown, no emoji, no lists). "
+            "Answer what they actually said: greet a greeting, answer "
+            "questions about what you can do, and if they asked for an edit "
+            "confirm it's saved and say what happens next. Never promise a "
+            "specific completion time.")
     msgs = [{"role": "system", "content": system}]
     for h in history[-10:]:
         msgs.append({"role": h["role"],
                      "content": (h["content"] or "")[:800]})
     req = {"model": CONCIERGE_MODEL, "messages": msgs}
     try:
-        resp = _concierge_llm().chat.completions.create(
-            model=CONCIERGE_MODEL, messages=msgs,
-            max_tokens=220, temperature=0.6)
-        text = (resp.choices[0].message.content or "").strip()
+        create_kwargs = dict(model=CONCIERGE_MODEL, messages=msgs,
+                             max_tokens=300, temperature=0.5)
+        if want_act:
+            # Force the {act, reply} object so a plain-prose answer to a real
+            # create request can't be silently misread as chat (act=False) and
+            # dropped with no agent turn.
+            create_kwargs["response_format"] = {"type": "json_object"}
+        resp = _concierge_llm().chat.completions.create(**create_kwargs)
+        raw = (resp.choices[0].message.content or "").strip()
         usage = getattr(resp, "usage", None)
         rec = {"model": CONCIERGE_MODEL, "request": req,
-               "response": {"reply": text},
+               "response": {"reply": raw},
                "prompt_tokens": getattr(usage, "prompt_tokens", None),
                "completion_tokens": getattr(usage, "completion_tokens",
                                             None)}
+        text, act = (raw, False)
+        if want_act:
+            text, act = _parse_act(raw)
+        # The ACT ack IS posted to the user, so it must clear the same honesty
+        # bar as a chat reply: a drifted past-tense "I've generated…" is a lie
+        # (the turn is only being queued now). The agent then does the real work
+        # and reports it truthfully.
+        if act:
+            if _CONCIERGE_CLAIM.search(text or ""):
+                text = "On it — starting that now."
+            return text, {"kind": "concierge", "stage": stage, "act": True}, \
+                rec, True
         if text and not _CONCIERGE_CLAIM.search(text):
-            return text, {"kind": "concierge", "stage": stage}, rec
-        rec["response"] = {"rejected": text or "(empty completion)"}
-        return fallback, {"kind": "canned", "stage": stage}, rec
+            return text, {"kind": "concierge", "stage": stage}, rec, False
+        rec["response"] = {"rejected": raw or "(empty completion)"}
+        return fallback, {"kind": "canned", "stage": stage}, rec, False
     except Exception as e:
         print(f"[concierge] LLM call failed: {e}", flush=True)
         return fallback, {"kind": "canned", "stage": stage}, {
             "model": CONCIERGE_MODEL, "request": req,
             "response": {"error": str(e)[:300]},
-            "prompt_tokens": None, "completion_tokens": None}
+            "prompt_tokens": None, "completion_tokens": None}, False
 
 
 @contextmanager
@@ -1259,12 +1374,18 @@ def post_message(user_id, project_id):
                              AND role IN ('user', 'assistant')
                            ORDER BY id DESC LIMIT 12""",
                         (p["chat_session_id"],))
+            _stage = _concierge_stage(idx_job["state"] if idx_job else None)
             concierge = {
-                "stage": _concierge_stage(idx_job["state"] if idx_job
-                                          else None),
+                "stage": _stage,
                 "index_error": idx_job["error"] if idx_job else None,
                 "history": list(reversed(cur.fetchall())),
                 "session_id": p["chat_session_id"],
+                # A canvas agent turn (no main video) can run only in the
+                # 'no_video' blank-canvas stage; while a video indexes or after
+                # a failed index, the pending/failed video is the program.
+                "can_act": _stage == "no_video",
+                "user_id": user_id,
+                "message_id": message_id,
             }
 
         else:
@@ -1301,12 +1422,19 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
     connection. _concierge_reply already degrades to the template on any
     model failure, so only a DB failure can swallow the reply (logged)."""
     try:
-        reply, reply_meta, llm_rec = _concierge_reply(
+        reply, reply_meta, llm_rec, act = _concierge_reply(
             ctx["stage"], ctx["history"], attachments,
-            index_error=ctx.get("index_error"))
+            index_error=ctx.get("index_error"), can_act=ctx.get("can_act"))
         conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
         try:
             cur = conn.cursor()
+
+            def _say(content, meta):
+                cur.execute("""INSERT INTO chat_messages (session_id, role,
+                                                          content, meta)
+                               VALUES (%s, 'assistant', %s, %s)""",
+                            (ctx["session_id"], content, Json(meta)))
+
             # The model call took up to ~14s. If the index state moved in
             # that window (analysis finished, failed, or a video arrived),
             # the drafted reply describes a world that no longer exists —
@@ -1317,11 +1445,46 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                            ORDER BY id DESC LIMIT 1""", (project_id,))
             row = cur.fetchone()
             stage_now = _concierge_stage(row["state"] if row else None)
-            if stage_now == ctx["stage"]:
-                cur.execute("""INSERT INTO chat_messages (session_id, role,
-                                                          content, meta)
-                               VALUES (%s, 'assistant', %s, %s)""",
-                            (ctx["session_id"], reply, Json(reply_meta)))
+            fresh = stage_now == ctx["stage"]
+
+            if fresh and act:
+                # The user asked to CREATE / BUILD something on the blank
+                # canvas — run a real agent turn (no main video required). It
+                # charges credits per turn exactly like any edit, so reserve
+                # first and fail honestly if they're tapped out or already busy.
+                if not check_and_reserve(conn, ctx["user_id"], min_credits=1.0):
+                    _say("You're out of credits — they refresh daily, or "
+                         "upgrade for a bigger monthly pool to keep creating.",
+                         {"kind": "concierge", "credits_exhausted": True})
+                elif (_running_jobs_count(cur, ctx["user_id"])
+                      >= MAX_CONCURRENT_JOBS_PER_USER):
+                    _say("I've got a couple of things still processing — I'll "
+                         "start this the moment one finishes.",
+                         {"kind": "concierge"})
+                else:
+                    # The per-project "one agent turn at a time" 409 guard in
+                    # post_message can't see a turn THIS thread hasn't enqueued
+                    # yet, so two blank-canvas requests ~1s apart could both
+                    # reach here and enqueue two turns that race EDL writes.
+                    # Serialize on the project with an advisory xact lock (held
+                    # to commit) + a re-check, so the second thread waits, sees
+                    # the first's turn, and stands down.
+                    cur.execute("SELECT pg_advisory_xact_lock(%s)",
+                                (project_id,))
+                    cur.execute("""SELECT 1 FROM video_jobs
+                                   WHERE project_id = %s AND type = 'agent_turn'
+                                     AND state IN ('queued','running')
+                                   LIMIT 1""", (project_id,))
+                    if cur.fetchone():
+                        _say("I'm still working on your previous request — I'll "
+                             "get to this one next.", {"kind": "concierge"})
+                    else:
+                        if reply:
+                            _say(reply, {"kind": "concierge", "act": True})
+                        _enqueue(cur, project_id, ctx["user_id"], "agent_turn",
+                                 {"message_id": ctx["message_id"]})
+            elif fresh:
+                _say(reply, reply_meta)
             elif llm_rec:
                 llm_rec["response"] = dict(llm_rec.get("response") or {},
                                            stale=f"index moved to "

@@ -52,6 +52,39 @@ IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
 MAX_GENERATED_IMAGES_PER_TURN = int(
     os.getenv("MAX_GENERATED_IMAGES_PER_TURN", "4"))
 
+# ── AI sound-effect generation (ElevenLabs) ──────────────────────────────────
+# A dedicated provider — xAI/OpenAI have no text-to-audio endpoint. Empty key
+# disables the generate_sfx tool everywhere gracefully (same contract as image
+# gen); the built-in CC0 pack (add_sfx) stays available regardless.
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVEN_SFX_URL = os.getenv(
+    "ELEVEN_SFX_URL", "https://api.elevenlabs.io/v1/sound-generation")
+ELEVEN_SFX_MODEL = os.getenv("ELEVEN_SFX_MODEL", "")  # "" = provider default
+SFX_MAX_DURATION_S = float(os.getenv("SFX_MAX_DURATION_S", "22"))
+SFX_TIMEOUT_S = float(os.getenv("SFX_TIMEOUT_S", "60"))
+MAX_GENERATED_SFX_PER_TURN = int(os.getenv("MAX_GENERATED_SFX_PER_TURN", "6"))
+
+# ── AI video generation (fal.ai aggregator) ──────────────────────────────────
+# NOT OpenAI-compatible — its own REST (queue.fal.run/{model}). One FAL_KEY,
+# model chosen entirely by env (swap tiers without a deploy, exactly like
+# IMAGE_GEN_MODEL). Default = Kling 2.5 Turbo Pro image-to-video (best-reputation
+# animate-a-still). Empty key disables the generate_video tool gracefully.
+FAL_KEY = os.getenv("FAL_KEY", "")
+VIDEO_PROVIDER = os.getenv("VIDEO_PROVIDER", "fal")
+VIDEO_GEN_MODEL = os.getenv(
+    "VIDEO_GEN_MODEL", "fal-ai/kling-video/v2.5-turbo/pro/image-to-video")
+FAL_QUEUE_URL = os.getenv("FAL_QUEUE_URL", "https://queue.fal.run")
+VIDEO_MAX_SECONDS = float(os.getenv("VIDEO_MAX_SECONDS", "10"))
+# Kept UNDER AGENT_TURN_TIMEOUT_S (default 450) so a slow fal job fails inside
+# the turn instead of pinning a scarce agent slot ~2x past the turn budget on
+# the 1-vCPU worker (the round-19/28 slot-starvation class). Submit(30) +
+# poll(240) + response(30) + download(90) ≈ 390 < 450. Raise BOTH this and
+# AGENT_TURN_TIMEOUT_S together if you use a slower video model.
+VIDEO_POLL_TIMEOUT_S = float(os.getenv("VIDEO_POLL_TIMEOUT_S", "240"))
+VIDEO_POLL_INTERVAL_S = float(os.getenv("VIDEO_POLL_INTERVAL_S", "6"))
+MAX_GENERATED_VIDEOS_PER_TURN = int(
+    os.getenv("MAX_GENERATED_VIDEOS_PER_TURN", "3"))
+
 # The index pipeline version is a CODE CONSTANT in schemas.py, shared with
 # the backend (which loads worker/schemas.py directly) — bump it there, by
 # commit, whenever index output changes. It is deliberately NOT an env var:
@@ -206,6 +239,17 @@ AGENT_TURN_BUDGET_GRACE = float(os.getenv("AGENT_TURN_BUDGET_GRACE", "3"))
 LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
 LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
 IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.07"))
+# AI sound effect: ElevenLabs bills a flat cost per generation — keep this in
+# sync with your plan's per-sound-effect price (charged at 1 credit = $0.01).
+SFX_PRICE_USD = float(os.getenv("SFX_PRICE_USD", "0.08"))
+# AI video: fal bills PER SECOND (Kling 2.5 Turbo Pro ≈ $0.35 for the first 5s
+# then ~$0.07/s). cost = base + max(0, seconds - base_seconds) * per_sec. Keep
+# ALL THREE in sync with the fal model page for the id in VIDEO_GEN_MODEL, or
+# credits drift from real cost. (Mirrored in db.charge_turn_credits via the
+# per-generation cost_usd stored on the llm_calls row.)
+VIDEO_BASE_PRICE_USD = float(os.getenv("VIDEO_BASE_PRICE_USD", "0.35"))
+VIDEO_BASE_SECONDS = float(os.getenv("VIDEO_BASE_SECONDS", "5"))
+VIDEO_PRICE_USD_PER_SEC = float(os.getenv("VIDEO_PRICE_USD_PER_SEC", "0.07"))
 
 # The index proxy. This is an ANALYSIS + PREVIEW artifact, not a deliverable:
 # shot detection and thumbnails read it, previews render from it (at ~480p),

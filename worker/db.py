@@ -509,7 +509,11 @@ def charge_turn_credits(conn, user_id, job_id):
                               COALESCE(SUM(completion_tokens),0) AS tout,
                               COUNT(*) FILTER (
                                   WHERE purpose IN ('image_gen','image_edit')
-                                    AND response ? 'image_url') AS n_images
+                                    AND response ? 'image_url') AS n_images,
+                              COALESCE(SUM((response->>'cost_usd')::float)
+                                  FILTER (WHERE purpose IN
+                                          ('sfx_gen','video_gen')), 0)
+                                  AS gen_cost
                        FROM llm_calls WHERE job_id = %s""", (job_id,))
         row = cur.fetchone()
         if not row["n"]:
@@ -518,6 +522,9 @@ def charge_turn_credits(conn, user_id, job_id):
         cost = (float(row["tin"]) * LLM_PRICE_IN_PER_M +
                 float(row["tout"]) * LLM_PRICE_OUT_PER_M) / 1e6
         cost += float(row["n_images"] or 0) * IMAGE_PRICE_USD
+        # Generated sound effects (flat) + AI video (per-second) — the real USD
+        # cost is stored on each generation's llm_calls row by the worker tool.
+        cost += float(row["gen_cost"] or 0)
         credits = max(MIN_TURN_CREDITS, round(cost / 0.01, 1))
         cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
                        FROM users WHERE id = %s FOR UPDATE""", (user_id,))

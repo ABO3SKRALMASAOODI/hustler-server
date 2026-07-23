@@ -19,7 +19,8 @@ import scenes
 import sheets
 import storage
 import transcribe
-from schemas import VideoIndex, VideoInfo, clamp_word_times, default_edl
+from schemas import (VideoIndex, VideoInfo, clamp_word_times, default_edl,
+                     is_canvas_program)
 
 
 PROGRESS_EVERY_S = 5.0
@@ -441,9 +442,18 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     haven't made any edits" over a session where the agent had already cut
     her video. A replacement upload or a heal of a never-successful index is
     NOT a reindex and greets normally."""
-    if not worker_db.run(dbx.latest_edl, project_id):
+    _latest = worker_db.run(dbx.latest_edl, project_id)
+    if not _latest:
         worker_db.run(dbx.insert_edl, project_id,
                       default_edl(info["duration"]), "agent")
+    elif is_canvas_program(_latest["json"]):
+        # The user built a canvas program (images/clips, no main video) FIRST,
+        # then uploaded a main video. Migrate to a main-video program that keeps
+        # the whole video so it actually renders — carry any placed inserts over
+        # (render_edl validates + snaps them onto the new keep boundaries).
+        migrated = default_edl(info["duration"])
+        migrated["inserts"] = _latest["json"].get("inserts") or []
+        worker_db.run(dbx.insert_edl, project_id, migrated, "agent")
 
     pending, out_of_credits = None, False
     if session_id and user_id and config.OPENAI_API_KEY:

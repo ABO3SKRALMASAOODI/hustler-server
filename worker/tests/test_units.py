@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import captions as caplib                                    # noqa: E402
 from renderer import build_filtergraph                       # noqa: E402
 from schemas import (EDLValidationError, default_edl,        # noqa: E402
+                     canvas_edl, is_canvas_program, program_duration,
                      describe_edl, edl_signature, output_duration,
                      validate_edl)
 from timeline import Timeline, merge_spans                   # noqa: E402
@@ -64,6 +65,71 @@ expect_reject("music gain crazy",
 expect_reject("volume span reversed",
               {"keep": [[0, 60]],
                "volume": [{"start": 10, "end": 9, "gain_db": -5}]}, 60)
+
+# ── canvas programs (round 34): image/clip-only timelines, no main video ──────
+cp = validate_edl({
+    "keep": [],
+    "canvas": {"width": 1080, "height": 1920, "fps": 30},
+    "inserts": [{"id": "i1", "asset_key": "generated/p/a.png",
+                 "kind": "image", "at_output_s": 0, "duration_s": 3.0}],
+})
+check("canvas program validates with empty keep",
+      cp.keep == [] and cp.canvas is not None and cp.canvas.width == 1080)
+check("canvas program is flagged as such", is_canvas_program(cp.model_dump()))
+check("canvas single insert stays at 0", cp.inserts[0].at_output_s == 0.0)
+check("canvas program duration = sum of inserts",
+      program_duration(cp.model_dump()) == 3.0)
+
+cp2 = validate_edl({
+    "keep": [],
+    "canvas": {"width": 1920, "height": 1080},
+    "inserts": [
+        {"id": "b", "asset_key": "k2", "kind": "image",
+         "at_output_s": 99, "duration_s": 4.0},
+        {"id": "a", "asset_key": "k1", "kind": "video",
+         "at_output_s": 0, "duration_s": 3.0}],
+})
+check("canvas inserts lay end-to-end in at_output_s order",
+      [i.id for i in cp2.inserts] == ["a", "b"] and
+      [i.at_output_s for i in cp2.inserts] == [0.0, 3.0])
+check("canvas program duration spans both inserts",
+      program_duration(cp2.model_dump()) == 7.0)
+
+cpm = validate_edl({
+    "keep": [], "canvas": {"width": 1080, "height": 1080},
+    "inserts": [{"id": "i", "asset_key": "k", "kind": "image",
+                 "at_output_s": 0, "duration_s": 5.0}],
+    "music": [{"storage_key": "music/a.mp3", "start": 0, "end": 5}],
+    "sfx": [{"id": "s", "storage_key": "sfx:whoosh", "at": 1.0}],
+})
+check("canvas program takes program-time music + sfx",
+      len(cpm.music) == 1 and len(cpm.sfx) == 1)
+
+expect_reject("canvas without inserts",
+              {"keep": [], "canvas": {"width": 1080, "height": 1080}}, None)
+expect_reject("empty keep without canvas is still rejected",
+              {"keep": [], "inserts": [{"id": "i", "asset_key": "k",
+               "kind": "image", "at_output_s": 0, "duration_s": 3.0}]}, None)
+expect_reject("canvas rejects from_transcript captions",
+              {"keep": [], "canvas": {"width": 1080, "height": 1080},
+               "inserts": [{"id": "i", "asset_key": "k", "kind": "image",
+                            "at_output_s": 0, "duration_s": 3.0}],
+               "captions": {"mode": "from_transcript"}}, None)
+expect_reject("canvas rejects source-time volume",
+              {"keep": [], "canvas": {"width": 1080, "height": 1080},
+               "inserts": [{"id": "i", "asset_key": "k", "kind": "image",
+                            "at_output_s": 0, "duration_s": 3.0}],
+               "volume": [{"start": 0, "end": 2, "gain_db": -5}]}, None)
+
+ce = canvas_edl("9:16")
+check("canvas_edl helper picks 9:16 dims",
+      ce["keep"] == [] and ce["canvas"]["width"] == 1080
+      and ce["canvas"]["height"] == 1920)
+check("default_edl is not a canvas program",
+      not is_canvas_program(default_edl(10.0)))
+mv = validate_edl({"keep": [[0, 30]]}, 60).model_dump()
+check("main-video EDL signature omits the canvas key",
+      "canvas" not in edl_signature(mv))
 
 desc = describe_edl(ok.model_dump(), 60)
 check("describe mentions segments", "2 segments" in desc)
@@ -562,6 +628,50 @@ g_pad = build_filtergraph(
 check("pad mode letterboxes with centered black bars",
       "pad=720:720:(ow-iw)/2:(oh-ih)/2:color=black" in g_pad)
 
+print("== Filtergraph: canvas program (no main video) ==")
+# One generated image, 3s, on a 9:16 canvas — the image IS the whole program.
+cv_edl = validate_edl(
+    {"keep": [], "canvas": {"width": 1080, "height": 1920, "fps": 30},
+     "inserts": [{"id": "i1", "asset_key": "generated/p/a.png",
+                  "kind": "image", "at_output_s": 0, "duration_s": 3.0}]}
+).model_dump()
+cv_tl = Timeline(cv_edl["keep"], cv_edl["inserts"])
+g_cv = build_filtergraph(
+    cv_edl, cv_tl.out_duration, False, cv_tl, None, [], {}, preview=False,
+    W=1080, H=1920, fps=30.0, frame_mode=None,
+    insert_inputs=[(1, cv_edl["inserts"][0], False)], silence_idx=0)
+check("canvas program never references a main video input [0:v]",
+      "0:v" not in g_cv)
+check("canvas program builds no main-audio [asrc] chain", "[asrc]" not in g_cv)
+check("canvas single insert is the whole concat",
+      "[v_ins0][a_ins0]concat=n=1:v=1:a=1[vc][ac]" in g_cv)
+check("canvas image insert draws silence from the anullsrc",
+      "[sil0]atrim=start=0:end=3.000" in g_cv and "[0:a]anull[sil0]" in g_cv)
+check("canvas insert normalized to the canvas frame",
+      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+      in g_cv)
+
+# Two clips back-to-back on a canvas, plus one library sfx.
+cv2_edl = validate_edl(
+    {"keep": [], "canvas": {"width": 1920, "height": 1080},
+     "inserts": [{"id": "a", "asset_key": "video_clip/p/x.mp4", "kind": "video",
+                  "at_output_s": 0, "duration_s": 4.0},
+                 {"id": "b", "asset_key": "generated/p/y.png", "kind": "image",
+                  "at_output_s": 4, "duration_s": 3.0}],
+     "sfx": [{"id": "s", "storage_key": "sfx:whoosh", "at": 1.0}]}
+).model_dump()
+cv2_tl = Timeline(cv2_edl["keep"], cv2_edl["inserts"])
+g_cv2 = build_filtergraph(
+    cv2_edl, cv2_tl.out_duration, False, cv2_tl, None, [], {}, preview=False,
+    W=1920, H=1080, fps=30.0, frame_mode=None,
+    insert_inputs=[(1, cv2_edl["inserts"][0], True),
+                   (2, cv2_edl["inserts"][1], False)],
+    silence_idx=0, sfx_inputs=[(3, cv2_edl["sfx"][0], None)])
+check("canvas concatenates both clips in order",
+      "[v_ins0][a_ins0][v_ins1][a_ins1]concat=n=2:v=1:a=1[vc][ac]" in g_cv2)
+check("canvas program mixes the sfx over the concatenated audio",
+      "amix=inputs=2" in g_cv2 and ",adelay=1000:all=1" in g_cv2)
+
 print("== Captions at 9:16 with middle position (issues 1+3) ==")
 mid_edl = validate_edl(
     {"keep": [[0, 60]],
@@ -674,6 +784,9 @@ class ToolCtx:
         # Real ctx always carries the video index; tests default to an empty
         # transcript (so caption honesty warnings fire — asserted below).
         self.index = index if index is not None else {"words": []}
+        # These mocks all stand in for main-video edits (they carry a keep
+        # list); the canvas-program path is exercised by its own tests below.
+        self.has_main_video = True
 
     def latest_edl(self):
         return self._edl
@@ -951,6 +1064,86 @@ agent_tools.insert_media(ictx3, "clips/1/rec.mp4", 0.1, duration_s=2.0,
 check("positions near a boundary use it (no needless split)",
       ictx3.written["keep"] == [[2.67, 9.29]] and
       ictx3.written["inserts"][0]["at_output_s"] == 0.0)
+
+# insert_media on a project with NO main video mints a canvas program whose
+# frame matches the placed image, and the result is a valid canvas EDL.
+GEN_IMG = {"kind": "image_ref", "storage_key": "generated/1/a.png",
+           "width": 1080, "height": 1920,
+           "meta": {"filename": "generated-1.png"}, "id": 11}
+
+
+class CanvasInsCtx(ToolCtx):
+    def __init__(self):
+        super().__init__({"keep": [], "canvas": None}, GEN_IMG)
+        self.has_main_video = False
+        self.index = {}
+        self.canvas_ratio = "16:9"
+        self.workdir = "/tmp"
+
+
+cictx = CanvasInsCtx()
+r_cv = agent_tools.insert_media(cictx, "generated/1/a.png", 0.0, duration_s=3.0,
+                                motion="zoom_in")
+check("insert on a no-video project builds a canvas program",
+      cictx.written is not None and cictx.written["keep"] == []
+      and cictx.written["canvas"]["width"] == 1080
+      and cictx.written["canvas"]["height"] == 1920)
+check("the placed image is the program's first insert",
+      cictx.written["inserts"][0]["asset_key"] == "generated/1/a.png"
+      and cictx.written["inserts"][0]["motion"] == "zoom_in")
+check("the canvas program validates and runs 3s",
+      program_duration(
+          schemas.validate_edl(cictx.written).model_dump()) == 3.0)
+
+
+# Fix: the FIRST placed asset replaces the seeded DEFAULT canvas with one that
+# matches its aspect — a vertical clip on a no-video project must not pillar-box.
+class CanvasSeededCtx(ToolCtx):
+    def __init__(self):
+        super().__init__({"keep": [], "canvas": {"width": 1920, "height": 1080,
+                          "fps": 30.0, "bg_color": "#000000"}}, GEN_IMG)
+        self.has_main_video = False
+        self.index = {}
+        self.canvas_ratio = "16:9"
+        self.workdir = "/tmp"
+
+
+cs = CanvasSeededCtx()
+agent_tools.insert_media(cs, "generated/1/a.png", 0.0, duration_s=3.0)
+check("first placed asset overrides the seeded default canvas aspect",
+      cs.written["canvas"]["width"] == 1080
+      and cs.written["canvas"]["height"] == 1920)
+
+# Fix: a canvas program's aspect is fixed by the canvas, so set_frame must be
+# rejected (otherwise the agent claims a reframe the renderer silently drops).
+expect_reject("canvas rejects set_frame (aspect fixed by the canvas)",
+              {"keep": [], "canvas": {"width": 1080, "height": 1080},
+               "inserts": [{"id": "i", "asset_key": "k", "kind": "image",
+                            "at_output_s": 0, "duration_s": 3.0}],
+               "frame": {"ratio": "9:16", "mode": "crop"}}, None)
+
+# Fix: generate_sfx must refuse an empty program BEFORE spending at the provider
+# (validate_edl would reject the write afterwards, orphaning a paid-for sound).
+agent_tools.config.ELEVENLABS_API_KEY = "test-key"
+
+
+class EmptyCanvasCtx(ToolCtx):
+    def __init__(self):
+        super().__init__({"keep": [], "canvas": {"width": 1080, "height": 1080,
+                          "fps": 30.0, "bg_color": "#000000"}})
+        self.has_main_video = False
+        self.sfx_generated = []
+        self.gen_extra_cost_usd = 0.0
+        self.credit_budget = None
+        self.workdir = "/tmp"
+
+
+ecc = EmptyCanvasCtx()
+r_sfx = agent_tools.generate_sfx(ecc, "whoosh", 0)
+check("generate_sfx refuses an empty program before spending",
+      r_sfx.startswith("REJECTED") and ecc.written is None
+      and ecc.gen_extra_cost_usd == 0.0)
+agent_tools.config.ELEVENLABS_API_KEY = ""
 
 check("validate strips source_start_s from images and zero offsets",
       schemas.validate_edl(
@@ -1636,11 +1829,46 @@ check("openai_tools hides generate_image when disabled",
           for t in at.openai_tools()))
 cfg.IMAGE_GEN_MODEL = "qwen-image-plus"
 
+# generate_sfx / generate_video: hidden entirely unless their provider key is
+# set, so the agent never advertises a capability that would only 'unavailable'.
+import eleven as _eleven                                       # noqa: E402
+import videogen as _videogen                                   # noqa: E402
+check("generate_sfx hidden without an ElevenLabs key",
+      not _eleven.sound_gen_available()
+      and "generate_sfx" not in at.capabilities_digest()
+      and all(t["function"]["name"] != "generate_sfx"
+              for t in at.openai_tools()))
+cfg.ELEVENLABS_API_KEY = "test-key"
+check("generate_sfx appears once the sound provider is configured",
+      "generate_sfx" in at.capabilities_digest()
+      and any(t["function"]["name"] == "generate_sfx"
+              for t in at.openai_tools()))
+cfg.ELEVENLABS_API_KEY = ""
+
+check("generate_video hidden without a fal key",
+      not _videogen.video_gen_available()
+      and all(t["function"]["name"] != "generate_video"
+              for t in at.openai_tools()))
+cfg.FAL_KEY = "test-key"
+cfg.VIDEO_PROVIDER = "fal"
+check("generate_video appears once the video provider is configured",
+      any(t["function"]["name"] == "generate_video"
+          for t in at.openai_tools()))
+cfg.FAL_KEY = ""
+
+check("video price = base for the base window, per-second beyond",
+      _videogen.price_for(5) == 0.35 and _videogen.price_for(10) == 0.70)
+
 
 class GenCtx(ToolCtx):
     def __init__(self, edl=None):
         super().__init__(edl or {"keep": [[0.0, 30.0]]})
         self.images_generated = []
+        self.sfx_generated = []
+        self.videos_generated = []
+        self.gen_extra_cost_usd = 0.0
+        self.credit_budget = None          # uncapped in tests
+        self.tokens_in = self.tokens_out = 0
         self.workdir = tempfile.mkdtemp()
         self.index = {"video": {"duration": 30.0, "width": 1920,
                                 "height": 1080, "fps": 30.0,
