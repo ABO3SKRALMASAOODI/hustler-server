@@ -14,3 +14,9 @@ requests==2.32.3
 # A failure here is honest (the tool reports the extractor's own reason) but it
 # is still a broken feature, so treat a stale pin as a bug, not as drift.
 yt-dlp==2026.7.4
+# Headless-Chromium website capture for worker/webrecord.py (record_website
+# tool). The BROWSER itself is baked by the Dockerfile's
+# `playwright install --with-deps chromium` — keep that line and this pin in
+# the same commit when bumping, or the runtime downloads a browser on a box
+# with no disk to spare.
+playwright==1.49.1

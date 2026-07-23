@@ -34,8 +34,44 @@ def _full_shot_line(s):
     ost = cap.get("on_screen_text")
     if ost:
         desc += f'  on-screen text: "{ost}"'
+    if cap.get("subtitles"):
+        desc += "  [burned-in captions visible]"
     return (f"  [#{s['id']} {s['start']:.1f}-{s['end']:.1f}] "
             f"{desc or '(no visual description)'}")
+
+
+def _burned_captions_line(index):
+    """A warning line when the SOURCE footage already carries subtitle-style
+    captions, detected by the index's vision pass (ShotCaption.subtitles).
+
+    Why it exists: users drop pre-captioned videos, the agent (which never
+    sees pixels) burns new captions on top, and the render shows caption
+    soup. Two flagged shots AND a quarter of the described shots keeps a
+    single misread sign from crying wolf; the transcript cross-check
+    upgrades 'looks like' to 'matches the spoken words'. Old indexes have no
+    subtitles flags -> no line, honestly silent rather than guessed."""
+    shots = index.get("shots") or []
+    capped = [s for s in shots if s.get("caption")]
+    flagged = [s for s in capped if (s.get("caption") or {}).get("subtitles")]
+    if len(flagged) < 2 or len(flagged) < 0.25 * len(capped):
+        return None
+    words = {w["w"].lower().strip(".,!?\"'") for w in
+             (index.get("words") or []) if len(w.get("w") or "") > 3}
+    matched = 0
+    for s in flagged:
+        ost = ((s.get("caption") or {}).get("on_screen_text") or "").lower()
+        hits = sum(1 for t in ost.replace(",", " ").split()
+                   if t.strip(".,!?\"'") in words)
+        if hits >= 2:
+            matched += 1
+    conf = (" — their text MATCHES the spoken words, so they are subtitles, "
+            "not signage" if matched >= 1 else "")
+    return (f"WARNING — BURNED-IN CAPTIONS: {len(flagged)} of {len(capped)} "
+            f"described shots already show caption text baked into the "
+            f"footage{conf}. Adding captions would STACK new text on top of "
+            "the old. Follow the burned-captions rules: tell the user, and "
+            "offer to hide the old ones first (blur_region bar / crop) or "
+            "place new captions clear of them.")
 
 
 def _full_index_block(index):
@@ -70,6 +106,9 @@ def _full_index_block(index):
         "below; do NOT call get_shots for this video):"
         if shots else "SHOTS: none detected.")
     lines += [_full_shot_line(s) for s in shots]
+    bc = _burned_captions_line(index)
+    if bc:
+        lines.append(bc)
     lines.append(_silence_line(index))
     if lang:
         lines.append(f"LANGUAGE (detected): {lang}.")
@@ -124,6 +163,9 @@ def _index_summary(index):
         lines.append(f"  ... {len(shots) - 17} more (use get_shots) ...")
         lines += [shot_line(s) for s in shots[-5:]]
 
+    bc = _burned_captions_line(index)
+    if bc:
+        lines.append(bc)
     lines.append(_silence_line(index))
     if index.get("language"):
         lines.append(f"LANGUAGE (detected): {index['language']}.")
@@ -577,6 +619,9 @@ def _assets_made_note(ctx):
     if getattr(ctx, "images_generated", None):
         made.append(_n(len(ctx.images_generated),
                        "generated image", "generated images"))
+    if getattr(ctx, "web_recordings", None):
+        made.append(_n(len(ctx.web_recordings),
+                       "website recording", "website recordings"))
     if not made:
         return ""
     return (" — but " + " and ".join(made)
@@ -607,6 +652,11 @@ def _turn_facts(ctx, start_version):
                      "insert_media/add_music write also succeeded")
     else:
         fetched = "none"
+    if getattr(ctx, "web_recordings", None):
+        fetched += ("; website recordings: "
+                    + ", ".join(r["storage_key"] for r in ctx.web_recordings)
+                    + " — a recording is IN the video only if an "
+                      "insert_media/add_overlay write also succeeded")
     if ctx.last_preview is not None:
         pv = (f"rendered v{ctx.last_preview.get('edl_version')} "
               f"({ctx.last_preview.get('duration_s')}s)")
@@ -779,7 +829,8 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     a denial is wrong but not a fabrication worth suppressing.)"""
     wrote = bool(ctx.versions_written)
     acted = bool(ctx.versions_written or ctx.images_generated
-                 or ctx.urls_fetched)
+                 or ctx.urls_fetched
+                 or getattr(ctx, "web_recordings", None))
     previewed = ctx.last_preview is not None
     viol = _reply_violations(draft, wrote, previewed, acted)
     # Echo detection only polices turns that DID nothing: a working turn's

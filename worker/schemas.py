@@ -428,9 +428,25 @@ class Frame(BaseModel):
     """Output frame. ratio 'source' keeps the original dimensions; anything
     else is achieved by crop (center-crop + scale), pad (fit + black bars) or
     pad_blur (fit over a blurred scaled copy). Never upscales beyond the
-    source's pixel budget — see renderer.frame_dims."""
+    source's pixel budget — see renderer.frame_dims.
+
+    focus_x/focus_y (round 36): where the SUBJECT sits in the source frame,
+    as fractions 0-1 — the crop window is centered on that point instead of
+    the frame middle, which is what makes a 16:9 -> 9:16 conversion follow an
+    off-center speaker instead of chopping them in half. None = 0.5 (the
+    legacy center crop) and is dropped from signatures, so every stored EDL
+    renders byte-identically. Only meaningful for mode 'crop'."""
     ratio: Literal["source", "16:9", "9:16", "1:1", "4:5"] = "source"
     mode: Literal["crop", "pad", "pad_blur"] = "crop"
+    focus_x: Optional[float] = None
+    focus_y: Optional[float] = None
+
+    @field_validator("focus_x", "focus_y")
+    @classmethod
+    def _clamp_focus(cls, v):
+        if v is None:
+            return None
+        return round(min(max(float(v), 0.0), 1.0), 3)
 
 
 MAX_INSERT_DURATION_S = 600.0
@@ -661,6 +677,12 @@ class OverlayItem(BaseModel):
     x: AnimFloat = 0.5
     y: AnimFloat = 0.5
     scale: float = 0.4
+    # fit 'cover' (round 36): the overlay fills the WHOLE output frame
+    # (scaled up + cropped, x/y/scale ignored) — the b-roll cutaway mode:
+    # picture switches to the overlay while the program's audio keeps
+    # playing. None = the legacy width-fraction PIP and is dropped from
+    # signatures, so stored EDLs render byte-identically.
+    fit: Optional[Literal["cover"]] = None
     opacity: Optional[float] = None      # 0.05-1.0; None = fully opaque
     rotation: Optional[float] = None     # degrees, static
     source_start_s: Optional[float] = None   # video overlays: seek into clip
@@ -1567,6 +1589,12 @@ class ShotCaption(BaseModel):
     people: str = ""
     action: str = ""
     on_screen_text: str = ""
+    # Round 36: does this shot show SUBTITLE-style caption text burned into
+    # the footage (spoken-word captions, not signs/UI)? Detected by the same
+    # vision pass that writes the fields above. Default False so indexes
+    # from before this field load unchanged — absence means "not checked",
+    # which the summary treats the same as "no".
+    subtitles: bool = False
 
 
 class Shot(BaseModel):

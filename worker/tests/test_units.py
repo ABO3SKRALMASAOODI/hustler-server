@@ -4710,4 +4710,92 @@ try:
 finally:
     wconfig.URL_FETCH_ENABLED = True
 
+# ---- round 36: context-aware music defaults --------------------------------
+# The prod failure this pins: a 13s wave-ambience video (0 transcribed words)
+# got music at -14dB with a sidechain duck keyed on the waves — the user said
+# "im not hearing the music" twice. With no speech under the window the tool
+# must make the music the lead audio, not a bed.
+_saved_resolve = agent_tools._resolve_music
+agent_tools._resolve_music = lambda ctx, key: (
+    {"name": "Song", "duration_s": 200.0, "storage_key": key}, None)
+try:
+    _idx_speech = {"sentences": [{"t0": 1.0, "t1": 9.0}], "words": [],
+                   "silences": []}
+    _idx_mute = {"sentences": [], "words": [], "silences": []}
+    ctx_m1 = EdlStubCtx(_idx_speech, 20.0, {"keep": [[0.0, 20.0]]})
+    agent_tools.add_music(ctx_m1, "library:x")
+    _m = ctx_m1.latest_edl()["json"]["music"][0]
+    check("music under speech defaults to the -18dB smooth-duck bed",
+          _m["gain_db"] == -18.0 and _m["duck"] is True
+          and _m["duck_mode"] == "smooth")
+    ctx_m2 = EdlStubCtx(_idx_mute, 20.0, {"keep": [[0.0, 20.0]]})
+    _r2 = agent_tools.add_music(ctx_m2, "library:x")
+    _m2 = ctx_m2.latest_edl()["json"]["music"][0]
+    check("music with no speech becomes the LEAD audio (-4dB, no duck)",
+          _m2["gain_db"] == -4.0 and not _m2["duck"]
+          and "LEAD audio" in _r2)
+    ctx_m3 = EdlStubCtx(_idx_mute, 20.0, {"keep": [[0.0, 20.0]]})
+    _r3 = agent_tools.add_music(ctx_m3, "library:x", gain_db=-14.0)
+    check("an explicit low gain on a speechless video is honored but flagged",
+          ctx_m3.latest_edl()["json"]["music"][0]["gain_db"] == -14.0
+          and "far below" in _r3)
+    ctx_m4 = EdlStubCtx(_idx_speech, 20.0, {"keep": [[10.0, 20.0]]})
+    agent_tools.add_music(ctx_m4, "library:x")
+    check("speech the cut removed does not count — music still leads",
+          ctx_m4.latest_edl()["json"]["music"][0]["gain_db"] == -4.0)
+finally:
+    agent_tools._resolve_music = _saved_resolve
+
+# ---- round 36: subject-aware crop + b-roll cover in the graph ---------------
+_edl_focus = default_edl(60.0)
+_edl_focus["keep"] = [[0.0, 30.0]]
+_edl_focus["frame"] = {"ratio": "9:16", "mode": "crop", "focus_x": 0.31}
+_edl_focus = validate_edl(_edl_focus, 60.0).model_dump()
+import renderer as _rnd                                       # noqa: E402
+_gf = _rnd.build_filtergraph(
+    _edl_focus, 60.0, True, Timeline(_edl_focus["keep"]), None, [],
+    {"sentences": [], "words": [], "silences": []}, preview=True,
+    W=1080, H=1920, frame_mode="crop", src_w=1920, src_h=1080,
+    frame_focus=(0.31, None))
+check("focused crop emits the clip()-bounded x expression",
+      "crop=1080:1920:x='clip(iw*0.3100-ow/2,0,iw-ow)'" in _gf)
+_gf_center = _rnd.build_filtergraph(
+    _edl_focus, 60.0, True, Timeline(_edl_focus["keep"]), None, [],
+    {"sentences": [], "words": [], "silences": []}, preview=True,
+    W=1080, H=1920, frame_mode="crop", src_w=1920, src_h=1080,
+    frame_focus=None)
+check("no focus keeps the exact legacy crop string",
+      "crop=1080:1920,fps=" in _gf_center and "clip(iw*" not in _gf_center)
+
+_edl_cov = default_edl(60.0)
+_edl_cov["keep"] = [[0.0, 30.0]]
+_edl_cov["overlays"] = [{"id": "ov1", "asset_key": "clips/1/b.mp4",
+                         "kind": "video", "start": 5.0, "duration_s": 4.0,
+                         "fit": "cover"}]
+_edl_cov = validate_edl(_edl_cov, 60.0).model_dump()
+check("fit=cover survives validation", _edl_cov["overlays"][0]["fit"] == "cover")
+_gc = _rnd.build_filtergraph(
+    _edl_cov, 60.0, True, Timeline(_edl_cov["keep"]), None, [],
+    {"sentences": [], "words": [], "silences": []}, preview=True,
+    W=1280, H=720, src_w=1280, src_h=720,
+    overlay_inputs=[(1, _edl_cov["overlays"][0])])
+check("cover overlay scales to FILL the frame and crops the overflow",
+      "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720"
+      in _gc)
+check("cover overlay still windows on program time",
+      "enable='between(t,5.000,9.000)'" in _gc)
+
+# ---- round 36: record_website honesty gates --------------------------------
+import webrecord as _wrec                                     # noqa: E402
+check("record_website visibility tracks browser availability exactly",
+      agent_tools._tool_disabled("record_website") == (not _wrec.available()))
+if not _wrec.available():
+    check("record_website vanishes from schema and capabilities",
+          "record_website" not in
+          [t["function"]["name"] for t in agent_tools.openai_tools()]
+          and "- record_website(" not in agent_tools.capabilities_digest())
+    import agent_prompt as _ap                                # noqa: E402
+    check("prompt drops the WEBSITE CAPTURE bullet without the browser",
+          "WEBSITE CAPTURE" not in _ap.system_prompt())
+
 print(f"\nALL {PASS} CHECKS PASSED")

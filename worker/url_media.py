@@ -246,13 +246,28 @@ def _ytdlp_available():
         return False
 
 
-def _extract(url, workdir, prefer=None):
+def _bot_walled(detail):
+    """YouTube's datacenter-IP bot check — the one extractor failure that a
+    different player client often gets past, so it is worth exactly one
+    retry. Matched on the phrases yt-dlp surfaces for it."""
+    d = (detail or "").lower()
+    return ("sign in to confirm" in d or "not a bot" in d
+            or "--cookies" in d)
+
+
+def _extract(url, workdir, prefer=None, client_override=None):
     """Pull media out of a page with yt-dlp. Returns (path, info dict).
 
     Runs as a subprocess rather than through the python API so a hung or
     runaway extractor is killed by a timeout we control — the agent loop only
     checks its wall clock between tool calls, so an extractor that never
-    returns would otherwise hang the whole turn."""
+    returns would otherwise hang the whole turn.
+
+    client_override: an --extractor-args player_client value for the retry
+    path. YouTube bot-checks datacenter IPs on the default web client far
+    more aggressively than on the tv/mweb clients, so a bot-walled first
+    attempt earns ONE retry with alternate clients (see fetch below). This
+    is best-effort — when YouTube blocks both, the honest error stands."""
     max_bytes = config.FETCH_MAX_BYTES
     # Cap the resolution rather than taking "best": a 4K source is a ~10x
     # bigger download and a slower render for a clip that gets composited into
@@ -289,6 +304,8 @@ def _extract(url, workdir, prefer=None):
            "--match-filter", "!is_live",
            "--write-info-json",
            "-o", os.path.join(workdir, "dl.%(ext)s")]
+    if client_override:
+        cmd += ["--extractor-args", f"youtube:player_client={client_override}"]
     if prefer == KIND_AUDIO:
         # The user asked for a song. Pulling the video track and throwing it
         # away wastes the bulk of the download.
@@ -350,6 +367,33 @@ def _extract(url, workdir, prefer=None):
         raise FetchMediaError(
             f"that media is over the {max_bytes >> 20} MB limit")
     return path, info
+
+
+def _extract_with_fallback(url, workdir, prefer=None):
+    """_extract, with one alternate-client retry on YouTube's bot wall.
+
+    Real user impact before this: a pasted youtu.be link failed with 'Sign
+    in to confirm you're not a bot' on the very first customer who tried it —
+    Render's egress IP is a datacenter address, which the default web client
+    challenges. The tv/mweb clients are challenged far less; when they fail
+    too, the original honest error is what the user sees."""
+    try:
+        return _extract(url, workdir, prefer=prefer)
+    except FetchMediaError as e:
+        if not _bot_walled(str(e)):
+            raise
+        # Drop any partial files so the largest-file pick after the retry
+        # can never hand back a fragment of the failed attempt.
+        for p in glob.glob(os.path.join(workdir, "dl.*")):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        try:
+            return _extract(url, workdir, prefer=prefer,
+                            client_override="tv,mweb")
+        except FetchMediaError:
+            raise e
 
 
 def _download_direct(url, workdir):
@@ -446,7 +490,7 @@ def fetch(url, workdir, prefer=None):
                 "that link is a web page rather than a media file, and this "
                 "deployment cannot extract media from pages")
         try:
-            path, info = _extract(url, workdir, prefer=prefer)
+            path, info = _extract_with_fallback(url, workdir, prefer=prefer)
         except FetchMediaError:
             if direct_error is not None:
                 raise FetchMediaError(str(direct_error))
@@ -464,7 +508,7 @@ def fetch(url, workdir, prefer=None):
                 os.remove(path)
             except OSError:
                 pass
-            path, info = _extract(url, workdir, prefer=prefer)
+            path, info = _extract_with_fallback(url, workdir, prefer=prefer)
             extractor = (info or {}).get("extractor_key") or "yt-dlp"
             kind, probed = classify(path)
         else:

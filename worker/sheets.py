@@ -66,7 +66,7 @@ def build_contact_sheets(shots, thumb_paths, out_dir, prefix="sheet"):
 
 CAPTION_PROMPT = """This is a contact sheet of shots from one video. Each tile is labeled "#<shot id>  <start>-<end>".
 For EVERY tile, describe what you see. Reply with ONLY a JSON array, one object per tile:
-[{"shot": <id>, "setting": "<where/background>", "people": "<who is visible, or 'none'>", "action": "<what is happening>", "on_screen_text": "<any visible text, or ''>"}]
+[{"shot": <id>, "setting": "<where/background>", "people": "<who is visible, or 'none'>", "action": "<what is happening>", "on_screen_text": "<any visible text, or ''>", "subtitles": <true if the tile shows SUBTITLE-STYLE captions burned into the footage (styled spoken-word text, usually lower/center third) — signs, UI, watermarks and usernames do NOT count; else false>}]
 Tiles present: %s"""
 
 
@@ -92,6 +92,7 @@ def caption_shots(sheets, shots_by_id):
                 people=str(row.get("people") or "")[:200],
                 action=str(row.get("action") or "")[:300],
                 on_screen_text=str(row.get("on_screen_text") or "")[:300],
+                subtitles=bool(row.get("subtitles")),
             )
             any_ok = True
     return any_ok

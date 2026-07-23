@@ -192,6 +192,18 @@ FETCH_MAX_HEIGHT = int(os.getenv("FETCH_MAX_HEIGHT", "1080"))
 # per attempt; the constant is a runaway-loop backstop, not the real bound.
 MAX_FETCHED_URLS_PER_TURN = int(os.getenv("MAX_FETCHED_URLS_PER_TURN", "8"))
 
+# Recording a live web page as video (worker/webrecord.py) — headless
+# Chromium capture of a scrolling page. WEB_RECORD_ENABLED is the kill
+# switch (the tool + prompt claims vanish, same contract as URL_FETCH);
+# the capability also self-disables when playwright/Chromium are not baked
+# into the image (webrecord.available()). Durations: MAX_DURATION_S bounds
+# what the agent may ask for; WALL_S is the hard ceiling on the whole
+# browse-and-capture including page load, enforced around every step.
+WEB_RECORD_ENABLED = os.getenv("WEB_RECORD_ENABLED", "1") == "1"
+WEB_RECORD_MAX_DURATION_S = float(os.getenv("WEB_RECORD_MAX_DURATION_S",
+                                            "30"))
+WEB_RECORD_WALL_S = float(os.getenv("WEB_RECORD_WALL_S", "90"))
+
 # Worker tuning
 TMP_DIR = os.getenv("WORKER_TMP_DIR", "/tmp/valmera")
 POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))

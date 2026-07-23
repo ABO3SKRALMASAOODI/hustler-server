@@ -126,9 +126,16 @@ def frame_dims(src_w, src_h, ratio):
     return _even(long_out), _even(short_out)
 
 
-def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid):
+def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
+                     focus=None):
     """Append graph parts that bring in_label to exactly WxH @ fps, sar 1.
-    mode: crop (center-crop), pad (black bars), pad_blur (blurred backdrop)."""
+    mode: crop (center-crop), pad (black bars), pad_blur (blurred backdrop).
+
+    focus (round 36): (fx, fy) fractions of the source frame the crop window
+    centers on, or None for the legacy center crop. Only the crop mode uses
+    it — pad modes never discard picture. None/center emits the EXACT legacy
+    filter string, so every stored EDL (all focus-less) renders
+    byte-identically."""
     tail = f"fps={fps:.3f},setsar=1,format=yuv420p"
     if mode == "pad":
         parts.append(
@@ -144,9 +151,26 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid):
         parts.append(f"[pbBG{uid}][pbFG{uid}]overlay=(W-w)/2:(H-h)/2,"
                      f"{tail}[{out_label}]")
     else:                              # crop
-        parts.append(
-            f"[{in_label}]scale={W}:{H}:force_original_aspect_ratio=increase,"
-            f"crop={W}:{H},{tail}[{out_label}]")
+        fx = focus[0] if focus else None
+        fy = focus[1] if focus else None
+        if (fx is not None and abs(float(fx) - 0.5) > 1e-6) or \
+                (fy is not None and abs(float(fy) - 0.5) > 1e-6):
+            # Fractions survive the uniform scale, so the focus point maps
+            # straight onto the SCALED frame; clip() keeps the window inside
+            # the picture when the subject sits near an edge.
+            xe = (f"x='clip(iw*{float(fx if fx is not None else 0.5):.4f}"
+                  f"-ow/2,0,iw-ow)'")
+            ye = (f"y='clip(ih*{float(fy if fy is not None else 0.5):.4f}"
+                  f"-oh/2,0,ih-oh)'")
+            parts.append(
+                f"[{in_label}]scale={W}:{H}:"
+                f"force_original_aspect_ratio=increase,"
+                f"crop={W}:{H}:{xe}:{ye},{tail}[{out_label}]")
+        else:
+            parts.append(
+                f"[{in_label}]scale={W}:{H}:"
+                f"force_original_aspect_ratio=increase,"
+                f"crop={W}:{H},{tail}[{out_label}]")
 
 
 def _region_parts(parts, in_label, out_label, regions, sw, sh,
@@ -311,7 +335,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       src_w=None, src_h=None, src_pad=0.0,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
                       src_sar=1.0, src_fps=None,
-                      overlay_inputs=None, gfx_ass_path=None):
+                      overlay_inputs=None, gfx_ass_path=None,
+                      frame_focus=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -521,8 +546,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          + f"[a_seg{i}]")
     if do_norm:
         for i in range(n):
+            # frame_focus reaches ONLY the main footage: the focus point was
+            # measured on the source video, so inserts (below) keep the
+            # center crop.
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
-                             mode, f"s{i}")
+                             mode, f"s{i}", focus=frame_focus)
 
     # insert blocks: trim to their window (source_start_s picks where in
     # the clip the window starts), normalize like everything else
@@ -901,7 +929,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             off = float(item.get("source_start_s") or 0.0)
             chain.append(f"trim=start={off:.3f}:end={off + o_dur:.3f}")
             chain.append("setpts=PTS-STARTPTS")
-        chain.append(f"scale={ow}:-2")
+        if item.get("fit") == "cover":
+            # B-roll cutaway (round 36): fill the WHOLE output frame — scale
+            # up + center-crop the overflow. The position expression below
+            # still runs; with w == main_w and the default x/y of 0.5 it
+            # resolves to 0, and entrances/exits/opacity keep working.
+            chain.append(f"scale={W or 1280}:{H or 720}:"
+                         f"force_original_aspect_ratio=increase,"
+                         f"crop={W or 1280}:{H or 720}")
+        else:
+            chain.append(f"scale={ow}:-2")
         chain.append("format=rgba")
         op = item.get("opacity")
         if op is not None and float(op) < 0.999:
@@ -1330,6 +1367,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     W, H = frame_dims(info["width"], info["height"],
                       (frame or {}).get("ratio"))
     frame_mode = (frame or {}).get("mode", "crop") if frame else None
+    frame_focus = ((frame.get("focus_x"), frame.get("focus_y"))
+                   if frame and (frame.get("focus_x") is not None or
+                                 frame.get("focus_y") is not None) else None)
     fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
 
     inserts = edl.get("inserts") or []
@@ -1465,7 +1505,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               src_sar=info.get("sar") or 1.0,
                               src_fps=float(info["fps"]) or fps,
                               overlay_inputs=overlay_inputs,
-                              gfx_ass_path=gfx_path)
+                              gfx_ass_path=gfx_path,
+                              frame_focus=frame_focus)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).

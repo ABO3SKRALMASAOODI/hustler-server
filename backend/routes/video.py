@@ -1570,10 +1570,15 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
 #  User-authored EDL writes (frame selector, timeline inserts, voiceover)
 # ------------------------------------------------------------------ #
 
-def _apply_edl_op(edl, op, args, assets_by_id):
+def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
+                  speech_spans=None):
     """Apply one UI operation to an EDL dict. Returns (new_edl, desc) or
     raises ValueError with a user-facing message. Mirrors the agent tools'
-    snapping semantics (worker/agent_tools.py)."""
+    snapping semantics (worker/agent_tools.py).
+
+    src_dur: the original's duration (needed by the keep-editing ops).
+    speech_spans: [(t0, t1)] source-time sentence spans, or None when the
+    index isn't loaded — used only by add_music's context-aware defaults."""
     edl = json.loads(json.dumps(edl))   # deep copy
     if op == "set_frame":
         ratio = str(args.get("ratio") or "source")
@@ -1581,8 +1586,158 @@ def _apply_edl_op(edl, op, args, assets_by_id):
         if ratio == "source":
             edl["frame"] = None
             return edl, "output frame back to source"
-        edl["frame"] = {"ratio": ratio, "mode": mode}
+        frame = {"ratio": ratio, "mode": mode}
+        # Subject-aware crop focus (round 36) — same field the agent's
+        # auto_reframe writes; the UI passes it through when it has one.
+        for k in ("focus_x", "focus_y"):
+            if args.get(k) is not None:
+                frame[k] = float(args[k])
+        edl["frame"] = frame
         return edl, f"output frame {ratio} ({mode})"
+
+    if op == "split_keep":
+        # Split the take under the playhead into two clips — the CapCut
+        # scissors. Purely a keep-list rewrite: the program's picture and
+        # timing are unchanged until the user deletes/trims a side (round-35
+        # span_to_out handles the resulting contiguous boundary exactly).
+        at = float(args.get("at_program_s") or 0.0)
+        tl = wtimeline.Timeline(edl["keep"], edl.get("inserts") or [],
+                                edl.get("speed") or [])
+        src = tl.out_to_src(at)
+        if src is None:
+            raise ValueError("Move the playhead onto the footage to split — "
+                             "it is over an inserted clip.")
+        keep = [list(x) for x in edl["keep"]]
+        for i, (s, e) in enumerate(keep):
+            if s + 0.05 < src < e - 0.05:
+                cut = round(float(src), 3)
+                keep[i:i + 1] = [[s, cut], [cut, e]]
+                edl["keep"] = keep
+                return edl, f"split the clip at {round(at, 2)}s"
+        raise ValueError("That point is already a clip edge — nothing to "
+                         "split.")
+
+    if op == "remove_keep_segment":
+        idx = int(args.get("index", -1))
+        keep = [list(x) for x in edl.get("keep") or []]
+        if not (0 <= idx < len(keep)):
+            return edl, "clip already gone"
+        if len(keep) == 1 and not (edl.get("inserts") or []):
+            raise ValueError("Can't delete the only clip — the video would "
+                             "be empty. Trim it instead.")
+        s, e = keep.pop(idx)
+        edl["keep"] = keep
+        return edl, (f"deleted the clip covering {round(s, 2)}-"
+                     f"{round(e, 2)}s of the source")
+
+    if op == "trim_keep_segment":
+        # Drag a clip edge by delta_s PROGRAM seconds (negative = leftward).
+        # Applied in SOURCE time via the local speed factor, clamped to the
+        # neighbours — dragging outward restores cut footage, inward cuts
+        # more, exactly like a clip trim in any NLE.
+        idx = int(args.get("index", -1))
+        edge = str(args.get("edge") or "")
+        try:
+            delta = float(args.get("delta_s"))
+        except (TypeError, ValueError):
+            raise ValueError("Bad trim delta.")
+        keep = [list(x) for x in edl.get("keep") or []]
+        if not (0 <= idx < len(keep)) or edge not in ("start", "end"):
+            raise ValueError("Bad trim target.")
+        s, e = keep[idx]
+        pieces = wschemas.speed_pieces(s, e, edl.get("speed") or [])
+        if edge == "start":
+            factor = pieces[0][2] if pieces else 1.0
+            lo = keep[idx - 1][1] if idx > 0 else 0.0
+            new_s = round(min(max(s + delta * factor, lo), e - 0.1), 3)
+            if abs(new_s - s) < 0.01:
+                return edl, "no trim"
+            keep[idx][0] = new_s
+        else:
+            factor = pieces[-1][2] if pieces else 1.0
+            hi = (keep[idx + 1][0] if idx < len(keep) - 1
+                  else float(src_dur or e + abs(delta) + 1.0))
+            new_e = round(max(min(e + delta * factor, hi), s + 0.1), 3)
+            if abs(new_e - e) < 0.01:
+                return edl, "no trim"
+            keep[idx][1] = new_e
+        edl["keep"] = keep
+        return edl, (f"trimmed the clip to {keep[idx][0]}-{keep[idx][1]}s "
+                     "(source)")
+
+    if op == "trim_music":
+        prog = wschemas.program_duration(edl)
+        for m in (edl.get("music") or []):
+            if m.get("id") == args.get("id"):
+                start = round(min(max(float(args.get("start",
+                                                     m["start"]) or 0.0),
+                                      0.0), max(0.0, prog - 0.5)), 2)
+                end = round(min(max(float(args.get("end", m["end"])
+                                          or prog), start + 0.5), prog), 2)
+                m["start"], m["end"] = start, end
+                return edl, f"music {m['id']} now plays {start}-{end}s"
+        return edl, "music already gone"
+
+    if op == "retime_overlay":
+        prog = wschemas.program_duration(edl)
+        for ov in (edl.get("overlays") or []):
+            if ov.get("id") == args.get("id"):
+                if args.get("start") is not None:
+                    ov["start"] = round(min(max(float(args["start"]), 0.0),
+                                            max(0.0, prog - 0.2)), 2)
+                if args.get("duration_s") is not None:
+                    ov["duration_s"] = round(
+                        min(max(float(args["duration_s"]), 0.2),
+                            max(0.2, prog - float(ov["start"]))), 2)
+                else:
+                    over = float(ov["start"]) + float(ov["duration_s"]) - prog
+                    if over > 0.01:
+                        ov["duration_s"] = round(prog - float(ov["start"]), 2)
+                # Keyframes past a shortened window would fail validation
+                # and reject the whole write — trim them, same as the agent
+                # tool does.
+                for prop in ("x", "y"):
+                    if isinstance(ov.get(prop), list):
+                        ov[prop] = wschemas.clip_anim(ov[prop],
+                                                      float(ov["duration_s"]))
+                return edl, (f"overlay {ov['id']} now "
+                             f"{ov['start']}-"
+                             f"{round(float(ov['start']) + float(ov['duration_s']), 2)}s")
+        return edl, "overlay already gone"
+
+    if op == "remove_overlay":
+        before = edl.get("overlays") or []
+        edl["overlays"] = [o for o in before
+                           if o.get("id") != args.get("id")]
+        if len(edl["overlays"]) == len(before):
+            return edl, "overlay already gone"
+        return edl, f"removed overlay {args.get('id')}"
+
+    if op == "retime_text":
+        prog = wschemas.program_duration(edl)
+        for tx in (edl.get("texts") or []):
+            if tx.get("id") == args.get("id"):
+                length = float(tx["end"]) - float(tx["start"])
+                if args.get("start") is not None:
+                    tx["start"] = round(min(max(float(args["start"]), 0.0),
+                                            max(0.0, prog - 0.3)), 2)
+                    if args.get("end") is None:
+                        tx["end"] = round(min(float(tx["start"]) + length,
+                                              prog), 2)
+                if args.get("end") is not None:
+                    tx["end"] = round(min(max(float(args["end"]),
+                                              float(tx["start"]) + 0.3),
+                                          prog), 2)
+                return edl, (f"text {tx['id']} now "
+                             f"{tx['start']}-{tx['end']}s")
+        return edl, "text already gone"
+
+    if op == "remove_text":
+        before = edl.get("texts") or []
+        edl["texts"] = [t for t in before if t.get("id") != args.get("id")]
+        if len(edl["texts"]) == len(before):
+            return edl, "text already gone"
+        return edl, f"removed text {args.get('id')}"
 
     if op == "insert_media":
         asset = assets_by_id.get(int(args.get("asset_id") or 0))
@@ -1699,11 +1854,29 @@ def _apply_edl_op(edl, op, args, assets_by_id):
         n = 1
         while f"mus{n}" in taken:
             n += 1
+        # Context-aware defaults, mirroring worker add_music (round 36):
+        # under speech the track is a -18dB smooth-ducked bed; with no
+        # surviving speech it is the LEAD audio at -4dB with no duck — the
+        # unconditional -18dB default made every timeline-added song on a
+        # speechless video inaudible.
+        speech = 0.0
+        if speech_spans:
+            tl = wtimeline.Timeline(edl.get("keep") or [],
+                                    edl.get("inserts") or [],
+                                    edl.get("speed") or [])
+            for t0, t1 in speech_spans:
+                for a, b in tl.span_to_out(t0, t1):
+                    speech += max(0.0, min(b, end) - max(a, start))
+        lead = speech < 1.0
         items.append({"id": f"mus{n}", "storage_key": asset["storage_key"],
                       "start": start, "end": end,
-                      "gain_db": -18.0, "duck": True})
+                      "gain_db": -4.0 if lead else -18.0,
+                      "duck": not lead,
+                      "duck_mode": None if lead else "smooth"})
         edl["music"] = items
-        return edl, f"music added {start}-{end}s (mus{n})"
+        return edl, (f"music added {start}-{end}s (mus{n})"
+                     + (" — lead audio, no speech under it" if lead else
+                        " — ducked under the speech"))
 
     if op == "move_music":
         prog = wschemas.program_duration(edl)
@@ -1800,9 +1973,26 @@ def user_edl_write(user_id, project_id):
                        FROM assets WHERE project_id = %s""", (project_id,))
         assets_by_id = {a["id"]: a for a in cur.fetchall()}
 
+        # Sentence spans feed add_music's context-aware defaults only —
+        # loaded lazily so every other op skips the index read.
+        speech_spans = None
+        if op == "add_music":
+            try:
+                cur.execute("""SELECT json->'sentences' AS s FROM indexes
+                               WHERE video_sha256 = %s""",
+                            (original["sha256"],))
+                row = cur.fetchone()
+                speech_spans = [(float(x["t0"]), float(x["t1"]))
+                                for x in ((row and row["s"]) or [])]
+            except Exception:
+                speech_spans = None
+
         try:
             new_edl, desc = _apply_edl_op(edl_row["json"], op, args,
-                                          assets_by_id)
+                                          assets_by_id,
+                                          src_dur=float(
+                                              original["duration_s"]),
+                                          speech_spans=speech_spans)
             # Any op that changed the program's geometry (inserts here;
             # keep/speed are agent-only) re-anchors every program-time item
             # through the SAME remap the worker tools run: content-anchored

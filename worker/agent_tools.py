@@ -23,6 +23,7 @@ import storage
 import videogen
 import timeline as timeline_mod
 import url_media
+import webrecord
 from captions import KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, EDLValidationError, Frame,
                      canvas_edl, clip_anim, describe_edl, DEFAULT_CANVAS_FPS,
@@ -89,6 +90,7 @@ class ToolContext:
         self.sfx_generated = []       # sounds created by generate_sfx
         self.videos_generated = []    # clips created by generate_video
         self.urls_fetched = []        # assets created by fetch_url
+        self.web_recordings = []      # assets created by record_website
         # USD cost of non-LLM generations this turn (sfx flat, video per-second)
         # — added to running_credits so the in-turn spend cap sees them.
         self.gen_extra_cost_usd = 0.0
@@ -383,6 +385,8 @@ def get_shots(ctx, start=0, end=None):
         ost = cap.get("on_screen_text")
         if ost:
             desc += f'; on-screen text: "{ost}"'
+        if cap.get("subtitles"):
+            desc += "; [burned-in captions visible]"
         lines.append(f"[#{s['id']} {_fmt_t(s['start'])}-{_fmt_t(s['end'])}] "
                      f"{desc or '(no visual caption)'}")
     return _cap("\n".join(lines))
@@ -1201,8 +1205,27 @@ def list_music_library(ctx, mood=None):
         f"  library:{t['slug']} — {music_library.describe(t)}" for t in hits)
 
 
-def add_music(ctx, storage_key, start=None, end=None, gain_db=-18.0,
-              duck=True, offset_s=None, fade_in_s=None, fade_out_s=None,
+def _speech_overlap_s(ctx, edl, start_out, end_out):
+    """Seconds of SURVIVING speech inside an OUTPUT window — the fact that
+    decides whether music is a bed under a voice or the lead audio.
+    Sentences are source-time; span_to_out maps what the current cut keeps."""
+    sents = ctx.index.get("sentences") or []
+    if not sents:
+        return 0.0
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+    except Exception:
+        return 0.0
+    total = 0.0
+    for sn in sents:
+        for a, b in tl.span_to_out(sn["t0"], sn["t1"]):
+            total += max(0.0, min(b, end_out) - max(a, start_out))
+    return total
+
+
+def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
+              duck=None, offset_s=None, fade_in_s=None, fade_out_s=None,
               loop=True):
     track, err = _resolve_music(ctx, storage_key)
     if err:
@@ -1224,10 +1247,23 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=-18.0,
         e = round(min(max(float(end), s + 0.1), out_dur), 2)
     except (TypeError, ValueError):
         return "REJECTED: start/end must be numbers (OUTPUT-timeline seconds)."
-    try:
-        g = float(gain_db)
-    except (TypeError, ValueError):
-        return "REJECTED: gain_db must be a number."
+    # Context-aware defaults (round 36). Music under a VOICE sits low and
+    # ducks; music with no speech under it IS the audio and must be heard.
+    # The -18dB/duck=True pair, applied unconditionally, made every track on
+    # a speech-less video near-inaudible — and the sidechain duck then dipped
+    # it further on every ambient sound. Only the DEFAULTS are contextual;
+    # explicit arguments always win (they just earn an advisory note).
+    speech_s = _speech_overlap_s(ctx, edl, s, e)
+    lead = speech_s < 1.0
+    if gain_db is None:
+        g = -4.0 if lead else -18.0
+    else:
+        try:
+            g = float(gain_db)
+        except (TypeError, ValueError):
+            return "REJECTED: gain_db must be a number."
+    if duck is None:
+        duck = not lead
     span = e - s
     try:
         off = max(0.0, float(offset_s)) if offset_s is not None else None
@@ -1269,6 +1305,23 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=-18.0,
         res += ("\nNote: music ducks smoothly under speech (a sidechain dip "
                 "that follows the voice, not a hard step) — "
                 "set_music_fit(duck_mode='step') switches to the legacy duck.")
+    if res.startswith("EDL v"):
+        if lead and gain_db is None:
+            res += ("\nNote: no speech survives under this window, so the "
+                    "music was added as the LEAD audio — gain -4dB, no "
+                    "ducking. If it competes with the original sound, lower "
+                    "the original with set_volume rather than burying the "
+                    "music.")
+        elif lead and g <= -10.0:
+            res += (f"\nNote: no speech survives under this window, and at "
+                    f"{g:g}dB the music will sit far below the original "
+                    "audio — lead music usually plays at -6..0dB. Raise it "
+                    "with set_audio_gain if the user cannot hear it.")
+        elif lead and duck:
+            res += ("\nNote: there is no speech to duck under in this "
+                    "window — the sidechain will dip the music on every "
+                    "loud ORIGINAL sound instead (waves, crowd, noise). "
+                    "set_music_fit(duck=false) if that is not wanted.")
 
     # Tell the agent what the track can actually cover, so it reports the
     # truth rather than assuming the span got filled.
@@ -1643,10 +1696,19 @@ def set_volume(ctx, start, end, gain_db):
     return ctx.write_edl(edl, f"volume {g:+.1f}dB on {s}-{e}s (source time)")
 
 
-def set_frame(ctx, ratio, mode="crop"):
+def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None):
+    payload = {"ratio": str(ratio), "mode": str(mode or "crop")}
+    for k, v in (("focus_x", focus_x), ("focus_y", focus_y)):
+        if v is not None:
+            try:
+                payload[k] = float(v)
+            except (TypeError, ValueError):
+                return ("REJECTED: focus_x/focus_y must be numbers 0-1 — "
+                        "fractions of the SOURCE frame where the subject "
+                        "sits ((0,0) = top-left). Use look_at or "
+                        "auto_reframe to find the subject.")
     try:
-        frame = Frame.model_validate({"ratio": str(ratio),
-                                      "mode": str(mode or "crop")})
+        frame = Frame.model_validate(payload)
     except Exception:
         return ('REJECTED: ratio must be one of source, 16:9, 9:16, 1:1, 4:5 '
                 'and mode one of crop, pad, pad_blur. Example: '
@@ -1656,8 +1718,115 @@ def set_frame(ctx, ratio, mode="crop"):
         edl["frame"] = None
         return ctx.write_edl(edl, "output frame back to the source ratio")
     edl["frame"] = frame.model_dump()
-    return ctx.write_edl(
-        edl, f"output frame set to {frame.ratio} ({frame.mode})")
+    aimed = ""
+    if frame.mode == "crop" and (frame.focus_x is not None or
+                                 frame.focus_y is not None):
+        aimed = (f", crop centered on ({frame.focus_x if frame.focus_x is not None else 0.5:g}, "
+                 f"{frame.focus_y if frame.focus_y is not None else 0.5:g}) "
+                 "of the source frame")
+    res = ctx.write_edl(
+        edl, f"output frame set to {frame.ratio} ({frame.mode}){aimed}")
+    if (res.startswith("EDL v") and frame.mode == "crop"
+            and frame.focus_x is None and frame.focus_y is None
+            and frame.ratio in ("9:16", "1:1", "4:5")
+            and ctx.has_main_video):
+        res += ("\nNote: this is a CENTER crop — if the subject is not "
+                "dead-center it will sit off-frame or be cut. Call "
+                "auto_reframe to aim the crop at the subject, or pass "
+                "focus_x/focus_y yourself (fractions of the source frame, "
+                "from look_at).")
+    return res
+
+
+def auto_reframe(ctx, ratio="9:16", mode="crop"):
+    """Convert the output frame AND aim the crop at the real subject: sample
+    frames across the kept footage, ask the vision model where the subject
+    sits, write set_frame with that focus. The honest fix for '9:16 just
+    cut the middle of the screen'."""
+    if str(ratio) == "source":
+        return set_frame(ctx, "source")
+    if str(mode or "crop") != "crop":
+        # pad modes never discard picture, so there is nothing to aim.
+        return set_frame(ctx, ratio, mode)
+    if not ctx.has_main_video:
+        return set_frame(ctx, ratio, "crop")
+    if not llm.vision_available():
+        res = set_frame(ctx, ratio, "crop")
+        if res.startswith("EDL v"):
+            res += ("\nNote: no vision model is configured, so the crop is "
+                    "the plain CENTER crop — auto framing needs vision.")
+        return res
+    try:
+        proxy = ctx.proxy_path()
+    except Exception as err:
+        res = set_frame(ctx, ratio, "crop")
+        if res.startswith("EDL v"):
+            res += (f"\nNote: could not fetch frames ({err}), so the crop "
+                    "is the plain CENTER crop.")
+        return res
+    edl = dict(ctx.latest_edl()["json"])
+    keep = edl.get("keep") or [[0.0, ctx.duration]]
+    kept_total = sum(e - s for s, e in keep) or ctx.duration
+    # 5 samples spread over the KEPT footage only — framing follows what the
+    # viewer will actually see, not the cut material.
+    frames, names = [], []
+    for i in range(5):
+        target = kept_total * (i + 0.5) / 5
+        acc = 0.0
+        t = keep[-1][1] - 0.01
+        for s, e in keep:
+            if acc + (e - s) >= target:
+                t = s + (target - acc)
+                break
+            acc += e - s
+        fp = os.path.join(ctx.workdir, f"reframe_{i}.jpg")
+        try:
+            media.frame_at(proxy, t, fp)
+            frames.append(fp)
+            names.append(f"kept-footage frame {i + 1} @{t:.1f}s")
+        except media.MediaError:
+            pass
+    if not frames:
+        res = set_frame(ctx, ratio, "crop")
+        if res.startswith("EDL v"):
+            res += ("\nNote: could not extract frames, so the crop is the "
+                    "plain CENTER crop.")
+        return res
+    prompt = (f"These are {len(frames)} frames sampled across one video. "
+              "For EACH frame, give the position of the MAIN SUBJECT "
+              "(the person/face if there is one, else the visual focal "
+              "point) as fractions of the frame, (0,0) = top-left. Reply "
+              "with ONLY a JSON array, one object per frame in order: "
+              '[{"x": 0.0-1.0, "y": 0.0-1.0}]')
+    reply = llm.ask_vision(prompt, frames, purpose="vision_reframe",
+                           image_names=names)
+    pts = []
+    for row in (llm.extract_json_array(reply) or []):
+        try:
+            pts.append((min(max(float(row["x"]), 0.0), 1.0),
+                        min(max(float(row["y"]), 0.0), 1.0)))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not pts:
+        res = set_frame(ctx, ratio, "crop")
+        if res.startswith("EDL v"):
+            res += ("\nNote: the vision model gave no usable subject "
+                    "positions, so the crop is the plain CENTER crop.")
+        return res
+    # Median, not mean: one wide establishing shot must not drag the crop
+    # off every talking-head frame.
+    xs, ys = sorted(p[0] for p in pts), sorted(p[1] for p in pts)
+    fx, fy = xs[len(xs) // 2], ys[len(ys) // 2]
+    res = set_frame(ctx, ratio, "crop", focus_x=round(fx, 3),
+                    focus_y=round(fy, 3))
+    if res.startswith("EDL v"):
+        res += (f"\nMeasured on {len(pts)} sampled frames: subject sits at "
+                f"({fx:.2f}, {fy:.2f}) of the source frame — the crop "
+                "follows it instead of the frame center. The focus is one "
+                "FIXED point for the whole video (it does not track "
+                "movement); if the subject moves across the frame between "
+                "shots, say so honestly and offer pad_blur instead.")
+    return res
 
 
 def set_color_grade(ctx, preset):
@@ -2319,9 +2488,10 @@ def _parse_anim_float(v, name):
 
 def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
                 scale=0.4, opacity=None, entrance=None, exit=None,
-                source_start_s=None):
+                source_start_s=None, fit=None):
     """Draw an asset OVER the program picture for a program-time window —
-    picture-in-picture, a corner logo, a cover with opacity."""
+    picture-in-picture, a corner logo, or (fit='cover') a full-frame B-ROLL
+    cutaway while the program's audio keeps playing."""
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
@@ -2372,6 +2542,14 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
         if v is not None and v not in OVERLAY_ANIMS:
             return (f"REJECTED: {label} must be one of "
                     f"{', '.join(OVERLAY_ANIMS)}.")
+    fitv = None
+    if fit is not None:
+        fitv = str(fit).strip().lower()
+        if fitv in ("", "none", "pip"):
+            fitv = None
+        elif fitv != "cover":
+            return ("REJECTED: fit must be 'cover' (full-frame b-roll "
+                    "cutaway) or omitted (width-fraction PIP).")
     xv, xerr = _parse_anim_float(x if x is not None else 0.5, "x")
     if xerr:
         return xerr
@@ -2393,18 +2571,25 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
     overlays = [dict(o) for o in (edl.get("overlays") or [])]
     item = {"id": _next_item_id(overlays, "ov"), "asset_key": asset_key,
             "kind": kind, "start": s, "duration_s": dur, "x": xv, "y": yv,
-            "scale": sc, "opacity": op, "entrance": entrance, "exit": exit,
+            "scale": sc, "fit": fitv, "opacity": op,
+            "entrance": entrance, "exit": exit,
             "source_start_s": off if kind == "video" else None}
     overlays.append(item)
     edl["overlays"] = overlays
     moving = isinstance(xv, list) or isinstance(yv, list)
     pos = ("a keyframed drift" if moving
            else f"center ({xv:g}, {yv:g})")
+    what = (f"FULL-FRAME b-roll cover" if fitv == "cover"
+            else f"{sc:g}x frame width at {pos}")
     res = ctx.write_edl(
         edl, f"overlay {kind} '{name}' at {s}-{round(s + dur, 2)}s "
-             f"(program time), {sc:g}x frame width at {pos} [{item['id']}]")
+             f"(program time), {what} [{item['id']}]")
     if res.startswith("EDL v"):
         notes = []
+        if fitv == "cover":
+            notes.append("the picture fully switches to this asset for the "
+                         "window while the program's AUDIO (speech, music) "
+                         "keeps playing — the b-roll cutaway")
         if kind == "video":
             notes.append("the overlay's own audio does NOT play (silent "
                          "picture-in-picture) — say so if the user wants "
@@ -3186,6 +3371,88 @@ def fetch_url(ctx, url, as_kind=None):
     return (f"Downloaded \"{got['filename']}\"{detail} as a "
             f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
             f"the project but NOT in the video yet — {nxt}.")
+
+
+def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
+    """Record a scrolling screen capture of a live web page (headless
+    browser) and register it as a project video asset."""
+    if not webrecord.available():
+        return ("REJECTED: website recording is not available on this "
+                "deployment. Offer the user the alternative: they can screen-"
+                "record the page themselves and upload the file.")
+    url = _clean_url(url)
+    if not url:
+        return "REJECTED: record_website needs a url."
+    # Runaway backstop, same contract as MAX_FETCHED_URLS_PER_TURN: each
+    # capture is individually wall-clock-bounded; this only stops a loop.
+    if len(ctx.web_recordings) >= 3:
+        return ("REJECTED: 3 pages already recorded this turn, which is the "
+                "limit. Place what you have, or ask the user to continue in "
+                "another message.")
+    # Default the viewport to the shape the capture will LAND in — the
+    # project's output frame — so a 9:16 edit gets a phone-shaped page
+    # capture instead of a squashed desktop one.
+    if orientation is None:
+        edl = ctx.latest_edl()["json"]
+        ratio = ((edl.get("frame") or {}).get("ratio")
+                 or (edl.get("canvas") or {}).get("ratio") or "")
+        orientation = ("portrait" if ratio == "9:16"
+                       else "square" if ratio == "1:1" else "landscape")
+    elif str(orientation).strip().lower() not in ("landscape", "portrait",
+                                                  "square"):
+        return ("REJECTED: orientation must be landscape, portrait or "
+                "square — or omit it to match the project's output frame.")
+    else:
+        orientation = str(orientation).strip().lower()
+    try:
+        dur = float(duration_s) if duration_s is not None else 12.0
+    except (TypeError, ValueError):
+        return "REJECTED: duration_s must be a number of seconds (4-30)."
+
+    workdir = os.path.join(ctx.workdir, f"webrec_{uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        got = webrecord.record(url, workdir, duration_s=dur,
+                               orientation=orientation,
+                               scroll=bool(scroll))
+    except webrecord.WebRecordError as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f"Could not record that page — {e}. Tell the user plainly "
+                "and offer the alternative (they screen-record it and "
+                "upload). Do NOT claim anything was recorded or added.")
+    except Exception as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f"Could not record that page ({str(e)[:200]}). Tell the "
+                "user it did not work. Do NOT claim anything was added.")
+
+    path = got["path"]
+    key = url_media.storage_key(ctx.project_id, url_media.KIND_VIDEO, path)
+    try:
+        storage.upload_file(path, key, url_media.content_type(path))
+    except Exception as e:
+        return (f"Recorded the page but could not save the capture "
+                f"({str(e)[:160]}). Do NOT claim it was added; try again.")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    from urllib.parse import urlparse as _up
+    domain = (_up(got.get("final_url") or url).hostname or "site")
+    fname = f"{domain} capture.mp4"
+    ctx.db.run(dbx.insert_asset, ctx.project_id, url_media.KIND_VIDEO, key,
+               bytes_=None, duration_s=got.get("duration_s"),
+               width=got.get("width"), height=got.get("height"),
+               fps=30.0,
+               meta={"filename": fname, "recorded": True,
+                     "source_url": got.get("final_url") or url,
+                     "page_title": got.get("page_title")})
+    ctx.web_recordings.append({"storage_key": key, "url": url})
+    return (f"Recorded \"{got.get('page_title') or domain}\" — "
+            f"{got['duration_s']:.1f}s at {got['width']}x{got['height']} "
+            f"(the page loads, holds, then smooth-scrolls to the bottom): "
+            f"storage_key={key}. It is saved to the project but NOT in the "
+            "video yet — splice it with insert_media, or lay it over the "
+            "footage with add_overlay (fit='cover' for a full-frame "
+            "cutaway while the speech continues). The capture is SILENT.")
 
 
 # ------------------------------------------------------------------ #
@@ -4199,18 +4466,21 @@ TOOLS = {
                            + ", ".join(music_library.MOODS) + ".",
                            {"mood": {"type": "string",
                                      "enum": list(music_library.MOODS)}}),
-    "add_music": (add_music, "Mix music under the edit as BACKGROUND MUSIC "
-                  "(default -18dB, ducked under speech). storage_key is "
-                  "either a 'library:<slug>' from list_music_library() or an "
-                  "exact key from list_assets(kind='music') (the user's own "
-                  "uploads) — never invent one. start/end are OUTPUT-timeline "
-                  "seconds and DEFAULT TO THE WHOLE VIDEO, so omit them for "
-                  "'add some music'. Fades in/out by default. loop=true (the "
+    "add_music": (add_music, "Mix music into the edit. The defaults are "
+                  "CONTEXT-AWARE: under speech the track sits low as a bed "
+                  "(-18dB, ducked); when NO speech survives under the window "
+                  "the music is the LEAD audio (-4dB, no ducking) so the "
+                  "user actually hears it. Pass gain_db/duck only to "
+                  "override that. storage_key is either a 'library:<slug>' "
+                  "from list_music_library() or an exact key from "
+                  "list_assets(kind='music') (the user's own uploads) — "
+                  "never invent one. start/end are OUTPUT-timeline seconds "
+                  "and DEFAULT TO THE WHOLE VIDEO, so omit them for 'add "
+                  "some music'. Fades in/out by default. loop=true (the "
                   "default) repeats a short track to fill the span; "
                   "offset_s starts partway into the track, e.g. to skip a "
-                  "slow intro. duck=true ducks the music under speech — new "
-                  "items duck SMOOTHLY by default (a sidechain dip that "
-                  "follows the voice; set_music_fit(duck_mode='step') "
+                  "slow intro. Ducking is SMOOTH by default (a sidechain dip "
+                  "that follows the voice; set_music_fit(duck_mode='step') "
                   "restores the legacy hard -12dB duck).",
                   {"storage_key": {"type": "string"},
                    "start": {"type": "number"},
@@ -4319,15 +4589,36 @@ TOOLS = {
                     "gain_db": {"type": "number"}}),
     "set_frame": (set_frame, "Set the output aspect ratio for every render. "
                   "ratio: source, 16:9, 9:16, 1:1 or 4:5; mode: crop "
-                  "(center-crop, default), pad (black bars) or pad_blur "
-                  "(blurred backdrop). Never upscales beyond the source's "
-                  "pixels. Example — 'make it 9:16 for TikTok': "
-                  "set_frame(\"9:16\", \"crop\").",
+                  "(default), pad (black bars) or pad_blur (blurred "
+                  "backdrop). focus_x/focus_y aim the CROP at the subject "
+                  "(fractions of the source frame, (0,0) = top-left) — "
+                  "without them the crop is the dead-center window, which "
+                  "chops an off-center speaker. For 'make it 9:16' on real "
+                  "footage PREFER auto_reframe, which measures the subject "
+                  "and sets the focus for you. Never upscales beyond the "
+                  "source's pixels.",
                   {"ratio": {"type": "string",
                              "enum": ["source", "16:9", "9:16", "1:1",
                                       "4:5"]},
                    "mode": {"type": "string",
-                            "enum": ["crop", "pad", "pad_blur"]}}),
+                            "enum": ["crop", "pad", "pad_blur"]},
+                   "focus_x": {"type": "number"},
+                   "focus_y": {"type": "number"}}),
+    "auto_reframe": (auto_reframe, "Convert the output frame AND aim the "
+                     "crop at the real subject: samples frames across the "
+                     "kept footage, asks the vision model where the subject "
+                     "sits, and writes set_frame with that focus. THE tool "
+                     "for 'make it 9:16 / vertical / for TikTok' on real "
+                     "footage — a plain center crop chops off-center "
+                     "subjects. The focus is one fixed point (it does not "
+                     "track motion); it reports the measured position so "
+                     "you can judge and adjust with set_frame focus_x/"
+                     "focus_y.",
+                     {"ratio": {"type": "string",
+                                "enum": ["9:16", "1:1", "4:5", "16:9",
+                                         "source"]},
+                      "mode": {"type": "string",
+                               "enum": ["crop", "pad", "pad_blur"]}}),
     "insert_media": (insert_media, "Splice an uploaded video clip or image "
                      "INTO the edit at ANY position in the FINAL edited "
                      "video — mid-take positions split the take cleanly at a "
@@ -4418,6 +4709,24 @@ TOOLS = {
                   {"url": {"type": "string"},
                    "as_kind": {"type": "string",
                                "enum": ["clip", "music", "image"]}}),
+    "record_website": (record_website, "RECORD A LIVE WEB PAGE as video: a "
+                       "headless browser opens the URL at the project's "
+                       "aspect, holds the top, smooth-scrolls to the bottom "
+                       "and holds — the classic product-demo pan — and the "
+                       "capture becomes a project video asset. THE tool for "
+                       "'show my website / landing page / this product page "
+                       "in the edit'. duration_s 4-30 (default 12). "
+                       "orientation defaults to the project's output frame. "
+                       "scroll=false just holds the top of the page. The "
+                       "capture is SILENT and shows the PUBLIC page (no "
+                       "logins, no clicks); place it with insert_media or "
+                       "add_overlay(fit='cover').",
+                       {"url": {"type": "string"},
+                        "duration_s": {"type": "number"},
+                        "orientation": {"type": "string",
+                                        "enum": ["landscape", "portrait",
+                                                 "square"]},
+                        "scroll": {"type": "boolean"}}),
     "set_color_grade": (set_color_grade, "Apply a color-grade preset to the "
                         "whole video (captions stay unstyled): vibrant, "
                         "warm, cool, bw, vintage, cinematic — or 'none' to "
@@ -4535,30 +4844,37 @@ TOOLS = {
                      {"id": {"type": "string"}}),
     "add_overlay": (add_overlay, "Draw an image or video clip OVER the "
                     "program picture for a window of PROGRAM time — "
-                    "picture-in-picture b-roll, a corner logo, a full-frame "
-                    "cover with opacity. asset_key from list_assets "
-                    "(kind='clip'/'image') or a generated/fetched asset. "
-                    "duration_s defaults: image 4s, video the clip's length "
-                    "(bounded by the program end). x/y = the overlay's "
-                    "CENTER as fractions of the frame (0.5,0.5 = centered; "
-                    "0.85,0.15 = top-right corner) — pass a keyframe list "
-                    "[{t,v}] (t = seconds from the overlay's own start) for "
-                    "a slow drift/slide. scale = overlay width as a "
-                    "fraction of the frame width (0.05-1.0, default 0.4). "
-                    "opacity 0.05-1.0 (omit = opaque). entrance/exit: fade, "
-                    "slide_left, slide_right, slide_up. source_start_s "
-                    "seeks into a video overlay. HONEST LIMITS: a video "
-                    "overlay's audio does NOT play (silent PIP), overlays "
-                    "render above footage but BELOW captions, and they do "
-                    "NOT track objects in the footage. For a full-frame "
-                    "cutaway that replaces the footage use insert_media "
-                    "instead.",
+                    "picture-in-picture, a corner logo, or fit='cover' for "
+                    "a FULL-FRAME B-ROLL CUTAWAY: the picture switches to "
+                    "the asset while the program's audio (the speaker, the "
+                    "music) keeps playing — THE way to show what the "
+                    "speaker is talking about without touching the timing. "
+                    "asset_key from list_assets (kind='clip'/'image') or a "
+                    "generated/fetched/recorded asset. duration_s defaults: "
+                    "image 4s, video the clip's length (bounded by the "
+                    "program end); b-roll reads best at 2-6s. x/y = the "
+                    "overlay's CENTER as fractions of the frame (ignored "
+                    "with fit='cover') — pass a keyframe list [{t,v}] (t = "
+                    "seconds from the overlay's own start) for a slow "
+                    "drift/slide. scale = overlay width as a fraction of "
+                    "the frame width (0.05-1.0, default 0.4; ignored with "
+                    "fit='cover'). opacity 0.05-1.0 (omit = opaque). "
+                    "entrance/exit: fade, slide_left, slide_right, "
+                    "slide_up. source_start_s seeks into a video overlay. "
+                    "HONEST LIMITS: a video overlay's audio does NOT play "
+                    "(silent), overlays render above footage but BELOW "
+                    "captions (captions stay visible over b-roll), and "
+                    "they do NOT track objects in the footage. "
+                    "insert_media PAUSES the talk and adds time; "
+                    "fit='cover' does not — pick by whether the speech "
+                    "should continue.",
                     {"asset_key": {"type": "string"},
                      "start": {"type": "number"},
                      "duration_s": {"type": "number"},
                      "x": {"type": ["number", "array"]},
                      "y": {"type": ["number", "array"]},
                      "scale": {"type": "number"},
+                     "fit": {"type": "string", "enum": ["cover"]},
                      "opacity": {"type": "number"},
                      "entrance": {"type": "string",
                                   "enum": list(OVERLAY_ANIMS)},
@@ -4757,6 +5073,8 @@ REQUIRED_ARGS = {
     "set_audio_gain": ["kind", "id", "gain_db"],
     "set_volume": ["start", "end", "gain_db"],
     "set_frame": ["ratio"],
+    "auto_reframe": ["ratio"],
+    "record_website": ["url"],
     "insert_media": ["asset_key", "at_output_s"],
     "remove_insert": ["id"],
     "set_color_grade": ["preset"],
@@ -4800,7 +5118,8 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "set_caption_style", "add_music", "remove_music",
                "swap_music", "set_music_fit",
                "add_sfx", "move_sfx", "remove_sfx",
-               "set_audio_gain", "set_volume", "set_frame",
+               "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
+               "record_website",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
@@ -4828,6 +5147,8 @@ def _tool_disabled(name):
         return not videogen.video_gen_available()
     if name == "fetch_url":
         return not config.URL_FETCH_ENABLED
+    if name == "record_website":
+        return not webrecord.available()
     # Same rule for the music library: a deployment whose image shipped no
     # tracks must not advertise one, or the agent offers music it cannot
     # deliver and then has to walk it back.
