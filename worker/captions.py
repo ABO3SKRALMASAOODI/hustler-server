@@ -27,6 +27,8 @@ relative to the 1280x720 the base numbers were tuned on.
 import os
 import re
 
+from schemas import MAX_WORDS_PER_CAPTION
+
 FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
 MAX_LINE_CHARS = 42
@@ -285,8 +287,13 @@ PREMIUM_MARGIN_X = {"left": 0.085, "center": 0.10}
 
 # Karaoke (dynamic) captions: groups of up to N words; the word being
 # spoken pops and lights up in the highlight color. Groups larger than
-# KARAOKE_HARD_MAX read as a wall of text, so max_words is clamped there
-# (the caption tools disclose the clamp to the agent).
+# KARAOKE_HARD_MAX read as a wall of text, so max_words is clamped there.
+# THIS CLAMP CAN NEVER MOVE: it is applied at RENDER time, and 3 stored
+# prod EDLs (proj 13 v3-5, dynamic + max_words 6 — written in the round-7
+# window before the tool-side clamp existed) render 4-word groups under it;
+# raising it would make a fresh render of those versions differ from their
+# cached previews. Group sizes above 4 ride the NEW captions.karaoke_group_n
+# field instead, baked by the tools at write time (round 35).
 KARAOKE_MAX_WORDS = 3
 KARAOKE_HARD_MAX = 4
 DEFAULT_HIGHLIGHT = "#FFE14D"
@@ -500,17 +507,23 @@ def _inline_hl(hex_rgb):
 
 
 def events_dynamic(out_words, style=None, max_words=None,
-                   line_chars=MAX_LINE_CHARS):
+                   line_chars=MAX_LINE_CHARS, karaoke_group_n=None):
     """Karaoke captions (modern reels style): the phrase shows in groups of
     up to 3 words and the word being SPOKEN pops in and lights up in the
     highlight color; the others stay in the base caption color. One Dialogue
     per word — timing comes from the real transcript, never invented.
     Chunks are kept within one line's char budget so the pop animation never
-    shifts a wrap point mid-word on narrow frames."""
+    shifts a wrap point mid-word on narrow frames. An explicit
+    karaoke_group_n (baked by the tools at write time) wins; without it the
+    legacy interpretation of max_words is frozen forever (see
+    KARAOKE_HARD_MAX)."""
     s = _norm_style(style)
     hl = _inline_hl(s.get("highlight_color") or DEFAULT_HIGHLIGHT)
-    group_n = min(int(max_words), KARAOKE_HARD_MAX) if max_words \
-        else KARAOKE_MAX_WORDS
+    if karaoke_group_n:
+        group_n = max(1, int(karaoke_group_n))
+    else:
+        group_n = min(int(max_words), KARAOKE_HARD_MAX) if max_words \
+            else KARAOKE_MAX_WORDS
     active_pre = (r"{\1c" + hl + r"\fscx62\fscy62"
                   r"\t(0,90,\fscx114\fscy114)\t(90,170,\fscx106\fscy106)}")
     chunks, cur, chars = [], [], 0
@@ -1029,7 +1042,12 @@ def events_premium(out_words, style=None, max_words=None,
     accent = _inline_hl(s.get("highlight_color") or DEFAULT_HIGHLIGHT)
     upper = s["uppercase"] if s["uppercase"] is not None else p["uppercase"]
     emph = {n for n in (_norm_word(w) for w in (emphasis_words or [])) if n}
-    max_w = min(int(max_words), 12) if max_words else p["max_words"]
+    # Clamped to the schema-wide max (16): the schema/tools advertise 1-16,
+    # so a lower silent clamp here would misgroup an honest 13-16 request.
+    # Safe for stored versions — pre-round-35 validation rejected >12, so no
+    # stored EDL can carry one (verified against prod Jul 23 2026).
+    max_w = min(int(max_words), MAX_WORDS_PER_CAPTION) if max_words \
+        else p["max_words"]
     line_chars = _premium_line_chars(p, s, play_res)
     chunks = _premium_chunks(out_words, max_w,
                              line_chars * PREMIUM_MAX_LINES)
@@ -1288,7 +1306,8 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
             events = events_dynamic(
                 out_words, style=global_style,
                 max_words=captions.get("max_words_per_caption"),
-                line_chars=line_chars_for(global_style, play_res))
+                line_chars=line_chars_for(global_style, play_res),
+                karaoke_group_n=captions.get("karaoke_group_n"))
         else:
             events = events_from_transcript(
                 out_words, max_words=captions.get("max_words_per_caption"),

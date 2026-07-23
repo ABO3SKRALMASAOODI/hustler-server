@@ -26,7 +26,9 @@ MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0
 GAIN_MAX_DB = 12.0
 HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
-MAX_WORDS_PER_CAPTION = 12
+# Widened 12 -> 16 (round 35) and enforcement changed from reject to clamp:
+# an out-of-range grouping is a taste choice to trim, not an impossible state.
+MAX_WORDS_PER_CAPTION = 16
 # Continuous caption-size fine-tune multiplier bounds (see CaptionStyle).
 CAPTION_SIZE_SCALE_MIN = 0.5
 CAPTION_SIZE_SCALE_MAX = 3.0
@@ -38,6 +40,143 @@ class EDLValidationError(ValueError):
 
 def _r(t):
     return round(float(t), 2)
+
+
+# ------------------------------------------------------------------ #
+#  EDL v2 — the universal keyframe primitive                           #
+# ------------------------------------------------------------------ #
+# Any AnimFloat field accepts either a plain number (constant — exactly what
+# every EDL ever written stores, so signatures are untouched) or a list of
+# keyframes. `t` is seconds from the ELEMENT's own start; `ease` describes
+# the curve INTO this keyframe from the previous one. The renderer compiles
+# keyframes to ffmpeg expressions; tools clamp values through _norm_anim.
+
+EASINGS = ("linear", "in", "out", "in_out", "hold")
+
+
+class Keyframe(BaseModel):
+    t: float
+    v: float
+    # None = linear (kept None so a linear keyframe adds no signature noise)
+    ease: Optional[Literal["linear", "in", "out", "in_out", "hold"]] = None
+
+
+# NOTE: float FIRST — pydantic must prefer the scalar branch for numbers.
+AnimFloat = Union[float, List[Keyframe]]
+
+
+def is_animated(v):
+    return isinstance(v, list)
+
+
+def anim_value(v, t):
+    """Evaluate an AnimFloat at element-local time t (python-side mirror of
+    the renderer's expression compiler — used by tools and tests)."""
+    if not isinstance(v, list):
+        return float(v)
+    kfs = [(k["t"], k["v"], k.get("ease")) if isinstance(k, dict)
+           else (k.t, k.v, k.ease) for k in v]
+    if not kfs:
+        return 0.0
+    if t <= kfs[0][0]:
+        return float(kfs[0][1])
+    for i in range(1, len(kfs)):
+        t0, v0, _ = kfs[i - 1]
+        t1, v1, ease = kfs[i]
+        if t <= t1:
+            if t1 - t0 <= 1e-9 or ease == "hold":
+                return float(v0) if t < t1 else float(v1)
+            p = (t - t0) / (t1 - t0)
+            if ease == "in":
+                p = p * p
+            elif ease == "out":
+                p = p * (2 - p)
+            elif ease == "in_out":
+                p = p * p * (3 - 2 * p)
+            return float(v0 + (v1 - v0) * p)
+    return float(kfs[-1][1])
+
+
+def anim_bounds(v):
+    """(min, max) an AnimFloat can reach — for range validation."""
+    if not isinstance(v, list):
+        return float(v), float(v)
+    vals = [(k["v"] if isinstance(k, dict) else k.v) for k in v] or [0.0]
+    return float(min(vals)), float(max(vals))
+
+
+def _norm_anim(v, name, lo, hi, max_t=None, max_kfs=24):
+    """Validate + clamp an AnimFloat in place. Constants clamp to [lo, hi];
+    keyframe times must be sorted, non-negative and within max_t; values
+    clamp. Returns the normalized value (a float, or a list of Keyframe)."""
+    if not isinstance(v, list):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise EDLValidationError(f"{name} must be a number or keyframes.")
+        return round(min(max(f, lo), hi), 4)
+    if not v:
+        raise EDLValidationError(f"{name}: keyframe list is empty.")
+    if len(v) > max_kfs:
+        raise EDLValidationError(
+            f"{name}: {len(v)} keyframes — at most {max_kfs}.")
+    kfs = []
+    last_t = -1e9
+    for i, k in enumerate(v):
+        k = k if isinstance(k, Keyframe) else Keyframe.model_validate(k)
+        k.t = round(float(k.t), 3)
+        if k.t < 0:
+            raise EDLValidationError(f"{name}[{i}].t is negative.")
+        if max_t is not None and k.t > max_t + 0.01:
+            raise EDLValidationError(
+                f"{name}[{i}].t {k.t} exceeds the element's own length "
+                f"({round(max_t, 2)}s — keyframe times are LOCAL).")
+        if k.t <= last_t + 1e-9:
+            raise EDLValidationError(
+                f"{name}: keyframe times must be strictly increasing.")
+        last_t = k.t
+        k.v = round(min(max(float(k.v), lo), hi), 4)
+        if k.ease == "linear":
+            k.ease = None       # canonical: default drops from signatures
+        kfs.append(k)
+    if len(kfs) == 1:
+        return kfs[0].v         # one keyframe is a constant
+    return kfs
+
+
+def clip_anim(v, new_dur):
+    """Trim an AnimFloat to a shortened element duration.
+
+    Every site that shrinks an element's duration_s must run its keyframed
+    properties through this — _norm_anim hard-rejects keyframes past the
+    element's length, so an untrimmed curve makes validate_edl reject the
+    WHOLE later write (a keep cut, an insert removal) over a keyframe the
+    user never mentioned. Returns v unchanged when nothing exceeds new_dur
+    (signature-stable for untouched items). Otherwise: keyframes at
+    t <= new_dur survive, the curve's value AT new_dur is appended as the
+    final keyframe (sampled with the incoming keyframe's ease, so the
+    truncated ramp bends exactly like the original up to the cut), and a
+    single surviving point collapses to a constant."""
+    if not isinstance(v, list) or not v:
+        return v
+    def _t(k):
+        return float((k.get("t") if isinstance(k, dict) else k.t) or 0.0)
+    if all(_t(k) <= new_dur + 0.01 for k in v):
+        return v
+    kept = [dict(k) if isinstance(k, dict) else
+            {"t": k.t, "v": k.v, "ease": k.ease}
+            for k in v if _t(k) <= new_dur + 1e-9]
+    incoming = next((k for k in v if _t(k) > new_dur + 1e-9), None)
+    kf = {"t": round(max(0.0, new_dur), 3),
+          "v": round(float(anim_value(v, new_dur)), 4)}
+    ease = (incoming.get("ease") if isinstance(incoming, dict)
+            else incoming.ease) if incoming is not None else None
+    if ease:
+        kf["ease"] = ease
+    kept.append(kf)
+    if len(kept) < 2:
+        return kf["v"]
+    return kept
 
 
 # ------------------------------------------------------------------ #
@@ -197,6 +336,14 @@ class CaptionsFromTranscript(BaseModel):
     # Chunk word-timed captions into groups of at most N words. Timing always
     # comes from the real word timestamps in the index — never invented.
     max_words_per_caption: Optional[int] = None
+    # Karaoke (legacy-dynamic) group size, BAKED at write time. The renderer
+    # historically clamped dynamic grouping at 4 regardless of
+    # max_words_per_caption; 3 stored prod EDLs (proj 13 v3-5, mw=6) rely on
+    # that clamp, so the render-time interpretation of EXISTING fields can
+    # never change. Raising the cap therefore rides a NEW field: tools write
+    # the concrete group size here (<= 8), old EDLs leave it None and render
+    # exactly as always. None never reaches the signature.
+    karaoke_group_n: Optional[int] = None
     style: Optional[CaptionStyle] = None
     # Keywords the premium presets emphasize (accent color / highlight box /
     # serif italic) wherever they appear in the transcript. Chosen by the
@@ -237,6 +384,11 @@ class MusicItem(BaseModel):
     fade_in_s: Optional[float] = None   # the item's own fade, not the program's
     fade_out_s: Optional[float] = None
     loop: Optional[bool] = None         # opt-IN; None/False both mean "don't"
+    # Round 35 — smooth speech ducking (sidechain compression: the music
+    # dips WITH the voice and swells back in the gaps, instead of the legacy
+    # -12dB step). Opt-in per item by add_music so every music item written
+    # before this field renders exactly as it always did.
+    duck_mode: Optional[Literal["smooth"]] = None
 
 
 class SfxItem(BaseModel):
@@ -318,8 +470,11 @@ class VoiceoverItem(BaseModel):
 
 GRADE_PRESETS = ("vibrant", "warm", "cool", "bw", "vintage", "cinematic")
 ZOOM_STRENGTH_MIN = 0.05
-ZOOM_STRENGTH_MAX = 1.0
-FADE_MAX_S = 5.0
+# Widened from 1.0 (round 35): a 1.5 strength is a 2.5x punch — bold but
+# real; the old cap existed because center-only zooms past 2x looked lost,
+# and targeted zooms (cx/cy) don't.
+ZOOM_STRENGTH_MAX = 1.5
+FADE_MAX_S = 10.0
 
 
 class ZoomItem(BaseModel):
@@ -327,25 +482,44 @@ class ZoomItem(BaseModel):
     'punch' (default, instant step in/out), 'ease' (smoothly ramps in and
     out inside the window), 'push_in' / 'pull_out' (continuous Ken Burns
     drift across the whole window). Optional so pre-round-9 EDLs keep
-    their signatures."""
+    their signatures.
+
+    cx/cy (round 35): the zoom TARGET as fractions of the output frame
+    (0,0 = top-left). None = center, which is exactly what every earlier
+    zoom rendered — so old EDLs keep both their signatures and their look.
+    """
     id: str
     start: float
     end: float
     strength: float = 0.25
     mode: Optional[Literal["punch", "ease", "push_in", "pull_out"]] = None
+    cx: Optional[float] = None
+    cy: Optional[float] = None
 
 
-TRANSITION_STYLES = ("dip_black", "dip_white")
+# Round 35: the junction library grew past the two dips. Every style is
+# duration-preserving BY CONSTRUCTION (each block animates within its own
+# footage around the junction; audio concat is untouched) — that property is
+# why no timeline math anywhere changes when transitions change.
+#   whip_left/whip_right — the frame whips off in that direction with a
+#     motion smear; the next block whips in.
+#   zoom_punch — the outgoing block accelerates INTO the cut (fast push-in),
+#     the incoming block lands from a slight over-zoom.
+#   glitch — an RGB-split / noise burst on the frames around the cut.
+#   flash — a white flash that peaks exactly on the cut (dip_white's louder
+#     sibling: additive flash, not a fade-through).
+TRANSITION_STYLES = ("dip_black", "dip_white", "whip_left", "whip_right",
+                     "zoom_punch", "glitch", "flash")
 TRANSITION_MIN_S = 0.1
-TRANSITION_MAX_S = 1.0
+TRANSITION_MAX_S = 1.5
 
 
 class TransitionSpec(BaseModel):
-    """A quick dip-through-black (or white flash) at EVERY junction between
-    program blocks — cut points and insert boundaries. Duration-preserving
-    (video fades out/in around each junction; audio is untouched), so no
+    """A junction effect at EVERY cut/insert boundary. Duration-preserving
+    (video animates out/in around each junction; audio is untouched), so no
     timeline math changes anywhere."""
-    style: Literal["dip_black", "dip_white"]
+    style: Literal["dip_black", "dip_white", "whip_left", "whip_right",
+                   "zoom_punch", "glitch", "flash"]
     duration_s: float = 0.3
 
 
@@ -381,13 +555,46 @@ class RegionItem(BaseModel):
     _mode = field_validator("mode", mode="before")(_coerce_mode)
 
 
+# ── Stylize effects (round 35) ───────────────────────────────────────────
+# Windowed finishing effects on the program picture. Each is one opinionated,
+# render-tested filter chain; intensity is 0-1 with a per-kind neutral
+# default. start/end are FINAL-program seconds; both None = whole program.
+# CONTENT-anchored (like zooms): a stylized moment follows its footage
+# through later cuts.
+STYLIZE_KINDS = ("grain", "vignette", "glow", "chromatic", "dream_blur",
+                 "vhs", "flash", "shake")
+
+
+class StylizeItem(BaseModel):
+    id: str
+    kind: Literal["grain", "vignette", "glow", "chromatic", "dream_blur",
+                  "vhs", "flash", "shake"]
+    start: Optional[float] = None
+    end: Optional[float] = None
+    intensity: Optional[float] = None      # None = the kind's default (0.5)
+
+
+class GradeCustom(BaseModel):
+    """Continuous color controls applied to all footage AFTER the preset
+    grade (captions/graphics are never graded). All optional; a value of
+    None means 'leave that axis alone', so a custom grade that only warms
+    the image says only that."""
+    exposure: Optional[float] = None       # -1..1 (maps to eq brightness)
+    contrast: Optional[float] = None       # 0.5..1.6 (1.0 neutral)
+    saturation: Optional[float] = None     # 0..2   (1.0 neutral)
+    temperature: Optional[float] = None    # -1 (cool) .. 1 (warm)
+    tint: Optional[float] = None           # -1 (green) .. 1 (magenta)
+
+
 class Effects(BaseModel):
     """Whole-program visual effects. grade is a color-grade preset applied
     to all footage (never to burned captions); zooms are punch-in/eased/
     Ken Burns windows; fades are to/from black at the very start/end
     (video + audio); transition dips through black/white at every cut;
     regions censor fixed rectangles (Optional so pre-round-12 EDLs keep
-    their signatures)."""
+    their signatures); stylize is the windowed finishing-effect stack and
+    grade_custom the continuous color controls (both round 35, Optional
+    for the same signature reason)."""
     grade: Optional[Literal["vibrant", "warm", "cool", "bw", "vintage",
                             "cinematic"]] = None
     zooms: List[ZoomItem] = Field(default_factory=list)
@@ -395,6 +602,8 @@ class Effects(BaseModel):
     fade_out_s: Optional[float] = None
     transition: Optional[TransitionSpec] = None
     regions: Optional[List[RegionItem]] = None
+    stylize: Optional[List[StylizeItem]] = None
+    grade_custom: Optional[GradeCustom] = None
 
 
 # Canvas (round 34) — output geometry for a program that has NO main source
@@ -430,6 +639,103 @@ class Canvas(BaseModel):
     bg_color: str = "#000000"
 
 
+# ── Overlays (round 35): the layered-track primitive ─────────────────────
+# An overlay draws an asset OVER the program picture for a window of program
+# time — picture-in-picture b-roll, a corner inset, a logo, a full cover
+# with opacity. x/y are the overlay's CENTER as fractions of the output
+# frame and are keyframeable (slide/drift moves); scale is the overlay's
+# width as a fraction of the frame width. PROGRAM-anchored: keep changes
+# clamp overlays to the new program rather than remapping through source
+# (an overlay covers a span of the *edit*, not a moment of the footage).
+OVERLAY_ANIMS = ("fade", "slide_left", "slide_right", "slide_up")
+OVERLAY_SCALE_MIN = 0.05
+OVERLAY_SCALE_MAX = 1.0
+
+
+class OverlayItem(BaseModel):
+    id: str
+    asset_key: str
+    kind: Literal["video", "image"]
+    start: float                    # FINAL-program seconds
+    duration_s: float
+    x: AnimFloat = 0.5
+    y: AnimFloat = 0.5
+    scale: float = 0.4
+    opacity: Optional[float] = None      # 0.05-1.0; None = fully opaque
+    rotation: Optional[float] = None     # degrees, static
+    source_start_s: Optional[float] = None   # video overlays: seek into clip
+    entrance: Optional[Literal["fade", "slide_left", "slide_right",
+                               "slide_up"]] = None
+    exit: Optional[Literal["fade", "slide_left", "slide_right",
+                           "slide_up"]] = None
+    # Video overlays are silent v1 (their audio never mixes) — a PIP that
+    # suddenly talks over the program is almost never what "add b-roll"
+    # means, and the honest tool result says so.
+
+
+# ── Text overlays (round 35): the motion-graphics layer ──────────────────
+# Rendered by libass via a SECOND .ass file burned after captions, from the
+# parameterized templates in worker/graphics.py — title cards, lower thirds,
+# callouts, big numbers, quotes, chapter markers. PROGRAM-anchored.
+TEXT_TEMPLATES = ("title", "subtitle", "lower_third", "callout",
+                  "big_number", "quote", "chapter")
+TEXT_ANIMS = ("fade", "pop", "slide_up", "blur_in", "whip", "rise", "drop",
+              "typewriter")
+TEXT_FONTS = ("Inter Display Black", "Inter Display ExtraBold",
+              "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
+              "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
+              "Instrument Serif", "DM Serif Display", "Montserrat")
+
+
+class TextItem(BaseModel):
+    id: str
+    text: str
+    start: float                    # FINAL-program seconds
+    end: float
+    template: Literal["title", "subtitle", "lower_third", "callout",
+                      "big_number", "quote", "chapter"] = "title"
+    x: Optional[float] = None       # fractions of frame; None = template's
+    y: Optional[float] = None
+    size_scale: Optional[float] = None      # 0.4-3.0 on the template's size
+    color: Optional[str] = None             # #RRGGBB
+    accent_color: Optional[str] = None
+    font: Optional[Literal["Inter Display Black", "Inter Display ExtraBold",
+                           "Inter Display Bold", "Anton", "Bebas Neue",
+                           "Archivo Black", "Poppins Black", "Syne ExtraBold",
+                           "Playfair Display Black", "Instrument Serif",
+                           "DM Serif Display", "Montserrat"]] = None
+    entrance: Optional[Literal["fade", "pop", "slide_up", "blur_in", "whip",
+                               "rise", "drop", "typewriter"]] = None
+    exit: Optional[Literal["fade", "pop", "slide_up", "blur_in", "whip",
+                           "rise", "drop"]] = None
+    uppercase: Optional[bool] = None
+    box: Optional[bool] = None      # backing panel behind the text
+
+
+# ── Speed spans (round 35): time remapping ───────────────────────────────
+# A speed factor over a SOURCE-time range (like volume automation): factor
+# 2.0 plays that footage at double speed, 0.5 at half. SOURCE-anchored: the
+# ramp belongs to the footage it was placed on. Audio keeps its pitch
+# (atempo). Slow motion duplicates frames (no synthetic interpolation on
+# this hardware) — the tools say so below 0.6x.
+SPEED_FACTOR_MIN = 0.25
+SPEED_FACTOR_MAX = 4.0
+
+
+class SpeedSpan(BaseModel):
+    id: str
+    start: float                    # SOURCE seconds
+    end: float
+    factor: float
+
+
+class Master(BaseModel):
+    """Output mastering. loudness 'social' normalizes the final mix to
+    -14 LUFS / -1.5 dBTP (the streaming/social target) via loudnorm —
+    applied to preview AND final so what the user approves is what ships."""
+    loudness: Optional[Literal["social"]] = None
+
+
 class EDL(BaseModel):
     # keep is empty ONLY for a canvas program (image/clip-only, no main video);
     # otherwise it is the non-empty cut list of the one main video.
@@ -443,6 +749,13 @@ class EDL(BaseModel):
     inserts: List[InsertItem] = Field(default_factory=list)
     voiceover: List[VoiceoverItem] = Field(default_factory=list)
     effects: Optional[Effects] = None
+    # round 35 — every field below is empty/None on every EDL written before
+    # it existed, and edl_signature drops empty values, so historical
+    # signatures are untouched.
+    overlays: List[OverlayItem] = Field(default_factory=list)
+    texts: List[TextItem] = Field(default_factory=list)
+    speed: List[SpeedSpan] = Field(default_factory=list)
+    master: Optional[Master] = None
 
 
 def default_edl(duration):
@@ -466,19 +779,62 @@ def output_duration(keep):
     return round(sum(e - s for s, e in keep), 2)
 
 
-def keep_boundaries(keep):
+def _span_of(sp):
+    if isinstance(sp, dict):
+        return float(sp["start"]), float(sp["end"]), float(sp["factor"])
+    return float(sp.start), float(sp.end), float(sp.factor)
+
+
+def speed_pieces(s, e, speed):
+    """Split ONE keep span into constant-rate pieces [(ps, pe, factor)].
+    speed is the EDL's speed list (source-time spans); pieces outside every
+    span run at 1.0. The single source of truth for time-remap math — the
+    Timeline, the renderer and the duration helpers all call this."""
+    if not speed:
+        return [(s, e, 1.0)]
+    cuts = {round(s, 4), round(e, 4)}
+    for sp in speed:
+        a, b, _f = _span_of(sp)
+        if b > s + 1e-6 and a < e - 1e-6:
+            cuts.add(round(min(max(a, s), e), 4))
+            cuts.add(round(min(max(b, s), e), 4))
+    pts = sorted(cuts)
+    out = []
+    for i in range(len(pts) - 1):
+        ps, pe = pts[i], pts[i + 1]
+        if pe - ps < 1e-4:
+            continue
+        mid = (ps + pe) / 2.0
+        f = 1.0
+        for sp in speed:
+            a, b, fac = _span_of(sp)
+            if a - 1e-6 <= mid <= b + 1e-6:
+                f = fac
+                break
+        out.append((ps, pe, f))
+    return out or [(s, e, 1.0)]
+
+
+def sped_len(s, e, speed):
+    """Output seconds one keep span occupies once speed is applied."""
+    return sum((pe - ps) / f for ps, pe, f in speed_pieces(s, e, speed))
+
+
+def keep_boundaries(keep, speed=None):
     """Output-time positions (pre-insert timeline) where a splice may sit:
-    0, each segment join, and the end."""
+    0, each segment join, and the end. Speed-aware: a sped segment occupies
+    its remapped length."""
     bounds, acc = [0.0], 0.0
     for s, e in keep:
-        acc = round(acc + (e - s), 2)
+        acc = round(acc + sped_len(s, e, speed), 2)
         bounds.append(acc)
     return bounds
 
 
 def program_duration(edl_dict):
-    """Final program length: kept footage plus all spliced inserts."""
-    dur = output_duration(edl_dict["keep"])
+    """Final program length: kept footage (speed-remapped) plus inserts."""
+    speed = edl_dict.get("speed") or []
+    dur = sum(sped_len(s, e, speed) for s, e in edl_dict["keep"])
     for ins in edl_dict.get("inserts") or []:
         dur += float(ins["duration_s"])
     return round(dur, 2)
@@ -553,7 +909,12 @@ def validate_edl(data, duration=None):
                 "the output aspect of a canvas program is fixed by its canvas, "
                 "not set_frame — choose the aspect when you place content "
                 "instead.")
+        if edl.speed:
+            raise EDLValidationError(
+                "speed ramps address source time and need a main video; not "
+                "available on an image/clip-only program.")
         edl.keep = keep = []
+        speed_dump = []
         out_dur = 0.0
     else:
         # A keep list is present: this is a main-video program; a stray canvas
@@ -580,7 +941,37 @@ def validate_edl(data, duration=None):
                     f"[{keep[i][0]}, {keep[i][1]}]. Segments must be sorted and "
                     "non-overlapping.")
         edl.keep = keep
-        out_dur = output_duration(keep)
+
+        # Speed spans: SOURCE-time ranges, sorted, non-overlapping, factors
+        # clamped. Validated before durations because everything program-
+        # bounded below (music, sfx, zooms, overlays, texts) must be checked
+        # against the REMAPPED program length.
+        if edl.speed:
+            seen_sp = set()
+            for i, sp in enumerate(edl.speed):
+                if not sp.id or sp.id in seen_sp:
+                    raise EDLValidationError(
+                        f"speed[{i}].id must be non-empty and unique.")
+                seen_sp.add(sp.id)
+                sp.start, sp.end = _r(sp.start), _r(sp.end)
+                _check_span(f"speed[{i}]", sp.start, sp.end, duration,
+                            min_len=0.2)
+                sp.factor = round(min(max(float(sp.factor),
+                                          SPEED_FACTOR_MIN),
+                                      SPEED_FACTOR_MAX), 3)
+                if abs(sp.factor - 1.0) < 0.01:
+                    raise EDLValidationError(
+                        f"speed[{i}].factor {sp.factor} is 1.0 — that is no "
+                        "change; remove the span instead.")
+            edl.speed.sort(key=lambda x: x.start)
+            for i in range(1, len(edl.speed)):
+                if edl.speed[i].start < edl.speed[i - 1].end - 0.001:
+                    raise EDLValidationError(
+                        f"speed spans overlap: "
+                        f"[{edl.speed[i-1].start}, {edl.speed[i-1].end}] and "
+                        f"[{edl.speed[i].start}, {edl.speed[i].end}].")
+        speed_dump = [s.model_dump() for s in edl.speed]
+        out_dur = round(sum(sped_len(s, e, speed_dump) for s, e in keep), 2)
 
     # Captions on a canvas program are positioned in PROGRAM time (bounded by
     # the concatenated inserts); on a main-video program they are source time.
@@ -600,12 +991,11 @@ def validate_edl(data, duration=None):
     elif isinstance(edl.captions, CaptionsFromTranscript):
         mw = edl.captions.max_words_per_caption
         if mw is not None:
-            mw = int(mw)
-            if not (1 <= mw <= MAX_WORDS_PER_CAPTION):
-                raise EDLValidationError(
-                    f"max_words_per_caption {mw} outside "
-                    f"[1, {MAX_WORDS_PER_CAPTION}].")
-            edl.captions.max_words_per_caption = mw
+            edl.captions.max_words_per_caption = \
+                min(max(int(mw), 1), MAX_WORDS_PER_CAPTION)
+        kg = edl.captions.karaoke_group_n
+        if kg is not None:
+            edl.captions.karaoke_group_n = min(max(int(kg), 1), 8)
 
     # Frame: 'source' is the absence of a frame — normalize so old EDLs and
     # explicit-source EDLs compare identical.
@@ -614,7 +1004,8 @@ def validate_edl(data, duration=None):
 
     # Inserts: concrete durations, unique ids, and every splice point must
     # sit exactly on a keep boundary (the tools snap; this is the backstop).
-    bounds = keep_boundaries(keep)
+    # Boundaries are speed-aware: a sped segment occupies its remapped length.
+    bounds = keep_boundaries(keep, speed_dump)
     seen_ids = set()
     for i, ins in enumerate(edl.inserts):
         ins.at_output_s = _r(ins.at_output_s)
@@ -764,6 +1155,79 @@ def validate_edl(data, duration=None):
                 f"volume[{i}].gain_db {v.gain_db} outside "
                 f"[{GAIN_MIN_DB}, {GAIN_MAX_DB}].")
 
+    # Overlays: program-time windows, keyframeable position, clamped scale.
+    seen_ov = set()
+    for i, ov in enumerate(edl.overlays):
+        if not ov.id or ov.id in seen_ov:
+            raise EDLValidationError(
+                f"overlays[{i}].id must be non-empty and unique.")
+        seen_ov.add(ov.id)
+        if not ov.asset_key:
+            raise EDLValidationError(f"overlays[{i}].asset_key is empty.")
+        ov.start = _r(ov.start)
+        ov.duration_s = _r(ov.duration_s)
+        if ov.start < 0 or ov.start > max(0.0, prog_dur - 0.1):
+            raise EDLValidationError(
+                f"overlays[{i}].start {ov.start} outside the program "
+                f"(0 to {round(prog_dur, 2)}s).")
+        if not (0.2 <= ov.duration_s <= max(0.2, prog_dur - ov.start + 0.01)):
+            raise EDLValidationError(
+                f"overlays[{i}].duration_s {ov.duration_s} must be 0.2s to "
+                f"the end of the program ({round(prog_dur - ov.start, 2)}s).")
+        ov.x = _norm_anim(ov.x, f"overlays[{i}].x", -0.5, 1.5,
+                          max_t=ov.duration_s)
+        ov.y = _norm_anim(ov.y, f"overlays[{i}].y", -0.5, 1.5,
+                          max_t=ov.duration_s)
+        ov.scale = round(min(max(float(ov.scale), OVERLAY_SCALE_MIN),
+                             OVERLAY_SCALE_MAX), 3)
+        if ov.opacity is not None:
+            ov.opacity = round(min(max(float(ov.opacity), 0.05), 1.0), 3)
+            if ov.opacity >= 0.999:
+                ov.opacity = None       # fully opaque = the default
+        if ov.rotation is not None:
+            ov.rotation = round(float(ov.rotation) % 360.0, 1) or None
+        if ov.source_start_s is not None:
+            ov.source_start_s = _r(ov.source_start_s)
+            if ov.source_start_s < 0:
+                raise EDLValidationError(
+                    f"overlays[{i}].source_start_s must be >= 0.")
+            if ov.kind == "image" or ov.source_start_s == 0.0:
+                ov.source_start_s = None
+    edl.overlays.sort(key=lambda o: (o.start, o.id))
+
+    # Text overlays: program-time windows, template-driven geometry.
+    seen_tx = set()
+    for i, tx in enumerate(edl.texts):
+        if not tx.id or tx.id in seen_tx:
+            raise EDLValidationError(
+                f"texts[{i}].id must be non-empty and unique.")
+        seen_tx.add(tx.id)
+        if not (tx.text or "").strip():
+            raise EDLValidationError(f"texts[{i}].text is empty.")
+        tx.text = tx.text.strip()[:200]
+        tx.start, tx.end = _r(tx.start), _r(tx.end)
+        _check_span(f"texts[{i}]", tx.start, tx.end, prog_dur, min_len=0.3)
+        for fname in ("x", "y"):
+            fv = getattr(tx, fname)
+            if fv is not None:
+                setattr(tx, fname, round(min(max(float(fv), 0.0), 1.0), 3))
+        if tx.size_scale is not None:
+            tx.size_scale = round(min(max(float(tx.size_scale), 0.4), 3.0), 3)
+            if abs(tx.size_scale - 1.0) < 1e-6:
+                tx.size_scale = None
+        for cname in ("color", "accent_color"):
+            cv = getattr(tx, cname)
+            if cv is not None:
+                cv = cv.strip()
+                if not HEX_COLOR.match(cv):
+                    raise EDLValidationError(
+                        f"texts[{i}].{cname} '{cv}' must be #RRGGBB hex.")
+                setattr(tx, cname, cv.upper())
+    edl.texts.sort(key=lambda t: (t.start, t.id))
+
+    if edl.master is not None and edl.master.loudness is None:
+        edl.master = None       # empty master is the absence of mastering
+
     if edl.effects is not None:
         fx = edl.effects
         seen_z = set()
@@ -776,31 +1240,71 @@ def validate_edl(data, duration=None):
             # zooms live in the FINAL program timeline (incl. inserts)
             _check_span(f"effects.zooms[{i}]", z.start, z.end, prog_dur,
                         min_len=0.2)
-            z.strength = round(float(z.strength), 2)
-            if not (ZOOM_STRENGTH_MIN <= z.strength <= ZOOM_STRENGTH_MAX):
-                raise EDLValidationError(
-                    f"effects.zooms[{i}].strength {z.strength} outside "
-                    f"[{ZOOM_STRENGTH_MIN}, {ZOOM_STRENGTH_MAX}].")
+            z.strength = round(min(max(float(z.strength), ZOOM_STRENGTH_MIN),
+                                   ZOOM_STRENGTH_MAX), 2)
             if z.mode == "punch":
                 z.mode = None       # the default — keep signatures canonical
+            # Zoom target: fractions of the output frame; None (or an
+            # explicit center) renders the legacy center zoom.
+            for cname in ("cx", "cy"):
+                cv = getattr(z, cname)
+                if cv is not None:
+                    cv = round(min(max(float(cv), 0.0), 1.0), 3)
+                    setattr(z, cname, None if abs(cv - 0.5) < 1e-6 else cv)
         fx.zooms.sort(key=lambda z: z.start)
         if fx.transition is not None:
             tr = fx.transition
-            tr.duration_s = _r(tr.duration_s)
-            if not (TRANSITION_MIN_S <= tr.duration_s <= TRANSITION_MAX_S):
-                raise EDLValidationError(
-                    f"effects.transition.duration_s {tr.duration_s} outside "
-                    f"[{TRANSITION_MIN_S}, {TRANSITION_MAX_S}].")
+            tr.duration_s = _r(min(max(float(tr.duration_s),
+                                       TRANSITION_MIN_S), TRANSITION_MAX_S))
         for name in ("fade_in_s", "fade_out_s"):
             val = getattr(fx, name)
             if val is not None:
                 val = _r(val)
                 if val == 0.0:
                     val = None          # 0 clears the fade
-                elif not (0.1 <= val <= FADE_MAX_S):
-                    raise EDLValidationError(
-                        f"effects.{name} {val} outside [0.1, {FADE_MAX_S}].")
+                else:
+                    val = _r(min(max(val, 0.1), FADE_MAX_S))
                 setattr(fx, name, val)
+        if fx.stylize is not None:
+            seen_st = set()
+            for i, st in enumerate(fx.stylize):
+                if not st.id or st.id in seen_st:
+                    raise EDLValidationError(
+                        f"effects.stylize[{i}].id must be non-empty and "
+                        "unique.")
+                seen_st.add(st.id)
+                if (st.start is None) != (st.end is None):
+                    raise EDLValidationError(
+                        f"effects.stylize[{i}]: pass both start and end "
+                        "(program seconds), or neither for the whole video.")
+                if st.start is not None:
+                    st.start, st.end = _r(st.start), _r(st.end)
+                    _check_span(f"effects.stylize[{i}]", st.start, st.end,
+                                prog_dur)
+                if st.intensity is not None:
+                    st.intensity = round(min(max(float(st.intensity),
+                                                 0.05), 1.0), 3)
+                    if abs(st.intensity - 0.5) < 1e-6:
+                        st.intensity = None     # the default — canonical
+            fx.stylize.sort(key=lambda s: (s.start or 0.0, s.id))
+            if not fx.stylize:
+                fx.stylize = None
+        if fx.grade_custom is not None:
+            gc = fx.grade_custom
+            _GC_BOUNDS = {"exposure": (-1.0, 1.0), "contrast": (0.5, 1.6),
+                          "saturation": (0.0, 2.0), "temperature": (-1.0, 1.0),
+                          "tint": (-1.0, 1.0)}
+            _GC_NEUTRAL = {"exposure": 0.0, "contrast": 1.0,
+                           "saturation": 1.0, "temperature": 0.0, "tint": 0.0}
+            for fname, (lo, hi) in _GC_BOUNDS.items():
+                fv = getattr(gc, fname)
+                if fv is not None:
+                    fv = round(min(max(float(fv), lo), hi), 3)
+                    if abs(fv - _GC_NEUTRAL[fname]) < 1e-6:
+                        fv = None       # neutral = the absence of the control
+                    setattr(gc, fname, fv)
+            if all(getattr(gc, f) is None for f in _GC_BOUNDS):
+                fx.grade_custom = None
         if fx.regions is not None:
             seen_r = set()
             for i, rg in enumerate(fx.regions):
@@ -835,7 +1339,8 @@ def validate_edl(data, duration=None):
         # EDLs and cleared-effects EDLs compare identical.
         if fx.grade is None and not fx.zooms and fx.fade_in_s is None \
                 and fx.fade_out_s is None and fx.transition is None \
-                and fx.regions is None:
+                and fx.regions is None and fx.stylize is None \
+                and fx.grade_custom is None:
             edl.effects = None
 
     return edl
@@ -938,6 +1443,8 @@ def describe_edl(edl_dict, duration=None):
                 f.append(f"{m.gain_db:g}dB")
             if not m.duck:
                 f.append("no duck")
+            elif m.duck_mode == "smooth":
+                f.append("smooth duck")
             bits.append("/".join(f) or "plain")
         parts.append(f"music x{len(edl.music)} ({', '.join(bits)})")
     if edl.sfx:
@@ -952,13 +1459,39 @@ def describe_edl(edl_dict, duration=None):
         parts.append(f"sfx x{len(edl.sfx)} ({', '.join(bits)})")
     if edl.volume:
         parts.append(f"volume x{len(edl.volume)}")
+    if edl.speed:
+        # Spelled out per span: a speed change that renders differently must
+        # LOOK different in this diff, or the agent can't see its own edit.
+        bits = [f"{sp.factor:g}x@{sp.start:g}-{sp.end:g}s"
+                for sp in edl.speed]
+        parts.append(f"speed x{len(edl.speed)} ({', '.join(bits)})")
+    if edl.overlays:
+        bits = []
+        for ov in edl.overlays:
+            name = ov.asset_key.split("/")[-1]
+            anim = "*" if (is_animated(ov.x) or is_animated(ov.y)) else ""
+            bits.append(f"{name}@{ov.start:g}s {ov.scale:g}w{anim}")
+        parts.append(f"overlays x{len(edl.overlays)} ({', '.join(bits)})")
+    if edl.texts:
+        bits = [f"{tx.template} \"{tx.text[:24]}\"@{tx.start:g}-{tx.end:g}s"
+                for tx in edl.texts]
+        parts.append(f"text x{len(edl.texts)} ({', '.join(bits)})")
     if edl.effects:
         fx = edl.effects
         bits = []
         if fx.grade:
             bits.append(f"grade {fx.grade}")
+        if fx.grade_custom:
+            gc = fx.grade_custom
+            axes = [f"{n[:4]} {getattr(gc, n):+g}" for n in
+                    ("exposure", "contrast", "saturation", "temperature",
+                     "tint") if getattr(gc, n) is not None]
+            bits.append("custom grade (" + ", ".join(axes) + ")")
         if fx.zooms:
-            bits.append(f"zoom x{len(fx.zooms)}")
+            tgt = sum(1 for z in fx.zooms
+                      if z.cx is not None or z.cy is not None)
+            bits.append(f"zoom x{len(fx.zooms)}"
+                        + (f" ({tgt} targeted)" if tgt else ""))
         fades = [n for n, v in (("in", fx.fade_in_s),
                                 ("out", fx.fade_out_s)) if v]
         if fades:
@@ -968,7 +1501,14 @@ def describe_edl(edl_dict, duration=None):
                         f"{fx.transition.duration_s}s")
         if fx.regions:
             bits.append("censor region x" + str(len(fx.regions)))
+        if fx.stylize:
+            names = [s.kind + (f"@{s.start:g}-{s.end:g}s"
+                               if s.start is not None else "")
+                     for s in fx.stylize]
+            bits.append("stylize " + "+".join(names))
         parts.append(", ".join(bits))
+    if edl.master and edl.master.loudness:
+        parts.append(f"mastered ({edl.master.loudness} loudness)")
     return ", ".join(parts)
 
 
@@ -1062,3 +1602,11 @@ class VideoIndex(BaseModel):
     # failures, capped vision sampling). Surfaced in admin so a partially
     # degraded index is visible instead of silently worse.
     warnings: List[str] = Field(default_factory=list)
+    # Perception sidecar (round 35): beat grid / energy envelope / speech-
+    # stress data from worker/perception.py. Deliberately an opaque dict with
+    # its OWN version key ("v": perception.PERCEPTION_VERSION), lazily
+    # computed and upserted the first time a tool needs it — NOT part of the
+    # indexer's output contract, so shipping or changing it never bumps
+    # PIPELINE_VERSION and never triggers a re-index. Declared here so any
+    # code path that round-trips an index through this model preserves it.
+    perception: Optional[dict] = None

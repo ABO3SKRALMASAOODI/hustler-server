@@ -253,10 +253,14 @@ expect_reject("bad hex color",
               {"keep": [[0, 60]],
                "captions": {"mode": "from_transcript",
                             "style": {"color": "red"}}}, 60)
-expect_reject("max words out of range",
-              {"keep": [[0, 60]],
-               "captions": {"mode": "from_transcript",
-                            "max_words_per_caption": 40}}, 60)
+# Round 35: out-of-range grouping CLAMPS instead of rejecting — a taste
+# value to trim, not an impossible state (§ cap-removal policy).
+_mw = validate_edl({"keep": [[0, 60]],
+                    "captions": {"mode": "from_transcript",
+                                 "max_words_per_caption": 40}}, 60
+                   ).model_dump()
+check("max words clamps to 16",
+      _mw["captions"]["max_words_per_caption"] == 16)
 
 legacy = validate_edl({"keep": [[0, 60]],
                        "captions": {"mode": "from_transcript",
@@ -431,13 +435,21 @@ check("no warning when nothing re-included",
       audit.regression_warnings([[0.0, 60.0]], [[0.0, 30.0]], idx_r3) == [])
 
 print("== get_words ==")
+# Round 35: the 60s hard window is gone — any range is allowed, bounded by
+# a word-count cap with an honest truncation tail instead.
 long_words = [{"w": f"w{i}", "t0": i, "t1": i + 0.4} for i in range(100)]
 sctx = StubCtx({"words": long_words,
                 "sentences": [{"id": "s1", "t0": 0, "t1": 3,
                                "text": "w0 w1 w2"}]}, 120.0)
 r = get_words(sctx, 0, 120)
-check("over-cap range rejected with guidance",
-      r.startswith("REJECTED") and "60" in r)
+check("full-range window allowed now", "w99" in r
+      and not r.startswith("REJECTED"))
+many = [{"w": f"w{i}", "t0": i * 0.2, "t1": i * 0.2 + 0.1}
+        for i in range(500)]
+mctx = StubCtx({"words": many, "sentences": []}, 120.0)
+r = get_words(mctx, 0, 120)
+check("over-cap word count truncates honestly",
+      "w399" in r and "w450" not in r and "more words" in r)
 r = get_words(sctx, 10, 20)
 check("word timings returned", "10.00-10.40 w10" in r)
 check("get_transcript points at get_words",
@@ -1175,12 +1187,18 @@ check("describe mentions the effects",
       "grade vibrant" in describe_edl(fx_edl, 60) and
       "zoom x1" in describe_edl(fx_edl, 60) and
       "fade out" in describe_edl(fx_edl, 60))
-expect_reject("zoom strength out of range",
-              {"keep": [[0, 20]],
-               "effects": {"zooms": [{"id": "z", "start": 0, "end": 2,
-                                      "strength": 3.0}]}}, 60)
-expect_reject("fade too long",
-              {"keep": [[0, 20]], "effects": {"fade_in_s": 30}}, 60)
+# Round 35: out-of-range strengths/fades CLAMP instead of rejecting (the
+# cap-removal policy: validation trims taste values, rejects only the
+# impossible).
+_zc = validate_edl({"keep": [[0, 20]],
+                    "effects": {"zooms": [{"id": "z", "start": 0, "end": 2,
+                                           "strength": 3.0}]}}, 60
+                   ).model_dump()
+check("zoom strength clamps to 1.5",
+      _zc["effects"]["zooms"][0]["strength"] == 1.5)
+_fc = validate_edl({"keep": [[0, 20]], "effects": {"fade_in_s": 30}}, 60
+                   ).model_dump()
+check("fade clamps to 10s", _fc["effects"]["fade_in_s"] == 10.0)
 check("all-empty effects normalize away (signature-stable with old EDLs)",
       schemas.edl_signature(schemas.validate_edl(
           {"keep": [[0.0, 20.0]], "effects": {"zooms": []}}, 60)
@@ -1198,7 +1216,7 @@ check("set_color_grade rejects unknown presets listing the real ones",
 tctx = ToolCtx({"keep": [[0.0, 20.0]]})
 agent_tools.add_zoom(tctx, 2, 4, strength=5.0)
 check("add_zoom clamps strength and assigns an id",
-      tctx.written["effects"]["zooms"][0]["strength"] == 1.0 and
+      tctx.written["effects"]["zooms"][0]["strength"] == 1.5 and
       tctx.written["effects"]["zooms"][0]["id"] == "zm1")
 zctx = ToolCtx({"keep": [[0.0, 20.0]],
                 "effects": {"zooms": [{"id": "zm1", "start": 2.0,
@@ -1341,9 +1359,9 @@ r = agent_tools.add_captions(kctx, mode="from_transcript",
                              style={"dynamic": True},
                              max_words_per_caption=8)
 check("add_captions clamps karaoke group size in the stored EDL",
-      kctx.written["captions"]["max_words_per_caption"] == 4)
+      kctx.written["captions"]["max_words_per_caption"] == 6)
 check("add_captions discloses the karaoke cap",
-      "at most 4 words" in r and "instead of 8" in r)
+      "at most 6 words" in r and "instead of 8" in r)
 kctx = ToolCtx({"keep": [[0.0, 30.0]]})
 r = agent_tools.add_captions(kctx, mode="from_transcript",
                              max_words_per_caption=8)
@@ -1355,7 +1373,7 @@ kctx = ToolCtx({"keep": [[0.0, 30.0]],
                              "max_words_per_caption": 8, "style": None}})
 r = agent_tools.set_caption_style(kctx, {"dynamic": True})
 check("set_caption_style clamps stored group size when enabling karaoke",
-      kctx.written["captions"]["max_words_per_caption"] == 4)
+      kctx.written["captions"]["max_words_per_caption"] == 6)
 check("set_caption_style discloses the clamp", "lowered from 8" in r)
 
 print("== Round-8 review fixes: honesty vocabulary + hint routing ==")
@@ -1404,10 +1422,12 @@ for q in ("add an animated zoom on my face",
 check("caption hint still owns caption asks",
       "captions" in (al._nearest_alternative("animated captions please")
                      or ""))
-check("insert hint says any point, not between segments",
-      "ANY" in al._nearest_alternative("splice my logo into the video") and
-      "between segments" not in
-      al._nearest_alternative("splice my logo into the video"))
+# Round 35: a logo ask routes to the OVERLAY capability (a real corner
+# logo now exists) — with the no-tracking limit stated honestly.
+check("logo hint routes to overlays with the tracking limit",
+      "logo" in (al._nearest_alternative("splice my logo into the video")
+                 or "") and
+      "track" in al._nearest_alternative("splice my logo into the video"))
 
 print("== Round-8 review fixes: attachment context skips 'audio' kind ==")
 
@@ -1448,10 +1468,13 @@ check("transition survives validation",
                                           "duration_s": 0.3})
 check("describe mentions transitions",
       "transitions dip_black 0.3s" in describe_edl(tr_edl, 60))
-expect_reject("transition too long",
-              {"keep": [[0, 20]],
-               "effects": {"transition": {"style": "dip_black",
-                                          "duration_s": 3.0}}}, 60)
+# Round 35: over-long transition durations clamp (cap-removal policy)
+_tc = validate_edl({"keep": [[0, 20]],
+                    "effects": {"transition": {"style": "dip_black",
+                                               "duration_s": 3.0}}}, 60
+                   ).model_dump()
+check("transition duration clamps to 1.5s",
+      _tc["effects"]["transition"]["duration_s"] == 1.5)
 expect_reject("unknown transition style",
               {"keep": [[0, 20]],
                "effects": {"transition": {"style": "crossfade",
@@ -1509,7 +1532,7 @@ r = agent_tools.set_transitions(tctx, "dip_black")
 check("set_transitions writes style + default duration",
       tctx.written["effects"]["transition"] == {"style": "dip_black",
                                                 "duration_s": 0.3} and
-      "dip-black" in r)
+      "dip_black" in r)
 check("set_transitions counts the junctions", "1 junction" in r)
 check("set_transitions rejects crossfade asks with guidance",
       agent_tools.set_transitions(ToolCtx({"keep": [[0.0, 5.0]]}),
@@ -1674,7 +1697,7 @@ for s in ("No transitions were added this turn.",
               if not al._negated_claim(s, mm)), None)
     check(f"honest phrasing passes: {s[:44]!r}", m is None)
 check("effects hint mentions transitions and Ken Burns",
-      "transitions" in al._nearest_alternative("add transitions please") and
+      "transition" in al._nearest_alternative("add transitions please") and
       "Ken Burns" in al._nearest_alternative("animate the photo"))
 check("capabilities digest lists set_transitions",
       "set_transitions(" in agent_tools.capabilities_digest())
@@ -3347,8 +3370,8 @@ tctx = ToolCtx({"keep": [[0.0, 30.0]],
                              "style": {"preset": "classic"}}})
 r = set_caption_style(tctx, {"dynamic": True})
 check("preset 'classic' still gets the legacy karaoke clamp",
-      tctx.written["captions"]["max_words_per_caption"] == 4 and
-      "at most 4" in r)
+      tctx.written["captions"]["max_words_per_caption"] == 6 and
+      "at most 6" in r)
 tctx = ToolCtx({"keep": [[0.0, 30.0]],
                 "captions": {"mode": "from_transcript",
                              "max_words_per_caption": None,
@@ -4291,24 +4314,56 @@ check("a sound whose moment is cut away is dropped, not left drifting",
       not _dctx.latest_edl()["json"].get("sfx")
       and "no longer in the edit" in _dres)
 
-# (2) removing an INSERT shortens the program without touching sfx — the
-# bounds check would reject the whole op, so clicking x on an insert failed
-# over an unrelated sound.
+# (2) removing an INSERT shortens the program exactly like a keep cut — it
+# runs the SAME shared remap (round 35.1: the old sfx-only drop left new
+# item kinds to reject the removal, and let content-anchored items drift).
+import timeline as _tlmod                                      # noqa: E402
 _ins = {"keep": [[0.0, 10.0]], "captions": None,
         "inserts": [{"id": "ins1", "asset_key": "media/1/b.mp4",
                      "kind": "clip", "at_output_s": 10.0, "duration_s": 6.0}],
         "sfx": [{"id": "sx1", "storage_key": "sfx:ding", "at": 13.0,
                  "gain_db": -6.0}]}
-check("remove_insert drops sfx orphaned by the shorter program",
-      agent_tools._drop_orphaned_sfx(dict(_ins, inserts=[]))
-      and not dict(_ins, inserts=[], sfx=[]).get("sfx"))
-_i2 = {"keep": [[0.0, 10.0]], "captions": None, "inserts": [],
-       "sfx": [{"id": "sx1", "storage_key": "sfx:ding", "at": 13.0,
-                "gain_db": -6.0}]}
-agent_tools._drop_orphaned_sfx(_i2)
+_i2 = dict(_ins, inserts=[])
+_notes = _tlmod.remap_program_items(
+    _i2, _tlmod.Timeline(_ins["keep"], _ins["inserts"], None),
+    _tlmod.Timeline(_i2["keep"], [], None))
+check("remove_insert's remap drops sfx orphaned by the shorter program",
+      _i2["sfx"] == [] and any("sound effect" in n for n in _notes))
 check("the orphan is actually removed, so validate_edl accepts the write",
-      _i2["sfx"] == []
-      and validate_edl(_i2, 60.0).sfx == [])
+      validate_edl(dict(_i2), 60.0).sfx == [])
+# content-anchored items FOLLOW their footage through an insert removal —
+# a whoosh 1.5s after a 6s insert must fire 1.5s after the junction, not
+# 6s late on different footage.
+_i3 = {"keep": [[0.0, 5.0], [5.0, 10.0]], "captions": None, "inserts": [],
+       "sfx": [{"id": "sx1", "storage_key": "sfx:ding", "at": 12.5,
+                "gain_db": -6.0}]}
+_tlmod.remap_program_items(
+    _i3, _tlmod.Timeline(_i3["keep"],
+                         [{"at_output_s": 5.0, "duration_s": 6.0}], None),
+    _tlmod.Timeline(_i3["keep"], [], None))
+check("remove_insert's remap shifts sfx back with their footage",
+      abs(_i3["sfx"][0]["at"] - 6.5) < 0.01)
+
+# (2b) beat_align_cuts must never CLOSE a cut gap: a removed filler is ~2x
+# the default tolerance wide, and without the 0.1s neighbour margin both of
+# its edges could snap to the SAME beat — silently restoring the footage
+# the user removed, as touching spans validate_edl accepts.
+_bctx = EdlStubCtx({"words": [], "silences": []}, 20.0,
+                   {"keep": [[0.0, 10.0], [10.4, 20.0]], "captions": None})
+_bctx.has_main_video = True
+_orig_gp = agent_tools._get_perception
+agent_tools._get_perception = lambda ctx: {
+    "v": 1, "bpm": 120.0, "bpm_conf": 0.9,
+    "beats": [9.7, 10.2, 10.7], "vb_env": [], "vb_env_fps": 8.0}
+try:
+    _bres = agent_tools.beat_align_cuts(_bctx, tolerance_s=0.35)
+finally:
+    agent_tools._get_perception = _orig_gp
+_bkeep = _bctx.latest_edl()["json"]["keep"]
+check("beat_align moves the edge that fits (end -> the 10.2 beat)",
+      _bres.startswith("EDL v") and abs(_bkeep[0][1] - 10.2) < 0.01)
+check("beat_align leaves a gap the collapse would have destroyed",
+      _bkeep[1][0] - _bkeep[0][1] >= 0.1 - 1e-9)
 
 # (3) a card-less final must not be permanently undownloadable: the worker
 # legitimately stamps outro_v=0, and comparing to OUTRO_VERSION would hide it

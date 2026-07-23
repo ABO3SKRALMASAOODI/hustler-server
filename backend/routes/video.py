@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import re
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
@@ -34,6 +35,19 @@ _spec = importlib.util.spec_from_file_location(
     "worker_schemas", os.path.abspath(_schemas_path))
 wschemas = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wschemas)
+
+# worker/timeline.py rides along the same way (registered first so its
+# `from worker_schemas import ...` fallback resolves): Timeline math and the
+# shared program-item re-anchoring (remap_program_items) must be the SAME
+# code on both services, or a UI insert removal and an agent cut would
+# re-anchor sfx/zooms/overlays differently.
+sys.modules.setdefault("worker_schemas", wschemas)
+_tl_path = os.path.join(os.path.dirname(__file__), "..", "..",
+                        "worker", "timeline.py")
+_tl_spec = importlib.util.spec_from_file_location(
+    "worker_timeline", os.path.abspath(_tl_path))
+wtimeline = importlib.util.module_from_spec(_tl_spec)
+_tl_spec.loader.exec_module(wtimeline)
 
 video_bp = Blueprint("video", __name__)
 
@@ -252,35 +266,74 @@ def _concierge_reply(stage, history, attachments, index_error=None,
         "yet — never claim or imply that you did.",
     ]
     if stage == "no_video":
-        # Transcript-based editing is the one thing that genuinely needs a
-        # video; everything else is either available now or never.
+        # Transcript-based editing and speed ramps are the two things that
+        # genuinely need a main video (both address its source timeline);
+        # everything else is available now, once content is on the canvas,
+        # or never.
         facts.append(
             "Once a video WITH SPEECH is in the program, transcript-based "
             "editing also unlocks: cutting silences and bad takes, word-timed "
-            "captions (including karaoke), and censoring on-screen text. "
-            "Regardless, you canNOT change playback speed, do true crossfades "
-            "(overlapping footage), overlay logos/watermarks, or add custom "
-            "caption fonts, outlines or stickers"
+            "captions (including karaoke), censoring on-screen text, and "
+            "speed ramps / slow motion (speed changes address the main "
+            "video's own timeline, so they need one). Once any visual "
+            "content is on the canvas you can also layer image or clip "
+            "overlays over it (picture-in-picture, a corner logo — silent, "
+            "not motion-tracked) and text / motion-graphics templates. "
+            "Regardless, you canNOT do true crossfades that overlap two "
+            "shots' footage, motion-track a sticker or graphic onto a "
+            "moving object, place text behind the subject, choose a "
+            "different transition style per cut, or use custom uploaded "
+            "fonts (there is a built-in font menu)"
             + ("" if _video_gen_enabled() else
                ", and you canNOT generate moving VIDEO footage")
             + ". If they ask about something not covered here, say you're not "
             "sure it's supported rather than promising it.")
     else:
+        # The can-do list is EXHAUSTIVE by contract (the closing sentence
+        # says so), so every round-35 capability the agent actually has must
+        # appear here or the concierge actively denies it — the same
+        # two-surfaces-disagreeing failure the provider gates prevent.
         facts.append(
             "Once a video is ready you can: cut silences and bad takes, add "
             "word-timed captions (including karaoke word-pop styles), add "
-            "background music or voiceover, drop one-shot sound effects "
-            "(whooshes, impacts, risers, clicks, dings) on exact moments "
-            "from a built-in pack, zooms (including smooth Ken "
-            "Burns style), dip-to-black/white transitions, fades, color "
-            "grades, vertical/square/portrait reframing, blur/pixelate/"
-            "black-out a fixed region to censor burned-in usernames, "
-            "watermarks or on-screen text, and splice uploaded "
-            "clips or images into the video full-frame"
+            "background music or voiceover (music can duck smoothly under "
+            "speech, dipping and swelling with the voice), drop one-shot "
+            "sound effects (whooshes, impacts, risers, clicks, dings) on "
+            "exact moments from a built-in pack"
+            + (", or generate custom sound effects to order from a text "
+               "description" if _sound_gen_enabled() else "")
+            + ", change playback speed on chosen parts of the video (speed "
+            "ramps, timelapse, slow motion — slow motion repeats frames, so "
+            "below about 0.6x it visibly steps rather than staying fluid), "
+            "overlay uploaded images or clips on top of the video as "
+            "picture-in-picture, b-roll or a logo (video overlays are "
+            "silent, and overlays do not track moving objects), add text "
+            "and motion-graphics templates (title, subtitle, lower third, "
+            "callout, big number, quote, chapter) with entrance/exit "
+            "animations including typewriter, zooms (including smooth Ken "
+            "Burns style and punch-ins aimed at a chosen spot in the "
+            "frame), transitions at every cut in 7 styles (dip to black or "
+            "white, whip left/right, zoom punch, glitch, flash), fades, "
+            "color-grade presets plus continuous custom color controls "
+            "(exposure, contrast, saturation, temperature, tint), windowed "
+            "finishing effects (film grain, vignette, glow, chromatic "
+            "aberration, dream blur, VHS, flash, camera shake), analyze "
+            "the real audio's beat grid and the speaker's vocal stress to "
+            "align cuts to the music's beat, punch in on emphasized words "
+            "and lay an automatic sound-design pass, apply a whole "
+            "coordinated look in one request, master the final mix to the "
+            "-14 LUFS social loudness target, vertical/square/portrait "
+            "reframing, blur/pixelate/black-out a fixed region to censor "
+            "burned-in usernames, watermarks or on-screen text, and splice "
+            "uploaded clips or images into the video full-frame"
             + (", and download a video, song or image from a LINK they paste "
                "(direct file links and YouTube/TikTok/Vimeo/SoundCloud pages) "
                "and put it straight into the edit"
                if _url_fetch_enabled() else "")
+            + (", and generate short AI video clips from a text description "
+               "(or animate a still image into a moving clip) that splice "
+               "into the edit"
+               if _video_gen_enabled() else "")
             + ((", and generate images with AI from a text description"
                 + (", or by restyling a frame of their video or an uploaded "
                    "image (e.g. giving a character a new hairstyle)"
@@ -291,14 +344,19 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                    "restyle or edit an existing frame or photo (only generate a "
                    "fresh image from a description), ")
                 + ("generate or alter MOVING footage (AI images land as "
-                   "still-frame moments, not tracked effects), change"
-                   if not _video_gen_enabled() else "change"))
+                   "still-frame moments, not tracked effects), do"
+                   if not _video_gen_enabled() else "do"))
                if _image_gen_enabled() else
-               ". You canNOT: generate footage or images from nothing, "
-               "change")
-            + " playback speed, do true crossfades (overlapping footage), "
-            "overlay logos or watermarks on top of the video, or add custom "
-            "caption fonts, outlines or stickers. These two "
+               (". You canNOT: generate still images from nothing, do"
+                if _video_gen_enabled() else
+                ". You canNOT: generate footage or images from nothing, "
+                "do"))
+            + " true crossfades that overlap two shots' footage (transitions "
+            "animate around the cut but never blend both sides), motion-"
+            "track a sticker or graphic onto a moving object, place text "
+            "behind the subject, choose a different transition style per "
+            "cut (one style applies to every junction), or use custom "
+            "uploaded fonts (there is a built-in font menu). These two "
             "lists are exhaustive — if they ask about anything not on them, "
             "say you're not sure it's supported yet rather than promising it.")
     if attachments:
@@ -1548,7 +1606,10 @@ def _apply_edl_op(edl, op, args, assets_by_id):
                 dur = min(dur, 10.0)
         at = float(args.get("at_output_s") or 0.0)
         inserts = list(edl.get("inserts") or [])
-        bounds = wschemas.keep_boundaries(edl["keep"])
+        # Speed-aware boundaries: a sped keep segment occupies its remapped
+        # length, so snapping against raw source lengths would splice at
+        # positions validate_edl (and the worker's own snapping) disagree on.
+        bounds = wschemas.keep_boundaries(edl["keep"], edl.get("speed"))
         ins_sorted = sorted((float(i["at_output_s"]), float(i["duration_s"]))
                             for i in inserts)
         final_of = {b: b + sum(d for a, d in ins_sorted if a <= b + 1e-6)
@@ -1573,6 +1634,8 @@ def _apply_edl_op(edl, op, args, assets_by_id):
                 i["duration_s"] = round(
                     min(max(float(args.get("duration_s") or 3.0), 0.2),
                         600.0), 2)
+                # Program-item re-anchoring happens in user_edl_write's
+                # shared remap (same code the worker tools run).
                 return edl, f"insert {i['id']} duration {i['duration_s']}s"
         return edl, "insert already gone"
 
@@ -1583,7 +1646,8 @@ def _apply_edl_op(edl, op, args, assets_by_id):
         if not target_ins:
             return edl, "insert already gone"
         at = float(args.get("at_output_s") or 0.0)
-        bounds = wschemas.keep_boundaries(edl["keep"])
+        # Speed-aware, same as insert_media above.
+        bounds = wschemas.keep_boundaries(edl["keep"], edl.get("speed"))
         others = sorted((float(i["at_output_s"]), float(i["duration_s"]))
                         for i in inserts if i is not target_ins)
         final_of = {b: b + sum(d for a, d in others if a <= b + 1e-6)
@@ -1599,12 +1663,6 @@ def _apply_edl_op(edl, op, args, assets_by_id):
         edl["inserts"] = [i for i in before if i.get("id") != args.get("id")]
         if len(edl["inserts"]) == len(before):
             return edl, "insert already gone"
-        # Removing an insert shortens the program, but sfx are bounded by the
-        # OLD length — validate_edl would reject the whole op, so clicking x
-        # on an insert would fail over an unrelated sound effect.
-        prog = wschemas.program_duration(edl)
-        edl["sfx"] = [s for s in (edl.get("sfx") or [])
-                      if float(s.get("at") or 0.0) <= max(0.0, prog - 0.05)]
         return edl, f"removed insert {args.get('id')}"
 
     if op == "add_voiceover":
@@ -1745,6 +1803,30 @@ def user_edl_write(user_id, project_id):
         try:
             new_edl, desc = _apply_edl_op(edl_row["json"], op, args,
                                           assets_by_id)
+            # Any op that changed the program's geometry (inserts here;
+            # keep/speed are agent-only) re-anchors every program-time item
+            # through the SAME remap the worker tools run: content-anchored
+            # zooms/sfx/stylize follow their footage, program-anchored
+            # music/vo/overlays/texts clamp — otherwise removing an insert
+            # 400s over a stale zoom, or every sound after it drifts by the
+            # insert's length.
+            old_j = edl_row["json"]
+            if (new_edl.get("keep"), new_edl.get("inserts"),
+                    new_edl.get("speed")) != \
+                    (old_j.get("keep"), old_j.get("inserts"),
+                     old_j.get("speed")):
+                old_tl = wtimeline.Timeline(old_j.get("keep") or [],
+                                            old_j.get("inserts") or [],
+                                            old_j.get("speed") or [])
+                new_tl = wtimeline.Timeline(new_edl.get("keep") or [],
+                                            new_edl.get("inserts") or [],
+                                            new_edl.get("speed") or [])
+                notes = wtimeline.remap_program_items(new_edl, old_tl,
+                                                      new_tl)
+                if notes:
+                    desc += " — " + "; ".join(
+                        n[6:] if n.startswith("note: ") else n
+                        for n in notes)
             normalized = wschemas.validate_edl(
                 new_edl, float(original["duration_s"])).model_dump()
         except (ValueError, wschemas.EDLValidationError) as e:

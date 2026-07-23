@@ -363,6 +363,25 @@ def upsert_index(conn, project_id, sha256, index_json):
               config.PIPELINE_VERSION))
 
 
+def set_index_perception(conn, sha256, perception_json, pipeline_version):
+    """Merge ONLY the perception sidecar into an index row, atomically.
+
+    Deliberately not upsert_index: the sidecar is computed over a
+    minutes-long analysis window, and writing the whole row back would
+    (a) clobber any transcript edit or re-index that landed meanwhile and
+    (b) re-stamp pipeline_version, laundering a stale index as current and
+    cancelling the backend's self-heal re-index. The single-statement
+    jsonb_set touches nothing but the 'perception' key, and the
+    pipeline_version guard makes this a silent no-op if a re-index replaced
+    the row mid-analysis — the sidecar then simply recomputes next call."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE indexes
+            SET json = jsonb_set(json, '{perception}', %s::jsonb)
+            WHERE video_sha256 = %s AND pipeline_version = %s
+        """, (json.dumps(perception_json), sha256, pipeline_version))
+
+
 def latest_edl(conn, project_id):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM edls WHERE project_id = %s

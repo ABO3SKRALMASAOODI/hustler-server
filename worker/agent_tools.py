@@ -17,6 +17,7 @@ import eleven
 import llm
 import media
 import music_library
+import perception
 import sfx_library
 import storage
 import videogen
@@ -24,13 +25,26 @@ import timeline as timeline_mod
 import url_media
 from captions import KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, EDLValidationError, Frame,
-                     canvas_edl, describe_edl, DEFAULT_CANVAS_FPS,
+                     canvas_edl, clip_anim, describe_edl, DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
                      output_duration, program_duration, validate_edl,
                      MAX_INSERT_DURATION_S, GAIN_MIN_DB, GAIN_MAX_DB,
                      GRADE_PRESETS, TRANSITION_STYLES, TRANSITION_MIN_S,
-                     TRANSITION_MAX_S)
+                     TRANSITION_MAX_S, OVERLAY_ANIMS, OVERLAY_SCALE_MIN,
+                     OVERLAY_SCALE_MAX, SPEED_FACTOR_MIN, SPEED_FACTOR_MAX,
+                     STYLIZE_KINDS, TEXT_ANIMS, TEXT_FONTS, TEXT_TEMPLATES,
+                     ZOOM_STRENGTH_MIN, ZOOM_STRENGTH_MAX)
 from timeline import Timeline
+
+# Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
+# 4) applies to EDLs with no explicit group — 3 stored prod EDLs (proj 13,
+# dynamic + mw=6) render 4-word groups under it, and a stored version's
+# render can never change. Group sizes up to 6 therefore ride the NEW
+# captions.karaoke_group_n field, BAKED at write time by
+# _bake_karaoke_group below: new writes opt in, old versions render exactly
+# as always.
+KARAOKE_TOOL_MAX = 6
+assert KARAOKE_TOOL_MAX >= KARAOKE_HARD_MAX
 
 
 class AskUser(Exception):
@@ -63,6 +77,8 @@ class ToolContext:
         self.workdir = workdir
         self._proxy_local = None
         self._asset_locals = {}       # asset id -> downloaded local path
+        self._perception = None       # main video's audio analysis, cached
+        self._asset_perception = {}   # asset/library key -> audio analysis
         self.last_preview = None      # set by render_preview
         self.last_selfcheck = None    # vision one-liner from the last preview
         self.versions_written = []    # EDL versions created this turn
@@ -252,7 +268,8 @@ def get_kept_transcript(ctx):
     repetition/tightening pass really removed the repeats."""
     latest = ctx.latest_edl()
     edl = latest["json"]
-    tl = Timeline(edl["keep"], edl.get("inserts") or [])
+    tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                  edl.get("speed") or [])
     out_words = tl.kept_words(ctx.index.get("words", []))
     if not out_words:
         return ("The current edit keeps no transcribed speech."
@@ -293,7 +310,10 @@ def get_kept_transcript(ctx):
                 budget=config.TRANSCRIPT_CHAR_BUDGET)
 
 
-GET_WORDS_MAX_RANGE_S = 60.0
+# Adaptive response bound (was a 60s hard range reject): a wide range over
+# sparse speech is perfectly answerable, so the WORD count is what's capped —
+# the tail says exactly how much was withheld and how to get it.
+GET_WORDS_MAX_WORDS = 400
 
 
 def get_words(ctx, start=0, end=None):
@@ -303,20 +323,24 @@ def get_words(ctx, start=0, end=None):
     end = ctx.clamp(end if end is not None else ctx.duration)
     if end <= start:
         return "REJECTED: end must be greater than start."
-    if end - start > GET_WORDS_MAX_RANGE_S + 0.01:
-        return (f"REJECTED: range {end - start:.0f}s is too wide — call "
-                f"get_words on ranges of {GET_WORDS_MAX_RANGE_S:.0f}s or "
-                f"less (e.g. get_words({start:.0f}, "
-                f"{start + GET_WORDS_MAX_RANGE_S:.0f}), then the next "
-                "window). Use get_transcript to find the right region first.")
     words = ctx.index.get("words", [])
     rows = [w for w in words if w["t1"] > start and w["t0"] < end]
     if not rows:
         return (f"No transcribed words between {start}s and {end}s."
                 if words else
                 "This video has no transcript (no speech or no audio track).")
-    out = [f"{_fmt_t(w['t0'])}-{_fmt_t(w['t1'])} {w['w']}" for w in rows]
-    return _cap("\n".join(out))
+    shown = rows[:GET_WORDS_MAX_WORDS]
+    out = [f"{_fmt_t(w['t0'])}-{_fmt_t(w['t1'])} {w['w']}" for w in shown]
+    tail = ""
+    if len(rows) > len(shown):
+        # Floor the suggested start (int()): rounding UP could skip words
+        # whose t1 falls inside the rounded gap; flooring only re-shows a
+        # ≤1s overlap the strict t1>start filter tolerates. The end is
+        # printed exactly for the same reason.
+        tail = (f"\n...{len(rows) - len(shown)} more words (up to {end}s) "
+                f"not shown — narrow the range and call again "
+                f"(e.g. get_words({int(shown[-1]['t1'])}, {end:g})).")
+    return _cap("\n".join(out) + tail)
 
 
 def search_transcript(ctx, query):
@@ -435,7 +459,9 @@ def look_at(ctx, start, end, question):
         proxy = ctx.proxy_path()
     except Exception as err:
         return f"Cannot fetch frames right now ({err}). Decide from the index."
-    n = 4 if e - s > 1.5 else 2
+    # 6 frames over a >30s range (was 4 max): 4 samples across half a minute
+    # skip whole shots; the marginal vision cost is small next to a wrong cut.
+    n = 6 if e - s > 30 else (4 if e - s > 1.5 else 2)
     frames, frame_names = [], []
     for i in range(n):
         t = s + (e - s) * (i + 0.5) / n
@@ -545,12 +571,19 @@ def _merge_touching(spans):
     return merged
 
 
+# The shared re-anchoring pass lives in timeline.py (round 35.1) so the
+# backend UI ops apply the IDENTICAL anchor policy — one implementation,
+# every surface. Alias kept for the existing call sites below.
+_remap_program_items = timeline_mod.remap_program_items
+
+
 def _write_keep(ctx, new_keep, desc, snap_to_words=False,
                 check_regression=False):
     """Shared tail for every keep-modifying write: optional outward word
-    snapping, the version write, then mid-word boundary warnings (and, for
-    full replacements, mechanical regression warnings) appended to a still
-    SUCCESSFUL result."""
+    snapping, insert re-snap + program-item re-anchoring (the shared remap
+    above, speed-aware), the version write, then mid-word boundary warnings
+    (and, for full replacements, mechanical regression warnings) appended to
+    a still SUCCESSFUL result."""
     words = ctx.index.get("words", [])
     silences = ctx.index.get("silences", [])
     if snap_to_words and words:
@@ -562,164 +595,23 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     prev_keep = prev["json"]["keep"]
     edl = dict(prev["json"])
     edl["keep"] = new_keep
+    speed = edl.get("speed") or []
     # Inserts sit at keep boundaries; when the keep list changes, re-snap
     # each to the nearest boundary of the NEW keep so the edit stays valid.
+    # Boundaries are speed-aware — a sped segment occupies its remapped length.
     if edl.get("inserts"):
-        bounds = keep_boundaries(new_keep)
+        bounds = keep_boundaries(new_keep, speed)
         edl["inserts"] = [
             {**ins, "at_output_s": min(bounds,
                                        key=lambda b: abs(b - ins["at_output_s"]))}
             for ins in edl["inserts"]]
-    # Everything below lives in PROGRAM time, which this write is changing. A
-    # stale item that no longer fits would fail validation and reject the whole
-    # write — so a pre-existing zoom could make an unrelated cut impossible.
-    # Each collection follows its own anchor:
-    #   zooms      - CONTENT-anchored ("push in on the skyline"): remap through
-    #                the source so the zoom stays on the moment it was placed
-    #                on; drop it when that footage is cut away.
-    #   sfx        - CONTENT-anchored one-shot ("a whoosh on that cut"): remap
-    #                the POINT through the source; drop it when that moment is
-    #                cut away. Output-time units do NOT decide the anchor —
-    #                zoom start/end are output time too. What the item is
-    #                attached to decides it.
-    #   music /    - PROGRAM-anchored ("music under the whole video", "narrate
-    #   voiceover    at 10s"): clamp to the new program length.
-    #   regions    - PROGRAM-anchored censor window: clamp (drop if outside).
-    region_notes = []
-    prog = output_duration(new_keep) + sum(
-        float(i["duration_s"]) for i in edl.get("inserts") or [])
-    old_tl = Timeline(prev_keep, prev["json"].get("inserts") or [])
-    new_tl = Timeline(new_keep, edl.get("inserts") or [])
-
-    fx = dict(edl.get("effects") or {})
-    fx_changed = False
-    if fx.get("zooms"):
-        kept_zooms = []
-        for z in fx["zooms"]:
-            z = dict(z)
-            moved = timeline_mod.remap_program_span(
-                old_tl, new_tl, float(z["start"]), float(z["end"]))
-            if moved is None:
-                # Endpoints inside a spliced insert have no source time; only
-                # a genuinely cut-away zoom maps to nothing.
-                if old_tl.out_to_src(float(z["start"])) is None or \
-                        old_tl.out_to_src(float(z["end"])) is None:
-                    kept_zooms.append(z)
-                    continue
-                region_notes.append(
-                    f"note: zoom {z.get('id')} was removed — the footage it "
-                    "was on is no longer in the edit.")
-                fx_changed = True
-                continue
-            ns, ne = moved
-            if ne - ns < 0.2:
-                region_notes.append(
-                    f"note: zoom {z.get('id')} was removed — only "
-                    f"{ne - ns:.2f}s of the footage it was on survives the "
-                    "cut.")
-                fx_changed = True
-                continue
-            if (ns, ne) != (z["start"], z["end"]):
-                region_notes.append(
-                    f"note: zoom {z.get('id')} moved to {ns}-{ne}s (output "
-                    "time) so it stays on the same footage.")
-                z["start"], z["end"] = ns, ne
-                fx_changed = True
-            kept_zooms.append(z)
-        if fx_changed:
-            fx["zooms"] = kept_zooms
-    if fx.get("regions"):
-        kept_regs = []
-        for r in fx["regions"]:
-            r = dict(r)
-            if r.get("end") is not None and r["end"] > prog:
-                if (r.get("start") or 0.0) >= prog - 0.05:
-                    region_notes.append(
-                        f"note: censor region {r.get('id')} was removed — "
-                        "its time window falls entirely outside the "
-                        "shortened edit.")
-                    fx_changed = True
-                    continue
-                r["end"] = round(prog, 2)
-                region_notes.append(
-                    f"note: censor region {r.get('id')}'s time window now "
-                    f"ends at {r['end']}s to fit the shortened edit.")
-                fx_changed = True
-            kept_regs.append(r)
-        if fx_changed:
-            fx["regions"] = kept_regs
-    if fx_changed:
-        edl["effects"] = fx
-
-    if edl.get("music"):
-        kept_music = []
-        for m in edl["music"]:
-            m = dict(m)
-            if m["end"] > prog:
-                if m["start"] >= prog - 0.1:
-                    region_notes.append(
-                        f"note: music {m.get('id')} was removed — it starts "
-                        "after the end of the shortened edit.")
-                    continue
-                m["end"] = round(prog, 2)
-                region_notes.append(
-                    f"note: music {m.get('id')} now ends at {m['end']}s to "
-                    "fit the shortened edit.")
-            kept_music.append(m)
-        edl["music"] = kept_music
-    if edl.get("voiceover"):
-        kept_vo = []
-        for v in edl["voiceover"]:
-            v = dict(v)
-            if v["start_output_s"] > max(0.0, prog - 0.05):
-                region_notes.append(
-                    f"note: voiceover {v.get('id')} was removed — it starts "
-                    "after the end of the shortened edit.")
-                continue
-            kept_vo.append(v)
-        edl["voiceover"] = kept_vo
-    if edl.get("sfx"):
-        # CONTENT-anchored, like a zoom — NOT program-anchored like music. The
-        # prompt tells the agent to land a whoosh ON a cut point and an impact
-        # ON the reveal, so the sound belongs to a moment in the footage and
-        # has to follow it. Left in program time it silently drifts by the
-        # length of every cut made before it: trim 10s off the front and the
-        # whoosh that was on the cut now fires 10s into the next take, with no
-        # note, while write_edl still reports success.
-        #
-        # A point, not a span, so remap_program_span is no use here — a
-        # zero-length span maps to no output pieces and returns None. Map the
-        # point itself through the source.
-        kept_sfx = []
-        for s in edl["sfx"]:
-            s = dict(s)
-            at = float(s["at"])
-            src = old_tl.out_to_src(at)
-            # No source time means the point sits inside a spliced insert;
-            # those keep their program position.
-            new_at = new_tl.src_to_out(src) if src is not None else at
-            if new_at is None:
-                region_notes.append(
-                    f"note: sound effect {s.get('id')} was removed — the "
-                    "moment it was placed on is no longer in the edit.")
-                continue
-            if abs(new_at - at) > 0.01:
-                region_notes.append(
-                    f"note: sound effect {s.get('id')} moved to "
-                    f"{round(new_at, 2)}s so it stays on the same moment.")
-            s["at"] = round(new_at, 2)
-            # A point past the end of a shortened edit is dropped, not
-            # clamped: clamping would pile every orphan onto the last frame.
-            # Without this the sfx bounds check in validate_edl rejects the
-            # whole CUT — the user asks to trim the end and is told the edit
-            # is invalid, over a sound they never mentioned.
-            if s["at"] > max(0.0, prog - 0.05):
-                region_notes.append(
-                    f"note: sound effect {s.get('id')} was removed — it sits "
-                    "after the end of the shortened edit.")
-                continue
-            kept_sfx.append(s)
-        edl["sfx"] = kept_sfx
+    # Program-time items re-anchor through the shared remap; both Timelines
+    # carry the (unchanged-by-this-write) speed list so their clocks agree
+    # with what actually renders.
+    old_tl = Timeline(prev_keep, prev["json"].get("inserts") or [],
+                      prev["json"].get("speed") or [])
+    new_tl = Timeline(new_keep, edl.get("inserts") or [], speed)
+    region_notes = _remap_program_items(edl, old_tl, new_tl)
 
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
@@ -966,11 +858,11 @@ def add_captions(ctx, mode=None, items=None, style=None,
         # with their own budgets, so the clamp is legacy-dynamic only.
         karaoke_note = ""
         if mw and not premium and (parsed_style or {}).get("dynamic") \
-                and mw > KARAOKE_HARD_MAX:
+                and mw > KARAOKE_TOOL_MAX:
             karaoke_note = (f"\nNote: dynamic (karaoke) captions group at "
-                            f"most {KARAOKE_HARD_MAX} words per line — "
-                            f"using {KARAOKE_HARD_MAX} instead of {mw}.")
-            mw = KARAOKE_HARD_MAX
+                            f"most {KARAOKE_TOOL_MAX} words per line — "
+                            f"using {KARAOKE_TOOL_MAX} instead of {mw}.")
+            mw = KARAOKE_TOOL_MAX
         if not premium and (parsed_style or {}).get("dynamic") \
                 and (parsed_style or {}).get("animation"):
             karaoke_note += ("\nNote: dynamic karaoke captions animate "
@@ -1034,7 +926,7 @@ def add_captions(ctx, mode=None, items=None, style=None,
                "style": parsed_style}
         if emphasis_words:
             cfg["emphasis_words"] = emphasis_words
-        edl["captions"] = cfg
+        edl["captions"] = _bake_karaoke_group(cfg)
         desc = "captions from transcript enabled"
         if premium:
             desc += f", preset {preset}"
@@ -1097,6 +989,26 @@ def _parse_partial_style(style):
                 '"highlight_color":"#RRGGBB","leading":0.5-2.2,'
                 '"emphasis_scale":1.0-3.0,"animation":"fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop"}.')
     return {k: validated[k] for k in style}
+
+
+def _bake_karaoke_group(caps):
+    """Bake the karaoke group size for legacy-dynamic captions (mutates and
+    returns caps). The renderer's dynamic grouping stays hard-clamped at 4
+    for EDLs carrying no explicit group — the render-time meaning of
+    EXISTING fields never changes — so sizes above 4 ride karaoke_group_n,
+    written concretely here at write time."""
+    if not isinstance(caps, dict):
+        return caps
+    st = caps.get("style") or {}
+    preset = st.get("preset")
+    legacy_dynamic = bool(st.get("dynamic")) and \
+        (not preset or preset == "classic")
+    mw = caps.get("max_words_per_caption")
+    if legacy_dynamic and mw:
+        caps["karaoke_group_n"] = min(int(mw), KARAOKE_TOOL_MAX)
+    else:
+        caps.pop("karaoke_group_n", None)
+    return caps
 
 
 def merge_caption_style(captions, partial):
@@ -1173,18 +1085,21 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
         else:
             emph_note = ("\nNote: emphasis_words apply to from_transcript "
                          "captions only — manual caption items ignore them.")
-    # turning karaoke on with a stored group size above the render's hard
-    # max: clamp the stored value so state and output agree, and say so.
+    # any patch that LANDS in legacy-dynamic with a stored group size above
+    # the karaoke max (turning dynamic on, OR switching a premium preset
+    # back to classic while dynamic was already on): clamp the stored value
+    # so state and output agree, and say so.
     karaoke_note = ""
-    if isinstance(merged, dict) and partial.get("dynamic") \
-            and not eff_preset \
-            and (merged.get("max_words_per_caption") or 0) > KARAOKE_HARD_MAX:
+    eff_dynamic = isinstance(merged, dict) and not eff_preset \
+        and bool((merged.get("style") or {}).get("dynamic"))
+    if eff_dynamic \
+            and (merged.get("max_words_per_caption") or 0) > KARAOKE_TOOL_MAX:
         karaoke_note = (f"\nNote: dynamic (karaoke) captions group at most "
-                        f"{KARAOKE_HARD_MAX} words per line — "
+                        f"{KARAOKE_TOOL_MAX} words per line — "
                         f"max_words_per_caption lowered from "
                         f"{merged['max_words_per_caption']} to "
-                        f"{KARAOKE_HARD_MAX}.")
-        merged["max_words_per_caption"] = KARAOKE_HARD_MAX
+                        f"{KARAOKE_TOOL_MAX}.")
+        merged["max_words_per_caption"] = KARAOKE_TOOL_MAX
     if partial.get("animation"):
         eff_style = (merged.get("style") or {}) if isinstance(merged, dict) \
             else {}
@@ -1211,7 +1126,7 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
         karaoke_note += (f"\nNote: preset '{eff_preset}' drives its own "
                          "word-by-word animation — the 'dynamic' flag is "
                          "ignored while a preset is set.")
-    edl["captions"] = merged
+    edl["captions"] = _bake_karaoke_group(merged)
     desc = f"caption style updated: {json.dumps(partial)}" if partial \
         else f"caption emphasis words set ({len(emphasis_words or [])})"
     result = ctx.write_edl(edl, desc)
@@ -1336,8 +1251,13 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=-18.0,
     fi, fo = min(fi, span / 2), min(fo, span / 2)
 
     music = [dict(m) for m in (edl.get("music") or [])]
+    # NEW music ducks smoothly (sidechain — the bed dips WITH the voice and
+    # swells back in the gaps) instead of the legacy -12dB step. Written on
+    # the item, never inferred at render, and never applied to existing music
+    # items — their duck_mode stays whatever it was.
     item = {"id": _next_item_id(music, "mus"), "storage_key": storage_key,
             "start": s, "end": e, "gain_db": g, "duck": bool(duck),
+            "duck_mode": "smooth" if duck else None,
             "offset_s": off, "fade_in_s": fi or None,
             "fade_out_s": fo or None, "loop": True if loop else None}
     music.append(item)
@@ -1345,6 +1265,10 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=-18.0,
     res = ctx.write_edl(
         edl, f"music '{track['name']}' at {s}-{e}s "
              f"(output timeline), {g}dB, duck={bool(duck)} [{item['id']}]")
+    if duck and res.startswith("EDL v"):
+        res += ("\nNote: music ducks smoothly under speech (a sidechain dip "
+                "that follows the voice, not a hard step) — "
+                "set_music_fit(duck_mode='step') switches to the legacy duck.")
 
     # Tell the agent what the track can actually cover, so it reports the
     # truth rather than assuming the span got filled.
@@ -1584,7 +1508,8 @@ def swap_music(ctx, id, storage_key):
 
 
 def set_music_fit(ctx, id, start=None, end=None, offset_s=None,
-                  fade_in_s=None, fade_out_s=None, loop=None, duck=None):
+                  fade_in_s=None, fade_out_s=None, loop=None, duck=None,
+                  duck_mode=None):
     """Retime or refit EXISTING music in place. Anything left unset is left
     alone — this is the tool for 'start the music later', 'make it fade out',
     'loop it to the end', without remove + re-add losing the other settings."""
@@ -1629,17 +1554,33 @@ def set_music_fit(ctx, id, start=None, end=None, offset_s=None,
         hit["loop"] = True if loop else None
     if duck is not None:
         hit["duck"] = bool(duck)
+    duck_note = ""
+    if duck_mode is not None:
+        dm = str(duck_mode).strip().lower()
+        if dm not in ("smooth", "step"):
+            return ("REJECTED: duck_mode must be 'smooth' (a sidechain dip "
+                    "that follows the voice) or 'step' (the legacy hard "
+                    "-12dB duck).")
+        # 'step' is the absence of the smooth mode, stored as None so the
+        # item hashes exactly like every pre-smooth EDL.
+        hit["duck_mode"] = "smooth" if dm == "smooth" else None
+        if not hit.get("duck"):
+            duck_note = ("\nNote: this item has duck=false, so duck_mode "
+                         "has no audible effect until ducking is turned on.")
     if hit == before:
         return (f"NO CHANGE — music {id} already has those settings. Do NOT "
                 "tell the user you changed anything.")
     edl["music"] = items
     changed = ", ".join(
         f"{k}={hit.get(k)}" for k in
-        ("start", "end", "offset_s", "fade_in_s", "fade_out_s", "loop", "duck")
+        ("start", "end", "offset_s", "fade_in_s", "fade_out_s", "loop",
+         "duck", "duck_mode")
         if hit.get(k) != before.get(k))
     res = ctx.write_edl(
         edl, f"music {id} ('{_music_name(hit['storage_key'])}') refit: "
              f"{changed}")
+    if duck_note and res.startswith("EDL v"):
+        res += duck_note
     track, _ = _resolve_music(ctx, hit["storage_key"])
     tdur = (track or {}).get("duration_s")
     span = hit["end"] - hit["start"]
@@ -1739,18 +1680,18 @@ ZOOM_MODE_DESC = {"punch": "punch-in", "ease": "eased",
                   "pull_out": "Ken Burns pull-out"}
 
 
-def add_zoom(ctx, start, end, strength=0.25, mode=None):
+def add_zoom(ctx, start, end, strength=0.25, mode=None, cx=None, cy=None):
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     try:
         s = round(min(max(float(start), 0.0), max(0.0, prog - 0.2)), 2)
         e = round(min(max(float(end), s), prog), 2)
         st = round(min(max(float(strength if strength is not None else 0.25),
-                           0.05), 1.0), 2)
+                           ZOOM_STRENGTH_MIN), ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
         return ("REJECTED: start/end/strength must be numbers. start/end are "
-                "OUTPUT-timeline seconds; strength 0.05-1.0 (0.25 = 25% "
-                "punch-in).")
+                "OUTPUT-timeline seconds; strength 0.05-1.5 (0.25 = 25% "
+                "punch-in; above 1.0 is a dramatic 2x+ punch).")
     if e - s < 0.2:
         return "REJECTED: a zoom needs at least 0.2s."
     zmode = (mode or "punch").strip().lower()
@@ -1759,18 +1700,33 @@ def add_zoom(ctx, start, end, strength=0.25, mode=None):
                 "punch = instant step in/out; ease = smooth ramp in and "
                 "out; push_in / pull_out = continuous Ken Burns drift "
                 "across the window.")
+    # Optional zoom TARGET (round 35): fractions of the output frame,
+    # (0,0) = top-left. None keeps the legacy center zoom.
+    tgt = {}
+    for cname, cval in (("cx", cx), ("cy", cy)):
+        if cval is None:
+            continue
+        try:
+            tgt[cname] = round(min(max(float(cval), 0.0), 1.0), 3)
+        except (TypeError, ValueError):
+            return ("REJECTED: cx/cy must be numbers 0-1 — fractions of the "
+                    "output frame ((0,0) = top-left, (0.5,0.5) = center). "
+                    "Use look_at to find the subject first.")
     fx = dict(edl.get("effects") or {})
     zooms = [dict(z) for z in (fx.get("zooms") or [])]
     item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
             "strength": st}
     if zmode != "punch":
         item["mode"] = zmode
+    item.update(tgt)
     zooms.append(item)
     fx["zooms"] = zooms
     edl["effects"] = fx
+    aimed = (f", aimed at ({tgt.get('cx', 0.5):g}, {tgt.get('cy', 0.5):g}) "
+             "of the frame" if tgt else "")
     return ctx.write_edl(
         edl, f"{ZOOM_MODE_DESC[zmode]} zoom {int(st * 100)}% on {s}-{e}s "
-             f"(output time) [{item['id']}]")
+             f"(output time){aimed} [{item['id']}]")
 
 
 def remove_zoom(ctx, id):
@@ -1814,6 +1770,19 @@ def set_fades(ctx, fade_in_s=None, fade_out_s=None):
     return ctx.write_edl(edl, "fade to/from black: " + ", ".join(bits))
 
 
+# One honest line per junction style — shown in rejects and diffs so the
+# agent describes what actually renders, not what a style name suggests.
+TRANSITION_DESC = {
+    "dip_black": "quick dip through black",
+    "dip_white": "soft white fade-through",
+    "whip_left": "fast leftward slide with motion blur",
+    "whip_right": "fast rightward slide with motion blur",
+    "zoom_punch": "accelerating push through the cut",
+    "glitch": "RGB-split/noise burst around the cut",
+    "flash": "additive white pop peaking on the cut",
+}
+
+
 def set_transitions(ctx, style, duration_s=0.3):
     p = (style or "").strip().lower()
     edl = dict(ctx.latest_edl()["json"])
@@ -1828,21 +1797,23 @@ def set_transitions(ctx, style, duration_s=0.3):
     if p not in TRANSITION_STYLES:
         return (f"REJECTED: style must be one of "
                 f"{', '.join(TRANSITION_STYLES)} — or 'none' to clear. "
-                "dip_black = quick dip through black at every cut; "
-                "dip_white = a white flash. True crossfades (overlapping "
-                "footage) are not supported — say so if asked.")
+                + "; ".join(f"{k} = {v}" for k, v in TRANSITION_DESC.items())
+                + ". All are duration-preserving junction effects. True "
+                "crossfades (overlapping footage) are not supported — say "
+                "so if asked.")
     try:
         d = round(min(max(float(duration_s if duration_s is not None
                                 else 0.3), TRANSITION_MIN_S),
                       TRANSITION_MAX_S), 2)
     except (TypeError, ValueError):
-        return "REJECTED: duration_s must be a number of seconds (0.1-1.0)."
+        return ("REJECTED: duration_s must be a number of seconds "
+                f"({TRANSITION_MIN_S:g}-{TRANSITION_MAX_S:g}).")
     fx["transition"] = {"style": p, "duration_s": d}
     edl["effects"] = fx
     n_cuts = max(0, len(edl.get("keep") or []) - 1) \
         + len(edl.get("inserts") or [])
     return ctx.write_edl(
-        edl, f"transitions: {d}s {p.replace('_', '-')} at every cut "
+        edl, f"transitions: {d}s {p} ({TRANSITION_DESC[p]}) at every cut "
              f"(~{n_cuts} junction{'s' if n_cuts != 1 else ''})")
 
 
@@ -2070,9 +2041,11 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
         return ctx.write_edl(edl, desc)
 
     keep = [list(x) for x in edl["keep"]]
-    tl = Timeline(keep, inserts)
+    orig_keep = [list(x) for x in keep]
+    speed = edl.get("speed") or []
+    tl = Timeline(keep, inserts, speed)
     at = round(min(max(at, 0.0), tl.out_duration), 2)
-    pre_bounds = keep_boundaries(keep)
+    pre_bounds = keep_boundaries(keep, speed)
     final_of = {b: b + sum(d for a2, d in tl.ins if a2 <= b + 1e-6)
                 for b in pre_bounds}
     nearest_b = min(pre_bounds, key=lambda b: abs(final_of[b] - at))
@@ -2104,7 +2077,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                 s0, e0 = keep[seg_i]
                 keep[seg_i:seg_i + 1] = [[s0, src], [src, e0]]
                 edl["keep"] = keep
-                target_pre = keep_boundaries(keep)[seg_i + 1]
+                target_pre = keep_boundaries(keep, speed)[seg_i + 1]
                 note_bits.append(
                     f"split the take at source {src}s (a word edge) so the "
                     "insert lands mid-talk exactly where asked")
@@ -2117,6 +2090,12 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     if motion:
         item["motion"] = motion
     edl["inserts"] = inserts + [item]
+    # Splicing shifts everything after the insert later (and may split a
+    # take): re-anchor through the shared remap so content-anchored zooms/
+    # sfx move WITH their footage instead of drifting onto the insert.
+    old_tl = Timeline(orig_keep, inserts, speed)
+    new_tl = Timeline(keep, edl["inserts"], speed)
+    remap_notes = _remap_program_items(edl, old_tl, new_tl)
     window = (f" (using clip {off:.1f}-{round(off + dur, 2):.1f}s)"
               if off else "")
     moved = f" with a Ken Burns {motion} move" if motion else ""
@@ -2128,30 +2107,9 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     if result.startswith("EDL v"):
         result += ("\nNote: captions cover the main footage only — inserted "
                    "media is not transcribed or captioned.")
+        if remap_notes:
+            result += "\n" + "\n".join(remap_notes)
     return result
-
-
-def _drop_orphaned_sfx(edl):
-    """Drop sound effects that no longer fit the program, returning notes.
-
-    Shrinking the program by any route other than a keep change — removing a
-    spliced insert, shortening one — leaves sfx bounded by the OLD program
-    length. validate_edl then rejects the whole write, so a user clicking x on
-    an insert is told their edit is invalid over a sound they never mentioned.
-    """
-    items = edl.get("sfx") or []
-    if not items:
-        return []
-    prog = program_duration(edl)
-    kept, notes = [], []
-    for s in items:
-        if float(s["at"]) > max(0.0, prog - 0.05):
-            notes.append(f"note: sound effect {s.get('id')} was removed — it "
-                         "sits after the end of the shortened edit.")
-            continue
-        kept.append(s)
-    edl["sfx"] = kept
-    return notes
 
 
 def remove_insert(ctx, id):
@@ -2163,7 +2121,15 @@ def remove_insert(ctx, id):
         return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
                 f"{have}. Call get_edl to see them.")
     edl["inserts"] = [i for i in inserts if i.get("id") != id]
-    notes = _drop_orphaned_sfx(edl)
+    # Removing an insert shifts everything after it earlier and shortens the
+    # program — the SAME re-anchoring as a keep cut. The old sfx-only drop
+    # left overlays/texts/windowed-stylize past the shortened end to reject
+    # the whole removal, and let content-anchored zooms/sfx silently drift
+    # onto different footage.
+    speed = edl.get("speed") or []
+    old_tl = Timeline(edl.get("keep") or [], inserts, speed)
+    new_tl = Timeline(edl.get("keep") or [], edl["inserts"], speed)
+    notes = _remap_program_items(edl, old_tl, new_tl)
     res = ctx.write_edl(
         edl, f"removed insert {id} "
              f"('{os.path.basename(hit['asset_key'])}', {hit['duration_s']}s) "
@@ -2221,6 +2187,501 @@ def remove_voiceover(ctx, id):
     return ctx.write_edl(
         edl, f"removed voiceover {id} "
              f"('{os.path.basename(hit['asset_key'])}')")
+
+
+# ------------------------------------------------------------------ #
+#  EDL v2 write tools (round 35): speed, overlays, text, stylize,      #
+#  custom grade, mastering                                             #
+# ------------------------------------------------------------------ #
+
+def _write_speed(ctx, prev, edl, desc, warn_slow=False):
+    """Shared tail for speed writes: re-snap inserts to the speed-remapped
+    boundaries, re-anchor program-time items through the shared remap (the
+    program clock itself just changed), then write and disclose the new
+    program length."""
+    keep = edl["keep"]
+    speed = edl.get("speed") or []
+    ins_notes = []
+    if edl.get("inserts"):
+        # A speed change moves every downstream boundary, so re-snapping by
+        # nearest VALUE can silently hop an insert to a DIFFERENT junction
+        # (4x the intro and boundary 10.0 lands nearer the NEXT take's start
+        # than its own remapped 2.5). The keep list is unchanged here, so
+        # old and new boundary lists pair 1:1 — re-snap by junction INDEX,
+        # which preserves exactly which cut the insert sits at.
+        old_bounds = keep_boundaries(keep, prev["json"].get("speed") or [])
+        bounds = keep_boundaries(keep, speed)
+        resnapped = []
+        for ins in edl["inserts"]:
+            oi = min(range(len(old_bounds)),
+                     key=lambda k: abs(old_bounds[k] - ins["at_output_s"]))
+            new_at = bounds[oi]
+            if abs(new_at - float(ins["at_output_s"])) > 0.01:
+                ins_notes.append(
+                    f"note: insert {ins.get('id')} now splices at "
+                    f"{round(new_at, 2)}s — the same junction, on the "
+                    "speed-remapped clock.")
+            resnapped.append({**ins, "at_output_s": new_at})
+        edl["inserts"] = resnapped
+    old_tl = Timeline(prev["json"]["keep"], prev["json"].get("inserts") or [],
+                      prev["json"].get("speed") or [])
+    new_tl = Timeline(keep, edl.get("inserts") or [], speed)
+    notes = ins_notes + _remap_program_items(edl, old_tl, new_tl)
+    result = ctx.write_edl(edl, desc)
+    if not result.startswith("EDL v"):
+        return result
+    result += (f"\nProgram length: {round(old_tl.out_duration, 2)}s -> "
+               f"{round(new_tl.out_duration, 2)}s.")
+    if warn_slow:
+        result += ("\nWARNING: slow motion duplicates frames on this "
+                   "pipeline — below 0.6x it visibly steps. Prefer 0.6-0.8x "
+                   "unless the user accepts the stepping; say so honestly.")
+    if notes:
+        result += "\n" + "\n".join(notes)
+    return result
+
+
+def set_speed(ctx, start, end, factor):
+    """A constant speed factor over a SOURCE-time span (like set_volume) —
+    the ramp belongs to the footage it was placed on, so it survives later
+    cuts without drifting."""
+    if not ctx.has_main_video:
+        return ("REJECTED: speed ramps address SOURCE time and need a main "
+                "video — an image/clip-only program has no source clock. "
+                "Choose clip windows with insert_media instead.")
+    try:
+        s, e = ctx.clamp(start), ctx.clamp(end)
+    except ValueError as err:
+        return f"REJECTED: {err}"
+    if e - s < 0.2:
+        return "REJECTED: a speed span needs at least 0.2s of source footage."
+    try:
+        f = round(min(max(float(factor), SPEED_FACTOR_MIN),
+                      SPEED_FACTOR_MAX), 3)
+    except (TypeError, ValueError):
+        return ("REJECTED: factor must be a number 0.25-4.0 (2.0 = double "
+                "speed, 0.5 = half speed; audio keeps its pitch).")
+    if abs(f - 1.0) < 0.01:
+        return ("REJECTED: factor 1.0 is normal speed — nothing to write. "
+                "Use remove_speed(id) to undo an existing span.")
+    prev = ctx.latest_edl()
+    edl = dict(prev["json"])
+    spans = [dict(sp) for sp in (edl.get("speed") or [])]
+    # Speed spans never overlap (schema): an overlapping request REPLACES
+    # what it collides with, and the result says which spans died for it.
+    replaced = [sp for sp in spans
+                if float(sp["end"]) > s + 1e-6 and float(sp["start"]) < e - 1e-6]
+    spans = [sp for sp in spans if sp not in replaced]
+    item = {"id": _next_item_id(spans, "sp"), "start": s, "end": e,
+            "factor": f}
+    spans.append(item)
+    spans.sort(key=lambda x: float(x["start"]))
+    edl["speed"] = spans
+    desc = f"{f:g}x speed on source {s}-{e}s [{item['id']}]"
+    if replaced:
+        desc += (", replacing overlapping span(s) "
+                 + ", ".join(f"{sp.get('id')} ({float(sp['factor']):g}x "
+                             f"{sp['start']}-{sp['end']}s)"
+                             for sp in replaced))
+    return _write_speed(ctx, prev, edl, desc, warn_slow=(f < 0.6))
+
+
+def remove_speed(ctx, id):
+    prev = ctx.latest_edl()
+    edl = dict(prev["json"])
+    spans = [dict(sp) for sp in (edl.get("speed") or [])]
+    hit = next((sp for sp in spans if sp.get("id") == id), None)
+    if not hit:
+        have = ", ".join(sp.get("id") or "?" for sp in spans) or "none"
+        return (f"REJECTED: no speed span with id '{id}'. Existing speed "
+                f"spans: {have}. Call get_edl to see them.")
+    edl["speed"] = [sp for sp in spans if sp.get("id") != id]
+    return _write_speed(
+        ctx, prev, edl,
+        f"removed speed span {id} ({float(hit['factor']):g}x on source "
+        f"{hit['start']}-{hit['end']}s) — normal speed restored there")
+
+
+def _parse_anim_float(v, name):
+    """(value, error): a plain number, or a keyframe list passed through for
+    the schema's _norm_anim to validate and clamp."""
+    if isinstance(v, bool):
+        return None, f"REJECTED: {name} must be a number, not a boolean."
+    if isinstance(v, (int, float)):
+        return float(v), None
+    if isinstance(v, list):
+        return v, None
+    return None, (f"REJECTED: {name} must be a number (a fraction of the "
+                  'frame) or a keyframe list like [{"t":0,"v":0.8}, '
+                  '{"t":3,"v":0.2}] with t in seconds from the '
+                  "overlay's own start.")
+
+
+def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
+                scale=0.4, opacity=None, entrance=None, exit=None,
+                source_start_s=None):
+    """Draw an asset OVER the program picture for a program-time window —
+    picture-in-picture, a corner logo, a cover with opacity."""
+    asset, err = _resolve_media_asset(ctx, asset_key,
+                                      ("video_clip", "image_ref"))
+    if err:
+        return err
+    kind = "image" if asset["kind"] == "image_ref" else "video"
+    name = (asset.get("meta") or {}).get("filename") or \
+        os.path.basename(asset_key)
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    if prog <= 0.4:
+        return ("REJECTED: there is no program yet to overlay onto — place "
+                "footage first (insert_media / keep), then add the overlay.")
+    try:
+        s = round(min(max(float(start), 0.0), max(0.0, prog - 0.2)), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: start must be a number (PROGRAM-timeline seconds)."
+    off = None
+    clip_dur = None
+    if kind == "video":
+        clip_dur = _asset_media_duration(ctx, asset)
+        if source_start_s is not None:
+            try:
+                off = round(max(0.0, float(source_start_s)), 2)
+            except (TypeError, ValueError):
+                return ("REJECTED: source_start_s must be a number of "
+                        "seconds (a seek into the overlay clip).")
+            if off >= clip_dur - 0.2:
+                return (f"REJECTED: source_start_s {off}s is at/past the end "
+                        f"of the clip ({clip_dur:.1f}s).")
+    remaining = round(prog - s, 2)
+    if duration_s is None:
+        # Image overlays default to a 4s moment; video overlays play the
+        # clip out (bounded by the program end) — both concrete in the EDL.
+        dur = round(min(4.0, remaining), 2) if kind == "image" else \
+            round(min(clip_dur - (off or 0.0), remaining), 2)
+    else:
+        try:
+            dur = round(min(max(float(duration_s), 0.2), remaining), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: duration_s must be a number of seconds."
+        if kind == "video" and (off or 0.0) + dur > clip_dur + 0.05:
+            return (f"REJECTED: the window {off or 0}-"
+                    f"{round((off or 0.0) + dur, 2)}s runs past the end of "
+                    f"the clip ({clip_dur:.1f}s).")
+    if dur < 0.2:
+        return "REJECTED: the overlay window is shorter than 0.2s."
+    for label, v in (("entrance", entrance), ("exit", exit)):
+        if v is not None and v not in OVERLAY_ANIMS:
+            return (f"REJECTED: {label} must be one of "
+                    f"{', '.join(OVERLAY_ANIMS)}.")
+    xv, xerr = _parse_anim_float(x if x is not None else 0.5, "x")
+    if xerr:
+        return xerr
+    yv, yerr = _parse_anim_float(y if y is not None else 0.5, "y")
+    if yerr:
+        return yerr
+    try:
+        sc = round(min(max(float(scale if scale is not None else 0.4),
+                           OVERLAY_SCALE_MIN), OVERLAY_SCALE_MAX), 3)
+    except (TypeError, ValueError):
+        return ("REJECTED: scale must be a number — the overlay's width as "
+                "a fraction of the frame width (0.05-1.0).")
+    op = None
+    if opacity is not None:
+        try:
+            op = float(opacity)
+        except (TypeError, ValueError):
+            return "REJECTED: opacity must be a number (0.05-1.0)."
+    overlays = [dict(o) for o in (edl.get("overlays") or [])]
+    item = {"id": _next_item_id(overlays, "ov"), "asset_key": asset_key,
+            "kind": kind, "start": s, "duration_s": dur, "x": xv, "y": yv,
+            "scale": sc, "opacity": op, "entrance": entrance, "exit": exit,
+            "source_start_s": off if kind == "video" else None}
+    overlays.append(item)
+    edl["overlays"] = overlays
+    moving = isinstance(xv, list) or isinstance(yv, list)
+    pos = ("a keyframed drift" if moving
+           else f"center ({xv:g}, {yv:g})")
+    res = ctx.write_edl(
+        edl, f"overlay {kind} '{name}' at {s}-{round(s + dur, 2)}s "
+             f"(program time), {sc:g}x frame width at {pos} [{item['id']}]")
+    if res.startswith("EDL v"):
+        notes = []
+        if kind == "video":
+            notes.append("the overlay's own audio does NOT play (silent "
+                         "picture-in-picture) — say so if the user wants "
+                         "its sound")
+        notes.append("overlays render above the footage but BELOW captions, "
+                     "and do not track objects in the footage")
+        res += "\nNote: " + "; ".join(notes) + "."
+    return res
+
+
+def remove_overlay(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(o) for o in (edl.get("overlays") or [])]
+    hit = next((o for o in items if o.get("id") == id), None)
+    if not hit:
+        have = ", ".join(o.get("id") or "?" for o in items) or "none"
+        return (f"REJECTED: no overlay with id '{id}'. Existing overlays: "
+                f"{have}. Call get_edl to see them.")
+    edl["overlays"] = [o for o in items if o.get("id") != id]
+    return ctx.write_edl(
+        edl, f"removed overlay {id} "
+             f"('{os.path.basename(hit['asset_key'])}', "
+             f"{hit['start']}-{round(float(hit['start']) + float(hit['duration_s']), 2)}s)")
+
+
+def move_overlay(ctx, id, start=None, x=None, y=None, scale=None):
+    """Reposition/retime/resize an EXISTING overlay in place — only the
+    fields passed change."""
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(o) for o in (edl.get("overlays") or [])]
+    hit = next((o for o in items if o.get("id") == id), None)
+    if not hit:
+        have = ", ".join(o.get("id") or "?" for o in items) or "none"
+        return (f"REJECTED: no overlay with id '{id}'. Existing overlays: "
+                f"{have}. Call get_edl to see them.")
+    prog = program_duration(edl)
+    before = dict(hit)
+    note = ""
+    if start is not None:
+        try:
+            hit["start"] = round(min(max(float(start), 0.0),
+                                     max(0.0, prog - 0.2)), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: start must be a number (program seconds)."
+        overrun = hit["start"] + float(hit["duration_s"]) - prog
+        if overrun > 0.01:
+            hit["duration_s"] = round(prog - hit["start"], 2)
+            for prop in ("x", "y"):    # keyframes past the new end would
+                if isinstance(hit.get(prop), list):     # reject the write
+                    hit[prop] = clip_anim(hit[prop], hit["duration_s"])
+            note = (f"\nNote: the window was shortened to "
+                    f"{hit['duration_s']}s so it still ends inside the "
+                    "program.")
+    if x is not None:
+        xv, xerr = _parse_anim_float(x, "x")
+        if xerr:
+            return xerr
+        hit["x"] = xv
+    if y is not None:
+        yv, yerr = _parse_anim_float(y, "y")
+        if yerr:
+            return yerr
+        hit["y"] = yv
+    if scale is not None:
+        try:
+            hit["scale"] = round(min(max(float(scale), OVERLAY_SCALE_MIN),
+                                     OVERLAY_SCALE_MAX), 3)
+        except (TypeError, ValueError):
+            return "REJECTED: scale must be a number (0.05-1.0)."
+    if hit == before:
+        return (f"NO CHANGE — overlay {id} already has those settings. Do "
+                "NOT tell the user you changed anything.")
+    edl["overlays"] = items
+    changed = ", ".join(f"{k}={hit.get(k)}"
+                        for k in ("start", "duration_s", "x", "y", "scale")
+                        if hit.get(k) != before.get(k))
+    res = ctx.write_edl(edl, f"overlay {id} moved: {changed}")
+    if note and res.startswith("EDL v"):
+        res += note
+    return res
+
+
+def add_text(ctx, text, start, end, template="title", x=None, y=None,
+             size_scale=None, color=None, accent_color=None, font=None,
+             entrance=None, exit=None, uppercase=None, box=None):
+    """Burn a designed text template over a program-time window — titles,
+    lower thirds, callouts, big numbers, quotes, chapter markers."""
+    t = (text or "").strip()
+    if not t:
+        return "REJECTED: text is empty."
+    tpl = (template or "title").strip().lower()
+    if tpl not in TEXT_TEMPLATES:
+        return (f"REJECTED: template must be one of "
+                f"{', '.join(TEXT_TEMPLATES)}.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    if prog <= 0.4:
+        return ("REJECTED: there is no program yet to put text on — place "
+                "footage first, then add the text.")
+    try:
+        s = round(min(max(float(start), 0.0), max(0.0, prog - 0.3)), 2)
+        e = round(min(max(float(end), s + 0.3), prog), 2)
+    except (TypeError, ValueError):
+        return ("REJECTED: start/end must be numbers (PROGRAM-timeline "
+                "seconds — where in the edited video the text shows).")
+    if entrance is not None and entrance not in TEXT_ANIMS:
+        return (f"REJECTED: entrance must be one of "
+                f"{', '.join(TEXT_ANIMS)}.")
+    if exit is not None and (exit not in TEXT_ANIMS or exit == "typewriter"):
+        return ("REJECTED: exit must be one of "
+                + ", ".join(a for a in TEXT_ANIMS if a != "typewriter")
+                + " (typewriter is entrance-only).")
+    if font is not None and font not in TEXT_FONTS:
+        return (f"REJECTED: font must be one of the bundled families: "
+                f"{', '.join(TEXT_FONTS)}.")
+    for label, v in (("x", x), ("y", y)):
+        if v is not None:
+            try:
+                float(v)
+            except (TypeError, ValueError):
+                return (f"REJECTED: {label} must be a number 0-1 (fraction "
+                        "of the frame).")
+    if size_scale is not None:
+        try:
+            float(size_scale)
+        except (TypeError, ValueError):
+            return "REJECTED: size_scale must be a number (0.4-3.0)."
+    texts = [dict(tx) for tx in (edl.get("texts") or [])]
+    item = {"id": _next_item_id(texts, "tx"), "text": t[:200], "start": s,
+            "end": e, "template": tpl,
+            "x": float(x) if x is not None else None,
+            "y": float(y) if y is not None else None,
+            "size_scale": float(size_scale) if size_scale is not None else None,
+            "color": color, "accent_color": accent_color, "font": font,
+            "entrance": entrance, "exit": exit,
+            "uppercase": bool(uppercase) if uppercase is not None else None,
+            "box": bool(box) if box is not None else None}
+    texts.append(item)
+    edl["texts"] = texts
+    return ctx.write_edl(
+        edl, f"{tpl} text \"{t[:40]}\" at {s}-{e}s (program time) "
+             f"[{item['id']}]")
+
+
+def remove_text(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(tx) for tx in (edl.get("texts") or [])]
+    hit = next((tx for tx in items if tx.get("id") == id), None)
+    if not hit:
+        have = ", ".join(tx.get("id") or "?" for tx in items) or "none"
+        return (f"REJECTED: no text with id '{id}'. Existing texts: {have}. "
+                "Call get_edl to see them.")
+    edl["texts"] = [tx for tx in items if tx.get("id") != id]
+    return ctx.write_edl(
+        edl, f"removed {hit.get('template', 'text')} text "
+             f"\"{str(hit.get('text', ''))[:24]}\" ({id})")
+
+
+def add_stylize(ctx, kind, start=None, end=None, intensity=None):
+    """A windowed finishing effect on the program picture."""
+    k = (kind or "").strip().lower()
+    if k not in STYLIZE_KINDS:
+        return (f"REJECTED: kind must be one of {', '.join(STYLIZE_KINDS)}.")
+    if (start is None) != (end is None):
+        return ("REJECTED: pass both start and end (program seconds), or "
+                "neither for the whole video.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    s = e = None
+    if start is not None:
+        try:
+            s = round(min(max(float(start), 0.0), max(0.0, prog - 0.1)), 2)
+            e = round(min(max(float(end), s + 0.1), prog), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: start/end must be numbers (program seconds)."
+    inten = None
+    if intensity is not None:
+        try:
+            inten = round(min(max(float(intensity), 0.05), 1.0), 3)
+        except (TypeError, ValueError):
+            return "REJECTED: intensity must be a number 0.05-1.0."
+    fx = dict(edl.get("effects") or {})
+    sts = [dict(sx) for sx in (fx.get("stylize") or [])]
+    item = {"id": _next_item_id(sts, "st"), "kind": k, "start": s, "end": e,
+            "intensity": inten}
+    sts.append(item)
+    fx["stylize"] = sts
+    edl["effects"] = fx
+    window = (f" on {s}-{e}s (program time)" if s is not None
+              else " on the whole video")
+    shown = inten if inten is not None else 0.5
+    return ctx.write_edl(
+        edl, f"stylize {k}{window}, intensity {shown:g} [{item['id']}]")
+
+
+def remove_stylize(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    sts = [dict(sx) for sx in (fx.get("stylize") or [])]
+    hit = next((sx for sx in sts if sx.get("id") == id), None)
+    if not hit:
+        have = ", ".join(sx.get("id") or "?" for sx in sts) or "none"
+        return (f"REJECTED: no stylize effect with id '{id}'. Existing: "
+                f"{have}. Call get_edl to see them.")
+    fx["stylize"] = [sx for sx in sts if sx.get("id") != id]
+    edl["effects"] = fx
+    return ctx.write_edl(edl, f"removed stylize {hit['kind']} ({id})")
+
+
+# (lo, hi, neutral) per custom-grade axis — the neutral value IS the absence
+# of the control, so passing it clears the axis (schema normalizes the same).
+_GRADE_AXES = {"exposure": (-1.0, 1.0, 0.0), "contrast": (0.5, 1.6, 1.0),
+               "saturation": (0.0, 2.0, 1.0), "temperature": (-1.0, 1.0, 0.0),
+               "tint": (-1.0, 1.0, 0.0)}
+
+
+def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
+                     temperature=None, tint=None):
+    """Continuous color controls, merged axis-by-axis into
+    effects.grade_custom — None leaves an axis alone, its neutral clears it."""
+    vals = {"exposure": exposure, "contrast": contrast,
+            "saturation": saturation, "temperature": temperature,
+            "tint": tint}
+    if all(v is None for v in vals.values()):
+        return ("REJECTED: pass at least one axis — exposure -1..1, "
+                "contrast 0.5..1.6 (1.0 neutral), saturation 0..2 (1.0 "
+                "neutral), temperature -1 (cool)..1 (warm), tint -1 "
+                "(green)..1 (magenta). An axis's neutral value clears it.")
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    # model_dump stores untouched axes as explicit None — drop them so an
+    # all-cleared grade reads as empty here, not as a dict of Nones.
+    gc = {k: v for k, v in (fx.get("grade_custom") or {}).items()
+          if v is not None}
+    bits = []
+    for axis, v in vals.items():
+        if v is None:
+            continue                      # leave that axis alone
+        lo, hi, neutral = _GRADE_AXES[axis]
+        try:
+            fv = round(min(max(float(v), lo), hi), 3)
+        except (TypeError, ValueError):
+            return f"REJECTED: {axis} must be a number ({lo:g} to {hi:g})."
+        if abs(fv - neutral) < 1e-6:
+            gc.pop(axis, None)
+            bits.append(f"{axis} cleared")
+        else:
+            gc[axis] = fv
+            bits.append(f"{axis} {fv:+g}")
+    fx["grade_custom"] = gc or None
+    edl["effects"] = fx
+    res = ctx.write_edl(edl, "custom grade: " + ", ".join(bits))
+    if res.startswith("EDL v"):
+        if not gc:
+            res += "\nCustom grade fully cleared (all axes neutral)."
+        elif fx.get("grade"):
+            res += (f"\nNote: applied AFTER the '{fx['grade']}' preset grade "
+                    "— the two compose (captions/graphics are never graded).")
+    return res
+
+
+def set_master_loudness(ctx, enabled):
+    """Toggle -14 LUFS output mastering (edl['master'])."""
+    on = bool(enabled)
+    edl = dict(ctx.latest_edl()["json"])
+    edl["master"] = {"loudness": "social"} if on else None
+    if not on:
+        return ctx.write_edl(
+            edl, "master loudness removed (the mix ships at its natural "
+                 "level)")
+    res = ctx.write_edl(edl, "master loudness: social (-14 LUFS)")
+    if res.startswith("EDL v"):
+        res += ("\nThe final mix is normalized to -14 LUFS / -1.5 dBTP (the "
+                "social/streaming loudness target) on PREVIEW and EXPORT — "
+                "what the user approves is what ships. It changes loudness, "
+                "not the balance between voice/music/sfx.")
+    return res
 
 
 IMAGE_ASPECTS = ("16:9", "9:16", "1:1", "4:3", "3:4")
@@ -2733,9 +3194,13 @@ def fetch_url(ctx, url, as_kind=None):
 
 def get_edl(ctx):
     row = ctx.latest_edl()
+    # 20000 chars (was 8000): the EDL now carries overlays/texts/speed/
+    # stylize too, and the old cap silently amputated exactly the
+    # collections a v2 edit needs to see. The explicit budget matters —
+    # _cap's default (TOOL_OUTPUT_CHAR_BUDGET) would undo the raise.
     return _cap(f"EDL v{row['version']} "
                 f"({describe_edl(row['json'], ctx.duration)}):\n"
-                + json.dumps(row["json"], indent=1)[:8000])
+                + json.dumps(row["json"], indent=1)[:20000], budget=20500)
 
 
 def render_preview(ctx):
@@ -2792,7 +3257,8 @@ def render_preview(ctx):
                 if isinstance(caps, dict) \
                         and caps.get("mode") == "from_transcript":
                     _ctl = Timeline(row["json"]["keep"],
-                                    row["json"].get("inserts") or [])
+                                    row["json"].get("inserts") or [],
+                                    row["json"].get("speed") or [])
                     if not _ctl.kept_words(ctx.index.get("words", [])):
                         note += (" CAPTION AUDIT: captions are ON but ZERO "
                                  "transcribed words survive this cut — the "
@@ -2805,7 +3271,8 @@ def render_preview(ctx):
             # must not tell the user repetitions are gone when they are not.
             try:
                 edl = row["json"]
-                tl = Timeline(edl["keep"], edl.get("inserts") or [])
+                tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                              edl.get("speed") or [])
                 reps = find_repeated_phrases(
                     tl.kept_words(ctx.index.get("words", [])))
                 if reps:
@@ -2874,6 +3341,668 @@ def ask_user(ctx, question):
 
 
 # ------------------------------------------------------------------ #
+#  Perception + director tools (round 35)                              #
+# ------------------------------------------------------------------ #
+# Perception feeds DECISIONS, never renders: these tools read the measured
+# beat grid / energy envelope / word stress and write CONCRETE timestamps
+# into the EDL. The renderer never consults perception, so a render stays
+# reproducible from (EDL version, source sha, index words) alone.
+
+def _get_perception(ctx):
+    """The main video's perception sidecar (beats/energy/stress), cached on
+    the ctx after the first call and persisted on the index row by
+    perception.get_or_compute_for_index — the first call streams the proxy's
+    audio once; every later call (this turn or any future one) is a read."""
+    if ctx._perception is not None:
+        return ctx._perception
+    original = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
+    if not original or not original.get("sha256"):
+        raise perception.PerceptionError("no indexed main video")
+    index_row = ctx.db.run(dbx.get_index_by_sha, original["sha256"])
+    if not index_row:
+        raise perception.PerceptionError("no index row for this video")
+    p = perception.get_or_compute_for_index(ctx.db, dbx, index_row,
+                                            ctx.proxy_path())
+    ctx._perception = p
+    return p
+
+
+def _describe_tempo(p):
+    bpm, conf = p.get("bpm"), float(p.get("bpm_conf") or 0.0)
+    if not bpm:
+        return (f"tempo: no detectable musical pulse (confidence "
+                f"{conf:.2f}) — do not beat-sync anything to this audio.")
+    verdict = ("reliable" if conf >= 0.7 else
+               "usable" if conf >= 0.5 else
+               "LOW — the pulse is weak; beat_align_cuts will refuse")
+    return f"tempo: {bpm:g} BPM (confidence {conf:.2f} — {verdict})"
+
+
+def _describe_beats(p):
+    beats = p.get("beats") or []
+    if not beats:
+        return "beats: none detected."
+    head = ", ".join(f"{b:g}" for b in beats[:8])
+    return f"beats: {len(beats)} on the grid; first: {head}s"
+
+
+def _largest_energy_rise(p, window_s=6.0, min_db=6.0):
+    """(rise_end_t, rise_db) — the biggest energy climb within a rolling
+    window, reported at the moment the climb PEAKS (a riser should resolve
+    exactly there). None when the track never climbs min_db."""
+    energy = p.get("energy") or []
+    bin_s = float(p.get("energy_bin_s") or 0.5)
+    if not energy:
+        return None
+    win = max(1, int(round(window_s / bin_s)))
+    best_i, best_rise = None, min_db
+    for i in range(len(energy)):
+        low = min(energy[max(0, i - win):i + 1])
+        rise = energy[i] - low
+        if rise > best_rise:
+            best_i, best_rise = i, rise
+    if best_i is None:
+        return None
+    return round((best_i + 0.5) * bin_s, 2), round(best_rise, 1)
+
+
+def _describe_energy(p):
+    energy = p.get("energy") or []
+    bin_s = float(p.get("energy_bin_s") or 0.5)
+    if not energy:
+        return "energy: no envelope."
+    loud_i = max(range(len(energy)), key=lambda i: energy[i])
+    quiet_i = min(range(len(energy)), key=lambda i: energy[i])
+    line = (f"energy: loudest around {round((loud_i + 0.5) * bin_s, 1)}s "
+            f"(the 0dB peak), quietest around "
+            f"{round((quiet_i + 0.5) * bin_s, 1)}s "
+            f"({energy[quiet_i]:g}dB below peak)")
+    rise = _largest_energy_rise(p)
+    if rise:
+        line += f"; biggest rise: +{rise[1]:g}dB climbing into {rise[0]:g}s"
+    return line
+
+
+def _asset_audio_analysis(ctx, asset_key):
+    """Tempo/beats/energy for a music reference — a project upload (cached
+    on the asset's meta) or a bundled library track (cached per turn)."""
+    if music_library.is_library_ref(asset_key):
+        t = music_library.resolve(asset_key)
+        if not t:
+            return (f"REJECTED: '{asset_key}' is not a track in the built-in "
+                    "library. Call list_music_library() and use a slug it "
+                    "returns.")
+        p = ctx._asset_perception.get(asset_key)
+        if p is None:
+            try:
+                p = perception.analyze_audio(
+                    music_library.local_path(asset_key))
+            except Exception as e:
+                return (f"Audio analysis failed for that track "
+                        f"({str(e)[:160]}).")
+            ctx._asset_perception[asset_key] = p
+        name = t["title"]
+    else:
+        asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+        if not asset or asset["kind"] != "music":
+            return (f"REJECTED: '{asset_key}' is not a music asset in this "
+                    "project. Analyze uploads from list_assets(kind='music') "
+                    "or a library: reference.")
+        p = ctx._asset_perception.get(asset_key)
+        if p is None:
+            try:
+                local = _asset_local_path(ctx, asset)
+                p = perception.get_or_compute_for_asset(ctx.db, dbx, asset,
+                                                        local)
+            except Exception as e:
+                return (f"Audio analysis failed for that file "
+                        f"({str(e)[:160]}).")
+            ctx._asset_perception[asset_key] = p
+        name = (asset.get("meta") or {}).get("filename") or \
+            os.path.basename(asset_key)
+    return _cap(f"Audio analysis of '{name}' (times are seconds INTO THE "
+                "TRACK — e.g. an add_music offset_s to start on the drop):\n"
+                "- " + "\n- ".join([_describe_tempo(p), _describe_beats(p),
+                                    _describe_energy(p)])
+                + "\n(word-stress analysis applies to the main video only)")
+
+
+def get_audio_analysis(ctx, asset_key=None):
+    """READ: the measured musical/energy structure of the source audio (or
+    of a music asset when asset_key is passed)."""
+    if asset_key:
+        return _asset_audio_analysis(ctx, asset_key)
+    if not ctx.has_main_video:
+        return ("REJECTED: there is no main video to analyze on this "
+                "image/clip-only program. Pass asset_key to analyze an "
+                "uploaded music file or a library: track instead.")
+    try:
+        p = _get_perception(ctx)
+    except Exception as e:
+        return (f"Audio analysis unavailable for this video "
+                f"({str(e)[:160]}). Decide from the transcript, silences "
+                "and shot captions instead.")
+    lines = [_describe_tempo(p), _describe_beats(p), _describe_energy(p)]
+    words = ctx.index.get("words") or []
+    if words:
+        idxs = perception.top_stressed_words(p, words, count=8)
+        scores = perception.word_stress(p, words)
+        if idxs:
+            lines.append(
+                "top stressed words (measured vocal emphasis): "
+                + ", ".join(f"'{words[i]['w']}' @{words[i]['t0']:.2f}s "
+                            f"({scores[i]:.2f})" for i in idxs))
+        else:
+            lines.append("no clearly stressed words found.")
+        cov = perception.stress_coverage_s(p)
+        if any(float(w["t0"]) >= cov for w in words):
+            lines.append(
+                f"NOTE: stress analysis covers the first {cov / 60:.0f} "
+                "minutes only — words after that carry NO measured stress "
+                "(they are excluded above, not scored low).")
+    else:
+        lines.append("no transcript — word-stress analysis n/a.")
+    return _cap("Audio analysis of the SOURCE (all times are SOURCE "
+                "seconds — program positions shift with the cut):\n- "
+                + "\n- ".join(lines))
+
+
+def punch_in_on_emphasis(ctx, count=4, strength=0.35):
+    """Punch zooms on the most vocally stressed KEPT words, in ONE version.
+    Every timestamp is a real word time mapped through the current cut —
+    nothing is estimated."""
+    if not ctx.has_main_video:
+        return ("REJECTED: needs the main video — an image/clip-only "
+                "program has no speech to find emphasis in.")
+    words = ctx.index.get("words") or []
+    if not words:
+        return ("REJECTED: this video has no transcript, so there are no "
+                "stressed words to punch in on. Place zooms by hand with "
+                "add_zoom instead.")
+    try:
+        n = min(max(int(count), 1), 8)
+    except (TypeError, ValueError):
+        return "REJECTED: count must be an integer (1-8)."
+    try:
+        st = round(min(max(float(strength), ZOOM_STRENGTH_MIN),
+                       ZOOM_STRENGTH_MAX), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: strength must be a number (0.05-1.5)."
+    try:
+        p = _get_perception(ctx)
+    except Exception as e:
+        return (f"Audio analysis unavailable ({str(e)[:160]}) — place zooms "
+                "by hand with add_zoom instead.")
+    edl = dict(ctx.latest_edl()["json"])
+    tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    prog = round(tl.out_duration, 2)
+    scores = perception.word_stress(p, words)
+    picked = []          # (word, program_t0)
+    for i in sorted(range(len(words)), key=lambda k: -scores[k]):
+        if len(picked) >= n:
+            break
+        w = words[i]
+        if len((w["w"] or "").strip("\"'.,!?;:")) < 3:
+            continue                     # tiny function words aren't emphasis
+        mid = (float(w["t0"]) + float(w["t1"])) / 2.0
+        if tl.src_to_out(mid) is None:
+            continue                     # the word is cut — skip it
+        pt = tl.src_to_out(float(w["t0"]))
+        if pt is None:
+            pt = tl.src_to_out(mid)
+        pt = round(pt, 2)
+        if any(abs(pt - q[1]) < 4.0 for q in picked):
+            continue                     # spaced >= 4s apart in program time
+        picked.append((w, pt))
+    if not picked:
+        return ("No stressed words survive the current cut with 4s spacing "
+                "— nothing was written. Place zooms by hand with add_zoom "
+                "if you still want them. Do NOT tell the user zooms were "
+                "added.")
+    picked.sort(key=lambda q: q[1])
+    fx = dict(edl.get("effects") or {})
+    zooms = [dict(z) for z in (fx.get("zooms") or [])]
+    placed = []
+    for w, pt in picked:
+        # 60ms early so the punch lands ON the word's attack, not after it.
+        s = round(max(0.0, pt - 0.06), 2)
+        e = round(min(prog, s + 0.9), 2)
+        if e - s < 0.2:
+            continue                     # the word sits at the very end
+        item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
+                "strength": st}
+        zooms.append(item)
+        placed.append((w, pt, item["id"]))
+    if not placed:
+        return ("No placeable emphasis moments — the stressed words all sit "
+                "at the very end of the program. Nothing was written.")
+    fx["zooms"] = zooms
+    edl["effects"] = fx
+    res = ctx.write_edl(
+        edl, f"{len(placed)} punch zoom(s) ({int(st * 100)}%) on the most "
+             "vocally stressed words")
+    if res.startswith("EDL v"):
+        res += ("\nPunch-ins (program time, from measured vocal stress):\n"
+                + "\n".join(f"  '{w['w']}' @ {pt}s [{zid}]"
+                            for w, pt, zid in placed))
+    return res
+
+
+def _pick_sfx(category, tag=None):
+    """Deterministic pick from the bundled pack: the alphabetically-first
+    sound in the category (tag matches first when a tag is given) — the same
+    inputs always place the same sound, so re-running a pass is a NO CHANGE,
+    not a reshuffle."""
+    hits = [t for t in sfx_library.CATALOG if t.get("category") == category]
+    if tag:
+        tagged = [t for t in hits if tag in (t.get("tags") or ())]
+        hits = tagged or hits
+    hits = sorted(hits, key=lambda t: t["slug"])
+    return hits[0] if hits else None
+
+
+def sound_design_pass(ctx, intensity="medium"):
+    """Deterministic sound design in ONE version: whooshes on cut junctions,
+    one impact on the strongest stressed word, one riser resolving into the
+    biggest energy rise — all from the built-in pack, all disclosed."""
+    if not sfx_library.CATALOG:
+        return ("REJECTED: this deployment ships no built-in sound pack, so "
+                "there is nothing to place. Sounds the user uploads can "
+                "still be placed by hand with add_sfx.")
+    if not ctx.has_main_video:
+        return ("REJECTED: the sound-design pass reads the main video's cut "
+                "junctions and audio analysis — on an image/clip-only "
+                "program place sounds by hand with add_sfx.")
+    budgets = {"light": 2, "medium": 4, "strong": 6}
+    level = (intensity or "medium").strip().lower()
+    if level not in budgets:
+        return ("REJECTED: intensity must be light (2 placements), medium "
+                "(4) or strong (6).")
+    budget = budgets[level]
+    edl = dict(ctx.latest_edl()["json"])
+    tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    prog = round(tl.out_duration, 2)
+    if prog < 3.0:
+        return "REJECTED: the program is too short for a sound-design pass."
+    existing = [float(sx["at"]) for sx in (edl.get("sfx") or [])]
+    placements = []      # (sound, at, why)
+
+    def _clear(at):
+        # never stack within 1.5s of an existing sound or another placement
+        return (all(abs(at - x) >= 1.5 for x in existing)
+                and all(abs(at - q[1]) >= 1.5 for q in placements))
+
+    p = None
+    try:
+        p = _get_perception(ctx)
+    except Exception:
+        pass                # junction whooshes still work without analysis
+
+    # ONE impact on THE strongest stressed surviving word — if that exact
+    # moment already carries a sound there is no impact this pass. Walking
+    # down the list instead would make every re-run invent a new hit on a
+    # progressively weaker word, which is a reshuffle, not idempotence.
+    words = ctx.index.get("words") or []
+    impact = _pick_sfx("impact")
+    if p is not None and words and impact and len(placements) < budget:
+        scores = perception.word_stress(p, words)
+        for i in sorted(range(len(words)), key=lambda k: -scores[k]):
+            w = words[i]
+            if len((w["w"] or "").strip("\"'.,!?;:")) < 3:
+                continue
+            pt = tl.src_to_out(float(w["t0"]))
+            if pt is None or pt > prog - 0.2:
+                continue
+            if _clear(round(pt, 2)):
+                placements.append(
+                    (impact, round(pt, 2),
+                     f"impact on the stressed word '{w['w']}'"))
+            break
+    # One riser ending exactly INTO the largest energy rise.
+    riser = _pick_sfx("riser")
+    if p is not None and riser and len(placements) < budget:
+        rise = _largest_energy_rise(p)
+        if rise:
+            rt = tl.src_to_out(rise[0])
+            rdur = float(riser.get("duration_s") or 2.0)
+            # The riser must FIT before the rise (rt >= its length), or the
+            # start clamps to 0 and the sound resolves at rdur — later than
+            # the rise the disclosure line claims. When it doesn't fit,
+            # place nothing rather than describe a moment that isn't real.
+            if rt is not None and rt >= rdur:
+                at = round(rt - rdur, 2)
+                if _clear(at):
+                    placements.append(
+                        (riser, at, f"riser resolving into the "
+                                    f"+{rise[1]:g}dB rise at "
+                                    f"{round(rt, 2)}s"))
+    # Whooshes on internal cut junctions with the remaining budget. The 5s
+    # cadence counts EXISTING sounds too — otherwise a re-run would fill the
+    # very junctions the first run's spacing deliberately skipped.
+    whoosh = _pick_sfx("transition", tag="whoosh")
+    if whoosh:
+        for j in tl.offsets[1:]:     # segment joins in final program time
+            if len(placements) >= budget:
+                break
+            at = round(j, 2)
+            if at < 0.5 or at > prog - 0.5:
+                continue             # skip the junction at t=0 / the end
+            if any(abs(at - x) < 5.0 for x in existing) or \
+                    any(abs(at - q[1]) < 5.0 for q in placements):
+                continue             # spaced >= 5s from every other accent
+            placements.append((whoosh, at, "whoosh on the cut junction"))
+    if not placements:
+        return ("NO CHANGE: nothing to place — every candidate moment is "
+                "within 1.5s of an existing sound, or there are no cut "
+                "junctions/analysis to work from. Place sounds by hand with "
+                "add_sfx if you still want them. Do NOT tell the user sound "
+                "design was added.")
+    items = [dict(sx) for sx in (edl.get("sfx") or [])]
+    detail = []
+    for sound, at, why in sorted(placements, key=lambda q: q[1]):
+        taken = {sx.get("id") for sx in items}
+        k = 1
+        while f"sx{k}" in taken:
+            k += 1
+        items.append({"id": f"sx{k}",
+                      "storage_key": sfx_library.ref(sound["slug"]),
+                      "at": at, "gain_db": -6.0})
+        detail.append(f"  sx{k}: '{sound['title']}' @ {at}s — {why}")
+    edl["sfx"] = items
+    res = ctx.write_edl(
+        edl, f"sound-design pass ({level}): {len(detail)} placement(s) "
+             "from the built-in pack")
+    if res.startswith("EDL v"):
+        res += "\nPlacements (program time):\n" + "\n".join(detail)
+    return res
+
+
+def beat_align_cuts(ctx, tolerance_s=0.35):
+    """Move each INTERNAL keep boundary to the nearest beat within tolerance
+    — never the program's first start or last end, never into a word."""
+    if not ctx.has_main_video:
+        return ("REJECTED: needs a main video with cut boundaries — an "
+                "image/clip-only program has none.")
+    try:
+        tol = min(max(float(tolerance_s), 0.05), 1.0)
+    except (TypeError, ValueError):
+        return "REJECTED: tolerance_s must be a number of seconds."
+    try:
+        p = _get_perception(ctx)
+    except Exception as e:
+        return f"Audio analysis unavailable ({str(e)[:160]})."
+    bpm, conf = p.get("bpm"), float(p.get("bpm_conf") or 0.0)
+    beats = p.get("beats") or []
+    if not bpm or not beats or conf < 0.5:
+        return ("REJECTED: the tempo estimate is not reliable enough to cut "
+                f"to (bpm {bpm or 'none'}, confidence {conf:.2f}; "
+                "beat-aligning needs >= 0.5). 'Syncing' cuts to a pulse "
+                "that isn't really there would be a lie — tell the user "
+                "honestly.")
+    cur = ctx.latest_edl()["json"]["keep"]
+    if len(cur) < 2:
+        return ("NO CHANGE: a single kept span has no internal cut "
+                "boundaries to align (its start and end never move). Make "
+                "cuts first. Do NOT tell the user the cuts were "
+                "beat-aligned.")
+    words = ctx.index.get("words") or []
+    new_keep = [list(x) for x in cur]
+    moved = skipped_tol = skipped_word = already = 0
+    for i in range(len(new_keep)):
+        for j in (0, 1):
+            if (i == 0 and j == 0) or (i == len(new_keep) - 1 and j == 1):
+                continue          # the program's first start / last end
+            b = new_keep[i][j]
+            cand = min(beats, key=lambda t: abs(t - b))
+            delta = abs(cand - b)
+            if delta < 0.02:
+                already += 1
+                continue
+            if delta > tol:
+                skipped_tol += 1
+                continue
+            if audit.word_at_boundary(words, cand):
+                skipped_word += 1
+                continue
+            # The move must not invert this span or collide with a neighbor
+            # — and a cut GAP must never close: without the 0.1s margin,
+            # both edges of a narrow cut (a removed filler is ~2x the
+            # default tolerance) could snap to the SAME beat, silently
+            # restoring the removed footage as touching spans.
+            if j == 0:
+                lo = (new_keep[i - 1][1] + 0.1) if i > 0 else 0.0
+                hi = new_keep[i][1] - 0.1
+            else:
+                lo = new_keep[i][0] + 0.1
+                hi = ((new_keep[i + 1][0] - 0.1)
+                      if i < len(new_keep) - 1 else ctx.duration)
+            if not (lo - 1e-6 <= cand <= hi + 1e-6):
+                skipped_tol += 1
+                continue
+            new_keep[i][j] = round(cand, 2)
+            moved += 1
+    if not moved:
+        return (f"NO CHANGE: no boundary moved — {already} already on the "
+                f"beat, {skipped_tol} had no beat within {tol}s (or the "
+                f"move would collide with a neighbouring span), "
+                f"{skipped_word} would land inside a word. Do NOT tell the "
+                "user the cuts were beat-aligned.")
+    res = _write_keep(
+        ctx, new_keep,
+        f"beat-aligned {moved} internal cut boundar"
+        f"{'y' if moved == 1 else 'ies'} to the {bpm:g} BPM grid "
+        f"(tolerance {tol}s)")
+    if res.startswith("EDL v"):
+        res += (f"\nMoved {moved}; skipped {skipped_word} (would land "
+                f"inside a word) and {skipped_tol} (no beat within {tol}s "
+                f"/ neighbour collision); {already} already on the beat. "
+                f"BPM {bpm:g}, confidence {conf:.2f}.")
+    return res
+
+
+def _emphasis_candidates(ctx):
+    """(words, detail_lines, note): emphasis candidates from the REAL
+    transcript — measured vocal stress + digit words + rare words.
+    Deterministic; stress silently degrades to nothing when analysis fails
+    (the note says so)."""
+    words = ctx.index.get("words") or []
+    if not words:
+        return [], [], ""
+    seen, out = set(), []
+
+    def _add(tok):
+        t = str(tok or "").strip("\"'.,!?;:").strip()
+        k = _norm_token(t)
+        if not k or k in seen:
+            return False
+        seen.add(k)
+        out.append(t)
+        return True
+
+    lines, note = [], ""
+    stressed = []
+    try:
+        p = _get_perception(ctx)
+        scores = perception.word_stress(p, words)
+        for i in perception.top_stressed_words(p, words, count=10):
+            stressed.append((words[i], scores[i]))
+        cov = perception.stress_coverage_s(p)
+        if any(float(w["t0"]) >= cov for w in words):
+            note = (f"\n(stress analysis covers the first {cov / 60:.0f} "
+                    "minutes only — words after that were never measured "
+                    "and are excluded from the stressed list)")
+    except Exception as e:
+        note = (f"\n(vocal-stress analysis unavailable: {str(e)[:120]} — "
+                "the list is built from digits/rarity only)")
+    if stressed:
+        lines.append("vocally stressed (measured): "
+                     + ", ".join(f"'{w['w']}' @{w['t0']:.1f}s ({sc:.2f})"
+                                 for w, sc in stressed))
+        for w, _sc in stressed:
+            _add(w["w"])
+    digits = [w["w"].strip("\"'.,!?;:") for w in words
+              if any(ch.isdigit() for ch in w["w"]) and _add(w["w"])]
+    if digits:
+        lines.append("numbers (presets emphasize digits automatically, "
+                     "still worth listing): " + ", ".join(digits[:12]))
+    freq = {}
+    for w in words:
+        k = _norm_token(w["w"])
+        if k:
+            freq[k] = freq.get(k, 0) + 1
+    rare = []
+    for w in words:
+        if len(out) >= 25:
+            break
+        k = _norm_token(w["w"])
+        if k and len(k) >= 6 and freq[k] == 1 and _add(w["w"]):
+            rare.append(w["w"].strip("\"'.,!?;:"))
+    if rare:
+        lines.append("rare/distinctive: " + ", ".join(rare[:12]))
+    return out[:25], lines, note
+
+
+def suggest_emphasis(ctx):
+    """READ: candidate emphasis words, verbatim from the transcript."""
+    if not ctx.has_main_video:
+        return ("REJECTED: needs a transcribed main video — an "
+                "image/clip-only program has no transcript.")
+    out, lines, note = _emphasis_candidates(ctx)
+    if not out:
+        return ("This video has no transcript (or no usable words) — there "
+                "is nothing to emphasize.")
+    return _cap("Emphasis candidates (verbatim from the REAL transcript):\n"
+                + "\n".join("- " + ln for ln in lines)
+                + "\nPass to add_captions / set_caption_style as "
+                  "emphasis_words: " + json.dumps(out) + note)
+
+
+# ONE-CALL looks (apply_look): each composes caption style + grade + custom
+# grade + transitions + fades + stylize as plain EDL DATA — every component
+# is an ordinary field the user could have set one call at a time, and the
+# result names each one. A key absent = leave that axis alone; "grade": None
+# = explicitly clear it. sound_design/smooth_duck are REPORTED suggestions
+# only — apply_look never touches keep, music or sfx.
+LOOKS = {
+    "hype": {"captions": {"preset": "beast", "size": "xl"},
+             "grade": "vibrant", "transition": ("zoom_punch", 0.25),
+             "fade_out_s": 0.6, "sound_design": "medium"},
+    "clean": {"captions": {"preset": "podcast"}, "grade": None,
+              "fade_in_s": 0.5, "fade_out_s": 0.5, "smooth_duck": True},
+    "cinematic": {"captions": {"preset": "elegant"}, "grade": "cinematic",
+                  "grade_custom": {"temperature": 0.1},
+                  "fade_in_s": 1.0, "fade_out_s": 1.0,
+                  "transition": ("dip_black", 0.4)},
+    "luxury": {"captions": {"preset": "luxe"}, "grade": "warm",
+               "grade_custom": {"temperature": 0.15},
+               "fade_in_s": 0.8, "fade_out_s": 0.8},
+    "meme": {"captions": {"preset": "impact", "size": "xl"},
+             "transition": ("flash", 0.15), "stylize": ("grain", 0.3)},
+}
+
+
+def apply_look(ctx, name):
+    """Compose one look — captions/grade/transitions/fades/stylize — in a
+    single EDL version, reporting every component it set."""
+    n = (name or "").strip().lower()
+    look = LOOKS.get(n)
+    if not look:
+        return (f"REJECTED: unknown look '{name}'. Looks: "
+                + ", ".join(sorted(LOOKS))
+                + ". Each composes captions, grade, transitions, fades and "
+                  "stylize in one version.")
+    edl = dict(ctx.latest_edl()["json"])
+    set_bits, notes = [], []
+    cap_patch = look.get("captions")
+    if cap_patch:
+        if not ctx.has_main_video or not (ctx.index.get("words") or []):
+            notes.append("captions skipped — no transcribed main video, so "
+                         "there is nothing to caption.")
+        else:
+            caps = edl.get("captions")
+            if isinstance(caps, dict) and caps.get("emphasis_words"):
+                emphasis, emph_src = caps["emphasis_words"], "kept existing"
+            else:
+                emphasis = _emphasis_candidates(ctx)[0]
+                emph_src = "picked from the transcript"
+            merged = (merge_caption_style(caps, dict(cap_patch)) if caps
+                      else {"mode": "from_transcript",
+                            "max_words_per_caption": None,
+                            "style": dict(cap_patch)})
+            bit = f"captions preset '{cap_patch['preset']}'"
+            if cap_patch.get("size"):
+                bit += f" size {cap_patch['size']}"
+            if isinstance(merged, dict):
+                if emphasis:
+                    merged["emphasis_words"] = emphasis
+                    bit += f", {len(emphasis)} emphasis words ({emph_src})"
+            else:
+                bit += (" (manual caption items restyled; emphasis words "
+                        "apply to transcript captions only)")
+            edl["captions"] = merged
+            set_bits.append(bit)
+    fx = dict(edl.get("effects") or {})
+    if "grade" in look:
+        fx["grade"] = look["grade"]
+        set_bits.append(f"grade {look['grade'] or 'cleared'}")
+    if look.get("grade_custom"):
+        gc = dict(fx.get("grade_custom") or {})
+        gc.update(look["grade_custom"])
+        fx["grade_custom"] = gc
+        set_bits.append("custom grade " + ", ".join(
+            f"{k} {v:+g}" for k, v in look["grade_custom"].items()))
+    if look.get("transition"):
+        tst, tdur = look["transition"]
+        fx["transition"] = {"style": tst, "duration_s": tdur}
+        set_bits.append(f"transitions {tst} {tdur}s")
+    for fk, label in (("fade_in_s", "fade in"), ("fade_out_s", "fade out")):
+        if fk in look:
+            fx[fk] = look[fk]
+            set_bits.append(f"{label} {look[fk]}s")
+    if look.get("stylize"):
+        skind, sint = look["stylize"]
+        sts = [dict(sx) for sx in (fx.get("stylize") or [])]
+        if any(sx.get("kind") == skind and sx.get("start") is None
+               for sx in sts):
+            notes.append(f"stylize {skind} was already on the whole video — "
+                         "left as is.")
+        else:
+            sts.append({"id": _next_item_id(sts, "st"), "kind": skind,
+                        "start": None, "end": None, "intensity": sint})
+            fx["stylize"] = sts
+            set_bits.append(f"stylize {skind} {sint:g}")
+    edl["effects"] = fx
+    if not set_bits:
+        return ("NO CHANGE: every component of that look is already in "
+                "place (or not applicable here). Do NOT tell the user you "
+                "changed anything.")
+    res = ctx.write_edl(edl, f"look '{n}': " + "; ".join(set_bits))
+    if res.startswith("EDL v"):
+        if notes:
+            res += "\n" + "\n".join("Note: " + x for x in notes)
+        # sound_design_pass places BUNDLED sounds — on a deployment that
+        # ships no pack the tool is hidden, so suggesting it here would
+        # advertise a capability that can only reject.
+        if not sfx_library.CATALOG:
+            res += "\napply_look never touches cuts, music or sfx."
+        elif look.get("sound_design"):
+            res += ("\nSound design is a separate call — run "
+                    f"sound_design_pass('{look['sound_design']}') for the "
+                    "audio accents this look pairs with (apply_look never "
+                    "touches cuts, music or sfx).")
+        else:
+            res += ("\napply_look never touches cuts, music or sfx — sound "
+                    "design is a separate call (sound_design_pass).")
+        if look.get("smooth_duck") and edl.get("music"):
+            res += ("\nNote: existing music items were NOT touched — for "
+                    "the smooth speech duck this look pairs with, call "
+                    "set_music_fit(id, duck_mode='smooth') on them.")
+    return res
+
+
+# ------------------------------------------------------------------ #
 #  Registry + OpenAI schemas                                           #
 # ------------------------------------------------------------------ #
 
@@ -2934,8 +4063,9 @@ TOOLS = {
                             "repeated-phrase detection. ALWAYS call this "
                             "after cutting repetitions or tightening — it is "
                             "how you verify nothing repeated survived.", {}),
-    "get_words": (get_words, "Word-level timestamps [{t0-t1 word}] for a "
-                  "range of up to 60s (source seconds). THE source of truth "
+    "get_words": (get_words, "Word-level timestamps [{t0-t1 word}] for any "
+                  "source-time range (the response caps at 400 words and "
+                  "says how to page for the rest). THE source of truth "
                   "for cut points inside a sentence — never estimate word "
                   "timing from sentence ranges.",
                   {"start": {"type": "number"},
@@ -3042,7 +4172,7 @@ TOOLS = {
                      "(presets are already big at 'm'), size_scale "
                      "0.5-3.0, dynamic:true (legacy karaoke, no preset), "
                      "animation fade|pop|slide_up (static captions only), "
-                     "max_words_per_caption 1-12. Example — premium reel "
+                     "max_words_per_caption 1-16. Example — premium reel "
                      "captions: {mode:'from_transcript', style:{preset:"
                      "'podcast'}, emphasis_words:['money','22','future',"
                      "'opportunities']}. Example — dictated title card: "
@@ -3078,7 +4208,10 @@ TOOLS = {
                   "'add some music'. Fades in/out by default. loop=true (the "
                   "default) repeats a short track to fill the span; "
                   "offset_s starts partway into the track, e.g. to skip a "
-                  "slow intro. duck=true lowers music 12dB under speech.",
+                  "slow intro. duck=true ducks the music under speech — new "
+                  "items duck SMOOTHLY by default (a sidechain dip that "
+                  "follows the voice; set_music_fit(duck_mode='step') "
+                  "restores the legacy hard -12dB duck).",
                   {"storage_key": {"type": "string"},
                    "start": {"type": "number"},
                    "end": {"type": "number"},
@@ -3122,9 +4255,11 @@ TOOLS = {
     "set_music_fit": (set_music_fit, "Retime or refit EXISTING music in "
                       "place — 'start the music later', 'let it run to the "
                       "end', 'fade it out', 'loop it', 'stop it ducking'. "
-                      "Anything you omit is left alone. Use this instead of "
-                      "remove+re-add, which loses the other settings. For "
-                      "loudness use set_audio_gain.",
+                      "Anything you omit is left alone. duck_mode: 'smooth' "
+                      "= a sidechain dip that follows the voice and swells "
+                      "back in the gaps; 'step' = the legacy hard -12dB "
+                      "duck. Use this instead of remove+re-add, which loses "
+                      "the other settings. For loudness use set_audio_gain.",
                       {"id": {"type": "string"},
                        "start": {"type": "number"},
                        "end": {"type": "number"},
@@ -3132,7 +4267,9 @@ TOOLS = {
                        "fade_in_s": {"type": "number"},
                        "fade_out_s": {"type": "number"},
                        "loop": {"type": "boolean"},
-                       "duck": {"type": "boolean"}}),
+                       "duck": {"type": "boolean"},
+                       "duck_mode": {"type": "string",
+                                     "enum": ["smooth", "step"]}}),
     "remove_music": (remove_music, "Remove one background-music item by its "
                      "id (see get_edl). Use this to cut the music entirely "
                      "or before re-adding it with a different range.",
@@ -3292,18 +4429,25 @@ TOOLS = {
                                              "none"]}}),
     "add_zoom": (add_zoom, "Zoom on a time range of the FINAL edited video "
                  "(output seconds) — the standard retention effect for "
-                 "emphasis on a key line. strength 0.05-1.0 (default 0.25 = "
-                 "25% closer). mode: 'punch' (default, instant step), "
-                 "'ease' (smoothly ramps in and out — use when the user "
-                 "wants it subtle/animated), 'push_in' / 'pull_out' "
-                 "(continuous Ken Burns drift across the whole window — "
-                 "use for slow cinematic movement). Use 1-3 short zooms at "
-                 "emphatic moments, not wall-to-wall.",
+                 "emphasis on a key line. strength 0.05-1.5 (default 0.25 = "
+                 "25% closer; above 1.0 is a dramatic 2x+ punch). mode: "
+                 "'punch' (default, instant step), 'ease' (smoothly ramps "
+                 "in and out — use when the user wants it subtle/animated), "
+                 "'push_in' / 'pull_out' (continuous Ken Burns drift across "
+                 "the whole window — use for slow cinematic movement). "
+                 "cx/cy (0-1 fractions of the output frame, (0,0) = "
+                 "top-left) AIM the zoom at a subject instead of the "
+                 "center — find it with look_at first; omit both for the "
+                 "classic center zoom. Use 1-3 short zooms at emphatic "
+                 "moments, not wall-to-wall; for automatic zooms on the "
+                 "strongest spoken words use punch_in_on_emphasis.",
                  {"start": {"type": "number"}, "end": {"type": "number"},
                   "strength": {"type": "number"},
                   "mode": {"type": "string",
                            "enum": ["punch", "ease", "push_in",
-                                    "pull_out"]}}),
+                                    "pull_out"]},
+                  "cx": {"type": "number"},
+                  "cy": {"type": "number"}}),
     "remove_zoom": (remove_zoom, "Remove one zoom by its id (see "
                     "get_edl).", {"id": {"type": "string"}}),
     "set_fades": (set_fades, "Fade from black at the start and/or to black "
@@ -3312,17 +4456,24 @@ TOOLS = {
                   {"fade_in_s": {"type": "number"},
                    "fade_out_s": {"type": "number"}}),
     "set_transitions": (set_transitions, "Transitions at EVERY cut point "
-                        "and insert boundary: a quick dip through black "
-                        "(style 'dip_black') or a white flash "
-                        "('dip_white'), duration_s 0.1-1.0 (default 0.3). "
-                        "'none' removes them (hard cuts again). THE tool "
-                        "when the user asks for transitions between "
-                        "clips/cuts. True crossfades (overlapping footage) "
-                        "are NOT supported — offer a dip instead and say "
-                        "so.",
+                        "and insert boundary — all duration-preserving "
+                        "junction effects (footage never overlaps, timing "
+                        "never changes). Styles: 'dip_black' = quick dip "
+                        "through black (calm, universal); 'dip_white' = "
+                        "soft white fade-through; 'whip_left'/'whip_right' "
+                        "= fast directional slide with motion blur "
+                        "(energetic vlogs/reels); 'zoom_punch' = "
+                        "accelerating push through the cut (hype, sports); "
+                        "'glitch' = RGB-split/noise burst (tech, gaming); "
+                        "'flash' = additive white pop peaking ON the cut "
+                        "(beat-synced edits). duration_s 0.1-1.5 (default "
+                        "0.3; keep whip/flash short, 0.15-0.4). 'none' "
+                        "removes them (hard cuts again). True crossfades "
+                        "(overlapping footage) are NOT supported — offer "
+                        "one of these instead and say so.",
                         {"style": {"type": "string",
-                                   "enum": ["dip_black", "dip_white",
-                                            "none"]},
+                                   "enum": list(TRANSITION_STYLES)
+                                   + ["none"]},
                          "duration_s": {"type": "number"}}),
     "blur_region": (blur_region, "Blur, pixelate or black-out a fixed "
                     "RECTANGLE of the original footage — THE tool to "
@@ -3364,6 +4515,216 @@ TOOLS = {
                        "duck_others": {"type": "boolean"}}),
     "remove_voiceover": (remove_voiceover, "Remove one voiceover by its id "
                          "(see get_edl).", {"id": {"type": "string"}}),
+    "set_speed": (set_speed, "Speed up or slow down a SOURCE-time range of "
+                  "the main video (like set_volume, start/end are SOURCE "
+                  "seconds — the ramp stays on its footage through later "
+                  "cuts, and music/overlays/zooms/sfx are re-anchored "
+                  "automatically). factor 0.25-4.0: 2.0 = double speed, "
+                  "0.5 = half; audio keeps its pitch. Slow motion below "
+                  "0.6x visibly steps (frames are duplicated, not "
+                  "synthesized) — the tool warns; prefer 0.6-0.8x. A span "
+                  "that overlaps an existing one REPLACES it (disclosed). "
+                  "THE tool for 'speed up the boring part' / 'slow-mo that "
+                  "moment'.",
+                  {"start": {"type": "number"},
+                   "end": {"type": "number"},
+                   "factor": {"type": "number"}}),
+    "remove_speed": (remove_speed, "Remove one speed span by its id (see "
+                     "get_edl) — that footage returns to normal speed and "
+                     "program-time items re-anchor automatically.",
+                     {"id": {"type": "string"}}),
+    "add_overlay": (add_overlay, "Draw an image or video clip OVER the "
+                    "program picture for a window of PROGRAM time — "
+                    "picture-in-picture b-roll, a corner logo, a full-frame "
+                    "cover with opacity. asset_key from list_assets "
+                    "(kind='clip'/'image') or a generated/fetched asset. "
+                    "duration_s defaults: image 4s, video the clip's length "
+                    "(bounded by the program end). x/y = the overlay's "
+                    "CENTER as fractions of the frame (0.5,0.5 = centered; "
+                    "0.85,0.15 = top-right corner) — pass a keyframe list "
+                    "[{t,v}] (t = seconds from the overlay's own start) for "
+                    "a slow drift/slide. scale = overlay width as a "
+                    "fraction of the frame width (0.05-1.0, default 0.4). "
+                    "opacity 0.05-1.0 (omit = opaque). entrance/exit: fade, "
+                    "slide_left, slide_right, slide_up. source_start_s "
+                    "seeks into a video overlay. HONEST LIMITS: a video "
+                    "overlay's audio does NOT play (silent PIP), overlays "
+                    "render above footage but BELOW captions, and they do "
+                    "NOT track objects in the footage. For a full-frame "
+                    "cutaway that replaces the footage use insert_media "
+                    "instead.",
+                    {"asset_key": {"type": "string"},
+                     "start": {"type": "number"},
+                     "duration_s": {"type": "number"},
+                     "x": {"type": ["number", "array"]},
+                     "y": {"type": ["number", "array"]},
+                     "scale": {"type": "number"},
+                     "opacity": {"type": "number"},
+                     "entrance": {"type": "string",
+                                  "enum": list(OVERLAY_ANIMS)},
+                     "exit": {"type": "string",
+                              "enum": list(OVERLAY_ANIMS)},
+                     "source_start_s": {"type": "number"}}),
+    "move_overlay": (move_overlay, "Reposition/retime/resize an EXISTING "
+                     "overlay — 'move the logo to the other corner', 'make "
+                     "the PIP smaller'. Only the fields you pass change. id "
+                     "from get_edl.",
+                     {"id": {"type": "string"},
+                      "start": {"type": "number"},
+                      "x": {"type": ["number", "array"]},
+                      "y": {"type": ["number", "array"]},
+                      "scale": {"type": "number"}}),
+    "remove_overlay": (remove_overlay, "Remove one overlay by its id (see "
+                       "get_edl).", {"id": {"type": "string"}}),
+    "add_text": (add_text, "Burn a designed motion-graphics TEXT template "
+                 "over a PROGRAM-time window — separate from captions "
+                 "(spoken words) and overlays (media). Templates: 'title' "
+                 "(big centered opening card), 'subtitle' (support line "
+                 "under a title), 'lower_third' (name/context bar, "
+                 "interviews), 'callout' (short pointed label), "
+                 "'big_number' (a huge stat — '10x', '$40K'), 'quote' (a "
+                 "quoted line), 'chapter' (section marker). x/y override "
+                 "the template's position (fractions of the frame); "
+                 "size_scale 0.4-3.0; color/accent_color '#RRGGBB'; font "
+                 "from the bundled families (exact name, e.g. 'Anton'); "
+                 "entrance/exit: fade, pop, slide_up, blur_in, whip, rise, "
+                 "drop, plus 'typewriter' (entrance only); uppercase forces "
+                 "casing; box adds a backing panel. Use for text the user "
+                 "dictates — titles, labels, stats; spoken-word captions "
+                 "stay with add_captions.",
+                 {"text": {"type": "string"},
+                  "start": {"type": "number"},
+                  "end": {"type": "number"},
+                  "template": {"type": "string",
+                               "enum": list(TEXT_TEMPLATES)},
+                  "x": {"type": "number"},
+                  "y": {"type": "number"},
+                  "size_scale": {"type": "number"},
+                  "color": {"type": "string"},
+                  "accent_color": {"type": "string"},
+                  "font": {"type": "string", "enum": list(TEXT_FONTS)},
+                  "entrance": {"type": "string", "enum": list(TEXT_ANIMS)},
+                  "exit": {"type": "string",
+                           "enum": [a for a in TEXT_ANIMS
+                                    if a != "typewriter"]},
+                  "uppercase": {"type": "boolean"},
+                  "box": {"type": "boolean"}}),
+    "remove_text": (remove_text, "Remove one text element by its id (see "
+                    "get_edl).", {"id": {"type": "string"}}),
+    "add_stylize": (add_stylize, "Layer a windowed finishing effect on the "
+                    "program picture: 'grain' (film grain), 'vignette' "
+                    "(darkened corners), 'glow' (soft bloom), 'chromatic' "
+                    "(RGB fringe), 'dream_blur' (soft dreamy diffusion), "
+                    "'vhs' (tape look), 'flash' (strobe pop), 'shake' "
+                    "(camera shake). start/end are PROGRAM seconds — omit "
+                    "both for the whole video. intensity 0.05-1.0 (default "
+                    "0.5). Content-anchored: a stylized moment follows its "
+                    "footage through later cuts. One or two layered "
+                    "effects read as a look; five read as a broken TV.",
+                    {"kind": {"type": "string",
+                              "enum": list(STYLIZE_KINDS)},
+                     "start": {"type": "number"},
+                     "end": {"type": "number"},
+                     "intensity": {"type": "number"}}),
+    "remove_stylize": (remove_stylize, "Remove one stylize effect by its id "
+                       "(see get_edl).", {"id": {"type": "string"}}),
+    "set_grade_custom": (set_grade_custom, "Continuous color controls on "
+                         "all footage, applied AFTER the preset grade (the "
+                         "two compose — 'cinematic but warmer' = preset "
+                         "cinematic + temperature 0.2): exposure -1..1, "
+                         "contrast 0.5..1.6 (1.0 neutral), saturation 0..2 "
+                         "(1.0 neutral), temperature -1 (cool)..1 (warm), "
+                         "tint -1 (green)..1 (magenta). Pass ONLY the axes "
+                         "to change; an axis's neutral value clears it; "
+                         "all axes neutral clears the whole custom grade. "
+                         "Captions and graphics are never graded.",
+                         {"exposure": {"type": "number"},
+                          "contrast": {"type": "number"},
+                          "saturation": {"type": "number"},
+                          "temperature": {"type": "number"},
+                          "tint": {"type": "number"}}),
+    "set_master_loudness": (set_master_loudness, "enabled=true normalizes "
+                            "the FINAL MIX to -14 LUFS / -1.5 dBTP (the "
+                            "social/streaming loudness target) on preview "
+                            "AND export — the fix for 'the export sounds "
+                            "quiet on TikTok/YouTube'. It changes loudness, "
+                            "not the voice/music/sfx balance. false removes "
+                            "mastering.",
+                            {"enabled": {"type": "boolean"}}),
+    "get_audio_analysis": (get_audio_analysis, "READ: measured musical/"
+                           "energy analysis of the source audio (cached "
+                           "after the first call): tempo (BPM + confidence "
+                           "— below 0.5 the pulse is unreliable and "
+                           "beat_align_cuts refuses), the beat grid, where "
+                           "the loudest/quietest sections and the biggest "
+                           "energy rise sit, and the most vocally STRESSED "
+                           "words with timestamps. Times are SOURCE "
+                           "seconds. Call before beat_align_cuts / "
+                           "punch_in_on_emphasis / sound_design_pass, or "
+                           "to answer 'what's the tempo'. Pass asset_key "
+                           "(an uploaded music file or library: track) to "
+                           "analyze that instead — e.g. to find the drop "
+                           "for add_music offset_s.",
+                           {"asset_key": {"type": "string"}}),
+    "punch_in_on_emphasis": (punch_in_on_emphasis, "ONE-CALL emphasis "
+                             "zooms: writes punch zooms on the N most "
+                             "vocally STRESSED words that survive the "
+                             "current cut (stress measured from the audio, "
+                             "times from the real word timestamps — never "
+                             "guessed), spaced >=4s apart, in one EDL "
+                             "version. count 1-8 (default 4); strength "
+                             "0.05-1.5 (default 0.35). The result lists "
+                             "each word + program time — report those to "
+                             "the user. THE tool for 'add zooms on the "
+                             "important moments'.",
+                             {"count": {"type": "integer"},
+                              "strength": {"type": "number"}}),
+    "sound_design_pass": (sound_design_pass, "ONE-CALL sound design from "
+                          "the built-in pack, in one version: a whoosh on "
+                          "cut junctions (spaced >=5s), one impact on the "
+                          "strongest stressed word, one riser resolving "
+                          "INTO the biggest energy rise. intensity: "
+                          "'light' (2 placements), 'medium' (4), 'strong' "
+                          "(6). Never stacks within 1.5s of an existing "
+                          "sound. The result lists every placement (sound "
+                          "@ time) — report them. For hand-placed accents "
+                          "use add_sfx; for custom sounds generate_sfx.",
+                          {"intensity": {"type": "string",
+                                         "enum": ["light", "medium",
+                                                  "strong"]}}),
+    "beat_align_cuts": (beat_align_cuts, "Move each INTERNAL cut boundary "
+                        "(never the program's first start / last end) to "
+                        "the nearest musical beat within tolerance_s "
+                        "(default 0.35s), skipping any move that would "
+                        "land inside a word. Requires a confident tempo "
+                        "(bpm confidence >= 0.5, see get_audio_analysis) — "
+                        "refuses honestly below that rather than 'syncing' "
+                        "to noise. One EDL version; reports moved/skipped "
+                        "counts. THE tool for 'cut to the beat'.",
+                        {"tolerance_s": {"type": "number"}}),
+    "suggest_emphasis": (suggest_emphasis, "READ: candidate emphasis words "
+                         "from the REAL transcript — the most vocally "
+                         "stressed words (measured), words with digits, "
+                         "and rare/distinctive words — as a verbatim list "
+                         "to pass to add_captions / set_caption_style "
+                         "emphasis_words.", {}),
+    "apply_look": (apply_look, "ONE-CALL aesthetic: composes caption "
+                   "preset + grade + custom grade + transitions + fades + "
+                   "stylize in a single EDL version and reports every "
+                   "component it set. Looks: 'hype' (beast xl captions, "
+                   "vibrant grade, zoom_punch cuts, closing fade), 'clean' "
+                   "(podcast captions, ungraded, gentle fades), "
+                   "'cinematic' (elegant captions, cinematic grade + "
+                   "slight warmth, 1s fades, dip_black), 'luxury' (luxe "
+                   "captions, warm grade + temperature lift, long fades), "
+                   "'meme' (impact xl captions, flash cuts, grain). "
+                   "Preserves existing emphasis_words, else picks them "
+                   "from the transcript. Never touches cuts, music or sfx "
+                   "— offer sound_design_pass separately for audio "
+                   "accents. Every component can be adjusted afterwards "
+                   "with its own tool.",
+                   {"name": {"type": "string",
+                             "enum": sorted(LOOKS)}}),
     "get_edl": (get_edl, "Current EDL JSON and version.", {}),
     "render_preview": (render_preview, "Render the current EDL as a fast "
                        "480p preview from the proxy, attach it to chat, and "
@@ -3405,6 +4766,23 @@ REQUIRED_ARGS = {
     "blur_region": ["x", "y", "w", "h"],
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
+    "set_speed": ["start", "end", "factor"],
+    "remove_speed": ["id"],
+    "add_overlay": ["asset_key", "start"],
+    "move_overlay": ["id"],
+    "remove_overlay": ["id"],
+    "add_text": ["text", "start", "end"],
+    "remove_text": ["id"],
+    "add_stylize": ["kind"],
+    "remove_stylize": ["id"],
+    "set_grade_custom": [],
+    "set_master_loudness": ["enabled"],
+    "get_audio_analysis": [],
+    "punch_in_on_emphasis": [],
+    "sound_design_pass": [],
+    "beat_align_cuts": [],
+    "suggest_emphasis": [],
+    "apply_look": ["name"],
     "generate_image": ["prompt"],
     "generate_sfx": ["prompt", "at"],
     "generate_video": ["prompt"],
@@ -3426,7 +4804,15 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
-               "blur_region", "remove_blur", "generate_image",
+               "blur_region", "remove_blur",
+               "set_speed", "remove_speed",
+               "add_overlay", "move_overlay", "remove_overlay",
+               "add_text", "remove_text",
+               "add_stylize", "remove_stylize",
+               "set_grade_custom", "set_master_loudness",
+               "punch_in_on_emphasis", "sound_design_pass",
+               "beat_align_cuts", "apply_look",
+               "generate_image",
                "generate_sfx", "generate_video", "fetch_url"}
 
 
@@ -3448,6 +4834,10 @@ def _tool_disabled(name):
     if name == "list_music_library":
         return not music_library.CATALOG
     if name == "list_sfx_library":
+        return not sfx_library.CATALOG
+    # The director pass places bundled sounds — with no pack shipped it can
+    # only reject, so it must not be advertised (same rule as the libraries).
+    if name == "sound_design_pass":
         return not sfx_library.CATALOG
     return False
 
@@ -3471,6 +4861,17 @@ def openai_tools():
     for name, (_fn, desc, props) in TOOLS.items():
         if _tool_disabled(name):
             continue
+        # Cross-references to a HIDDEN tool must vanish with it, or the
+        # model is pointed at a capability that no longer exists this
+        # deployment (apply_look's description names sound_design_pass).
+        if not sfx_library.CATALOG:
+            desc = desc.replace(
+                "Never touches cuts, music or sfx — offer sound_design_pass "
+                "separately for audio accents. ",
+                "Never touches cuts, music or sfx. ").replace(
+                "Call before beat_align_cuts / punch_in_on_emphasis / "
+                "sound_design_pass, or ",
+                "Call before beat_align_cuts / punch_in_on_emphasis, or ")
         out.append({
             "type": "function",
             "function": {

@@ -225,12 +225,11 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
             "exist, generated from the tool registry:\n"
             + agent_tools.capabilities_digest()
             + "\nNothing else exists. If the user asks for anything not "
-            "listed (speed changes, stickers/GIF overlays pinned on top of "
-            "moving footage, custom fonts, generated VIDEO footage or "
-            "motion graphics, ...), say so plainly and offer the closest "
-            "listed alternative — NEVER describe a change these tools "
-            "cannot make, and NEVER claim something is impossible when a "
-            "tool above covers it.")
+            "listed (motion-TRACKED stickers pinned to moving objects, "
+            "true crossfades, custom font files, ...), say so plainly and "
+            "offer the closest listed alternative — NEVER describe a "
+            "change these tools cannot make, and NEVER claim something is "
+            "impossible when a tool above covers it.")
 
     # system_prompt(), not the raw constant: it drops the built-in-library
     # claims when this image shipped no tracks.
@@ -384,7 +383,8 @@ EDIT_CLAIM = re.compile(
     r"(?i)("
     r"\b(?:i(?:'ve| have)?|we(?:'ve| have)?|now|just) "
     r"(?:cut|trimmed|removed|applied|added|set|updated|changed|adjusted|"
-    r"restored|made|moved|cropped|resized|reframed|inserted|spliced)\b"
+    r"restored|made|moved|cropped|resized|reframed|inserted|spliced|"
+    r"sped|slowed|overlaid|stylized|mastered|beat.?aligned)\b"
     r"|\b(?:cuts?|changes?|edits?|adjustments?)(?: (?:were|have been|are|got))? "
     r"(?:applied|made|done)\b"
     r"|\bapplied (?:the |a )?(?:cut|change|edit|style)"
@@ -413,12 +413,27 @@ EDIT_CLAIM = re.compile(
     r"\b(?:grades?|color.?grades?|zooms?|punch.?ins?|fades?|filters?|"
     r"karaoke|highlights?|transitions?|dips?|ken.?burns|animations?|"
     r"sound.?effects?|sfx|whoosh(?:es)?|swipes?|risers?|impacts?|"
-    r"booms?|sub.?drops?|glitch(?:es)?|zaps?|dings?|chimes?|stingers?)\b"
+    r"booms?|sub.?drops?|glitch(?:es)?|zaps?|dings?|chimes?|stingers?|"
+    r"overlays?|texts?|titles?|title.?cards?|lower.?thirds?|callouts?|"
+    r"speed(?:.?ramps?)?|slow.?motion|stylize|grain|vignettes?|glows?|"
+    r"vhs|shakes?|looks?|loudness|master(?:ing)?|sound.?design)\b"
     r"|\b(?<!no )(?:color.?grade|grade|zoom|punch.?in|"
     r"fades?(?:[- ]?(?:in|out)| to black)?|filter|transitions?|"
-    r"ken.?burns|animations?) "
+    r"ken.?burns|animations?|overlays?|texts?|titles?|lower.?thirds?|"
+    r"speed(?:.?ramps?)?|slow.?motion|stylize|grain|vignettes?|looks?|"
+    r"loudness|master(?:ing)?|sound.?design) "
     r"(?:is|was|has been|are|were) (?:now )?"
-    r"(?:added|applied|set|enabled)\b"
+    r"(?:added|applied|set|enabled|active|in place)\b"
+    # speed statives — "the intro is now sped up", "that section plays at
+    # 2x", "the clip is in slow motion". Same shape as the audio branch, so
+    # honest offers ("I can slow it down") never trip the fence.
+    r"|\b(?<!no )(?:video|clip|footage|section|segment|intro|outro|part|"
+    r"middle|moment)\b[^.\n]{0,50}\b(?:is|are|was|were|has been|have been) "
+    r"(?:now )?(?:sped.?up|slowed(?:.?down)?|in slow.?motion|"
+    r"(?:running |playing )?at [0-9]+(?:\.[0-9]+)?x)\b"
+    # mastering statives — "the mix is mastered to -14 LUFS"
+    r"|\b(?<!no )(?:mix|audio|export|loudness)\b[^.\n]{0,40}"
+    r"\b(?:is|was|has been) (?:now )?(?:mastered|normali[sz]ed to)\b"
     r"|\bcaptions? (?:now )?(?:fade|pop|slide) in\b"
     # audio claims — "The music now plays only from 0.0 to 15.0 seconds…"
     # Stative/perfect constructions only, so honest offers ("I can make the
@@ -651,14 +666,40 @@ ALTERNATIVE_HINTS = [
      "risers into a transition, plus clicks, pops, glitches, zaps, dings and "
      "camera shutters — from the built-in sound pack, at any volume, and I "
      "can move or remove them afterwards."),
+    # speed BEFORE effects: "slow motion" contains 'motion', which the
+    # effects regex matches, and the most specific hint must win the scan
+    (re.compile(r"(?i)slow.?mo(?:tion)?\b|\bspeed\b|speed.?up|sped|"
+                r"time.?lapse|fast.?forward|\b[0-9](?:\.[0-9])?x\b"),
+     "What I CAN do: speed up or slow down any part of the video (0.25x to "
+     "4x) with pitch-preserved audio — mild slow motion (0.6x and up) looks "
+     "smooth; more extreme slow motion visibly steps because frames are "
+     "duplicated, not synthesized."),
+    # overlays/text BEFORE effects and insert: "animated title" contains
+    # 'animat' (effects) and "logo" also lives in the insert hint — a
+    # title/overlay ask deserves the overlay answer. (?<!sub) keeps
+    # "subtitles" with the caption hint below.
+    (re.compile(r"(?i)overlay|picture.?in.?picture|\bpip\b|sticker|"
+                r"lower.?third|(?<!sub)title\b|title.?cards?|"
+                r"big.?numbers?|chapter.?mark|text.?on.?screen|\blogo\b"),
+     "What I CAN do: draw an image or clip over the footage — "
+     "picture-in-picture, a corner logo, a full-frame cover — at a fixed "
+     "or slowly drifting position, and burn designed text templates: "
+     "title cards, lower thirds, callouts, big numbers, quotes, chapter "
+     "markers. Overlays hold their position; they can't track a moving "
+     "object in the footage."),
     # effects next: zoom/filter/fade phrasings often also contain 'animated'
     # or 'tiktok', and the most specific hint must win the first-match scan
     (re.compile(r"(?i)effect|filter|grade|zoom|punch|fade|transition|"
-                r"viral|engag|animat|ken.?burns|motion"),
-     "What I CAN do: color-grade the whole video (vibrant, warm, cool, "
-     "black-and-white, vintage, cinematic), punch-in or smooth Ken Burns "
-     "zooms, dip-to-black/white transitions at every cut, fade in/out, "
-     "karaoke captions, animated caption entrances (fade/pop/slide), and "
+                r"viral|engag|animat|ken.?burns|motion|beat|stylize|"
+                r"grain|vignette|vhs|\blook\b|loud"),
+     "What I CAN do: color-grade the whole video (presets plus custom "
+     "exposure/contrast/saturation/temperature), punch-in or smooth Ken "
+     "Burns zooms (including aimed at a subject), seven transition styles "
+     "at every cut (dips, whips, zoom-punch, glitch, flash), fade in/out, "
+     "stylize effects (film grain, vignette, glow, VHS), beat-aligned "
+     "cuts and automatic punch-ins on the most stressed words, one-call "
+     "looks (hype/clean/cinematic/luxury/meme), loudness mastering for "
+     "social platforms, karaoke captions, animated caption entrances, and "
      "Ken Burns motion on inserted images."),
     (re.compile(r"(?i)9.?:.?16|16.?:.?9|1.?:.?1|4.?:.?5|aspect|ratio|"
                 r"vertical|portrait|square|crop|tiktok|reels?|shorts?"),

@@ -24,12 +24,14 @@ import audit
 import captions as caplib
 import config
 import db as dbx
+import graphics
 import media
 import music_library
 import sfx_library
 import sheets
 import storage
-from schemas import EDLValidationError, is_canvas_program, validate_edl
+from schemas import (EDLValidationError, is_canvas_program, speed_pieces,
+                     validate_edl)
 from timeline import Timeline, merge_spans
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -55,6 +57,52 @@ def _enable_expr(spans):
 
 def _even(x):
     return max(2, int(round(x / 2.0)) * 2)
+
+
+def _anim_expr(v, tvar):
+    """Compile an AnimFloat (a constant or a keyframe list — see schemas)
+    to an ffmpeg expression over `tvar` (an expression yielding the
+    ELEMENT-LOCAL time in seconds). Easing curves are the same closed forms
+    anim_value evaluates python-side, so tools, tests and renders agree.
+    Nested if() rather than summed between(): keyframe segments share
+    endpoints, and summed windows double-count exactly at the shared
+    instant."""
+    if not isinstance(v, list):
+        return f"{float(v):.4f}"
+    kfs = [(k["t"], k["v"], k.get("ease")) if isinstance(k, dict)
+           else (k.t, k.v, k.ease) for k in v]
+    expr = f"{kfs[-1][1]:.4f}"          # after the last keyframe: hold
+    for i in range(len(kfs) - 1, 0, -1):
+        t0, v0, _ = kfs[i - 1]
+        t1, v1, ease = kfs[i]
+        if t1 - t0 <= 1e-9 or ease == "hold":
+            seg = f"{v0:.4f}"
+        else:
+            p = f"(({tvar}-{t0:.3f})/{t1 - t0:.3f})"
+            if ease == "in":
+                p = f"pow({p},2)"
+            elif ease == "out":
+                p = f"({p}*(2-{p}))"
+            elif ease == "in_out":
+                p = f"({p}*{p}*(3-2*{p}))"
+            seg = f"({v0:.4f}+{v1 - v0:.4f}*{p})"
+        expr = f"if(lt({tvar},{t1:.3f}),{seg},{expr})"
+    return f"if(lt({tvar},{kfs[0][0]:.3f}),{kfs[0][1]:.4f},{expr})"
+
+
+def _atempo_chain(factor):
+    """atempo accepts 0.5-2.0 per instance; chain instances for the rest.
+    Returns e.g. 'atempo=2.0,atempo=1.5' for 3.0x."""
+    steps = []
+    f = float(factor)
+    while f > 2.0 + 1e-9:
+        steps.append(2.0)
+        f /= 2.0
+    while f < 0.5 - 1e-9:
+        steps.append(0.5)
+        f /= 0.5
+    steps.append(round(f, 4))
+    return ",".join(f"atempo={s:g}" for s in steps)
 
 
 def frame_dims(src_w, src_h, ratio):
@@ -262,7 +310,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       insert_inputs=None, vo_inputs=None, silence_idx=None,
                       src_w=None, src_h=None, src_pad=0.0,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
-                      src_sar=1.0, src_fps=None):
+                      src_sar=1.0, src_fps=None,
+                      overlay_inputs=None, gfx_ass_path=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -309,34 +358,58 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # A plain single-source cut needs no per-segment normalization (the old,
     # cheap graph). The moment a frame is set, foreign material is spliced
     # in, or a zoom needs exact CFR WxH frames, EVERY block must land on
-    # identical dims/fps/audio before concat.
+    # identical dims/fps/audio before concat. Round 35 widens the list:
+    # speed pieces need CFR so their concat is seamless; overlays compute
+    # their geometry from exact WxH; the whip/zoom_punch/glitch junctions
+    # run per-block zoompan/overlay math that assumes CFR WxH; shake is a
+    # zoompan.
     fx = edl.get("effects") or {}
     zooms = fx.get("zooms") or []
     regions = fx.get("regions") or []
-    do_norm = bool(insert_inputs) or frame_mode is not None or bool(zooms)
+    speed = edl.get("speed") or []
+    stylize = fx.get("stylize") or []
+    grade_custom = fx.get("grade_custom") or {}
+    overlay_inputs = overlay_inputs or []
+    master = edl.get("master") or {}
+    transition = fx.get("transition") or None
+    tstyle = (transition or {}).get("style")
+    do_norm = (bool(insert_inputs) or frame_mode is not None or bool(zooms)
+               or bool(speed) or bool(overlay_inputs)
+               or tstyle in ("whip_left", "whip_right", "zoom_punch")
+               or any(s.get("kind") == "shake" for s in stylize))
     mode = frame_mode or "crop"
 
     # Censor regions are burned into each SOURCE segment BEFORE any
     # reframe/normalization: their fractions are of the SOURCE frame
     # (exactly what look_at showed the agent), a later crop/pad moves the
     # censored footage as one, and inserted material is never censored.
+    # Pieces per segment: with no speed spans every segment is one piece at
+    # factor 1 and the classic emission below runs untouched. seg_out_len is
+    # the segment's PROGRAM length (speed-remapped) — the number every block
+    # duration and program-time accumulation must use.
+    seg_pcs = [speed_pieces(s, e, speed) for s, e in keep]
+    seg_out_len = [sum((pe - ps) / f for ps, pe, f in pcs)
+                   for pcs in seg_pcs]
+
     sw = sh = None
     seg_prog = []
     if regions:
         sw, sh = int(src_w or W), int(src_h or H)
         # program-time start of every keep segment (inserts included), for
         # mapping windowed regions into segment-local time — mirrors the
-        # block-order loop below
+        # block-order loop below. Uses the SPED segment lengths: a windowed
+        # region's program times only line up when the accumulation matches
+        # what the viewer's clock does.
         _at = [tl.ins[j][0] for j in range(len(insert_inputs))]
         _pre = _prog = 0.0
         _j = 0
-        for s, e in keep:
+        for i, (s, e) in enumerate(keep):
             while _j < len(_at) and _at[_j] <= _pre + 1e-6:
                 _prog += float(insert_inputs[_j][1]["duration_s"])
                 _j += 1
             seg_prog.append(_prog)
-            _pre += e - s
-            _prog += e - s
+            _pre += seg_out_len[i]
+            _prog += seg_out_len[i]
 
     def _seg_video(i, in_label, s, e):
         vlab = f"segv{i}" if do_norm else f"v_seg{i}"
@@ -349,24 +422,93 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{in_label}]trim=start={s:.3f}:end={e:.3f},"
                          f"setpts=PTS-STARTPTS[{vlab}]")
 
+    def _seg_pieces_video_audio(i, v_in, a_in, s, e):
+        """Speed path: one keep segment -> constant-rate pieces, each
+        trimmed, censored (windows mapped into the piece's own pre-speed
+        clock), retimed with setpts/atempo, then concatenated back into
+        [segv{i}]/[a_seg{i}]. Only reached when the EDL carries speed spans
+        (do_norm is forced on, so segv{i} is normalized right after)."""
+        pcs = seg_pcs[i]
+        k = len(pcs)
+        if k > 1:
+            parts.append(f"[{v_in}]split={k}"
+                         + "".join(f"[pv{i}_{j}]" for j in range(k)))
+            parts.append(f"[{a_in}]asplit={k}"
+                         + "".join(f"[pa{i}_{j}]" for j in range(k)))
+        else:
+            parts.append(f"[{v_in}]null[pv{i}_0]")
+            parts.append(f"[{a_in}]anull[pa{i}_0]")
+        p_acc = 0.0        # sped seconds consumed within this segment so far
+        for j, (ps, pe, f) in enumerate(pcs):
+            spts = "" if abs(f - 1.0) < 1e-9 else f"/{f:.4f}"
+            if regions:
+                # Region windows arrive in PROGRAM time; inside a sped piece
+                # the local pre-speed clock runs `f` times program speed.
+                # The piece's program start accumulates from seg_prog — the
+                # same insert-aware walk the non-speed path uses — NEVER via
+                # tl.src_to_out(ps): at a contiguous keep boundary (the
+                # mid-take-insert split shape) src_to_out first-matches the
+                # EARLIER segment and returns a time missing the insert's
+                # duration, landing the censor window on the wrong footage.
+                p0 = seg_prog[i] + p_acc
+                p1 = p0 + (pe - ps) / f
+                local_rgs = []
+                for rg in regions:
+                    if rg.get("start") is not None:
+                        a = max(float(rg["start"]), p0)
+                        b = min(float(rg["end"]), p1)
+                        if b - a < 0.02:
+                            continue
+                        local_rgs.append(dict(rg, start=(a - p0) * f,
+                                              end=(b - p0) * f))
+                    else:
+                        local_rgs.append(dict(rg, start=None, end=None))
+                parts.append(f"[pv{i}_{j}]trim=start={ps:.3f}:end={pe:.3f},"
+                             f"setpts=PTS-STARTPTS[pvr{i}_{j}]")
+                _region_parts(parts, f"pvr{i}_{j}", f"pvt{i}_{j}", local_rgs,
+                              sw, sh, 0.0, pe - ps, f"sp{i}_{j}")
+                parts.append(f"[pvt{i}_{j}]setpts=PTS{spts}[pvz{i}_{j}]")
+            else:
+                parts.append(f"[pv{i}_{j}]trim=start={ps:.3f}:end={pe:.3f},"
+                             f"setpts=(PTS-STARTPTS){spts}[pvz{i}_{j}]")
+            tempo = "" if abs(f - 1.0) < 1e-9 else f",{_atempo_chain(f)}"
+            parts.append(f"[pa{i}_{j}]atrim=start={ps:.3f}:end={pe:.3f},"
+                         f"asetpts=PTS-STARTPTS{tempo},{AUDIO_NORM}"
+                         f"[paz{i}_{j}]")
+            p_acc += (pe - ps) / f
+        if k == 1:
+            parts.append(f"[pvz{i}_0]null[segv{i}]")
+            parts.append(f"[paz{i}_0]anull[a_seg{i}]")
+        else:
+            pairs = "".join(f"[pvz{i}_{j}][paz{i}_{j}]" for j in range(k))
+            parts.append(f"{pairs}concat=n={k}:v=1:a=1[segv{i}][a_seg{i}]")
+
     # main segments: trim (+ censor regions), then (when needed) normalize
     # to the output frame. Skipped entirely for a canvas program (no [0]).
-    if n == 1:
+    if n >= 1:
         vsrc = "0:v"
         if src_pad > 0:
             parts.append(f"[0:v]tpad=stop_mode=clone:"
                          f"stop_duration={src_pad:.3f}[vpad]")
             vsrc = "vpad"
+    if speed and n >= 1:
+        # Speed path: every segment needs its own video AND audio tap.
+        if n == 1:
+            parts.append(f"[{vsrc}]null[vin0]")
+            parts.append("[asrc]anull[ain0]")
+        else:
+            parts.append(f"[{vsrc}]split=" + str(n)
+                         + "".join(f"[vin{i}]" for i in range(n)))
+            parts.append("[asrc]asplit=" + str(n)
+                         + "".join(f"[ain{i}]" for i in range(n)))
+        for i, (s, e) in enumerate(keep):
+            _seg_pieces_video_audio(i, f"vin{i}", f"ain{i}", s, e)
+    elif n == 1:
         _seg_video(0, vsrc, keep[0][0], keep[0][1])
         parts.append(f"[asrc]atrim=start={keep[0][0]:.3f}:end={keep[0][1]:.3f},"
                      f"asetpts=PTS-STARTPTS"
                      + (f",{AUDIO_NORM}" if do_norm else "") + "[a_seg0]")
     elif n > 1:
-        vsrc = "0:v"
-        if src_pad > 0:
-            parts.append(f"[0:v]tpad=stop_mode=clone:"
-                         f"stop_duration={src_pad:.3f}[vpad]")
-            vsrc = "vpad"
         parts.append(f"[{vsrc}]split=" + str(n)
                      + "".join(f"[vin{i}]" for i in range(n)))
         parts.append("[asrc]asplit=" + str(n)
@@ -429,51 +571,274 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}",
                            float(insert_inputs[ins_j][1]["duration_s"])))
             ins_j += 1
-        blocks.append((f"v_seg{i}", f"a_seg{i}", e - s))
-        pre += e - s
+        # seg_out_len, not e - s: a sped segment's block duration is its
+        # REMAPPED length (identical to e - s when no speed spans exist).
+        blocks.append((f"v_seg{i}", f"a_seg{i}", seg_out_len[i]))
+        pre += seg_out_len[i]
     while ins_j < len(insert_inputs):
         blocks.append((f"v_ins{ins_j}", f"a_ins{ins_j}",
                        float(insert_inputs[ins_j][1]["duration_s"])))
         ins_j += 1
 
-    # Transitions: a dip through black/white at every junction. Duration-
-    # preserving by construction — each block fades out/in within its own
-    # footage (video only; audio concat is untouched), so no timeline math
-    # anywhere changes.
-    transition = fx.get("transition") or None
+    # Transitions: a junction effect at every cut/insert boundary, chosen
+    # from TRANSITION_STYLES. Every style is duration-preserving by
+    # construction — each block animates within its own footage (video only;
+    # audio concat is untouched), so no timeline math anywhere changes.
+    # Styles that manufacture geometry (whip/zoom_punch) forced do_norm
+    # above, so W/H/fps here are the real per-block dimensions.
+    trans_post = None    # (style, tdur) applied ONCE after concat, not per block
     if transition and len(blocks) > 1:
         tdur = float(transition.get("duration_s") or 0.3)
-        tcolor = "white" if transition.get("style") == "dip_white" \
-            else "black"
-        faded = []
-        for k, (vlab, alab, bd) in enumerate(blocks):
-            td = min(tdur, max(0.0, bd / 2 - 0.05))
-            chain = []
-            if td >= 0.05:
-                if k > 0:
-                    chain.append(f"fade=t=in:st=0:d={td:.2f}:c={tcolor}")
-                if k < len(blocks) - 1:
-                    chain.append(f"fade=t=out:st={max(0.0, bd - td):.2f}:"
-                                 f"d={td:.2f}:c={tcolor}")
-            if chain:
-                parts.append(f"[{vlab}]{','.join(chain)}[vtr{k}]")
-                faded.append((f"vtr{k}", alab, bd))
-            else:
-                faded.append((vlab, alab, bd))
-        blocks = faded
+        style = transition.get("style") or "dip_black"
+        nb = len(blocks)
+        if style in ("whip_left", "whip_right", "zoom_punch"):
+            # Geometry-manufacturing styles run as ONE post-concat instance
+            # (below): per-block emission put a full-resolution overlay/
+            # color/zoompan chain in the graph for EVERY block, so graph
+            # size and filter frame queues scaled with the cut count on the
+            # OOM-prone 1-vCPU worker. dip/flash/glitch stay per block —
+            # fade/eq/rgbashift are cheap and enable-gated.
+            trans_post = (style, tdur)
+        else:
+            faded = []
+            for k, (vlab, alab, bd) in enumerate(blocks):
+                td = min(tdur, max(0.0, bd / 2 - 0.05))
+                first, last = k == 0, k == nb - 1
+                if td < 0.05 or (first and last):
+                    faded.append((vlab, alab, bd))
+                    continue
+                out_lab = f"vtr{k}"
+                # edge windows this block participates in (an interior block
+                # has both: an incoming edge at t=0, an outgoing edge at bd)
+                spans = []
+                if not first:
+                    spans.append((0.0, td))
+                if not last:
+                    spans.append((max(0.0, bd - td), bd))
+                en = "+".join(f"between(t,{a:.3f},{b:.3f})"
+                              for a, b in spans)
+                if style in ("dip_black", "dip_white"):
+                    tcolor = "white" if style == "dip_white" else "black"
+                    chain = []
+                    if not first:
+                        chain.append(f"fade=t=in:st=0:d={td:.2f}:c={tcolor}")
+                    if not last:
+                        chain.append(f"fade=t=out:st={max(0.0, bd - td):.2f}:"
+                                     f"d={td:.2f}:c={tcolor}")
+                    parts.append(f"[{vlab}]{','.join(chain)}[{out_lab}]")
+                elif style == "flash":
+                    # Additive white pop peaking exactly ON the cut — eq's
+                    # brightness accepts a per-frame expression, so the ramp
+                    # is continuous, unlike a dip's fade-through.
+                    terms = []
+                    if not last:
+                        terms.append(
+                            f"0.85*max(0,1-({bd:.3f}-t)/{td:.3f})")
+                    if not first:
+                        terms.append(f"0.85*max(0,1-t/{td:.3f})")
+                    parts.append(f"[{vlab}]eq=brightness='{'+'.join(terms)}'"
+                                 f":eval=frame[{out_lab}]")
+                elif style == "glitch":
+                    rr = max(4, int(round((W or 1280) * 0.008)))
+                    parts.append(
+                        f"[{vlab}]rgbashift=rh={rr}:bh=-{rr}:enable='{en}',"
+                        f"noise=alls=18:allf=t:enable='{en}'[{out_lab}]")
+                else:
+                    faded.append((vlab, alab, bd))
+                    continue
+                faded.append((out_lab, alab, bd))
+            blocks = faded
 
     pairs = "".join(f"[{v}][{a}]" for v, a, _d in blocks)
     parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
 
     vlabel = "vc"
-    # effects: grade -> punch-in zooms -> (captions burn) -> fades. Zooms use
-    # one zoompan whose z steps up inside each window; do_norm guarantees the
-    # frames entering it are exact CFR WxH so on/fps is program time.
+    if trans_post:
+        # Junction list in PROGRAM time. Each side of a junction keeps the
+        # per-block rule: it participates only when its own block affords
+        # td >= 0.05 (min(tdur, bd/2 - 0.05)). Terms are half-open-windowed
+        # (gte*lt) so the junction frame belongs to the incoming side — the
+        # exact frame ownership concat gave the per-block version.
+        style, tdur = trans_post
+        cum, juncs = 0.0, []
+        for k in range(len(blocks) - 1):
+            bd_k, bd_n = blocks[k][2], blocks[k + 1][2]
+            cum += bd_k
+            td_o = min(tdur, max(0.0, bd_k / 2 - 0.05))
+            td_i = min(tdur, max(0.0, bd_n / 2 - 0.05))
+            juncs.append((cum, td_o if td_o >= 0.05 else None,
+                          td_i if td_i >= 0.05 else None))
+
+        def _win(tvar, a, b):
+            return f"gte({tvar},{a:.3f})*lt({tvar},{b:.3f})"
+
+        if style in ("whip_left", "whip_right"):
+            # The frame whips off in the cut direction over a black backdrop
+            # while a directional blur smears the motion; the next block
+            # whips in from the opposite edge. Quadratic easing so the move
+            # accelerates INTO the cut.
+            dirn = -1 if style == "whip_left" else 1
+            xterms, enspans = [], []
+            for c, td_o, td_i in juncs:
+                if td_o:
+                    xterms.append(
+                        f"{dirn}*{W}*pow(max(0,"
+                        f"(t-{c - td_o:.3f})/{td_o:.3f}),2)"
+                        f"*{_win('t', c - td_o, c)}")
+                    enspans.append((c - td_o, c))
+                if td_i:
+                    # ({-dirn}) not -({dirn}): terms are '+'-joined, and
+                    # ffmpeg's expression parser rejects the '+-(' sequence
+                    # a leading unary minus would produce.
+                    xterms.append(
+                        f"({-dirn})*{W}*pow(max(0,"
+                        f"1-(t-{c:.3f})/{td_i:.3f}),2)"
+                        f"*{_win('t', c, c + td_i)}")
+                    enspans.append((c, c + td_i))
+            if xterms:
+                total_bd = sum(b for _, _, b in blocks)
+                blur_r = max(6, int(round((W or 1280) * 0.012)))
+                en = "+".join(f"between(t,{a:.3f},{b:.3f})"
+                              for a, b in merge_spans(enspans, gap=0.0))
+                parts.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:"
+                             f"d={total_bd:.3f}[wbg]")
+                parts.append(f"[wbg][{vlabel}]overlay="
+                             f"x='{'+'.join(xterms)}':y=0:"
+                             f"eof_action=pass[wov]")
+                parts.append(f"[wov]dblur=angle=0:radius={blur_r}:"
+                             f"enable='{en}'[vwhip]")
+                vlabel = "vwhip"
+        else:                          # zoom_punch
+            # Accelerating push INTO the cut; the next block lands from a
+            # slight over-zoom. zoompan needs CFR (do_norm forced), so
+            # on/fps is program time.
+            T = f"on/{fps:.3f}"
+            zterms = []
+            for c, td_o, td_i in juncs:
+                if td_o:
+                    zterms.append(
+                        f"0.45*pow(max(0,({T}-{c - td_o:.3f})"
+                        f"/{td_o:.3f}),2)*{_win(T, c - td_o, c)}")
+                if td_i:
+                    zterms.append(
+                        f"0.30*pow(max(0,1-({T}-{c:.3f})"
+                        f"/{td_i:.3f}),2)*{_win(T, c, c + td_i)}")
+            if zterms:
+                parts.append(f"[{vlabel}]zoompan=z='1+{'+'.join(zterms)}'"
+                             f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                             f":d=1:s={W}x{H}:fps={fps:.3f}[vpunch]")
+                vlabel = "vpunch"
+    # effects: grade -> custom grade -> stylize -> zooms -> overlays ->
+    # (captions burn) -> (graphics burn) -> fades. Zooms use one zoompan
+    # whose z steps up inside each window; do_norm guarantees the frames
+    # entering it are exact CFR WxH so on/fps is program time. Overlays sit
+    # ABOVE zooms deliberately (a corner PIP must not scale when the footage
+    # punches) and BELOW both text layers (words always win).
     grade = fx.get("grade")
     if grade and grade in GRADE_FILTERS:
         parts.append(f"[{vlabel}]{GRADE_FILTERS[grade]}[vgrade]")
         vlabel = "vgrade"
+    if grade_custom:
+        # Continuous color controls, applied AFTER the preset so "cinematic
+        # but warmer" composes. exposure maps to eq brightness (+-0.35 full
+        # scale); temperature/tint to colorbalance shadows+midtones — the
+        # portable approximation (colortemperature exists but its neutral
+        # point drifts across ffmpeg majors; colorbalance does not).
+        gc = grade_custom
+        eq_bits = []
+        if gc.get("exposure") is not None:
+            eq_bits.append(f"brightness={0.35 * float(gc['exposure']):.3f}")
+        if gc.get("contrast") is not None:
+            eq_bits.append(f"contrast={float(gc['contrast']):.3f}")
+        if gc.get("saturation") is not None:
+            eq_bits.append(f"saturation={float(gc['saturation']):.3f}")
+        cb_bits = []
+        temp = float(gc.get("temperature") or 0.0)
+        tint = float(gc.get("tint") or 0.0)
+        rs = 0.10 * temp + 0.03 * tint
+        bs = -0.12 * temp + 0.05 * tint
+        gs = -0.08 * tint
+        if abs(rs) > 1e-4:
+            cb_bits.append(f"rs={rs:.3f}:rm={rs * 0.6:.3f}")
+        if abs(gs) > 1e-4:
+            cb_bits.append(f"gs={gs:.3f}:gm={gs * 0.6:.3f}")
+        if abs(bs) > 1e-4:
+            cb_bits.append(f"bs={bs:.3f}:bm={bs * 0.6:.3f}")
+        chain = []
+        if eq_bits:
+            chain.append("eq=" + ":".join(eq_bits))
+        if cb_bits:
+            chain.append("colorbalance=" + ":".join(cb_bits))
+        if chain:
+            parts.append(f"[{vlabel}]{','.join(chain)}[vgcust]")
+            vlabel = "vgcust"
+    for si, styl in enumerate(stylize):
+        kind = styl.get("kind")
+        i_ = float(styl.get("intensity") or 0.5)
+        a = styl.get("start")
+        b = styl.get("end")
+        if a is not None:
+            a = max(0.0, float(a))
+            b = min(tl.out_duration, float(b))
+            if b - a < 0.05:
+                continue
+            en = f":enable='between(t,{a:.3f},{b:.3f})'"
+            win = f"between(t,{a:.3f},{b:.3f})"
+        else:
+            en = ""
+            win = "1"
+        out_lab = f"vsty{si}"
+        if kind == "grain":
+            parts.append(f"[{vlabel}]noise=alls={5 + int(25 * i_)}"
+                         f":allf=t+u{en}[{out_lab}]")
+        elif kind == "vignette":
+            parts.append(f"[{vlabel}]vignette=a=PI/{4.8 - 2.2 * i_:.2f}"
+                         f"{en}[{out_lab}]")
+        elif kind == "chromatic":
+            r = 2 + int(10 * i_)
+            parts.append(f"[{vlabel}]rgbashift=rh={r}:bh=-{r}{en}"
+                         f"[{out_lab}]")
+        elif kind == "dream_blur":
+            parts.append(f"[{vlabel}]gblur=sigma={2 + 8 * i_:.1f}{en}"
+                         f"[{out_lab}]")
+        elif kind == "vhs":
+            parts.append(f"[{vlabel}]rgbashift=rh=3:bh=-3{en},"
+                         f"noise=alls=12:allf=t{en},"
+                         f"eq=saturation=0.8:contrast=1.05{en}[{out_lab}]")
+        elif kind == "flash":
+            parts.append(f"[{vlabel}]eq=brightness={0.15 + 0.45 * i_:.2f}"
+                         f"{en}[{out_lab}]")
+        elif kind == "glow":
+            # split -> blur -> screen-blend. blend's enable passes the TOP
+            # (first) input through when off, which is the ungraded main —
+            # exactly the off state a windowed glow needs.
+            parts.append(f"[{vlabel}]split[glA{si}][glB{si}]")
+            parts.append(f"[glB{si}]gblur=sigma={10 + 25 * i_:.1f}[glG{si}]")
+            parts.append(f"[glA{si}][glG{si}]blend=all_mode=screen"
+                         f":all_opacity={0.25 + 0.4 * i_:.2f}{en}"
+                         f"[{out_lab}]")
+        elif kind == "shake":
+            # Windowed handheld wobble via zoompan: z=1 outside the window,
+            # so there is NO hidden crop on the rest of the program (a naive
+            # crop-shift shakes cheaply but permanently zooms everything).
+            T = f"on/{fps:.3f}"
+            winT = win.replace("t,", f"{T},") if win != "1" else "1"
+            amp = (W or 1280) * 0.006 * (0.5 + i_)
+            z_amt = 0.04 + 0.06 * i_
+            parts.append(
+                f"[{vlabel}]zoompan=z='1+{z_amt:.3f}*({winT})'"
+                f":x='iw/2-(iw/zoom/2)+{amp:.1f}*sin({T}*{13 + 8 * i_:.1f})"
+                f"*({winT})'"
+                f":y='ih/2-(ih/zoom/2)+{amp * 0.7:.1f}*cos({T}*{11 + 6 * i_:.1f})"
+                f"*({winT})'"
+                f":d=1:s={W}x{H}:fps={fps:.3f}[{out_lab}]")
+        else:
+            continue
+        vlabel = out_lab
     zoom_terms = []
+    zoom_targeted = any(z.get("cx") is not None or z.get("cy") is not None
+                        for z in zooms)
+    cx_terms, cy_terms = [], []
     for z in zooms:
         a = max(0.0, float(z["start"]))
         b = min(tl.out_duration, float(z["end"]))
@@ -499,12 +864,87 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f"*between({t},{a:.3f},{b:.3f})")
         else:                           # punch: instant step in/out
             zoom_terms.append(f"{st:.2f}*between({t},{a:.3f},{b:.3f})")
+        if zoom_targeted:
+            # target expressions: 0.5 (center) outside every window, the
+            # zoom's own cx/cy inside its window — so multiple zooms can
+            # each punch toward their own subject.
+            cx = z.get("cx")
+            cy = z.get("cy")
+            if cx is not None and abs(float(cx) - 0.5) > 1e-6:
+                cx_terms.append(f"{float(cx) - 0.5:.3f}"
+                                f"*between({t},{a:.3f},{b:.3f})")
+            if cy is not None and abs(float(cy) - 0.5) > 1e-6:
+                cy_terms.append(f"{float(cy) - 0.5:.3f}"
+                                f"*between({t},{a:.3f},{b:.3f})")
     if zoom_terms:
         zexpr = "1+" + "+".join(zoom_terms)
+        if zoom_targeted:
+            cxe = "0.5" + ("+" + "+".join(cx_terms) if cx_terms else "")
+            cye = "0.5" + ("+" + "+".join(cy_terms) if cy_terms else "")
+            xexpr = f"(iw-iw/zoom)*({cxe})"
+            yexpr = f"(ih-ih/zoom)*({cye})"
+        else:
+            # the exact legacy strings — mathematically (iw-iw/zoom)*0.5
+            xexpr = "iw/2-(iw/zoom/2)"
+            yexpr = "ih/2-(ih/zoom/2)"
         parts.append(f"[{vlabel}]zoompan=z='{zexpr}'"
-                     f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                     f":x='{xexpr}':y='{yexpr}'"
                      f":d=1:s={W}x{H}:fps={fps:.3f}[vzoom]")
         vlabel = "vzoom"
+    # ---- overlays (round 35): PIP / b-roll / logo layer -----------------
+    for j, (idx, item) in enumerate(overlay_inputs):
+        o_start = float(item["start"])
+        o_dur = float(item["duration_s"])
+        ow = _even((W or 1280) * float(item.get("scale") or 0.4))
+        chain = []
+        if item["kind"] != "image":
+            off = float(item.get("source_start_s") or 0.0)
+            chain.append(f"trim=start={off:.3f}:end={off + o_dur:.3f}")
+            chain.append("setpts=PTS-STARTPTS")
+        chain.append(f"scale={ow}:-2")
+        chain.append("format=rgba")
+        op = item.get("opacity")
+        if op is not None and float(op) < 0.999:
+            chain.append(f"colorchannelmixer=aa={float(op):.3f}")
+        ent, ext = item.get("entrance"), item.get("exit")
+        ed = min(0.35, o_dur / 3)
+        if ent == "fade":
+            chain.append(f"fade=t=in:st=0:d={ed:.2f}:alpha=1")
+        if ext == "fade":
+            chain.append(f"fade=t=out:st={max(0.0, o_dur - ed):.2f}"
+                         f":d={ed:.2f}:alpha=1")
+        rot = item.get("rotation")
+        if rot:
+            rad = float(rot) * 3.14159265 / 180.0
+            chain.append(f"rotate={rad:.4f}:c=black@0.0"
+                         f":ow=rotw({rad:.4f}):oh=roth({rad:.4f})")
+        chain.append(f"setpts=PTS+{o_start:.3f}/TB")
+        parts.append(f"[{idx}:v]{','.join(chain)}[ovp{j}]")
+        # position: keyframed fractions of the MAIN frame, center-anchored.
+        # Slide entrance/exit rides the position expression (quadratic ease
+        # from/to one frame-width/height away).
+        lt = f"(t-{o_start:.3f})"
+        xe = f"main_w*({_anim_expr(item.get('x', 0.5), lt)})-w/2"
+        ye = f"main_h*({_anim_expr(item.get('y', 0.5), lt)})-h/2"
+        if ent == "slide_left":       # arrives moving leftward: from right
+            xe += f"+main_w*pow(max(0,1-{lt}/{ed:.2f}),2)"
+        elif ent == "slide_right":
+            xe += f"-main_w*pow(max(0,1-{lt}/{ed:.2f}),2)"
+        elif ent == "slide_up":       # arrives moving upward: from below
+            ye += f"+main_h*pow(max(0,1-{lt}/{ed:.2f}),2)"
+        xt0 = max(0.0, o_dur - ed)
+        if ext == "slide_left":
+            xe += f"-main_w*pow(max(0,({lt}-{xt0:.2f})/{ed:.2f}),2)"
+        elif ext == "slide_right":
+            xe += f"+main_w*pow(max(0,({lt}-{xt0:.2f})/{ed:.2f}),2)"
+        elif ext == "slide_up":
+            ye += f"-main_h*pow(max(0,({lt}-{xt0:.2f})/{ed:.2f}),2)"
+        parts.append(
+            f"[{vlabel}][ovp{j}]overlay=x='{xe}':y='{ye}'"
+            f":eof_action=pass"
+            f":enable='between(t,{o_start:.3f},{o_start + o_dur:.3f})'"
+            f"[vov{j}]")
+        vlabel = f"vov{j}"
     if ass_path:
         # fontsdir points libass at the premium fonts bundled with the
         # worker (worker/fonts) — system fontconfig still supplies DejaVu
@@ -512,6 +952,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{vlabel}]subtitles=filename='{ass_path}'"
                      f":fontsdir='{caplib.FONTS_DIR}'[vsub]")
         vlabel = "vsub"
+    if gfx_ass_path:
+        # The motion-graphics layer burns on its own pass ABOVE captions —
+        # a title always wins over a caption crossing it (see graphics.py
+        # for why it is a separate file, not extra caption events).
+        parts.append(f"[{vlabel}]subtitles=filename='{gfx_ass_path}'"
+                     f":fontsdir='{caplib.FONTS_DIR}'[vgfx]")
+        vlabel = "vgfx"
     fade_in = float(fx.get("fade_in_s") or 0.0)
     fade_out = float(fx.get("fade_out_s") or 0.0)
     if fade_in:
@@ -594,6 +1041,18 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         alabel = "aduck"
 
     mix_labels = []
+    # Smooth (sidechain) ducking: each opted-in music item compresses
+    # against a copy of the program audio, so the bed dips WITH the voice
+    # and swells back in the gaps instead of the legacy -12dB step. Split
+    # the program feed once, before the mix consumes it.
+    smooth_js = [j for j, (_i, item, _d) in enumerate(music_inputs or [])
+                 if item.get("duck", True)
+                 and item.get("duck_mode") == "smooth"]
+    if smooth_js:
+        taps = "".join(f"[dref{j}]" for j in smooth_js)
+        parts.append(f"[{alabel}]asplit={len(smooth_js) + 1}"
+                     f"[aduckm]{taps}")
+        alabel = "aduckm"
     if music_inputs:
         speech = _speech_spans_out(index, tl)
         for j, (input_idx, item, track_dur) in enumerate(music_inputs):
@@ -607,8 +1066,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             off = max(0.0, float(item.get("offset_s") or 0.0))
             if track_dur and off >= track_dur - 0.05:
                 off = 0.0          # past the end would render pure silence
+            smooth = j in smooth_js
             duck = ""
-            if item.get("duck", True) and speech:
+            if item.get("duck", True) and not smooth and speech:
                 win = [(max(s, m_start), min(e, m_end)) for s, e in speech
                        if min(e, m_end) - max(s, m_start) > 0.05]
                 if win:
@@ -631,7 +1091,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f"asetpts=PTS-STARTPTS{fades},"
                 f"volume={item.get('gain_db', -18)}dB,"
                 f"aresample=48000{delay}{duck}[mus{j}]")
-            mix_labels.append(f"[mus{j}]")
+            if smooth:
+                # After adelay both streams share the program clock, so the
+                # compressor reacts to the words playing at that instant.
+                # threshold 0.03 ~= -30dBFS: real speech, not room tone.
+                parts.append(f"[mus{j}][dref{j}]sidechaincompress="
+                             f"threshold=0.03:ratio=12:attack=180:"
+                             f"release=550[musc{j}]")
+                mix_labels.append(f"[musc{j}]")
+            else:
+                mix_labels.append(f"[mus{j}]")
     for j, (input_idx, vo, vd) in enumerate(vo_inputs):
         delay_ms = int(max(0.0, float(vo["start_output_s"])) * 1000)
         delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""
@@ -651,7 +1120,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         mix_labels.append(f"[sfx{j}]")
 
     outro_on = outro_here          # one predicate, so the video and audio
-    a_prog = "aprog" if outro_on else "aout"
+    loud = (master or {}).get("loudness") == "social"
+    a_prog = "aprog" if (outro_on or loud) else "aout"
     a_final = "apre" if (fade_in or fade_out or outro_on) else a_prog
     if mix_labels:
         parts.append(f"[{alabel}]" + "".join(mix_labels) +
@@ -684,6 +1154,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 chain.append(f"afade=t=out:st={tl.out_duration - d:.2f}"
                              f":d={d:.2f}")
         parts.append(f"[apre]{','.join(chain) or 'anull'}[{a_prog}]")
+
+    if loud:
+        # Master loudness: -14 LUFS / -1.5 dBTP (the social/streaming
+        # target), single-pass dynamic loudnorm on the PROGRAM only — the
+        # end card's silence must not drag the integrated measurement, and
+        # normalizing before the concat keeps it out. loudnorm internally
+        # resamples to 192k, so the format is pinned back after.
+        nxt = "amst" if outro_on else "aout"
+        parts.append(f"[{a_prog}]loudnorm=I=-14:TP=-1.5:LRA=11,"
+                     f"{AUDIO_NORM}[{nxt}]")
+        a_prog = nxt
 
     if outro_on:
         parts.append(f"anullsrc=r=48000:cl=stereo:d={outro_s:.3f},"
@@ -720,6 +1201,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None):
     ass_path = caplib.build_ass(edl, {}, tl,
                                 os.path.join(workdir, "captions.ass"),
                                 play_res=(W, H))
+    gfx_path = graphics.build_gfx_ass(edl, tl.out_duration,
+                                      os.path.join(workdir, "graphics.ass"),
+                                      play_res=(W, H))
 
     def _fetch(key, tag, idx):
         local = os.path.join(workdir, f"{tag}_{idx}"
@@ -782,6 +1266,17 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None):
         vo_inputs.append((next_idx, item, vo_dur))
         next_idx += 1
 
+    overlay_inputs = []
+    for item in edl.get("overlays") or []:
+        local = _fetch(item["asset_key"], "overlay", next_idx)
+        if item["kind"] == "image" or local.endswith(IMAGE_EXTS):
+            extra_inputs += ["-loop", "1", "-t", f"{item['duration_s']:.3f}",
+                             "-r", f"{fps:.3f}", "-i", local]
+        else:
+            extra_inputs += ["-i", local]
+        overlay_inputs.append((next_idx, item))
+        next_idx += 1
+
     outro_s = outro_seconds(preview)
     card_idx = None
     if outro_s > 0.0:
@@ -797,7 +1292,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None):
                               vo_inputs=vo_inputs, silence_idx=silence_idx,
                               src_w=W, src_h=H, src_pad=0.0,
                               sfx_inputs=sfx_inputs, outro_s=outro_s,
-                              card_idx=card_idx, src_sar=1.0, src_fps=fps)
+                              card_idx=card_idx, src_sar=1.0, src_fps=fps,
+                              overlay_inputs=overlay_inputs,
+                              gfx_ass_path=gfx_path)
 
     if preview:
         encode = ["-c:v", "libx264", "-preset", config.PREVIEW_PRESET,
@@ -837,10 +1334,13 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []
-    tl = Timeline(edl["keep"], inserts)
+    tl = Timeline(edl["keep"], inserts, edl.get("speed"))
     ass_path = caplib.build_ass(edl, index, tl,
                                 os.path.join(workdir, "captions.ass"),
                                 play_res=(W, H))
+    gfx_path = graphics.build_gfx_ass(edl, tl.out_duration,
+                                      os.path.join(workdir, "graphics.ass"),
+                                      play_res=(W, H))
 
     def _fetch(key, tag, idx):
         local = os.path.join(workdir, f"{tag}_{idx}"
@@ -922,6 +1422,17 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         vo_inputs.append((next_idx, item, vo_dur))
         next_idx += 1
 
+    overlay_inputs = []
+    for item in edl.get("overlays") or []:
+        local = _fetch(item["asset_key"], "overlay", next_idx)
+        if item["kind"] == "image" or local.endswith(IMAGE_EXTS):
+            extra_inputs += ["-loop", "1", "-t", f"{item['duration_s']:.3f}",
+                             "-r", f"{fps:.3f}", "-i", local]
+        else:
+            extra_inputs += ["-i", local]
+        overlay_inputs.append((next_idx, item))
+        next_idx += 1
+
     # Finals render from the ORIGINAL, previews from the proxy — and the proxy
     # already holds its last frame across a short picture track. Without the
     # same hold here the two would disagree: the user approves a preview and
@@ -952,7 +1463,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               src_pad=src_pad, sfx_inputs=sfx_inputs,
                               outro_s=outro_s, card_idx=card_idx,
                               src_sar=info.get("sar") or 1.0,
-                              src_fps=float(info["fps"]) or fps)
+                              src_fps=float(info["fps"]) or fps,
+                              overlay_inputs=overlay_inputs,
+                              gfx_ass_path=gfx_path)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).
@@ -998,7 +1511,8 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
     if src_dur:
         keep = [[s, min(e, src_dur)] for s, e in keep if s < src_dur]
         keep = keep or edl_json["keep"]     # never let clamping empty it out
-    program = Timeline(keep, edl_json.get("inserts") or []).out_duration
+    program = Timeline(keep, edl_json.get("inserts") or [],
+                       edl_json.get("speed")).out_duration
     # The rendered file is the programme PLUS the branded end card. The
     # tolerance does not absorb it: 2.5s exceeds max(0.75s, 3%) for anything
     # under ~83s, so without this every short export fails verification and

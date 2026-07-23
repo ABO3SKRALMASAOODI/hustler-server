@@ -241,7 +241,7 @@ def content_matches_kind(head, kind):
 # render lands now. A prefix missing here silently orphans bytes on delete.
 DELETE_PREFIXES = ("originals", "proxies", "audio", "thumbs", "sheets",
                    "renders", "media", "music", "images", "clips", "generated",
-                   "fetched")
+                   "generated_sfx", "generated_video", "fetched")
 
 
 def delete_project_objects(project_id):

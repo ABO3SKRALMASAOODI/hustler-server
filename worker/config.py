@@ -49,8 +49,11 @@ IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "grok-2-image-1212")
 IMAGE_EDIT_MODEL = os.getenv("IMAGE_EDIT_MODEL", "")
 IMAGE_API_URL = os.getenv("IMAGE_API_URL", "")
 IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
+# 8 (was 4): the real bound is the user's credit budget (_gen_budget_reject
+# prices every image before spending); this stays only as a backstop against
+# a runaway generation loop.
 MAX_GENERATED_IMAGES_PER_TURN = int(
-    os.getenv("MAX_GENERATED_IMAGES_PER_TURN", "4"))
+    os.getenv("MAX_GENERATED_IMAGES_PER_TURN", "8"))
 
 # ── AI sound-effect generation (ElevenLabs) ──────────────────────────────────
 # A dedicated provider — xAI/OpenAI have no text-to-audio endpoint. Empty key
@@ -62,7 +65,9 @@ ELEVEN_SFX_URL = os.getenv(
 ELEVEN_SFX_MODEL = os.getenv("ELEVEN_SFX_MODEL", "")  # "" = provider default
 SFX_MAX_DURATION_S = float(os.getenv("SFX_MAX_DURATION_S", "22"))
 SFX_TIMEOUT_S = float(os.getenv("SFX_TIMEOUT_S", "60"))
-MAX_GENERATED_SFX_PER_TURN = int(os.getenv("MAX_GENERATED_SFX_PER_TURN", "6"))
+# 10 (was 6): the credit budget is the real bound (each sound is priced
+# before the provider is called); this is a runaway-loop backstop only.
+MAX_GENERATED_SFX_PER_TURN = int(os.getenv("MAX_GENERATED_SFX_PER_TURN", "10"))
 
 # ── AI video generation (fal.ai aggregator) ──────────────────────────────────
 # NOT OpenAI-compatible — its own REST (queue.fal.run/{model}). One FAL_KEY,
@@ -183,7 +188,9 @@ FETCH_MAX_DURATION_S = float(os.getenv("FETCH_MAX_DURATION_S", "3600"))
 # Resolution cap for extracted video. A 4K source is a ~10x bigger download
 # and a slower render for a clip that gets composited into a 1080p timeline.
 FETCH_MAX_HEIGHT = int(os.getenv("FETCH_MAX_HEIGHT", "1080"))
-MAX_FETCHED_URLS_PER_TURN = int(os.getenv("MAX_FETCHED_URLS_PER_TURN", "4"))
+# 8 (was 4): fetches are size/duration-capped individually and cleaned up
+# per attempt; the constant is a runaway-loop backstop, not the real bound.
+MAX_FETCHED_URLS_PER_TURN = int(os.getenv("MAX_FETCHED_URLS_PER_TURN", "8"))
 
 # Worker tuning
 TMP_DIR = os.getenv("WORKER_TMP_DIR", "/tmp/valmera")

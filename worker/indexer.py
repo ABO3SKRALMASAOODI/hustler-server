@@ -314,6 +314,25 @@ def run_index_job(worker_db, job):
                           bytes_=os.path.getsize(wav_local),
                           duration_s=info["duration"], sha256=sha)
 
+        # 8.5 Perception sidecar (round 35): beat grid / energy / speech
+        # stress from the wav that already exists. Computed inline for NEW
+        # indexes because it is cheap (~seconds of numpy) while the wav is
+        # local; cached pre-v35 indexes get it LAZILY the first time a tool
+        # asks (perception.get_or_compute_for_index) — deliberately NOT a
+        # PIPELINE_VERSION bump, so shipping this re-indexes nothing.
+        # Non-fatal by the same contract as thumbnails: perception feeds
+        # DECISIONS, never renders, so a failure degrades to a warning.
+        perception_sidecar = None
+        if wav_local:
+            try:
+                import perception as perception_mod
+                perception_sidecar = perception_mod.analyze_audio(wav_local)
+            except Exception as e:
+                warnings.append(
+                    f"audio perception failed ({str(e)[:120]}) — beat-synced "
+                    "and emphasis-driven edits will analyze on first use")
+        worker_db.run(dbx.set_progress, job_id, 94)
+
         # 9. Assemble + persist the index
         index = VideoIndex(
             video=VideoInfo(duration=info["duration"], fps=info["fps"],
@@ -327,6 +346,7 @@ def run_index_job(worker_db, job):
             sheet_keys=sheet_keys,
             language=language,
             warnings=warnings,
+            perception=perception_sidecar,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         _finish_setup(worker_db, project_id, session_id, info, index,
