@@ -2111,17 +2111,30 @@ def _run_clean(ctx, regions):
     stats = inpaint.clean_video(src, regions, out, prox)
     storage.upload_file(out, key, "video/mp4")
     storage.upload_file(prox, pkey, "video/mp4")
-    ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_source", key,
-               bytes_=os.path.getsize(out), duration_s=stats["duration_s"],
-               width=stats["width"], height=stats["height"],
-               fps=stats["fps"],
-               meta={"filename": "cleaned-source.mp4", "clean_fp": fp,
-                     "generated": True, "model": "local:inpaint",
-                     "regions": len(regions)})
-    ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_proxy", pkey,
-               bytes_=os.path.getsize(prox), duration_s=stats["duration_s"],
-               meta={"filename": "cleaned-proxy.mp4", "clean_fp": fp,
-                     "generated": True, "model": "local:inpaint"})
+    # Asset rows are BOOKKEEPING here, not the contract: the EDL carries the
+    # storage keys the renderer reads, so a repaint that is already uploaded
+    # must not be thrown away because a row could not be written. (It is also
+    # what stops this feature from being coupled to a schema migration —
+    # assets.kind has a CHECK constraint, and 'clean_source'/'clean_proxy' are
+    # only admitted by migration 007. Without it the erase still works; the
+    # cleaned files just do not show in the admin's media list.)
+    try:
+        ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_source", key,
+                   bytes_=os.path.getsize(out), duration_s=stats["duration_s"],
+                   width=stats["width"], height=stats["height"],
+                   fps=stats["fps"],
+                   meta={"filename": "cleaned-source.mp4", "clean_fp": fp,
+                         "generated": True, "model": "local:inpaint",
+                         "regions": len(regions)})
+        ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_proxy", pkey,
+                   bytes_=os.path.getsize(prox), duration_s=stats["duration_s"],
+                   meta={"filename": "cleaned-proxy.mp4", "clean_fp": fp,
+                         "generated": True, "model": "local:inpaint"})
+    except Exception as e:
+        print(f"[erase] cleaned-source asset rows not recorded for project "
+              f"{ctx.project_id} ({str(e)[:160]}) — the repaint itself is in "
+              "storage and the EDL points at it; run migration 007",
+              flush=True)
     ctx._clean_stats = stats
     # Reclaim the bytes now. A full-res cleaned copy is the size of the source
     # again, and two erases in one turn would otherwise sit on the worker's

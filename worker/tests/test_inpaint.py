@@ -506,11 +506,19 @@ class _FakeCtx:
         return f"EDL v{self._edl['version'] - 1} -> " \
                f"v{self._edl['version']}: {desc}"
 
+    # Set to raise when the DB refuses the new asset kinds (the CHECK
+    # constraint before migration 007) — the erase must still succeed.
+    reject_kinds = ()
+
     def run(self, fn, *a, **k):
         import db as dbx
         if fn is dbx.latest_asset:
             return {"storage_key": "originals/1/src.mp4", "sha256": "abc123"}
         if fn is dbx.insert_asset:
+            if a[1] in self.reject_kinds:
+                raise RuntimeError(
+                    'new row for relation "assets" violates check constraint '
+                    '"assets_kind_check"')
             self.inserted.append((a[1], a[2]))     # (kind, key)
             return None
         raise AssertionError(f"unexpected db call: {fn}")
@@ -568,6 +576,40 @@ def test_erase_region_tool_end_to_end():
         finally:
             t.storage = real_storage
     print("PASS: erase_region end-to-end (upload, EDL, measurement, undo)")
+
+
+def test_erase_survives_a_db_that_rejects_the_new_asset_kinds():
+    """The repaint must not be lost to a bookkeeping row.
+
+    assets.kind carries a CHECK constraint and 'clean_source'/'clean_proxy'
+    are only admitted by migration 007 — so between deploying the code and
+    running the migration, the INSERT fails. The cleaned file is already in
+    storage and the EDL is what the renderer follows, so the erase has to
+    complete anyway; only the admin listing is missing.
+    """
+    if _skip():
+        return
+    import agent_tools as t
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "cap.mp4")
+        _clip_with_captions(src, seconds=2.5)
+        store = _FakeStorage(d)
+        store.objects["originals/1/src.mp4"] = src
+        ctx = _FakeCtx(d, src, media.probe(src)["duration"])
+        ctx.reject_kinds = ("clean_source", "clean_proxy")
+        real_storage = t.storage
+        t.storage = store
+        try:
+            region = inpaint.detect_text_regions(src, samples=12)[0]
+            out = t.erase_region(ctx, region["x"], region["y"],
+                                 region["w"], region["h"])
+            assert out.startswith("EDL v"), out
+            sc = ctx.latest_edl()["json"]["source_clean"]
+            assert sc["asset_key"] in store.objects
+            assert ctx.inserted == [], ctx.inserted
+        finally:
+            t.storage = real_storage
+    print("PASS: erase completes even when the asset rows are refused")
 
 
 def test_erase_refuses_a_video_too_long_to_finish():
