@@ -43,7 +43,18 @@ VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "120"))
 #     restyling (set OPENAI_BASE_URL back to dashscope, or IMAGE_API_URL).
 # Empty IMAGE_GEN_MODEL disables the generate_image tool everywhere gracefully,
 # same contract as VISION_MODEL.
-IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "grok-2-image-1212")
+# MODEL ID HISTORY — image gen has 404'd on xAI TWICE now, silently, for weeks:
+#   grok-2-image       -> never a valid xAI id (404 "not-found"), Jul 17-21 2026
+#   grok-2-image-1212  -> valid, but DEPRECATED 2026-02-24; the round-33 "fix"
+#                         swapped one 404 for another and was never live-checked
+#   grok-imagine-image -> the replacement xAI's own 404 body names. Current.
+# Every attempt is logged to llm_calls (purpose 'image_gen') with the model and
+# the error, so `SELECT model, count(*) FILTER (WHERE response->>'error' IS NOT
+# NULL) FROM llm_calls WHERE purpose='image_gen' GROUP BY 1` tells you in one
+# query whether the id is live. RUN IT after changing this — a wrong id here is
+# invisible in the UI (the agent just says it couldn't make an image) and keeps
+# IMAGE_PRICE_USD charging nothing while the feature is dead.
+IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "grok-imagine-image")
 # Frame/image restyling model — only used by the DashScope backend. Empty on
 # the OpenAI/xAI backend (which has no image-edit endpoint).
 IMAGE_EDIT_MODEL = os.getenv("IMAGE_EDIT_MODEL", "")

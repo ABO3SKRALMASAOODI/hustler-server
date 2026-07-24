@@ -26,6 +26,7 @@ import url_media
 import webrecord
 from captions import KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, EDLValidationError, Frame,
+                     HEX_COLOR,
                      canvas_edl, clip_anim, describe_edl, DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
                      output_duration, program_duration, validate_edl,
@@ -2748,6 +2749,194 @@ def remove_text(ctx, id):
              f"\"{str(hit.get('text', ''))[:24]}\" ({id})")
 
 
+def set_caption_mutes(ctx, spans=None):
+    """Silence burned captions over PROGRAM-time windows, leaving them on
+    everywhere else. Full replacement: spans=[] clears every mute."""
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    if prog <= 0.4:
+        return ("REJECTED: there is no program yet to mute captions on — "
+                "place footage first.")
+    if not edl.get("captions"):
+        return ("REJECTED: this edit has no captions to mute. Turn them on "
+                "with add_captions first, or there is nothing to hide.")
+    if spans is None:
+        return ("REJECTED: pass spans as a list of [start, end] PROGRAM-second "
+                "pairs, or spans=[] to un-mute everything.")
+    if not isinstance(spans, list):
+        return "REJECTED: spans must be a list of [start, end] pairs."
+    norm = []
+    for i, sp in enumerate(spans):
+        if not isinstance(sp, (list, tuple)) or len(sp) != 2:
+            return (f"REJECTED: spans[{i}] must be a [start, end] pair of "
+                    "PROGRAM-time seconds.")
+        try:
+            s = round(min(max(float(sp[0]), 0.0), max(0.0, prog - 0.05)), 2)
+            e = round(min(max(float(sp[1]), s + 0.05), prog), 2)
+        except (TypeError, ValueError):
+            return f"REJECTED: spans[{i}] must be two numbers."
+        norm.append([s, e])
+    edl["caption_mutes"] = norm
+    if not norm:
+        return ctx.write_edl(edl, "caption mutes cleared — captions show "
+                                  "everywhere again")
+    bits = ", ".join(f"{s:g}-{e:g}s" for s, e in norm)
+    result = ctx.write_edl(
+        edl, f"captions muted over {len(norm)} window(s): {bits}")
+    if result.startswith("EDL v"):
+        # Say what it actually does, so the model does not describe this to the
+        # user as "removed those words" — the speech is untouched, only the
+        # burned text is hidden.
+        result += ("\nNote: this hides the burned caption text over those "
+                   "windows only — the audio and the cut are unchanged, and "
+                   "captions still show everywhere else. Caption lines are "
+                   "hidden WHOLE: a line that starts before a window and runs "
+                   "into it disappears entirely (its word timings are baked, "
+                   "so it cannot be cut in half). A line that merely grazes an "
+                   "edge — under 0.15s inside — is kept. If that costs words "
+                   "either side of the window, tighten the window to the "
+                   "effect itself rather than widening it.")
+    return result
+
+
+# Solid-colour cards are synthesized locally with Pillow: a title card must
+# never depend on the image-generation API (which has 404'd for weeks at a
+# time — see config.IMAGE_GEN_MODEL) or on fetching a colour swatch off the
+# public internet, which is what the agent resorted to before this tool
+# existed.
+CARD_DIMS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080),
+             "4:3": (1440, 1080), "3:4": (1080, 1440)}
+
+
+def _solid_card_asset(ctx, color):
+    """Get (or create) a project image asset that is one flat colour at the
+    output aspect. Cached per (project, colour, aspect) so a four-card
+    sequence uploads one image, not four."""
+    aspect = _default_image_aspect(ctx)
+    w, h = CARD_DIMS.get(aspect, CARD_DIMS["16:9"])
+    ck = (color.upper(), aspect)
+    hit = getattr(ctx, "_card_assets", None)
+    if hit is None:
+        hit = ctx._card_assets = {}
+    if ck in hit:
+        return hit[ck], None
+    from PIL import Image
+    path = os.path.join(ctx.workdir, f"card_{color.lstrip('#')}_{w}x{h}.png")
+    rgb = tuple(int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    try:
+        Image.new("RGB", (w, h), rgb).save(path)
+    except Exception as e:
+        return None, f"Could not build the card image ({str(e)[:120]})."
+    key = f"generated/{ctx.project_id}/card-{uuid.uuid4().hex[:12]}.png"
+    try:
+        storage.upload_file(path, key, "image/png")
+    except Exception as e:
+        return None, (f"The card was built but could not be saved to storage "
+                      f"({str(e)[:120]}). Try again.")
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "image_ref", key,
+               bytes_=os.path.getsize(path), width=w, height=h,
+               meta={"filename": f"title-card-{color.lstrip('#')}.png",
+                     "caption": f"Solid {color} title card ({w}x{h})",
+                     "generated": True, "model": "local:solid"})
+    hit[ck] = key
+    return key, None
+
+
+def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
+                   bg_color="#000000", color=None, accent_color=None,
+                   font=None, size_scale=None, entrance=None, exit=None,
+                   subtitle=None):
+    """Cut to a standalone full-frame card showing only this text, then return
+    to the footage. One operation: builds the blank card, splices it into the
+    program, and centres the text on it."""
+    t = (text or "").strip()
+    if not t:
+        return "REJECTED: text is empty — a title card needs its line."
+    tpl = (template or "title").strip().lower()
+    if tpl not in TEXT_TEMPLATES:
+        return (f"REJECTED: template must be one of "
+                f"{', '.join(TEXT_TEMPLATES)}.")
+    bg = (bg_color or "#000000").strip().upper()
+    if not HEX_COLOR.match(bg):
+        return "REJECTED: bg_color must be #RRGGBB hex, e.g. #000000."
+    try:
+        dur = round(min(max(float(duration_s), 0.6), 15.0), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: duration_s must be a number of seconds."
+    try:
+        at = float(at_output_s)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s must be a number — where in the FINAL "
+                "edited video the card cuts in, in seconds.")
+
+    key, err = _solid_card_asset(ctx, bg)
+    if err:
+        return err
+    before = {i.get("id") for i in (ctx.latest_edl()["json"].get("inserts")
+                                    or [])}
+    placed = insert_media(ctx, key, at, duration_s=dur)
+    if not placed.startswith("EDL v"):
+        return placed                      # REJECTED / failure, verbatim
+
+    edl = dict(ctx.latest_edl()["json"])
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    item = next((i for i in inserts if i.get("id") not in before), None)
+    if item is None:
+        return (placed + "\nThe card is placed, but its program position "
+                "could not be resolved — add the text with add_text.")
+    # Program window of THIS insert: insert_positions() works on the same
+    # (at_output_s, duration_s) sort the Timeline uses; our item was appended
+    # last, so among identical tuples it is the LAST matching index.
+    def _tup(i):
+        return (float(i["at_output_s"]), float(i["duration_s"]))
+    tuples = sorted(_tup(i) for i in inserts)
+    mine = _tup(item)
+    positions = Timeline([list(k) for k in (edl.get("keep") or [])],
+                         inserts, edl.get("speed") or []).insert_positions()
+    idx = len(tuples) - 1 - tuples[::-1].index(mine)
+    card_start, card_len = positions[idx]
+    card_end = round(card_start + card_len, 2)
+    card_start = round(card_start, 2)
+
+    texts = [dict(tx) for tx in (edl.get("texts") or [])]
+    # Held a hair inside the card so the entrance/exit animation plays ON the
+    # blank frame instead of bleeding onto the footage either side.
+    pad = min(0.12, card_len / 8.0)
+    ts, te = round(card_start + pad, 2), round(card_end - pad, 2)
+    made = []
+    item_tx = {"id": _next_item_id(texts, "tx"), "text": t[:200],
+               "start": ts, "end": te, "template": tpl,
+               "x": 0.5, "y": 0.5,        # dead centre: it owns the frame
+               "size_scale": float(size_scale) if size_scale is not None
+               else None,
+               "color": color, "accent_color": accent_color, "font": font,
+               "entrance": entrance, "exit": exit,
+               "uppercase": None, "box": None}
+    texts.append(item_tx)
+    made.append(f"{tpl} \"{t[:40]}\"")
+    sub = (subtitle or "").strip()
+    if sub:
+        texts.append({"id": _next_item_id(texts, "tx"), "text": sub[:200],
+                      "start": ts, "end": te, "template": "subtitle",
+                      "x": 0.5, "y": 0.635, "size_scale": None,
+                      "color": color, "accent_color": accent_color,
+                      "font": None, "entrance": entrance, "exit": exit,
+                      "uppercase": None, "box": None})
+        made.append(f"subtitle \"{sub[:30]}\"")
+    edl["texts"] = texts
+    result = ctx.write_edl(
+        edl, f"centred {' + '.join(made)} on the {bg} card at "
+             f"{card_start}-{card_end}s [{item_tx['id']}]")
+    if result.startswith("EDL v"):
+        result += (f"\nThe card is a real cut in the program: the footage "
+                   f"pauses for {card_len:g}s at {card_start}s and the frame "
+                   "shows ONLY this text. Spoken-word captions do not appear "
+                   "on it (inserted media is not transcribed), so nothing "
+                   "overlaps — no caption mute is needed. Everything after "
+                   f"{card_start}s shifted {card_len:g}s later.")
+    return result
+
+
 def add_stylize(ctx, kind, start=None, end=None, intensity=None):
     """A windowed finishing effect on the program picture."""
     k = (kind or "").strip().lower()
@@ -4927,6 +5116,50 @@ TOOLS = {
                   "box": {"type": "boolean"}}),
     "remove_text": (remove_text, "Remove one text element by its id (see "
                     "get_edl).", {"id": {"type": "string"}}),
+    "add_title_card": (add_title_card, "Cut to a STANDALONE full-frame card "
+                       "showing only this text, then return to the footage — "
+                       "the 'show the term on a blank screen' move. One call "
+                       "does all of it: builds the solid-colour card, splices "
+                       "it into the program at at_output_s, and centres the "
+                       "text on it. Because the card is a real cut (not an "
+                       "overlay), spoken-word captions never appear on it, so "
+                       "nothing overlaps. at_output_s is PROGRAM seconds and "
+                       "everything after it shifts later by duration_s "
+                       "(2-3s reads well). bg_color is the card colour "
+                       "('#000000' default); subtitle adds a smaller second "
+                       "line under the title. Use add_text instead when the "
+                       "text should sit OVER the footage rather than replace "
+                       "it.",
+                       {"text": {"type": "string"},
+                        "at_output_s": {"type": "number"},
+                        "duration_s": {"type": "number"},
+                        "template": {"type": "string",
+                                     "enum": list(TEXT_TEMPLATES)},
+                        "bg_color": {"type": "string"},
+                        "color": {"type": "string"},
+                        "accent_color": {"type": "string"},
+                        "font": {"type": "string", "enum": list(TEXT_FONTS)},
+                        "size_scale": {"type": "number"},
+                        "entrance": {"type": "string", "enum": list(TEXT_ANIMS)},
+                        "exit": {"type": "string",
+                                 "enum": [a for a in TEXT_ANIMS
+                                          if a != "typewriter"]},
+                        "subtitle": {"type": "string"}}),
+    "set_caption_mutes": (set_caption_mutes, "Hide the burned spoken-word "
+                          "captions over specific PROGRAM-time windows, "
+                          "leaving them on everywhere else — for when a "
+                          "full-frame effect, a graphic or a text treatment "
+                          "would otherwise have captions burned across it. "
+                          "spans is the COMPLETE list of muted windows as "
+                          "[[start, end], ...] in program seconds; it "
+                          "REPLACES the existing list, and spans=[] turns "
+                          "every caption back on. The audio and the cut are "
+                          "untouched — only the burned text is hidden. Not "
+                          "needed for inserted media or title cards (they "
+                          "are never captioned to begin with).",
+                          {"spans": {"type": "array",
+                                     "items": {"type": "array",
+                                               "items": {"type": "number"}}}}),
     "add_stylize": (add_stylize, "Layer a windowed finishing effect on the "
                     "program picture: 'grain' (film grain), 'vignette' "
                     "(darkened corners), 'glow' (soft bloom), 'chromatic' "
@@ -5091,6 +5324,8 @@ REQUIRED_ARGS = {
     "remove_overlay": ["id"],
     "add_text": ["text", "start", "end"],
     "remove_text": ["id"],
+    "add_title_card": ["text", "at_output_s"],
+    "set_caption_mutes": ["spans"],
     "add_stylize": ["kind"],
     "remove_stylize": ["id"],
     "set_grade_custom": [],
@@ -5127,6 +5362,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "set_speed", "remove_speed",
                "add_overlay", "move_overlay", "remove_overlay",
                "add_text", "remove_text",
+               "add_title_card", "set_caption_mutes",
                "add_stylize", "remove_stylize",
                "set_grade_custom", "set_master_loudness",
                "punch_in_on_emphasis", "sound_design_pass",

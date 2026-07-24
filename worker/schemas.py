@@ -778,6 +778,16 @@ class EDL(BaseModel):
     texts: List[TextItem] = Field(default_factory=list)
     speed: List[SpeedSpan] = Field(default_factory=list)
     master: Optional[Master] = None
+    # round 37 — PROGRAM-time windows where burned captions are suppressed.
+    # Captions were all-or-nothing before this: a full-frame effect or a title
+    # treatment that covers the frame still had the spoken-word captions burned
+    # over it, and the only way out was turning captions off for the WHOLE
+    # video. Inserts already create caption-free time (they are not
+    # transcribed, so kept_words maps around them) — this covers the OVERLAY
+    # case, where the speaker keeps talking under the effect.
+    # Empty list, so edl_signature drops it and every pre-round-37 EDL keeps
+    # its signature and its cached renders.
+    caption_mutes: List[List[float]] = Field(default_factory=list)
 
 
 def default_edl(duration):
@@ -1247,6 +1257,27 @@ def validate_edl(data, duration=None):
                 setattr(tx, cname, cv.upper())
     edl.texts.sort(key=lambda t: (t.start, t.id))
 
+    # Caption mutes: PROGRAM-time windows, same clock as texts/stylize. Sorted
+    # and merged, so overlapping asks collapse instead of stacking duplicates
+    # (the renderer only cares whether a caption falls inside ANY window).
+    if edl.caption_mutes:
+        spans = []
+        for i, mu in enumerate(edl.caption_mutes):
+            if len(mu) != 2:
+                raise EDLValidationError(
+                    f"caption_mutes[{i}] must be a [start, end] pair.")
+            s, e = _r(mu[0]), _r(mu[1])
+            _check_span(f"caption_mutes[{i}]", s, e, prog_dur, min_len=0.05)
+            spans.append([s, e])
+        spans.sort()
+        merged = [spans[0]]
+        for s, e in spans[1:]:
+            if s <= merged[-1][1] + 0.001:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        edl.caption_mutes = merged
+
     if edl.master is not None and edl.master.loudness is None:
         edl.master = None       # empty master is the absence of mastering
 
@@ -1498,6 +1529,9 @@ def describe_edl(edl_dict, duration=None):
         bits = [f"{tx.template} \"{tx.text[:24]}\"@{tx.start:g}-{tx.end:g}s"
                 for tx in edl.texts]
         parts.append(f"text x{len(edl.texts)} ({', '.join(bits)})")
+    if edl.caption_mutes:
+        bits = [f"{s:g}-{e:g}s" for s, e in edl.caption_mutes]
+        parts.append(f"captions muted ({', '.join(bits)})")
     if edl.effects:
         fx = edl.effects
         bits = []

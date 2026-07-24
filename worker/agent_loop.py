@@ -924,6 +924,39 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
             "honesty": honesty, "timings": timings}
 
 
+# Fractions of AGENT_TURN_TIMEOUT_S at which the loop tells the model how much
+# of the turn is gone. Without this the model has NO clock: it plans as if time
+# were free, and the timeout lands mid-rebuild — the user gets "that took longer
+# than I allow myself" with a half-finished edit instead of a landed one. The
+# note is information, not a cap; the model decides what to drop.
+TIME_PRESSURE_MARKS = (0.55, 0.8)
+
+
+def _time_pressure_note(result, t_start, warned):
+    """Append a one-line budget warning to a tool result, once per mark. A
+    render_preview still has to fit in what's left, so the last mark says to
+    render NOW rather than to keep editing."""
+    frac = (time.monotonic() - t_start) / max(1.0, config.AGENT_TURN_TIMEOUT_S)
+    for mark in TIME_PRESSURE_MARKS:
+        if frac >= mark and mark not in warned:
+            warned.add(mark)
+            left = max(0, int(config.AGENT_TURN_TIMEOUT_S * (1.0 - frac)))
+            if mark == TIME_PRESSURE_MARKS[-1]:
+                return result + (
+                    f"\n\n[system: ~{left}s left in this turn, and a preview "
+                    "render needs a good chunk of it. Stop editing now — "
+                    "render_preview and reply with what you changed. Anything "
+                    "unfinished belongs in your reply as the next step, not in "
+                    "more tool calls.]")
+            return result + (
+                f"\n\n[system: about half this turn's time is gone (~{left}s "
+                "left, render included). Finish the highest-value part of the "
+                "request and land it. Do NOT tear down work you already did to "
+                "rebuild it a different way — refine in place, or leave it and "
+                "say so.]")
+    return result
+
+
 def _run_loop(ctx, worker_db, job, session_id, user_message,
               attachment_note=""):
     client = llm.client()
@@ -934,6 +967,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     timings = {"llm_s": 0.0, "llm_calls": 0, "tools": {}}
     honesty = {"false_claims": 0, "corrective_note": False}
     start_version = ctx.latest_edl()["version"]
+    warned = set()                 # time-pressure marks already delivered
 
     for iteration in range(config.AGENT_MAX_ITERATIONS):
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
@@ -1099,6 +1133,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     ctx.write_calls.append(name)
             total_steps += 1
             _activity(worker_db, session_id, name, args, result)
+            result = _time_pressure_note(result, t_start, warned)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
 

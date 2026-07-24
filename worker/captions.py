@@ -1285,6 +1285,31 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
     return path
 
 
+# A caption that only grazes the edge of a mute window (a few frames of
+# overlap) is not what the user was pointing at when they said "no captions
+# during the effect" — dropping it would silently delete words either side of
+# the window. Anything visible for longer than this INSIDE the window goes.
+MUTE_GRAZE_S = 0.15
+
+
+def apply_mutes(events, mutes):
+    """Drop caption events that are on screen during a caption_mutes window
+    (PROGRAM seconds). Events are DROPPED, never trimmed: premium/karaoke
+    events carry inline \\k word timings measured from the event's own start,
+    so moving a boundary would desync every word after it. Callers that want
+    partial coverage should mute the exact window instead."""
+    if not mutes or not events:
+        return events
+    kept = []
+    for ev in events:
+        s, e = float(ev["start"]), float(ev["end"])
+        hidden = any(min(e, float(m1)) - max(s, float(m0)) > MUTE_GRAZE_S
+                     for m0, m1 in mutes)
+        if not hidden:
+            kept.append(ev)
+    return kept
+
+
 def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
     """EDL captions field -> .ass file (or None when captions are off).
     Captions come from the MAIN footage's transcript only — inserted clips
@@ -1327,6 +1352,7 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         global_style = None
     else:
         return None
+    events = apply_mutes(events, edl.get("caption_mutes"))
     if not events:
         return None
     return write_ass(events, path, global_style, play_res)

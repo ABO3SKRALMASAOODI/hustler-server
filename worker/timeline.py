@@ -66,6 +66,15 @@ class Timeline:
             consumed += d
         return out
 
+    def seg_program_range(self, t):
+        """(program_start, program_end) of the kept segment containing source
+        time t, or None if t is cut. This is the continuous run of program
+        time that footage plays in — nothing spliced can fall inside it."""
+        for i, (s, e) in enumerate(self.segs):
+            if s - 1e-6 <= t <= e + 1e-6:
+                return self.offsets[i], self.offsets[i] + self.seg_out_len[i]
+        return None
+
     def src_to_out(self, t):
         """Map a source time to final-program time. Times inside a cut
         region map to None."""
@@ -148,11 +157,25 @@ class Timeline:
             o0 = self.src_to_out(t0)
             o1 = self.src_to_out(t1)
             half = (t1 - t0) / 2.0
-            out.append({
-                "w": token,
-                "t0": o0 if o0 is not None else max(0.0, o - half),
-                "t1": o1 if o1 is not None else min(self.out_duration, o + half),
-            })
+            t0o = o0 if o0 is not None else max(0.0, o - half)
+            t1o = o1 if o1 is not None else min(self.out_duration, o + half)
+            # Keep the word inside the ONE run of program time it actually
+            # plays in. A word's edges map independently, and a source time
+            # sitting exactly on a keep boundary is ambiguous — src_to_out
+            # resolves it to the earlier segment. So a word starting exactly
+            # where a segment was split (which is where insert_media splits,
+            # deliberately, to avoid clipping a word) had its start mapped
+            # BEFORE the spliced media and its end AFTER it: the caption for
+            # that word stretched across the whole insert and burned over it.
+            # That is the "captions overlap the title card" report. Clamping
+            # to the midpoint's own segment makes the ambiguity resolve the
+            # same way the footage does.
+            rng = self.seg_program_range(mid)
+            if rng:
+                lo, hi = rng
+                t0o = min(max(t0o, lo), hi)
+                t1o = min(max(t1o, lo), hi)
+            out.append({"w": token, "t0": t0o, "t1": t1o})
         return out
 
 
@@ -436,6 +459,41 @@ def remap_program_items(edl, old_tl, new_tl):
                     "fit the shortened edit.")
             kept_tx.append(tx)
         edl["texts"] = kept_tx
+    if edl.get("caption_mutes"):
+        # CONTENT-anchored: a mute exists to keep captions off a particular
+        # moment (the effect / graphic it was paired with), so it must follow
+        # that footage exactly like the stylize it shadows. Left program-
+        # anchored, a cut upstream would slide the mute onto innocent speech
+        # and silently delete those captions instead.
+        kept_mu = []
+        for m0, m1 in edl["caption_mutes"]:
+            moved = remap_program_span(old_tl, new_tl, float(m0), float(m1))
+            if moved is None:
+                # Anchored inside spliced media (which is never captioned
+                # anyway): keep the window, clamped so it still validates.
+                if old_tl.out_to_src(float(m0)) is None or \
+                        old_tl.out_to_src(float(m1)) is None:
+                    if float(m0) < max(0.0, prog - 0.05):
+                        kept_mu.append([float(m0),
+                                        round(min(float(m1), prog), 2)])
+                    continue
+                region_notes.append(
+                    "note: a caption mute was dropped — the footage it was "
+                    "on is no longer in the edit, so those captions show "
+                    "again.")
+                continue
+            ns, ne = moved
+            if ne - ns < 0.05:
+                region_notes.append(
+                    "note: a caption mute was dropped — almost none of the "
+                    "footage it was on survives the cut.")
+                continue
+            if (ns, ne) != (m0, m1):
+                region_notes.append(
+                    f"note: a caption mute moved to {ns}-{ne}s so it stays "
+                    "on the same moment.")
+            kept_mu.append([ns, ne])
+        edl["caption_mutes"] = kept_mu
     return region_notes
 
 
