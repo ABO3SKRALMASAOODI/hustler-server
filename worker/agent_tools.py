@@ -2936,6 +2936,187 @@ def add_color_screen(ctx, at_output_s, duration_s=2.0, color="#000000",
     return result
 
 
+# ── Corrupt-screen "glitch" moments (round 37) ──────────────────────────────
+# A full-frame digital-corruption BEAT the agent drops between sections — the
+# promo/meme "the signal breaks, then we cut to the next thing" transition
+# (podcast -> CORRUPT -> punchline). Like the colour cards, the clip is
+# SYNTHESIZED locally with ffmpeg from lavfi noise sources: it never touches
+# the image/video-generation APIs and never depends on the source footage, so
+# it is always available and costs no generation credits. Each style is one
+# opinionated filtergraph rendered at a low internal resolution and
+# neighbour-upscaled to the output frame — the chunky blockiness IS the
+# aesthetic and keeps the geq passes cheap on the 1-vCPU worker. The clip
+# carries a matching static/hiss audio burst (unless sound=False) so the
+# corruption is HEARD as well as seen: the renderer plays an insert's own audio
+# over its window (media.probe -> has_ins_audio), so during the glitch the
+# program audio drops out and the static plays alone, then footage resumes.
+CORRUPT_STYLES = ("digital", "vhs", "static")
+CORRUPT_FPS = 20
+CORRUPT_MIN_S = 0.2
+CORRUPT_MAX_S = 6.0
+
+
+def _corrupt_filtergraph(style, ow, oh, dur, intensity, sound):
+    """Return (filter_complex_str, has_audio) for one glitch style at output
+    ow×oh. intensity 0-1 scales displacement / RGB split / snow / band
+    strength. Commas inside geq/mod/pow expressions are backslash-escaped so
+    the graph survives being passed as a single subprocess argv (no shell)."""
+    k = max(0.0, min(1.0, float(intensity)))
+    # internal render size: cap the long edge ~640 so the per-pixel geq passes
+    # stay cheap; the neighbour upscale to output gives the chunky look.
+    sc = 640.0 / max(ow, oh)
+    iw = max(2, int(round(ow * sc / 2)) * 2)
+    ih = max(2, int(round(oh * sc / 2)) * 2)
+    a_amp = round(0.25 + 0.4 * k, 3)
+    if style == "vhs":
+        band = round(60 + 60 * k)                 # tracking-band brightness
+        split = round(4 + 10 * k)                 # chroma bleed
+        v = (
+            f"color=c=black:s={iw}x{ih}:r={CORRUPT_FPS}:d={dur},"
+            f"format=yuv420p[bg];"
+            f"nullsrc=s=48x27:r={CORRUPT_FPS}:d={dur},format=yuv420p,"
+            f"geq=lum='120+random(1)*70':cb='random(2)*255':cr='random(3)*255',"
+            f"scale={iw}:{ih}:flags=neighbor[base];"
+            f"[bg][base]blend=all_mode=normal:all_opacity=0.8[m1];"
+            f"[m1]geq=lum='lum(X\\,Y)+{band}*exp(-pow((Y-mod(T*300\\,{ih}))"
+            f"/22\\,2))':cb='cb(X\\,Y)':cr='cr(X\\,Y)'[m2];"
+            f"[m2]geq=lum='lum(X\\,Y)*(0.72+0.28*abs(sin(Y*1.6)))':"
+            f"cb='cb(X\\,Y)':cr='cr(X\\,Y)'[m3];"
+            f"[m3]rgbashift=rh={split}:bh=-{split}[m4];"
+            f"[m4]scale={ow}:{oh}:flags=neighbor,format=yuv420p[vout]"
+        )
+        acolor = "brown"
+    elif style == "static":
+        roll = round(120 + 120 * k)               # rolling hold-bar speed
+        v = (
+            f"nullsrc=s={iw}x{ih}:r={CORRUPT_FPS}:d={dur},format=yuv420p,"
+            f"geq=lum='random(1)*255':cb='128+(random(2)-0.5)*50':"
+            f"cr='128+(random(3)-0.5)*50'[snow];"
+            f"[snow]geq=lum='lum(X\\,Y)*(0.55+0.45*abs(sin((Y+mod(T*{roll}"
+            f"\\,{ih}))*0.6)))':cb='cb(X\\,Y)':cr='cr(X\\,Y)'[m1];"
+            f"[m1]scale={ow}:{oh}:flags=neighbor,format=yuv420p[vout]"
+        )
+        acolor = "white"
+    else:                                         # digital (default)
+        shift = round(70 + 120 * k)               # horizontal tear amount
+        split = round(6 + 16 * k)                 # RGB split
+        bh = max(2, int(round(32 * oh / ow / 2)) * 2)   # block grid, output AR
+        band_h = max(6, round(ih / 30.0))         # tear-band height
+        addop = round(0.06 + 0.12 * k, 3)         # snow overlay opacity
+        tear = f"{shift}*sin(floor(Y/{band_h})*2.3+T*16)"
+        v = (
+            f"nullsrc=s=32x{bh}:r={CORRUPT_FPS}:d={dur},format=gbrp,"
+            f"geq=r='random(1)*255':g='random(2)*255':b='random(3)*255',"
+            f"scale={iw}:{ih}:flags=neighbor[blk];"
+            f"[blk]geq=r='r(mod(X+{tear}\\,W)\\,Y)':"
+            f"g='g(mod(X+{tear}\\,W)\\,Y)':b='b(mod(X+{tear}\\,W)\\,Y)'[torn];"
+            f"nullsrc=s={iw}x{ih}:r={CORRUPT_FPS}:d={dur},format=gbrp,"
+            f"geq=r='random(4)*255':g='random(4)*255':b='random(4)*255'[snow];"
+            f"[torn][snow]blend=all_mode=addition:all_opacity={addop}[m];"
+            f"[m]rgbashift=rh={split}:bh=-{split}:gv=3[m2];"
+            f"[m2]scale={ow}:{oh}:flags=neighbor,format=yuv420p[vout]"
+        )
+        acolor = "pink"
+    if sound:
+        v += (f";anoisesrc=d={dur}:c={acolor}:a={a_amp},"
+              f"aformat=sample_fmts=fltp:channel_layouts=stereo[aout]")
+    return v, sound
+
+
+def _corrupt_glitch_asset(ctx, style, intensity, dur, sound):
+    """Get (or create) a project video_clip that is a synthesized glitch clip.
+    Cached per (style, intensity bucket, duration, sound, aspect) so a repeated
+    corrupt-screen beat renders and uploads one clip, not many."""
+    aspect = _default_image_aspect(ctx)
+    ow, oh = CARD_DIMS.get(aspect, CARD_DIMS["16:9"])
+    kb = round(max(0.0, min(1.0, float(intensity))), 1)      # 0.0..1.0 buckets
+    ck = (style, kb, dur, bool(sound), aspect)
+    hit = getattr(ctx, "_corrupt_assets", None)
+    if hit is None:
+        hit = ctx._corrupt_assets = {}
+    if ck in hit:
+        return hit[ck], None
+    fg, has_a = _corrupt_filtergraph(style, ow, oh, dur, kb, sound)
+    path = os.path.join(ctx.workdir, f"glitch_{style}_{uuid.uuid4().hex[:8]}.mp4")
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-filter_complex", fg, "-map", "[vout]"]
+    if has_a:
+        cmd += ["-map", "[aout]", "-c:a", "aac"]
+    cmd += ["-t", str(dur), "-r", str(CORRUPT_FPS), "-c:v", "libx264",
+            "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p",
+            "-shortest", path]
+    try:
+        media.run(cmd)
+    except Exception as e:
+        return None, f"Could not build the corrupt screen ({str(e)[:140]})."
+    try:
+        real_dur = media.probe(path).get("duration") or dur
+    except Exception:
+        real_dur = dur
+    key = f"generated_video/{ctx.project_id}/glitch-{uuid.uuid4().hex[:12]}.mp4"
+    try:
+        storage.upload_file(path, key, "video/mp4")
+    except Exception as e:
+        return None, (f"The corrupt screen was built but could not be saved to "
+                      f"storage ({str(e)[:140]}). Try again.")
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "video_clip", key,
+               bytes_=os.path.getsize(path), duration_s=real_dur,
+               width=ow, height=oh,
+               meta={"filename": f"corrupt-{style}.mp4",
+                     "caption": f"{style} corrupt-screen glitch ({dur}s)",
+                     "generated": True, "model": f"local:glitch-{style}"})
+    hit[ck] = key
+    return key, None
+
+
+def add_corrupt_screen(ctx, at_output_s, duration_s=0.6, style="digital",
+                       intensity=0.7, sound=True):
+    """Cut to a full-frame CORRUPT / glitch screen for a beat, then return to
+    the footage — a datamosh-style transition between sections. Synthesized
+    locally (no image/video generation), so it is always available and free."""
+    st = (style or "digital").strip().lower()
+    if st in ("glitch", "datamosh", "corruption", "digital_glitch"):
+        st = "digital"
+    if st in ("snow", "noise", "tv", "no_signal"):
+        st = "static"
+    if st not in CORRUPT_STYLES:
+        return (f"REJECTED: style must be one of {', '.join(CORRUPT_STYLES)} "
+                "(digital = datamosh macroblocks + tearing; vhs = tracking "
+                "band + scanlines; static = TV snow / no-signal).")
+    try:
+        at = float(at_output_s)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s must be a number — where in the FINAL "
+                "edited video the corrupt screen cuts in, in seconds.")
+    try:
+        dur = round(min(max(float(duration_s), CORRUPT_MIN_S),
+                        CORRUPT_MAX_S), 1)
+    except (TypeError, ValueError):
+        return "REJECTED: duration_s must be a number of seconds."
+    try:
+        k = max(0.0, min(1.0, float(intensity)))
+    except (TypeError, ValueError):
+        return "REJECTED: intensity must be a number 0-1."
+    snd = bool(sound)
+
+    key, err = _corrupt_glitch_asset(ctx, st, k, dur, snd)
+    if err:
+        return err
+    placed = insert_media(ctx, key, at, duration_s=dur)
+    if not placed.startswith("EDL v"):
+        return placed
+    heard = ("a burst of static/hiss plays over it" if snd
+             else "it is silent")
+    result = placed.split(". Before:")[0]
+    result += (f"\nThis is a {st} corrupt-screen glitch ({dur}s) — a full-frame "
+               f"digital-corruption beat; {heard}. It is inserted media, so no "
+               "spoken-word captions appear on it (nothing overlaps). Great as "
+               "a punchy transition BETWEEN sections; keep it short (0.3-1s "
+               "reads as a hit, longer starts to feel broken). Raise intensity "
+               "for a harsher break, lower it for a subtle flicker.")
+    return result
+
+
 def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
                    bg_color="#000000", color=None, accent_color=None,
                    font=None, size_scale=None, entrance=None, exit=None,
@@ -5260,6 +5441,29 @@ TOOLS = {
                                         "enum": list(CARD_DIRECTIONS)},
                           "motion": {"type": "string",
                                      "enum": list(INSERT_MOTIONS)}}),
+    "add_corrupt_screen": (add_corrupt_screen, "Cut to a full-frame CORRUPT / "
+                           "glitch screen for a beat, then return to the "
+                           "footage — a datamosh-style transition BETWEEN "
+                           "sections (e.g. podcast -> CORRUPT -> the next "
+                           "scene). Synthesized locally like the colour cards: "
+                           "NO image or video generation, always available, "
+                           "costs no generation credits. style: 'digital' "
+                           "(vivid datamosh macroblocks + horizontal tearing, "
+                           "the default), 'vhs' (tracking band + scanlines + "
+                           "chroma bleed), or 'static' (TV snow / no-signal). "
+                           "at_output_s is PROGRAM seconds; everything after "
+                           "shifts later by duration_s. Keep it SHORT (0.3-1s "
+                           "reads as a hit; longer feels genuinely broken). "
+                           "intensity 0-1 = how harsh (default 0.7). sound "
+                           "(default true) plays a matching static/hiss burst "
+                           "over the glitch; set false for a silent flicker. "
+                           "No captions ever land on it (inserted media).",
+                           {"at_output_s": {"type": "number"},
+                            "duration_s": {"type": "number"},
+                            "style": {"type": "string",
+                                      "enum": list(CORRUPT_STYLES)},
+                            "intensity": {"type": "number"},
+                            "sound": {"type": "boolean"}}),
     "set_caption_mutes": (set_caption_mutes, "Hide the burned spoken-word "
                           "captions over specific PROGRAM-time windows, "
                           "leaving them on everywhere else — for when a "
@@ -5441,6 +5645,7 @@ REQUIRED_ARGS = {
     "remove_text": ["id"],
     "add_title_card": ["text", "at_output_s"],
     "add_color_screen": ["at_output_s"],
+    "add_corrupt_screen": ["at_output_s"],
     "set_caption_mutes": ["spans"],
     "add_stylize": ["kind"],
     "remove_stylize": ["id"],
@@ -5478,7 +5683,8 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "set_speed", "remove_speed",
                "add_overlay", "move_overlay", "remove_overlay",
                "add_text", "remove_text",
-               "add_title_card", "add_color_screen", "set_caption_mutes",
+               "add_title_card", "add_color_screen", "add_corrupt_screen",
+               "set_caption_mutes",
                "add_stylize", "remove_stylize",
                "set_grade_custom", "set_master_loudness",
                "punch_in_on_emphasis", "sound_design_pass",
