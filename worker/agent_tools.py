@@ -3,6 +3,7 @@ short instructive string the model can act on, every output fits the token
 budget. Write tools create new EDL versions and return one-line diffs."""
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import audit
 import config
 import db as dbx
 import eleven
+import inpaint
 import llm
 import media
 import music_library
@@ -2047,6 +2049,320 @@ def blur_region(ctx, x, y, w, h, mode="blur", start=None, end=None):
     return result
 
 
+# ── Round 39: measuring burned-in text, and repainting it out ───────────────
+# The most common thing users ask for on footage they did not shoot: "remove
+# the captions", "change the caption font", "get rid of the username". Two
+# separate failures used to make that a bad experience — the agent had to GUESS
+# the rectangle from a contact sheet (and put the bar in the wrong place), and
+# the only outcome available was a cover, never a removal. find_burned_text
+# measures the rectangle; erase_* repaint the pixels and render from the
+# repainted copy.
+
+def _original_local(ctx):
+    """The project's ORIGINAL video on local disk (downloaded once per turn).
+
+    Every clean runs from the original, never from a previously cleaned file:
+    repainting a repaint compounds the reconstruction and slowly smears the
+    picture. It is also what makes an erase undoable — remove_erase re-cleans
+    the remaining regions from untouched source.
+    """
+    if getattr(ctx, "_orig_local", None):
+        return ctx._orig_local
+    row = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
+    if not row:
+        raise RuntimeError("this project has no original video")
+    local = os.path.join(ctx.workdir,
+                         "orig" + os.path.splitext(row["storage_key"])[1])
+    storage.download_to(row["storage_key"], local)
+    ctx._orig_local = local
+    ctx._orig_sha = row.get("sha256") or ""
+    return local
+
+
+def _clean_fp(sha, regions):
+    payload = json.dumps([{k: r.get(k) for k in
+                           ("x", "y", "w", "h", "start", "end", "fill")}
+                          for r in regions], sort_keys=True)
+    return hashlib.sha1((sha + payload).encode()).hexdigest()
+
+
+def _run_clean(ctx, regions):
+    """Produce (asset_key, proxy_key, fp) for this exact region list.
+
+    Cached on the fingerprint: re-erasing the same rectangle, or undoing one of
+    three and putting it back, costs nothing the second time.
+    """
+    src = _original_local(ctx)
+    fp = _clean_fp(getattr(ctx, "_orig_sha", ""), regions)
+    key = f"cleaned/{ctx.project_id}/{fp[:16]}.mp4"
+    pkey = f"cleaned/{ctx.project_id}/{fp[:16]}_proxy.mp4"
+    if storage.exists(key) and storage.exists(pkey):
+        return key, pkey, fp
+    info = media.probe(src)
+    if float(info["duration"]) > config.CLEAN_MAX_SOURCE_S:
+        raise ValueError(
+            f"this video is {info['duration'] / 60:.1f} min long and "
+            f"repainting works frame by frame — above "
+            f"{config.CLEAN_MAX_SOURCE_S / 60:.0f} min it does not finish "
+            "inside one edit turn. Offer the alternatives honestly: cover the "
+            "area with blur_region, or crop it out of frame with "
+            "auto_reframe/set_frame.")
+    out = os.path.join(ctx.workdir, f"clean_{fp[:8]}.mp4")
+    prox = os.path.join(ctx.workdir, f"clean_{fp[:8]}_proxy.mp4")
+    stats = inpaint.clean_video(src, regions, out, prox)
+    storage.upload_file(out, key, "video/mp4")
+    storage.upload_file(prox, pkey, "video/mp4")
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_source", key,
+               bytes_=os.path.getsize(out), duration_s=stats["duration_s"],
+               width=stats["width"], height=stats["height"],
+               fps=stats["fps"],
+               meta={"filename": "cleaned-source.mp4", "clean_fp": fp,
+                     "generated": True, "model": "local:inpaint",
+                     "regions": len(regions)})
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_proxy", pkey,
+               bytes_=os.path.getsize(prox), duration_s=stats["duration_s"],
+               meta={"filename": "cleaned-proxy.mp4", "clean_fp": fp,
+                     "generated": True, "model": "local:inpaint"})
+    ctx._clean_stats = stats
+    # Reclaim the bytes now. A full-res cleaned copy is the size of the source
+    # again, and two erases in one turn would otherwise sit on the worker's
+    # ephemeral disk next to the original, the proxy and every render temp —
+    # this box has run out of disk before. Storage has both objects.
+    for p in (out, prox):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return key, pkey, fp
+
+
+def _apply_clean(ctx, regions, what):
+    """Re-clean from the original for `regions` and write the EDL.
+
+    `regions` is the COMPLETE list for this project (not a delta), because the
+    cleaned file is one artifact: every erase re-derives it from the untouched
+    original.
+    """
+    edl = dict(ctx.latest_edl()["json"])
+    if not regions:
+        edl["source_clean"] = None
+        return ctx.write_edl(edl, f"restored the original pixels ({what})")
+    src = _original_local(ctx)
+    before = [inpaint.text_energy(src, (r["x"], r["y"], r["w"], r["h"]),
+                                  samples=5) for r in regions]
+    key, pkey, fp = _run_clean(ctx, regions)
+    edl["source_clean"] = {"asset_key": key, "proxy_key": pkey, "fp": fp,
+                           "regions": regions}
+    result = ctx.write_edl(edl, what)
+    if not result.startswith("EDL v"):
+        return result
+    # Honesty check: measure the ink in each rectangle on the file that will
+    # actually be rendered. A claim that the text is gone is only made when
+    # the pixels say so — and when they do not, the agent is told which
+    # rectangle survived and what to try, instead of reporting success.
+    local = os.path.join(ctx.workdir, "clean_check.mp4")
+    try:
+        storage.download_to(key, local)
+        after = [inpaint.text_energy(local, (r["x"], r["y"], r["w"], r["h"]),
+                                     samples=5) for r in regions]
+    except Exception:
+        after = None
+    if after:
+        lines = []
+        for r, b, a in zip(regions, before, after):
+            gone = (b <= 0.5) or (a <= max(1.5, b * 0.35))
+            lines.append(
+                f"[{r['id']}] ink {b:g} -> {a:g} "
+                + ("— gone" if gone else "— STILL VISIBLE"))
+        result += "\nMeasured on the repainted video: " + "; ".join(lines)
+        if any("STILL" in ln for ln in lines):
+            result += ("\nOne rectangle still shows ink. Widen it (outlines "
+                       "and shadows sit outside the letters), or pass "
+                       "fill='box' to repaint the whole rectangle instead of "
+                       "the strokes. Do NOT tell the user it was removed "
+                       "until this measures clean.")
+        else:
+            result += ("\nThe pixels are genuinely repainted — say REMOVED, "
+                       "not covered. Renders now read the cleaned video; "
+                       "cuts, captions and every timestamp are unchanged.")
+    stats = getattr(ctx, "_clean_stats", None) or {}
+    if any(p.get("escalated") for p in (stats.get("plates") or [])):
+        result += ("\nThe caption sat on a solid bar, so the WHOLE bar was "
+                   "repainted, not just the letters (lifting the text off a "
+                   "bar would leave the bar). On a busy background that can "
+                   "leave a soft patch — look at the preview and mention it "
+                   "if you see one.")
+    result += ("\nNEXT: render_preview so the user sees it, and if they asked "
+               "for a different caption FONT, add_captions now — the frame is "
+               "clear, so new captions cannot stack on the old ones.")
+    return result
+
+
+def find_burned_text(ctx, scope="all", start=None, end=None):
+    """Measure where text is burned into the footage. Read-only."""
+    if not ctx.has_main_video:
+        return ("REJECTED: there is no main video in this project to scan.")
+    sc = (scope or "all").strip().lower()
+    if sc not in ("all", "captions", "watermark", "text"):
+        return ("REJECTED: scope must be 'all', 'captions' (subtitle-style "
+                "lines), 'watermark' (a static handle/logo) or 'text'.")
+    try:
+        path = ctx.proxy_path()
+    except Exception:
+        path = _original_local(ctx)
+    try:
+        regions = inpaint.detect_text_regions(
+            path, start=start, end=end,
+            samples=config.CLEAN_DETECT_SAMPLES)
+    except Exception as e:
+        return f"Could not scan the video for burned-in text ({str(e)[:160]})."
+    if sc != "all":
+        regions = [r for r in regions if r["kind"] == sc]
+    if not regions:
+        return ("No burned-in text found"
+                + (f" of kind '{sc}'" if sc != "all" else "")
+                + ". If the user insists there is some, ask WHERE it appears "
+                "(corner? bottom? at which second?) and pass that rectangle "
+                "to erase_region directly — do not invent one.")
+    lines = []
+    for i, r in enumerate(regions, start=1):
+        lines.append(
+            f"{i}. {r['kind']}: x={r['x']} y={r['y']} w={r['w']} h={r['h']} "
+            f"— visible {r['first_s']}-{r['last_s']}s, in "
+            f"{int(r['coverage'] * 100)}% of sampled frames"
+            + (", content changes between frames"
+               if r["changes"] > 6 else ", identical in every frame"))
+    return ("Measured from the frames (not estimated — these rectangles are "
+            "exact):\n" + "\n".join(lines)
+            + "\nPass one of these rectangles to erase_region to repaint it "
+            "out, or call erase_burned_text to erase every caption band in "
+            "one pass.")
+
+
+def erase_burned_text(ctx, scope="captions", start=None, end=None):
+    """Detect and repaint out every burned-in region of one kind, one pass."""
+    if not ctx.has_main_video:
+        return "REJECTED: there is no main video in this project."
+    sc = (scope or "captions").strip().lower()
+    if sc not in ("all", "captions", "watermark", "text"):
+        return ("REJECTED: scope must be 'captions', 'watermark', 'text' or "
+                "'all'.")
+    try:
+        path = ctx.proxy_path()
+    except Exception:
+        path = _original_local(ctx)
+    found = inpaint.detect_text_regions(path, start=start, end=end,
+                                        samples=config.CLEAN_DETECT_SAMPLES)
+    if sc != "all":
+        found = [r for r in found if r["kind"] == sc]
+    if not found:
+        return (f"NO CHANGE: no burned-in {sc} were found in the footage, so "
+                "nothing was erased. Do NOT tell the user text was removed. "
+                "Ask them where they see it and use erase_region with that "
+                "rectangle.")
+    edl = ctx.latest_edl()["json"]
+    regions = [dict(r) for r in
+               ((edl.get("source_clean") or {}).get("regions") or [])]
+    added = []
+    for r in found:
+        item = {"id": _next_item_id(regions, "er"),
+                "x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"],
+                "start": None, "end": None, "fill": "text",
+                "kind": r["kind"]}
+        regions.append(item)
+        added.append(item)
+    what = ("erased " + ", ".join(f"{a['kind']} at y={a['y']:g} [{a['id']}]"
+                                  for a in added)
+            + " from the source pixels")
+    try:
+        return _apply_clean(ctx, regions, what)
+    except ValueError as e:
+        return f"REJECTED: {e}"
+    except Exception as e:
+        return (f"The repaint failed ({str(e)[:180]}). Nothing changed — do "
+                "NOT claim the text was removed.")
+
+
+def erase_region(ctx, x, y, w, h, start=None, end=None, fill="text"):
+    """Repaint one rectangle out of the source pixels."""
+    if not ctx.has_main_video:
+        return "REJECTED: there is no main video in this project."
+    f = (fill or "text").strip().lower()
+    if f not in ("text", "box"):
+        return ("REJECTED: fill must be 'text' (repaint the letter strokes "
+                "and keep the picture behind them — for captions, subtitles "
+                "and watermarks) or 'box' (repaint the whole rectangle — for "
+                "an object, a sticker or a logo shape).")
+    try:
+        rx, ry, rw, rh = float(x), float(y), float(w), float(h)
+    except (TypeError, ValueError):
+        return ("REJECTED: x, y, w, h must be numbers — FRACTIONS of the "
+                "frame (0-1). x,y is the TOP-LEFT corner. Call "
+                "find_burned_text to get exact rectangles instead of "
+                "estimating them.")
+    if not (0 <= rx <= 1 and 0 <= ry <= 1 and 0 < rw <= 1 and 0 < rh <= 1):
+        return ("REJECTED: x, y, w, h are FRACTIONS of the frame (0-1). "
+                "find_burned_text returns them in exactly this form.")
+    if (start is None) != (end is None):
+        return ("REJECTED: pass both start and end (SOURCE seconds — the "
+                "repaint happens on the source before any cut), or neither "
+                "for the whole video.")
+    span = {}
+    if start is not None:
+        try:
+            span = {"start": round(float(start), 2),
+                    "end": round(float(end), 2)}
+        except (TypeError, ValueError):
+            return "REJECTED: start/end must be numbers of seconds."
+        if span["end"] <= span["start"]:
+            return "REJECTED: end must be after start."
+    edl = ctx.latest_edl()["json"]
+    regions = [dict(r) for r in
+               ((edl.get("source_clean") or {}).get("regions") or [])]
+    item = {"id": _next_item_id(regions, "er"), "x": round(rx, 3),
+            "y": round(ry, 3), "w": round(rw, 3), "h": round(rh, 3),
+            "start": span.get("start"), "end": span.get("end"),
+            "fill": f, "kind": None}
+    regions.append(item)
+    window = (f" from {item['start']}s to {item['end']}s (source time)"
+              if span else " for the whole video")
+    what = (f"erased the {'object' if f == 'box' else 'text'} at "
+            f"x={item['x']},y={item['y']} size {item['w']}x{item['h']}"
+            f"{window} from the source pixels [{item['id']}]")
+    try:
+        return _apply_clean(ctx, regions, what)
+    except ValueError as e:
+        return f"REJECTED: {e}"
+    except Exception as e:
+        return (f"The repaint failed ({str(e)[:180]}). Nothing changed — do "
+                "NOT claim anything was removed.")
+
+
+def remove_erase(ctx, id=None):
+    """Undo one erase (or all), re-cleaning from the untouched original."""
+    edl = ctx.latest_edl()["json"]
+    regions = [dict(r) for r in
+               ((edl.get("source_clean") or {}).get("regions") or [])]
+    if not regions:
+        return ("NO CHANGE: nothing has been erased from this video's pixels. "
+                "Do NOT tell the user you restored anything.")
+    if id:
+        hit = next((r for r in regions if r.get("id") == id), None)
+        if not hit:
+            have = ", ".join(r.get("id", "?") for r in regions)
+            return (f"REJECTED: no erased region with id '{id}'. Existing: "
+                    f"{have}. Call get_edl to see them, or omit id to restore "
+                    "the whole original picture.")
+        regions = [r for r in regions if r.get("id") != id]
+        what = f"put back the pixels erased by {id}"
+    else:
+        regions, what = [], f"put back all {len(regions)} erased region(s)"
+    try:
+        return _apply_clean(ctx, regions, what)
+    except Exception as e:
+        return f"Could not rebuild the video ({str(e)[:180]}). Nothing changed."
+
+
 def remove_blur(ctx, id=None):
     if id is not None and not str(id).strip():
         return ("REJECTED: id is empty. Pass a real region id from "
@@ -4050,18 +4366,54 @@ def _self_check(ctx, result):
     except Exception:
         return None
     try:
-        frame_note = _frame_context(ctx.latest_edl()["json"])
+        edl = ctx.latest_edl()["json"]
+        frame_note = _frame_context(edl)
+        fx_note = _deliberate_fx_note(edl)
     except Exception:
-        frame_note = ""
+        frame_note = fx_note = ""
     return llm.ask_vision(
-        frame_note +
+        frame_note + fx_note +
         "This is a 3x3 contact sheet sampled evenly from an automatically "
         "edited video. In one or two sentences: does anything look broken "
         "(unexpected black frames, half-cut faces mid-action, missing "
-        "captions if text was expected)? If it looks fine, say "
-        "'looks clean'.",
+        "captions if text was expected)? Frames showing a DELIBERATE effect "
+        "listed above are expected, not defects — but say so plainly if one "
+        "of them looks OVERDONE for this footage (harsh, cheap, or so strong "
+        "the shot underneath is lost). If it looks fine, say 'looks clean'.",
         [local], max_tokens=200, purpose="vision_selfcheck",
         image_names=[sheet_key])
+
+
+def _deliberate_fx_note(edl):
+    """One line naming the full-frame effects THIS edit applied on purpose.
+
+    Without it the reviewer reads its own edit as damage: a 0.5s corrupt
+    screen came back as "0:05 shows heavy colour glitch/artifacts" and a
+    flash transition as "0:04 is a washed-out/white frame" — true, alarming,
+    and both intentional. Naming them turns the check from a false alarm into
+    the useful question: is this effect too much for this footage?
+    """
+    fx = edl.get("effects") or {}
+    bits = []
+    kinds = sorted({(s.get("kind") or "") for s in (fx.get("stylize") or [])}
+                   & {"flash", "chromatic", "vhs", "glitch", "shake",
+                      "dream_blur", "glow"})
+    if kinds:
+        bits.append(", ".join(kinds) + " stylize passes")
+    style = ((fx.get("transition") or {}).get("style") or "")
+    if style in ("flash", "glitch", "whip_left", "whip_right", "zoom_punch"):
+        bits.append(f"'{style}' transitions at every cut")
+    # Inserts carry only asset_key — the synthesized ones are named by the
+    # tool that built them (generated_video/<pid>/glitch-*.mp4,
+    # generated/<pid>/card-*.png), which is what makes them recognisable here.
+    keys = [str(i.get("asset_key") or "") for i in (edl.get("inserts") or [])]
+    if any("glitch-" in k for k in keys):
+        bits.append("a corrupt-screen glitch insert")
+    if any("/card-" in k for k in keys):
+        bits.append("a full-frame colour card")
+    if not bits:
+        return ""
+    return ("Deliberate effects in this edit: " + "; ".join(bits) + ". ")
 
 
 def ask_user(ctx, question):
@@ -5277,6 +5629,70 @@ TOOLS = {
     "remove_blur": (remove_blur, "Remove one censor region by its id (see "
                     "get_edl), or ALL censor regions when id is omitted.",
                     {"id": {"type": "string"}}),
+    "find_burned_text": (find_burned_text, "MEASURE where text is burned into "
+                         "the footage — subtitle bands, watermarks, handles, "
+                         "on-screen labels. Reads the actual frames and "
+                         "returns EXACT rectangles as frame fractions, plus "
+                         "when each is visible. Use this INSTEAD of "
+                         "estimating a rectangle from look_at: an estimated "
+                         "box is what puts a bar next to the text instead of "
+                         "over it. Read-only. scope: 'captions' (wide "
+                         "subtitle lines whose words change), 'watermark' (a "
+                         "small mark identical in every frame), 'text', or "
+                         "'all' (default). start/end limit the scan to a "
+                         "source-time window.",
+                         {"scope": {"type": "string",
+                                    "enum": ["all", "captions", "watermark",
+                                             "text"]},
+                          "start": {"type": "number"},
+                          "end": {"type": "number"}}),
+    "erase_burned_text": (erase_burned_text, "TRULY REMOVE burned-in captions "
+                          "(or watermarks) — one call: it measures every "
+                          "matching region and REPAINTS THE PIXELS, "
+                          "reconstructing the picture that was behind the "
+                          "text. This is real removal, not a blur or a bar: "
+                          "say 'removed'. Use it for 'remove the captions' / "
+                          "'take the subtitles off' / 'get rid of the "
+                          "watermark' on footage that arrived with text "
+                          "burned in, and BEFORE add_captions when the user "
+                          "wants a different caption font or style — with the "
+                          "old text gone, new captions cannot stack on it. "
+                          "Cuts, timings, transcript and captions are "
+                          "unaffected; the video is unchanged except that the "
+                          "text is gone. scope defaults to 'captions'.",
+                          {"scope": {"type": "string",
+                                     "enum": ["all", "captions", "watermark",
+                                              "text"]},
+                           "start": {"type": "number"},
+                           "end": {"type": "number"}}),
+    "erase_region": (erase_region, "TRULY REMOVE whatever is inside one "
+                     "rectangle — repaints those pixels and reconstructs the "
+                     "background, so the thing is GONE, not covered. Use it "
+                     "for a word, a sign, a sticker, a logo, a person's name "
+                     "on screen, or any object the user wants taken out. "
+                     "x,y = TOP-LEFT corner, w,h = size, all FRACTIONS (0-1) "
+                     "of the SOURCE frame — get them from find_burned_text "
+                     "rather than estimating. fill: 'text' (default — "
+                     "repaints only the letter strokes and keeps the picture "
+                     "behind them; best for captions/handles) or 'box' "
+                     "(repaints the whole rectangle; use for an OBJECT or a "
+                     "solid graphic). start/end (SOURCE seconds) limit it to "
+                     "a window; omit both for the whole video. Reconstruction "
+                     "is excellent for thin text and for anything on a steady "
+                     "shot; a large object on a moving, detailed background "
+                     "can leave a soft patch — the result is measured and "
+                     "reported back to you, so check it before you promise "
+                     "anything.",
+                     {"x": {"type": "number"}, "y": {"type": "number"},
+                      "w": {"type": "number"}, "h": {"type": "number"},
+                      "start": {"type": "number"},
+                      "end": {"type": "number"},
+                      "fill": {"type": "string", "enum": ["text", "box"]}}),
+    "remove_erase": (remove_erase, "Undo an erase: put the original pixels "
+                     "back for one erased region by its id (see get_edl), or "
+                     "for ALL of them when id is omitted. Always rebuilds "
+                     "from the untouched original.",
+                     {"id": {"type": "string"}}),
     "add_voiceover": (add_voiceover, "Lay an uploaded audio file OVER the "
                       "whole program from start_output_s (a position in the "
                       "FINAL edited video, default 0). duck_others (default "
@@ -5634,6 +6050,7 @@ REQUIRED_ARGS = {
     "remove_zoom": ["id"],
     "set_transitions": ["style"],
     "blur_region": ["x", "y", "w", "h"],
+    "erase_region": ["x", "y", "w", "h"],
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
     "set_speed": ["start", "end", "factor"],
@@ -5680,6 +6097,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
                "blur_region", "remove_blur",
+               "erase_burned_text", "erase_region", "remove_erase",
                "set_speed", "remove_speed",
                "add_overlay", "move_overlay", "remove_overlay",
                "add_text", "remove_text",

@@ -1267,10 +1267,18 @@ def project_state(user_id, project_id):
             {"id": a["id"], "storage_key": a["storage_key"],
              "filename": (a.get("meta") or {}).get("filename"),
              "duration_s": a["duration_s"]} for a in music],
+        # `generated` marks media the AGENT produced inside this project —
+        # generated images/video, colour and glitch cards, link downloads,
+        # website captures. They are legitimately re-insertable, so they belong
+        # in the picker, but they are not the user's own files and the UI must
+        # not present them as such.
         "media_assets": [
             {"id": a["id"], "kind": a["kind"],
              "storage_key": a["storage_key"],
              "filename": (a.get("meta") or {}).get("filename"),
+             "generated": bool((a.get("meta") or {}).get("generated")
+                               or (a.get("meta") or {}).get("fetched")
+                               or (a.get("meta") or {}).get("recorded")),
              "duration_s": a["duration_s"]}
             for a in extra if a["kind"] in ("video_clip", "image_ref")],
     })
@@ -2066,7 +2074,7 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 1
+OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
 
 
 def _final_is_current(meta):

@@ -69,9 +69,10 @@ def _burned_captions_line(index):
     return (f"WARNING — BURNED-IN CAPTIONS: {len(flagged)} of {len(capped)} "
             f"described shots already show caption text baked into the "
             f"footage{conf}. Adding captions would STACK new text on top of "
-            "the old. Follow the burned-captions rules: tell the user, and "
-            "offer to hide the old ones first (blur_region bar / crop) or "
-            "place new captions clear of them.")
+            "the old. You can REMOVE the old ones for real: "
+            "erase_burned_text() measures the band and repaints those pixels, "
+            "so a re-caption in any style lands on a clear frame. Tell the "
+            "user what you found and do that first.")
 
 
 def _full_index_block(index):
@@ -701,9 +702,10 @@ ALTERNATIVE_HINTS = [
                 r"watermark|censor|blur|pixelat|black.?out|"
                 r"(?:remove|hide|cover|get rid of)[^.\n]{0,40}"
                 r"(?:text|logo|name|handle|tag|overlay)"),
-     "What I CAN do: blur, pixelate or black-out a fixed rectangle over a "
-     "burned-in username, watermark, logo or on-screen text — tell me "
-     "roughly where it sits and I'll place the censor box and show you a "
+     "What I CAN do: actually REMOVE burned-in text or an object — I find "
+     "where it sits, repaint those pixels and rebuild the picture behind "
+     "them, so it is gone rather than covered (I can also blur, pixelate or "
+     "bar it if you prefer). Tell me what to take out and I'll show you a "
      "preview."),
     # sfx BEFORE effects: the effects regex matches the bare word
     # 'effect', so "add some sound effects" was answered with colour

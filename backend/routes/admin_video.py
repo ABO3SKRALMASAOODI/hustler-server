@@ -701,6 +701,63 @@ def video_costs():
 
 
 UPLOAD_KINDS = ("original", "music", "image_ref", "video_clip")
+# Repainted copies of a source (round 39 erase). Deliberately NOT in
+# UPLOAD_KINDS — nobody uploaded them — but they are full-size video objects,
+# so they belong in the per-user media view where their storage is visible.
+CLEAN_KINDS = ("clean_source", "clean_proxy")
+
+
+def _machine_made(alias):
+    """SQL predicate: this asset was made BY THE PRODUCT, not uploaded.
+
+    Every asset the agent synthesizes, generates, downloads from a pasted link
+    or records from a website lands in the same kinds a person's own files do —
+    a locally-built glitch card and a user's own clip are both 'video_clip'.
+    Counting on kind alone made the admin report that a user "uploaded
+    corrupt-digital.mp4" the day add_corrupt_screen shipped, when in fact the
+    agent had built it inside their project. The producing tools each stamp
+    meta: generated (colour/title cards, glitch screens, generate_image,
+    generate_video), fetched (fetch_url), recorded (record_website).
+
+    Compared as text, not cast to bool: a cast raises on any meta value that
+    isn't a bool literal, which would take down the whole admin page over one
+    odd row written by a future tool.
+    """
+    return (f"(COALESCE({alias}.meta->>'generated', '') = 'true' "
+            f"OR COALESCE({alias}.meta->>'fetched', '') = 'true' "
+            f"OR COALESCE({alias}.meta->>'recorded', '') = 'true')")
+
+
+def _is_machine(a):
+    """Python twin of _machine_made, for rows already fetched."""
+    m = a.get("meta") or {}
+    return bool(m.get("generated") or m.get("fetched") or m.get("recorded"))
+
+
+def _asset_row(a):
+    """One media row for the admin, carrying WHERE it came from.
+
+    `origin` is the honest provenance line: which tool/model made it, or the
+    URL it was pulled from — so a glitch card reads "local:glitch-digital" and
+    a downloaded clip shows its source page, instead of both looking like
+    files the customer chose to upload.
+    """
+    m = a.get("meta") or {}
+    origin = None
+    if m.get("generated"):
+        origin = m.get("model") or "generated"
+    elif m.get("fetched"):
+        origin = m.get("source_url") or "fetched from a link"
+    elif m.get("recorded"):
+        origin = m.get("source_url") or "website capture"
+    return {"id": a["id"], "project_id": a["project_id"],
+            "kind": a["kind"],
+            "filename": m.get("filename"),
+            "bytes": a["bytes"], "duration_s": a["duration_s"],
+            "width": a["width"], "height": a["height"],
+            "created_at": a["created_at"].isoformat(),
+            "origin": origin,
+            "url": _presign(a["storage_key"])}
 
 
 @admin_video_bp.route("/admin/video/users", methods=["GET"])
@@ -719,6 +776,7 @@ def video_users():
                    COALESCE(j.turns, 0) AS turns,
                    COALESCE(j.exports, 0) AS exports,
                    COALESCE(a.uploads, 0) AS uploads,
+                   COALESCE(a.generated, 0) AS generated,
                    COALESCE(a.bytes, 0) AS storage_bytes,
                    COALESCE(l.tokens_in, 0) AS tokens_in,
                    COALESCE(l.tokens_out, 0) AS tokens_out,
@@ -743,8 +801,10 @@ def video_users():
                               MAX(updated_at) AS last
                        FROM video_jobs GROUP BY user_id) j ON j.user_id = u.id
             LEFT JOIN (SELECT p3.user_id,
-                              COUNT(*) FILTER (WHERE ast.kind IN %s)
-                                  AS uploads,
+                              COUNT(*) FILTER (WHERE ast.kind IN %s
+                                  AND NOT {_machine_made('ast')}) AS uploads,
+                              COUNT(*) FILTER (WHERE {_machine_made('ast')})
+                                  AS generated,
                               SUM(ast.bytes)::bigint AS bytes,
                               MAX(ast.created_at) AS last
                        FROM assets ast
@@ -776,6 +836,7 @@ def video_users():
          "turns": r["turns"], "exports": r["exports"],
          "unserved": r["unserved"],
          "uploads": r["uploads"],
+         "generated": r["generated"],
          "storage_bytes": int(r["storage_bytes"] or 0),
          "tokens_in": int(r["tokens_in"] or 0),
          "tokens_out": int(r["tokens_out"] or 0),
@@ -950,8 +1011,8 @@ def video_user_detail(user_id):
                        JOIN projects p ON p.id = a.project_id
                        WHERE p.user_id = %s AND a.kind IN %s
                        ORDER BY a.id DESC LIMIT 100""",
-                    (user_id, UPLOAD_KINDS))
-        uploads = cur.fetchall()
+                    (user_id, UPLOAD_KINDS + CLEAN_KINDS))
+        assets = cur.fetchall()
 
         cur.execute("""SELECT job_id, credits_used, tokens_used, created_at
                        FROM job_credits WHERE user_id = %s
@@ -978,15 +1039,11 @@ def video_user_detail(user_id):
              "last_activity": p["last_activity"].isoformat()
                  if p["last_activity"] else None}
             for p in projects],
-        "uploads": [
-            {"id": a["id"], "project_id": a["project_id"],
-             "kind": a["kind"],
-             "filename": (a.get("meta") or {}).get("filename"),
-             "bytes": a["bytes"], "duration_s": a["duration_s"],
-             "width": a["width"], "height": a["height"],
-             "created_at": a["created_at"].isoformat(),
-             "url": _presign(a["storage_key"])}
-            for a in uploads],
+        # Two lists, never one. These rows share the same kinds — the agent's
+        # own media is stamped in meta — and merging them told the founder a
+        # user had uploaded a file the AGENT had built in their project.
+        "uploads": [_asset_row(a) for a in assets if not _is_machine(a)],
+        "generated": [_asset_row(a) for a in assets if _is_machine(a)],
         "ledger": [
             {"job_id": l["job_id"],
              "credits_used": float(l["credits_used"] or 0),

@@ -1,103 +1,37 @@
 """Build the Valmera end card PNG that every export ends on.
 
-The robot is REDRAWN as primitives, not upscaled: the only art in the repo is
-a 180px favicon (public/icon-512.png), and 180 -> 2048 is an 11x blow-up that
-looks like a blurry sticker next to crisp type. Every measurement below was
-read off that favicon programmatically (row-profile fit, see analyze_logo.py),
-so this is the same robot, at vector quality.
+The mark is the SITE's robot — the full-body white robot in the landing-page
+navbar (`frontend-next/public/hustler-robot95.riv`). It is not redrawn here:
+`worker/brand/robot.png` is that Rive artboard rendered to a transparent PNG at
+2400px, so the end card and the site show the same character, pixel for pixel.
+See brand/README.md for the one-line Chrome command that regenerates it.
 
-Coordinates are in the favicon's 180x180 space and scaled at draw time.
+Only one correction is applied, and it is deliberate: the artwork is drawn for a
+LIGHT background, so its black parts (visor, arm and leg detail, the antenna
+stalk) are meant to read as ink. On the black end card every one of them still
+reads — they sit inside white shapes and become negative space — EXCEPT the
+antenna stalk, which has white on neither side and simply vanishes, leaving the
+red ball floating unattached. `_fix_antenna` repaints exactly those rows white.
+
+Layout is set in INK boxes, never text boxes: a text box carries the font's full
+ascent/descent, so a nominal gap measures nearly double in real whitespace.
 """
 import os
 from PIL import Image, ImageDraw, ImageFont
 
-RED    = (235, 50, 35, 255)     # #EB3223  head visor, antenna ball
-RED_ST = (249, 53, 37, 255)     # #F93525  antenna stalk (very slightly hotter)
-PINK   = (239, 135, 131, 255)   # #EF8783  stalk droplet highlights
-WHITE  = (255, 255, 255, 255)
-INK    = (0, 0, 0, 255)
+WHITE = (255, 255, 255, 255)
 
-SS = 8                          # supersample factor; downsampled with LANCZOS
-SRC_W, SRC_H = 180.0, 182.0     # favicon space, extended 2px: the real head
-                                # bottom (y=181) is CROPPED by the icon frame.
+# Type colours. The tagline is deliberately NOT mid-grey — a solid #9E9E9E line
+# under a pure-white wordmark is the exact "cheap web ad" tell. Muted white sits
+# back into the black without reading as a second, greyer brand. 59% is as low
+# as it goes and still survives the render chain: the card is scaled to ~0.6x
+# frame width and re-encoded at CRF 20+, and anything under ~50% at this size
+# came back from ffmpeg as a grey smudge.
+TAGLINE = (255, 255, 255, 150)
+RULE = (255, 255, 255, 80)
 
-
-def _superellipse(cx, cy, a, b, n, steps=720):
-    """The head. Fitted n=2.2 — it is measurably neither an ellipse (n=2,
-    too fat at the cheeks) nor a rounded rect (too square at the crown)."""
-    pts = []
-    for i in range(steps):
-        t = 2.0 * 3.141592653589793 * i / steps
-        import math
-        ct, st = math.cos(t), math.sin(t)
-        x = cx + a * (abs(ct) ** (2.0 / n)) * (1 if ct >= 0 else -1)
-        y = cy + b * (abs(st) ** (2.0 / n)) * (1 if st >= 0 else -1)
-        pts.append((x, y))
-    return pts
-
-
-def _arc_band(d, cx, cy, r, stroke, x_from, x_to, colour, s):
-    """Stroked circular arc clipped to an x range, drawn as a polygon band so
-    the caps stay round at any scale (PIL's arc() width is pixel-quantised)."""
-    import math
-    a0 = math.acos(max(-1.0, min(1.0, (x_from - cx) / r)))
-    a1 = math.acos(max(-1.0, min(1.0, (x_to - cx) / r)))
-    lo, hi = min(a0, a1), max(a0, a1)
-    outer, inner = [], []
-    steps = 240
-    for i in range(steps + 1):
-        t = lo + (hi - lo) * i / steps
-        ct, st = math.cos(t), math.sin(t)
-        outer.append(((cx + (r + stroke / 2) * ct) * s,
-                      (cy + (r + stroke / 2) * st) * s))
-        inner.append(((cx + (r - stroke / 2) * ct) * s,
-                      (cy + (r - stroke / 2) * st) * s))
-    d.polygon(outer + inner[::-1], fill=colour)
-    # round caps
-    for t in (lo, hi):
-        px, py = cx + r * math.cos(t), cy + r * math.sin(t)
-        rr = stroke / 2
-        d.ellipse([(px - rr) * s, (py - rr) * s, (px + rr) * s, (py + rr) * s],
-                  fill=colour)
-
-
-def draw_robot(height_px):
-    """The Valmera robot, RGBA, transparent background."""
-    s = (height_px * SS) / SRC_H
-    W, H = int(SRC_W * s), int(SRC_H * s)
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-
-    def rrect(x0, y0, x1, y1, r, fill):
-        d.rounded_rectangle([x0 * s, y0 * s, x1 * s, y1 * s],
-                            radius=r * s, fill=fill)
-
-    def circle(cx, cy, r, fill):
-        d.ellipse([(cx - r) * s, (cy - r) * s, (cx + r) * s, (cy + r) * s],
-                  fill=fill)
-
-    # --- behind the head: ears, then the antenna, so both tuck under it -----
-    rrect(1, 110, 10, 148, 4, RED)          # left ear
-    rrect(169, 110, 178, 148, 4, RED)       # right ear
-    rrect(87, 20, 94, 74, 3.4, RED_ST)      # antenna stalk
-    for cy in (32.0, 46.0, 61.0):           # the three droplet highlights
-        d.polygon([(90.5 * s, (cy - 5.2) * s), (93.0 * s, cy * s),
-                   (90.5 * s, (cy + 5.2) * s), (88.0 * s, cy * s)], fill=PINK)
-    circle(90.5, 14.5, 14, RED)             # antenna ball
-
-    # --- head ---------------------------------------------------------------
-    d.polygon([(x * s, y * s) for x, y in
-               _superellipse(89.5, 125, 79, 56, 2.2)], fill=WHITE)
-
-    # --- face ---------------------------------------------------------------
-    _arc_band(d, 90.5, -12.0, 103.0, 3.2, 42, 139, INK, s)   # brow
-    rrect(39, 100, 142, 148, 20, RED)                        # visor
-    circle(59.5, 123.5, 10.5, INK)                           # left eye
-    circle(121.5, 123.5, 10.5, INK)                          # right eye
-    _arc_band(d, 90.5, 130.0, 12.0, 3.4, 78.5, 102.5, INK, s)  # smile
-
-    return img.resize((int(SRC_W * height_px / SRC_H), height_px),
-                      Image.LANCZOS)
+ROBOT_PNG = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "brand", "robot.png")
 
 
 def _ink(img):
@@ -105,56 +39,115 @@ def _ink(img):
     return img.crop(b) if b else img
 
 
-def _render_text(text, font, fill, tracking):
-    """Text as a tight-cropped RGBA layer. Composing from INK boxes (not PIL
-    text boxes) is what makes the vertical rhythm real: a text box carries the
-    font's full ascent/descent, so a nominal 86px gap under the robot measured
-    174px of actual whitespace."""
-    probe = Image.new("RGBA", (10, 10))
-    pd = ImageDraw.Draw(probe)
-    widths = [pd.textlength(c, font=font) for c in text]
-    total = int(sum(widths) + tracking * (len(text) - 1)) + 40
-    a, dsc = font.getmetrics()
-    layer = Image.new("RGBA", (total, a + dsc + 40), (0, 0, 0, 0))
+def _fix_antenna(img):
+    """Repaint the antenna stalk white so it survives on black.
+
+    The stalk is found structurally, not by hard-coded coordinates: scan down
+    from the top and take the rows whose only opaque pixels are near-black AND
+    span less than 12% of the width — that is the thin bar between the red ball
+    and the head, and nothing else in the artboard is both that narrow and that
+    dark. Stop at the first row that fails (the head's crown), so no black
+    inside the head or body is ever touched.
+    """
+    img = img.convert("RGBA")
+    px = img.load()
+    W, H = img.size
+    hit = 0
+    for y in range(H):
+        xs = [x for x in range(W) if px[x, y][3] > 128]
+        if not xs:
+            continue
+        dark = [x for x in xs if max(px[x, y][:3]) < 60]
+        if not dark:
+            continue                      # ball rows / clean rows: keep going
+        if len(xs) > 0.12 * W:
+            break                         # reached the head — stop, keep ink
+        for x in dark:
+            px[x, y] = WHITE
+        hit += len(dark)
+    return img, hit
+
+
+def robot(height_px):
+    """The site's robot, RGBA, transparent, ready for a black card."""
+    src = Image.open(ROBOT_PNG).convert("RGBA")
+    src, n = _fix_antenna(src)
+    if not n:
+        raise SystemExit("antenna stalk not found — did brand/robot.png "
+                         "change? Re-check _fix_antenna before shipping a "
+                         "card with a floating antenna ball.")
+    w = max(1, round(src.width * height_px / src.height))
+    return _ink(src.resize((w, height_px), Image.LANCZOS))
+
+
+def _text(text, font, fill, tracking):
+    """Text as a tight-cropped RGBA layer, letter-spaced by hand (PIL has no
+    tracking). Cropping to ink is what makes the vertical rhythm below real."""
+    probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+    widths = [probe.textlength(c, font=font) for c in text]
+    total = int(sum(widths) + tracking * max(0, len(text) - 1)) + 80
+    asc, dsc = font.getmetrics()
+    layer = Image.new("RGBA", (total, asc + dsc + 80), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
-    x = 20.0
+    x = 40.0
     for c, w in zip(text, widths):
-        d.text((x, 20), c, font=font, fill=fill)
+        d.text((x, 40), c, font=font, fill=fill)
         x += w + tracking
     return _ink(layer)
 
 
 def build(out_path, pjs_path):
-    ROBOT_H = 720
-    WORD_SIZE, WORD_TRACK = 300, -0.030     # -0.03em, as the site sets it
-    LINE_SIZE, LINE_TRACK = 74, 0.055       # opened up: small grey text on
-                                            # black needs air to stay legible
-    GAP_ROBOT, GAP_WORD = 84, 78            # INK gaps, not text-box gaps
+    """Compose the card.
+
+    Proportions are the point. The old card set a 300px wordmark under a 720px
+    robot with a 74px grey line — three competing weights, all near the same
+    size, which is what read as an ad. Here one element leads (the mark), the
+    wordmark is secondary, and the attribution is a hairline-quiet tracked
+    caption. Nothing repeats: the wordmark says the name once, the caption says
+    what happened, so "Valmera" is not printed twice on the same card.
+    """
+    ROBOT_H = 660
+    WORD_SIZE, WORD_TRACK = 232, -0.030    # -0.03em — the site's wordmark
+    # Caption width is what sizes the whole card: the renderer fits the card
+    # inside a box, so the WIDEST element decides how big everything else
+    # lands. A long, heavily-tracked caption silently shrank the mark to 13%
+    # of frame height. Short line, moderate tracking, and the robot leads.
+    CAP_SIZE, CAP_TRACK = 52, 0.30
+    GAP_MARK = 104                         # robot -> wordmark (ink gap)
+    GAP_RULE = 52                          # wordmark -> hairline
+    GAP_CAP = 46                           # hairline -> caption
+    RULE_H = 3
 
     word_f = ImageFont.truetype(pjs_path, WORD_SIZE)
-    word_f.set_variation_by_axes([800])      # the site's wordmark weight
-    line_f = ImageFont.truetype(pjs_path, LINE_SIZE)
-    line_f.set_variation_by_axes([500])
+    word_f.set_variation_by_axes([800])
+    cap_f = ImageFont.truetype(pjs_path, CAP_SIZE)
+    cap_f.set_variation_by_axes([600])
 
-    robot = draw_robot(ROBOT_H)
-    word = _render_text("Valmera", word_f, WHITE, WORD_TRACK * WORD_SIZE)
-    line = _render_text("Edited by Valmera agent", line_f,
-                        (158, 158, 158, 255), LINE_TRACK * LINE_SIZE)
+    mark = robot(ROBOT_H)
+    word = _text("Valmera", word_f, WHITE, WORD_TRACK * WORD_SIZE)
+    cap = _text("EDITED WITH VALMERA", cap_f, TAGLINE, CAP_TRACK * CAP_SIZE)
 
-    W = max(robot.width, word.width, line.width)
-    H = robot.height + GAP_ROBOT + word.height + GAP_WORD + line.height
+    rule_w = int(cap.width * 0.30)
+    rule = Image.new("RGBA", (rule_w, RULE_H), RULE)
+
+    W = max(mark.width, word.width, cap.width)
+    H = (mark.height + GAP_MARK + word.height + GAP_RULE + RULE_H
+         + GAP_CAP + cap.height)
     card = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     y = 0
-    for part in (robot, word, line):
+    for part, gap in ((mark, GAP_MARK), (word, GAP_RULE), (rule, GAP_CAP),
+                      (cap, 0)):
         card.paste(part, ((W - part.width) // 2, y), part)
-        y += part.height + (GAP_ROBOT if part is robot else GAP_WORD)
+        y += part.height + gap
 
     card.save(out_path)
     print(f"card {card.size[0]}x{card.size[1]}  aspect "
-          f"{card.size[0] / card.size[1]:.3f}  robot {robot.size}  "
-          f"word {word.size}  line {line.size}  "
+          f"{card.size[0] / card.size[1]:.3f}  robot {mark.size}  "
+          f"word {word.size}  caption {cap.size}  "
           f"({os.path.getsize(out_path) / 1024:.0f} KB)")
     return card
+
+
 PJS_URL = ("https://raw.githubusercontent.com/google/fonts/main/ofl/"
            "plusjakartasans/PlusJakartaSans%5Bwght%5D.ttf")
 

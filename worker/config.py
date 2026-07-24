@@ -347,6 +347,21 @@ PROXY_HEIGHT = int(os.getenv("PROXY_HEIGHT", "540"))
 PROXY_PRESET = os.getenv("PROXY_PRESET", "veryfast")
 PROXY_CRF = int(os.getenv("PROXY_CRF", "25"))
 
+# Round 39 — repainting burned-in text/objects out of the source (inpaint.py).
+# The clean pass decodes every frame, repaints the marked rectangles and
+# re-encodes, so it costs roughly a proxy encode plus the per-frame work. It
+# runs INSIDE an agent turn, so the bound that matters is AGENT_TURN_TIMEOUT_S:
+# past this source length the pass would be killed mid-way and the user would
+# get an error instead of an edit. Above it the agent offers the honest
+# alternatives (cover with blur_region, or crop the band out of frame) rather
+# than starting something that cannot finish. Raise it when the clean pass
+# moves onto the media executor, where it is not racing a turn timeout.
+CLEAN_MAX_SOURCE_S = float(os.getenv("CLEAN_MAX_SOURCE_S", "600"))
+# Frames sampled when LOOKING for burned-in text. Detection reads the proxy and
+# input-seeks, so each sample is a seek, not a decode; 28 covers a caption that
+# is only on screen for part of the video without making the scan noticeable.
+CLEAN_DETECT_SAMPLES = int(os.getenv("CLEAN_DETECT_SAMPLES", "28"))
+
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /
 # screen content and several times faster than the old medium/CRF18.
@@ -400,7 +415,7 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK changes. It is stored on every render asset
 # and busts the render cache, so an existing export re-encodes with the new
 # card instead of serving pre-outro bytes forever.
-OUTRO_VERSION = 1
+OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
 
 FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "5400"))
 # A stalled encode stops emitting -progress lines but keeps its stdout pipe

@@ -256,6 +256,28 @@ def endcard_path():
     return ENDCARD_PATH if os.path.exists(ENDCARD_PATH) else None
 
 
+def clean_source_key(edl_json, variant):
+    """Round 39 — the REPAINTED source this EDL renders from, or None.
+
+    When the agent erased burned-in text or an object, the pixels were fixed in
+    a copy of the source and the EDL points at it: full-res for the final, the
+    repainted 540p proxy for the preview, so the preview the user approves is
+    the one that ships. A preview with no repainted proxy falls back to the
+    full-res clean rather than to the ORIGINAL — slower, but showing the user
+    the text they just watched disappear would be a lie the reply would not
+    catch. Nothing else about rendering changes: the cleaned file has the same
+    duration, rate and audio, so every EDL and index timestamp still lands on
+    the same frame.
+    """
+    clean = (edl_json or {}).get("source_clean") or {}
+    key = clean.get("asset_key")
+    if not key:
+        return None
+    if variant == "preview":
+        return clean.get("proxy_key") or key
+    return key
+
+
 def outro_seconds(preview):
     """How much time the end card adds to a render of this variant.
 
@@ -1047,7 +1069,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         ofps = fps if (do_norm or not src_fps) else float(src_fps)
         parts.append(f"[{vlabel}]scale={oW}:{H},setsar=1,"
                      f"format=yuv420p[vprog]")
-        cw, ch = _even(oW * 0.62), _even(H * 0.55)
+        cw, ch = _even(oW * 0.72), _even(H * 0.62)
         parts.append(f"color=c=black:s={oW}x{H}:r={ofps:.3f}:d={outro_s:.3f},"
                      f"format=rgba[obg]")
         # One square-ish card fits every aspect ratio: scaled to fit inside a
@@ -1706,6 +1728,14 @@ def run_render_job(worker_db, job):
             proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
             if proxy:
                 src_asset = proxy
+        clean_key = clean_source_key(edl_row["json"], variant)
+        if clean_key:
+            if not storage.exists(clean_key):
+                raise RuntimeError(
+                    "The cleaned source for this edit is missing from storage "
+                    f"({clean_key}) — re-run the erase so the repainted video "
+                    "exists before rendering")
+            src_asset = {"storage_key": clean_key}
 
     workdir = os.path.join(config.TMP_DIR, f"render_{job_id}")
     os.makedirs(workdir, exist_ok=True)

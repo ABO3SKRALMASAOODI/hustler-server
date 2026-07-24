@@ -758,6 +758,48 @@ class Master(BaseModel):
     loudness: Optional[Literal["social"]] = None
 
 
+CLEAN_FILLS = ("text", "box")
+
+
+class CleanRegion(BaseModel):
+    """One rectangle that was REPAINTED OUT of the source pixels.
+
+    Unlike a RegionItem (which the renderer blurs or bars at render time),
+    this is already gone: the erase tool wrote a cleaned copy of the source
+    and the render reads that copy. The record is kept so the agent can list
+    what was erased, undo one of them (which re-cleans from the ORIGINAL —
+    never from an already-cleaned file, which would compound the repaint), and
+    so the fingerprint below can prove the cleaned file matches this EDL.
+
+    fill 'text' repaints only the letter strokes and keeps the picture behind
+    them; 'box' repaints the whole rectangle, for an object rather than ink.
+    """
+    id: str
+    x: float
+    y: float
+    w: float
+    h: float
+    start: Optional[float] = None
+    end: Optional[float] = None
+    fill: Literal["text", "box"] = "text"
+    kind: Optional[str] = None          # what the detector called it
+
+
+class SourceClean(BaseModel):
+    """Pointer to the repainted source this EDL renders from.
+
+    asset_key replaces the original for FINAL renders and proxy_key replaces
+    the 540p proxy for PREVIEWS, so what the user approves in the preview is
+    what ships. fp is a fingerprint of (original sha, regions): the renderer
+    refuses a cleaned file that does not match this EDL's regions rather than
+    silently rendering someone else's repaint.
+    """
+    asset_key: str
+    proxy_key: Optional[str] = None
+    fp: str
+    regions: List[CleanRegion] = Field(default_factory=list)
+
+
 class EDL(BaseModel):
     # keep is empty ONLY for a canvas program (image/clip-only, no main video);
     # otherwise it is the non-empty cut list of the one main video.
@@ -788,6 +830,10 @@ class EDL(BaseModel):
     # Empty list, so edl_signature drops it and every pre-round-37 EDL keeps
     # its signature and its cached renders.
     caption_mutes: List[List[float]] = Field(default_factory=list)
+    # round 39 — burned-in text/objects repainted OUT of the source pixels.
+    # None on every EDL written before it existed, and edl_signature drops
+    # None, so historical signatures and their cached renders are untouched.
+    source_clean: Optional[SourceClean] = None
 
 
 def default_edl(duration):
@@ -1396,6 +1442,42 @@ def validate_edl(data, duration=None):
                 and fx.grade_custom is None:
             edl.effects = None
 
+    if edl.source_clean is not None:
+        sc = edl.source_clean
+        if not sc.asset_key or not sc.fp:
+            raise EDLValidationError(
+                "source_clean needs both asset_key and fp — an EDL that "
+                "points at a repainted source without saying WHICH repaint "
+                "would render whatever file happened to be there.")
+        seen_c = set()
+        for i, cr in enumerate(sc.regions):
+            if not cr.id or cr.id in seen_c:
+                raise EDLValidationError(
+                    f"source_clean.regions[{i}].id must be non-empty and "
+                    "unique.")
+            seen_c.add(cr.id)
+            cr.x = round(min(max(float(cr.x), 0.0), 1.0 - REGION_MIN_FRAC), 3)
+            cr.y = round(min(max(float(cr.y), 0.0), 1.0 - REGION_MIN_FRAC), 3)
+            cr.w = round(min(max(float(cr.w), 0.0), 1.0 - cr.x), 3)
+            cr.h = round(min(max(float(cr.h), 0.0), 1.0 - cr.y), 3)
+            if cr.w < REGION_MIN_FRAC or cr.h < REGION_MIN_FRAC:
+                raise EDLValidationError(
+                    f"source_clean.regions[{i}]: the rectangle is too small "
+                    "or falls outside the frame — x/y/w/h are fractions of "
+                    "the frame (0-1), w and h at least 0.01.")
+            if (cr.start is None) != (cr.end is None):
+                raise EDLValidationError(
+                    f"source_clean.regions[{i}]: pass both start and end "
+                    "(SOURCE seconds), or neither for the whole video.")
+            if cr.start is not None:
+                # SOURCE time, not program time: the repaint happens on the
+                # source file before a single cut is applied, so its window
+                # cannot be checked against the program duration.
+                cr.start, cr.end = _r(cr.start), _r(cr.end)
+                if cr.end <= cr.start:
+                    raise EDLValidationError(
+                        f"source_clean.regions[{i}]: end must be after start.")
+
     return edl
 
 
@@ -1565,6 +1647,13 @@ def describe_edl(edl_dict, duration=None):
         parts.append(", ".join(bits))
     if edl.master and edl.master.loudness:
         parts.append(f"mastered ({edl.master.loudness} loudness)")
+    if edl.source_clean and edl.source_clean.regions:
+        # Named as ERASED, never as "censored"/"blurred": these pixels are
+        # repainted in the file the render reads, and describing that as a
+        # cover would put a lie in every EDL summary the agent quotes back.
+        erased = ", ".join(
+            f"{(r.kind or 'region')} [{r.id}]" for r in edl.source_clean.regions)
+        parts.append(f"erased from the source: {erased}")
     return ", ".join(parts)
 
 
