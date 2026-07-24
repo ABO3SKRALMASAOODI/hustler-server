@@ -398,6 +398,27 @@ def test_renderer_reads_the_cleaned_source():
     print("PASS: renderer picks the repainted source per variant")
 
 
+def test_replaced_video_drops_a_stale_repaint():
+    """Uploading a new video keeps the project's EDL, so a repaint of the OLD
+    upload must not be rendered — that would bring the replaced footage back."""
+    import renderer
+    import schemas
+
+    regions = [{"id": "er1", "x": 0.1, "y": 0.8, "w": 0.8, "h": 0.12,
+                "start": None, "end": None, "fill": "text", "kind": "captions"}]
+    edl = {"keep": [[0.0, 5.0]],
+           "source_clean": {"asset_key": "cleaned/1/x.mp4",
+                            "proxy_key": "cleaned/1/x_proxy.mp4",
+                            "fp": schemas.clean_fingerprint("sha-OLD", regions),
+                            "regions": regions}}
+    assert renderer.clean_source_key(edl, "final", "sha-OLD") == "cleaned/1/x.mp4"
+    assert renderer.clean_source_key(edl, "final", "sha-NEW") is None
+    assert renderer.clean_source_key(edl, "preview", "sha-NEW") is None
+    # unknown sha (canvas / legacy call sites) keeps today's behaviour
+    assert renderer.clean_source_key(edl, "final") == "cleaned/1/x.mp4"
+    print("PASS: a repaint of a replaced upload is ignored")
+
+
 class _FakeStorage:
     """In-memory stand-in for R2, so the whole tool path runs offline."""
 

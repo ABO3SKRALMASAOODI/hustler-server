@@ -3,7 +3,6 @@ short instructive string the model can act on, every output fits the token
 budget. Write tools create new EDL versions and return one-line diffs."""
 
 import difflib
-import hashlib
 import json
 import os
 import re
@@ -27,7 +26,8 @@ import timeline as timeline_mod
 import url_media
 import webrecord
 from captions import KARAOKE_HARD_MAX
-from schemas import (CANVAS_DIMS, CaptionStyle, EDLValidationError, Frame,
+from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
+                     EDLValidationError, Frame,
                      HEX_COLOR,
                      canvas_edl, clip_anim, describe_edl, DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
@@ -2080,10 +2080,9 @@ def _original_local(ctx):
 
 
 def _clean_fp(sha, regions):
-    payload = json.dumps([{k: r.get(k) for k in
-                           ("x", "y", "w", "h", "start", "end", "fill")}
-                          for r in regions], sort_keys=True)
-    return hashlib.sha1((sha + payload).encode()).hexdigest()
+    # One implementation, shared with the renderer: it proves at render time
+    # that the cleaned file is a repaint of THIS project's current video.
+    return clean_fingerprint(sha, regions)
 
 
 def _run_clean(ctx, regions):

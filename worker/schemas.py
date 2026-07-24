@@ -6,6 +6,7 @@ filtergraphs. A TypeScript mirror of the EDL type lives in the frontend repo
 at src/types/edl.ts — keep the two in sync.
 """
 
+import hashlib
 import json
 import re
 from typing import List, Literal, Optional, Union
@@ -759,6 +760,22 @@ class Master(BaseModel):
 
 
 CLEAN_FILLS = ("text", "box")
+
+
+def clean_fingerprint(src_sha, regions):
+    """Identity of a repainted source: (which video, which rectangles).
+
+    Shared by the tool that WRITES the cleaned file and the renderer that
+    READS it, so the renderer can prove the file it is about to render is a
+    repaint of the video this project currently holds. That check is what
+    stops a replaced upload from rendering the OLD footage: the EDL survives a
+    replace, so without it a project whose captions were erased would keep
+    rendering the erased copy of the video the user just swapped out.
+    """
+    payload = json.dumps([{k: r.get(k) for k in
+                           ("x", "y", "w", "h", "start", "end", "fill")}
+                          for r in (regions or [])], sort_keys=True)
+    return hashlib.sha1(((src_sha or "") + payload).encode()).hexdigest()
 
 
 class CleanRegion(BaseModel):

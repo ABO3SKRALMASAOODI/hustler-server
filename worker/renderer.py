@@ -30,8 +30,8 @@ import music_library
 import sfx_library
 import sheets
 import storage
-from schemas import (EDLValidationError, is_canvas_program, speed_pieces,
-                     validate_edl)
+from schemas import (clean_fingerprint, EDLValidationError,
+                     is_canvas_program, speed_pieces, validate_edl)
 from timeline import Timeline, merge_spans
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -256,7 +256,7 @@ def endcard_path():
     return ENDCARD_PATH if os.path.exists(ENDCARD_PATH) else None
 
 
-def clean_source_key(edl_json, variant):
+def clean_source_key(edl_json, variant, src_sha=None):
     """Round 39 — the REPAINTED source this EDL renders from, or None.
 
     When the agent erased burned-in text or an object, the pixels were fixed in
@@ -272,6 +272,17 @@ def clean_source_key(edl_json, variant):
     clean = (edl_json or {}).get("source_clean") or {}
     key = clean.get("asset_key")
     if not key:
+        return None
+    # An EDL outlives a video REPLACEMENT (uploading a new file keeps the
+    # project's edit), so a repaint of the old upload would otherwise render
+    # the old footage entirely — the user swaps their video and watches the
+    # previous one come back. The fingerprint ties the cleaned file to the
+    # source sha it was made from: when it no longer matches, this project's
+    # current video was simply never cleaned, so render it as it is.
+    if src_sha and clean.get("fp") and clean["fp"] != clean_fingerprint(
+            src_sha, clean.get("regions") or []):
+        print(f"[render] ignoring cleaned source {key}: it is a repaint of a "
+              "different upload (the video was replaced)", flush=True)
         return None
     if variant == "preview":
         return clean.get("proxy_key") or key
@@ -1728,7 +1739,7 @@ def run_render_job(worker_db, job):
             proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
             if proxy:
                 src_asset = proxy
-        clean_key = clean_source_key(edl_row["json"], variant)
+        clean_key = clean_source_key(edl_row["json"], variant, src_sha)
         if clean_key:
             if not storage.exists(clean_key):
                 raise RuntimeError(
