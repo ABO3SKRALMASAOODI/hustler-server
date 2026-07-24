@@ -44,17 +44,24 @@ VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "120"))
 # Empty IMAGE_GEN_MODEL disables the generate_image tool everywhere gracefully,
 # same contract as VISION_MODEL.
 # MODEL ID HISTORY — image gen has 404'd on xAI TWICE now, silently, for weeks:
-#   grok-2-image       -> never a valid xAI id (404 "not-found"), Jul 17-21 2026
-#   grok-2-image-1212  -> valid, but DEPRECATED 2026-02-24; the round-33 "fix"
-#                         swapped one 404 for another and was never live-checked
-#   grok-imagine-image -> the replacement xAI's own 404 body names. Current.
+#   grok-2-image        -> never a valid xAI id (404 "not-found"), Jul 17-21 2026
+#   grok-2-image-1212   -> valid once, DEPRECATED 2026-02-24; the round-33 "fix"
+#                          swapped one 404 for another and was never live-checked
+#   grok-imagine-image* -> the Grok Imagine family that replaced it (Jan 2026).
+# *WHICH id: the live 404 body said "use grok-imagine-image", but xAI's official
+# docs (docs.x.ai/developers/model-capabilities/images/generation, checked Jul 24
+# 2026) use grok-imagine-image-QUALITY in EVERY code sample for /v1/images/
+# generations — the bare name is ambiguous/contested. We use the id the docs
+# actually call, to avoid a third silent 404. (grok-imagine-image-pro was
+# retired 2026-05-15.) Price below tracks the -quality tier (~$0.055/image).
 # Every attempt is logged to llm_calls (purpose 'image_gen') with the model and
 # the error, so `SELECT model, count(*) FILTER (WHERE response->>'error' IS NOT
-# NULL) FROM llm_calls WHERE purpose='image_gen' GROUP BY 1` tells you in one
-# query whether the id is live. RUN IT after changing this — a wrong id here is
-# invisible in the UI (the agent just says it couldn't make an image) and keeps
-# IMAGE_PRICE_USD charging nothing while the feature is dead.
-IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "grok-imagine-image")
+# NULL), count(*) FROM llm_calls WHERE purpose='image_gen' GROUP BY 1` tells you
+# in one query whether the id is live. RUN IT after deploy — a wrong id here is
+# invisible in the UI (the agent just says it couldn't make an image). If it
+# still 404s, the error body names the id xAI wants; set IMAGE_GEN_MODEL to it
+# on the worker (no redeploy) and sync IMAGE_PRICE_USD to its real price.
+IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "grok-imagine-image-quality")
 # Frame/image restyling model — only used by the DashScope backend. Empty on
 # the OpenAI/xAI backend (which has no image-edit endpoint).
 IMAGE_EDIT_MODEL = os.getenv("IMAGE_EDIT_MODEL", "")
@@ -91,11 +98,11 @@ VIDEO_GEN_MODEL = os.getenv(
     "VIDEO_GEN_MODEL", "fal-ai/kling-video/v2.5-turbo/pro/image-to-video")
 FAL_QUEUE_URL = os.getenv("FAL_QUEUE_URL", "https://queue.fal.run")
 VIDEO_MAX_SECONDS = float(os.getenv("VIDEO_MAX_SECONDS", "10"))
-# Kept UNDER AGENT_TURN_TIMEOUT_S (default 450) so a slow fal job fails inside
-# the turn instead of pinning a scarce agent slot ~2x past the turn budget on
-# the 1-vCPU worker (the round-19/28 slot-starvation class). Submit(30) +
-# poll(240) + response(30) + download(90) ≈ 390 < 450. Raise BOTH this and
-# AGENT_TURN_TIMEOUT_S together if you use a slower video model.
+# Kept UNDER AGENT_TURN_TIMEOUT_S (default 720) so a slow fal job fails inside
+# the turn instead of pinning a scarce agent slot past the turn budget on the
+# 1-vCPU worker (the round-19/28 slot-starvation class). Submit(30) + poll(240)
+# + response(30) + download(90) ≈ 390 < 720. Raise this if you use a slower
+# video model, keeping it under AGENT_TURN_TIMEOUT_S.
 VIDEO_POLL_TIMEOUT_S = float(os.getenv("VIDEO_POLL_TIMEOUT_S", "240"))
 VIDEO_POLL_INTERVAL_S = float(os.getenv("VIDEO_POLL_INTERVAL_S", "6"))
 MAX_GENERATED_VIDEOS_PER_TURN = int(
@@ -236,7 +243,19 @@ AGENT_TEMPERATURE = 0.2
 # Wall-clock ceiling for one agent turn — a generous final backstop, not a
 # leash. On expiry the loop stops, saves whatever it finished, and posts an
 # honest message — never a silent "Editing…" forever.
-AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "450"))
+# 720 (was 450): a real edit that ends in a preview render was landing right at
+# the old ceiling — on the 1-vCPU box a preview alone is ~60-100s, so a turn
+# doing genuine work plus a render had almost no margin and got cut mid-finish
+# (prod job 456: 509s > 450). The efficiency fixes (add_title_card /
+# add_color_screen collapse ~30 build/teardown calls to a few) and the
+# in-turn time-pressure warnings at 0.55/0.8 do most of the work; this is the
+# headroom so a legitimately busy turn finishes instead of being guillotined.
+# The reaper does NOT fight this — a live turn's heartbeat thread keeps its
+# slot healthy, so the turn timeout is the true ceiling. VIDEO_POLL_TIMEOUT_S
+# (240) and FETCH_TIMEOUT_S (180) still sit safely under it. Cost of raising:
+# a genuinely stuck turn holds one shared agent slot longer, so do NOT push
+# this to many minutes on a 1-vCPU box.
+AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "720"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # Transcript tools get a far larger budget: silently dropping the tail of a
@@ -268,7 +287,10 @@ AGENT_TURN_BUDGET_GRACE = float(os.getenv("AGENT_TURN_BUDGET_GRACE", "3"))
 # (Must mirror db.charge_turn_credits so the in-turn cap and final charge agree.)
 LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
 LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
-IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.07"))
+# Per-image charge (1 credit = $0.01). 0.055 tracks grok-imagine-image-quality
+# (see IMAGE_GEN_MODEL); if you switch IMAGE_GEN_MODEL, set this to that tier's
+# real per-image price or credits drift from cost.
+IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.055"))
 # AI sound effect: ElevenLabs bills a flat cost per generation — keep this in
 # sync with your plan's per-sound-effect price (charged at 1 credit = $0.01).
 SFX_PRICE_USD = float(os.getenv("SFX_PRICE_USD", "0.08"))
