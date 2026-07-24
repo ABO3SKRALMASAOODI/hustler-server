@@ -168,6 +168,65 @@ def test_muting_everything_yields_no_ass_file():
     assert captions.build_ass(e, INDEX, tl, path) is None
 
 
+# ── 3b. no caption may hold across a spliced screen ─────────────────────── #
+
+def _windows(edl):
+    tl = Timeline([list(k) for k in edl["keep"]], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    return [(round(s, 2), round(s + d, 2)) for s, d in tl.insert_positions()]
+
+
+def _overlap_count(edl):
+    tl = Timeline([list(k) for k in edl["keep"]], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    path = os.path.join(tempfile.mkdtemp(), "c.ass")
+    if not captions.build_ass(edl, INDEX, tl, path):
+        return 0
+    wins = _windows(edl)
+    n = 0
+    for ln in open(path):
+        if not ln.startswith("Dialogue"):
+            continue
+        s0, s1 = _start_s(ln), _end_s(ln)
+        for w0, w1 in wins:
+            if min(s1, w1) - max(s0, w0) > 0.15:
+                n += 1
+    return n
+
+
+def test_no_caption_holds_across_a_short_insert_in_any_mode():
+    """A 0.3s screen makes only a 0.3s output gap — under the 1.2s flush — so
+    grouping used to pack words from both sides into one caption that spanned
+    it, and premium/karaoke held the prior caption across it. Both are fixed:
+    grouping breaks at the insert AND the display end is clamped to it."""
+    base = {"keep": [[0.0, 6.0], [6.0, 30.0]],
+            "inserts": [{"id": "ins1", "asset_key": "generated/1/card.png",
+                         "kind": "image", "at_output_s": 6.0,
+                         "duration_s": 0.3}]}
+    for style in (None, {"preset": "luxe"}, {"preset": "karaoke"},
+                  {"dynamic": True}):
+        e = _dump({**base,
+                   "captions": {"mode": "from_transcript",
+                                "max_words_per_caption": 3, "style": style}},
+                  30.0)
+        assert _overlap_count(e) == 0, f"{style} caption spans the screen"
+
+
+def test_insert_break_passes_are_noops_without_inserts():
+    """Legacy render identity: an EDL with no inserts must build byte-identical
+    captions — the break/clamp passes touch nothing."""
+    ev = [{"start": 1.0, "end": 2.0, "text": "a"}]
+    words = [{"w": "x", "t0": 1.0, "t1": 2.0}]
+
+    class NoInsertTL:
+        def insert_positions(self):
+            return []
+
+    assert captions._clamp_events_to_inserts(ev, NoInsertTL()) is ev
+    assert captions._mark_insert_breaks(words, NoInsertTL()) is words
+    assert "brk" not in words[0]
+
+
 # ── 4. title cards ──────────────────────────────────────────────────────── #
 
 def test_inserted_card_time_carries_no_captions():

@@ -2799,34 +2799,49 @@ def set_caption_mutes(ctx, spans=None):
     return result
 
 
-# Solid-colour cards are synthesized locally with Pillow: a title card must
-# never depend on the image-generation API (which has 404'd for weeks at a
-# time — see config.IMAGE_GEN_MODEL) or on fetching a colour swatch off the
-# public internet, which is what the agent resorted to before this tool
-# existed.
+# Colour cards are synthesized locally with Pillow: a blank/solid/gradient
+# screen must never depend on the image-generation API (which has 404'd for
+# weeks at a time — see config.IMAGE_GEN_MODEL) or on fetching a colour swatch
+# off the public internet, which is what the agent resorted to before these
+# tools existed.
 CARD_DIMS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080),
              "4:3": (1440, 1080), "3:4": (1080, 1440)}
+CARD_DIRECTIONS = ("vertical", "horizontal", "diagonal", "radial")
 
 
-def _solid_card_asset(ctx, color):
-    """Get (or create) a project image asset that is one flat colour at the
-    output aspect. Cached per (project, colour, aspect) so a four-card
-    sequence uploads one image, not four."""
+def _hex_rgb(color):
+    c = color.lstrip("#")
+    return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _color_card_asset(ctx, color, color2=None, direction="vertical"):
+    """Get (or create) a project image asset that is a flat colour (color2
+    None) or a two-colour gradient, at the output aspect. Cached per
+    (project, colour(s), direction, aspect) so a repeated card uploads one
+    image, not many."""
     aspect = _default_image_aspect(ctx)
     w, h = CARD_DIMS.get(aspect, CARD_DIMS["16:9"])
-    ck = (color.upper(), aspect)
+    c1 = color.upper()
+    c2 = color2.upper() if color2 else None
+    ck = (c1, c2, direction if c2 else None, aspect)
     hit = getattr(ctx, "_card_assets", None)
     if hit is None:
         hit = ctx._card_assets = {}
     if ck in hit:
         return hit[ck], None
     from PIL import Image
-    path = os.path.join(ctx.workdir, f"card_{color.lstrip('#')}_{w}x{h}.png")
-    rgb = tuple(int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
     try:
-        Image.new("RGB", (w, h), rgb).save(path)
+        if not c2:
+            img = Image.new("RGB", (w, h), _hex_rgb(c1))
+            label, kind = f"Solid {c1}", "solid"
+        else:
+            img = _gradient_image(w, h, _hex_rgb(c1), _hex_rgb(c2), direction)
+            label, kind = f"{c1}->{c2} {direction} gradient", "gradient"
+        tag = c1.lstrip("#") + (("-" + c2.lstrip("#")) if c2 else "")
+        path = os.path.join(ctx.workdir, f"card_{tag}_{w}x{h}.png")
+        img.save(path)
     except Exception as e:
-        return None, f"Could not build the card image ({str(e)[:120]})."
+        return None, f"Could not build the colour card ({str(e)[:120]})."
     key = f"generated/{ctx.project_id}/card-{uuid.uuid4().hex[:12]}.png"
     try:
         storage.upload_file(path, key, "image/png")
@@ -2835,11 +2850,90 @@ def _solid_card_asset(ctx, color):
                       f"({str(e)[:120]}). Try again.")
     ctx.db.run(dbx.insert_asset, ctx.project_id, "image_ref", key,
                bytes_=os.path.getsize(path), width=w, height=h,
-               meta={"filename": f"title-card-{color.lstrip('#')}.png",
-                     "caption": f"Solid {color} title card ({w}x{h})",
-                     "generated": True, "model": "local:solid"})
+               meta={"filename": f"color-card-{tag}.png",
+                     "caption": f"{label} card ({w}x{h})",
+                     "generated": True, "model": f"local:{kind}"})
     hit[ck] = key
     return key, None
+
+
+def _gradient_image(w, h, rgb1, rgb2, direction):
+    """A two-colour linear/radial gradient. numpy-vectorised (already a hard
+    dependency of the worker) so a 1080x1920 card builds in a few ms."""
+    import numpy as np
+    from PIL import Image
+    if direction == "radial":
+        yy, xx = np.mgrid[0:h, 0:w]
+        cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+        d = np.sqrt(((xx - cx) / cx) ** 2 + ((yy - cy) / cy) ** 2)
+        t = np.clip(d / np.sqrt(2.0), 0.0, 1.0)
+    elif direction == "horizontal":
+        t = np.tile(np.linspace(0.0, 1.0, w), (h, 1))
+    elif direction == "diagonal":
+        gx = np.linspace(0.0, 1.0, w)[None, :]
+        gy = np.linspace(0.0, 1.0, h)[:, None]
+        t = np.clip((gx + gy) / 2.0, 0.0, 1.0)
+    else:                                            # vertical (default)
+        t = np.tile(np.linspace(0.0, 1.0, h), (w, 1)).T
+    t = t[..., None]
+    c1 = np.array(rgb1, dtype=np.float32)
+    c2 = np.array(rgb2, dtype=np.float32)
+    arr = (c1 * (1.0 - t) + c2 * t).astype(np.uint8)
+    return Image.fromarray(arr, "RGB")
+
+
+# Back-compat alias: add_title_card was written against the solid-only helper.
+def _solid_card_asset(ctx, color):
+    return _color_card_asset(ctx, color)
+
+
+def add_color_screen(ctx, at_output_s, duration_s=2.0, color="#000000",
+                     color2=None, direction="vertical", motion=None):
+    """Cut to a full-frame SOLID or GRADIENT colour screen for a moment, then
+    return to the footage — no text, no image generation. Built locally."""
+    c1 = (color or "#000000").strip().upper()
+    if not HEX_COLOR.match(c1):
+        return "REJECTED: color must be #RRGGBB hex, e.g. #FFFFFF for white."
+    c2 = None
+    if color2:
+        c2 = str(color2).strip().upper()
+        if not HEX_COLOR.match(c2):
+            return ("REJECTED: color2 must be #RRGGBB hex (the gradient's "
+                    "second colour), or omit it for a flat fill.")
+    direction = (direction or "vertical").strip().lower()
+    if direction not in CARD_DIRECTIONS:
+        return (f"REJECTED: direction must be one of "
+                f"{', '.join(CARD_DIRECTIONS)}.")
+    try:
+        at = float(at_output_s)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s must be a number — where in the FINAL "
+                "edited video the screen cuts in, in seconds.")
+    try:
+        dur = round(min(max(float(duration_s), 0.2), 30.0), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: duration_s must be a number of seconds."
+    if motion is not None:
+        motion = str(motion).strip().lower() or None
+        if motion and motion not in INSERT_MOTIONS:
+            return (f"REJECTED: motion must be one of "
+                    f"{', '.join(INSERT_MOTIONS)}.")
+
+    key, err = _color_card_asset(ctx, c1, c2, direction)
+    if err:
+        return err
+    placed = insert_media(ctx, key, at, duration_s=dur, motion=motion)
+    if not placed.startswith("EDL v"):
+        return placed
+    look = (f"a {direction} {c1}->{c2} gradient" if c2 else f"solid {c1}")
+    named = {"#FFFFFF": " (white)", "#000000": " (black)"}.get(c1, "")
+    result = placed.split(". Before:")[0]
+    result += (f"\nThis is {look}{named if not c2 else ''} — a full-frame "
+               "colour screen with NO text (add_text over it, or use "
+               "add_title_card if you wanted a titled card). Spoken-word "
+               "captions do not appear on it (inserted media is never "
+               "captioned), so nothing overlaps.")
+    return result
 
 
 def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
@@ -5145,6 +5239,27 @@ TOOLS = {
                                  "enum": [a for a in TEXT_ANIMS
                                           if a != "typewriter"]},
                         "subtitle": {"type": "string"}}),
+    "add_color_screen": (add_color_screen, "Cut to a full-frame SOLID or "
+                         "GRADIENT colour screen for a moment, then return to "
+                         "the footage — NO text, NO image generation, built "
+                         "instantly. Use for a plain white/black flash, a "
+                         "coloured interstitial, or a gradient backdrop. "
+                         "color is '#RRGGBB' (default black; '#FFFFFF' is "
+                         "white); pass color2 for a two-colour gradient with "
+                         "direction vertical/horizontal/diagonal/radial. "
+                         "at_output_s is PROGRAM seconds; everything after it "
+                         "shifts later by duration_s. motion adds a slow Ken "
+                         "Burns push on the screen. For a card WITH a word on "
+                         "it use add_title_card; to put text over this screen "
+                         "afterwards, add_text at the same window.",
+                         {"at_output_s": {"type": "number"},
+                          "duration_s": {"type": "number"},
+                          "color": {"type": "string"},
+                          "color2": {"type": "string"},
+                          "direction": {"type": "string",
+                                        "enum": list(CARD_DIRECTIONS)},
+                          "motion": {"type": "string",
+                                     "enum": list(INSERT_MOTIONS)}}),
     "set_caption_mutes": (set_caption_mutes, "Hide the burned spoken-word "
                           "captions over specific PROGRAM-time windows, "
                           "leaving them on everywhere else — for when a "
@@ -5325,6 +5440,7 @@ REQUIRED_ARGS = {
     "add_text": ["text", "start", "end"],
     "remove_text": ["id"],
     "add_title_card": ["text", "at_output_s"],
+    "add_color_screen": ["at_output_s"],
     "set_caption_mutes": ["spans"],
     "add_stylize": ["kind"],
     "remove_stylize": ["id"],
@@ -5362,7 +5478,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "set_speed", "remove_speed",
                "add_overlay", "move_overlay", "remove_overlay",
                "add_text", "remove_text",
-               "add_title_card", "set_caption_mutes",
+               "add_title_card", "add_color_screen", "set_caption_mutes",
                "add_stylize", "remove_stylize",
                "set_grade_custom", "set_master_loudness",
                "punch_in_on_emphasis", "sound_design_pass",

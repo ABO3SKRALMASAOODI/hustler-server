@@ -462,6 +462,47 @@ def line_chars_for(style, play_res=BASE_PLAY_RES):
     return max(8, min(MAX_LINE_CHARS, int(usable / (0.52 * font))))
 
 
+def _clamp_events_to_inserts(events, tl):
+    """Shorten any caption whose DISPLAY tail holds across an inserted screen.
+    Grouping is broken at inserts (_mark_insert_breaks) so no event's WORDS
+    span one, but premium/karaoke extend an event's end to hold until the next
+    caption — that hold would stretch the last pre-insert caption over the
+    insert. No word ever plays during an insert, so clamping the end down to
+    the insert's start only trims dead hold time; word \\k timings (all before
+    the insert) are untouched. Never moves a start."""
+    windows = tl.insert_positions() if tl else []
+    if not windows or not events:
+        return events
+    for ev in events:
+        for ws, wd in windows:
+            if ev["start"] < ws - 0.001 and ev["end"] > ws:
+                ev["end"] = ws
+    return [ev for ev in events if ev["end"] - ev["start"] > 0.02]
+
+
+def _mark_insert_breaks(out_words, tl):
+    """Flag the first spoken word after each spliced insert with brk=True, so
+    caption grouping never packs words from both sides of an inserted screen
+    into ONE caption event — that event would span the insert and burn over it.
+    A LONG insert already forces a flush via the >1.2s output-time gap; a SHORT
+    one (a 0.3s white flash) does not, which is the case this covers. Only
+    inserts create the discontinuity here — a plain hard cut between kept
+    segments is left grouping exactly as before, so no insert-free EDL's
+    captions (or their render cache) change."""
+    windows = tl.insert_positions() if tl else []
+    if not windows or not out_words:
+        return out_words
+    prev_end = None
+    for w in out_words:
+        if prev_end is not None:
+            for ws, wd in windows:
+                if prev_end <= ws + 0.02 and ws + wd <= w["t0"] + 0.02:
+                    w["brk"] = True
+                    break
+        prev_end = w["t1"]
+    return out_words
+
+
 def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS):
     """out_words: [{'w','t0','t1'}] already in OUTPUT time (kept words only).
     Groups words into events of at most 2 lines x line_chars chars — or at
@@ -486,7 +527,7 @@ def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS)
         gap = (w["t0"] - group[-1]["t1"]) if group else 0.0
         full = (chars + 1 + len(w["w"]) > limit or
                 (max_words and len(group) >= max_words))
-        if group and (full or gap > 1.2):
+        if group and (full or gap > 1.2 or w.get("brk")):
             flush()
         group.append(w)
         chars += (1 if chars else 0) + len(w["w"])
@@ -530,7 +571,7 @@ def events_dynamic(out_words, style=None, max_words=None,
     for w in out_words:
         would = chars + (1 if chars else 0) + len(w["w"])
         if cur and (w["t0"] - cur[-1]["t1"] > 1.2 or len(cur) >= group_n
-                    or would > line_chars):
+                    or would > line_chars or w.get("brk")):
             chunks.append(cur)
             cur, chars = [], 0
             would = len(w["w"])
@@ -770,7 +811,7 @@ def _premium_chunks(out_words, max_w, chunk_chars):
     for w in out_words:
         would = chars + (1 if chars else 0) + len(w["w"])
         if cur and (w["t0"] - cur[-1]["t1"] > 1.2 or len(cur) >= max_w
-                    or would > chunk_chars):
+                    or would > chunk_chars or w.get("brk")):
             chunks.append(cur)
             cur, chars = [], 0
             would = len(w["w"])
@@ -1319,7 +1360,8 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
     if not captions:
         return None
     if isinstance(captions, dict) and captions.get("mode") == "from_transcript":
-        out_words = tl.kept_words(index.get("words", []))
+        out_words = _mark_insert_breaks(tl.kept_words(index.get("words", [])),
+                                        tl)
         global_style = captions.get("style")
         if _preset_of(_norm_style(global_style)):
             events = events_premium(
@@ -1352,6 +1394,7 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         global_style = None
     else:
         return None
+    events = _clamp_events_to_inserts(events, tl)
     events = apply_mutes(events, edl.get("caption_mutes"))
     if not events:
         return None
