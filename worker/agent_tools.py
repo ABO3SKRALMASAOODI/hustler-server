@@ -5599,11 +5599,15 @@ TOOLS = {
                                    "enum": list(TRANSITION_STYLES)
                                    + ["none"]},
                          "duration_s": {"type": "number"}}),
-    "blur_region": (blur_region, "Blur, pixelate or black-out a fixed "
-                    "RECTANGLE of the original footage — THE tool to "
-                    "remove/censor a burned-in username, gamertag, "
-                    "watermark, logo or other on-screen text (pixels can't "
-                    "be erased, but this hides them). x,y = TOP-LEFT corner "
+    "blur_region": (blur_region, "Put a VISIBLE censor over a fixed "
+                    "RECTANGLE of the original footage — blur, mosaic or a "
+                    "black bar. Use it when the user WANTS the covering to "
+                    "show: a face, a document, a phone number, a plate. To "
+                    "make something GO AWAY instead — burned-in captions, a "
+                    "watermark, a username, an object — use erase_region / "
+                    "erase_burned_text, which repaint the pixels and rebuild "
+                    "the picture behind them; a blur where the user asked "
+                    "for removal reads as a workaround. x,y = TOP-LEFT corner "
                     "and w,h = size, all as FRACTIONS (0-1) of the SOURCE "
                     "frame — exactly the frames look_at shows you; a 9:16 "
                     "or other output reframe moves the censored footage "
