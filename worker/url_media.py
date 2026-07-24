@@ -44,6 +44,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from urllib.parse import urlparse, unquote
 
@@ -306,6 +307,12 @@ def _extract(url, workdir, prefer=None, client_override=None):
            "-o", os.path.join(workdir, "dl.%(ext)s")]
     if client_override:
         cmd += ["--extractor-args", f"youtube:player_client={client_override}"]
+    # Operator-supplied cookies (see config.YTDLP_COOKIES_FILE). Checked for
+    # existence every call rather than at import: a missing secret file must
+    # degrade to the normal anonymous attempt, not crash every fetch.
+    cookies = config.YTDLP_COOKIES_FILE
+    if cookies and os.path.isfile(cookies):
+        cmd += ["--cookies", cookies]
     if prefer == KIND_AUDIO:
         # The user asked for a song. Pulling the video track and throwing it
         # away wastes the bulk of the download.
@@ -369,31 +376,63 @@ def _extract(url, workdir, prefer=None, client_override=None):
     return path, info
 
 
+def _clear_partials(workdir):
+    """Drop partial files so the largest-file pick after a retry can never
+    hand back a fragment of the failed attempt."""
+    for p in glob.glob(os.path.join(workdir, "dl.*")):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
 def _extract_with_fallback(url, workdir, prefer=None):
-    """_extract, with one alternate-client retry on YouTube's bot wall.
+    """_extract, walking alternate player clients on YouTube's bot wall.
 
     Real user impact before this: a pasted youtu.be link failed with 'Sign
-    in to confirm you're not a bot' on the very first customer who tried it —
-    Render's egress IP is a datacenter address, which the default web client
-    challenges. The tv/mweb clients are challenged far less; when they fail
-    too, the original honest error is what the user sees."""
+    in to confirm you're not a bot' on the very first customer who tried it,
+    and again on the founder's own music-video link. Render's egress is a
+    datacenter IP, which the default web client is challenged on almost
+    every time.
+
+    Two things to be honest about:
+      - No client is a fix. The challenge is an IP-reputation check, so the
+        chain is a real improvement (each client is challenged at a
+        different rate) and NOT a guarantee. config.YTDLP_COOKIES_FILE is
+        the only reliable answer, and it is an operator decision.
+      - Bot-wall failures are fast — they come back during extraction,
+        before any media is downloaded — so walking several clients costs
+        seconds. The deadline below exists for the pathological case where
+        an attempt starts downloading and then fails, which could otherwise
+        stack full FETCH_TIMEOUT_S waits and eat the agent's whole turn.
+    """
     try:
         return _extract(url, workdir, prefer=prefer)
     except FetchMediaError as e:
         if not _bot_walled(str(e)):
             raise
-        # Drop any partial files so the largest-file pick after the retry
-        # can never hand back a fragment of the failed attempt.
-        for p in glob.glob(os.path.join(workdir, "dl.*")):
+        deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
+        for client in config.YTDLP_FALLBACK_CLIENTS:
+            if time.monotonic() >= deadline:
+                break
+            _clear_partials(workdir)
             try:
-                os.remove(p)
-            except OSError:
-                pass
-        try:
-            return _extract(url, workdir, prefer=prefer,
-                            client_override="tv,mweb")
-        except FetchMediaError:
-            raise e
+                return _extract(url, workdir, prefer=prefer,
+                                client_override=client)
+            except FetchMediaError as retry_err:
+                # A DIFFERENT failure means this client got past the wall and
+                # hit something real (private, region-locked, removed). That
+                # is the useful error — stop cycling and report it.
+                if not _bot_walled(str(retry_err)):
+                    raise
+        _clear_partials(workdir)
+        raise FetchMediaError(
+            "YouTube blocked the download from our server (\"sign in to "
+            "confirm you're not a bot\"). This is YouTube refusing our "
+            "datacenter IP, not a problem with the link — it usually still "
+            "plays fine in your own browser. Download the file yourself and "
+            "attach it with the paperclip in chat (mp3/wav/m4a for audio, "
+            "mp4/mov for video) and it will drop straight into the edit.")
 
 
 def _download_direct(url, workdir):

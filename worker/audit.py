@@ -39,6 +39,53 @@ def midword_boundaries(keep, words, duration=None):
     return out
 
 
+def speech_gaps(words, duration, min_s=0.7, silences=None):
+    """Spans of the source where NOBODY IS TALKING, from the word timings.
+
+    This is what a user means by "cut the silences". The index's `silences`
+    are something narrower: spans where the WAVEFORM is below a noise floor.
+    On a talking-head in a quiet room the two agree, which is why the gap
+    went unnoticed — but on anything with a continuous bed (gameplay, music,
+    room noise, a stream) the audio never drops below the floor, so
+    ffmpeg's silencedetect returns NOTHING and the product told a real user
+    with a 2-minute gameplay clip that his video had no silences to cut
+    while he was looking at long stretches of nobody speaking.
+
+    Derived from `words`, which every index already carries, so it needs no
+    re-index and no PIPELINE_VERSION bump — it works on every project ever
+    uploaded, including the ones already sitting in the database.
+
+    Returns [{'start', 'end', 'quiet_frac'}], where quiet_frac is how much
+    of the gap is ALSO below the noise floor (1.0 = true silence, ~0.0 =
+    there is sound there, just not speech). Callers disclose the difference
+    rather than pretending a game explosion is silence.
+    """
+    # No transcript at all means no speech to find gaps BETWEEN. Returning
+    # the whole video as one gap would be literally true and operationally
+    # awful — a caller that trusted it would cut every frame — so the empty
+    # answer is given here rather than left for each call site to remember.
+    if not words:
+        return []
+    spans = sorted(((float(w["t0"] if isinstance(w, dict) else w.t0),
+                     float(w["t1"] if isinstance(w, dict) else w.t1))
+                    for w in words), key=lambda x: x[0])
+    gaps, cursor = [], 0.0
+    for t0, t1 in spans:
+        if t0 - cursor >= min_s:
+            gaps.append((round(cursor, 2), round(t0, 2)))
+        cursor = max(cursor, t1)
+    if duration and duration - cursor >= min_s:
+        gaps.append((round(cursor, 2), round(float(duration), 2)))
+
+    out = []
+    for s, e in gaps:
+        quiet = sum(max(0.0, min(e, qe) - max(s, qs))
+                    for qs, qe in (silences or []))
+        out.append({"start": s, "end": e,
+                    "quiet_frac": round(quiet / (e - s), 2) if e > s else 0.0})
+    return out
+
+
 def nearest_silence_midpoint(silences, t):
     best = None
     for s, e in silences or []:

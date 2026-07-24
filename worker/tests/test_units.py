@@ -2333,20 +2333,44 @@ check("no font override still defaults to DejaVu Sans",
 print("== Round-13: compound editing tools ==")
 import agent_tools                                            # noqa: E402
 
-# cut_silences: cuts every gap >= threshold, keeping padding around speech
+# cut_silences: cuts every gap >= threshold, keeping padding around speech.
+# NO transcript here, so it falls back to the quiet-waveform spans — the only
+# signal a speechless video (slideshow, montage) offers.
 _cs = DropCtx({"keep": [[0.0, 60.0]]})
 _cs.index = {"words": [], "video": {"duration": 60.0},
              "silences": [[10.0, 12.0], [20.0, 25.0], [30.0, 30.3]]}
 r = agent_tools.cut_silences(_cs, min_silence_s=0.5, padding_s=0.12)
 check("cut_silences cut the two long gaps, kept the sub-padding one",
-      r.startswith("EDL v") and "cut 2 silence" in r)
+      r.startswith("EDL v") and "cut 2 quiet span" in r)
 _kept = output_duration([list(x) for x in _cs.written["keep"]])
 check("cut_silences kept ~53.5s (60 - 1.76 - 4.76)",
       53.0 < _kept < 54.0)
 _cs2 = DropCtx({"keep": [[0.0, 60.0]]})
 _cs2.index = {"words": [], "video": {"duration": 60.0}, "silences": []}
 check("cut_silences reports nothing to cut when there are no silences",
-      "No silences" in agent_tools.cut_silences(_cs2))
+      "nothing to cut by silence" in agent_tools.cut_silences(_cs2))
+
+# Round 40 regression — the gameplay clip that got told it was already tight.
+# Continuous game audio keeps the waveform above the noise floor, so
+# silencedetect returns NOTHING while the player says nothing for most of the
+# clip. "Silence" must mean nobody talking, or this user is lied to again.
+# (DropCtx is a 60s double, so the real 2-minute case is scaled to fit it.)
+_gp = DropCtx({"keep": [[0.0, 60.0]]})
+_gp.index = {"video": {"duration": 60.0}, "silences": [],
+             "words": ([{"w": "a", "t0": i * 0.5, "t1": i * 0.5 + 0.4}
+                        for i in range(16)] +            # talks 0.0-7.9s
+                       [{"w": "b", "t0": 50 + i * 0.5, "t1": 50 + i * 0.5 + 0.4}
+                        for i in range(12)])}            # talks 50.0-55.9s
+_gr = agent_tools.cut_silences(_gp, min_silence_s=0.7, padding_s=0.12)
+check("cut_silences finds the pauses a game/music bed hides from silencedetect",
+      _gr.startswith("EDL v") and "gap(s) in the speech" in _gr)
+check("...and says the cut audio was NOT actually quiet",
+      "HONESTY" in _gr and "NOT quiet" in _gr)
+_gkept = output_duration([list(x) for x in _gp.written["keep"]])
+check("...cutting the ~42s + ~4s nobody was talking over, keeping the talking",
+      13.0 < _gkept < 16.0)
+check("find_silences reports talking gaps, not an empty waveform answer",
+      "gap(s) in the speech" in agent_tools.find_silences(_gp))
 
 # remove_filler_words: cuts exact word spans for um/uh/etc.
 _fw = DropCtx({"keep": [[0.0, 60.0]]})
@@ -4490,6 +4514,80 @@ check("a private address is rejected even when allowlisted",
       not net_fetch._ip_is_public(net_fetch._parse_ip("127.0.0.1"))
       and not net_fetch._ip_is_public(net_fetch._parse_ip("169.254.169.254"))
       and net_fetch._ip_is_public(net_fetch._parse_ip("8.8.8.8")))
+
+# Round 40 — the bot-wall fallback chain. A pasted YouTube link failed for a
+# real customer AND for the founder's own music-video link; walking alternate
+# player clients is the best we can do without operator cookies, so the
+# control flow around it is pinned here.
+_real_extract = url_media._extract
+try:
+    _tried = []
+
+    def _walled(url, workdir, prefer=None, client_override=None):
+        _tried.append(client_override)
+        raise url_media.FetchMediaError("Sign in to confirm you're not a bot")
+
+    url_media._extract = _walled
+    try:
+        url_media._extract_with_fallback("https://youtu.be/x", "/tmp")
+        _msg = ""
+    except url_media.FetchMediaError as _e:
+        _msg = str(_e)
+    check("every fallback client is tried on a bot wall",
+          _tried == [None] + wconfig.YTDLP_FALLBACK_CLIENTS)
+    check("...then the user is told to attach the file, not just 'failed'",
+          "paperclip" in _msg and "not a problem with the link" in _msg)
+
+    # A different error behind the wall means a client got THROUGH and hit
+    # something real — that is the useful error, so stop cycling.
+    _tried.clear()
+
+    def _private(url, workdir, prefer=None, client_override=None):
+        _tried.append(client_override)
+        raise url_media.FetchMediaError(
+            "Sign in to confirm you're not a bot" if client_override is None
+            else "Private video")
+
+    url_media._extract = _private
+    try:
+        url_media._extract_with_fallback("https://youtu.be/x", "/tmp")
+        _msg2 = ""
+    except url_media.FetchMediaError as _e:
+        _msg2 = str(_e)
+    check("a real error behind the wall stops the chain and is reported",
+          _tried == [None, wconfig.YTDLP_FALLBACK_CLIENTS[0]]
+          and "Private video" in _msg2)
+
+    # A non-bot-wall first failure must not burn retries at all.
+    _tried.clear()
+
+    def _404(url, workdir, prefer=None, client_override=None):
+        _tried.append(client_override)
+        raise url_media.FetchMediaError("HTTP Error 404")
+
+    url_media._extract = _404
+    try:
+        url_media._extract_with_fallback("https://x.com/y", "/tmp")
+    except url_media.FetchMediaError:
+        pass
+    check("a non-bot-wall failure retries nothing", _tried == [None])
+
+    # And a client that gets through returns immediately.
+    _tried.clear()
+
+    def _recovers(url, workdir, prefer=None, client_override=None):
+        _tried.append(client_override)
+        if client_override == wconfig.YTDLP_FALLBACK_CLIENTS[1]:
+            return ("/tmp/dl.mp4", {"title": "ok"})
+        raise url_media.FetchMediaError("Sign in to confirm you're not a bot")
+
+    url_media._extract = _recovers
+    _p, _i = url_media._extract_with_fallback("https://youtu.be/x", "/tmp")
+    check("a client that gets through wins and stops the chain",
+          _p == "/tmp/dl.mp4"
+          and _tried == [None] + wconfig.YTDLP_FALLBACK_CLIENTS[:2])
+finally:
+    url_media._extract = _real_extract
 
 # URLs as models actually pass them.
 check("a markdown link is unwrapped",

@@ -11,6 +11,7 @@ import re
 import shutil
 import time
 
+import audit
 import config
 import db as dbx
 import llm
@@ -497,12 +498,17 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     mins = info["duration"] / 60.0
     n_shots = len(index.get("shots", []))
     n_words = len(index.get("words", []))
-    n_sil = len([s for s in index.get("silences", [])
-                 if s[1] - s[0] >= 0.7])
+    # Gaps in the SPEECH, not dips in the waveform — the waveform test reads
+    # zero on anything with a continuous bed (gameplay, music, a noisy room),
+    # so this line used to greet those users with "0 noticeable silences"
+    # over a video full of nobody talking. See audit.speech_gaps.
+    n_sil = len(audit.speech_gaps(index.get("words", []), info["duration"],
+                                  min_s=0.7,
+                                  silences=index.get("silences", [])))
     stats = (f"{mins:.1f} min, {n_shots} "
              f"shot{'s' if n_shots != 1 else ''}, "
-             f"{n_words} transcribed words, {n_sil} noticeable "
-             f"silence{'s' if n_sil != 1 else ''}")
+             f"{n_words} transcribed words, {n_sil} pause"
+             f"{'s' if n_sil != 1 else ''} in the talking")
     summary = f"Your video is ready to edit — {stats}. "
     if pending:
         summary += ("I'm starting on the request you sent while I was "

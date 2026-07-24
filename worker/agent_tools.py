@@ -38,7 +38,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      OVERLAY_SCALE_MAX, SPEED_FACTOR_MIN, SPEED_FACTOR_MAX,
                      STYLIZE_KINDS, TEXT_ANIMS, TEXT_FONTS, TEXT_TEMPLATES,
                      ZOOM_STRENGTH_MIN, ZOOM_STRENGTH_MAX)
-from timeline import Timeline
+from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
 # 4) applies to EDLs with no explicit group — 3 stored prod EDLs (proj 13,
@@ -86,6 +86,11 @@ class ToolContext:
         self.last_preview = None      # set by render_preview
         self.last_selfcheck = None    # vision one-liner from the last preview
         self.versions_written = []    # EDL versions created this turn
+        # Every EDL state visited this turn -> the version it was first seen
+        # at. A write that lands on a state already in here is a CYCLE: the
+        # turn has undone itself and is about to repeat the same attempt.
+        # See write_edl for why this is reported rather than blocked.
+        self._states_seen = {}
         self.rendered_versions = set()  # versions with a successful preview
         self.autorendered = False     # loop set: model skipped render_preview
         self.write_calls = []         # successful write tool names this turn
@@ -155,6 +160,10 @@ class ToolContext:
         version (no version row is created), or a REJECTED message on
         validation failure."""
         prev = self.latest_edl()
+        if not self._states_seen:
+            # Seed with the state the turn STARTED in, or undoing every edit
+            # back to the beginning would read as progress.
+            self._states_seen[edl_signature(prev["json"])] = prev["version"]
         try:
             normalized = validate_edl(new_edl_dict, self.duration).model_dump()
         except EDLValidationError as e:
@@ -164,13 +173,43 @@ class ToolContext:
                     "the requested change may need a different tool or may "
                     "not be supported. Do NOT tell the user you changed "
                     "anything.")
+        sig = edl_signature(normalized)
         version = self.db.run(dbx.insert_edl, self.project_id, normalized,
                               "agent")
         self.versions_written.append(version)
         before = describe_edl(prev["json"])
         after = describe_edl(normalized, self.duration)
-        return (f"EDL v{prev['version']} -> v{version}: {change_desc}. "
+        line = (f"EDL v{prev['version']} -> v{version}: {change_desc}. "
                 f"Before: {before}. After: {after}.")
+
+        # Cycle detection. A turn that removes what it just added and adds it
+        # back has made no progress, and left alone it will keep going: one
+        # real session spent ~150 versions and most of a dollar re-placing
+        # three title cards, because the thing it was reacting to came back
+        # every lap.
+        #
+        # Reported, never blocked. A hard cap would break the legitimate case
+        # (returning to an earlier state on the way somewhere new), and the
+        # agent cannot see its own repetition — the diff of each individual
+        # step looks like progress. The missing information is that this exact
+        # state already existed, so that is what gets handed back.
+        seen_at = self._states_seen.get(sig)
+        if seen_at is not None:
+            line += (
+                f"\nLOOP DETECTED: this is the same edit as v{seen_at}, which "
+                "you already produced this turn — everything since then has "
+                "cancelled out. Do NOT try that sequence again; it will land "
+                "here a third time. Something you believe about the edit is "
+                "wrong, so verify before editing further: read get_edl for "
+                "the real item positions, and if you are reacting to a render "
+                "(a black frame, missing text), call look_at on that exact "
+                "time to see what is actually there. If you still cannot make "
+                "it work, stop and tell the user plainly what you tried and "
+                "what you observed — an honest dead end costs them far less "
+                "than another lap.")
+        else:
+            self._states_seen[sig] = version
+        return line
 
 
 def _cap(text, budget=None):
@@ -200,15 +239,28 @@ def get_video_info(ctx):
                 f"clip{'s' if len(ins) != 1 else ''}, "
                 f"{program_duration(edl['json'])}s total.")
     v = ctx.index["video"]
-    sil = [s for s in ctx.index.get("silences", []) if s[1] - s[0] >= 0.7]
-    total_sil = sum(e - s for s, e in sil)
+    gaps, basis = _dead_air(ctx, 0.7)
+    total_gap = sum(g["end"] - g["start"] for g in gaps)
+    quiet = [s for s in ctx.index.get("silences", []) if s[1] - s[0] >= 0.7]
     edl = ctx.latest_edl()
+    # Both numbers, always, and labelled — they diverge exactly when it
+    # matters (a bed of game/music audio keeps the waveform above the noise
+    # floor while nobody is talking), and reporting only the waveform one is
+    # how a user with an obviously pausey gameplay clip got told there was
+    # nothing to cut.
+    if basis == "waveform":
+        gap_txt = (f"no speech transcribed, so there are no talking pauses; "
+                   f"{len(quiet)} quiet span(s) >=0.7s by waveform")
+    else:
+        gap_txt = (f"{len(gaps)} pause(s) in the talking >=0.7s totalling "
+                   f"{total_gap:.1f}s (use these for 'cut the silences'); "
+                   f"{len(quiet)} of the video's quiet-waveform spans")
     return (f"duration={v['duration']}s, {v['width']}x{v['height']} @ "
             f"{v['fps']}fps, audio={'yes' if v['has_audio'] else 'NO'}. "
             f"{len(ctx.index.get('shots', []))} shots, "
             f"{len(ctx.index.get('sentences', []))} sentences / "
             f"{len(ctx.index.get('words', []))} words, "
-            f"{len(sil)} silences >=0.7s totalling {total_sil:.1f}s. "
+            f"{gap_txt}. "
             f"Current EDL v{edl['version']}: {describe_edl(edl['json'], v['duration'])}.")
 
 
@@ -395,28 +447,69 @@ def get_shots(ctx, start=0, end=None):
     return _cap("\n".join(lines))
 
 
+def _dead_air(ctx, min_s):
+    """Spans worth cutting when the user says "cut the silences", and which
+    signal they came from: (gaps, basis).
+
+    basis 'speech'   — gaps BETWEEN spoken words (audit.speech_gaps). The
+                       right answer whenever the video has speech, because
+                       "silence" to a user means nobody talking. Waveform
+                       quiet alone misses all of it under a music/game bed.
+    basis 'waveform' — no words were transcribed at all, so there is no
+                       speech to find gaps between. A slideshow or a clip
+                       with occasional sound still has real quiet spans, and
+                       they are the only signal available, so fall back to
+                       them rather than refusing a video that genuinely has
+                       silences to cut.
+    """
+    words = ctx.index.get("words", [])
+    quiet = [list(s) for s in ctx.index.get("silences", [])]
+    if words:
+        dur = (ctx.index.get("video") or {}).get("duration") or ctx.duration
+        return audit.speech_gaps(words, dur, min_s=min_s,
+                                 silences=quiet), "speech"
+    return ([{"start": s, "end": e, "quiet_frac": 1.0} for s, e in quiet
+             if e - s >= min_s], "waveform")
+
+
 def find_silences(ctx, min_seconds=0.7):
     try:
         min_s = max(0.1, float(min_seconds))
     except (TypeError, ValueError):
         return "REJECTED: min_seconds must be a number."
-    sil = [s for s in ctx.index.get("silences", [])
-           if s[1] - s[0] >= min_s]
-    if not sil:
-        return f"No silences of {min_s}s or longer."
     words = ctx.index.get("words", [])
+    gaps, basis = _dead_air(ctx, min_s)
+    if not gaps:
+        if basis == "waveform":
+            return ("No speech was transcribed AND the audio never drops "
+                    "below the noise floor — there is nothing this tool can "
+                    "call a silence. Say so plainly; do not guess at pauses "
+                    "from the picture.")
+        return f"No gaps in the speech of {min_s}s or longer."
     lines = []
-    for s, e in sil[:100]:
+    for g in gaps[:100]:
+        s, e = g["start"], g["end"]
         before = next((w["w"] for w in reversed(words) if w["t1"] <= s + 0.05),
                       None)
         after = next((w["w"] for w in words if w["t0"] >= e - 0.05), None)
         ctxt = ""
         if before or after:
             ctxt = f" — after '{before or '(start)'}', before '{after or '(end)'}'"
+        # An unquiet gap is nobody-talking-over-sound: cuttable, but the user
+        # loses that sound, so it is never presented as though it were quiet.
+        q = g["quiet_frac"]
+        sound = "" if q >= 0.8 else (
+            f" [NOT quiet — {int((1 - q) * 100)}% of this gap has audio "
+            "(music/game/room); cutting it removes that sound too]")
         lines.append(f"{_fmt_t(s)}-{_fmt_t(e)} ({e - s:.2f}s, midpoint "
-                     f"{_fmt_t((s + e) / 2)}){ctxt}")
-    note = f"\n({len(sil) - 100} more not shown)" if len(sil) > 100 else ""
-    return _cap(f"{len(sil)} silences >= {min_s}s:\n" + "\n".join(lines) + note)
+                     f"{_fmt_t((s + e) / 2)}){ctxt}{sound}")
+    note = f"\n({len(gaps) - 100} more not shown)" if len(gaps) > 100 else ""
+    head = (f"{len(gaps)} gap(s) in the speech >= {min_s}s (spans where "
+            "nobody is talking — this is what 'silence' means to the user, "
+            "not just a quiet waveform)") if basis == "speech" else \
+        (f"No speech was transcribed in this video, so these are the "
+         f"{len(gaps)} quiet-WAVEFORM span(s) >= {min_s}s")
+    return _cap(head + ":\n" + "\n".join(lines) + note)
 
 
 def list_assets(ctx, kind=None):
@@ -724,30 +817,53 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12):
         pad = max(0.0, float(padding_s))
     except (TypeError, ValueError):
         return "REJECTED: padding_s must be a number of seconds."
-    sil = [s for s in ctx.index.get("silences", []) if s[1] - s[0] >= min_s]
-    if not sil:
-        return (f"No silences of {min_s}s or longer were detected — the video "
+    # Gaps in the SPEECH, not dips in the waveform. A gameplay clip, a video
+    # over a music bed or anything recorded in a noisy room never drops below
+    # the noise floor, so the waveform test found nothing and this tool used
+    # to answer "already tight" while the user watched a minute of nobody
+    # talking. See audit.speech_gaps.
+    gaps, basis = _dead_air(ctx, min_s)
+    if not gaps:
+        if basis == "waveform":
+            return ("No speech was transcribed in this video AND the audio "
+                    "never drops below the noise floor, so there is nothing "
+                    "to cut by silence. Tell the user that plainly and ask "
+                    "which parts to keep, or cut by the picture with "
+                    "find_shots / look_at.")
+        return (f"No gaps in the speech of {min_s}s or longer — the talking "
                 "is already tight, so nothing was cut.")
-    cuts = []
-    for s, e in sil:
-        cs, ce = round(s + pad, 2), round(e - pad, 2)
+    cuts, noisy = [], 0
+    for g in gaps:
+        cs, ce = round(g["start"] + pad, 2), round(g["end"] - pad, 2)
         if ce - cs >= 0.1:
             cuts.append([cs, ce])
+            if g["quiet_frac"] < 0.8:
+                noisy += 1
     if not cuts:
-        return (f"Found {len(sil)} silence(s), but each is too short to trim "
-                f"once {pad}s of padding is kept around speech. Nothing was "
-                "cut (lower padding_s to trim more aggressively).")
+        return (f"Found {len(gaps)} speech gap(s), but each is too short to "
+                f"trim once {pad}s of padding is kept around speech. Nothing "
+                "was cut (lower padding_s to trim more aggressively).")
     cur = ctx.latest_edl()["json"]["keep"]
     new = [list(x) for x in audit.subtract_spans(cur, cuts)]
     if not new:
-        return ("REJECTED: cutting every detected silence would remove the "
-                "whole video. Inspect find_silences and cut a narrower set.")
+        return ("REJECTED: cutting every speech gap would remove the whole "
+                "video. Inspect find_silences and cut a narrower set.")
     removed = output_duration(cur) - output_duration(new)
-    return _write_keep(
+    what = "gap(s) in the speech" if basis == "speech" else "quiet span(s)"
+    res = _write_keep(
         ctx, new,
-        f"cut {len(cuts)} silence gap(s) >= {min_s}s ({removed:.1f}s removed, "
-        f"{pad}s kept around speech)",
+        f"cut {len(cuts)} {what} >= {min_s}s ({removed:.1f}s "
+        f"removed, {pad}s kept around speech)",
         snap_to_words=True)
+    if noisy and res.startswith("EDL v"):
+        # Never let this land as "I removed the silences" when the user is
+        # about to notice their game audio / music jumping at those cuts.
+        res += (f"\nHONESTY: {noisy} of those {len(cuts)} gaps were NOT "
+                "quiet — nobody was talking, but there was audio there "
+                "(music, game or room sound). That audio is now gone at "
+                "those points. Tell the user this rather than calling them "
+                "silences, and offer to restore any they want back.")
+    return res
 
 
 def remove_filler_words(ctx, words=None):
@@ -3487,25 +3603,23 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
     if item is None:
         return (placed + "\nThe card is placed, but its program position "
                 "could not be resolved — add the text with add_text.")
-    # Program window of THIS insert: insert_positions() works on the same
-    # (at_output_s, duration_s) sort the Timeline uses; our item was appended
-    # last, so among identical tuples it is the LAST matching index.
-    def _tup(i):
-        return (float(i["at_output_s"]), float(i["duration_s"]))
-    tuples = sorted(_tup(i) for i in inserts)
-    mine = _tup(item)
-    positions = Timeline([list(k) for k in (edl.get("keep") or [])],
-                         inserts, edl.get("speed") or []).insert_positions()
-    idx = len(tuples) - 1 - tuples[::-1].index(mine)
-    card_start, card_len = positions[idx]
-    card_end = round(card_start + card_len, 2)
-    card_start = round(card_start, 2)
+    # Program window of THIS insert, resolved by id: two cards can share a
+    # position, and picking by tuple made that a guess.
+    windows = insert_windows(
+        inserts, Timeline([list(k) for k in (edl.get("keep") or [])],
+                          inserts, edl.get("speed") or []))
+    win = windows.get(item["id"])
+    if win is None:
+        # The card IS placed; only its program window is unresolved. Say so
+        # and let the agent add the text rather than crashing the tool on an
+        # edit that partly succeeded.
+        return (placed + "\nThe card is placed, but its program position "
+                "could not be resolved — add the text with add_text.")
+    card_start, card_end = win
+    card_len = round(card_end - card_start, 2)
 
     texts = [dict(tx) for tx in (edl.get("texts") or [])]
-    # Held a hair inside the card so the entrance/exit animation plays ON the
-    # blank frame instead of bleeding onto the footage either side.
-    pad = min(0.12, card_len / 8.0)
-    ts, te = round(card_start + pad, 2), round(card_end - pad, 2)
+    ts, te = card_text_window(card_start, card_end)
     made = []
     item_tx = {"id": _next_item_id(texts, "tx"), "text": t[:200],
                "start": ts, "end": te, "template": tpl,
@@ -3514,7 +3628,10 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
                else None,
                "color": color, "accent_color": accent_color, "font": font,
                "entrance": entrance, "exit": exit,
-               "uppercase": None, "box": None}
+               "uppercase": None, "box": None,
+               # Bound to the card, not to program time: every later insert
+               # moves this card, and the words must move with it.
+               "anchor_insert": item["id"]}
     texts.append(item_tx)
     made.append(f"{tpl} \"{t[:40]}\"")
     sub = (subtitle or "").strip()
@@ -3524,7 +3641,8 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
                       "x": 0.5, "y": 0.635, "size_scale": None,
                       "color": color, "accent_color": accent_color,
                       "font": None, "entrance": entrance, "exit": exit,
-                      "uppercase": None, "box": None})
+                      "uppercase": None, "box": None,
+                      "anchor_insert": item["id"]})
         made.append(f"subtitle \"{sub[:30]}\"")
     edl["texts"] = texts
     result = ctx.write_edl(
@@ -3536,7 +3654,12 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
                    "shows ONLY this text. Spoken-word captions do not appear "
                    "on it (inserted media is not transcribed), so nothing "
                    "overlaps — no caption mute is needed. Everything after "
-                   f"{card_start}s shifted {card_len:g}s later.")
+                   f"{card_start}s shifted {card_len:g}s later.\n"
+                   f"The words are BOUND to this card ({item['id']}): adding, "
+                   "moving or removing any other card moves them with it "
+                   "automatically, and remove_insert takes the text with it. "
+                   "Place your cards in ANY order and do NOT re-place a card "
+                   "because a later one shifted it — it did not come loose.")
     return result
 
 

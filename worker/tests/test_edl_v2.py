@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 from schemas import (anim_value, clip_anim, edl_signature,  # noqa: E402
                      program_duration, sped_len, speed_pieces, validate_edl)
-from timeline import (Timeline, remap_program_items,  # noqa: E402
+from timeline import (Timeline, card_text_window,  # noqa: E402
+                      insert_windows, remap_program_items,
                       remap_program_span)
 
 
@@ -248,6 +249,85 @@ def test_remap_stylize_and_overlay_keyframes():
                         Timeline([[10.0, 40.0]], []))
     st1 = edl2["effects"]["stylize"][0]
     assert (st1["start"], st1["end"]) == (5.0, 10.0)
+
+
+def test_title_card_text_stays_on_its_card():
+    """Round 40 regression. A card's program position moves whenever ANY
+    earlier insert is added or removed. Before anchor_insert the card's words
+    stayed put: the card rendered BLANK and the words landed on the footage.
+    A real session burned ~150 EDL versions re-placing three cards chasing
+    that black frame, so this is pinned hard."""
+    def card(cid, txid, at, dur=2.0):
+        return ({"id": cid, "asset_key": "c.png", "kind": "image",
+                 "at_output_s": at, "duration_s": dur},
+                {"id": txid, "text": txid.upper(), "template": "title",
+                 "anchor_insert": cid})
+
+    ins1, tx1 = card("ins1", "tx1", 36.7)
+    ins2, tx2 = card("ins2", "tx2", 33.1)       # lands BEFORE ins1
+    keep = [[0.0, 56.8]]
+    tl1 = Timeline([list(k) for k in keep], [ins1])
+    tx1["start"], tx1["end"] = card_text_window(
+        *insert_windows([ins1], tl1)["ins1"])
+    edl = {"keep": keep, "inserts": [ins1, ins2], "texts": [tx1, tx2]}
+    tl2 = Timeline([list(k) for k in keep], [ins1, ins2])
+    tx2["start"], tx2["end"] = card_text_window(
+        *insert_windows([ins1, ins2], tl2)["ins2"])
+    remap_program_items(edl, tl1, tl2)
+
+    wins = insert_windows(edl["inserts"], tl2)
+    assert wins["ins1"] == (38.7, 40.7)          # the card moved
+    moved = next(t for t in edl["texts"] if t["id"] == "tx1")
+    assert wins["ins1"][0] <= moved["start"] and \
+        moved["end"] <= wins["ins1"][1]          # ...and its words moved too
+
+    # removing a card takes its text with it — no orphan left to strand
+    old_tl, kept = tl2, [i for i in edl["inserts"] if i["id"] != "ins2"]
+    edl["inserts"] = kept
+    remap_program_items(edl, old_tl,
+                        Timeline([list(k) for k in keep], kept))
+    assert [t["id"] for t in edl["texts"]] == ["tx1"]
+
+
+def test_full_length_music_follows_a_growing_program():
+    """Round 40. Clamp-only meant a bed laid under the WHOLE video went
+    short the moment an insert grew the program — the last seconds lost
+    their music silently, and the studio drew the music lane shorter than
+    the video. A deliberately short cue must still keep its own length."""
+    keep = [[0.0, 54.41]]
+    ins = [{"id": "ins1", "asset_key": "c.png", "kind": "image",
+            "at_output_s": 12.0, "duration_s": 2.0}]
+    old, new = Timeline(keep, []), Timeline(keep, ins)
+
+    bed = {"keep": keep, "inserts": ins,
+           "music": [{"id": "m1", "storage_key": "library:x", "start": 0.0,
+                      "end": 54.41, "gain_db": -18.0, "duck": True}]}
+    remap_program_items(bed, old, new)
+    assert bed["music"][0]["end"] == round(new.out_duration, 2) == 56.41
+
+    cue = {"keep": keep, "inserts": ins,
+           "music": [{"id": "m1", "storage_key": "library:x", "start": 10.0,
+                      "end": 20.0, "gain_db": -18.0, "duck": True}]}
+    remap_program_items(cue, old, new)
+    assert cue["music"][0]["end"] == 20.0        # not stretched
+
+    # shrinking still clamps a full-length bed
+    short = Timeline([[0.0, 30.0]], [])
+    bed2 = {"keep": [[0.0, 30.0]], "inserts": [],
+            "music": [{"id": "m1", "storage_key": "library:x", "start": 0.0,
+                       "end": 54.41, "gain_db": -18.0, "duck": True}]}
+    remap_program_items(bed2, old, short)
+    assert bed2["music"][0]["end"] == 30.0
+
+
+def test_anchor_insert_is_signature_safe():
+    """Every text ever written carries anchor_insert=None after this change;
+    none of them may re-render."""
+    edl = copy.deepcopy(LEGACY)
+    edl["texts"] = [{"id": "tx1", "text": "HELLO", "start": 1.0, "end": 3.0}]
+    n = validate_edl(copy.deepcopy(edl), 30.0).model_dump()
+    assert n["texts"][0]["anchor_insert"] is None
+    assert '"anchor_insert"' not in edl_signature(n)
 
 
 def test_karaoke_group_field_is_signature_safe():

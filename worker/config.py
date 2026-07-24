@@ -202,6 +202,33 @@ FETCH_IMAGE_MAX_BYTES = int(os.getenv("FETCH_IMAGE_MAX_BYTES", str(10 << 20)))
 # link fails inside the turn with an honest message instead of eating the
 # whole turn and timing it out.
 FETCH_TIMEOUT_S = float(os.getenv("FETCH_TIMEOUT_S", "180"))
+# Path to a Netscape-format cookies.txt for the extractor, or "" for none.
+#
+# This is the ONLY thing that reliably gets past YouTube's "Sign in to
+# confirm you're not a bot" wall. That wall is an IP-reputation check:
+# Render's egress is a datacenter address, so the default web client is
+# challenged on essentially every request no matter how many player clients
+# we cycle through. The alternate-client chain below helps sometimes and
+# cannot be relied on.
+#
+# Deliberately unset by default, and deliberately an operator decision:
+# supplying cookies means the fetch runs as a logged-in YouTube account,
+# which is a terms-of-service question (and puts that account at risk), not
+# a technical one. Nothing here bypasses payment or DRM — it is the same
+# public page a browser loads — but it should be switched on knowingly.
+# Point it at a file on the worker's disk (e.g. a Render secret file).
+YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+# Alternate player clients tried, in order, after a bot-wall failure. These
+# fail FAST (the challenge comes back during extraction, long before any
+# bytes are downloaded), so walking a few costs seconds, not minutes — but
+# the chain is still deadline-guarded in url_media._extract_with_fallback.
+YTDLP_FALLBACK_CLIENTS = [
+    c.strip() for c in os.getenv(
+        "YTDLP_FALLBACK_CLIENTS",
+        "tv,mweb|android_vr|web_safari|tv_embedded").split("|") if c.strip()]
+# Ceiling on the whole bot-wall retry chain, so a pathological case cannot
+# stack full download timeouts and eat the agent turn.
+FETCH_RETRY_BUDGET_S = float(os.getenv("FETCH_RETRY_BUDGET_S", "75"))
 FETCH_MAX_DURATION_S = float(os.getenv("FETCH_MAX_DURATION_S", "3600"))
 # Resolution cap for extracted video. A 4K source is a ~10x bigger download
 # and a slower render for a clip that gets composited into a 1080p timeline.

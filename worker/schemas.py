@@ -733,6 +733,19 @@ class TextItem(BaseModel):
                            "rise", "drop"]] = None
     uppercase: Optional[bool] = None
     box: Optional[bool] = None      # backing panel behind the text
+    # Round 40 — the text OWNS a spliced card rather than a span of the edit.
+    # Set to an insert id by add_title_card. Plain program-anchored texts
+    # leave it None (and _sig_canon drops nested None keys, so every text
+    # written before this field hashes identically — no re-renders).
+    #
+    # Why it exists: a card's program position moves whenever ANY earlier
+    # insert is added, moved, resized or removed, but a program-anchored
+    # text does not move with it. The card then renders BLANK and its words
+    # land on the footage — which is exactly what a real session hit, where
+    # three title cards were added and removed twelve times chasing a black
+    # frame the agent could see but not explain. timeline.remap_program_items
+    # re-derives an anchored text from its card's new window instead.
+    anchor_insert: Optional[str] = None
 
 
 # ── Speed spans (round 35): time remapping ───────────────────────────────

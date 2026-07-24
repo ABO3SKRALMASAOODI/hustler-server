@@ -30,6 +30,39 @@ def _ins_tuple(i):
     return (float(i.at_output_s), float(i.duration_s))
 
 
+def _ins_id(i):
+    return i.get("id") if isinstance(i, dict) else getattr(i, "id", None)
+
+
+def insert_windows(inserts, tl):
+    """{insert id: (program_start, program_end)} for a Timeline built from
+    the SAME insert list.
+
+    Timeline sorts its inserts by (at_output_s, duration_s) and
+    insert_positions() returns windows in that order, so re-sorting the
+    items by the same key pairs each id with its own window. Python's sort
+    is stable, so two inserts sharing a position stay in list order on both
+    sides and still get the right window each — the ambiguity that made
+    callers guess a "last matching index" before.
+    """
+    ordered = sorted((inserts or []), key=_ins_tuple)
+    out = {}
+    for item, (start, dur) in zip(ordered, tl.insert_positions()):
+        iid = _ins_id(item)
+        if iid:
+            out[iid] = (round(start, 2), round(start + dur, 2))
+    return out
+
+
+def card_text_window(card_start, card_end):
+    """Program window for text that OWNS a spliced card, held a hair inside
+    it so the entrance/exit animation plays on the blank frame instead of
+    bleeding onto the footage either side. One definition, used both when
+    the card is created and every time it is re-anchored."""
+    pad = min(0.12, (card_end - card_start) / 8.0)
+    return round(card_start + pad, 2), round(card_end - pad, 2)
+
+
 class Timeline:
     def __init__(self, keep, inserts=None, speed=None):
         """keep: sorted, non-overlapping [[s, e], ...] in source seconds.
@@ -346,9 +379,30 @@ def remap_program_items(edl, old_tl, new_tl):
         edl["effects"] = fx
 
     if edl.get("music"):
+        old_prog = round(old_tl.out_duration, 2)
         kept_music = []
         for m in edl["music"]:
             m = dict(m)
+            # A bed laid under the WHOLE video follows the program in both
+            # directions. Clamping only (the old behaviour) meant any insert
+            # that GREW the program left the music short: add a title card
+            # and the last seconds of the edit silently lose their music,
+            # with nothing said. The agent had to notice and call
+            # set_music_fit by hand, and when it forgot, the studio drew a
+            # music lane visibly shorter than the video — which is exactly
+            # what the founder reported seeing.
+            covers_all = (float(m["start"]) <= 0.05
+                          and float(m["end"]) >= old_prog - 0.05)
+            if covers_all:
+                if abs(float(m["end"]) - prog) > 0.01:
+                    m["end"] = round(prog, 2)
+                    region_notes.append(
+                        f"note: music {m.get('id')} now runs to {m['end']}s, "
+                        "still covering the whole video.")
+                kept_music.append(m)
+                continue
+            # A deliberately shorter cue keeps its own length; only trim it
+            # when the edit no longer reaches that far.
             if m["end"] > prog:
                 if m["start"] >= prog - 0.1:
                     region_notes.append(
@@ -443,9 +497,40 @@ def remap_program_items(edl, old_tl, new_tl):
             kept_ov.append(ov)
         edl["overlays"] = kept_ov
     if edl.get("texts"):
+        # A text carrying anchor_insert does not live in program time at all
+        # — it belongs to a spliced card, and the card moves whenever any
+        # earlier insert is added, moved, resized or removed. Re-derive it
+        # from the card's NEW window (and drop it when the card is gone) so
+        # the words can never be left behind on the footage while the card
+        # renders blank.
+        windows = insert_windows(edl.get("inserts"), new_tl)
         kept_tx = []
         for tx in edl["texts"]:
             tx = dict(tx)
+            anchor = tx.get("anchor_insert")
+            if anchor:
+                win = windows.get(anchor)
+                if win is None:
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\") was removed "
+                        "with the card it was on.")
+                    continue
+                ns, ne = card_text_window(*win)
+                if ne - ns < 0.3:      # card too short to hold readable text
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\") was removed — "
+                        "its card is now too short to show it.")
+                    continue
+                if (ns, ne) != (tx.get("start"), tx.get("end")):
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\") moved to "
+                        f"{ns}-{ne}s, staying on its card.")
+                    tx["start"], tx["end"] = ns, ne
+                kept_tx.append(tx)
+                continue
             if float(tx["end"]) > prog:
                 if float(tx["start"]) >= prog - 0.3:
                     region_notes.append(
