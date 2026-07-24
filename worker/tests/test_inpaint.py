@@ -341,6 +341,47 @@ def _clip_bar_captions(path, seconds=3.0):
     return n
 
 
+def _vs_truth(clean_path, truth_path, region, times=(0.8, 1.5, 2.2), pad=25):
+    """How far the repainted band is from footage that never had the text.
+
+    The honest measure of "removed". An ink-response check says the LETTERS are
+    gone; it stays quiet about a ghost of the words in the background plate, a
+    flat plastic patch where the grain should be, or the two ends of a caption
+    bar left standing. All three of those shipped and were only caught by
+    looking — so they are measured here, per pixel, against ground truth.
+    """
+    x0 = max(0, int(region["x"] * W) - pad)
+    y0 = max(0, int(region["y"] * H) - pad)
+    x1 = min(W, int((region["x"] + region["w"]) * W) + pad)
+    y1 = min(H, int((region["y"] + region["h"]) * H) + pad)
+    worst_mean = worst_p95 = 0.0
+    for t in times:
+        got = inpaint._grab(clean_path, t, W, H)[y0:y1, x0:x1].astype(np.float32)
+        want = inpaint._grab(truth_path, t, W, H)[y0:y1, x0:x1].astype(np.float32)
+        d = np.abs(got - want).mean(axis=2)
+        worst_mean = max(worst_mean, float(d.mean()))
+        worst_p95 = max(worst_p95, float(np.percentile(d, 95)))
+    return worst_mean, worst_p95
+
+
+def test_repaint_matches_footage_that_never_had_captions():
+    if _skip():
+        return
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "cap.mp4")
+        out = os.path.join(d, "clean.mp4")
+        truth = os.path.join(d, "truth.mp4")
+        n = _clip_with_captions(src)
+        _encode(truth, [_background(i, n) for i in range(n)], with_audio=False)
+        region = inpaint.detect_text_regions(src, samples=14)[0]
+        inpaint.clean_video(src, [dict(region, fill="text")], out)
+        mean, p95 = _vs_truth(out, truth, region)
+        assert mean < 8.0 and p95 < 20.0, \
+            f"repaint is visibly off the real background: mean {mean:.1f}, " \
+            f"p95 {p95:.1f} (0-255)"
+    print(f"PASS: stroke repaint vs ground truth — mean {mean:.1f}, p95 {p95:.1f}")
+
+
 def test_caption_on_a_solid_bar_is_fully_removed():
     if _skip():
         return
@@ -358,19 +399,14 @@ def test_caption_on_a_solid_bar_is_fully_removed():
         assert stats["plates"][0]["escalated"] is True, \
             "a caption on a solid bar was repainted stroke-only — the bar stays"
 
-        # the repainted band must match the footage that never had a bar,
-        # not merely stop containing letters
-        x0 = int(region["x"] * W) + 6
-        x1 = int((region["x"] + region["w"]) * W) - 6
-        y0 = int(region["y"] * H) + 6
-        y1 = int((region["y"] + region["h"]) * H) - 6
-        got = inpaint._grab(out, 1.5, W, H)[y0:y1, x0:x1].astype(np.float32)
-        want = inpaint._grab(truth, 1.5, W, H)[y0:y1, x0:x1].astype(np.float32)
-        dark = float(np.mean(np.abs(got.mean(axis=(0, 1))
-                                    - want.mean(axis=(0, 1)))))
-        assert dark < 26, f"the bar survived: repaint {got.mean(axis=(0,1))} " \
-                          f"vs real background {want.mean(axis=(0,1))}"
-    print(f"PASS: solid caption bar escalated + removed (mean gap {dark:.1f})")
+        # Per-pixel, across the span, INCLUDING a margin — a bar is as wide as
+        # the line it carries, and measuring one frame in the middle once let
+        # both ends of the longest caption's bar survive in the corners.
+        mean, p95 = _vs_truth(out, truth, region)
+        assert mean < 9.0 and p95 < 22.0, \
+            f"the bar (or an end of it) survived: mean {mean:.1f}, p95 {p95:.1f}"
+    print(f"PASS: solid caption bar escalated + removed — mean {mean:.1f}, "
+          f"p95 {p95:.1f}")
 
 
 def test_renderer_reads_the_cleaned_source():

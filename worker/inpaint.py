@@ -340,17 +340,24 @@ class _Region:
         """The PADDED band — what gets processed and written back."""
         return frame[self.y0:self.y1, self.x0:self.x1]
 
-    def mask_for(self, band):
+    def mask_for(self, band, dilate=3):
         """Mask in padded-band coordinates. Never marks a pixel outside the
         inner box: the margin is context to reconstruct FROM, and erasing ink
         the user did not point at (the next line of a two-line caption, a sign
-        behind the subject) would be a change they never asked for."""
+        behind the subject) would be a change they never asked for.
+
+        `dilate` is wider when EXCLUDING pixels from the background plate than
+        when repainting: a glyph's antialiased edge is not caught by the
+        threshold, and letting those half-lit pixels into the median painted a
+        faint ghost of the words back into the picture.
+        """
         m = np.zeros(band.shape[:2], np.uint8)
         inner = band[self.iy0:self.iy1, self.ix0:self.ix1]
         if self.fill == "box":
             m[self.iy0:self.iy1, self.ix0:self.ix1] = 255
         else:
-            m[self.iy0:self.iy1, self.ix0:self.ix1] = ink_mask(inner)
+            m[self.iy0:self.iy1, self.ix0:self.ix1] = ink_mask(inner,
+                                                               dilate=dilate)
         return m
 
 
@@ -416,11 +423,35 @@ def _grow_to_bar(path, region, W, H, dur):
     pixels (that IS the bar), mask everything close to it in a generously
     expanded crop, and take the connected blob that contains the text.
     """
-    t = ((float(region.start) + float(region.end)) / 2.0
-         if region.start is not None else dur / 2.0)
+    # Sampled across the span and UNIONED, never from one frame: the bar is as
+    # wide as the line it carries, so a bar measured on the shortest caption
+    # leaves both ends of the longest one standing in the picture.
+    s = 0.0 if region.start is None else float(region.start)
+    e = dur if region.end is None else float(region.end)
+    e = max(e, s + 0.1)
+    step = (e - s) / 6.0
+    found = []
+    for i in range(5):
+        got = _bar_box_at(path, region, W, H, s + step * (i + 1))
+        if got:
+            found.append(got)
+    if not found:
+        return
+    x0 = min(b[0] for b in found)
+    y0 = min(b[1] for b in found)
+    x1 = max(b[2] for b in found)
+    y1 = max(b[3] for b in found)
+    # +3px: a bar's own edge is antialiased against the picture, and leaving
+    # that one-pixel rim behind draws a perfect outline of the thing that was
+    # just removed.
+    region.set_box(x0 - 3, y0 - 3, x1 + 3, y1 + 3)
+
+
+def _bar_box_at(path, region, W, H, t):
+    """The backing bar's bounding box in ONE frame, or None."""
     f = _grab(path, t, W, H)
     if f is None:
-        return
+        return None
     bh = region.by1 - region.by0
     bw = region.bx1 - region.bx0
     gx0 = max(0, region.bx0 - int(bw * 0.25) - 20)
@@ -431,7 +462,7 @@ def _grow_to_bar(path, region, W, H, dur):
     inner = f[region.by0:region.by1, region.bx0:region.bx1]
     ink = ink_mask(inner, dilate=3) > 0
     if ink.all() or inner.size == 0:
-        return
+        return None
     bar = np.median(inner[~ink].astype(np.float32), axis=0)
     close = (np.abs(crop.astype(np.float32) - bar).max(axis=2) < 34
              ).astype(np.uint8) * 255
@@ -446,14 +477,14 @@ def _grow_to_bar(path, region, W, H, dur):
     if lid == 0:                       # centre is text, not bar: try any row
         rows = np.where(close.any(axis=1))[0]
         if not len(rows):
-            return
+            return None
         lid = lab[rows[len(rows) // 2]][close[rows[len(rows) // 2]].argmax()]
     if lid == 0 or lid >= n:
-        return
+        return None
     x, y, w, h, area = stats_[lid]
     if area < 0.25 * (bw * bh):        # not a bar, just a blotch
-        return
-    region.set_box(gx0 + x, gy0 + y, gx0 + x + w, gy0 + y + h)
+        return None
+    return (gx0 + x, gy0 + y, gx0 + x + w, gy0 + y + h)
 
 
 def _build_plate(path, region, W, H, dur, samples=22):
@@ -469,7 +500,7 @@ def _build_plate(path, region, W, H, dur, samples=22):
             continue
         band = region.crop(f).astype(np.uint8)
         stack.append(band)
-        masks.append(region.mask_for(band) > 0)
+        masks.append(region.mask_for(band, dilate=5) > 0)
     if len(stack) < PLATE_MIN_CLEAN:
         return
     arr = np.stack(stack).astype(np.float32)
@@ -495,11 +526,37 @@ def _build_plate(path, region, W, H, dur, samples=22):
         med = np.nanmedian(masked, axis=0)
     med = np.nan_to_num(med, nan=0.0)
     region.plate = med.astype(np.uint8)
-    region.plate_ok = (counts >= PLATE_MIN_CLEAN) & region.static
+    ok = (counts >= PLATE_MIN_CLEAN) & region.static
+    # Does the plate itself still show the text? Where a pixel had only a
+    # handful of clean samples, those few can carry a neighbouring word's
+    # edge, and the median then paints a faint ghost of the caption back into
+    # the picture — visible even when the ink measurement says it is gone.
+    # Any pixel the plate is inky at is handed to cv2.inpaint instead.
+    if region.plate is not None and region.plate.size:
+        ghost = ink_mask(region.plate, dilate=2) > 0
+        ok = ok & ~ghost
+    region.plate_ok = ok
 
 
-def _repaint(band, mask, region):
-    """Replace the masked pixels of one band, feathered."""
+def _grain_sigma(band, mask):
+    """How much high-frequency noise the UNTOUCHED part of this band carries.
+
+    Video is never smooth: sensor noise, film grain and codec dither give every
+    real frame a texture. cv2.inpaint returns a perfectly smooth fill, so a
+    repainted rectangle reads as a plastic patch against its own surroundings
+    even when the colour is right. Matching that texture is what makes the
+    repaint disappear rather than merely lose its text.
+    """
+    keep = ~(mask > 0)
+    if keep.sum() < 200:
+        return 0.0
+    gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    hi = gray - cv2.GaussianBlur(gray, (0, 0), 1.2)
+    return float(np.clip(np.std(hi[keep]), 0.0, 12.0))
+
+
+def _repaint(band, mask, region, rng=None):
+    """Replace the masked pixels of one band, feathered and re-grained."""
     if not mask.any():
         return band
     out = band
@@ -509,15 +566,22 @@ def _repaint(band, mask, region):
         if use.any():
             out = np.where(use[..., None], region.plate, out)
         m = m & ~region.plate_ok
+    filled = np.zeros(mask.shape, bool)
     if m.any():
         # TELEA reconstructs from the boundary inwards — the right algorithm
         # for thin strokes and small shapes, which is what is left here.
         out = cv2.inpaint(np.ascontiguousarray(out),
                           (m.astype(np.uint8) * 255), 3, cv2.INPAINT_TELEA)
+        filled = m
+    sigma = _grain_sigma(band, mask)
+    if sigma > 0.6 and filled.any():
+        noise = (rng or np.random).normal(0.0, sigma, filled.shape)
+        out = np.clip(out.astype(np.float32)
+                      + noise[..., None] * filled[..., None], 0, 255)
     soft = cv2.GaussianBlur((mask > 0).astype(np.float32), (0, 0), 1.6)
     soft = np.clip(soft, 0.0, 1.0)[..., None]
     return (band.astype(np.float32) * (1.0 - soft)
-            + out.astype(np.float32) * soft).astype(np.uint8)
+            + np.asarray(out, np.float32) * soft).astype(np.uint8)
 
 
 def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
