@@ -1,7 +1,16 @@
 # Valmera media+agent worker.
 # Render: create a Background Worker, Runtime = Docker,
 # Dockerfile path = worker/Dockerfile, Docker context = worker/
-FROM python:3.11-slim
+#
+# Pinned to bookworm (Debian 12), NOT the floating `-slim` tag. `-slim` moved to
+# trixie (Debian 13) in 2026, and Playwright 1.49's `install --with-deps` list
+# still names `ttf-unifont` / `ttf-ubuntu-font-family` — packages trixie dropped
+# (now `fonts-unifont`) — so the chromium layer died with "Package has no
+# installation candidate" and every deploy failed. Bookworm is a supported
+# Playwright target, so the dep list resolves cleanly. Bump this deliberately
+# (and re-test the chromium layer) when moving to a newer Debian, never by
+# floating the tag.
+FROM python:3.11-slim-bookworm
 
 # fontconfig + Noto give libass real glyphs to fall back to when the caption
 # font (DejaVu Sans) lacks a script. Without Devanagari/Arabic/CJK coverage,
