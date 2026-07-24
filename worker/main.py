@@ -27,18 +27,35 @@ import agent_loop
 import config
 import db as dbx
 import indexer
+import remote
 import renderer
 
 MEDIA_TYPES = ("preview", "final")
 INDEX_TYPES = ("index",)
 AGENT_TYPES = ("agent_turn",)
 
-RUNNERS = {
-    "index": indexer.run_index_job,
-    "preview": renderer.run_render_job,
-    "final": renderer.run_render_job,
-    "agent_turn": agent_loop.run_agent_job,
-}
+
+def _build_runners():
+    """agent_turn always runs locally on the dispatcher (it is network-bound —
+    a remote many-core/GPU box would sit idle waiting on the LLM). index/media
+    go to the remote executor when REMOTE_EXECUTOR_URL is set, else they run
+    locally exactly as before — so the split is off until you opt in."""
+    if config.REMOTE_EXECUTOR_URL:
+        return {
+            "index": remote.run_index_remote,
+            "preview": remote.run_render_remote,
+            "final": remote.run_render_remote,
+            "agent_turn": agent_loop.run_agent_job,
+        }
+    return {
+        "index": indexer.run_index_job,
+        "preview": renderer.run_render_job,
+        "final": renderer.run_render_job,
+        "agent_turn": agent_loop.run_agent_job,
+    }
+
+
+RUNNERS = _build_runners()
 
 
 def process_one(worker_db, job):
@@ -260,11 +277,17 @@ def main():
     _sweep_tmp()
     signal.signal(signal.SIGTERM, _on_shutdown)
     signal.signal(signal.SIGINT, _on_shutdown)
-    print(f"valmera-worker starting: media_slots={config.MEDIA_SLOTS} "
+    exec_mode = ("remote executor " + config.REMOTE_EXECUTOR_URL
+                 if config.REMOTE_EXECUTOR_URL else "local")
+    print(f"valmera-worker (dispatcher) starting: media_slots={config.MEDIA_SLOTS} "
           f"index_slots={config.INDEX_SLOTS} agent_slots={config.AGENT_SLOTS} "
-          f"whisper={config.WHISPER_MODEL}/"
+          f"media/index={exec_mode} whisper={config.WHISPER_MODEL}/"
           f"{config.WHISPER_DEVICE} agent_model={config.AGENT_MODEL} "
           f"vision={config.VISION_MODEL or 'off'}", flush=True)
+    if config.REMOTE_EXECUTOR_URL and not config.REMOTE_EXECUTOR_SECRET:
+        print("[dispatcher] WARNING: REMOTE_EXECUTOR_URL set but "
+              "REMOTE_EXECUTOR_SECRET is empty — calls will be unauthenticated.",
+              flush=True)
 
     threads = [
         threading.Thread(target=dbx.heartbeat_forever, daemon=True,
@@ -293,4 +316,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # One image, two roles. The executor is the stateless compute endpoint
+    # (Cloud Run); the default "worker" is the always-on dispatcher.
+    if config.WORKER_ROLE == "executor":
+        import http_server
+        http_server.serve()
+    else:
+        main()

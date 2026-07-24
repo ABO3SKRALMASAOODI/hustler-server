@@ -234,6 +234,38 @@ MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "1"))
 INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "1"))
 AGENT_SLOTS = int(os.getenv("WORKER_AGENT_SLOTS", "2"))
 HEARTBEAT_EVERY_S = 20
+
+# ── Remote executor (round 38): request-based media/index compute ──────────
+# The worker image runs in one of two ROLES, chosen by WORKER_ROLE:
+#   "worker"   (default) — the always-on DISPATCHER. Polls the queue and owns
+#              all retry/heartbeat/reaper/credit logic. Runs agent_turn LOCALLY
+#              (it is network-bound — waiting on the LLM — so a GPU/many-core
+#              box would sit idle). If REMOTE_EXECUTOR_URL is set it ships
+#              index/preview/final to the executor over HTTP instead of
+#              encoding them on this box; if unset it runs them locally exactly
+#              as before (so this whole feature is off until you opt in).
+#   "executor" — a STATELESS compute endpoint (main.py hands off to
+#              http_server.serve()). Runs the SAME indexer/renderer code per
+#              HTTP request. Deploy it on a scale-to-zero, many-core / GPU host
+#              (Google Cloud Run: 8 vCPU, concurrency=1, min-instances=0) so a
+#              fresh instance handles each render — no INDEX_SLOTS=1 queue, and
+#              $0 while idle. It writes progress to the same Postgres, so the
+#              studio's job-status polling is unchanged.
+WORKER_ROLE = os.getenv("WORKER_ROLE", "worker").strip().lower()
+# Dispatcher -> executor. Base URL of the Cloud Run service (no trailing path),
+# e.g. https://valmera-executor-xxxx.a.run.app. Empty = run media/index locally.
+REMOTE_EXECUTOR_URL = os.getenv("REMOTE_EXECUTOR_URL", "").strip().rstrip("/")
+# Shared bearer secret checked by the executor (constant-time). MUST be long and
+# random; the executor refuses every /run without it. Set the SAME value on both
+# services. The executor still reads the job's real data from the DB — the body
+# is only a job id + payload — so this guards compute/cost, not data secrecy.
+REMOTE_EXECUTOR_SECRET = os.getenv("REMOTE_EXECUTOR_SECRET", "")
+# Dispatcher-side HTTP timeout awaiting a remote render. Must exceed the longest
+# real encode AND stay under Cloud Run's request cap (3600s). A render on 8 vCPU
+# is minutes; on timeout the dispatcher requeues (renders are idempotent/cached).
+REMOTE_EXECUTOR_TIMEOUT_S = int(os.getenv("REMOTE_EXECUTOR_TIMEOUT_S", "3300"))
+# Port the executor's HTTP server binds (Cloud Run injects $PORT, default 8080).
+EXECUTOR_PORT = int(os.getenv("PORT", "8080"))
 STALE_AFTER_S = 120           # running + no heartbeat for this long => reclaimable
 MAX_ATTEMPTS_MEDIA = 3        # first run + 2 retries
 MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resend)

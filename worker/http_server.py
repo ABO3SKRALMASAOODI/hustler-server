@@ -1,0 +1,128 @@
+"""Stateless media/index executor (round 38).
+
+Runs when WORKER_ROLE=executor. This is the compute box — deploy it on a
+scale-to-zero, many-core (or GPU) host such as Google Cloud Run:
+
+    gcloud run deploy valmera-executor \
+        --source worker/ --region us-central1 \
+        --cpu 8 --memory 16Gi --concurrency 1 \
+        --min-instances 0 --max-instances 5 --timeout 3600 \
+        --set-env-vars WORKER_ROLE=executor,REMOTE_EXECUTOR_SECRET=...,DATABASE_URL=...,<S3+model envs>
+
+Each HTTP request runs ONE job to completion on its own instance, so there is
+no INDEX_SLOTS=1 serialization and nothing is billed while idle. It writes
+progress + results to the same Postgres the dispatcher polls, so the studio's
+job-status UI needs no change. It uses only the Python stdlib for HTTP — no new
+image dependency — because Cloud Run just needs a process listening on $PORT.
+
+Routes:
+    GET  /health  -> 200 "ok"        (Cloud Run startup/health probe)
+    POST /run     -> {"result": ...} | {"error": "..."}   (Bearer-authed)
+"""
+
+import hmac
+import json
+import os
+import time
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import config
+import db as dbx
+import indexer
+import renderer
+
+# Only the compute runners are exposed remotely. agent_turn stays on the
+# dispatcher (network-bound), so it is intentionally NOT in this map.
+RUNNERS = {
+    "index": indexer.run_index_job,
+    "preview": renderer.run_render_job,
+    "final": renderer.run_render_job,
+}
+
+
+def _authorized(headers):
+    """Constant-time bearer check. If no secret is configured the endpoint is
+    open — allowed only for local testing; production MUST set the secret on
+    both services (config warns on boot)."""
+    if not config.REMOTE_EXECUTOR_SECRET:
+        return True
+    got = headers.get("Authorization", "")
+    prefix = "Bearer "
+    if not got.startswith(prefix):
+        return False
+    return hmac.compare_digest(got[len(prefix):], config.REMOTE_EXECUTOR_SECRET)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, code, obj):
+        body = json.dumps(obj, default=str).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass  # we do our own structured logging in do_POST
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("/health", "/healthz", ""):
+            self._send(200, {"status": "ok", "role": "executor"})
+        else:
+            self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/run":
+            return self._send(404, {"error": "not found"})
+        if not _authorized(self.headers):
+            return self._send(401, {"error": "unauthorized"})
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, TypeError) as e:
+            return self._send(400, {"error": f"bad request body: {e}"})
+        job = payload.get("job") or {}
+        jtype = job.get("type")
+        runner = RUNNERS.get(jtype)
+        if not runner:
+            return self._send(400, {"error": f"unsupported job type: {jtype}"})
+
+        job_id = job.get("id")
+        t0 = time.monotonic()
+        print(f"[executor] start {jtype} job={job_id} "
+              f"project={job.get('project_id')}", flush=True)
+        db = dbx.Db()
+        try:
+            result = runner(db, job)
+            dt = round(time.monotonic() - t0, 2)
+            print(f"[executor] done {jtype} job={job_id} in {dt}s", flush=True)
+            self._send(200, {"result": result})
+        except Exception as e:
+            traceback.print_exc()
+            dt = round(time.monotonic() - t0, 2)
+            print(f"[executor] FAILED {jtype} job={job_id} after {dt}s: {e}",
+                  flush=True)
+            # 200 + {"error"} so the dispatcher parses the real message and runs
+            # its normal requeue/reaper path — same as a local runner raising.
+            self._send(200, {"error": str(e)})
+        finally:
+            db.reset()   # close this request's connection (no pooling here)
+
+
+def serve():
+    config.require_core()
+    os.makedirs(config.TMP_DIR, exist_ok=True)
+    if not config.REMOTE_EXECUTOR_SECRET:
+        print("[executor] WARNING: REMOTE_EXECUTOR_SECRET is unset — /run is "
+              "OPEN. Set it on this service and the dispatcher.", flush=True)
+    port = config.EXECUTOR_PORT
+    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"valmera-executor listening on :{port} "
+          f"(whisper={config.WHISPER_MODEL}/{config.WHISPER_DEVICE})",
+          flush=True)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    serve()
