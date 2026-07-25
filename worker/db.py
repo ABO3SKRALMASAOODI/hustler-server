@@ -519,6 +519,34 @@ IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.055"))
 MIN_TURN_CREDITS = 1.0
 
 
+def video_settings(conn):
+    """Operator toggles from the admin panel: {'enabled', 'force'}.
+
+    Falls back to the config defaults when the table does not exist yet (the
+    backend creates it lazily, and the worker must not depend on having been
+    deployed second). to_regclass is checked FIRST rather than catching the
+    error, because in postgres a failed statement poisons the whole
+    transaction — a missing table would take the render down with it, which
+    is a spectacular way for a cosmetic toggle to break exports.
+    """
+    default = {"enabled": config.WATERMARK_ENABLED, "force": False}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.video_settings') AS t")
+            if not (cur.fetchone() or {}).get("t"):
+                return default
+            cur.execute("SELECT watermark_enabled, watermark_force "
+                        "FROM video_settings WHERE id = 1")
+            row = cur.fetchone()
+        if not row:
+            return default
+        return {"enabled": bool(row["watermark_enabled"]),
+                "force": bool(row["watermark_force"])}
+    except Exception:
+        # A toggle lookup must never be the reason an export fails.
+        return default
+
+
 def user_is_paid(conn, user_id):
     """Is this user on a paid plan right now? Decides the free-tier
     watermark, so the failure directions are NOT symmetric.

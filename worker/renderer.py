@@ -335,7 +335,7 @@ def watermark_font_path():
     return p if os.path.exists(p) else None
 
 
-def wants_watermark(variant, is_paid):
+def wants_watermark(variant, is_paid, settings=None):
     """Should THIS render carry the free-tier mark?
 
     Finals only (a preview is a working artefact, not the thing the user
@@ -344,19 +344,33 @@ def wants_watermark(variant, is_paid):
     with no text, or text in a fallback font that is not the site's — would
     be worse than none, so a missing asset means no mark at all rather than
     a degraded one.
+
+    `settings` are the admin panel's live toggles (db.video_settings):
+      enabled — master switch, off means nobody is marked.
+      force   — mark EVERY final, paid included. This exists because the
+                owner of the product is on a paid plan and therefore cannot
+                see the feature on their own exports; without it the only
+                way to check the mark is to register a throwaway account.
+                It overrides the plan check, NOT the master switch.
+    When settings is None the config default stands, so a worker that cannot
+    reach the table still behaves sensibly.
     """
-    if variant != "final" or is_paid or not config.WATERMARK_ENABLED:
+    s = settings or {"enabled": config.WATERMARK_ENABLED, "force": False}
+    if variant != "final" or not s.get("enabled"):
+        return False
+    if is_paid and not s.get("force"):
         return False
     return bool(robot_path() and watermark_font_path())
 
 
-def watermark_version(variant, is_paid):
+def watermark_version(variant, is_paid, settings=None):
     """The `wm_v` stamp for a render: the version burned in, or 0 for none.
     0 is a real answer ("this file carries no mark"), never "unknown"."""
-    return config.WATERMARK_VERSION if wants_watermark(variant, is_paid) else 0
+    return (config.WATERMARK_VERSION
+            if wants_watermark(variant, is_paid, settings) else 0)
 
 
-def watermark_current(meta, variant, is_paid):
+def watermark_current(meta, variant, is_paid, settings=None):
     """Does this cached render carry the mark THIS user should have now?
 
     The upgrade path is the whole point. A free user exports (wm_v=1), pays,
@@ -369,8 +383,8 @@ def watermark_current(meta, variant, is_paid):
     feature carry no mark, which is correct for a paid user and stale for a
     free one, so only free users re-encode.
     """
-    return ((meta or {}).get("wm_v") or 0) == watermark_version(variant,
-                                                                is_paid)
+    return ((meta or {}).get("wm_v") or 0) == watermark_version(
+        variant, is_paid, settings)
 
 
 def watermark_geometry(W, H):
@@ -1815,7 +1829,8 @@ def run_render_job(worker_db, job):
     # stored on the project. A user who upgraded a minute ago must get a
     # clean file for this export, and a lapsed one must get the mark back.
     is_paid = bool(worker_db.run(dbx.user_is_paid, job.get("user_id")))
-    want_wm = wants_watermark(variant, is_paid)
+    wm_settings = worker_db.run(dbx.video_settings)
+    want_wm = wants_watermark(variant, is_paid, wm_settings)
 
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
@@ -1860,7 +1875,8 @@ def run_render_job(worker_db, job):
         # stamp means the render predates the card and must be re-encoded,
         # where a missing caption fingerprint is trusted.
         if fp_ok and outro_current(cached.get("meta"), variant) \
-                and watermark_current(cached.get("meta"), variant, is_paid):
+                and watermark_current(cached.get("meta"), variant, is_paid,
+                                      wm_settings):
             return {"render_asset_id": cached["id"],
                     "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
                     "duration_s": cached["duration_s"], "edl_version": version,
@@ -1983,7 +1999,8 @@ def run_render_job(worker_db, job):
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
                   "outro_v": (config.OUTRO_VERSION
                               if outro_seconds(variant == "preview") else 0),
-                  "wm_v": watermark_version(variant, is_paid)})
+                  "wm_v": watermark_version(variant, is_paid,
+                                            wm_settings)})
         # Reclaim the renders this one just replaced. Unique-per-render keys
         # made recovery possible but left every superseded object in the bucket
         # forever; only this exact (variant, version) is pruned, so pinned older

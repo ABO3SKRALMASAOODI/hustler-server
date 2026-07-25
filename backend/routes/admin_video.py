@@ -1051,3 +1051,70 @@ def video_user_detail(user_id):
              "created_at": l["created_at"].isoformat()}
             for l in ledger],
     })
+
+
+# ── Watermark toggles (round 41) ─────────────────────────────────────────
+# Live operator switches for the free-tier mark, read by the worker on every
+# render (worker/db.video_settings). Deliberately DB-backed rather than env:
+# an env var needs a redeploy of the Cloud Run executor to take effect, which
+# is minutes and a build — useless as a switch you want to flip and observe.
+#
+# Table is created lazily here, mirroring newsletter_settings, so no schema
+# change lands in models.py.
+def _ensure_video_settings(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS video_settings (
+            id INTEGER PRIMARY KEY,
+            watermark_enabled BOOLEAN DEFAULT TRUE,
+            watermark_force BOOLEAN DEFAULT FALSE,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("INSERT INTO video_settings (id) VALUES (1) "
+                "ON CONFLICT (id) DO NOTHING")
+
+
+@admin_video_bp.route("/admin/video/settings", methods=["GET"])
+@admin_required
+def video_settings_get():
+    with adb() as conn:
+        cur = conn.cursor()
+        _ensure_video_settings(cur)
+        conn.commit()
+        cur.execute("SELECT watermark_enabled, watermark_force, updated_at "
+                    "FROM video_settings WHERE id = 1")
+        row = cur.fetchone() or {}
+    return jsonify({
+        "watermark_enabled": bool(row.get("watermark_enabled", True)),
+        "watermark_force": bool(row.get("watermark_force", False)),
+        "updated_at": (row.get("updated_at").isoformat()
+                       if row.get("updated_at") else None),
+    })
+
+
+@admin_video_bp.route("/admin/video/settings", methods=["POST"])
+@admin_required
+def video_settings_set():
+    body = request.get_json(silent=True) or {}
+    with adb() as conn:
+        cur = conn.cursor()
+        _ensure_video_settings(cur)
+        # Only the keys actually sent are written, so the two switches can be
+        # flipped independently without one clobbering the other.
+        sets, vals = [], []
+        for key, col in (("watermark_enabled", "watermark_enabled"),
+                         ("watermark_force", "watermark_force")):
+            if key in body:
+                sets.append(f"{col} = %s")
+                vals.append(bool(body[key]))
+        if not sets:
+            return jsonify({"error": "nothing to update"}), 400
+        cur.execute(f"UPDATE video_settings SET {', '.join(sets)}, "
+                    "updated_at = NOW() WHERE id = 1", vals)
+        conn.commit()
+        cur.execute("SELECT watermark_enabled, watermark_force "
+                    "FROM video_settings WHERE id = 1")
+        row = cur.fetchone() or {}
+    return jsonify({"ok": True,
+                    "watermark_enabled": bool(row.get("watermark_enabled")),
+                    "watermark_force": bool(row.get("watermark_force"))})

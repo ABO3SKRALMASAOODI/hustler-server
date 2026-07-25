@@ -5051,3 +5051,35 @@ check("watermark: WATERMARK_ENABLED=0 really disables the mark",
       not renderer.wants_watermark("final", is_paid=False)
       and renderer.watermark_version("final", False) == 0)
 wconfig.WATERMARK_ENABLED = _wm_was
+
+# ── Live admin toggles (db.video_settings) ───────────────────────────────
+_ON = {"enabled": True, "force": False}
+_OFF = {"enabled": False, "force": False}
+_FORCE = {"enabled": True, "force": True}
+check("toggle: master OFF marks nobody, free included",
+      not renderer.wants_watermark("final", False, _OFF)
+      and not renderer.wants_watermark("final", True, _OFF))
+check("toggle: master ON marks free but not paid",
+      renderer.wants_watermark("final", False, _ON)
+      and not renderer.wants_watermark("final", True, _ON))
+check("toggle: FORCE marks paid too (so the owner can see it)",
+      renderer.wants_watermark("final", True, _FORCE)
+      and renderer.wants_watermark("final", False, _FORCE))
+check("toggle: FORCE does NOT override the master switch",
+      not renderer.wants_watermark("final", True,
+                                   {"enabled": False, "force": True}))
+check("toggle: FORCE still never touches previews",
+      not renderer.wants_watermark("preview", False, _FORCE))
+check("toggle: flipping a switch busts the cached final both ways",
+      not renderer.watermark_current({"wm_v": 1}, "final", False, _OFF)
+      and not renderer.watermark_current({"wm_v": 0}, "final", True, _FORCE))
+
+# The backend owns the table; the worker must survive it not existing yet.
+_bav = open(os.path.join(os.path.dirname(__file__),
+                         "../../backend/routes/admin_video.py")).read()
+check("toggle: the backend creates video_settings lazily (not in models.py)",
+      "CREATE TABLE IF NOT EXISTS video_settings" in _bav)
+check("toggle: the worker checks to_regclass before reading the table "
+      "(a failed statement would poison the render's transaction)",
+      "to_regclass('public.video_settings')" in
+      open(os.path.join(os.path.dirname(__file__), "..", "db.py")).read())
