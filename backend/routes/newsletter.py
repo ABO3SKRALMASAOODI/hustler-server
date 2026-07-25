@@ -65,6 +65,30 @@ BACKEND_PUBLIC_URL = os.getenv(
 # Successful "final export" states seen in video_jobs.
 EXPORT_STATES = "('done','succeeded','success','completed','ready')"
 
+# ── Cadence ──────────────────────────────────────────────────────────────
+# These are what actually decide how often a user hears from us, and they
+# were far too slow: with a 14-day export nudge and a 21-day dormant cooldown
+# a typical user got ONE email a fortnight, which is why the whole programme
+# felt dead even though the scheduler was firing every day.
+#
+# The per-user-per-day cap (NOT_TODAY) is deliberately KEPT. It is not what
+# made things slow — it only stops three campaigns landing in the same inbox
+# in the same minute, which reads as spam and costs deliverability. The
+# frequency comes from the cooldowns below, and the ceiling is now roughly
+# 2-3 emails a week per active user instead of 2 a month.
+#
+# All tunable without a deploy-time code change; raise them again if Brevo
+# complaint rates climb.
+EXPORT_NUDGE_COOLDOWN_D = int(os.getenv("NL_EXPORT_NUDGE_COOLDOWN_D", "4"))
+DORMANT_AFTER_D = int(os.getenv("NL_DORMANT_AFTER_D", "3"))
+DORMANT_COOLDOWN_D = int(os.getenv("NL_DORMANT_COOLDOWN_D", "7"))
+WINBACK_AFTER_D = int(os.getenv("NL_WINBACK_AFTER_D", "21"))
+WINBACK_COOLDOWN_D = int(os.getenv("NL_WINBACK_COOLDOWN_D", "21"))
+# Weekly tips now go out on TWO weekdays (Mon + Thu by default) rather than
+# one, so the steady drumbeat is twice a week. weekly_weekday from settings
+# stays the primary day; this is the extra one.
+WEEKLY_EXTRA_WEEKDAY = int(os.getenv("NL_WEEKLY_EXTRA_WEEKDAY", "3"))
+
 # last-activity per user across every signal we have.
 LAST_ACTIVE = """GREATEST(
   COALESCE((SELECT MAX(created_at) FROM client_events ce WHERE ce.user_id=u.id), TIMESTAMPTZ 'epoch'),
@@ -312,19 +336,19 @@ def _eligible(conn, campaign, weekly_key=None):
             AND NOT {HAS_EXPORT}
             AND {LAST_ACTIVE} >= NOW() - INTERVAL '21 days'
             AND u.created_at <= NOW() - INTERVAL '1 day'
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='export_nudge' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '14 days')
+            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='export_nudge' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '{EXPORT_NUDGE_COOLDOWN_D} days')
             AND {NOT_TODAY}"""
     elif campaign == "dormant":
         sql = cols + f"""{BASE_FILTER}
-            AND {LAST_ACTIVE} <= NOW() - INTERVAL '5 days'
-            AND {LAST_ACTIVE} > NOW() - INTERVAL '21 days'
+            AND {LAST_ACTIVE} <= NOW() - INTERVAL '{DORMANT_AFTER_D} days'
+            AND {LAST_ACTIVE} > NOW() - INTERVAL '{WINBACK_AFTER_D} days'
             AND ({HAS_PROJECT} OR {HAS_CHAT})
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='dormant' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '21 days')
+            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='dormant' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '{DORMANT_COOLDOWN_D} days')
             AND {NOT_TODAY}"""
     elif campaign == "winback":
         sql = cols + f"""{BASE_FILTER}
-            AND {LAST_ACTIVE} <= NOW() - INTERVAL '30 days'
-            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='winback' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '45 days')
+            AND {LAST_ACTIVE} <= NOW() - INTERVAL '{WINBACK_AFTER_D} days'
+            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='winback' AND s.status='sent' AND s.sent_at >= NOW() - INTERVAL '{WINBACK_COOLDOWN_D} days')
             AND {NOT_TODAY}"""
     elif campaign == "weekly_value":
         sql = cols + f"""{BASE_FILTER}
@@ -421,14 +445,26 @@ def run_daily_tick(force=False, dry_run=False):
                     continue
                 process(campaign, _eligible(conn, campaign), tmpl)
 
-            # Weekly value — only on its configured weekday (dry-run previews anytime).
+            # Weekly value — on its configured weekday AND on the extra one,
+            # so the steady drumbeat is twice a week (dry-run previews anytime).
+            #
+            # The two runs need DIFFERENT dedup keys. The key is what
+            # _eligible checks to decide "already had this one", so reusing a
+            # single per-ISO-week key would make the second day a guaranteed
+            # no-op — the send would look scheduled and quietly do nothing.
             weekly_day = int(settings.get("weekly_weekday") if settings.get("weekly_weekday") is not None else 1)
-            weekly_due = (now.weekday() == weekly_day)
+            is_primary = (now.weekday() == weekly_day)
+            is_extra = (WEEKLY_EXTRA_WEEKDAY >= 0
+                        and now.weekday() == WEEKLY_EXTRA_WEEKDAY
+                        and WEEKLY_EXTRA_WEEKDAY != weekly_day)
+            weekly_due = is_primary or is_extra
             if settings.get("weekly_enabled") and (weekly_due or dry_run):
                 tmpl = get_template(conn, "weekly_value")
                 if tmpl["enabled"]:
                     iso = now.isocalendar()
                     weekly_key = f"weekly-{iso[0]}-W{iso[1]:02d}"
+                    if is_extra:
+                        weekly_key += "-b"
                     process(weekly_key, _eligible(conn, "weekly_value", weekly_key=weekly_key), tmpl)
                     summary["weekly_key"] = weekly_key
                     summary["weekly_due"] = weekly_due
