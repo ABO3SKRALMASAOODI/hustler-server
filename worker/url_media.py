@@ -329,7 +329,7 @@ def _extract(url, workdir, prefer=None, client_override=None):
         # invisible, because nothing is waiting on it any more.
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
-                                start_new_session=True)
+                                errors="replace", start_new_session=True)
     except FileNotFoundError:
         raise FetchMediaError("the link extractor is not installed")
     try:

@@ -1014,17 +1014,29 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             start_balance = (ctx.credit_budget or 0.0) \
                 - config.AGENT_TURN_BUDGET_GRACE
             exhausted = (start_balance - ctx.running_credits()) < 1.0
+            # A subscriber's pool comes back; a free user's does not. Saying
+            # "credits refresh daily" to someone whose one-time allowance is
+            # spent is simply false, and it teaches them to wait instead of
+            # deciding.
+            try:
+                subscribed = worker_db.run(dbx.user_is_subscribed,
+                                           job["user_id"])
+            except Exception:
+                subscribed = False
+            _refill = ("Your credits refresh on your plan's cycle — or "
+                       "upgrade for a bigger monthly pool to keep editing now."
+                       if subscribed else
+                       "That was the free allowance, and it doesn't refill. "
+                       "Start your trial to keep editing.")
             if ctx.versions_written:
                 if exhausted:
                     return _finalize(
                         ctx, worker_db, session_id,
                         "That used up your available credits — the edits I "
-                        "finished are saved and previewed below. Credits "
-                        "refresh on your plan's cycle (daily on the free "
-                        "plan); you can also upgrade for a bigger monthly "
-                        "pool to keep editing now.",
+                        "finished are saved and previewed below. " + _refill,
                         "budget", total_steps, timings, honesty,
-                        extra_meta={"credits_exhausted": True})
+                        extra_meta={"credits_exhausted": True,
+                                    "free_trial_exhausted": not subscribed})
                 return _finalize(
                     ctx, worker_db, session_id,
                     "I've hit my budget for this request, so I'm stopping "
@@ -1034,12 +1046,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if exhausted:
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "You're out of credits, so I stopped before "
-                              "changing anything. Credits refresh on your "
-                              "plan's cycle (daily on the free plan); you can "
-                              "also upgrade for a bigger monthly pool to keep "
-                              "editing now.",
+                              "changing anything. " + _refill,
                               {"error": "turn_budget",
-                               "credits_exhausted": True})
+                               "credits_exhausted": True,
+                               "free_trial_exhausted": not subscribed})
             else:
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "This request needed more work than its budget "

@@ -21,7 +21,7 @@ import sheets
 import storage
 import transcribe
 from schemas import (VideoIndex, VideoInfo, clamp_word_times, default_edl,
-                     is_canvas_program)
+                     is_canvas_program, validate_edl)
 
 
 PROGRESS_EVERY_S = 5.0
@@ -412,9 +412,11 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
                   "right now — tell them that.")
     elif out_of_credits:
         branch = ("IMPORTANT: they sent a request while you were "
-                  "analyzing, but they are out of credits (credits "
-                  "refresh daily) — tell them honestly to send it again "
-                  "once credits refresh.")
+                  "analyzing, but they are out of credits — the free "
+                  "allowance is granted once and does NOT refill, so do "
+                  "not tell them to wait for a refresh. Say plainly that "
+                  "their free credits are used up and they can start their "
+                  "trial to keep editing.")
     else:
         branch = ("End by inviting their first editing request, with ONE "
                   "concrete example — grounded in the transcript opening "
@@ -463,6 +465,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     haven't made any edits" over a session where the agent had already cut
     her video. A replacement upload or a heal of a never-successful index is
     NOT a reindex and greets normally."""
+    edl_was_reset = False
     _latest = worker_db.run(dbx.latest_edl, project_id)
     if not _latest:
         worker_db.run(dbx.insert_edl, project_id,
@@ -475,6 +478,27 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         migrated = default_edl(info["duration"])
         migrated["inserts"] = _latest["json"].get("inserts") or []
         worker_db.run(dbx.insert_edl, project_id, migrated, "agent")
+    else:
+        # A REPLACEMENT upload re-bases the whole timeline. Every EDL time is
+        # a source time, so an edit built against a 276s video is nonsense
+        # against the 202s one that replaced it — and because every write tool
+        # validates the WHOLE EDL, one out-of-range span makes the project
+        # permanently unwritable: keep blocks a volume fix, volume blocks a
+        # keep fix, and nothing can ever land. A real customer hit exactly
+        # that on 2026-07-25 and the agent had to tell them "the edit is stuck
+        # and I can't change it from here". Re-validating against the NEW
+        # duration is the precise test: a re-index of the same file still
+        # validates and keeps every edit, and only a genuine replacement
+        # resets.
+        try:
+            validate_edl(_latest["json"], info["duration"])
+        except Exception as e:
+            fresh = default_edl(info["duration"])
+            worker_db.run(dbx.insert_edl, project_id, fresh, "agent")
+            print(f"[index] project {project_id}: the existing edit did not "
+                  f"fit the new source ({str(e)[:160]}) — reset to the full "
+                  "video so edits can land again", flush=True)
+            edl_was_reset = True
 
     pending, out_of_credits = None, False
     if session_id and user_id and config.OPENAI_API_KEY:
@@ -515,8 +539,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                     "analyzing — give me a moment.")
     elif out_of_credits:
         summary += ("I found the request you sent while I was analyzing, "
-                    "but you're out of credits — they refresh daily, so "
-                    "send it again once they do.")
+                    "but you're out of credits — the free allowance doesn't "
+                    "refill. Start your trial and send it again.")
     else:
         summary += ("Tell me what you'd like changed — for example: \"cut "
                     "the dead air, caption every word, and tighten the "
@@ -535,15 +559,23 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         elif session_id and out_of_credits:
             worker_db.run(dbx.add_message, session_id, "assistant",
                           "I found the request you sent earlier, but you're "
-                          "out of credits — they refresh daily, so send it "
-                          "again once they do.",
+                          "out of credits — the free allowance doesn't "
+                          "refill. Start your trial and send it again.",
                           {"kind": "index_ready", "auto_resume": False,
-                           "reindex": True})
+                           "reindex": True,
+                           "credits_exhausted": True})
     else:
         drafted = _greet_via_llm(worker_db, project_id, stats, pending,
                                  out_of_credits, index)
         if drafted:
             summary = drafted
+        if edl_was_reset:
+            # Say it plainly. Silently discarding someone's edit is worse than
+            # the deadlock it replaces.
+            summary += ("\n\nHeads up: this replaced the video the previous "
+                        "edit was built on, so I've started fresh from the "
+                        "full new upload — the earlier cuts don't apply to "
+                        "this footage.")
         if session_id:
             worker_db.run(dbx.add_message, session_id, "assistant", summary,
                           {"kind": "index_ready", "auto_resume": bool(pending),

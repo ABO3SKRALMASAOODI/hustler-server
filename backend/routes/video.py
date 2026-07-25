@@ -23,7 +23,7 @@ from psycopg2.extras import RealDictCursor, Json
 from flask import Blueprint, request, jsonify, current_app
 
 from routes.auth import token_required
-from credits import check_and_reserve
+from credits import check_and_reserve, get_balance
 import storage
 
 # The EDL schema's single source of truth is worker/schemas.py (pure
@@ -1373,9 +1373,16 @@ def post_message(user_id, project_id):
         indexed = bool(original and _index_row(cur, original["sha256"]))
         if indexed and not check_and_reserve(conn, user_id,
                                              min_credits=1.0):
+            info = get_balance(conn, user_id)
+            spent = info.get("free_trial_exhausted")
             return jsonify({
-                "error": "You're out of credits — they refresh daily, or "
-                         "upgrade for a bigger monthly pool.",
+                "error": ("You've used all your free credits — they don't "
+                          "refill. Start your trial to keep editing."
+                          if spent else
+                          "You're out of credits — they refresh on your "
+                          "plan's cycle, or upgrade for a bigger monthly "
+                          "pool."),
+                "free_trial_exhausted": bool(spent),
                 "code": "insufficient_credits"}), 402
 
         # Job-cap check BEFORE the insert: returning 429 after inserting the
@@ -1523,9 +1530,16 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                 # charges credits per turn exactly like any edit, so reserve
                 # first and fail honestly if they're tapped out or already busy.
                 if not check_and_reserve(conn, ctx["user_id"], min_credits=1.0):
-                    _say("You're out of credits — they refresh daily, or "
-                         "upgrade for a bigger monthly pool to keep creating.",
-                         {"kind": "concierge", "credits_exhausted": True})
+                    spent = get_balance(
+                        conn, ctx["user_id"]).get("free_trial_exhausted")
+                    _say(("You've used all your free credits — they don't "
+                          "refill. Start your trial to keep creating."
+                          if spent else
+                          "You're out of credits — they refresh on your "
+                          "plan's cycle, or upgrade for a bigger monthly pool "
+                          "to keep creating."),
+                         {"kind": "concierge", "credits_exhausted": True,
+                          "free_trial_exhausted": bool(spent)})
                 elif (_running_jobs_count(cur, ctx["user_id"])
                       >= MAX_CONCURRENT_JOBS_PER_USER):
                     _say("I've got a couple of things still processing — I'll "

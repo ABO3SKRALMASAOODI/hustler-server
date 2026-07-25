@@ -24,6 +24,20 @@ def video_gen_available():
     return bool(config.FAL_KEY) and config.VIDEO_PROVIDER == "fal"
 
 
+def needs_image(model=None):
+    """Does the configured model REQUIRE a first frame to animate?
+
+    The default id is `.../image-to-video`, and fal accepts the submit for one
+    of those without an image_url — validation happens on the worker, minutes
+    later, and comes back as a finished job with no video in it. So the agent
+    got "the provider finished but returned no video url" twice for two real
+    users on 2026-07-25 and concluded video generation was broken, when the
+    call was simply missing its required input. Detect it up front instead.
+    """
+    m = (model or config.VIDEO_GEN_MODEL or "").lower()
+    return "image-to-video" in m or m.endswith("/i2v") or "/i2v/" in m
+
+
 # Per-model input-shape quirks (the research flagged these as real: duration
 # enums and image param names differ). Kling only accepts "5" or "10" as the
 # duration; most others take an integer. Extend as models are added.
@@ -72,6 +86,10 @@ def generate_video(prompt, out_path, image_url=None, duration_s=5):
     if not video_gen_available():
         return False, "video generation is not configured (no fal.ai key)", 0.0
     model = config.VIDEO_GEN_MODEL
+    if needs_image(model) and not image_url:
+        return False, (f"the configured video model ({model}) animates a "
+                       "still image and was given none — generate the first "
+                       "frame first, then animate it"), 0.0
     seconds = _snap_seconds(model, duration_s)
     body = _build_body(model, prompt, image_url, seconds)
     submit_url = f"{config.FAL_QUEUE_URL.rstrip('/')}/{model}"
@@ -128,7 +146,20 @@ def generate_video(prompt, out_path, image_url=None, duration_s=5):
         return False, f"could not read the finished video ({str(e)[:120]})", 0.0
     url = _extract_video_url(result)
     if not url:
-        return False, "the provider finished but returned no video url", 0.0
+        # Say WHAT came back. "no video url" alone is undiagnosable: it reads
+        # identically for a content-policy refusal, a missing required input
+        # and an unrecognised response shape, and it cost a week of blind
+        # retries once already.
+        detail = ""
+        if isinstance(result, dict):
+            for k in ("detail", "error", "message"):
+                if result.get(k):
+                    detail = f": {str(result[k])[:200]}"
+                    break
+            if not detail:
+                detail = (" (response keys: "
+                          + ", ".join(sorted(result)[:8]) + ")")
+        return False, f"the provider finished but returned no video{detail}", 0.0
 
     # Download to disk immediately — the fal URL is temporary; the caller
     # re-hosts to our own R2 (never hand the fal URL to the player).

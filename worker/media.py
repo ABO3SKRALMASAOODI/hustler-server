@@ -19,7 +19,17 @@ class MediaError(RuntimeError):
 
 def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
     """Run ffmpeg/ffprobe. With progress_cb, parses -progress pipe:1 output
-    and reports percent of expected_out_s."""
+    and reports percent of expected_out_s.
+
+    Both branches decode with errors="replace". ffmpeg's log is NOT UTF-8: it
+    echoes container metadata verbatim (a Shift-JIS title, a CP-1251 artist)
+    and, on damaged input, prints raw bytes inside its decode warnings. With
+    strict decoding — the default for text=True — that raised UnicodeDecodeError
+    *out of subprocess.run itself*, which is not a MediaError, so every caller's
+    `except MediaError` missed it and the whole agent turn died. It cost a real
+    user their edit on 2026-07-25 ("'utf-8' codec can't decode byte 0xf9").
+    A log line is diagnostics; it must never be able to fail a job.
+    """
     timeout = timeout or config.FFMPEG_TIMEOUT_S
     if progress_cb and expected_out_s:
         # ffmpeg logs to stderr for the whole encode. Left as its own
@@ -30,7 +40,8 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
         # hours). Merge stderr INTO stdout so one continuously-drained
         # stream carries both; the buffer can never fill.
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True)
+                                stderr=subprocess.STDOUT, text=True,
+                                errors="replace")
         # A genuine hang emits nothing on either stream, so a watchdog still
         # enforces a hard wall-clock cap and a shorter no-progress stall cap;
         # killing the process closes the pipe and unblocks the read loop.
@@ -102,7 +113,8 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
             raise MediaError("ffmpeg failed: " + " | ".join(list(tail)[-12:]))
         return ""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         raise MediaError(f"{os.path.basename(cmd[0])} timed out after {timeout}s")
     if p.returncode != 0:
@@ -320,6 +332,7 @@ def black_seconds(path, duration=None):
             "-an", "-f", "null", "-"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace",
                            timeout=config.FFMPEG_TIMEOUT_S)
     except Exception:
         return 0.0
@@ -337,7 +350,7 @@ def detect_silences(wav_path, duration):
     cmd = ["ffmpeg", "-i", wav_path, "-af",
            f"silencedetect=noise={config.SILENCE_NOISE_DB}:d={config.SILENCE_MIN_S}",
            "-f", "null", "-"]
-    p = subprocess.run(cmd, capture_output=True, text=True,
+    p = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
                        timeout=config.FFMPEG_TIMEOUT_S)
     if p.returncode != 0:
         tail = "\n".join((p.stderr or "").strip().splitlines()[-6:])
@@ -372,10 +385,14 @@ def frame_at(src, t, dst, width=None, quality=4):
     readable frame is on disk or this raises MediaError — the failure every
     caller already handles.
 
-    Two seek modes are tried before giving up. Input seek (-ss before -i) is
+    Three seek modes are tried before giving up. Input seek (-ss before -i) is
     the fast path. Output seek (-ss after -i) decodes from the start: slower,
     but it lands frames that input seek misses on files with sparse keyframes
-    or edit lists (phone screen recordings are full of both).
+    or edit lists (phone screen recordings are full of both). The last is the
+    fully explicit form — pin the video stream, drop every other one, and name
+    the muxer with -update 1. Without that the image2 muxer has to guess that a
+    filename with no %d in it is a single still, and it logs that guess at
+    ERROR level; builds that turn it into a real error write nothing at all.
     """
     vf = ["-vf", rf"scale={width}:-2"] if width else []
     ts = f"{max(0.0, t):.3f}"
@@ -384,6 +401,9 @@ def frame_at(src, t, dst, width=None, quality=4):
          "-frames:v", "1", *vf, "-q:v", str(quality), dst],
         ["ffmpeg", "-y", "-i", src, "-ss", ts,
          "-frames:v", "1", *vf, "-q:v", str(quality), dst],
+        ["ffmpeg", "-y", "-i", src, "-ss", ts, "-map", "0:v:0",
+         "-an", "-sn", "-dn", "-frames:v", "1", *vf, "-q:v", str(quality),
+         "-f", "image2", "-update", "1", dst],
     )
     last_err = None
     for cmd in attempts:

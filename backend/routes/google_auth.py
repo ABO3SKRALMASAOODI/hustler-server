@@ -19,6 +19,8 @@ from werkzeug.security import generate_password_hash
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from credits import FREE_GRANT_CREDITS
+
 google_auth_bp = Blueprint("google_auth", __name__)
 
 # ── Google OAuth endpoints ────────────────────────────────────────────────────
@@ -124,19 +126,20 @@ def google_callback():
                 plan    = user.get("plan", "free") or "free"
             else:
                 dummy_pw = generate_password_hash(os.urandom(32).hex())
-                # Let the credit columns take their table defaults — same as an
-                # email signup (credits_daily 20 + credits_bonus 150 => balance
-                # 170). Previously this hard-coded credits_balance=20, so Google
-                # users' shown balance ignored the 150 welcome bonus until their
-                # first credits poll recomputed daily+bonus+monthly. The bonus was
-                # always present and spendable; only the stored balance was wrong.
+                # Grant the free allowance explicitly, exactly as the email
+                # signup does. The table defaults still describe the retired
+                # 20-daily + 150-bonus scheme, and a Google user landing on a
+                # different number than an email user is the kind of drift
+                # nobody notices until someone complains about their balance.
                 cur.execute(
                     """
-                    INSERT INTO users (email, password, is_verified, auth_provider)
-                    VALUES (%s, %s, 1, 'google')
+                    INSERT INTO users (email, password, is_verified, auth_provider,
+                                       credits_daily, credits_bonus,
+                                       credits_monthly, credits_balance)
+                    VALUES (%s, %s, 1, 'google', 0, %s, 0, %s)
                     RETURNING id
                     """,
-                    (email, dummy_pw)
+                    (email, dummy_pw, FREE_GRANT_CREDITS, FREE_GRANT_CREDITS)
                 )
                 row     = cur.fetchone()
                 user_id = row["id"]

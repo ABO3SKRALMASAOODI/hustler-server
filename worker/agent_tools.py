@@ -29,7 +29,8 @@ from captions import KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      EDLValidationError, Frame,
                      HEX_COLOR,
-                     canvas_edl, clip_anim, describe_edl, DEFAULT_CANVAS_FPS,
+                     canvas_edl, clip_anim, default_edl, describe_edl,
+                     DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
                      output_duration, program_duration, validate_edl,
                      MAX_INSERT_DURATION_S, GAIN_MIN_DB, GAIN_MAX_DB,
@@ -167,7 +168,22 @@ class ToolContext:
         try:
             normalized = validate_edl(new_edl_dict, self.duration).model_dump()
         except EDLValidationError as e:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {e}"
+            msg = f"REJECTED (EDL v{prev['version']} unchanged): {e}"
+            # Is the CURRENT saved state itself invalid? Then no edit built on
+            # it can ever save, and telling the agent to "fix the span" sends
+            # it round a loop it cannot exit — which is what happened to a real
+            # customer on 2026-07-25. Name the escape hatch instead.
+            try:
+                validate_edl(prev["json"], self.duration)
+            except EDLValidationError:
+                msg += ("\nThe SAVED edit is itself invalid against this "
+                        f"source ({self.duration}s), so every write will be "
+                        "rejected no matter what you change — most likely the "
+                        "video was replaced with a different one. Tell the "
+                        "user the old edit no longer fits this footage and "
+                        "call reset_edit to start from the full video, then "
+                        "rebuild what they asked for.")
+            return msg
         if edl_signature(normalized) == edl_signature(prev["json"]):
             return (f"NO CHANGE — the EDL is identical to v{prev['version']}; "
                     "the requested change may need a different tool or may "
@@ -558,22 +574,53 @@ def look_at(ctx, start, end, question):
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
-        return f"Cannot fetch frames right now ({err}). Decide from the index."
+        proxy = None
+        proxy_err = str(err)
+    else:
+        proxy_err = None
     # 6 frames over a >30s range (was 4 max): 4 samples across half a minute
     # skip whole shots; the marginal vision cost is small next to a wrong cut.
     n = 6 if e - s > 30 else (4 if e - s > 1.5 else 2)
-    frames, frame_names = [], []
-    for i in range(n):
-        t = s + (e - s) * (i + 0.5) / n
-        fp = os.path.join(ctx.workdir, f"look_{int(t * 100)}.jpg")
-        try:
-            media.frame_at(proxy, t, fp)
-            frames.append(fp)
-            frame_names.append(f"proxy frame @{t:.2f}s")
-        except media.MediaError:
-            pass
+    times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
+
+    def _sample(path, label, tag):
+        """Pull `times` out of one file. Returns (frames, names, last_error)."""
+        got, names, err = [], [], None
+        for i, t in enumerate(times):
+            fp = os.path.join(ctx.workdir, f"look_{tag}_{i}_{int(t * 100)}.jpg")
+            try:
+                media.frame_at(path, t, fp)
+            except media.MediaError as ex:
+                err = str(ex)
+                continue
+            got.append(fp)
+            names.append(f"{label} @{t:.2f}s")
+        return got, names, err
+
+    frames, frame_names, last_err = ([], [], proxy_err)
+    if proxy:
+        frames, frame_names, last_err = _sample(proxy, "proxy frame", "p")
+    # The proxy is a convenience, not the only copy of the footage. When it
+    # yields nothing, fall back to the ORIGINAL rather than blinding the agent:
+    # a whole paid turn was burned on 2026-07-25 doing 20 look_at calls that all
+    # came back "Could not extract frames", while render_preview on the same
+    # project worked perfectly — proving the pixels were reachable all along.
     if not frames:
-        return "Could not extract frames for that range."
+        try:
+            src = _original_local(ctx)
+        except Exception as ex:
+            last_err = last_err or str(ex)
+        else:
+            frames, frame_names, err2 = _sample(src, "source frame", "o")
+            last_err = err2 or last_err
+    if not frames:
+        # Never a bare "could not" again — the reason is the whole diagnosis.
+        return ("Could not extract frames for that range from either the "
+                f"proxy or the original ({(last_err or 'unknown error')[:220]})."
+                " The footage itself is fine for cutting and rendering — work "
+                "from get_shots, the transcript and get_video_info instead, "
+                "and say you could not LOOK at it rather than that the video "
+                "is broken.")
     try:
         has_frame = bool((ctx.latest_edl()["json"].get("frame") or {})
                          .get("ratio"))
@@ -632,18 +679,22 @@ def look_at_asset(ctx, asset_key, question, start=0, end=None):
     if e <= s:
         e = min(dur, s + 1.0)
     n = 6 if e - s > 20 else 4
-    frames, frame_names = [], []
+    frames, frame_names, last_err = [], [], None
     for i in range(n):
         t = s + (e - s) * (i + 0.5) / n
-        fp = os.path.join(ctx.workdir, f"alook_{asset['id']}_{int(t * 10)}.jpg")
+        fp = os.path.join(ctx.workdir,
+                          f"alook_{asset['id']}_{i}_{int(t * 10)}.jpg")
         try:
             media.frame_at(local, t, fp, width=640)
             frames.append(fp)
             frame_names.append(f"clip '{name}' frame @{t:.2f}s")
-        except media.MediaError:
-            pass
+        except media.MediaError as ex:
+            last_err = str(ex)
     if not frames:
-        return "Could not extract frames from that clip."
+        return ("Could not extract frames from that clip "
+                f"({(last_err or 'unknown error')[:220]}). The clip can still "
+                "be inserted — you just cannot see inside it; ask the user "
+                "which part to use instead of guessing.")
     labels = ", ".join(f"{s + (e - s) * (i + 0.5) / n:.1f}s"
                        for i in range(len(frames)))
     answer = llm.ask_vision(
@@ -2222,6 +2273,23 @@ def _run_clean(ctx, regions):
             "inside one edit turn. Offer the alternatives honestly: cover the "
             "area with blur_region, or crop it out of frame with "
             "auto_reframe/set_frame.")
+    # Duration is only half the cost. A 4K frame is 8x a 1080p one to decode,
+    # repaint and re-encode, and two turns died of exactly this on 2026-07-25:
+    # the box ran out of memory, so the WORKER died rather than the job — every
+    # other user's turn went with it. Refuse honestly instead.
+    mpx_s = (int(info["width"]) * int(info["height"]) / 1e6) * \
+        float(info["duration"])
+    if mpx_s > config.CLEAN_MAX_MPX_SECONDS:
+        raise ValueError(
+            f"this video is {info['width']}x{info['height']} for "
+            f"{float(info['duration']) / 60:.1f} min, which is more pixels "
+            "than a frame-by-frame repaint can finish inside one edit turn "
+            f"(about {config.CLEAN_MAX_MPX_SECONDS / (int(info['width']) * int(info['height']) / 1e6) / 60:.0f} "
+            "min at this resolution). Offer the alternatives honestly: cover "
+            "the area with blur_region, or crop it out of frame with "
+            "auto_reframe/set_frame. (Passing start/end does NOT help — the "
+            "whole file is still re-encoded; it only narrows which frames get "
+            "repainted.)")
     out = os.path.join(ctx.workdir, f"clean_{fp[:8]}.mp4")
     prox = os.path.join(ctx.workdir, f"clean_{fp[:8]}_proxy.mp4")
     stats = inpaint.clean_video(src, regions, out, prox)
@@ -2326,6 +2394,71 @@ def _apply_clean(ctx, regions, what):
     return result
 
 
+_SEED_PROMPT = (
+    "These frames are from one video. Find every piece of text, watermark, "
+    "logo or handle that is BURNED INTO the picture — permanently part of the "
+    "footage, in the same place in every frame. Ignore anything that is part "
+    "of the scene itself (a road sign, a book cover, a shop front, text on a "
+    "screen being filmed).\n"
+    "Reply with ONLY a JSON array, one object per mark:\n"
+    '[{"text": "<what it reads, or a short description>", '
+    '"x": <left>, "y": <top>, "w": <width>, "h": <height>}]\n'
+    "x, y, w, h are FRACTIONS of the frame from the TOP-LEFT corner (0-1). "
+    "Be generous: include the whole mark plus a little around it. "
+    "Return [] if there is none.")
+
+
+def _vision_seeded_regions(ctx, path, start, end, limit=3):
+    """Ask the frames where a mark is, then measure the ink there.
+
+    The measurement pass is what makes this trustworthy: the model only
+    chooses where to look, and `snap_box_to_ink` returns None when there is no
+    ink in the rectangle, so an imagined watermark produces no region at all.
+    """
+    if not llm.vision_available():
+        return []
+    try:
+        dur = float(ctx.duration)
+    except Exception:
+        return []
+    s = 0.0 if start is None else max(0.0, float(start))
+    e = dur if end is None else min(dur, float(end))
+    if e - s < 0.05:
+        s, e = 0.0, dur
+    frames = []
+    for i in range(4):
+        t = s + (e - s) * (i + 0.5) / 4
+        fp = os.path.join(ctx.workdir, f"seed_{i}_{int(t * 100)}.jpg")
+        try:
+            media.frame_at(path, t, fp)
+            frames.append(fp)
+        except media.MediaError:
+            pass
+    if not frames:
+        return []
+    reply = llm.ask_vision(_SEED_PROMPT, frames, purpose="vision_look",
+                           image_names=[f"frame {i + 1}"
+                                        for i in range(len(frames))])
+    out = []
+    for row in (llm.extract_json_array(reply) or [])[:limit]:
+        try:
+            box = (float(row["x"]), float(row["y"]),
+                   float(row["w"]), float(row["h"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (0 <= box[0] < 1 and 0 <= box[1] < 1
+                and 0 < box[2] <= 1 and 0 < box[3] <= 1):
+            continue
+        try:
+            snapped = inpaint.snap_box_to_ink(path, box, start=s, end=e)
+        except Exception:
+            snapped = None
+        if snapped:
+            snapped["label"] = str(row.get("text") or "burned-in text")[:80]
+            out.append(snapped)
+    return out
+
+
 def find_burned_text(ctx, scope="all", start=None, end=None):
     """Measure where text is burned into the footage. Read-only."""
     if not ctx.has_main_video:
@@ -2347,11 +2480,25 @@ def find_burned_text(ctx, scope="all", start=None, end=None):
     if sc != "all":
         regions = [r for r in regions if r["kind"] == sc]
     if not regions:
+        seeded = _vision_seeded_regions(ctx, path, start, end)
+        if seeded:
+            return ("The line-structure scan found nothing, so I LOOKED at "
+                    "the frames and then measured the ink inside what the "
+                    "frames showed. These rectangles are measured, not "
+                    "estimated:\n"
+                    + "\n".join(
+                        f"{i}. {r['label']}: x={r['x']} y={r['y']} "
+                        f"w={r['w']} h={r['h']} — ink in "
+                        f"{int(r['coverage'] * 100)}% of the rectangle across "
+                        f"{r['samples']} sampled frames"
+                        for i, r in enumerate(seeded, start=1))
+                    + "\nPass one of these to erase_region to repaint it out.")
         return ("No burned-in text found"
                 + (f" of kind '{sc}'" if sc != "all" else "")
-                + ". If the user insists there is some, ask WHERE it appears "
-                "(corner? bottom? at which second?) and pass that rectangle "
-                "to erase_region directly — do not invent one.")
+                + " — neither the line-structure scan nor a look at the "
+                "frames turned any up. If the user insists there is some, ask "
+                "WHERE it appears (corner? bottom? at which second?) and pass "
+                "that rectangle to erase_region directly — do not invent one.")
     lines = []
     for i, r in enumerate(regions, start=1):
         lines.append(
@@ -2384,7 +2531,14 @@ def erase_burned_text(ctx, scope="captions", start=None, end=None):
     if sc != "all":
         found = [r for r in found if r["kind"] == sc]
     if not found:
-        return (f"NO CHANGE: no burned-in {sc} were found in the footage, so "
+        # Same second chance find_burned_text gets: look at the frames, then
+        # measure the ink where they say it is. Still nothing = still nothing.
+        for r in _vision_seeded_regions(ctx, path, start, end):
+            found.append({"x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"],
+                          "kind": sc if sc != "all" else "text"})
+    if not found:
+        return (f"NO CHANGE: no burned-in {sc} were found in the footage — "
+                "not by the line scan and not by looking at the frames — so "
                 "nothing was erased. Do NOT tell the user text was removed. "
                 "Ask them where they see it and use erase_region with that "
                 "rectangle.")
@@ -2466,6 +2620,40 @@ def erase_region(ctx, x, y, w, h, start=None, end=None, fill="text"):
                 "NOT claim anything was removed.")
 
 
+def reset_edit(ctx):
+    """Throw the whole edit away and start again from the untouched source.
+
+    The escape hatch. Every write tool validates the ENTIRE EDL before it will
+    save, which is right — a half-valid timeline renders garbage — but it also
+    means a single out-of-range span makes a project permanently unwritable:
+    the keep fix is blocked by the volume span and the volume fix is blocked by
+    the keep span, forever. A real customer's project reached exactly that
+    state on 2026-07-25 (their replacement upload was shorter than the one the
+    edit was built on) and the agent had to tell them it was stuck.
+
+    This is the one write that cannot be blocked, because it does not build on
+    the current state — it replaces it with a freshly generated default, which
+    validates by construction.
+    """
+    if not ctx.has_main_video:
+        return ("REJECTED: there is no main video to reset to. This project "
+                "is a canvas program built from clips and images — remove the "
+                "inserts you don't want instead.")
+    prev = ctx.latest_edl()
+    fresh = default_edl(ctx.duration)
+    result = ctx.write_edl(
+        fresh, "reset the edit — back to the full untouched video")
+    if result.startswith("NO CHANGE"):
+        return ("NO CHANGE: the edit is already the full untouched video "
+                f"({ctx.duration}s, nothing cut). There was nothing to reset.")
+    if not result.startswith("EDL v"):
+        return result
+    return (result + f"\nEverything from v{prev['version']} is gone: cuts, "
+            "music, captions, inserts, effects, erases. The user's original "
+            "upload is untouched and every version is still in history. Say "
+            "plainly that you started over, then rebuild what they asked for.")
+
+
 def remove_erase(ctx, id=None):
     """Undo one erase (or all), re-cleaning from the untouched original."""
     edl = ctx.latest_edl()["json"]
@@ -2539,8 +2727,19 @@ def _resolve_media_asset(ctx, asset_key, kinds):
                 if avail else "Nothing of that type is uploaded to this "
                               "project yet — ask the user to attach or "
                               "upload one.")
-        return None, (f"REJECTED: '{asset_key}' is not a "
-                      f"{'/'.join(kinds)} asset in this project. {hint}")
+        # Say WHICH kind it actually is. "nothing of that type is uploaded" on
+        # a key the agent just read out of list_assets reads as "that file does
+        # not exist", and the agent then tells the user their upload is missing.
+        what = (f"'{asset_key}' is this project's {asset['kind']}, not a "
+                f"{'/'.join(kinds)} asset" if asset
+                else f"'{asset_key}' is not a {'/'.join(kinds)} asset in this "
+                     "project")
+        if asset and asset["kind"] in ("original", "proxy"):
+            return None, (f"REJECTED: {what} — it IS the main video. Use "
+                          "look_at(start, end) for the main video; "
+                          "look_at_asset is only for a separately uploaded "
+                          "clip or image.")
+        return None, f"REJECTED: {what}. {hint}"
     return asset, None
 
 
@@ -3993,8 +4192,9 @@ def _gen_budget_reject(ctx, projected_usd, what):
     if ctx.running_credits() + projected > ctx.credit_budget:
         return (f"REJECTED: not enough credits to {what} (it costs about "
                 f"{projected:.0f} credits and the balance won't cover it). Tell "
-                "the user honestly they're out of credits — they refresh daily, "
-                "or upgrading adds a bigger monthly pool.")
+                "the user honestly they're out of credits. Do NOT promise a "
+                "daily refresh — the free allowance is granted once and does "
+                "not refill; starting a plan is what unlocks more.")
     return None
 
 
@@ -4091,11 +4291,16 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
                           config.VIDEO_MAX_SECONDS)
     except (TypeError, ValueError):
         est_seconds = 5.0
-    over = _gen_budget_reject(ctx, videogen.price_for(est_seconds),
-                              "generate a video")
+    # A model that animates a still bills for the still too — quote the real
+    # total, or the user is charged for something the pre-check said fit.
+    projected = videogen.price_for(est_seconds)
+    if not from_image_asset_key and videogen.needs_image():
+        projected += config.IMAGE_PRICE_USD
+    over = _gen_budget_reject(ctx, projected, "generate a video")
     if over:
         return over
     image_url = None
+    seeded_note = ""
     if from_image_asset_key:
         asset, err = _resolve_media_asset(ctx, from_image_asset_key,
                                           ("image_ref",))
@@ -4106,6 +4311,38 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
         except Exception as e:
             return (f"Could not prepare the source image for animation "
                     f"({str(e)[:140]}). Try again.")
+    elif videogen.needs_image():
+        # The configured model animates a still. Rather than submitting a call
+        # that cannot succeed (which is what produced two silent failures for
+        # real users), paint the first frame and animate that — the capability
+        # the user asked for, delivered through the pipe that actually works.
+        if not llm.image_available():
+            return ("Video generation here works by animating a still image, "
+                    "and image generation is not configured either — so a "
+                    "clip cannot be made from a text description alone. Say "
+                    "that honestly and offer the alternatives: an uploaded "
+                    "clip, or a generated image placed as a full-frame moment.")
+        seed_path = os.path.join(ctx.workdir,
+                                 f"vidseed_{len(ctx.videos_generated) + 1}.png")
+        ok, ierr = llm.generate_image(p, seed_path,
+                                      aspect=_default_image_aspect(ctx))
+        if not ok:
+            return (f"Video generation FAILED before it started: the first "
+                    f"frame could not be generated ({ierr}). Do NOT claim a "
+                    "clip was created.")
+        seed_key = f"generated/{ctx.project_id}/{uuid.uuid4().hex[:12]}.png"
+        try:
+            storage.upload_file(seed_path, seed_key, "image/png")
+            image_url = storage.presign_get(seed_key, expires=3600)
+        except Exception as e:
+            return (f"The first frame was generated but could not be staged "
+                    f"for animation ({str(e)[:140]}). Try again.")
+        if _log_generation(ctx, "image_gen", config.IMAGE_GEN_MODEL, p,
+                           seed_key, config.IMAGE_PRICE_USD):
+            ctx.gen_extra_cost_usd += config.IMAGE_PRICE_USD
+        seeded_note = (" The clip was made by generating a first frame from "
+                       "your description and animating it, so it is new "
+                       "footage — not your original shot re-rendered.")
     n = len(ctx.videos_generated) + 1
     out_path = os.path.join(ctx.workdir, f"genvid_{n}.mp4")
     ok, err, seconds = videogen.generate_video(p, out_path, image_url=image_url,
@@ -4141,7 +4378,7 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
             f"({round(dur, 1)}s). It is NOT in your program yet: place it with "
             f"insert_media(asset_key='{key}', at_output_s=...), trimming with "
             "duration_s/clip_start_s if you only want part, or check it first "
-            "with look_at_asset.")
+            "with look_at_asset." + seeded_note)
 
 
 # ── Fetching media from a link ───────────────────────────────────────────────
@@ -5827,6 +6064,13 @@ TOOLS = {
                       "start": {"type": "number"},
                       "end": {"type": "number"},
                       "fill": {"type": "string", "enum": ["text", "box"]}}),
+    "reset_edit": (reset_edit, "Throw the whole edit away and start again "
+                   "from the full untouched source video. Use it when the "
+                   "user asks to start over, and as the LAST RESORT when a "
+                   "write tool keeps rejecting the EDL for a reason you "
+                   "cannot fix from inside it (a span that no longer fits the "
+                   "source). Destructive: it drops every cut, caption, track "
+                   "and effect, so say so before and after.", {}),
     "remove_erase": (remove_erase, "Undo an erase: put the original pixels "
                      "back for one erased region by its id (see get_edl), or "
                      "for ALL of them when id is omitted. Always rebuilds "
@@ -6237,6 +6481,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "remove_zoom", "set_fades", "set_transitions",
                "blur_region", "remove_blur",
                "erase_burned_text", "erase_region", "remove_erase",
+               "reset_edit",
                "set_speed", "remove_speed",
                "add_overlay", "move_overlay", "remove_overlay",
                "add_text", "remove_text",

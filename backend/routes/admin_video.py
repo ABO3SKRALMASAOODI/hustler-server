@@ -423,6 +423,19 @@ def video_project_detail(project_id):
                         ORDER BY cm.id ASC""", (p["chat_session_id"],))
         unserved_ids = [r["id"] for r in cur.fetchall()]
 
+        cur.execute("""SELECT id, type, progress, payload,
+                              EXTRACT(EPOCH FROM (NOW() - created_at)) AS age_s
+                       FROM video_jobs
+                       WHERE project_id = %s AND state IN ('running', 'queued')
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        _live = cur.fetchone()
+        live_turn = {
+            "job_id": _live["id"], "type": _live["type"],
+            "progress": _live["progress"],
+            "message_id": (_live["payload"] or {}).get("message_id"),
+            "running_for_s": int(_live["age_s"] or 0),
+        } if _live else None
+
         # Thumbnails + contact sheets have no asset rows — their keys live
         # in the index JSON and in render results. Surface them here so the
         # admin grid can show everything.
@@ -585,6 +598,13 @@ def video_project_detail(project_id):
         "llm_call_count": llm_count,
         "turns": turns,
         "unserved_message_ids": unserved_ids,
+        # A turn that is STILL WORKING looks exactly like a turn that was
+        # ignored: the user's message sits there with no assistant reply under
+        # it. A founder read that as "this customer got no response" on
+        # 2026-07-25 while the agent was 90 seconds into a two-minute edit that
+        # then answered fine. Name the in-flight turn so the two are never
+        # confused again.
+        "live_turn": live_turn,
     })
 
 

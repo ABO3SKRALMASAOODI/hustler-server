@@ -13,7 +13,7 @@ from credits import (
     count_running_jobs,
     check_and_reserve, deduct_credits, get_balance,
     get_job_credits, refresh_daily_credits, tokens_to_credits,
-    is_model_allowed, get_anthropic_model, PLAN_MODELS
+    is_model_allowed, get_anthropic_model, PLAN_MODELS, FREE_GRANT_CREDITS
 )
 
 auth_bp = Blueprint('auth', __name__)
@@ -356,7 +356,16 @@ def register():
             cursor.close(); conn.close()
             return jsonify({'error': 'User already exists'}), 409
 
-    cursor.execute("INSERT INTO users (email, password, auth_provider) VALUES (%s, %s, 'email')", (email, hashed_pw))
+    # The grant is set HERE, not left to the table defaults: the defaults still
+    # say 20 daily + 150 bonus, and the free tier is now one flat
+    # FREE_GRANT_CREDITS allowance that never refills. Code is the authority so
+    # the two signup paths cannot drift from each other or from credits.py.
+    cursor.execute(
+        """INSERT INTO users (email, password, auth_provider,
+                              credits_daily, credits_bonus, credits_monthly,
+                              credits_balance)
+           VALUES (%s, %s, 'email', 0, %s, 0, %s)""",
+        (email, hashed_pw, FREE_GRANT_CREDITS, FREE_GRANT_CREDITS))
     conn.commit()
     code = str(random.randint(100000, 999999))
     cursor.execute("""

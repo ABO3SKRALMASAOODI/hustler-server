@@ -636,6 +636,44 @@ def test_erase_refuses_a_video_too_long_to_finish():
     print("PASS: over-long source refused with the honest alternatives")
 
 
+def test_snap_box_to_ink_finds_the_real_rectangle():
+    """The "Dream Life" case: vision points, the pixels decide.
+
+    detect_text_regions votes on horizontal line structure, so a small static
+    wordmark that is not subtitle-shaped scores nothing. snap_box_to_ink takes
+    a rough rectangle from the vision model and returns the tight box measured
+    off the frames — or None when there is nothing there, which is what stops
+    an imagined watermark from becoming a censored patch.
+    """
+    if _skip():
+        return
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "wm.mp4")
+        _clip_watermark(src)
+        # Deliberately loose and offset, the way a model's estimate is.
+        rough = (0.66, 0.02, 0.30, 0.16)
+        got = inpaint.snap_box_to_ink(src, rough)
+        assert got, "the watermark should have been measured"
+        # The mark is drawn at x=0.72*W, baseline y=0.11*H. The measured box
+        # must land on it, not on the whole search window.
+        assert 0.66 <= got["x"] <= 0.76, got
+        assert 0.02 <= got["y"] <= 0.12, got
+        assert got["w"] < rough[2], got          # tighter than what we passed
+        assert got["coverage"] > 0.02, got
+    print("PASS: snap_box_to_ink measures a mark the line scan misses")
+
+
+def test_snap_box_to_ink_returns_none_on_empty_footage():
+    """An imagined watermark must produce no rectangle at all."""
+    if _skip():
+        return
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "plain.mp4")
+        _clip_plain(src)
+        assert inpaint.snap_box_to_ink(src, (0.4, 0.15, 0.2, 0.08)) is None
+    print("PASS: no ink in the rectangle -> no region invented")
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted(globals().items()):

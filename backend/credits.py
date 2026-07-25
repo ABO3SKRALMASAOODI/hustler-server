@@ -82,10 +82,19 @@ PLAN_MONTHLY_LIMITS = {
 
 DOLLARS_PER_CREDIT  = 0.01
 MARKUP              = 1.0   # No markup — margin comes from bundle pricing
-FREE_DAILY_CREDITS  = 20
-SUB_DAILY_CREDITS   = 20
-INITIAL_BONUS       = 150   # One-time bonus on registration — generous
-                            # runway before anyone hits the paywall
+
+# The free tier is ONE flat allowance, granted once and never refilled.
+#
+# It used to be 20/day + a 150 one-time bonus, which made "how much do I have
+# left?" unanswerable: a user who ran out saw the balance climb back to 20
+# overnight, so out-of-credits read as a temporary glitch rather than the end
+# of the trial, and the upgrade prompt never had a moment where it was true.
+# One number, spent once, is honest and is what the paywall can point at.
+FREE_GRANT_CREDITS  = 120
+FREE_DAILY_CREDITS  = 0     # free credits do NOT refill — see FREE_GRANT_CREDITS
+SUB_DAILY_CREDITS   = 20    # subscribers keep their daily top-up on top of the
+                            # monthly pool their plan buys
+INITIAL_BONUS       = FREE_GRANT_CREDITS   # legacy name, same number
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 
@@ -120,9 +129,10 @@ def is_model_allowed(plan, V_model):
 
 def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
     """
-    Every day: reset daily_credits to 20 (never accumulates).
-    Monthly pool is untouched here — managed by webhook only.
-    Bonus pool is untouched — one-time only.
+    Every day: reset a SUBSCRIBER's daily pool to 20 (never accumulates).
+    Free users are not topped up at all — their allowance is the one-time
+    FREE_GRANT_CREDITS in the bonus pool, so the number they see only ever
+    goes down. Monthly pool is untouched here — managed by webhook only.
     Combined balance shown to user = daily + bonus + monthly.
 
     Only hits the DB with a write when the date has actually changed,
@@ -140,7 +150,9 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
         if not row:
             return 0
 
-        daily      = float(row["credits_daily"]) if row.get("credits_daily") is not None else 20.0
+        # NULL means "no daily pool", not "20". Defaulting a missing column to
+        # a number hands out credits nobody granted.
+        daily      = float(row["credits_daily"] or 0)
         reset_date = row["credits_daily_reset"]
         monthly    = float(row["credits_monthly"] or 0)
         bonus      = float(row.get("credits_bonus") or 0)
@@ -148,8 +160,20 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
         if isinstance(reset_date, str):
             reset_date = datetime.date.fromisoformat(reset_date)
 
-        if reset_date is None or reset_date < today:
-            daily = SUB_DAILY_CREDITS if is_subscribed else FREE_DAILY_CREDITS
+        # A free user's daily pool is never refilled, but the date still has to
+        # advance — otherwise this branch re-runs on every poll, taking a write
+        # lock each time. Whatever is left in their daily column (legacy users
+        # carry up to 20) is theirs to spend; it just never grows back.
+        if (reset_date is None or reset_date < today) and not is_subscribed:
+            cur.execute(
+                "UPDATE users SET credits_daily_reset = %s, "
+                "credits_balance = credits_daily + credits_bonus "
+                "+ credits_monthly WHERE id = %s",
+                (today, user_id)
+            )
+            conn.commit()
+        elif reset_date is None or reset_date < today:
+            daily = SUB_DAILY_CREDITS
             cur.execute(
                 """UPDATE users
                    SET credits_daily = %s,
@@ -188,16 +212,23 @@ def get_balance(conn, user_id: int) -> dict:
     plan = row.get("plan") or "free"
     balance = refresh_daily_credits(conn, user_id, is_subscribed)
 
-    # Total plan limit = daily credits + bonus + monthly pool
     monthly = PLAN_MONTHLY_LIMITS.get(plan, 0)
-    daily = SUB_DAILY_CREDITS if is_subscribed else FREE_DAILY_CREDITS
-    plan_limit = daily + INITIAL_BONUS + monthly
+    if is_subscribed:
+        plan_limit = SUB_DAILY_CREDITS + monthly
+    else:
+        # One flat allowance, so the denominator the UI shows is the grant
+        # itself — not a total nobody can ever hold at once.
+        plan_limit = FREE_GRANT_CREDITS
 
     return {
         "balance": balance,
         "is_subscribed": is_subscribed,
         "plan": plan,
         "plan_limit": plan_limit,
+        # The free allowance is spent and does not come back — the studio uses
+        # this to offer the trial instead of telling people to wait for a
+        # refresh that will never arrive.
+        "free_trial_exhausted": (not is_subscribed) and float(balance or 0) < 1,
     }
 
 

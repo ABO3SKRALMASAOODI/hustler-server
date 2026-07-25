@@ -384,6 +384,21 @@ PROXY_CRF = int(os.getenv("PROXY_CRF", "25"))
 # than starting something that cannot finish. Raise it when the clean pass
 # moves onto the media executor, where it is not racing a turn timeout.
 CLEAN_MAX_SOURCE_S = float(os.getenv("CLEAN_MAX_SOURCE_S", "600"))
+# ...and the bound that DURATION alone does not express: frame area. The clean
+# pass runs on the dispatcher — the smallest box in the fleet — and a 4K frame
+# costs 8x a 1080p one in decode buffer, numpy working set and x264 state. Two
+# real agent turns were killed outright on 2026-07-25 (a 1282x1596 erase and a
+# 1440x2560 one): the container was OOM-killed, so the job did not fail, the
+# WORKER died, and every other user's in-flight turn went down with it. The
+# encoder is now bounded (see inpaint.clean_video) and the total work is capped
+# here, so an oversized repaint is refused honestly instead of taking the
+# service down. Megapixel-seconds = width*height/1e6 * duration.
+CLEAN_MAX_MPX_SECONDS = float(os.getenv("CLEAN_MAX_MPX_SECONDS", "900"))
+# x264 keeps `rc-lookahead` decoded frames alive at all times. At 4K that alone
+# is ~1 GB per encoder before anything else. The clean pass does not need
+# lookahead quality — it is re-encoding footage it just decoded.
+CLEAN_X264_THREADS = int(os.getenv("CLEAN_X264_THREADS", "2"))
+CLEAN_X264_LOOKAHEAD = int(os.getenv("CLEAN_X264_LOOKAHEAD", "10"))
 # Frames sampled when LOOKING for burned-in text. Detection reads the proxy and
 # input-seeks, so each sample is a seek, not a decode; 28 covers a caption that
 # is only on screen for part of the video without making the scan noticeable.

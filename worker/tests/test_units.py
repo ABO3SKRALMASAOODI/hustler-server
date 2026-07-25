@@ -2577,7 +2577,10 @@ try:
     except mediamod.MediaError as e:
         check("exit-0-but-no-file raises instead of returning a phantom path",
               "no frame at 99.000s" in str(e) and "wrote no frame" in str(e))
-    check("both seek modes are tried before giving up", _c["n"] == 2)
+    # Three now: input seek, output seek, and the fully explicit
+    # -map/-f image2 -update 1 form for builds where the image2 muxer refuses
+    # to guess that a filename with no %d is a single still.
+    check("every seek mode is tried before giving up", _c["n"] == 3)
 
     # A zero-byte file must not pass as a frame, and must not be left behind
     # to fool the next existence check.
@@ -2609,6 +2612,23 @@ try:
     _dst = os.path.join(_tmpd, "e.jpg")
     check("a failed input seek still tries output seek",
           mediamod.frame_at("p.mp4", 5.0, _dst) == _dst)
+
+    # ...and when BOTH seek modes come back empty, the explicit muxer form is
+    # the last chance. Whole paid turns went blind on 2026-07-25 because
+    # look_at could not land a single frame off a proxy that rendered fine.
+    mediamod.run, _c = _stub_run(["fail", "nothing", "frame"])
+    _dst = os.path.join(_tmpd, "f.jpg")
+    check("the explicit -update 1 form is the last chance",
+          mediamod.frame_at("p.mp4", 5.0, _dst) == _dst and _c["n"] == 3)
+    _explicit = []
+    mediamod.run = lambda cmd, **kw: (_explicit.append(list(cmd)), "")[1]
+    try:
+        mediamod.frame_at("p.mp4", 5.0, os.path.join(_tmpd, "g.jpg"))
+    except mediamod.MediaError:
+        pass
+    check("the last attempt pins the video stream and names the muxer",
+          _explicit and "-update" in _explicit[-1]
+          and "0:v:0" in _explicit[-1] and "image2" in _explicit[-1])
 finally:
     mediamod.run = _real_run
 

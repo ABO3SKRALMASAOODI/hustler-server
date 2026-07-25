@@ -513,6 +513,22 @@ def user_credits_balance(conn, user_id):
         return float(row["credits_balance"] or 0) if row else 0.0
 
 
+def user_is_subscribed(conn, user_id):
+    """Needed because "you're out of credits" has two different truths.
+
+    A subscriber's pool really does come back — daily, and in full on renewal.
+    A free user's does NOT: the allowance is granted once (see
+    backend/credits.FREE_GRANT_CREDITS). Telling a free user to wait for a
+    refresh that will never arrive is a lie that also costs the sale, because
+    the moment they hit the wall is the only moment the upgrade is relevant.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT is_subscribed FROM users WHERE id = %s",
+                    (user_id,))
+        row = cur.fetchone()
+        return bool(row and row["is_subscribed"])
+
+
 # ── Credits ──────────────────────────────────────────────────────────────────
 # 1 credit = $0.01 of model cost (same convention as backend/credits.py).
 # Charged from actual llm_calls usage after each agent turn, spending

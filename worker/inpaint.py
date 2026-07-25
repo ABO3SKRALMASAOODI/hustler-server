@@ -627,23 +627,27 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
          "-vf", f"scale={W}:{H},fps={fps:.5f}",
          "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        bufsize=frame_bytes * 4)
+        # Capped, not proportional: `frame_bytes * 4` is 44 MB of Python-side
+        # buffer at 4K, on the smallest box in the fleet, for no throughput
+        # gain — the loop consumes a frame as fast as it is produced.
+        bufsize=min(frame_bytes * 4, 8 << 20))
 
+    # ONE encoder, and a bounded one. This used to be a single ffmpeg with two
+    # output files, i.e. two live x264 encoders — at 1440x2560 their frame
+    # buffers alone ran to ~1 GB and the container was OOM-killed, taking the
+    # whole worker (and every other user's in-flight turn) down with it. The
+    # proxy is derived in a second pass below, from a file that is already on
+    # disk, so the two encoders are never alive at the same time.
+    x264p = (f"rc-lookahead={config.CLEAN_X264_LOOKAHEAD}:sync-lookahead=0")
     enc_cmd = ["ffmpeg", "-y", "-v", "error",
                "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
                "-r", f"{fps:.5f}", "-i", "pipe:0", "-i", src,
                "-map", "0:v:0", "-map", "1:a?",
                "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+               "-threads", str(config.CLEAN_X264_THREADS),
+               "-x264-params", x264p,
                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                "-movflags", "+faststart", out_full]
-    if out_proxy:
-        h = config.PROXY_HEIGHT
-        enc_cmd += ["-map", "0:v:0", "-map", "1:a?",
-                    "-vf", rf"scale=-2:min({h}\,floor(ih/2)*2)",
-                    "-c:v", "libx264", "-preset", config.PROXY_PRESET,
-                    "-crf", str(config.PROXY_CRF), "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "128k",
-                    "-movflags", "+faststart", out_proxy]
     enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE,
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -691,6 +695,19 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
         rc = enc.wait(timeout=config.FFMPEG_TIMEOUT_S)
     if rc != 0 or not os.path.exists(out_full):
         raise media.MediaError(f"clean encode failed: {err or 'no output'}")
+    # Second pass, from the finished full-res file — cheap (it decodes an
+    # already-small H.264 instead of holding raw frames) and, crucially, it
+    # starts only once the first encoder has exited.
+    if out_proxy:
+        h = config.PROXY_HEIGHT
+        media.run(["ffmpeg", "-y", "-v", "error", "-i", out_full,
+                   "-vf", rf"scale=-2:min({h}\,floor(ih/2)*2)",
+                   "-c:v", "libx264", "-preset", config.PROXY_PRESET,
+                   "-crf", str(config.PROXY_CRF),
+                   "-threads", str(config.CLEAN_X264_THREADS),
+                   "-x264-params", x264p,
+                   "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                   "-movflags", "+faststart", out_proxy])
     if progress_cb:
         progress_cb(1.0)
     return {"frames": i, "frames_touched": touched,
@@ -700,6 +717,70 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
                         "plate": r.plate is not None,
                         "fill": r.fill,
                         "escalated": r.escalated} for r in regs]}
+
+
+def snap_box_to_ink(path, box, *, start=None, end=None, samples=12,
+                    pad_frac=0.02):
+    """Tighten a ROUGH rectangle onto the ink that is actually inside it.
+
+    detect_text_regions is deliberately blind to a whole class of real marks:
+    it votes on horizontal LINE structure, which is what a subtitle looks like,
+    and a soft semi-transparent wordmark floating in the upper third never
+    accumulates enough votes. A real user asked to remove a "Dream Life"
+    watermark on 2026-07-25 — the detector found nothing twice, the vision model
+    read it off the frames instantly, and the agent was left estimating a box
+    by eye, which is the one thing round 39 exists to stop.
+
+    So this closes the loop the other way round: vision says WHERE to look, and
+    the pixels still decide the rectangle. Given a coarse box it measures the
+    ink inside it across `samples` frames and returns the tight box in frame
+    fractions plus the coverage, or None when there is no ink there — which is
+    the honest answer when the model imagined the mark.
+    """
+    info = media.probe(path)
+    W, H = int(info["width"]), int(info["height"])
+    dur = float(info["duration"])
+    s = 0.0 if start is None else max(0.0, float(start))
+    e = dur if end is None else min(dur, float(end))
+    if e - s < 0.05:
+        s, e = 0.0, dur
+    # Look a little OUTSIDE the given box: a model's rectangle clips the ends
+    # of the word about as often as it overshoots, and a clipped erase leaves
+    # the last letter on screen.
+    gx0 = max(0, int((float(box[0]) - pad_frac) * W))
+    gy0 = max(0, int((float(box[1]) - pad_frac) * H))
+    gx1 = min(W, int((float(box[0]) + float(box[2]) + pad_frac) * W))
+    gy1 = min(H, int((float(box[1]) + float(box[3]) + pad_frac) * H))
+    if gx1 - gx0 < 4 or gy1 - gy0 < 4:
+        return None
+    n = max(4, min(int(samples), 30))
+    step = (e - s) / float(n + 1)
+    votes = np.zeros((gy1 - gy0, gx1 - gx0), np.float32)
+    seen = 0
+    for i in range(n):
+        f = _grab(path, s + step * (i + 1), W, H)
+        if f is None:
+            continue
+        seen += 1
+        votes += (ink_mask(f[gy0:gy1, gx0:gx1], dilate=1) > 0)
+    if not seen:
+        return None
+    # A watermark is the same pixels in every frame, so vote hard: half the
+    # samples. That also throws away moving picture detail that happens to
+    # look inky in one frame.
+    hot = (votes >= max(2.0, 0.5 * seen)).astype(np.uint8) * 255
+    if not hot.any():
+        return None
+    ys, xs = np.nonzero(hot)
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    if (x1 - x0) < 3 or (y1 - y0) < 3:
+        return None
+    coverage = float(hot[y0:y1, x0:x1].mean() / 255.0)
+    return {"x": round((gx0 + x0) / W, 4), "y": round((gy0 + y0) / H, 4),
+            "w": round((x1 - x0) / W, 4), "h": round((y1 - y0) / H, 4),
+            "coverage": round(coverage, 3), "samples": seen,
+            "first_s": round(s, 2), "last_s": round(e, 2)}
 
 
 def text_energy(path, box, *, at=None, samples=6):
