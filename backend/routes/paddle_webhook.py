@@ -85,18 +85,17 @@ def _user_id_by_customer_email(customer_id):
     except Exception as e:
         print(f"⚠️ customer lookup failed for {customer_id}: {e}")
         return None
-    conn = get_db()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(%s) LIMIT 1",
-                    (email,))
-        row = cur.fetchone()
-        cur.close()
-        if not row:
-            return None
-        return row['id'] if isinstance(row, dict) else row[0]
-    finally:
-        conn.close()
+    # NEVER close this connection. get_db() caches one per REQUEST on flask.g
+    # and hands the same object to every caller, so closing it here killed the
+    # connection that update_user_subscription_status then tried to use — the
+    # whole activation 500'd and Paddle retried forever. _user_id_by_subscription
+    # right below has always followed the same rule.
+    cur = get_db().cursor()
+    cur.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(%s) LIMIT 1",
+                (email,))
+    row = cur.fetchone()
+    cur.close()
+    return row[0] if row else None
 
 
 def _user_id_by_subscription(subscription_id):
