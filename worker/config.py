@@ -469,7 +469,10 @@ WATERMARK_VERSION = 1
 # do. Set WATERMARK_ENABLED=0 to switch the mark back off in one env var if
 # that needs to be undone in a hurry.
 WATERMARK_ENABLED = os.getenv("WATERMARK_ENABLED", "1") == "1"
-WATERMARK_TEXT = os.getenv("WATERMARK_TEXT", "edited by valmera agent")
+# Capitalised at the owner's request. Set as a literal rather than .upper()'d
+# at render time so an operator overriding WATERMARK_TEXT gets exactly the
+# casing they typed instead of having it silently rewritten.
+WATERMARK_TEXT = os.getenv("WATERMARK_TEXT", "EDITED BY VALMERA AGENT")
 # The site's wordmark face (frontend navbar uses Plus Jakarta Sans 800), so
 # the mark on the video and the logo on the page are the same type. This is
 # the font's FULL name — libass resolves it out of the bundled fonts dir the

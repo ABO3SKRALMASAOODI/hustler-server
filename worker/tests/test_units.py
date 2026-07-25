@@ -3152,6 +3152,18 @@ check("only a job we still hold is released",
       "state = 'running'" in _sql)
 check("no ids -> no query at all", wdb.release_jobs(_RelConn(), []) == 0)
 
+# set_progress also writes heartbeat_at, so without the same clause a job you
+# cancel keeps looking ALIVE: a hung render stamped progress onto a job that
+# had been 'failed' for 20 minutes, so the row read failed + 0s-old heartbeat
+# and nothing in the DB could tell you whether the process had actually died.
+_pc = _RelConn()
+wdb.set_progress(_pc, 42, 89)
+_psql = _pc.sql[0][0]
+check("set_progress cannot resurrect a cancelled job's heartbeat",
+      "state = 'running'" in _psql)
+check("set_progress still writes the heartbeat (that is why it needs the clause)",
+      "heartbeat_at = NOW()" in _psql)
+
 # The whisper cache is a liability once whisper is only the fallback: 'medium'
 # holds ~1.5GB for the process's life and that resident memory is what
 # OOM-killed the worker mid-customer.
@@ -5015,6 +5027,15 @@ for _W, _H in ((1080, 1920), (1920, 1080), (1080, 1080), (864, 1080)):
           _g["x_in"] >= _g["margin"] + _g["rw"])
     check(f"watermark {_W}x{_H}: the mark fits inside the frame",
           _g["margin"] + _g["rh"] < _H and _g["x_out"] < _W)
+    # x_out is where the words START; they extend RIGHT from there (\an7).
+    # Capitalising the text made it ~15% wider, and libass clips silently at
+    # the frame edge -- a half-visible wordmark is worse than none, and no
+    # error would appear anywhere. 0.75*fontsize per glyph is a deliberately
+    # generous advance for an ExtraBold uppercase face.
+    _tw = len(wconfig.WATERMARK_TEXT) * 0.75 * _g["fontsize"]
+    check(f"watermark {_W}x{_H}: '{wconfig.WATERMARK_TEXT}' fits without "
+          f"clipping (ends ~{int(_g['x_out'] + _tw)} of {_W})",
+          _g["x_out"] + _tw < _W)
 
 # Font drift: a family-name mismatch falls back to DejaVu SILENTLY, which is
 # exactly how a bare font override once shipped the wrong face.

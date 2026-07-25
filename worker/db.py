@@ -149,10 +149,22 @@ def active_job_ids():
 
 
 def set_progress(conn, job_id, progress):
+    """The `state = 'running'` clause is what makes a cancellation STICK.
+
+    This writes heartbeat_at, so without it a job cancelled out from under a
+    still-live process keeps getting heartbeated by its own zombie: the row
+    reads `failed` with a 0-second-old heartbeat forever, the reaper's
+    staleness rule is lied to, and there is no way to tell from the DB whether
+    the process actually died. That is not theoretical — a hung render kept
+    stamping progress=89 onto a job that had been failed for twenty minutes,
+    and it made "is it dead yet?" unanswerable. heartbeat_forever already has
+    this clause; this is the same rule, applied to the other writer.
+    """
     with conn.cursor() as cur:
         cur.execute("""UPDATE video_jobs
                        SET progress = %s, heartbeat_at = NOW(), updated_at = NOW()
-                       WHERE id = %s""", (min(100, max(0, int(progress))), job_id))
+                       WHERE id = %s AND state = 'running'""",
+                    (min(100, max(0, int(progress))), job_id))
 
 
 def finish_job(conn, job_id, state, error=None, result=None):
