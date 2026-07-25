@@ -458,7 +458,10 @@ OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
 # and busts the render cache exactly like OUTRO_VERSION, so a user who
 # UPGRADES gets a clean re-encode instead of their cached marked export
 # forever. Bump it whenever the mark's LOOK changes.
-WATERMARK_VERSION = 1
+# 2 = wordmark capitalised ("EDITED BY VALMERA AGENT"). Without this bump the
+# already-rendered exports stay stamped wm_v=1, pass the freshness gate, and
+# serve the old lowercase mark forever — which is precisely the end-card bug.
+WATERMARK_VERSION = 2
 # ON by owner's decision (the tradeoff was raised and taken deliberately).
 #
 # KNOWN OUTSTANDING: 44 public pages (58 occurrences) plus public/llms.txt and
