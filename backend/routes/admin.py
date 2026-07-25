@@ -1060,10 +1060,18 @@ def list_users():
                     -- Credits come STRAIGHT off the ledger by user_id.
                     -- This used to INNER JOIN jobs, which silently dropped
                     -- every video-lane row (job_id 'video:<n>' has no `jobs`
-                    -- row) -- i.e. 55% of all credits ever spent, and the
-                    -- only credits 63 of the 85 paying-attention users have.
-                    -- Those users all showed 0. job_credits.user_id is set
-                    -- on every row and indexed, so no join is needed at all.
+                    -- row) -- over half of all credits ever spent, and the
+                    -- only credits 63 of the 85 real users have. Those users
+                    -- all showed 0. job_credits.user_id is set on every row
+                    -- and indexed, so no join is needed at all.
+                    --
+                    -- NB: never write a literal percent sign anywhere in this
+                    -- string, comments included. psycopg2 scans the WHOLE
+                    -- query for placeholders whenever vars are passed, so a
+                    -- percent sign in a COMMENT is read as one and the call
+                    -- dies with "IndexError: list index out of range" before
+                    -- Postgres ever sees the SQL. That is exactly how this
+                    -- endpoint got emptied once already.
                     (SELECT COALESCE(SUM(jc.credits_used), 0)
                      FROM job_credits jc WHERE jc.user_id = u.id)
                         AS total_credits_used,
