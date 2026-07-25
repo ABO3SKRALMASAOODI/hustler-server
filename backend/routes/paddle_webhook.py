@@ -3,6 +3,7 @@ import hmac
 import os
 import time
 
+import requests
 from flask import Blueprint, request
 from models import get_db, update_user_subscription_status
 from datetime import datetime
@@ -53,6 +54,49 @@ def _plan_from_data(data):
         if pid and pid in PRICE_TO_PLAN:
             return PRICE_TO_PLAN[pid]
     return None
+
+
+_PADDLE_BASE = ("https://sandbox-api.paddle.com"
+                if os.environ.get('PADDLE_MODE') == 'sandbox'
+                else "https://api.paddle.com")
+
+
+def _user_id_by_customer_email(customer_id):
+    """The account that owns the email Paddle billed, or None.
+
+    One Paddle API call on a rare event (an activation), which is cheap next
+    to letting a forged custom_data.user_id decide who gets a paid plan.
+    Returns None on ANY failure so a Paddle hiccup degrades to the previous
+    behaviour (trust custom_data) rather than silently dropping a real
+    customer's activation.
+    """
+    if not customer_id:
+        return None
+    try:
+        r = requests.get(
+            f"{_PADDLE_BASE}/customers/{customer_id}",
+            headers={"Authorization": f"Bearer {os.environ['PADDLE_API_KEY']}"},
+            timeout=10)
+        if r.status_code != 200:
+            return None
+        email = ((r.json().get('data') or {}).get('email') or '').strip()
+        if not email:
+            return None
+    except Exception as e:
+        print(f"⚠️ customer lookup failed for {customer_id}: {e}")
+        return None
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(%s) LIMIT 1",
+                    (email,))
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        return row['id'] if isinstance(row, dict) else row[0]
+    finally:
+        conn.close()
 
 
 def _user_id_by_subscription(subscription_id):
@@ -155,7 +199,20 @@ def handle_webhook():
     subscription_id = data.get('subscription_id') or data.get('id')
 
     if event_type in GRANT_EVENTS:
-        user_id = custom_data.get('user_id')
+        # custom_data now arrives from Paddle.js (the browser creates the
+        # transaction so it can render inline), so user_id is no longer
+        # server-set and must not be trusted on its own. The BUYER'S EMAIL is
+        # the authoritative identity: resolve the account from Paddle's
+        # customer record and prefer it whenever the two disagree. Without
+        # this, editing customData in devtools would activate a plan on
+        # someone else's account.
+        user_id = _user_id_by_customer_email(data.get('customer_id'))
+        claimed = custom_data.get('user_id')
+        if user_id and claimed and str(claimed) != str(user_id):
+            print(f"⛔ custom_data claimed user {claimed} but the paying "
+                  f"customer is user {user_id} — granting to the payer")
+        if not user_id:
+            user_id = claimed          # unknown email (first purchase) -> fall back
         if not user_id:
             return 'OK', 200
         # Plan/credits come from the PAID price, never from custom_data.plan.

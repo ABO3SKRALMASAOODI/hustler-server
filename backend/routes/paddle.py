@@ -81,6 +81,44 @@ def _is_within_24h(created_at):
     return (now - created_at).total_seconds() < 86400
 
 
+@paddle_bp.route('/paddle/checkout-config', methods=['POST'])
+def checkout_config():
+    """What the browser needs to open an INLINE Paddle checkout itself.
+
+    Why the browser creates the transaction and not us: Paddle.js can only
+    render inline for a transaction that is already `ready`, and a transaction
+    we create server-side is `draft` — it has no customer and no address, and
+    we cannot invent either. Faced with a draft, Paddle.js does not error; it
+    silently redirects to its hosted page to collect those details, which is
+    exactly the "nice page, then the old checkout two seconds later" bounce.
+    Opening with `items` lets Paddle create the transaction AND collect the
+    address inside our own frame.
+
+    The price id and the email are returned from HERE rather than hardcoded in
+    the bundle so the client can never pick a price we did not authorise, and
+    the email is the JWT's, not whatever the page felt like sending.
+    """
+    try:
+        user_id, user_email = decode_token(request.headers.get('Authorization'))
+    except Exception:
+        return jsonify({"error": "Invalid token"}), 401
+    if not user_id:
+        return jsonify({"error": "Missing token"}), 401
+
+    data = request.json or {}
+    plan = data.get('plan', 'ai')
+    billing = 'yearly' if data.get('billing') == 'yearly' else 'monthly'
+    if plan not in PLANS:
+        return jsonify({"error": "Invalid plan"}), 400
+    if plan not in PURCHASABLE_PLANS:
+        return jsonify({"error": "That plan is no longer available."}), 400
+
+    price_id = (PLANS[plan]['yearly_price_id'] if billing == 'yearly'
+                else PLANS[plan]['price_id'])
+    return jsonify({"price_id": price_id, "email": user_email,
+                    "user_id": str(user_id), "plan": plan, "billing": billing})
+
+
 # ── Create checkout session ───────────────────────────────────────────────────
 
 @paddle_bp.route('/paddle/create-checkout-session', methods=['POST'])
