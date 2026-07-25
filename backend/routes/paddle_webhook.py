@@ -10,6 +10,12 @@ from datetime import datetime
 paddle_webhook = Blueprint('paddle_webhook', __name__)
 
 PLAN_CREDITS = {
+    # 'mcp' grants 0 ON PURPOSE. Credits meter OUR model spend, and on the
+    # MCP plan the customer's own key pays for the model — topping up a pool
+    # they never draw from would be meaningless, and metering their key as
+    # ours would overcharge them. Keep at 0 unless MCP starts using our LLM.
+    'mcp':   0,
+    'ai':    2400,
     'plus':  800,
     'pro':   2400,
     'ultra': 5000,

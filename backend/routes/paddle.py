@@ -9,6 +9,21 @@ paddle_bp = Blueprint('paddle', __name__)
 # ── Plan definitions ──────────────────────────────────────────────────────────
 
 PLANS_LIVE = {
+    # ── The two live plans (round 44) ───────────────────────────────────
+    # Both carry a 3-DAY FREE TRIAL, configured on the Paddle PRICE itself
+    # (trial_period: 3 days, requires_payment_method) — not in this code.
+    # Paddle therefore creates the subscription immediately, charges nothing
+    # until day 3, and fires subscription.created right away; the webhook
+    # grants credits on that event, so a trialling user is a paying user as
+    # far as the app is concerned and simply stops being one if they cancel.
+    #
+    # 'mcp' deliberately carries monthly_credits 0: on that plan the customer
+    # supplies their own model through their own MCP client, so the credit
+    # pool (which exists to meter OUR model spend) must not be topped up.
+    # Metering their own key as if it were ours would overcharge them.
+    'mcp':   {'price_id': 'pri_01kyde24w5s63hgzh7wzn4zwnt', 'yearly_price_id': 'pri_01kyde254pd3z24zqd8mzav861', 'monthly_credits': 0},
+    'ai':    {'price_id': 'pri_01kyde25cwqf7t2bk1ekky2pyp', 'yearly_price_id': 'pri_01kyde25n7rxrhajg5xvxxka7y', 'monthly_credits': 2400},
+    # ── Retired tiers, kept so grandfathered subscribers keep working ────
     'plus':  {'price_id': 'pri_01jxj6smtjkfsf22hdr4swyr9j', 'yearly_price_id': 'pri_01kkekq1hcvzvyhh3ffk3nk291', 'monthly_credits': 800},
     'pro':   {'price_id': 'pri_01kk4k4y8c3ygxd620vcxg6ph1', 'yearly_price_id': 'pri_01kkeksjv9pf2nc1gphj67m8ae', 'monthly_credits': 2400},
     'ultra': {'price_id': 'pri_01kk4k83cwpmf1jsctgdvhm0n6', 'yearly_price_id': 'pri_01kkektygjg89gywskyj1dycx2', 'monthly_credits': 5000},
@@ -30,7 +45,7 @@ PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_L
 # retired from the product but stay in PLANS (and PLAN_CREDITS in the webhook)
 # so grandfathered subscribers keep working — they must NOT be reachable via a
 # hand-crafted checkout/change-plan call that mints their live price IDs.
-PURCHASABLE_PLANS = {'plus', 'pro'}
+PURCHASABLE_PLANS = {'mcp', 'ai'}
 
 
 def get_paddle_base():
@@ -141,7 +156,13 @@ def create_checkout_session():
 
     resp_data = response.json()
     checkout_url = resp_data["data"]["checkout"]["url"]
-    return jsonify({"checkout_url": checkout_url})
+    # The transaction id is what lets the frontend open Paddle.js INLINE, on
+    # our own dark page, instead of sending the user to Paddle's hosted white
+    # two-column page. checkout_url is still returned so any older client (and
+    # the fallback path when Paddle.js fails to load) keeps working.
+    return jsonify({"checkout_url": checkout_url,
+                    "txn_id": resp_data["data"]["id"],
+                    "plan": plan, "billing": billing})
 
 
 # ── Check promo eligibility ──────────────────────────────────────────────────
