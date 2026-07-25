@@ -430,8 +430,16 @@ def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H):
     g = watermark_geometry(W, H)
     parts = [f"[{robot_idx}:v]scale={g['rw']}:{g['rh']}[wmbot]"]
     tail = out_label if not wm_ass_path else "wmv"
+    # shortest=1 is load-bearing: the robot is a LOOPED still, so with
+    # overlay's default shortest=0 ("do not end when the shortest input
+    # ends") the filter keeps emitting frames forever after the programme
+    # finishes and ffmpeg encodes into the void. That is not theoretical --
+    # it hung a real export at 89% for 8 minutes with a healthy heartbeat,
+    # which looks exactly like "slow" and never ends. The main stream drives
+    # the length; the input is ALSO bounded with -t as a second line of
+    # defence, generously, so it can never be the shorter one and truncate.
     parts.append(f"[{vlabel}][wmbot]overlay={g['margin']}:{g['margin']}:"
-                 f"format=auto[{tail}]")
+                 f"format=auto:shortest=1[{tail}]")
     if wm_ass_path:
         parts.append(f"[wmv]subtitles=filename='{wm_ass_path}'"
                      f":fontsdir='{caplib.FONTS_DIR}'[{out_label}]")
@@ -1485,7 +1493,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
     robot_idx, wm_ass_path = None, None
     if want_wm:
-        extra_inputs += ["-loop", "1", "-i", robot_path()]
+        extra_inputs += ["-loop", "1",
+                         "-t", f"{tl.out_duration + 5.0:.3f}",
+                         "-r", f"{fps:.3f}", "-i", robot_path()]
         robot_idx = next_idx
         next_idx += 1
         wm_ass_path = build_watermark_ass(
@@ -1668,7 +1678,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # PROGRAM's length (not the outro's — the mark stops before the card).
     robot_idx, wm_ass_path = None, None
     if want_wm:
-        extra_inputs += ["-loop", "1", "-i", robot_path()]
+        extra_inputs += ["-loop", "1",
+                         "-t", f"{tl.out_duration + 5.0:.3f}",
+                         "-r", f"{fps:.3f}", "-i", robot_path()]
         robot_idx = next_idx
         next_idx += 1
         wm_ass_path = build_watermark_ass(

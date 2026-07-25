@@ -5041,6 +5041,20 @@ check("watermark: no event runs past the end of the program",
       max(_ends) <= 25.0 + 1e-6)
 check("watermark: events are ordered and non-overlapping",
       all(_starts[i] >= _ends[i - 1] - 1e-6 for i in range(1, len(_dialogs))))
+# The overlay MUST end with the programme. The robot is a looped still, so
+# with overlay's default shortest=0 the filter emits frames forever after the
+# video ends and ffmpeg encodes into the void -- this hung a real export at
+# 89% for 8 minutes with a healthy heartbeat, which reads as "slow", not
+# "broken", and never finishes.
+_wm_graph = ";".join(renderer._watermark_parts("v0", "vout", 9, None,
+                                               1080, 1920))
+check("watermark: the overlay ends with the programme (shortest=1)",
+      "shortest=1" in _wm_graph)
+check("watermark: the looped robot input is bounded by -t like every other "
+      "still in the renderer",
+      'f"{tl.out_duration + 5.0:.3f}"' in open(
+          os.path.join(os.path.dirname(__file__), "..", "renderer.py")).read())
+
 _short = renderer.build_watermark_ass(_ass_p, 0.2, 1080, 1920)
 check("watermark: a too-short program gets no layer (no wasted pass)",
       _short is None)
