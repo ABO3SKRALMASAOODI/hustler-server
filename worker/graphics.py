@@ -508,3 +508,65 @@ def build_gfx_ass(edl, out_duration_s, path, play_res=BASE_PLAY_RES):
                      f"{_ass_time(ev['end'])},{names[ev['font']]}"
                      f",,0,0,0,,{ev['text']}\n")
     return path
+
+
+# ── Free-tier watermark text (round 41) ──────────────────────────────────
+# The mark's WORDS. The robot beside them is an ffmpeg overlay (a PNG needs
+# no text shaping), but the text goes through libass like every other burned
+# string in this pipeline.
+#
+# Deliberately NOT drawtext: drawtext needs ffmpeg built with libfreetype,
+# which is not guaranteed (the dev box's Homebrew build has no drawtext at
+# all), while libass is already load-bearing for captions and graphics — if
+# it were missing, captions would be broken long before this. It also gives
+# \move and \fad natively, so the slide and the fade are the renderer's
+# proven animation path rather than a hand-rolled per-frame expression.
+WATERMARK_STYLE = "WM"
+
+
+def build_watermark_ass(path, out_duration_s, play_res, text, x_in, x_out,
+                        y, fontsize, font, period_s, show_s, fade_s):
+    """Write the watermark's text layer: it slides out from beside the robot,
+    holds, then slides back and is gone until the next cycle.
+
+    Two events per cycle rather than one, because \\move is a single linear
+    tween — out-and-back needs one event each way. The pair is seamless: the
+    second starts exactly where the first ended, at the same x.
+
+    Returns path, or None when the program is too short to show the mark
+    once (an empty .ass would still cost a subtitles pass for nothing).
+    """
+    if not out_duration_s or out_duration_s <= 0.6:
+        return None
+    fade_ms = max(80, int(round(fade_s * 1000)))
+    hold_end = max(fade_s + 0.05, show_s - fade_s)   # when the slide back starts
+    events = []
+    t = 0.0
+    while t < out_duration_s - 0.3:
+        a0, a1 = t, min(t + hold_end, out_duration_s)
+        if a1 - a0 > 0.05:
+            events.append(
+                (a0, a1, rf"{{\an7\move({x_in},{y},{x_out},{y},0,{fade_ms})"
+                         rf"\fad({fade_ms},0)}}{text}"))
+        b0, b1 = t + hold_end, min(t + show_s, out_duration_s)
+        if b1 - b0 > 0.05:
+            events.append(
+                (b0, b1, rf"{{\an7\move({x_out},{y},{x_in},{y},0,{fade_ms})"
+                         rf"\fad(0,{fade_ms})}}{text}"))
+        t += period_s
+    if not events:
+        return None
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(GFX_HEADER.format(resx=int(play_res[0]),
+                                   resy=int(play_res[1])))
+        # Outline + soft shadow so the mark survives a white frame without a
+        # box behind it, which would read as a banner instead of a mark.
+        fh.write(f"Style: {WATERMARK_STYLE},{font},{int(fontsize)},"
+                 f"{ass_color('#FFFFFF')},&H00FFFFFF,&H00101010,&H78000000,"
+                 f"0,0,0,0,100,100,0,0,1,1.2,1.2,7,0,0,0,1\n")
+        fh.write(GFX_EVENTS_HEADER)
+        for s, e, body in events:
+            fh.write(f"Dialogue: 0,{_ass_time(s)},{_ass_time(e)},"
+                     f"{WATERMARK_STYLE},,0,0,0,,{body}\n")
+    return path

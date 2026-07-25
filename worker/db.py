@@ -519,6 +519,33 @@ IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.055"))
 MIN_TURN_CREDITS = 1.0
 
 
+def user_is_paid(conn, user_id):
+    """Is this user on a paid plan right now? Decides the free-tier
+    watermark, so the failure directions are NOT symmetric.
+
+    Marking a paying customer's export is a visible broken promise; failing
+    to mark a free export costs nothing but a little attribution. So this
+    errs toward PAID: either signal is enough. The backend sets
+    is_subscribed and plan together (models.update_user_subscription_status
+    clears BOTH to 0/'free' on cancel or refund), so a half-applied webhook
+    is the only state where they disagree — and in that state the user has
+    more likely just paid than just lapsed.
+
+    An unknown user (no row, no id) is treated as FREE: that is the
+    anonymous/unresolvable case, not a lapsed customer.
+    """
+    if not user_id:
+        return False
+    with conn.cursor() as cur:
+        cur.execute("SELECT is_subscribed, plan FROM users WHERE id = %s",
+                    (user_id,))
+        row = cur.fetchone()
+    if not row:
+        return False
+    plan = (row["plan"] or "free").strip().lower()
+    return bool(row["is_subscribed"]) or plan not in ("", "free")
+
+
 def charge_turn_credits(conn, user_id, job_id):
     """Deduct this turn's model cost from the user's credit pools.
     Returns the credits charged (float). Never raises the balance below 0

@@ -6,6 +6,7 @@ Run from the worker/ directory:  python tests/test_units.py
 import os
 import re
 import sys
+import subprocess
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -4922,3 +4923,129 @@ if not _wrec.available():
           "WEBSITE CAPTURE" not in _ap.system_prompt())
 
 print(f"\nALL {PASS} CHECKS PASSED")
+
+print("== Round-41: free-tier watermark ==")
+import graphics as _gfx                                        # noqa: E402
+
+# The feature SHIPS DISABLED: 44 public pages promise "never puts a watermark
+# ... on any plan, including Free", so the switch waits on that copy. Assert
+# the shipped default explicitly -- if someone flips it on, this test is the
+# reminder that the marketing site has to move in the same commit.
+check("watermark: ships DISABLED until the 'no watermark' copy is rewritten",
+      wconfig.WATERMARK_ENABLED is False)
+# Everything below tests the LOGIC, which must be correct whatever the
+# deployment switch says, so the flag is forced on for the duration.
+_wm_was = wconfig.WATERMARK_ENABLED
+wconfig.WATERMARK_ENABLED = True
+
+# Entitlement. The asymmetry is the point: marking a PAYING customer's export
+# is a broken promise, so both the variant and the plan must say "mark it".
+check("watermark: a free user's FINAL is marked",
+      renderer.wants_watermark("final", is_paid=False))
+check("watermark: a paid user's FINAL is clean",
+      not renderer.wants_watermark("final", is_paid=True))
+check("watermark: previews are NEVER marked (free or paid)",
+      not renderer.wants_watermark("preview", is_paid=False)
+      and not renderer.wants_watermark("preview", is_paid=True))
+check("watermark: wm_v stamps the version for free, 0 for paid",
+      renderer.watermark_version("final", False) == wconfig.WATERMARK_VERSION
+      and renderer.watermark_version("final", True) == 0)
+
+# Cache. This is the end-card bug's shape: the worker busts correctly only if
+# something asks it to, and an upgrade MUST invalidate a marked export.
+check("watermark: an upgraded user's cached MARKED final re-encodes",
+      not renderer.watermark_current({"wm_v": 1}, "final", is_paid=True))
+check("watermark: a lapsed user's cached CLEAN final re-encodes",
+      not renderer.watermark_current({"wm_v": 0}, "final", is_paid=False))
+check("watermark: a correctly-marked final is served from cache",
+      renderer.watermark_current({"wm_v": wconfig.WATERMARK_VERSION},
+                                 "final", is_paid=False))
+check("watermark: a paid user's clean final is served from cache",
+      renderer.watermark_current({"wm_v": 0}, "final", is_paid=True))
+check("watermark: previews ignore the mark entirely (no re-render storm)",
+      renderer.watermark_current({}, "preview", is_paid=False)
+      and renderer.watermark_current(None, "preview", is_paid=True))
+
+# The backend half must agree, or the studio serves a stale final forever.
+_bev2 = open(os.path.join(os.path.dirname(__file__),
+                          "../../backend/routes/video.py")).read()
+check("watermark: the backend's WATERMARK_VERSION matches the worker's",
+      f"WATERMARK_VERSION = {wconfig.WATERMARK_VERSION}" in _bev2)
+
+# Geometry: the text must start clear of the robot, or the words sit on it.
+for _W, _H in ((1080, 1920), (1920, 1080), (1080, 1080), (864, 1080)):
+    _g = renderer.watermark_geometry(_W, _H)
+    check(f"watermark {_W}x{_H}: text starts clear of the robot",
+          _g["x_in"] >= _g["margin"] + _g["rw"])
+    check(f"watermark {_W}x{_H}: the mark fits inside the frame",
+          _g["margin"] + _g["rh"] < _H and _g["x_out"] < _W)
+
+# Font drift: a family-name mismatch falls back to DejaVu SILENTLY, which is
+# exactly how a bare font override once shipped the wrong face.
+_wm_ttf = os.path.join(os.path.dirname(__file__), "..", "fonts",
+                       "PlusJakartaSans-ExtraBold.ttf")
+check("watermark: the wordmark font is bundled", os.path.exists(_wm_ttf))
+# Resolved through fontconfig (fc-scan), which is what libass itself uses to
+# turn a style's Fontname into a face -- so this asserts the real lookup, not
+# a parallel guess at it. fontTools is tried first only because it needs no
+# external binary. If NEITHER is available the check must FAIL LOUDLY rather
+# than pass silently: a name mismatch falls back to DejaVu with no error
+# anywhere, which is how a bare font override once shipped the wrong face.
+_fam = None
+try:
+    from fontTools.ttLib import TTFont as _TTF
+    _fam = {r.toUnicode() for r in _TTF(_wm_ttf)["name"].names
+            if r.nameID in (1, 4, 16)}
+except ImportError:
+    try:
+        _out = subprocess.run(["fc-scan", "--format", "%{family}", _wm_ttf],
+                              capture_output=True, text=True, timeout=20)
+        if _out.returncode == 0:
+            _fam = {x.strip() for x in _out.stdout.split(",") if x.strip()}
+    except (OSError, subprocess.SubprocessError):
+        _fam = None
+check("watermark: the bundled font really answers to WATERMARK_FONT_NAME "
+      "(a mismatch falls back to DejaVu with no error anywhere)",
+      bool(_fam) and wconfig.WATERMARK_FONT_NAME in _fam)
+
+# The robot's aspect is a CONSTANT the text position depends on; a
+# regenerated asset with a different shape would silently overlap the two.
+try:
+    from PIL import Image as _Img
+    _rw, _rh = _Img.open(renderer.robot_path()).size
+    check("watermark: WATERMARK_ROBOT_ASPECT matches the bundled robot.png",
+          abs(_rw / _rh - wconfig.WATERMARK_ROBOT_ASPECT) < 0.01)
+except ImportError:
+    pass
+
+# The ASS layer: two events per cycle (out-and-back needs one \move each way).
+_ass_p = os.path.join(tempfile.mkdtemp(), "wm.ass")
+_res = renderer.build_watermark_ass(_ass_p, 25.0, 1080, 1920)
+_body = open(_ass_p).read()
+_dialogs = [l for l in _body.splitlines() if l.startswith("Dialogue:")]
+_cycles = int(25.0 // wconfig.WATERMARK_PERIOD_S) + 1
+check("watermark: the ass layer is written", _res == _ass_p)
+check("watermark: two events per cycle (slide out, slide back)",
+      len(_dialogs) == 2 * _cycles)
+check("watermark: it slides BOTH ways", _body.count("\\move") == len(_dialogs))
+check("watermark: it fades in and out", "\\fad(" in _body)
+check("watermark: it is anchored top-left", "\\an7" in _body)
+check("watermark: it uses the site's wordmark face",
+      wconfig.WATERMARK_FONT_NAME in _body)
+def _ass_secs(ts):
+    h, m, rest = ts.split(":")
+    return int(h) * 3600 + int(m) * 60 + float(rest)
+
+
+_ends = [_ass_secs(d.split(",")[2]) for d in _dialogs]
+_starts = [_ass_secs(d.split(",")[1]) for d in _dialogs]
+check("watermark: no event runs past the end of the program",
+      max(_ends) <= 25.0 + 1e-6)
+check("watermark: events are ordered and non-overlapping",
+      all(_starts[i] >= _ends[i - 1] - 1e-6 for i in range(1, len(_dialogs))))
+_short = renderer.build_watermark_ass(_ass_p, 0.2, 1080, 1920)
+check("watermark: a too-short program gets no layer (no wasted pass)",
+      _short is None)
+wconfig.WATERMARK_ENABLED = _wm_was
+check("watermark: the kill switch really disables the mark",
+      not renderer.wants_watermark("final", is_paid=False))

@@ -1199,6 +1199,7 @@ def project_state(user_id, project_id):
                                       'video_clip', 'image_ref')
                        ORDER BY id DESC LIMIT 150""", (project_id,))
         extra = cur.fetchall()
+        _paid = _user_is_paid(cur, user_id)
 
     renders = [a for a in extra if a["kind"] == "render"]
     by_version = {}
@@ -1216,8 +1217,9 @@ def project_state(user_id, project_id):
         except (TypeError, ValueError):
             continue
         bv = by_version.setdefault(v, {})
-        if variant == "final" and not _final_is_current(m):
-            continue                       # pre-end-card export: not current
+        if variant == "final" and not (_final_is_current(m)
+                                       and _watermark_is_current(m, _paid)):
+            continue          # stale end card or wrong watermark: re-export
         if variant not in bv:
             bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
     # The preview the player should show is the render of the NEWEST edl version
@@ -2105,6 +2107,46 @@ def _final_is_current(meta):
     return v == 0 or v == OUTRO_VERSION
 
 
+# Mirrors worker/config.WATERMARK_VERSION — a worker test asserts they match.
+# The free-tier mark is burned into FINAL renders only (see the worker's
+# renderer.wants_watermark), so this is the backend half of the same rule.
+WATERMARK_VERSION = 1
+
+
+def _user_is_paid(cur, user_id):
+    """Same rule as worker/db.user_is_paid, and deliberately the same bias:
+    either signal counts as paid, because marking a paying customer's export
+    is a broken promise while missing a mark on a free one costs nothing."""
+    if not user_id:
+        return False
+    cur.execute("SELECT is_subscribed, plan FROM users WHERE id = %s",
+                (user_id,))
+    row = cur.fetchone()
+    if not row:
+        return False
+    plan = ((row.get("plan") if isinstance(row, dict) else row["plan"])
+            or "free").strip().lower()
+    sub = row.get("is_subscribed") if isinstance(row, dict) \
+        else row["is_subscribed"]
+    return bool(sub) or plan not in ("", "free")
+
+
+def _watermark_is_current(meta, is_paid):
+    """Does this cached final carry the mark this user should have NOW?
+
+    The upgrade path is the reason this exists: a free user exports (wm_v=1),
+    pays, hits Download again. Without this the studio presigns the cached
+    marked file and they are still staring at the watermark they just paid to
+    remove — the exact shape of the end-card bug, which sat in the layer
+    ABOVE a worker cache that was busting correctly the whole time.
+
+    Absent stamp means 0 (no mark): correct for a paid user, stale for a free
+    one, so only free users re-encode their pre-feature exports.
+    """
+    want = WATERMARK_VERSION if not is_paid else 0
+    return ((meta or {}).get("wm_v") or 0) == want
+
+
 @video_bp.route("/projects/<int:project_id>/edls", methods=["GET"])
 @token_required
 def list_edls(user_id, project_id):
@@ -2120,6 +2162,7 @@ def list_edls(user_id, project_id):
                        WHERE project_id = %s AND kind = 'render'""",
                     (project_id,))
         renders = cur.fetchall()
+        _paid = _user_is_paid(cur, user_id)
 
     by_version = {}
     for r in renders:
@@ -2130,8 +2173,9 @@ def list_edls(user_id, project_id):
         except (TypeError, ValueError):
             continue
         bv = by_version.setdefault(v, {})
-        if variant == "final" and not _final_is_current(m):
-            continue                       # pre-end-card export: not current
+        if variant == "final" and not (_final_is_current(m)
+                                       and _watermark_is_current(m, _paid)):
+            continue          # stale end card or wrong watermark: re-export
         # Keep the NEWEST asset id per (version, variant): a version can be
         # re-rendered, and the version list must point at the latest encode.
         if r["id"] > bv.get(variant, 0):

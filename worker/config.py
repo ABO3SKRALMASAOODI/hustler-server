@@ -444,6 +444,55 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # card instead of serving pre-outro bytes forever.
 OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
 
+# ── Free-tier watermark (round 41) ────────────────────────────────────────
+# The site's robot in the top-left of the EXPORT, with "edited by valmera
+# agent" sliding out beside it every few seconds and sliding back.
+#
+# FINAL renders only, and only for users without a paid plan. Previews are
+# never marked: the watermark is what a paid plan removes, so it belongs on
+# the artefact the user keeps, not on the working preview they are editing
+# against. Paid users get a clean file with no watermark filter in the graph
+# at all.
+#
+# WATERMARK_VERSION is stamped on every render asset as `wm_v` (0 = no mark)
+# and busts the render cache exactly like OUTRO_VERSION, so a user who
+# UPGRADES gets a clean re-encode instead of their cached marked export
+# forever. Bump it whenever the mark's LOOK changes.
+WATERMARK_VERSION = 1
+# DEFAULT OFF, and this is not timidity — it is a copy problem, not a code one.
+# 44 public pages (58 occurrences) plus public/llms.txt and llms-full.txt
+# currently state "Valmera never puts a watermark over your footage — on any
+# plan, including Free", and several of them RANK for "no watermark" queries.
+# The subscribe page sells "No watermark on your footage" as a Free perk.
+# Turning this on before that copy is rewritten makes the marketing site lie
+# to every visitor and to the AI crawlers the llms.txt files exist to feed.
+# Flip to "1" on the worker AND the executor once the copy is aligned.
+WATERMARK_ENABLED = os.getenv("WATERMARK_ENABLED", "0") == "1"
+WATERMARK_TEXT = os.getenv("WATERMARK_TEXT", "edited by valmera agent")
+# The site's wordmark face (frontend navbar uses Plus Jakarta Sans 800), so
+# the mark on the video and the logo on the page are the same type. This is
+# the font's FULL name — libass resolves it out of the bundled fonts dir the
+# same way "Inter Display Black" and "Syne ExtraBold" already resolve.
+WATERMARK_FONT_NAME = "Plus Jakarta Sans ExtraBold"
+# Fractions of the OUTPUT frame, so the mark lands proportionate on 9:16,
+# 16:9, 1:1 and 4:5 without a per-ratio asset — same principle as the card.
+WATERMARK_ROBOT_H_FRAC = float(os.getenv("WATERMARK_ROBOT_H_FRAC", "0.058"))
+WATERMARK_MARGIN_FRAC = float(os.getenv("WATERMARK_MARGIN_FRAC", "0.030"))
+WATERMARK_TEXT_H_FRAC = float(os.getenv("WATERMARK_TEXT_H_FRAC", "0.0175"))
+# Aspect of brand/robot.png (1467x2157). Pinned as a constant because the
+# text's x position is computed from the robot's WIDTH, and a regenerated
+# asset with a different aspect would silently overlap the two. A worker test
+# asserts this matches the bundled file.
+WATERMARK_ROBOT_ASPECT = 1467.0 / 2157.0
+# Timing of one cycle: hidden, slide out + fade in, hold, slide back + fade
+# out. Long period and short reveal on purpose — "easy to notice but not
+# annoying" means it must not be reading as a banner.
+WATERMARK_PERIOD_S = float(os.getenv("WATERMARK_PERIOD_S", "11.0"))
+WATERMARK_SHOW_S = float(os.getenv("WATERMARK_SHOW_S", "3.4"))
+WATERMARK_FADE_S = float(os.getenv("WATERMARK_FADE_S", "0.5"))
+WATERMARK_SLIDE_FRAC = float(os.getenv("WATERMARK_SLIDE_FRAC", "0.014"))
+WATERMARK_OPACITY = float(os.getenv("WATERMARK_OPACITY", "0.92"))
+
 FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "5400"))
 # A stalled encode stops emitting -progress lines but keeps its stdout pipe
 # open, so the progress reader would block forever (this once froze the only

@@ -239,6 +239,16 @@ def _speech_spans_out(index, tl):
 
 ENDCARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "brand", "endcard.png")
+# The mark itself: the same white robot the end card and the site navbar use,
+# so the corner watermark and the brand are one character.
+ROBOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "brand", "robot.png")
+
+
+def robot_path():
+    """The bundled robot, or None. Same contract as endcard_path(): a missing
+    brand asset degrades the render rather than failing it."""
+    return ROBOT_PATH if os.path.exists(ROBOT_PATH) else None
 
 
 def endcard_path():
@@ -319,6 +329,101 @@ def outro_current(meta, variant):
     return ((meta or {}).get("outro_v") or 0) == want
 
 
+def watermark_font_path():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "fonts", "PlusJakartaSans-ExtraBold.ttf")
+    return p if os.path.exists(p) else None
+
+
+def wants_watermark(variant, is_paid):
+    """Should THIS render carry the free-tier mark?
+
+    Finals only (a preview is a working artefact, not the thing the user
+    keeps), and only when the user has no paid plan. Also requires both the
+    robot and the wordmark font to be present: half a watermark — a robot
+    with no text, or text in a fallback font that is not the site's — would
+    be worse than none, so a missing asset means no mark at all rather than
+    a degraded one.
+    """
+    if variant != "final" or is_paid or not config.WATERMARK_ENABLED:
+        return False
+    return bool(robot_path() and watermark_font_path())
+
+
+def watermark_version(variant, is_paid):
+    """The `wm_v` stamp for a render: the version burned in, or 0 for none.
+    0 is a real answer ("this file carries no mark"), never "unknown"."""
+    return config.WATERMARK_VERSION if wants_watermark(variant, is_paid) else 0
+
+
+def watermark_current(meta, variant, is_paid):
+    """Does this cached render carry the mark THIS user should have now?
+
+    The upgrade path is the whole point. A free user exports (wm_v=1), pays,
+    and downloads again: without this the cached marked file is served
+    forever and they are still looking at the watermark they just paid to
+    remove. It busts downward too — a lapsed subscriber's clean export
+    re-encodes with the mark.
+
+    An ABSENT stamp means 0, matching outro_current: renders predating the
+    feature carry no mark, which is correct for a paid user and stale for a
+    free one, so only free users re-encode.
+    """
+    return ((meta or {}).get("wm_v") or 0) == watermark_version(variant,
+                                                                is_paid)
+
+
+def watermark_geometry(W, H):
+    """Pixel geometry of the mark for an output frame: the robot's box, and
+    where the text sits relative to it. One function so the ffmpeg overlay
+    and the ASS text agree on where the robot ends and the words begin —
+    computing them separately is how the two drift into overlapping."""
+    rh = max(24, _even(H * config.WATERMARK_ROBOT_H_FRAC))
+    rw = max(16, _even(rh * config.WATERMARK_ROBOT_ASPECT))
+    margin = max(10, int(round(min(W, H) * config.WATERMARK_MARGIN_FRAC)))
+    fs = max(9, int(round(H * config.WATERMARK_TEXT_H_FRAC)))
+    gap = max(6, int(round(fs * 0.72)))
+    slide = max(4, int(round(W * config.WATERMARK_SLIDE_FRAC)))
+    return {"rw": rw, "rh": rh, "margin": margin, "fontsize": fs,
+            # tucked against the robot, then slid clear
+            "x_in": margin + rw + gap,
+            "x_out": margin + rw + gap + slide,
+            "y": margin + max(0, (rh - fs) // 2)}
+
+
+def build_watermark_ass(path, out_duration_s, W, H):
+    g = watermark_geometry(W, H)
+    return graphics.build_watermark_ass(
+        path, out_duration_s, (W, H), config.WATERMARK_TEXT,
+        g["x_in"], g["x_out"], g["y"], g["fontsize"],
+        config.WATERMARK_FONT_NAME, config.WATERMARK_PERIOD_S,
+        config.WATERMARK_SHOW_S, config.WATERMARK_FADE_S)
+
+
+def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H):
+    """Filtergraph for the corner mark: the robot pinned top-left, then the
+    wordmark burned over it from its own .ass layer.
+
+    Applied to the PROGRAM stream before the end card is concatenated, so the
+    mark never lands on the card (which is already branded).
+
+    The robot is an overlay and the text is libass — not one mechanism for
+    both — because a PNG needs no shaping and a string does. libass is the
+    pipeline's proven text burner (captions and graphics both ride it) and
+    gives \\move/\\fad for free; drawtext would need ffmpeg built with
+    libfreetype, which is not guaranteed.
+    """
+    g = watermark_geometry(W, H)
+    parts = [f"[{robot_idx}:v]scale={g['rw']}:{g['rh']}[wmbot]"]
+    tail = out_label if not wm_ass_path else "wmv"
+    parts.append(f"[{vlabel}][wmbot]overlay={g['margin']}:{g['margin']}:"
+                 f"format=auto[{tail}]")
+    if wm_ass_path:
+        parts.append(f"[wmv]subtitles=filename='{wm_ass_path}'"
+                     f":fontsdir='{caplib.FONTS_DIR}'[{out_label}]")
+    return parts
+
+
 def sfx_source(key, fetch):
     """Resolve an sfx item's storage_key to a local file.
 
@@ -369,7 +474,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
                       src_sar=1.0, src_fps=None,
                       overlay_inputs=None, gfx_ass_path=None,
-                      frame_focus=None):
+                      frame_focus=None, robot_idx=None, wm_ass_path=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -1051,6 +1156,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # first and then forcing the programme back to WxH for concat compatibility
     # would scale a 480p preview back UP to full resolution — a preview that is
     # slower to encode and larger than the final it is standing in for.
+    # Free-tier mark on the PROGRAM stream, before any end card is
+    # concatenated — the card is already branded, and marking it would stack
+    # two logos on one frame.
+    if robot_idx is not None:
+        parts.extend(_watermark_parts(vlabel, "vwm", robot_idx,
+                                      wm_ass_path, W, H))
+        vlabel = "vwm"
+
     outro_here = outro_s > 0.0 and card_idx is not None
     v_final = "vout"
     if not outro_here and preview:
@@ -1252,7 +1365,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
-def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None):
+def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
+                       want_wm=False):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
@@ -1355,6 +1469,14 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None):
         card_idx = next_idx
         next_idx += 1
 
+    robot_idx, wm_ass_path = None, None
+    if want_wm:
+        extra_inputs += ["-loop", "1", "-i", robot_path()]
+        robot_idx = next_idx
+        next_idx += 1
+        wm_ass_path = build_watermark_ass(
+            os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H)
+
     graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
                               music_inputs, {}, preview,
                               W=W, H=H, fps=fps, frame_mode=None,
@@ -1364,7 +1486,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None):
                               sfx_inputs=sfx_inputs, outro_s=outro_s,
                               card_idx=card_idx, src_sar=1.0, src_fps=fps,
                               overlay_inputs=overlay_inputs,
-                              gfx_ass_path=gfx_path)
+                              gfx_ass_path=gfx_path, robot_idx=robot_idx,
+                              wm_ass_path=wm_ass_path)
 
     if preview:
         encode = ["-c:v", "libx264", "-preset", config.PREVIEW_PRESET,
@@ -1385,12 +1508,12 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None):
 
 
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
-               progress_cb=None):
+               progress_cb=None, want_wm=False):
     """Render an EDL against a source file. Returns output duration (s)."""
     if is_canvas_program(edl_dict):
         # No main video: the program is built on the canvas from inserts alone.
         return _render_canvas_edl(edl_dict, out_path, workdir, preview,
-                                  progress_cb)
+                                  progress_cb, want_wm=want_wm)
     info = media.probe(src_path)
     src_dur = info["duration"]
     edl = validate_edl(edl_dict, max(src_dur, max(e for _, e in edl_dict["keep"]))
@@ -1527,6 +1650,16 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         card_idx = next_idx
         next_idx += 1
 
+    # Same deal for the free-tier robot: a looped still input, held for the
+    # PROGRAM's length (not the outro's — the mark stops before the card).
+    robot_idx, wm_ass_path = None, None
+    if want_wm:
+        extra_inputs += ["-loop", "1", "-i", robot_path()]
+        robot_idx = next_idx
+        next_idx += 1
+        wm_ass_path = build_watermark_ass(
+            os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H)
+
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
@@ -1539,7 +1672,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               src_fps=float(info["fps"]) or fps,
                               overlay_inputs=overlay_inputs,
                               gfx_ass_path=gfx_path,
-                              frame_focus=frame_focus)
+                              frame_focus=frame_focus, robot_idx=robot_idx,
+                              wm_ass_path=wm_ass_path)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).
@@ -1677,6 +1811,11 @@ def run_render_job(worker_db, job):
     # it back from cache makes every retry a guaranteed no-op. force=1 (set by
     # the studio's "couldn't load" recovery) re-encodes to a FRESH key.
     force = bool(job["payload"].get("force"))
+    # Entitlement is read HERE, once, at render time — not from anything
+    # stored on the project. A user who upgraded a minute ago must get a
+    # clean file for this export, and a lapsed one must get the mark back.
+    is_paid = bool(worker_db.run(dbx.user_is_paid, job.get("user_id")))
+    want_wm = wants_watermark(variant, is_paid)
 
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
@@ -1720,7 +1859,8 @@ def run_render_job(worker_db, job):
         # here must therefore be the OPPOSITE of caption_fp's above: a MISSING
         # stamp means the render predates the card and must be re-encoded,
         # where a missing caption fingerprint is trusted.
-        if fp_ok and outro_current(cached.get("meta"), variant):
+        if fp_ok and outro_current(cached.get("meta"), variant) \
+                and watermark_current(cached.get("meta"), variant, is_paid):
             return {"render_asset_id": cached["id"],
                     "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
                     "duration_s": cached["duration_s"], "edl_version": version,
@@ -1792,7 +1932,7 @@ def run_render_job(worker_db, job):
 
         out_dur = render_edl(edl_row["json"], index, src_local, out_local,
                              workdir, preview=(variant == "preview"),
-                             progress_cb=_prog)
+                             progress_cb=_prog, want_wm=want_wm)
         _mark("encode_s")
 
         # Render verification: the output must be the expected length and must
@@ -1842,7 +1982,8 @@ def run_render_job(worker_db, job):
                   "sheet_key": sheet_key, "src_sha256": src_sha,
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
                   "outro_v": (config.OUTRO_VERSION
-                              if outro_seconds(variant == "preview") else 0)})
+                              if outro_seconds(variant == "preview") else 0),
+                  "wm_v": watermark_version(variant, is_paid)})
         # Reclaim the renders this one just replaced. Unique-per-render keys
         # made recovery possible but left every superseded object in the bucket
         # forever; only this exact (variant, version) is pruned, so pinned older
