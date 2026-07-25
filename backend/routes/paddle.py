@@ -45,7 +45,14 @@ PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_L
 # retired from the product but stay in PLANS (and PLAN_CREDITS in the webhook)
 # so grandfathered subscribers keep working — they must NOT be reachable via a
 # hand-crafted checkout/change-plan call that mints their live price IDs.
-PURCHASABLE_PLANS = {'mcp', 'ai'}
+# 'mcp' is deliberately NOT here: the MCP server does not exist yet, so a buyer
+# would pay, correctly receive 0 credits (they bring their own model) and have
+# nothing to connect to. The Paddle product, prices and 3-day trial are already
+# live and the plan stays in PLANS, so the one existing MCP subscription keeps
+# renewing and resolving — this only blocks NEW checkouts, including
+# hand-crafted ones that bypass the disabled button on the pricing page.
+# Add 'mcp' back the day the server ships.
+PURCHASABLE_PLANS = {'ai'}
 
 
 def get_paddle_base():
