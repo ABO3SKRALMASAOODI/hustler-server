@@ -4927,12 +4927,10 @@ print(f"\nALL {PASS} CHECKS PASSED")
 print("== Round-41: free-tier watermark ==")
 import graphics as _gfx                                        # noqa: E402
 
-# The feature SHIPS DISABLED: 44 public pages promise "never puts a watermark
-# ... on any plan, including Free", so the switch waits on that copy. Assert
-# the shipped default explicitly -- if someone flips it on, this test is the
-# reminder that the marketing site has to move in the same commit.
-check("watermark: ships DISABLED until the 'no watermark' copy is rewritten",
-      wconfig.WATERMARK_ENABLED is False)
+# The mark ships ENABLED by the owner's decision. Asserted explicitly so the
+# shipped state is always a deliberate one, in either direction.
+check("watermark: ships ENABLED (owner's call; /tools copy still outstanding)",
+      wconfig.WATERMARK_ENABLED is True)
 # Everything below tests the LOGIC, which must be correct whatever the
 # deployment switch says, so the flag is forced on for the duration.
 _wm_was = wconfig.WATERMARK_ENABLED
@@ -5046,6 +5044,10 @@ check("watermark: events are ordered and non-overlapping",
 _short = renderer.build_watermark_ass(_ass_p, 0.2, 1080, 1920)
 check("watermark: a too-short program gets no layer (no wasted pass)",
       _short is None)
+# The kill switch is the one-env-var undo if the mark has to come off in a
+# hurry, so it is asserted directly rather than inferred from the default.
+wconfig.WATERMARK_ENABLED = False
+check("watermark: WATERMARK_ENABLED=0 really disables the mark",
+      not renderer.wants_watermark("final", is_paid=False)
+      and renderer.watermark_version("final", False) == 0)
 wconfig.WATERMARK_ENABLED = _wm_was
-check("watermark: the kill switch really disables the mark",
-      not renderer.wants_watermark("final", is_paid=False))

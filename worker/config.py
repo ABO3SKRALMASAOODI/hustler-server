@@ -459,15 +459,16 @@ OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
 # UPGRADES gets a clean re-encode instead of their cached marked export
 # forever. Bump it whenever the mark's LOOK changes.
 WATERMARK_VERSION = 1
-# DEFAULT OFF, and this is not timidity — it is a copy problem, not a code one.
-# 44 public pages (58 occurrences) plus public/llms.txt and llms-full.txt
-# currently state "Valmera never puts a watermark over your footage — on any
-# plan, including Free", and several of them RANK for "no watermark" queries.
-# The subscribe page sells "No watermark on your footage" as a Free perk.
-# Turning this on before that copy is rewritten makes the marketing site lie
-# to every visitor and to the AI crawlers the llms.txt files exist to feed.
-# Flip to "1" on the worker AND the executor once the copy is aligned.
-WATERMARK_ENABLED = os.getenv("WATERMARK_ENABLED", "0") == "1"
+# ON by owner's decision (the tradeoff was raised and taken deliberately).
+#
+# KNOWN OUTSTANDING: 44 public pages (58 occurrences) plus public/llms.txt and
+# llms-full.txt still state "Valmera never puts a watermark over your footage
+# — on any plan, including Free", and several RANK for "no watermark"
+# queries. The subscribe page has been corrected; the /tools/* pages have NOT.
+# Until they are, the marketing site advertises the opposite of what exports
+# do. Set WATERMARK_ENABLED=0 to switch the mark back off in one env var if
+# that needs to be undone in a hurry.
+WATERMARK_ENABLED = os.getenv("WATERMARK_ENABLED", "1") == "1"
 WATERMARK_TEXT = os.getenv("WATERMARK_TEXT", "edited by valmera agent")
 # The site's wordmark face (frontend navbar uses Plus Jakarta Sans 800), so
 # the mark on the video and the logo on the page are the same type. This is
