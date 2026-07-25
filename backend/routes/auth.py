@@ -395,12 +395,25 @@ def login():
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
     user = cursor.fetchone()
-    cursor.close(); conn.close()
+    cursor.close()
 
     if not user or user['is_verified'] == 0:
+        conn.close()
         return jsonify({'error': 'User not found. Please register.'}), 404
     if not check_password_hash(user['password'], password):
+        conn.close()
         return jsonify({'error': 'Incorrect password'}), 401
+
+    # Record phone-vs-laptop from this sign-in. Wrapped because analytics must
+    # never be able to fail a login; stamp_device swallows its own errors too.
+    try:
+        from routes.onboarding import stamp_device
+        stamp_device(conn, user['id'], request.headers.get('User-Agent', ''))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
     token = jwt.encode({
         'sub':   str(user['id']),

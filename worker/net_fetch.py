@@ -512,13 +512,19 @@ def download(url, out_path, *, allowed_hosts=None, max_bytes, timeout_s,
 
 
 def get_json(url, *, allowed_hosts=None, timeout_s, params=None,
-             user_agent="valmera/1.0 (+https://valmera.io)"):
-    """GET a JSON API response under the same address policy."""
+             user_agent="valmera/1.0 (+https://valmera.io)", headers=None):
+    """GET a JSON API response under the same address policy.
+
+    `headers` carries per-provider auth (Pexels wants an Authorization header).
+    It is merged UNDER the defaults' keys so a caller cannot accidentally
+    unset Accept/User-Agent, and it is never logged — it holds an API key.
+    """
     check_url(url, allowed_hosts)
+    hdrs = dict(headers or {})
+    hdrs.update({"User-Agent": user_agent, "Accept": "application/json"})
     r = requests.get(url, params=params,
                      timeout=(CONNECT_TIMEOUT_S, timeout_s),
-                     headers={"User-Agent": user_agent,
-                              "Accept": "application/json"})
+                     headers=hdrs)
     if r.status_code != 200:
         raise FetchError(f"HTTP {r.status_code} from {urlparse(url).hostname}")
     try:

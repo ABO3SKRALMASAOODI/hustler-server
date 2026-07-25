@@ -18,6 +18,7 @@ from routes.planner import planner_bp
 from routes.newsletter import newsletter_bp, start_newsletter_scheduler
 from routes.video import video_bp
 from routes.admin_video import admin_video_bp
+from routes.onboarding import onboarding_bp
 
 load_dotenv()
 
@@ -71,6 +72,9 @@ def create_app():
     app.register_blueprint(newsletter_bp, url_prefix='/newsletter')
     app.register_blueprint(video_bp)
     app.register_blueprint(admin_video_bp)
+    # No url_prefix: this blueprint owns routes under BOTH /onboarding and
+    # /admin, so the prefixes live on the routes themselves.
+    app.register_blueprint(onboarding_bp)
 
     # ── Automated newsletter / lifecycle emails ───────────────────────
     # Started once per gunicorn worker; the advisory lock inside the tick

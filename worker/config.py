@@ -236,6 +236,11 @@ FETCH_MAX_HEIGHT = int(os.getenv("FETCH_MAX_HEIGHT", "1080"))
 # 8 (was 4): fetches are size/duration-capped individually and cleaned up
 # per attempt; the constant is a runaway-loop backstop, not the real bound.
 MAX_FETCHED_URLS_PER_TURN = int(os.getenv("MAX_FETCHED_URLS_PER_TURN", "8"))
+# Runaway backstop for stock b-roll, same contract as the URL cap above: each
+# download is individually byte- and time-bounded, so this only stops a loop
+# that would fill the worker's ephemeral disk. Taste, not capacity, is the
+# real limit — 1-3 cutaways a minute beat wall-to-wall b-roll.
+MAX_STOCK_PER_TURN = int(os.getenv("MAX_STOCK_PER_TURN", "6"))
 
 # Recording a live web page as video (worker/webrecord.py) — headless
 # Chromium capture of a scrolling page. WEB_RECORD_ENABLED is the kill
@@ -458,6 +463,16 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # and busts the render cache, so an existing export re-encodes with the new
 # card instead of serving pre-outro bytes forever.
 OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
+
+# ── Complex-script text rendering (round 44) ─────────────────────────────
+# Stamped as `gfx_shape_v` on every render and compared ONLY for EDLs whose
+# text actually contains a shaping-sensitive script (Arabic/Hebrew/Indic/
+# Thai/...). Those renders are known-wrong before v1: letter-spacing forced
+# libass onto its SIMPLE shaper, so the text burned in unjoined AND reversed.
+# Scoping the bust to shaped EDLs keeps every Latin render cached — a blanket
+# invalidation would re-encode the whole platform on a ~1 vCPU box.
+# Bump when the shaped-text emission changes again.
+GFX_SHAPING_VERSION = 1
 
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera

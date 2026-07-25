@@ -415,7 +415,7 @@ def style_line(name, style, play_res=BASE_PLAY_RES):
             f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
             f"-1,0,0,0,100,100,0,0,1,{outline},0,"
             f"{ALIGNMENTS.get(s['position'], 2)},{margin_lr},{margin_lr},"
-            f"{margin_v},1")
+            f"{margin_v},-1")
 
 
 def _ass_time(t):
@@ -665,7 +665,7 @@ def _premium_style_line(name, s, play_res):
     return (f"Style: {name},{_font_of(p, s)},{px},"
             f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
             f"0,0,0,0,100,100,0,0,1,{outline},{shadow},5,{margin},{margin},"
-            f"0,1")
+            f"0,-1")
 
 
 def _base_tags(p, s, px, f):

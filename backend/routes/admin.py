@@ -1042,11 +1042,37 @@ def list_users():
                     u.is_verified, u.auth_provider,
                     u.credits_balance, u.credits_daily, u.credits_monthly,
                     u.created_at, u.subscription_expiry,
-                    (SELECT COUNT(*) FROM jobs WHERE jobs.user_id = u.id) AS job_count,
-                    (SELECT COALESCE(SUM(jc.credits_used), 0) FROM job_credits jc
-                     INNER JOIN jobs j2 ON j2.job_id = jc.job_id
-                     WHERE j2.user_id = u.id) AS total_credits_used,
-                    (SELECT MAX(j3.created_at) FROM jobs j3 WHERE j3.user_id = u.id) AS last_active
+                    -- Detected from the User-Agent at each auth event, never
+                    -- asked. NULL for accounts that have not signed in since
+                    -- this shipped, and shown as "unknown" rather than
+                    -- guessed — the same honesty rule auth_provider follows.
+                    u.device_type, u.device_browser, u.last_seen_at,
+                    (SELECT o.channel FROM onboarding_responses o
+                      WHERE o.user_id = u.id) AS channel,
+                    (SELECT o.use_case FROM onboarding_responses o
+                      WHERE o.user_id = u.id) AS use_case,
+                    -- Jobs and activity span BOTH lanes: the retired app
+                    -- builder (jobs) and the live video studio (video_jobs).
+                    ((SELECT COUNT(*) FROM jobs WHERE jobs.user_id = u.id)
+                     + (SELECT COUNT(*) FROM video_jobs vj
+                        WHERE vj.user_id = u.id
+                          AND vj.type = 'agent_turn')) AS job_count,
+                    -- Credits come STRAIGHT off the ledger by user_id.
+                    -- This used to INNER JOIN jobs, which silently dropped
+                    -- every video-lane row (job_id 'video:<n>' has no `jobs`
+                    -- row) -- i.e. 55% of all credits ever spent, and the
+                    -- only credits 63 of the 85 paying-attention users have.
+                    -- Those users all showed 0. job_credits.user_id is set
+                    -- on every row and indexed, so no join is needed at all.
+                    (SELECT COALESCE(SUM(jc.credits_used), 0)
+                     FROM job_credits jc WHERE jc.user_id = u.id)
+                        AS total_credits_used,
+                    GREATEST(
+                        (SELECT MAX(j3.created_at) FROM jobs j3
+                         WHERE j3.user_id = u.id),
+                        (SELECT MAX(vj.created_at) FROM video_jobs vj
+                         WHERE vj.user_id = u.id)
+                    ) AS last_active
                 FROM users u {where}
                 ORDER BY {sort_col} {order}
                 LIMIT %s OFFSET %s
@@ -1125,16 +1151,30 @@ def top_users():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            # Ranked straight off the credit ledger by user_id. The old query
+            # walked users -> jobs -> job_credits, so a user whose spend is all
+            # in the video lane (no `jobs` row) contributed 0 and could never
+            # chart: the leaderboard was ranking the RETIRED app builder.
+            # Job counts come from both lanes, as their own subqueries, so the
+            # multi-lane join can't multiply the credit sum.
             cur.execute("""
                 SELECT
                     u.email, u.plan,
-                    COUNT(DISTINCT j.job_id) AS jobs,
-                    ROUND(COALESCE(SUM(jc.credits_used), 0)::numeric, 2) AS credits_used,
+                    ((SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id)
+                     + (SELECT COUNT(*) FROM video_jobs vj
+                        WHERE vj.user_id = u.id
+                          AND vj.type = 'agent_turn')) AS jobs,
+                    ROUND(COALESCE(SUM(jc.credits_used), 0)::numeric, 2)
+                        AS credits_used,
                     COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
-                    MAX(j.created_at) AS last_active
+                    GREATEST(
+                        (SELECT MAX(j.created_at) FROM jobs j
+                         WHERE j.user_id = u.id),
+                        (SELECT MAX(vj.created_at) FROM video_jobs vj
+                         WHERE vj.user_id = u.id)
+                    ) AS last_active
                 FROM users u
-                LEFT JOIN jobs j ON j.user_id = u.id
-                LEFT JOIN job_credits jc ON jc.job_id = j.job_id
+                LEFT JOIN job_credits jc ON jc.user_id = u.id
                 WHERE u.is_verified = 1 AND """ + _scope('u') + """
                 GROUP BY u.id, u.email, u.plan
                 ORDER BY credits_used DESC

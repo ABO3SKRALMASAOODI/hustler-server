@@ -329,6 +329,25 @@ def outro_current(meta, variant):
     return ((meta or {}).get("outro_v") or 0) == want
 
 
+def edl_has_shaped_text(edl):
+    """Does this EDL burn any text in a script that needs complex shaping?"""
+    return any(graphics.needs_shaping(t.get("text") or "")
+               for t in ((edl or {}).get("texts") or []))
+
+
+def shaping_current(meta, edl):
+    """Does this cached render predate the complex-script text fix?
+
+    Only EDLs that actually contain a shaped script are ever busted. For
+    everything else this is unconditionally True, so Latin renders keep their
+    cache — same reasoning as outro_current's grandfathering, and the same
+    reason it is a named function rather than an inline comparison.
+    """
+    if not edl_has_shaped_text(edl):
+        return True
+    return ((meta or {}).get("gfx_shape_v") or 0) == config.GFX_SHAPING_VERSION
+
+
 def watermark_font_path():
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      "fonts", "PlusJakartaSans-ExtraBold.ttf")
@@ -1887,6 +1906,7 @@ def run_render_job(worker_db, job):
         # stamp means the render predates the card and must be re-encoded,
         # where a missing caption fingerprint is trusted.
         if fp_ok and outro_current(cached.get("meta"), variant) \
+                and shaping_current(cached.get("meta"), edl_row["json"]) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings):
             return {"render_asset_id": cached["id"],
@@ -2011,6 +2031,7 @@ def run_render_job(worker_db, job):
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
                   "outro_v": (config.OUTRO_VERSION
                               if outro_seconds(variant == "preview") else 0),
+                  "gfx_shape_v": config.GFX_SHAPING_VERSION,
                   "wm_v": watermark_version(variant, is_paid,
                                             wm_settings)})
         # Reclaim the renders this one just replaced. Unique-per-render keys

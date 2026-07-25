@@ -50,6 +50,52 @@ PANEL_ALPHA = "&H20&"
 # falls back to a fade (same rule captions' LINE_ANIMS live by).
 MOVE_ANIMS = ("slide_up", "rise", "drop")
 
+# ── Complex-script (shaping-sensitive) text ──────────────────────────────
+# Letter-spacing and complex text shaping are MUTUALLY EXCLUSIVE in libass:
+# a non-zero \fsp drops the line to the SIMPLE (FriBidi-only) shaper, which
+# turns off BOTH HarfBuzz cursive joining AND bidi reordering. For Arabic
+# that is catastrophic and silent — the letters come out disconnected AND in
+# reverse order, i.e. unreadable, while every tool call still reports
+# success. It shipped that way: a real customer's Arabic title cards
+# ("اصنع مستقبلك معنا") rendered as "ان عم كلبقتسم عنصا" because the "title"
+# template carries spacing 1.0. 4 of the 5 templates set a non-zero spacing,
+# so nearly every Arabic/Hebrew/Indic/Thai title was affected.
+#
+# Tracking (letter-spacing) is a Latin-typography device with no meaning in
+# a cursive or reordering script anyway, so dropping it there costs the
+# design nothing and buys correct text. Verified against libass 0.17.5:
+# with \fsp the string renders reversed + unjoined, without it correctly.
+SHAPING_SENSITIVE_RANGES = (
+    (0x0590, 0x05FF),   # Hebrew
+    (0x0600, 0x06FF),   # Arabic
+    (0x0700, 0x074F),   # Syriac
+    (0x0750, 0x077F),   # Arabic Supplement
+    (0x0780, 0x07BF),   # Thaana
+    (0x0800, 0x085F),   # Samaritan / Mandaic
+    (0x08A0, 0x08FF),   # Arabic Extended-A
+    (0x0900, 0x0DFF),   # Devanagari .. Sinhala (Indic, needs reordering)
+    (0x0E00, 0x0E7F),   # Thai
+    (0x0E80, 0x0EFF),   # Lao
+    (0x0F00, 0x0FFF),   # Tibetan
+    (0x1000, 0x109F),   # Myanmar
+    (0x1780, 0x17FF),   # Khmer
+    (0xFB1D, 0xFDFF),   # Hebrew/Arabic presentation forms
+    (0xFE70, 0xFEFF),   # Arabic presentation forms-B
+)
+
+
+def needs_shaping(text):
+    """True when the text contains a script whose glyphs must be shaped
+    and/or reordered, and therefore cannot survive letter-spacing."""
+    for ch in text or "":
+        o = ord(ch)
+        for lo, hi in SHAPING_SENSITIVE_RANGES:
+            if lo <= o <= hi:
+                return True
+            if o < lo:
+                break
+    return False
+
 # ── Templates ────────────────────────────────────────────────────────────
 # One designed look per schemas.TEXT_TEMPLATES entry — data, not code
 # branches. base_size is the px at the 1280x720 reference frame (scaled by
@@ -156,12 +202,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 def _gfx_style_line(name, fam, play_res):
     """Nominal style: family only matters (Bold=0 — the bundled fonts are
-    already heavy weights; synthetic emboldening would distort them)."""
+    already heavy weights; synthetic emboldening would distort them).
+
+    The trailing field is Encoding, and it is -1 ON PURPOSE. libass reads it
+    as the paragraph's base direction: -1 (FONT_ENCODING_AUTO_DIRECTION) lets
+    FriBidi resolve direction from the first strong character, which is the
+    Unicode default; ANY other value hard-forces left-to-right. With the old
+    value of 1, "مرحبا VALMERA" laid the Arabic word out FIRST (leftmost) —
+    Latin word order on an Arabic sentence. Verified byte-identical output
+    for Latin, digit, accented and CJK text, so no existing render moves.
+    """
     f = max(play_res[0] / BASE_PLAY_RES[0], play_res[1] / BASE_PLAY_RES[1])
     px = max(12, round(48 * f))
     return (f"Style: {name},{fam},{px},"
             f"{ass_color('#FFFFFF')},&H00FFFFFF,&H00101010,&H96000000,"
-            f"0,0,0,0,100,100,0,0,1,0,{round(2.0 * f, 1)},5,0,0,0,1")
+            f"0,0,0,0,100,100,0,0,1,0,{round(2.0 * f, 1)},5,0,0,0,-1")
 
 
 # ── Animation recipes ────────────────────────────────────────────────────
@@ -230,6 +285,30 @@ class _Typist:
         return "".join(out)
 
 
+class _LineTypist:
+    """The typewriter's shaping-safe counterpart: one reveal window per
+    CALL (i.e. per line) instead of per glyph.
+
+    A cursive or reordering script cannot be revealed glyph-by-glyph. Each
+    per-glyph \\alpha segment is its own override block, so libass lays the
+    glyphs out as independent runs — Arabic comes out unjoined and visibly
+    overlapping (verified in libass 0.17.5). Keeping the whole line in one
+    run preserves joining and bidi while still reading as a reveal, so the
+    animation degrades in cadence rather than in correctness.
+    """
+
+    def __init__(self, n_lines, dur_ms, exit_ms):
+        n = max(1, n_lines)
+        total = max(240, min(1500, int(dur_ms * 0.6) - exit_ms))
+        self.step = max(60, int(total / n))
+        self.i = 0
+
+    def emit(self, text):
+        t0 = self.i * self.step
+        self.i += 1
+        return rf"{{\alpha&HFF&\t({t0},{t0 + 120},\alpha&H00&)}}" + _esc(text)
+
+
 # ── Compilation ──────────────────────────────────────────────────────────
 
 def _split_decks(text, tpl):
@@ -286,7 +365,11 @@ def _compile_item(tx, out_dur, play_res):
     except (TypeError, ValueError):
         size_scale = 1.0
     px = max(12, round(tpl["base_size"] * f * size_scale))
-    sp = round(tpl["spacing"] * f, 1)
+    # Letter-spacing is suppressed outright for shaping-sensitive scripts —
+    # see SHAPING_SENSITIVE_RANGES. Resolved from the item's OWN text before
+    # any wrapping so both decks and every line agree on one answer.
+    shaped = needs_shaping(tx.get("text") or "")
+    sp = 0.0 if shaped else round(tpl["spacing"] * f, 1)
     upper = tx.get("uppercase")
     upper = tpl["uppercase"] if upper is None else bool(upper)
     accent = _inline_hl(tx.get("accent_color") or DEFAULT_HIGHLIGHT)
@@ -324,7 +407,7 @@ def _compile_item(tx, out_dur, play_res):
         if d2["uppercase"]:
             sec_text = sec_text.upper()
         px2 = max(8, round(px * d2["scale"]))
-        sp2 = round(d2["spacing"] * f, 1)
+        sp2 = 0.0 if shaped else round(d2["spacing"] * f, 1)
 
     edge_x, edge_y = round(0.04 * W), round(0.03 * H)
     # Wrap budget from the REAL usable width at the item's own anchor —
@@ -430,7 +513,11 @@ def _compile_item(tx, out_dur, play_res):
 
     # ── body: pre-wrapped lines, deck2 restated inline ──
     typist = None
-    if typewriter:
+    if typewriter and shaped:
+        # Per-glyph reveal is impossible in a shaped script — reveal by line.
+        typist = _LineTypist(len(main_lines) + len(sec_lines), dur_ms,
+                             int(exit_s * 1000))
+    elif typewriter:
         n_glyphs = sum(1 for ch in "".join(main_lines + sec_lines)
                        if ch != " ")
         typist = _Typist(n_glyphs, dur_ms, int(exit_s * 1000))

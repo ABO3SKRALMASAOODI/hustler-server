@@ -20,6 +20,7 @@ import media
 import music_library
 import perception
 import sfx_library
+import stock
 import storage
 import videogen
 import timeline as timeline_mod
@@ -100,6 +101,11 @@ class ToolContext:
         self.videos_generated = []    # clips created by generate_video
         self.urls_fetched = []        # assets created by fetch_url
         self.web_recordings = []      # assets created by record_website
+        # Stock search results are cached per TURN so add_stock_media places
+        # the exact clip the model chose from, not whatever a repeat query
+        # returns (providers reorder results between identical calls).
+        self.stock_results = {}       # id -> search hit
+        self.stock_added = []         # assets created by add_stock_media
         # USD cost of non-LLM generations this turn (sfx flat, video per-second)
         # — added to running_credits so the in-turn spend cap sees them.
         self.gen_extra_cost_usd = 0.0
@@ -4525,6 +4531,165 @@ def fetch_url(ctx, url, as_kind=None):
             f"the project but NOT in the video yet — {nxt}.")
 
 
+# ── Stock b-roll ─────────────────────────────────────────────────────────────
+
+def _project_frame(ctx):
+    """(orientation, width, height) of the project's OUTPUT frame.
+
+    Both stock tools key off this: the search asks the provider for the right
+    orientation, and the download picks a rendition that covers these pixels.
+    Falls back to 16:9 1080p, which is what an un-set frame renders as.
+    """
+    try:
+        edl = ctx.latest_edl()["json"]
+        ratio = ((edl.get("frame") or {}).get("ratio")
+                 or (edl.get("canvas") or {}).get("ratio") or "")
+    except Exception:
+        ratio = ""
+    if ratio == "9:16":
+        return "portrait", 1080, 1920
+    if ratio == "1:1":
+        return "square", 1080, 1080
+    if ratio == "4:5":
+        return "portrait", 1080, 1350
+    return "landscape", 1920, 1080
+
+
+def search_stock(ctx, query, kind="video", orientation=None, count=6):
+    """Search the stock libraries. Returns candidates only — nothing is
+    downloaded and nothing enters the edit until add_stock_media is called."""
+    if not stock.available():
+        return ("REJECTED: stock footage is not available on this "
+                "deployment. Tell the user and offer the alternatives: they "
+                "can upload their own clip, or you can generate a still.")
+    q = (query or "").strip()
+    if not q:
+        return "REJECTED: search_stock needs a query, e.g. 'busy city street'."
+    if kind not in (stock.KIND_VIDEO, stock.KIND_PHOTO):
+        return "REJECTED: kind must be 'video' or 'photo'."
+    if orientation is None:
+        orientation = _project_frame(ctx)[0]
+    elif str(orientation).strip().lower() not in ("landscape", "portrait",
+                                                  "square"):
+        return ("REJECTED: orientation must be landscape, portrait or square "
+                "— or omit it to match the project's output frame.")
+    else:
+        orientation = str(orientation).strip().lower()
+
+    try:
+        hits = stock.search(q, kind=kind, orientation=orientation,
+                            count=count)
+    except stock.StockError as e:
+        return (f"Stock search failed — {e}. Tell the user plainly and offer "
+                "to use their own footage instead. Do NOT invent results.")
+    except Exception as e:
+        return (f"Stock search failed ({str(e)[:160]}). Do NOT invent "
+                "results; tell the user it did not work.")
+
+    if not hits:
+        return (f"No stock {kind}s matched \"{q}\" ({orientation}). Try a "
+                "simpler or more visual phrase (\"city traffic\" rather than "
+                "\"the hustle of modern life\"), or ask the user for a clip. "
+                "Do NOT claim you added anything.")
+
+    # Cached on the ctx so add_stock_media can take an id and not re-search —
+    # and, more importantly, so it downloads the EXACT result the model chose
+    # rather than whatever a second identical query happens to return.
+    for h in hits:
+        ctx.stock_results[h["id"]] = h
+    return (f"{len(hits)} stock {kind}(s) for \"{q}\" ({orientation}):\n"
+            + stock.summarize(hits)
+            + "\n\nNothing is downloaded or in the video yet. Pick the ONE "
+              "that best matches what the user asked for and call "
+              "add_stock_media(id=...). Prefer a clip whose description "
+              "actually depicts the subject over one that merely shares a "
+              "keyword.")
+
+
+def add_stock_media(ctx, id):
+    """Download a chosen search result and register it as a project asset."""
+    if not stock.available():
+        return "REJECTED: stock footage is not available on this deployment."
+    sid = (id or "").strip()
+    item = ctx.stock_results.get(sid)
+    if not item:
+        return ("REJECTED: unknown stock id. Call search_stock first and pass "
+                "an id exactly as it appears in those results.")
+    if len(ctx.stock_added) >= config.MAX_STOCK_PER_TURN:
+        return (f"REJECTED: {config.MAX_STOCK_PER_TURN} stock clips already "
+                "added this turn, which is the limit. Place what you have.")
+
+    _, want_w, want_h = _project_frame(ctx)
+    is_video = item.get("kind") == stock.KIND_VIDEO
+    kind = url_media.KIND_VIDEO if is_video else url_media.KIND_IMAGE
+    workdir = os.path.join(ctx.workdir, f"stock_{uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    path = os.path.join(workdir, f"stock.{'mp4' if is_video else 'jpg'}")
+    try:
+        stock.download(item, path, want_w, want_h)
+    except Exception as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f"Could not download that stock clip ({str(e)[:180]}). Pick a "
+                "different result or tell the user it did not work. Do NOT "
+                "claim anything was added.")
+
+    # ffprobe decides what this file actually IS — a provider's promise of an
+    # mp4 is a hint, exactly as in url_media. A truncated download that still
+    # wrote bytes would otherwise reach the renderer as a valid asset.
+    try:
+        info = media.probe(path) if is_video else None
+    except Exception:
+        info = None
+    if is_video and not (info and info.get("width")):
+        shutil.rmtree(workdir, ignore_errors=True)
+        return ("That stock file downloaded but is not a readable video. Pick "
+                "a different result. Do NOT claim anything was added.")
+
+    key = url_media.storage_key(ctx.project_id, kind, path)
+    try:
+        storage.upload_file(path, key, url_media.content_type(path))
+    except Exception as e:
+        return (f"Downloaded the stock clip but could not save it "
+                f"({str(e)[:160]}). Do NOT claim it was added; try again.")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    dur = (info or {}).get("duration") or item.get("duration_s")
+    w = (info or {}).get("width") or item.get("picked_width") or item.get("width")
+    h = (info or {}).get("height") or item.get("picked_height") or item.get("height")
+    desc = (item.get("description") or "stock clip")[:60]
+    fname = f"{desc}.{'mp4' if is_video else 'jpg'}"
+    ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
+               bytes_=None, duration_s=dur, width=w, height=h,
+               fps=(info or {}).get("fps"),
+               meta={"filename": fname, "stock": True,
+                     "provider": item.get("provider"),
+                     "stock_id": sid,
+                     "credit": item.get("credit"),
+                     "page_url": item.get("page_url"),
+                     "source_url": item.get("source_url"),
+                     "description": item.get("description")})
+    ctx.stock_added.append({"storage_key": key, "id": sid,
+                            "provider": item.get("provider")})
+
+    bits = []
+    if w and h:
+        bits.append(f"{w}x{h}")
+    if dur:
+        bits.append(f"{float(dur):.0f}s")
+    if item.get("credit"):
+        bits.append(f"by {item['credit']} / {item.get('provider')}")
+    detail = f" ({', '.join(bits)})" if bits else ""
+    place = ("add_overlay(fit='cover') to cut away to it while the speech "
+             "keeps running, or insert_media to splice it in and add time"
+             if is_video else
+             "insert_media to hold it on screen, or add_overlay(fit='cover')")
+    return (f"Added stock {'clip' if is_video else 'image'} \"{desc}\""
+            f"{detail} to the project: storage_key={key}. It is SILENT and "
+            f"NOT in the video yet — place it with {place}. Cover overlays of "
+            "2-6s read best; start it on the words that mention the subject.")
+
+
 def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
     """Record a scrolling screen capture of a live web page (headless
     browser) and register it as a project video asset."""
@@ -5897,6 +6062,30 @@ TOOLS = {
                   {"url": {"type": "string"},
                    "as_kind": {"type": "string",
                                "enum": ["clip", "music", "image"]}}),
+    "search_stock": (search_stock, "SEARCH A STOCK LIBRARY for b-roll the "
+                     "user does not have — 'a shot of a busy city', 'ocean "
+                     "waves', 'someone typing'. Returns candidates ONLY: "
+                     "nothing is downloaded and nothing enters the video. "
+                     "kind 'video' (default) or 'photo'. orientation "
+                     "defaults to the project's output frame, so a 9:16 edit "
+                     "gets vertical footage. Use short, VISUAL queries — "
+                     "'city traffic at night' beats 'the pace of modern "
+                     "life'. Then call add_stock_media with the best id.",
+                     {"query": {"type": "string"},
+                      "kind": {"type": "string",
+                               "enum": ["video", "photo"]},
+                      "orientation": {"type": "string",
+                                      "enum": ["landscape", "portrait",
+                                               "square"]},
+                      "count": {"type": "integer"}}),
+    "add_stock_media": (add_stock_media, "DOWNLOAD one search_stock result "
+                        "and save it as a project asset. `id` must be an id "
+                        "from a search_stock result in THIS turn. The clip "
+                        "is SILENT and is NOT in the video yet — place it "
+                        "with add_overlay(fit='cover') for a cutaway that "
+                        "keeps the speech running, or insert_media to splice "
+                        "it in. Always tell the user which shot you used.",
+                        {"id": {"type": "string"}}),
     "record_website": (record_website, "RECORD A LIVE WEB PAGE as video: a "
                        "headless browser opens the URL at the project's "
                        "aspect, holds the top, smooth-scrolls to the bottom "
@@ -6426,6 +6615,8 @@ REQUIRED_ARGS = {
     "set_frame": ["ratio"],
     "auto_reframe": ["ratio"],
     "record_website": ["url"],
+    "search_stock": ["query"],
+    "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
     "remove_insert": ["id"],
     "set_color_grade": ["preset"],
@@ -6475,7 +6666,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "swap_music", "set_music_fit",
                "add_sfx", "move_sfx", "remove_sfx",
                "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
-               "record_website",
+               "record_website", "add_stock_media",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
@@ -6509,6 +6700,8 @@ def _tool_disabled(name):
         return not config.URL_FETCH_ENABLED
     if name == "record_website":
         return not webrecord.available()
+    if name in ("search_stock", "add_stock_media"):
+        return not stock.available()
     # Same rule for the music library: a deployment whose image shipped no
     # tracks must not advertise one, or the agent offers music it cannot
     # deliver and then has to walk it back.

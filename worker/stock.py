@@ -1,0 +1,273 @@
+"""Stock b-roll: search a library, pull the right file, hand back an asset.
+
+The agent can already cut, caption and grade what the user uploaded. What it
+could not do is ADD footage the user does not have — "show a shot of a busy
+city" needed a clip from somewhere. This module is that somewhere.
+
+Two providers, tried in order, both free-to-use libraries:
+
+  Pexels  (PEXELS_API_KEY)  — video + photo, the better-curated of the two
+  Pixabay (PIXABAY_API_KEY) — video + photo, the fallback
+
+Design notes that matter for quality, because "a stock clip appeared" and "the
+RIGHT stock clip appeared, at the right size" are very different products:
+
+* ORIENTATION IS DERIVED, NOT GUESSED. The project's own output aspect picks
+  portrait/landscape/square, so a 9:16 edit never gets a letterboxed 16:9
+  b-roll dropped into it.
+* THE FILE VARIANT IS CHOSEN, NOT DEFAULTED. Providers return every rendition
+  from 360p to 4K under one result. We take the SMALLEST rendition that still
+  covers the output frame. Taking the largest would burn the worker's disk and
+  minutes of download for pixels the render throws away; taking the default
+  would upscale.
+* FAILURE IS HONEST. No key -> the capability reports itself off rather than
+  returning nothing and letting the agent invent a clip. No results -> says so.
+  Both are shapes the agent is otherwise tempted to paper over.
+
+Downloads go through net_fetch, so the SSRF policy, the byte cap and the
+wall-clock deadline documented there apply unchanged — a provider CDN is not
+more trusted than any other host.
+"""
+
+import os
+
+import config
+import net_fetch
+
+PEXELS_KEY = os.getenv("PEXELS_API_KEY", "").strip()
+PIXABAY_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
+
+PEXELS_VIDEO_API = "https://api.pexels.com/videos/search"
+PEXELS_PHOTO_API = "https://api.pexels.com/v1/search"
+PIXABAY_API = "https://pixabay.com/api/"
+PIXABAY_VIDEO_API = "https://pixabay.com/api/videos/"
+
+API_TIMEOUT_S = float(os.getenv("STOCK_API_TIMEOUT_S", "12"))
+DOWNLOAD_TIMEOUT_S = float(os.getenv("STOCK_DOWNLOAD_TIMEOUT_S", "90"))
+MAX_VIDEO_BYTES = int(os.getenv("STOCK_MAX_VIDEO_BYTES", str(90 * 1024 * 1024)))
+MAX_PHOTO_BYTES = int(os.getenv("STOCK_MAX_PHOTO_BYTES", str(15 * 1024 * 1024)))
+
+# A search result set the model can actually reason about. More than this and
+# the tool result becomes a wall of near-identical clips that costs tokens and
+# buys no better a choice.
+MAX_RESULTS = 8
+
+KIND_VIDEO = "video"
+KIND_PHOTO = "photo"
+
+
+class StockError(Exception):
+    """Anything the user should be told about in a plain sentence."""
+
+
+def available():
+    """Is any provider configured? Mirrors webrecord.available() — the tool
+    turns itself OFF honestly rather than failing per call."""
+    return bool(PEXELS_KEY or PIXABAY_KEY)
+
+
+def providers():
+    return [n for n, k in (("pexels", PEXELS_KEY), ("pixabay", PIXABAY_KEY)) if k]
+
+
+def orientation_for(width, height):
+    """The project's output frame -> the orientation to search for."""
+    try:
+        w, h = float(width or 0), float(height or 0)
+    except (TypeError, ValueError):
+        return "landscape"
+    if w <= 0 or h <= 0:
+        return "landscape"
+    r = w / h
+    if r < 0.95:
+        return "portrait"
+    if r > 1.05:
+        return "landscape"
+    return "square"
+
+
+def _pick_video_file(files, want_w, want_h):
+    """Smallest rendition that still covers the output frame.
+
+    Providers hand back everything from 360p to 4K. Covering the frame is what
+    stops an upscale; picking the SMALLEST that covers is what stops a 4K
+    download for a 1080p timeline. If nothing covers (rare, tiny sources), the
+    largest available is the closest we can get and is used instead.
+    """
+    usable = [f for f in files
+              if f.get("link") and (f.get("width") or 0) > 0
+              and str(f.get("file_type", "video/mp4")).startswith("video")]
+    if not usable:
+        return None
+    usable.sort(key=lambda f: (f.get("width", 0), f.get("height", 0)))
+    for f in usable:
+        if f.get("width", 0) >= want_w and f.get("height", 0) >= want_h:
+            return f
+    return usable[-1]
+
+
+# ── Pexels ───────────────────────────────────────────────────────────────
+
+def _pexels_search(query, kind, orientation, count):
+    url = PEXELS_VIDEO_API if kind == KIND_VIDEO else PEXELS_PHOTO_API
+    params = {"query": query, "per_page": count}
+    if orientation in ("landscape", "portrait", "square"):
+        params["orientation"] = orientation
+    data = net_fetch.get_json(
+        url, params=params, timeout_s=API_TIMEOUT_S,
+        allowed_hosts=["api.pexels.com"],
+        headers={"Authorization": PEXELS_KEY})
+
+    out = []
+    if kind == KIND_VIDEO:
+        for v in (data.get("videos") or []):
+            out.append({
+                "provider": "pexels", "kind": KIND_VIDEO,
+                "id": f"pexels:video:{v.get('id')}",
+                "width": v.get("width"), "height": v.get("height"),
+                "duration_s": v.get("duration"),
+                "description": (v.get("alt") or "").strip() or None,
+                "credit": ((v.get("user") or {}).get("name") or "").strip() or None,
+                "page_url": v.get("url"),
+                "_files": v.get("video_files") or [],
+            })
+    else:
+        for p in (data.get("photos") or []):
+            src = p.get("src") or {}
+            out.append({
+                "provider": "pexels", "kind": KIND_PHOTO,
+                "id": f"pexels:photo:{p.get('id')}",
+                "width": p.get("width"), "height": p.get("height"),
+                "duration_s": None,
+                "description": (p.get("alt") or "").strip() or None,
+                "credit": (p.get("photographer") or "").strip() or None,
+                "page_url": p.get("url"),
+                "_url": src.get("large2x") or src.get("original") or src.get("large"),
+            })
+    return out
+
+
+# ── Pixabay ──────────────────────────────────────────────────────────────
+
+def _pixabay_search(query, kind, orientation, count):
+    url = PIXABAY_VIDEO_API if kind == KIND_VIDEO else PIXABAY_API
+    params = {"key": PIXABAY_KEY, "q": query, "per_page": max(3, count),
+              "safesearch": "true"}
+    if kind == KIND_PHOTO:
+        params["image_type"] = "photo"
+        if orientation == "portrait":
+            params["orientation"] = "vertical"
+        elif orientation == "landscape":
+            params["orientation"] = "horizontal"
+    data = net_fetch.get_json(url, params=params, timeout_s=API_TIMEOUT_S,
+                              allowed_hosts=["pixabay.com"])
+
+    out = []
+    for h in (data.get("hits") or []):
+        tags = (h.get("tags") or "").strip() or None
+        credit = (h.get("user") or "").strip() or None
+        if kind == KIND_VIDEO:
+            vids = h.get("videos") or {}
+            # Normalise Pixabay's named sizes into the same shape Pexels uses,
+            # so _pick_video_file is the ONE renditions rule for both.
+            files = [{"link": v.get("url"), "width": v.get("width"),
+                      "height": v.get("height"), "file_type": "video/mp4"}
+                     for v in vids.values() if isinstance(v, dict) and v.get("url")]
+            if not files:
+                continue
+            biggest = max(files, key=lambda f: f.get("width") or 0)
+            out.append({
+                "provider": "pixabay", "kind": KIND_VIDEO,
+                "id": f"pixabay:video:{h.get('id')}",
+                "width": biggest.get("width"), "height": biggest.get("height"),
+                "duration_s": h.get("duration"),
+                "description": tags, "credit": credit,
+                "page_url": h.get("pageURL"), "_files": files,
+            })
+        else:
+            link = h.get("largeImageURL") or h.get("webformatURL")
+            if not link:
+                continue
+            out.append({
+                "provider": "pixabay", "kind": KIND_PHOTO,
+                "id": f"pixabay:photo:{h.get('id')}",
+                "width": h.get("imageWidth"), "height": h.get("imageHeight"),
+                "duration_s": None, "description": tags, "credit": credit,
+                "page_url": h.get("pageURL"), "_url": link,
+            })
+    return out
+
+
+# ── public API ───────────────────────────────────────────────────────────
+
+def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
+    """Search the configured providers. Returns [] when nothing matched.
+
+    Providers are tried in order and the FIRST one that returns anything wins
+    rather than merging — merged result sets from two libraries with different
+    curation read as noise, and the agent then picks worse.
+    """
+    if not available():
+        raise StockError("no stock provider is configured on this deployment")
+    query = (query or "").strip()
+    if not query:
+        raise StockError("a search query is required")
+    count = max(1, min(int(count or MAX_RESULTS), MAX_RESULTS))
+    if kind not in (KIND_VIDEO, KIND_PHOTO):
+        raise StockError(f"unknown stock kind '{kind}'")
+
+    errors = []
+    for name, fn, key in (("pexels", _pexels_search, PEXELS_KEY),
+                          ("pixabay", _pixabay_search, PIXABAY_KEY)):
+        if not key:
+            continue
+        try:
+            hits = fn(query, kind, orientation, count)
+        except Exception as e:
+            # One provider being down must not take the capability with it.
+            errors.append(f"{name}: {str(e)[:120]}")
+            continue
+        if hits:
+            return hits[:count]
+    if errors and len(errors) == len(providers()):
+        raise StockError("; ".join(errors))
+    return []
+
+
+def resolve(item, want_w, want_h):
+    """(download_url, max_bytes) for the rendition that fits this frame."""
+    if item.get("kind") == KIND_PHOTO:
+        if not item.get("_url"):
+            raise StockError("that result has no downloadable image")
+        return item["_url"], MAX_PHOTO_BYTES
+    f = _pick_video_file(item.get("_files") or [], want_w, want_h)
+    if not f:
+        raise StockError("that result has no downloadable video file")
+    item["picked_width"] = f.get("width")
+    item["picked_height"] = f.get("height")
+    return f["link"], MAX_VIDEO_BYTES
+
+
+def download(item, out_path, want_w, want_h):
+    """Fetch the chosen rendition to out_path. Returns the item, annotated."""
+    url, cap = resolve(item, want_w, want_h)
+    net_fetch.download(url, out_path, max_bytes=cap,
+                       timeout_s=DOWNLOAD_TIMEOUT_S)
+    item["source_url"] = url
+    return item
+
+
+def summarize(items):
+    """One compact line per hit for the agent to choose from."""
+    lines = []
+    for i in items:
+        bits = []
+        if i.get("width") and i.get("height"):
+            bits.append(f"{i['width']}x{i['height']}")
+        if i.get("duration_s"):
+            bits.append(f"{int(i['duration_s'])}s")
+        if i.get("credit"):
+            bits.append(f"by {i['credit']}")
+        desc = i.get("description") or "(no description)"
+        lines.append(f"  {i['id']} — {desc[:90]} ({', '.join(bits)})")
+    return "\n".join(lines)
