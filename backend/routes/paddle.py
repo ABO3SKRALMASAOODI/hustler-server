@@ -316,6 +316,111 @@ def change_plan():
 
 # ── Cancel subscription ───────────────────────────────────────────────────────
 
+def _plan_from_price(price_id):
+    for name, cfg in PLANS.items():
+        if price_id in (cfg.get('price_id'), cfg.get('yearly_price_id')):
+            return name
+    return None
+
+
+@paddle_bp.route('/paddle/subscription-state', methods=['GET'])
+def subscription_state():
+    """The REAL state of the subscription, read from Paddle.
+
+    The users table cannot answer this. Cancelling uses
+    effective_from=next_billing_period, so Paddle records a SCHEDULED change
+    and the subscription stays active until the period ends — nothing in our
+    database moves, and a UI driven off `plan`/`is_subscribed` alone shows the
+    identical screen after you cancel. That is exactly the bug this endpoint
+    exists to fix.
+
+    Degrades to the DB view when Paddle is unreachable, so the page still
+    renders something truthful rather than erroring.
+    """
+    try:
+        user_id, _ = decode_token(request.headers.get('Authorization'))
+    except Exception:
+        return jsonify({"error": "Invalid token"}), 401
+    if not user_id:
+        return jsonify({"error": "Missing token"}), 401
+
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    conn = psycopg2.connect(os.environ['DATABASE_URL'], cursor_factory=RealDictCursor)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT plan, is_subscribed, subscription_id "
+                        "FROM users WHERE id = %s", (int(user_id),))
+            row = cur.fetchone() or {}
+    finally:
+        conn.close()
+
+    out = {
+        "plan": row.get("plan") or "free",
+        "is_subscribed": bool(row.get("is_subscribed")),
+        "status": None, "scheduled_cancel_at": None,
+        "ends_at": None, "trialing": False, "source": "db",
+    }
+    sub_id = row.get("subscription_id")
+    if not sub_id:
+        return jsonify(out)
+
+    try:
+        r = requests.get(f"{get_paddle_base()}/subscriptions/{sub_id}",
+                         headers=paddle_headers(), timeout=12)
+        if r.status_code != 200:
+            return jsonify(out)
+        d = r.json().get("data") or {}
+    except Exception as e:
+        print(f"⚠️ subscription-state lookup failed: {e}")
+        return jsonify(out)
+
+    sched = d.get("scheduled_change") or {}
+    items = d.get("items") or [{}]
+    price_id = ((items[0].get("price") or {}).get("id"))
+    out.update({
+        "status": d.get("status"),
+        "trialing": d.get("status") == "trialing",
+        "scheduled_cancel_at": (sched.get("effective_at")
+                                if sched.get("action") == "cancel" else None),
+        "ends_at": (d.get("current_billing_period") or {}).get("ends_at"),
+        "plan": _plan_from_price(price_id) or out["plan"],
+        # Paddle is authoritative: `canceled` there means gone, whatever the
+        # users row still says (the row only moves when the webhook lands).
+        "is_subscribed": d.get("status") in ("active", "trialing", "past_due"),
+        "source": "paddle",
+    })
+    return jsonify(out)
+
+
+@paddle_bp.route('/paddle/resume-subscription', methods=['POST'])
+def resume_subscription():
+    """Undo a scheduled cancellation — the counterpart to cancel.
+
+    Without this, "cancel" was a one-way door inside the billing period: the
+    plan was still live and still being paid for, but the only way back was to
+    let it lapse and buy again.
+    """
+    try:
+        user_id, _ = decode_token(request.headers.get('Authorization'))
+    except Exception:
+        return jsonify({"error": "Invalid token"}), 401
+
+    from models import get_user_subscription_id
+    subscription_id = get_user_subscription_id(user_id)
+    if not subscription_id:
+        return jsonify({"error": "No subscription found"}), 400
+
+    res = requests.patch(
+        f"{get_paddle_base()}/subscriptions/{subscription_id}",
+        headers=paddle_headers(),
+        json={"scheduled_change": None})
+    if res.status_code not in (200, 204):
+        return jsonify({"error": "Could not resume the subscription",
+                        "details": res.text[:300]}), 500
+    return jsonify({"message": "Your subscription will continue as normal."})
+
+
 @paddle_bp.route('/paddle/cancel-subscription', methods=['POST'])
 def cancel_subscription():
     try:
