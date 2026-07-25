@@ -73,6 +73,14 @@ PLAN_MODELS = {
 # what actually grants the monthly pool on renewal.
 PLAN_MONTHLY_LIMITS = {
     "free":  0,
+    # The two live plans. Keep in step with PLAN_CREDITS in paddle_webhook.py —
+    # that one GRANTS the credits, this one is the denominator the studio shows.
+    # They were missing here, so an 'ai' subscriber paying $30 would have seen a
+    # limit of 20 (the daily top-up alone) even while holding 2,400 credits.
+    # 'mcp' is 0 on purpose: that plan brings its own model, so it never draws
+    # on our metered pool.
+    "mcp":   0,
+    "ai":    2400,
     "plus":  800,
     "pro":   2400,
     "ultra": 5000,

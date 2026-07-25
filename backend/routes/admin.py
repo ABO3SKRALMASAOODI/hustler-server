@@ -1013,7 +1013,13 @@ def list_users():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            where = "WHERE u.is_verified = 1"
+            # ONE population, everywhere: real post-relaunch customers, the
+            # same _scope every other dashboard already uses (it drops
+            # pre-epoch old-idea signups and the excluded test/admin
+            # accounts). This list used to show a raw "everyone" total beside
+            # a scoped one, so the Users tab disagreed with every other number
+            # in the admin and the rows did not match either count.
+            where = f"WHERE u.is_verified = 1 AND {_scope('u')}"
             params = []
             if search:
                 where += " AND u.email ILIKE %s"
@@ -1024,15 +1030,9 @@ def list_users():
 
             cur.execute(f"SELECT COUNT(*) AS total FROM users u {where}", params)
             total = cur.fetchone()['total']
-
-            # Second count: real post-relaunch customers only. Same _scope the
-            # dashboards use — drops pre-epoch old-idea signups and the excluded
-            # test/admin accounts — so the header can show "everyone" next to
-            # "real customers" instead of one inflated number.
-            cur.execute(
-                f"SELECT COUNT(*) AS n FROM users u {where} AND {_scope('u')}",
-                params)
-            real_total = cur.fetchone()['n']
+            # Kept in the payload so an older cached bundle keeps rendering,
+            # but it is now the same number rather than a second population.
+            real_total = total
 
             sort_col = f"u.{sort}" if sort != 'job_count' else 'job_count'
 
