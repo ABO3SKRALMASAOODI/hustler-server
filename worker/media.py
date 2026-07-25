@@ -37,6 +37,16 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
         stall_s = config.FFMPEG_STALL_TIMEOUT_S
         last = [time.monotonic()]
         kill_reason = []
+        # How much output time is still explainable. Past this the graph is
+        # producing video that the timeline says does not exist, which only
+        # happens when something in it cannot end (a -loop input with no -t,
+        # an overlay with shortest=0). That is a certainty, not a guess, so it
+        # is safe to kill on — and it is the ONLY one of the three watchdogs
+        # that could have caught the watermark runaway, because a runaway
+        # keeps emitting progress (never stalls) for far longer than anyone
+        # will wait (the wall-clock cap is an hour out).
+        overrun_at = (expected_out_s * config.FFMPEG_OVERRUN_FACTOR
+                      + config.FFMPEG_OVERRUN_FLOOR_S)
 
         def _watchdog():
             start = time.monotonic()
@@ -67,6 +77,17 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
                 if line.startswith("out_time_ms="):
                     try:
                         secs = int(line.split("=", 1)[1]) / 1_000_000.0
+                        # Check BEFORE clamping. The min(0.999, ...) below is
+                        # what hid the watermark runaway for a full hour: it
+                        # turned "this encode is 40x past the end of the video"
+                        # into a serene 99.9% and threw the evidence away.
+                        if secs > overrun_at:
+                            kill_reason.append(
+                                f"runaway encode: produced {secs:.0f}s of "
+                                f"output for a {expected_out_s:.0f}s timeline "
+                                f"— the filtergraph cannot terminate")
+                            proc.kill()
+                            break
                         progress_cb(min(0.999, secs / max(0.01, expected_out_s)))
                     except ValueError:
                         pass

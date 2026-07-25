@@ -500,12 +500,25 @@ WATERMARK_FADE_S = float(os.getenv("WATERMARK_FADE_S", "0.5"))
 WATERMARK_SLIDE_FRAC = float(os.getenv("WATERMARK_SLIDE_FRAC", "0.014"))
 WATERMARK_OPACITY = float(os.getenv("WATERMARK_OPACITY", "0.92"))
 
-FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "5400"))
+# MUST stay below the platform's own request timeout, or it is dead code: at
+# 5400 it sat ABOVE Cloud Run's 3600s, so Cloud Run always killed the request
+# first and this cap never once fired. That cost an hour of a pinned slot with
+# no honest error anywhere — the job just stopped existing. Keep it under
+# `gcloud run services describe valmera-executor --format='value(spec.template.spec.timeoutSeconds)'`.
+FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "3000"))
 # A stalled encode stops emitting -progress lines but keeps its stdout pipe
 # open, so the progress reader would block forever (this once froze the only
 # media slot for hours). Kill an encode that goes this long with no progress,
 # well before the full wall-clock cap above.
 FFMPEG_STALL_TIMEOUT_S = int(os.getenv("FFMPEG_STALL_TIMEOUT_S", "300"))
+# An encode that RUNS AWAY is loud, not silent: it emits -progress forever, so
+# the stall cap above can never fire and the wall-clock cap is an hour away.
+# But we know exactly how long the output must be, so out_time sailing past it
+# is not a heuristic — it is proof the filtergraph cannot terminate. Kill on
+# that and a runaway dies in seconds instead of occupying a slot for an hour.
+# Generous multiplier + floor so no legitimate encode is ever near it.
+FFMPEG_OVERRUN_FACTOR = float(os.getenv("FFMPEG_OVERRUN_FACTOR", "1.25"))
+FFMPEG_OVERRUN_FLOOR_S = float(os.getenv("FFMPEG_OVERRUN_FLOOR_S", "10"))
 
 
 def require_core():
