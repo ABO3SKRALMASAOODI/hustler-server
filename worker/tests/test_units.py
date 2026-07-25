@@ -3,6 +3,7 @@
 Run from the worker/ directory:  python tests/test_units.py
 """
 
+import ast
 import os
 import re
 import sys
@@ -4969,6 +4970,43 @@ _bev2 = open(os.path.join(os.path.dirname(__file__),
                           "../../backend/routes/video.py")).read()
 check("watermark: the backend's WATERMARK_VERSION matches the worker's",
       f"WATERMARK_VERSION = {wconfig.WATERMARK_VERSION}" in _bev2)
+
+# ---- the two halves must agree on the TOGGLES too, not just the version ----
+# This is the deadlock that shipped: the worker read the admin `force` switch
+# and the backend did not, so a PAID account with Force on rendered wm_v=1,
+# the backend's gate wanted 0, hid the finished export as "stale", asked for a
+# re-render, got the identical cached asset back, and hid it again. Download
+# spun forever and no file ever reached the user. A version match alone could
+# never catch that -- the rule is what drifted, so the rule is what is tested.
+# The backend's own source is exec'd (Flask-land is too heavy to import) and
+# driven through the same truth table as the worker's wants_watermark.
+_wm_ns = {"WATERMARK_VERSION": wconfig.WATERMARK_VERSION}
+exec(compile(ast.Module(
+    body=[n for n in ast.parse(_bev2).body
+          if isinstance(n, ast.FunctionDef)
+          and n.name in ("_watermark_wanted", "_watermark_is_current")],
+    type_ignores=[]), "<backend video.py>", "exec"), _wm_ns)
+check("watermark: the backend exposes the toggle rule as its own function",
+      "_watermark_wanted" in _wm_ns and "_watermark_is_current" in _wm_ns)
+check("watermark: the backend actually READS video_settings",
+      "_watermark_settings" in _bev2 and "watermark_force" in _bev2)
+
+for _paid in (False, True):
+    for _en in (False, True):
+        for _force in (False, True):
+            _s = {"enabled": _en, "force": _force}
+            _worker_marks = renderer.wants_watermark("final", _paid, _s)
+            _worker_v = (wconfig.WATERMARK_VERSION if _worker_marks else 0)
+            _backend_v = _wm_ns["_watermark_wanted"](_paid, _s)
+            check(f"watermark agree: paid={_paid} enabled={_en} "
+                  f"force={_force} -> worker {_worker_v} == backend "
+                  f"{_backend_v}", _worker_v == _backend_v)
+            # And the gate must ACCEPT what the worker just produced, or the
+            # studio hides a finished export and loops on it forever.
+            check(f"watermark no-deadlock: paid={_paid} enabled={_en} "
+                  f"force={_force}",
+                  _wm_ns["_watermark_is_current"]({"wm_v": _worker_v},
+                                                  _paid, _s))
 
 # Geometry: the text must start clear of the robot, or the words sit on it.
 for _W, _H in ((1080, 1920), (1920, 1080), (1080, 1080), (864, 1080)):

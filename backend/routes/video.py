@@ -1200,6 +1200,7 @@ def project_state(user_id, project_id):
                        ORDER BY id DESC LIMIT 150""", (project_id,))
         extra = cur.fetchall()
         _paid = _user_is_paid(cur, user_id)
+        _wm = _watermark_settings(cur)
 
     renders = [a for a in extra if a["kind"] == "render"]
     by_version = {}
@@ -1218,7 +1219,8 @@ def project_state(user_id, project_id):
             continue
         bv = by_version.setdefault(v, {})
         if variant == "final" and not (_final_is_current(m)
-                                       and _watermark_is_current(m, _paid)):
+                                       and _watermark_is_current(m, _paid,
+                                                                 _wm)):
             continue          # stale end card or wrong watermark: re-export
         if variant not in bv:
             bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
@@ -2131,7 +2133,49 @@ def _user_is_paid(cur, user_id):
     return bool(sub) or plan not in ("", "free")
 
 
-def _watermark_is_current(meta, is_paid):
+def _watermark_settings(cur):
+    """The admin toggles, read the same way worker/db.video_settings reads them.
+
+    to_regclass is checked FIRST rather than catching the error, because in
+    postgres a failed statement poisons the whole transaction — and this runs
+    inside /state, which is polled every 2s for every open studio.
+    """
+    default = {"enabled": True, "force": False}
+    try:
+        cur.execute("SELECT to_regclass('public.video_settings') AS t")
+        row = cur.fetchone()
+        if not row or not (row.get("t") if isinstance(row, dict) else row["t"]):
+            return default
+        cur.execute("SELECT watermark_enabled, watermark_force "
+                    "FROM video_settings WHERE id = 1")
+        row = cur.fetchone()
+        if not row:
+            return default
+        return {"enabled": bool(row["watermark_enabled"]),
+                "force": bool(row["watermark_force"])}
+    except Exception:
+        return default
+
+
+def _watermark_wanted(is_paid, settings):
+    """The wm_v a final rendered RIGHT NOW would carry — the backend half of
+    worker/renderer.wants_watermark, and it has to stay the same rule.
+
+    When these two disagree the studio deadlocks: this gate hides the render as
+    stale, the worker re-renders and hands back the identical cached asset, the
+    gate hides it again, and Download spins forever without ever producing a
+    file. That is not hypothetical — it shipped. `force` was readable by the
+    worker and invisible here, so every export by a PAID account with the admin
+    Force switch on was hidden from its owner in an endless loop.
+    """
+    if not settings.get("enabled"):
+        return 0
+    if is_paid and not settings.get("force"):
+        return 0
+    return WATERMARK_VERSION
+
+
+def _watermark_is_current(meta, is_paid, settings=None):
     """Does this cached final carry the mark this user should have NOW?
 
     The upgrade path is the reason this exists: a free user exports (wm_v=1),
@@ -2143,7 +2187,8 @@ def _watermark_is_current(meta, is_paid):
     Absent stamp means 0 (no mark): correct for a paid user, stale for a free
     one, so only free users re-encode their pre-feature exports.
     """
-    want = WATERMARK_VERSION if not is_paid else 0
+    want = _watermark_wanted(is_paid, settings or {"enabled": True,
+                                                   "force": False})
     return ((meta or {}).get("wm_v") or 0) == want
 
 
@@ -2163,6 +2208,7 @@ def list_edls(user_id, project_id):
                     (project_id,))
         renders = cur.fetchall()
         _paid = _user_is_paid(cur, user_id)
+        _wm = _watermark_settings(cur)
 
     by_version = {}
     for r in renders:
@@ -2174,7 +2220,8 @@ def list_edls(user_id, project_id):
             continue
         bv = by_version.setdefault(v, {})
         if variant == "final" and not (_final_is_current(m)
-                                       and _watermark_is_current(m, _paid)):
+                                       and _watermark_is_current(m, _paid,
+                                                                 _wm)):
             continue          # stale end card or wrong watermark: re-export
         # Keep the NEWEST asset id per (version, variant): a version can be
         # re-rendered, and the version list must point at the latest encode.
