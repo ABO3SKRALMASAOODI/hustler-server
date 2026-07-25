@@ -4242,6 +4242,25 @@ _bev = open(os.path.join(os.path.dirname(__file__),
                          "../../backend/routes/video.py")).read()
 check("outro: the backend's OUTRO_VERSION matches the worker's",
       f"OUTRO_VERSION = {_OV}" in _bev)
+# Round 40: the backend gates whether the studio ever ASKS for a re-render, so
+# a presence-only check silently pinned every pre-bump final. A real export
+# kept serving the v1 card after the v2 design shipped. Exercised against the
+# backend's own function so the two halves cannot drift apart again.
+_bmod = {"OUTRO_VERSION": _OV}
+exec(compile(_bev[_bev.index("def _final_is_current"):
+                  _bev.index("@video_bp.route", _bev.index(
+                      "def _final_is_current"))],
+             "video.py", "exec"), _bmod)
+_fic = _bmod["_final_is_current"]
+check("outro: a final carrying an OLD card version re-exports",
+      not _fic({"outro_v": _OV - 1}))
+check("outro: a final carrying the CURRENT card is left alone",
+      _fic({"outro_v": _OV}))
+check("outro: a deliberately card-less final is NOT re-exported forever "
+      "(Download must never become a silent no-op)",
+      _fic({"outro_v": 0}))
+check("outro: a pre-card final (no stamp at all) still re-exports",
+      not _fic({"src_sha256": "x"}) and not _fic(None))
 
 # --- honesty: the agent is told the card exists ---------------------------
 _sp = agent_prompt.system_prompt()
@@ -4390,10 +4409,16 @@ check("beat_align leaves a gap the collapse would have destroyed",
       _bkeep[1][0] - _bkeep[0][1] >= 0.1 - 1e-9)
 
 # (3) a card-less final must not be permanently undownloadable: the worker
-# legitimately stamps outro_v=0, and comparing to OUTRO_VERSION would hide it
+# legitimately stamps outro_v=0, and demanding OUTRO_VERSION would hide it
 # forever while the worker's cache kept serving it as current.
-check("backend treats the PRESENCE of the stamp as current, not its value",
-      '"outro_v" in (meta or {})' in _bev)
+#
+# This asserted the literal source text `'"outro_v" in (meta or {})'`, which
+# pinned the IMPLEMENTATION rather than the intent — and that implementation
+# (presence alone) was what let a bumped card version keep exporting the old
+# design. The intent is asserted behaviourally above, against the backend's
+# real function: outro_v=0 stays current, a stale version does not.
+check("a card-less final is still downloadable (intent preserved)",
+      _fic({"outro_v": 0}) and not _fic({"outro_v": _OV - 1}))
 
 # (4) the sfx fallback hint must not be swallowed by the effects hint, whose
 # regex matches the bare word "effect".

@@ -2078,14 +2078,31 @@ OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
 
 
 def _final_is_current(meta):
-    # PRESENCE of the stamp, not its value. The worker legitimately writes
-    # outro_v=0 when it rendered without a card (OUTRO_DURATION_S=0, or an
-    # image built without brand/endcard.png). Comparing to OUTRO_VERSION would
-    # hide that final forever while the worker's cache keeps serving it as
-    # current — Download becomes a permanent no-op with no error anywhere.
-    # Renders predating the card carry no key at all, so they still re-export,
-    # and this converges after exactly one re-render either way.
-    return "outro_v" in (meta or {})
+    # Two ways a final is current, and BOTH are needed:
+    #
+    #   outro_v == OUTRO_VERSION — it carries the card we ship today.
+    #   outro_v == 0             — the worker rendered deliberately WITHOUT a
+    #                              card (OUTRO_DURATION_S=0, or an image built
+    #                              without brand/endcard.png). There is no
+    #                              newer card for it to be missing, so demanding
+    #                              OUTRO_VERSION here would hide that final
+    #                              forever while the worker's cache keeps
+    #                              serving it — Download becomes a permanent
+    #                              no-op with no error anywhere.
+    #
+    # This used to test PRESENCE alone, which got the card-less case right and
+    # the version bump wrong: after OUTRO_VERSION went 1 -> 2 with a new card
+    # design, every existing final still stamped 1 was reported as current, so
+    # the studio presigned it and never posted /render/final. The worker's
+    # cache busts on a stale stamp perfectly well — nothing ever ASKED it to.
+    # Exports kept serving the old card, which is exactly what was reported.
+    #
+    # A stamp of some OTHER version means an OLD card, so it re-exports; the
+    # worker then re-encodes and stamps the current one. Converges after
+    # exactly one re-render, and renders predating the card (no key at all)
+    # still re-export as before.
+    v = (meta or {}).get("outro_v")
+    return v == 0 or v == OUTRO_VERSION
 
 
 @video_bp.route("/projects/<int:project_id>/edls", methods=["GET"])
