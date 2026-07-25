@@ -4192,9 +4192,9 @@ def _gen_budget_reject(ctx, projected_usd, what):
     if ctx.running_credits() + projected > ctx.credit_budget:
         return (f"REJECTED: not enough credits to {what} (it costs about "
                 f"{projected:.0f} credits and the balance won't cover it). Tell "
-                "the user honestly they're out of credits. Do NOT promise a "
-                "daily refresh — the free allowance is granted once and does "
-                "not refill; starting a plan is what unlocks more.")
+                "the user honestly they're out of credits. Do NOT promise "
+                "a daily refresh — the free allowance is granted once; "
+                "starting a plan is what unlocks more.")
     return None
 
 

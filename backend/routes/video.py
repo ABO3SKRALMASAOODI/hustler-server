@@ -1376,8 +1376,7 @@ def post_message(user_id, project_id):
             info = get_balance(conn, user_id)
             spent = info.get("free_trial_exhausted")
             return jsonify({
-                "error": ("You've used all your free credits — they don't "
-                          "refill. Start your trial to keep editing."
+                "error": ("You're out of credits."
                           if spent else
                           "You're out of credits — they refresh on your "
                           "plan's cycle, or upgrade for a bigger monthly "
@@ -1532,8 +1531,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                 if not check_and_reserve(conn, ctx["user_id"], min_credits=1.0):
                     spent = get_balance(
                         conn, ctx["user_id"]).get("free_trial_exhausted")
-                    _say(("You've used all your free credits — they don't "
-                          "refill. Start your trial to keep creating."
+                    _say(("You're out of credits."
                           if spent else
                           "You're out of credits — they refresh on your "
                           "plan's cycle, or upgrade for a bigger monthly pool "

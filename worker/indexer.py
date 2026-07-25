@@ -412,11 +412,10 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
                   "right now — tell them that.")
     elif out_of_credits:
         branch = ("IMPORTANT: they sent a request while you were "
-                  "analyzing, but they are out of credits — the free "
-                  "allowance is granted once and does NOT refill, so do "
-                  "not tell them to wait for a refresh. Say plainly that "
-                  "their free credits are used up and they can start their "
-                  "trial to keep editing.")
+                  "analyzing, but they are out of credits. The free "
+                  "allowance is granted once, so do NOT tell them to wait "
+                  "for a refresh — say plainly that they are out of credits "
+                  "and can start their trial to keep editing.")
     else:
         branch = ("End by inviting their first editing request, with ONE "
                   "concrete example — grounded in the transcript opening "
@@ -539,8 +538,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                     "analyzing — give me a moment.")
     elif out_of_credits:
         summary += ("I found the request you sent while I was analyzing, "
-                    "but you're out of credits — the free allowance doesn't "
-                    "refill. Start your trial and send it again.")
+                    "but you're out of credits. Start your trial and send it "
+                    "again.")
     else:
         summary += ("Tell me what you'd like changed — for example: \"cut "
                     "the dead air, caption every word, and tighten the "
@@ -558,9 +557,9 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                            "reindex": True})
         elif session_id and out_of_credits:
             worker_db.run(dbx.add_message, session_id, "assistant",
-                          "I found the request you sent earlier, but you're "
-                          "out of credits — the free allowance doesn't "
-                          "refill. Start your trial and send it again.",
+                          "I found the request you sent earlier, but "
+                          "you're out of credits. Start your trial and send "
+                          "it again.",
                           {"kind": "index_ready", "auto_resume": False,
                            "reindex": True,
                            "credits_exhausted": True})

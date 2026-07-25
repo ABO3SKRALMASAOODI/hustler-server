@@ -1026,7 +1026,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             _refill = ("Your credits refresh on your plan's cycle — or "
                        "upgrade for a bigger monthly pool to keep editing now."
                        if subscribed else
-                       "That was the free allowance, and it doesn't refill. "
                        "Start your trial to keep editing.")
             if ctx.versions_written:
                 if exhausted:
