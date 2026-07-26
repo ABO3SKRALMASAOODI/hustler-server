@@ -20,6 +20,7 @@ from routes.video import video_bp
 from routes.admin_video import admin_video_bp
 from routes.onboarding import onboarding_bp
 from routes.mcp import mcp_bp
+from routes.mcp_oauth import mcp_oauth_bp
 
 load_dotenv()
 
@@ -79,6 +80,10 @@ def create_app():
     # MCP: the editor as tools for an outside model. No UI anywhere; reachable
     # only with a token the admin account minted (see routes/mcp.py).
     app.register_blueprint(mcp_bp)
+    # ...and the OAuth server that lets claude.ai add it as a connector at all.
+    # No url_prefix: RFC 9728/8414 discovery documents MUST sit at the domain
+    # root, or the client never finds them.
+    app.register_blueprint(mcp_oauth_bp)
 
     # ── Automated newsletter / lifecycle emails ───────────────────────
     # Started once per gunicorn worker; the advisory lock inside the tick

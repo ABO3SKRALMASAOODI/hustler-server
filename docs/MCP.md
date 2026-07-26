@@ -1,15 +1,16 @@
 # Valmera over MCP — edit video from your own Claude session
 
-**Status: private.** No UI, no marketing, no signup path. Reachable only with a
-bearer token that only the admin account can mint, and every request re-checks
-the holder's email against `MCP_ALLOWED_EMAILS` (default: `thevalmera@gmail.com`
-alone). Nobody else can see it exists.
+**Status: private.** No UI, no marketing, no signup path. Two ways in — an
+OAuth login from claude.ai, or a static token only the admin account can mint —
+and BOTH re-check the account's email against `MCP_ALLOWED_EMAILS` (default:
+`thevalmera@gmail.com` alone) on every single request. Anyone else who finds
+the URL reaches a login screen that will never say yes.
 
 ## What it is
 
 An MCP endpoint at `POST /mcp` that hands **the complete Valmera editor tool
-registry** to whatever model you are running in Claude Code — Opus, Fable,
-whatever comes next — on your Anthropic subscription. Your model does the
+registry** to whatever model you are running — Claude in the claude.ai app, or
+Opus/Fable in Claude Code — on your Anthropic subscription. Your model does the
 thinking; Valmera does the editing. That is exactly the trade the `mcp` plan
 was always written around ("brings its own model").
 
@@ -29,21 +30,34 @@ headless model cannot: `list_projects`, `open_project`, `create_project`,
 
 ## Turning it on (once)
 
-**1. Apply the migration.** Render shell on the backend service:
+**1. Apply both migrations.** Render shell on the backend service:
 
 ```bash
 psql $DATABASE_URL -f backend/migrations/008_mcp.sql
+psql $DATABASE_URL -f backend/migrations/009_mcp_oauth.sql
 ```
 
-It relaxes `video_jobs.type`'s CHECK constraint to accept `mcp_tool`, and adds
-`mcp_tokens` + `mcp_catalog`. Until it runs, every MCP call fails at the INSERT.
+008 relaxes `video_jobs.type`'s CHECK to accept `mcp_tool` and adds
+`mcp_tokens` + `mcp_catalog` — without it every call fails at the INSERT. 009
+adds the four OAuth tables claude.ai needs.
 
-**2. Deploy** backend + worker (normal push to `main`). The worker publishes
-its tool catalog on boot — check the log for `published MCP tool catalog`. If
-it says it could not, step 1 has not run.
+**2. Deploy** backend + worker (push to `main`). The worker publishes its tool
+catalog on boot — look for `published MCP tool catalog` in its log. If it says
+it could not, step 1 has not run.
 
-**3. Mint a token** with your admin JWT (copy it out of the studio's
-localStorage):
+**3a. Connect from claude.ai** (the Claude app — web, desktop, mobile):
+
+> Settings → Connectors → Add custom connector → URL:
+> `https://entrepreneur-bot-backend.onrender.com/mcp`
+
+Claude discovers the authorization server from the 401, registers itself, and
+opens a Valmera login page. Sign in with **your email + password** (the same
+one you use on valmera.io) and press Allow. That is the whole setup — no token
+to copy anywhere. If your account signed up with Google it has no password
+yet; set one with "Forgot password" on valmera.io first.
+
+**3b. Or connect Claude Code**, which can carry a static token instead. Mint
+one with your admin JWT (copy it out of the studio's localStorage):
 
 ```bash
 curl -sS -X POST https://entrepreneur-bot-backend.onrender.com/mcp/tokens \
@@ -51,10 +65,8 @@ curl -sS -X POST https://entrepreneur-bot-backend.onrender.com/mcp/tokens \
   -H 'Content-Type: application/json' -d '{"label":"claude-code"}'
 ```
 
-The response contains the token **once** (only its sha256 is stored) and the
-exact `claude mcp add` line to paste.
-
-**4. Connect Claude Code:**
+The response contains the token **once** (only its sha256 is stored) plus the
+exact line to run:
 
 ```bash
 claude mcp add --transport http valmera \
@@ -62,8 +74,43 @@ claude mcp add --transport http valmera \
   --header "Authorization: Bearer vlm_mcp_..."
 ```
 
-Then `/mcp` inside Claude Code should list `valmera` as connected. Ask it to
-"list my Valmera projects".
+Either way, ask it to "list my Valmera projects" to check.
+
+## How the claude.ai connection actually works
+
+Its connector UI has no header field, so a static token is unusable there. The
+sequence — all of it implemented in `backend/routes/mcp_oauth.py`, all of it
+tested in `backend/tests/test_mcp.py`:
+
+```
+POST /mcp with no token
+  → 401 + WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource"
+GET  /.well-known/oauth-protected-resource      which authorization server? (RFC 9728)
+GET  /.well-known/oauth-authorization-server    its endpoints + PKCE (RFC 8414)
+POST /mcp/oauth/register                        Claude enrols itself (RFC 7591)
+GET  /mcp/oauth/authorize                       Valmera login + consent screen
+POST /mcp/oauth/authorize                       → 302 back to claude.ai with ?code=
+POST /mcp/oauth/token                           code + PKCE verifier → access + refresh
+POST /mcp with the access token                 editing
+```
+
+Properties worth knowing:
+
+- **PKCE (S256) is mandatory.** These are public clients holding no secret.
+- **Registration is open, and grants nothing.** The client registers before any
+  human is involved; authorization still needs your password *and* an address
+  on `MCP_ALLOWED_EMAILS`. A stranger who registers gets a login that will
+  never say yes.
+- **An unregistered `redirect_uri` dead-ends on our own page** rather than
+  redirecting — an authorization server that bounces errors to an unvalidated
+  URI is an open redirector.
+- **Refresh tokens rotate**, and a **replayed authorization code revokes the
+  whole grant** (a code used twice may have been stolen).
+- **The open project lives on the grant**, not the token, so a refresh — or a
+  reconnect — resumes on the same project.
+- Access tokens last 8h (`MCP_ACCESS_TTL_S`), refresh 90d
+  (`MCP_REFRESH_TTL_S`). Disconnecting in Claude calls `/mcp/oauth/revoke`,
+  which kills the grant.
 
 ## Using it
 
@@ -75,8 +122,9 @@ list_projects  →  open_project(3)  →  (the whole project state comes back)
 ```
 
 `open_project` is the one thing to remember: editing tools do not take a
-project id, they act on the token's active project. That pointer lives on the
-token row, so it survives a Claude Code restart.
+project id, they act on the connection's active project. That pointer is stored
+server-side (on the OAuth grant, or on the static token), so it survives a
+reconnect, a token refresh and a client restart.
 
 **Uploading a local file.** MCP arguments are JSON, so bytes never travel over
 the protocol. `upload_start` returns a presigned URL and the exact `curl` to
@@ -84,9 +132,12 @@ run; under 64 MB the model does it itself in one command. Bigger files are
 multipart (one ETag per part) — run the helper instead:
 
 ```bash
-export VALMERA_MCP_TOKEN=vlm_mcp_...
+export VALMERA_MCP_TOKEN=vlm_mcp_...     # a static token; mint one as in 3b
 python3 scripts/valmera_upload.py ~/Movies/talk.mp4 --project 3
 ```
+
+(Or just upload it in the studio as usual and `open_project` it from Claude —
+the connector does not care how the footage arrived.)
 
 A main video then has to be **analyzed** (transcript, shots, silences) before
 it can be edited — minutes on a long one. `index_status` reports it.
@@ -125,17 +176,21 @@ see your Claude session edit in real time, with the preview updating.
 
 ## Revoking
 
-```bash
-curl -sS -X DELETE .../mcp/tokens/1 -H "Authorization: Bearer $VALMERA_JWT"
-```
-
-or clear `MCP_ALLOWED_EMAILS` to shut the whole surface off without a deploy.
+- **claude.ai**: disconnect the connector (it calls `/mcp/oauth/revoke`), or
+  `UPDATE mcp_oauth_grants SET revoked_at = NOW()` for a specific connection.
+- **Claude Code**: `curl -X DELETE .../mcp/tokens/1 -H "Authorization: Bearer $VALMERA_JWT"`
+- **Everything at once**: set `MCP_ALLOWED_EMAILS` to an address nobody holds.
+  It is re-checked per request, so every live session dies on its next call —
+  no deploy, no token hunt.
 
 ## Env
 
 | Var | Where | Default | What |
 |---|---|---|---|
-| `MCP_ALLOWED_EMAILS` | backend | admin email | who may hold a token |
+| `MCP_ALLOWED_EMAILS` | backend | admin email | who may connect at all |
+| `BACKEND_URL` | backend | the onrender URL | the OAuth `issuer` — must be this server's real public origin |
+| `MCP_ACCESS_TTL_S` | backend | 28800 | access-token lifetime |
+| `MCP_REFRESH_TTL_S` | backend | 7776000 | refresh-token lifetime |
 | `MCP_SYNC_WAIT_S` | backend | 25 | longest a call blocks before ticketing |
 | `MCP_INSTRUCTIONS` | backend | `full` | `brief` drops the doctrine |
 | `WORKER_MCP_SLOTS` | worker | 2 | concurrent MCP tool calls |

@@ -32,10 +32,16 @@ worker for minutes — this deploys with 3 SYNC workers, so a long block here is
 a third of the whole API. If MCP ever gets real traffic, move gunicorn to
 `--worker-class gthread --threads 8` BEFORE raising MCP_SYNC_WAIT_S.
 
-VISIBILITY. There is no UI, no marketing and no way in without a token, tokens
-can only be minted by the admin account, and every request re-checks the
-holder's email against MCP_ALLOWED_EMAILS (default: the admin address alone).
-Revoking is a token row or one env var, not a deploy.
+TWO WAYS IN, ONE DOOR. Claude Code carries a static `vlm_mcp_…` token in a
+header. claude.ai cannot — its connector UI has no header field — so it takes
+the OAuth route in routes/mcp_oauth.py: it reads the 401 challenge below,
+registers itself, and sends the user through a login. Both end up as the same
+session dict here, and everything past _authenticate is identical.
+
+VISIBILITY. There is no UI, no marketing and no way in without either a token
+the admin minted or a login by an address on MCP_ALLOWED_EMAILS (default: the
+admin's alone) — re-checked on every single request, so revoking is a row or
+one env var, not a deploy.
 """
 
 import hashlib
@@ -45,9 +51,10 @@ import secrets
 import time
 
 import psycopg2
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, Response
 
 import storage
+import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
 from routes.video import (complete_upload_core, vdb, _enqueue,
@@ -94,8 +101,15 @@ def _bearer():
 
 
 def _authenticate():
-    """(token_row, error_message). The row carries user_id, email and the
-    active project — one query, because it runs on every single tool call."""
+    """(session, error_message). Two credential types reach this endpoint and
+    the rest of the file must not be able to tell them apart:
+
+      * a STATIC token (`vlm_mcp_…`) minted by the admin and pasted into a
+        Claude Code header — the only thing a CLI needs;
+      * an OAuth ACCESS TOKEN issued by routes/mcp_oauth — the only thing
+        claude.ai can use, because its connector UI has no header field.
+
+    Both resolve to the same shape: who you are, and which project is open."""
     raw = _bearer()
     if not raw:
         return None, "missing Authorization: Bearer <token> header"
@@ -106,22 +120,30 @@ def _authenticate():
                        FROM mcp_tokens t JOIN users u ON u.id = t.user_id
                        WHERE t.token_sha256 = %s""", (_sha(raw),))
         row = cur.fetchone()
-        if not row or row["revoked_at"]:
-            return None, "unknown or revoked token"
-        if (row["email"] or "").lower() not in ALLOWED_EMAILS:
-            # The account lost access after the token was minted.
-            return None, "this account is not enabled for MCP access"
-        cur.execute("""UPDATE mcp_tokens
-                       SET last_used_at = NOW(), calls = calls + 1
-                       WHERE id = %s""", (row["id"],))
-    return row, None
+        if row:
+            if row["revoked_at"]:
+                return None, "unknown or revoked token"
+            if (row["email"] or "").lower() not in ALLOWED_EMAILS:
+                # The account lost access after the token was minted.
+                return None, "this account is not enabled for MCP access"
+            cur.execute("""UPDATE mcp_tokens
+                           SET last_used_at = NOW(), calls = calls + 1
+                           WHERE id = %s""", (row["id"],))
+            return {"source": "static", "ref_id": row["id"],
+                    "user_id": row["user_id"], "email": row["email"],
+                    "active_project_id": row["active_project_id"]}, None
+    return mcp_oauth.verify_access_token(raw)
 
 
-def _set_active_project(token_id, project_id):
-    with vdb() as conn:
-        conn.cursor().execute(
-            "UPDATE mcp_tokens SET active_project_id = %s WHERE id = %s",
-            (project_id, token_id))
+def _set_active_project(tok, project_id):
+    if tok["source"] == "oauth":
+        mcp_oauth.set_active_project(tok["ref_id"], project_id)
+    else:
+        with vdb() as conn:
+            conn.cursor().execute(
+                "UPDATE mcp_tokens SET active_project_id = %s WHERE id = %s",
+                (project_id, tok["ref_id"]))
+    tok["active_project_id"] = project_id
 
 
 # ------------------------------------------------------------------ #
@@ -441,8 +463,7 @@ def _t_open_project(tok, args):
         p = _project_for_user(cur, project_id, tok["user_id"])
         if not p:
             return f"Project {project_id} does not exist on this account."
-    _set_active_project(tok["id"], project_id)
-    tok["active_project_id"] = project_id
+    _set_active_project(tok, project_id)
     state = _run_tool_job(tok, "__state__", {})
     return f"Opened project {project_id} — \"{p['title']}\".\n\n{state}"
 
@@ -459,8 +480,7 @@ def _t_create_project(tok, args):
                        VALUES (%s, %s, %s) RETURNING id""",
                     (int(tok["user_id"]), title, session_id))
         pid = cur.fetchone()["id"]
-    _set_active_project(tok["id"], pid)
-    tok["active_project_id"] = pid
+    _set_active_project(tok, pid)
     return (f"Created project {pid} (\"{title}\") and made it active. "
             "Add a video with upload_start, or start placing generated / "
             "uploaded assets for a canvas program.")
@@ -779,14 +799,29 @@ def _handle(tok, msg):
     return _error(req_id, -32601, f"method not found: {method}")
 
 
+def _unauthorized(err):
+    """401 + the RFC 9728 challenge.
+
+    This header is not a formality — it is the entire entry point for
+    claude.ai. Its connector has no place to type a token, so the ONLY way it
+    can ever authenticate is to be told, here, where the authorization server
+    lives; it then registers itself and opens the login page. Drop this header
+    and the Claude app can no longer connect at all, while Claude Code (which
+    carries a static token) keeps working and hides the breakage."""
+    resp = jsonify({"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32001, "message": err}})
+    resp.headers["WWW-Authenticate"] = (
+        'Bearer realm="valmera", '
+        f'resource_metadata="{mcp_oauth.base_url()}'
+        '/.well-known/oauth-protected-resource"')
+    return resp, 401
+
+
 @mcp_bp.route("/mcp", methods=["POST"])
 def mcp_endpoint():
     tok, err = _authenticate()
     if err:
-        # 401 with an honest reason. MCP clients surface this to the user, who
-        # is the only person who can fix it.
-        return jsonify({"jsonrpc": "2.0", "id": None,
-                        "error": {"code": -32001, "message": err}}), 401
+        return _unauthorized(err)
     body = request.get_json(silent=True)
     if body is None:
         return jsonify(_error(None, -32700, "parse error")), 400
@@ -795,14 +830,42 @@ def mcp_endpoint():
     msgs = body if batch else [body]
     out = [r for r in (_handle(tok, m) for m in msgs) if r is not None]
     if not out:
+        # A notification gets no reply, by protocol. 202 with an empty body.
         return "", 202
-    return jsonify(out if batch else out[0]), 200
+    return _respond(out if batch else out[0])
+
+
+def _respond(payload):
+    """Streamable HTTP lets the server answer a POST with either JSON or a
+    one-frame SSE stream. We pick by what the client asked for FIRST: Claude
+    Code sends `application/json, text/event-stream` and prefers JSON, while a
+    client that lists event-stream ahead of JSON is telling us it would rather
+    read a stream. Answering in the form the client ranked first is the
+    difference between a connector that works and one that hangs on connect."""
+    accept = (request.headers.get("Accept") or "").lower()
+    types = [t.split(";")[0].strip() for t in accept.split(",") if t.strip()]
+    prefers_sse = ("text/event-stream" in types
+                   and ("application/json" not in types
+                        or types.index("text/event-stream")
+                        < types.index("application/json")))
+    if not prefers_sse:
+        return jsonify(payload), 200
+    frame = f"event: message\ndata: {json.dumps(payload)}\n\n"
+    return Response(frame, status=200, mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no"})
 
 
 @mcp_bp.route("/mcp", methods=["GET", "DELETE"])
 def mcp_stream():
     """This server keeps no stream and no session state — the active project
-    lives on the token, so a reconnect resumes exactly where it left off."""
+    lives on the grant, so a reconnect resumes exactly where it left off.
+
+    Still authenticated: a client that probes with GET before POSTing must get
+    the same 401 challenge, or it never discovers the authorization server."""
+    tok, err = _authenticate()
+    if err:
+        return _unauthorized(err)
     if request.method == "DELETE":
         return "", 204
     return jsonify({"error": "This MCP server is request/response only; "
