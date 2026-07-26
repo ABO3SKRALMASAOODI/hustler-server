@@ -125,10 +125,47 @@ def get_db():
     return psycopg2.connect(current_app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
 
 
+_nl_schema_ready = False
+
+
 def ensure_newsletter_schema(conn):
-    """Idempotent, additive DDL. Safe to call on every request / tick."""
+    """Idempotent, additive DDL — but NOT free, so it runs once per process.
+
+    THIS FUNCTION TOOK THE WHOLE SITE DOWN (Jul 26 2026, ~22:26-22:35 UTC).
+
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS ...` needs an ACCESS EXCLUSIVE
+    lock on `users` even when the column already exists and the statement is a
+    no-op. That is harmless until something else holds any lock on `users` —
+    and then it is catastrophic, because Postgres queues lock requests in
+    order: once an ACCESS EXCLUSIVE request is waiting, EVERY later query on
+    that table waits behind it. `users` is read by essentially every request,
+    so one stalled session turned into a total outage in seconds.
+
+    What actually happened: an admin page load left a session `idle in
+    transaction` holding a read lock on `users`; the next newsletter request
+    queued an ALTER behind it; every subsequent request queued behind the
+    ALTER. The backend stopped answering while Postgres, the app and the code
+    were all individually "fine".
+
+    Three changes, each of which alone would have prevented it:
+      * a process-level flag, so this runs once rather than per request;
+      * the ALTER is skipped entirely unless the column is genuinely missing
+        (information_schema is a cheap catalog read, no table lock);
+      * `lock_timeout` so any DDL that cannot get its lock FAILS in seconds
+        instead of queueing and taking the table down with it.
+    """
+    global _nl_schema_ready
+    if _nl_schema_ready:
+        return
     cur = conn.cursor()
-    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMP")
+    # Never let DDL sit in the lock queue. Session-local; the app's normal
+    # queries are unaffected.
+    cur.execute("SET LOCAL lock_timeout = '3s'")
+    cur.execute("""SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users'
+                      AND column_name = 'unsubscribed_at'""")
+    if cur.fetchone() is None:
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMP")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS newsletter_sends (
             id SERIAL PRIMARY KEY,
@@ -166,6 +203,10 @@ def ensure_newsletter_schema(conn):
     cur.execute("INSERT INTO newsletter_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
     conn.commit()
     cur.close()
+    # Only after a clean run — a failure (including the 3s lock_timeout above)
+    # must leave this False so the next request retries rather than assuming a
+    # half-built schema is finished.
+    _nl_schema_ready = True
     # user_offers, same additive contract. Provisioned from here as well as
     # lazily from offers.py so the table exists before the first tick queries
     # it — its eligibility clauses degrade to TRUE without it, which would send
