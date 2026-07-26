@@ -283,7 +283,9 @@ def main():
           f"index_slots={config.INDEX_SLOTS} agent_slots={config.AGENT_SLOTS} "
           f"media/index={exec_mode} whisper={config.WHISPER_MODEL}/"
           f"{config.WHISPER_DEVICE} agent_model={config.AGENT_MODEL} "
-          f"vision={config.VISION_MODEL or 'off'}", flush=True)
+          f"vision={config.VISION_MODEL or 'off'}"
+          f"@{config.VISION_BASE_URL if config.VISION_API_KEY else 'NO KEY'}",
+          flush=True)
     if config.REMOTE_EXECUTOR_URL and not config.REMOTE_EXECUTOR_SECRET:
         print("[dispatcher] WARNING: REMOTE_EXECUTOR_URL set but "
               "REMOTE_EXECUTOR_SECRET is empty — calls will be unauthenticated.",

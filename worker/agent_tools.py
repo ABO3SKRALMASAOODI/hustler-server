@@ -102,6 +102,10 @@ class ToolContext:
         self.videos_generated = []    # clips created by generate_video
         self.urls_fetched = []        # assets created by fetch_url
         self.web_recordings = []      # assets created by record_website
+        # Audio lifted out of an uploaded VIDEO (extract_audio, or any audio
+        # tool handed a clip). A real project asset, so a turn that only did
+        # this did NOT do nothing — the honesty layer reads it.
+        self.audio_extracted = []
         # Stock search results are cached per TURN so add_stock_media places
         # the exact clip the model chose from, not whatever a repeat query
         # returns (providers reorder results between identical calls).
@@ -571,7 +575,16 @@ def list_assets(ctx, kind=None):
         cap = f" — {m['caption'][:120]}" if m.get("caption") else ""
         lines.append(f"[{a['kind']}] storage_key={a['storage_key']} "
                      f"\"{m.get('filename', '?')}\"{dur}{cap}")
-    return _cap("\n".join(lines))
+    out = "\n".join(lines)
+    # The commonest way a user delivers a SONG is as the video they found it
+    # in — a TikTok/Reel download. Say here that this works, at the moment the
+    # agent is looking at the clip, rather than leaving it to guess.
+    if any(a["kind"] == "video_clip" for a in rows):
+        out += ("\nAny [video_clip] can also be used as SOUND ONLY — pass its "
+                "storage_key straight to add_music / add_sfx / add_voiceover "
+                "(or call extract_audio first). Its picture stays out of the "
+                "edit entirely.")
+    return _cap(out)
 
 
 def look_at(ctx, start, end, question):
@@ -1326,14 +1339,140 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
     return result
 
 
-def _resolve_music(ctx, storage_key):
-    """(track, error) for a music reference.
+def _asset_name(asset):
+    return ((asset.get("meta") or {}).get("filename")
+            or os.path.basename(asset.get("storage_key") or "?"))
 
-    Two disjoint doors. A `library:` reference is looked up in the bundled
-    CC0 catalog by EXACT membership and never touches the assets table;
-    anything else falls through to the project-asset guard below, which is
-    unchanged — including the check that catches the pipeline's own extracted
-    speech track, the cause of the original inaudible-music bug."""
+
+def _audio_from_clip(ctx, asset):
+    """(music_asset, note, error) — an uploaded VIDEO's soundtrack as a
+    standalone audio asset the audio tools can use. Its picture is never
+    touched, which IS the feature: "use the song off this video, not its
+    scene".
+
+    Why this exists. A user who wants a song has the song as a video, because
+    that is the only file TikTok/Instagram/YouTube ever hands them. Before
+    round 47 every audio tool rejected a clip's key outright ("not a music
+    asset here") and the agent, believing the product could not do it, told
+    the user to go and convert the file themselves. On Jul 26 2026 one did:
+    they attached the same video FOUR times, were told no every time, and
+    left. Nothing was missing but this — the renderer has always been able to
+    read audio out of an mp4.
+
+    The extraction is cached as a real project asset (kind 'music', with the
+    source recorded in meta), so a clip resolved by add_music and then by
+    get_audio_analysis in the same turn costs one ffmpeg run, and a re-upload
+    of the same bytes costs none.
+    """
+    name = _asset_name(asset)
+    cached = ctx.db.run(dbx.extracted_audio_asset, ctx.project_id,
+                        asset["storage_key"], asset.get("sha256"))
+    if cached:
+        return cached, _sound_only_note(name, cached), None
+    try:
+        local = _asset_local_path(ctx, asset)
+    except Exception as e:
+        return None, None, (
+            f"Could not read '{name}' to take its audio ({str(e)[:140]}). "
+            "Do NOT claim the sound was added.")
+    out = os.path.join(ctx.workdir, f"clipaudio_{asset['id']}.m4a")
+    try:
+        dur = media.extract_audio_track(local, out)
+    except media.MediaError as e:
+        if "no audio stream" in str(e):
+            return None, None, (
+                f"REJECTED: '{name}' has no sound in it at all — it is a "
+                "silent video, so there is no audio to take from it. Tell "
+                "the user that plainly and ask for the song itself, or offer "
+                "a built-in track (list_music_library).")
+        return None, None, (
+            f"Could not take the audio out of '{name}' ({str(e)[:140]}). Do "
+            "NOT claim the sound was added.")
+    key = f"music/{ctx.project_id}/{uuid.uuid4().hex[:12]}.m4a"
+    try:
+        storage.upload_file(out, key, "audio/mp4")
+    except Exception as e:
+        return None, None, (
+            f"Took the audio out of '{name}' but could not save it "
+            f"({str(e)[:140]}). Do NOT claim the sound was added; try again.")
+    stem = os.path.splitext(name)[0][:60]
+    fname = f"{stem} (audio).m4a"
+    row = {"id": ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
+                            duration_s=dur,
+                            meta={"filename": fname,
+                                  "from_asset_key": asset["storage_key"],
+                                  "from_sha256": asset.get("sha256"),
+                                  "extracted_from_video": True,
+                                  "caption": f"sound only, taken from the "
+                                             f"uploaded video '{name}'"}),
+           "kind": "music", "storage_key": key, "duration_s": dur,
+           "meta": {"filename": fname}}
+    ctx.audio_extracted.append({"storage_key": key, "from": name})
+    return row, _sound_only_note(name, row), None
+
+
+def _sound_only_note(source_name, audio_asset):
+    """What the agent must tell the user about a clip used as sound.
+
+    Emitted on the cached path too: the claim being guarded is "the video is
+    in your edit", and that is just as wrong on the second turn as the first.
+    """
+    dur = audio_asset.get("duration_s") or 0.0
+    return (f"Note: '{source_name}' is a VIDEO, so its audio ({dur:.0f}s) is "
+            f"what plays — lifted out as a sound-only file "
+            f"({_asset_name(audio_asset)}, "
+            f"storage_key={audio_asset['storage_key']}). Its picture appears "
+            "NOWHERE in the edit; say that to the user rather than implying "
+            "the clip itself was added.")
+
+
+def extract_audio(ctx, asset_key):
+    """Take ONLY the sound out of an uploaded video, as a file the audio tools
+    can use. The video's picture is not shown anywhere."""
+    asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+    if asset and asset["kind"] in ("original", "proxy"):
+        return ("REJECTED: that is the MAIN video — its own sound is already "
+                "in the edit. Use set_volume to raise or lower it; extracting "
+                "it would only layer the same audio over itself.")
+    if asset and asset["kind"] == "audio":
+        return ("REJECTED: that file is already the main video's extracted "
+                "audio (a transcription artifact) — it is not user content "
+                "and must not be mixed back in.")
+    if asset and asset["kind"] == "music":
+        return (f"NO CHANGE — '{_asset_name(asset)}' is already an audio "
+                f"file; pass storage_key={asset_key} straight to add_music, "
+                "add_sfx or add_voiceover.")
+    if not asset or asset["kind"] != "video_clip":
+        avail = ctx.db.run(dbx.assets_by_kinds, ctx.project_id,
+                           ["video_clip"])
+        hint = ("Uploaded videos: " + "; ".join(a["storage_key"]
+                                                for a in avail[:12])
+                if avail else "No video has been uploaded to this project "
+                              "besides the main one.")
+        return (f"REJECTED: '{asset_key}' is not an uploaded video. {hint}")
+    got, note, err = _audio_from_clip(ctx, asset)
+    if err:
+        return err
+    dur = got.get("duration_s") or 0.0
+    return (f"Audio taken from '{_asset_name(asset)}' — storage_key="
+            f"{got['storage_key']} ({dur:.0f}s). Nothing is in the edit yet: "
+            "pass that key to add_music (a song under the video), add_sfx (a "
+            "one-shot moment) or add_voiceover (someone talking). The "
+            "video's picture is NOT used — only its sound."
+            + (f"\n{note}" if note else ""))
+
+
+def _resolve_music(ctx, storage_key):
+    """(track, error) for a music reference. track['storage_key'] is the key
+    the EDL must store — the caller must use it rather than what it was
+    handed, because a VIDEO resolves to the audio extracted from it.
+
+    Three doors. A `library:` reference is looked up in the bundled CC0
+    catalog by EXACT membership and never touches the assets table; an
+    uploaded VIDEO resolves through _audio_from_clip; anything else falls
+    through to the project-asset guard below, which is unchanged — including
+    the check that catches the pipeline's own extracted speech track, the
+    cause of the original inaudible-music bug."""
     if music_library.is_library_ref(storage_key):
         t = music_library.resolve(storage_key)
         if not t:
@@ -1343,7 +1482,7 @@ def _resolve_music(ctx, storage_key):
                 f"library. Call list_music_library() and use a slug it "
                 f"returns — never invent one. Known slugs: {have or 'none'}.")
         return {"name": t["title"], "duration_s": t.get("duration_s"),
-                "library": True}, None
+                "library": True, "storage_key": storage_key}, None
 
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
     if asset and asset["kind"] == "audio":
@@ -1354,6 +1493,13 @@ def _resolve_music(ctx, storage_key):
             "itself, near-inaudibly. Use a real music file instead: "
             "list_music_library() for a built-in track, or "
             "list_assets(kind='music') for the user's own uploads.")
+    if asset and asset["kind"] == "video_clip":
+        got, note, err = _audio_from_clip(ctx, asset)
+        if err:
+            return None, err
+        return {"name": _asset_name(got), "duration_s": got.get("duration_s"),
+                "library": False, "storage_key": got["storage_key"],
+                "note": note}, None
     if not asset or asset["kind"] != "music":
         avail = ctx.db.run(
             lambda conn: _music_assets(conn, ctx.project_id))
@@ -1363,7 +1509,8 @@ def _resolve_music(ctx, storage_key):
                               "list_music_library() for built-in tracks.")
         return None, f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
     return {"name": os.path.basename(storage_key),
-            "duration_s": asset.get("duration_s"), "library": False}, None
+            "duration_s": asset.get("duration_s"), "library": False,
+            "storage_key": storage_key}, None
 
 
 def list_music_library(ctx, mood=None):
@@ -1413,6 +1560,9 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
     track, err = _resolve_music(ctx, storage_key)
     if err:
         return err
+    # What the EDL stores is the RESOLVED key: hand this tool a video and the
+    # sound that plays is the audio extracted from it, never the video object.
+    storage_key = track["storage_key"]
     edl = dict(ctx.latest_edl()["json"])
     # Clamp against the FINAL program duration (kept footage + inserts), not
     # just the kept footage — otherwise music can never reach the end of a
@@ -1525,6 +1675,8 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
         res += (f"\nWARNING: this same file is also active as voiceover "
                 f"{', '.join(dup_vo)} — it will play TWICE. If you meant to "
                 f"replace it, call remove_voiceover('{dup_vo[0]}').")
+    if track.get("note") and not str(res).startswith("REJECTED"):
+        res += "\n" + track["note"]
     return res
 
 
@@ -1539,27 +1691,42 @@ def remove_music(ctx, id):
     edl["music"] = [m for m in items if m.get("id") != id]
     return ctx.write_edl(
         edl, f"removed music {id} "
-             f"('{_music_name(hit['storage_key'])}', "
+             f"('{_music_name(ctx, hit['storage_key'])}', "
              f"{hit['start']}-{hit['end']}s)")
 
 
-def _music_name(key):
+def _upload_name(ctx, key):
+    """The user's OWN filename for an uploaded audio asset.
+
+    Storage keys are random hex, so the basename fallback reports
+    '7f3a91b2c4d5.m4a' back at someone who attached 'my song.mp3' — and now
+    that audio can be lifted out of a video, the name is the only thing
+    telling the agent (and the user) WHICH file it is talking about."""
+    try:
+        a = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
+    except Exception:
+        a = None
+    return (((a or {}).get("meta") or {}).get("filename")
+            or os.path.basename(key or "?"))
+
+
+def _music_name(ctx, key):
     """Display name for a music reference. Library refs aren't paths, so
     basename() would print the raw 'library:slug' at the user."""
     t = music_library.resolve(key)
     if t:
         return t["title"]
-    return os.path.basename(key or "?")
+    return _upload_name(ctx, key)
 
 
-def _track_name(key):
+def _track_name(ctx, key):
     """Display name for ANY audio reference — music, sfx or upload. Both
-    bundled schemes resolve to a real title; everything else is a path."""
+    bundled schemes resolve to a real title; everything else is an upload."""
     for lib in (music_library, sfx_library):
         t = lib.resolve(key)
         if t:
             return t["title"]
-    return os.path.basename(key or "?")
+    return _upload_name(ctx, key)
 
 
 def _resolve_sfx(ctx, storage_key):
@@ -1575,6 +1742,9 @@ def _resolve_sfx(ctx, storage_key):
     Uploaded sounds arrive as kind 'music' — an uploaded audio file is just an
     audio file, and whether it is a bed or a one-shot is an EDL decision, not
     an asset kind. So there is no separate 'sfx' upload kind to keep in sync.
+    An uploaded VIDEO is the third door (round 47): it resolves to the audio
+    extracted from it, because "use the sound off this clip" is a thing users
+    ask for and the picture is simply never used.
     """
     if sfx_library.is_library_ref(storage_key):
         s = sfx_library.resolve(storage_key)
@@ -1585,7 +1755,7 @@ def _resolve_sfx(ctx, storage_key):
                 f"pack. Call list_sfx_library() and use a slug it returns — "
                 f"never invent one. Known slugs: {have or 'none'}.")
         return {"name": s["title"], "duration_s": s.get("duration_s"),
-                "library": True}, None
+                "library": True, "storage_key": storage_key}, None
 
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
     if asset and asset["kind"] == "audio":
@@ -1594,13 +1764,21 @@ def _resolve_sfx(ctx, storage_key):
             "(a transcription artifact), not a sound effect. Use "
             "list_sfx_library() for a built-in sound, or "
             "list_assets(kind='music') for the user's own uploads.")
+    if asset and asset["kind"] == "video_clip":
+        got, note, err = _audio_from_clip(ctx, asset)
+        if err:
+            return None, err
+        return {"name": _asset_name(got), "duration_s": got.get("duration_s"),
+                "library": False, "storage_key": got["storage_key"],
+                "note": note}, None
     if not asset or asset["kind"] != "music":
         return None, (
             f"REJECTED: '{storage_key}' is not an audio asset in this "
             "project. Call list_sfx_library() for the built-in pack, or "
             "list_assets(kind='music') for the user's uploads.")
     return {"name": os.path.basename(storage_key),
-            "duration_s": asset.get("duration_s"), "library": False}, None
+            "duration_s": asset.get("duration_s"), "library": False,
+            "storage_key": storage_key}, None
 
 
 def list_sfx_library(ctx, category=None):
@@ -1631,6 +1809,7 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0):
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
         return err
+    storage_key = sound["storage_key"]      # a video resolves to its audio
     try:
         at = float(at)
     except (TypeError, ValueError):
@@ -1663,6 +1842,8 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0):
     if dur and at + dur > prog + 0.05:
         note = (f" NOTE: '{sound['name']}' is {dur:.2f}s and the program ends "
                 f"at {round(prog, 2)}s, so its tail will be cut short.")
+    if sound.get("note"):
+        note += "\n" + sound["note"]
     return ctx.write_edl(
         edl, f"added sfx '{sound['name']}' at {round(at, 2)}s "
              f"({gain_db:+g}dB) as {sid}") + note
@@ -1678,7 +1859,7 @@ def remove_sfx(ctx, id):
                 "Call get_edl to see them.")
     edl["sfx"] = [s for s in items if s.get("id") != id]
     return ctx.write_edl(
-        edl, f"removed sfx {id} ('{_track_name(hit['storage_key'])}' "
+        edl, f"removed sfx {id} ('{_track_name(ctx, hit['storage_key'])}' "
              f"at {hit['at']}s)")
 
 
@@ -1702,7 +1883,7 @@ def move_sfx(ctx, id, at):
     hit["at"] = round(at, 2)
     edl["sfx"] = items
     return ctx.write_edl(
-        edl, f"moved sfx {id} ('{_track_name(hit['storage_key'])}') "
+        edl, f"moved sfx {id} ('{_track_name(ctx, hit['storage_key'])}') "
              f"{old}s -> {hit['at']}s")
 
 
@@ -1712,6 +1893,7 @@ def swap_music(ctx, id, storage_key):
     track, err = _resolve_music(ctx, storage_key)
     if err:
         return err
+    storage_key = track["storage_key"]      # a video resolves to its audio
     edl = dict(ctx.latest_edl()["json"])
     items = [dict(m) for m in (edl.get("music") or [])]
     hit = next((m for m in items if m.get("id") == id), None)
@@ -1722,7 +1904,7 @@ def swap_music(ctx, id, storage_key):
     if hit.get("storage_key") == storage_key:
         return (f"NO CHANGE — music {id} is already '{track['name']}'. "
                 "Do NOT tell the user you changed the track.")
-    old = _music_name(hit.get("storage_key"))
+    old = _music_name(ctx, hit.get("storage_key"))
     hit["storage_key"] = storage_key
     # An offset was measured into the OLD track — "start at the chorus" points
     # somewhere meaningless in a different song. Drop it rather than carry a
@@ -1740,6 +1922,8 @@ def swap_music(ctx, id, storage_key):
         res += (f"\nNote: '{track['name']}' is {tdur:.0f}s but the span is "
                 f"{span:.0f}s — it will fall silent for the rest unless you "
                 "set loop=true with set_music_fit.")
+    if track.get("note") and not str(res).startswith("REJECTED"):
+        res += "\n" + track["note"]
     return res
 
 
@@ -1813,7 +1997,7 @@ def set_music_fit(ctx, id, start=None, end=None, offset_s=None,
          "duck", "duck_mode")
         if hit.get(k) != before.get(k))
     res = ctx.write_edl(
-        edl, f"music {id} ('{_music_name(hit['storage_key'])}') refit: "
+        edl, f"music {id} ('{_music_name(ctx, hit['storage_key'])}') refit: "
              f"{changed}")
     if duck_note and res.startswith("EDL v"):
         res += duck_note
@@ -1850,7 +2034,7 @@ def set_audio_gain(ctx, kind, id, gain_db):
     edl[kind] = items
     key = hit.get("storage_key") or hit.get("asset_key") or "?"
     return ctx.write_edl(
-        edl, f"{kind} {id} ('{_track_name(key)}') gain "
+        edl, f"{kind} {id} ('{_track_name(ctx, key)}') gain "
              f"{old:+.1f}dB -> {g:+.1f}dB")
 
 
@@ -3035,11 +3219,25 @@ def remove_insert(ctx, id):
     return res
 
 
+def _resolve_audio_upload(ctx, asset_key):
+    """(asset, note, error) for any UPLOAD that is to be used as sound.
+
+    An audio file passes straight through; a VIDEO resolves to the audio taken
+    out of it (its picture is never used); everything else falls through to
+    _resolve_media_asset for the error, so the wording stays in one place."""
+    asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+    if asset and asset["kind"] == "video_clip":
+        return _audio_from_clip(ctx, asset)
+    asset, err = _resolve_media_asset(ctx, asset_key, ("music",))
+    return asset, None, err
+
+
 def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
                   duck_others=True):
-    asset, err = _resolve_media_asset(ctx, asset_key, ("music",))
+    asset, extract_note, err = _resolve_audio_upload(ctx, asset_key)
     if err:
         return err
+    asset_key = asset["storage_key"]        # a video resolves to its audio
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     try:
@@ -3066,6 +3264,8 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
         res += (f"\nWARNING: this same file is also active as music "
                 f"{', '.join(dup_mus)} — it will play TWICE. Background "
                 f"music belongs in music items, not voiceover.")
+    if extract_note and not str(res).startswith("REJECTED"):
+        res += "\n" + extract_note
     return res
 
 
@@ -5476,6 +5676,13 @@ def _asset_audio_analysis(ctx, asset_key):
         name = t["title"]
     else:
         asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+        # A VIDEO the user wants the song from is analyzed like any other
+        # track — beat-aligning cuts to it is the whole point of asking.
+        if asset and asset["kind"] == "video_clip":
+            asset, _note, err = _audio_from_clip(ctx, asset)
+            if err:
+                return err
+            asset_key = asset["storage_key"]
         if not asset or asset["kind"] != "music":
             return (f"REJECTED: '{asset_key}' is not a music asset in this "
                     "project. Analyze uploads from list_assets(kind='music') "
@@ -6256,6 +6463,22 @@ TOOLS = {
                    "fade_in_s": {"type": "number"},
                    "fade_out_s": {"type": "number"},
                    "loop": {"type": "boolean"}}),
+    "extract_audio": (extract_audio, "Take ONLY the sound out of an uploaded "
+                      "VIDEO and save it as an audio file — THE answer to "
+                      "'use the song from this clip', 'put this video's audio "
+                      "on my video', 'I want the sound but not the picture'. "
+                      "Users hand you songs as videos because a TikTok or "
+                      "Reel download is the only file they have; that is "
+                      "normal and it works. The clip's picture is never "
+                      "shown. asset_key is a [video_clip] storage_key from "
+                      "list_assets. Returns a new storage_key for add_music / "
+                      "add_sfx / add_voiceover — nothing is in the edit until "
+                      "you place it. Passing a clip's key DIRECTLY to those "
+                      "tools does the same thing in one step; call this when "
+                      "you want the file first (e.g. to get_audio_analysis "
+                      "its beats). If the clip is silent it says so — never "
+                      "claim a sound was added.",
+                      {"asset_key": {"type": "string"}}),
     "list_sfx_library": (list_sfx_library, "Browse the BUILT-IN sound-effects "
                         "pack — clicks, whooshes, impacts, risers, stings. "
                         "Always available with nothing uploaded. Returns "
@@ -7060,6 +7283,7 @@ REQUIRED_ARGS = {
     "add_music": ["storage_key"],
     "list_music_library": [],
     "list_sfx_library": [],
+    "extract_audio": ["asset_key"],
     "add_sfx": ["storage_key", "at"],
     "move_sfx": ["id", "at"],
     "remove_sfx": ["id"],
@@ -7121,7 +7345,7 @@ REQUIRED_ARGS = {
 WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "set_caption_style", "add_music", "remove_music",
-               "swap_music", "set_music_fit",
+               "swap_music", "set_music_fit", "extract_audio",
                "add_sfx", "move_sfx", "remove_sfx",
                "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
                "record_website", "record_website_demo", "showcase_demo",

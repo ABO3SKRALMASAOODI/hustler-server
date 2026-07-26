@@ -329,7 +329,12 @@ def video_overview():
                 "provider": _provider(base_url),
                 "base_url": base_url,
                 "agent_model": os.getenv("AGENT_MODEL", "deepseek-v4-pro"),
-                "vision_model": os.getenv("VISION_MODEL", "deepseek-v4-pro"),
+                # Vision runs on its OWN provider (worker/config.py): the
+                # chat provider may take no images at all — DeepSeek 400s on
+                # every one, which blinded the agent on Jul 26 2026.
+                "vision_model": os.getenv("VISION_MODEL", "grok-4.5"),
+                "vision_base_url": os.getenv("VISION_BASE_URL",
+                                             "https://api.x.ai/v1"),
                 "image_gen_model": os.getenv("IMAGE_GEN_MODEL",
                                              "grok-imagine-image-quality"),
                 "image_edit_model": os.getenv("IMAGE_EDIT_MODEL", "") or None,

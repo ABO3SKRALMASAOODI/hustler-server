@@ -25,6 +25,13 @@ import config
 
 _client = None
 _image_client = None
+_vision_client = None
+
+# Set when the vision provider proves it cannot accept images at all (a 400 on
+# the image part itself, not a transient error). Vision then reports itself
+# unavailable for the rest of the process instead of burning a doomed call per
+# look — DeepSeek rejected 59 in a row on Jul 26 2026 before anyone noticed.
+_vision_blind = False
 
 # Per-thread model-I/O recorder (set by the agent loop for the duration of a
 # turn). Signature: fn(purpose, request_payload, response_payload, usage).
@@ -92,8 +99,30 @@ def image_client():
     return _image_client
 
 
+def vision_client():
+    """Separate pooled client for vision — VISION_BASE_URL is configured
+    independently of the chat provider (a text-only chat provider is normal),
+    so this must NOT reuse client()."""
+    global _vision_client
+    if _vision_client is None:
+        _vision_client = OpenAI(base_url=config.VISION_BASE_URL,
+                                api_key=config.VISION_API_KEY,
+                                timeout=config.VISION_TIMEOUT_S,
+                                max_retries=config.LLM_MAX_RETRIES)
+    return _vision_client
+
+
+# The provider's own words for "I do not take images". Matched on the error
+# body because the only honest source for this is the API itself: a model card
+# claiming multimodality is not evidence (deepseek-v4-pro claimed it and 400s).
+_BLIND_MARKERS = ("unknown variant `image_url`", "unknown variant 'image_url'",
+                  "does not support image", "image input is not supported",
+                  "vision is not supported")
+
+
 def vision_available():
-    return bool(config.VISION_MODEL and config.OPENAI_API_KEY)
+    return bool(config.VISION_MODEL and config.VISION_API_KEY
+                and not _vision_blind)
 
 
 def cached_input_tokens(usage):
@@ -141,7 +170,7 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
     try:
         # Vision gets a MORE generous timeout than the text agent (spiky grok
         # multimodal latency); retries stay at the client default.
-        resp = client().with_options(
+        resp = vision_client().with_options(
             timeout=config.VISION_TIMEOUT_S
         ).chat.completions.create(
             model=config.VISION_MODEL,
@@ -156,12 +185,25 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
                {"answer": answer}, getattr(resp, "usage", None))
         return answer
     except Exception as e:
-        print(f"[vision] call failed: {e}", flush=True)
+        global _vision_blind
+        msg = str(e)
+        print(f"[vision] call failed: {msg}", flush=True)
+        # A provider that rejects the image PART is not having a bad minute —
+        # it will reject every future call identically. Stop asking, and let
+        # vision_available() tell the tools so they say "no vision configured"
+        # rather than "the model didn't answer" over and over.
+        if any(m in msg for m in _BLIND_MARKERS):
+            _vision_blind = True
+            print(f"[vision] {config.VISION_MODEL} at {config.VISION_BASE_URL} "
+                  "does not accept images — vision DISABLED for this process. "
+                  "Set VISION_BASE_URL/VISION_MODEL/VISION_API_KEY to a "
+                  "multimodal provider.", flush=True)
         _note_error(e)
         record(purpose,
                {"model": config.VISION_MODEL, "question": prompt,
-                "images": names},
-               {"error": str(e)[:300]}, None)
+                "images": names, "base_url": config.VISION_BASE_URL},
+               {"error": msg[:300],
+                "provider_cannot_see": _vision_blind or None}, None)
         return None
 
 

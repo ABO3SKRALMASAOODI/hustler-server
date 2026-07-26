@@ -20,25 +20,20 @@ S3_REGION = os.getenv("S3_REGION", "auto")
 # the defaults below already select v4-pro. (For xAI Grok: OPENAI_BASE_URL=
 # https://api.x.ai/v1, AGENT_MODEL=VISION_MODEL=grok-4.5, prices 2.0/6.0.)
 #
-# WHY v4-PRO AND NOT v4-FLASH: flash is text-only — it silently ignores or
-# rejects image_url parts, which would blind look_at and every contact-sheet
-# read. Pro is the only V4 tier that accepts images, so agent and vision share
-# it. Do not "save money" by moving AGENT_MODEL to flash without also proving
-# what happens to VISION_MODEL.
+# NO V4 TIER TAKES IMAGES. This was believed of v4-pro and it is false: the
+# DeepSeek chat API rejects an `image_url` content part at the JSON layer —
+# HTTP 400 "Failed to deserialize the JSON body: unknown variant `image_url`,
+# expected `text`" — so pro is as blind as flash. It cost a real outage: from
+# 13:06 UTC on Jul 26 2026 (the switch) every look_at, look_at_asset and
+# preview self-check 400'd, 59 calls in a row, and the agent asked users to
+# describe their own footage to it. Vision therefore has its OWN provider
+# below, exactly as image generation does. Do not point VISION_BASE_URL at
+# DeepSeek "because the agent runs there".
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 AGENT_MODEL = os.getenv("AGENT_MODEL", "deepseek-v4-pro")
-# deepseek-v4-pro is multimodal, so it doubles as the vision model. Empty
-# string disables all vision features gracefully.
-VISION_MODEL = os.getenv("VISION_MODEL", "deepseek-v4-pro")
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
-# Vision (look_at) is the slowest thing the agent does, so it gets a MORE
-# generous per-call timeout than the text agent (grok multimodal latency is
-# spiky) — retries stay at the client default. The agent isn't capped on how
-# many looks it may take; the accurate transcript (so it stops lip-reading)
-# plus the longer turn wall are what keep vision from running away.
-VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "120"))
 
 # Image generation runs on its OWN provider, independent of AGENT_MODEL.
 # DeepSeek publishes no image-generation model (its lineup is v4-pro/v4-flash
@@ -93,6 +88,32 @@ IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
 IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "https://api.x.ai/v1")
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "") or (
     OPENAI_API_KEY if IMAGE_BASE_URL == OPENAI_BASE_URL else "")
+
+# ── Vision (look_at / look_at_asset / contact-sheet captions / self-check) ───
+# Its OWN provider, for the same reason images have one: the chat provider may
+# have no multimodal surface at all. DeepSeek does not — it 400s on an
+# image_url part (see the block at the top), which blinded the agent for hours
+# on Jul 26 2026 because vision silently inherited AGENT_MODEL.
+#
+# Defaults to xAI grok-4.5, which served every look_at successfully until that
+# switch. The key follows the SAME inheritance rule as IMAGE_API_KEY: taken
+# from whichever configured provider shares this base URL, never handed across
+# providers (a DeepSeek key sent to xAI is a 401 on every call). With no key
+# for it, vision_available() is False and every vision tool says so plainly
+# instead of failing — the honest-off contract. Empty VISION_MODEL disables
+# vision the same graceful way.
+VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://api.x.ai/v1")
+VISION_MODEL = os.getenv("VISION_MODEL", "grok-4.5")
+VISION_API_KEY = (
+    os.getenv("VISION_API_KEY", "")
+    or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
+    or (IMAGE_API_KEY if VISION_BASE_URL == IMAGE_BASE_URL else ""))
+# Vision (look_at) is the slowest thing the agent does, so it gets a MORE
+# generous per-call timeout than the text agent (grok multimodal latency is
+# spiky) — retries stay at the client default. The agent isn't capped on how
+# many looks it may take; the accurate transcript (so it stops lip-reading)
+# plus the longer turn wall are what keep vision from running away.
+VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "120"))
 # 8 (was 4): the real bound is the user's credit budget (_gen_budget_reject
 # prices every image before spending); this stays only as a backstop against
 # a runaway generation loop.

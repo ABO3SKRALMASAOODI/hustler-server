@@ -269,6 +269,25 @@ def asset_by_key(conn, project_id, storage_key):
         return cur.fetchone()
 
 
+def extracted_audio_asset(conn, project_id, source_key, source_sha=None):
+    """The music asset previously extracted from THIS video, or None.
+
+    Matched on the source's sha as well as its storage key: the studio mints a
+    fresh object per upload, so a user who attaches the same file twice — which
+    is exactly what someone does when the first attempt was refused — would
+    otherwise pay the download + encode again for audio we already have.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = 'music'
+                         AND (meta->>'from_asset_key' = %s
+                              OR (%s <> '' AND meta->>'from_sha256' = %s))
+                       ORDER BY id DESC LIMIT 1""",
+                    (project_id, source_key, source_sha or "",
+                     source_sha or ""))
+        return cur.fetchone()
+
+
 def any_asset_by_sha(conn, kind, sha256):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
@@ -442,6 +461,8 @@ def _capped_payload(obj):
         s = s.replace(config.OPENAI_API_KEY, "[REDACTED]")
     if config.IMAGE_API_KEY:
         s = s.replace(config.IMAGE_API_KEY, "[REDACTED]")
+    if config.VISION_API_KEY:
+        s = s.replace(config.VISION_API_KEY, "[REDACTED]")
     if len(s) > LLM_PAYLOAD_CAP:
         return {"_truncated": True, "_original_bytes": len(s),
                 "_prefix": s[:LLM_PAYLOAD_CAP] + "…[truncated]"}

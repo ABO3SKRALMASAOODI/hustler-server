@@ -308,6 +308,75 @@ def extract_wav(src, dst):
          "-c:a", "pcm_s16le", dst])
 
 
+# Codecs an .m4a container carries unchanged, so the extraction is a remux
+# (a second or two on a long clip) instead of a full decode+encode.
+AUDIO_COPY_CODECS = ("aac", "alac")
+
+
+def audio_stream_of(path):
+    """The first audio stream's codec and channel count, or None when the file
+    carries no sound at all.
+
+    probe() only answers has_audio, and the copy-vs-re-encode decision needs
+    the codec name. Separate ffprobe rather than another probe() field because
+    this runs on files probe() would reject outright — an audio-only upload
+    has no video stream."""
+    out = run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+               "-show_entries", "stream=codec_name,channels",
+               "-print_format", "json", path], timeout=120)
+    try:
+        streams = json.loads(out).get("streams") or []
+    except (TypeError, ValueError):
+        return None
+    if not streams:
+        return None
+    s = streams[0]
+    try:
+        ch = int(s.get("channels") or 0)
+    except (TypeError, ValueError):
+        ch = 0
+    return {"codec": (s.get("codec_name") or "").lower(), "channels": ch}
+
+
+def extract_audio_track(src, dst):
+    """Write a video's audio to a standalone .m4a and return its duration.
+
+    Raises MediaError("no audio stream") when the source is silent — the
+    caller must say so rather than hand the user a file of silence.
+
+    The picture is never decoded (-vn + -map 0:a:0), which is the whole point:
+    this is how "use the song from this video, not its scene" is served. AAC
+    (what phones and TikTok downloads carry) is stream-COPIED; anything else
+    is encoded to AAC once, with the copy attempt retried as an encode because
+    a copy can still fail on an exotic container even when the codec matches.
+    """
+    info = audio_stream_of(src)
+    if not info:
+        raise MediaError("no audio stream")
+    head = ["ffmpeg", "-y", "-i", src, "-vn", "-sn", "-dn", "-map", "0:a:0"]
+    tail = ["-movflags", "+faststart", dst]
+    attempts = []
+    if info["codec"] in AUDIO_COPY_CODECS:
+        attempts.append(head + ["-c:a", "copy"] + tail)
+    attempts.append(head + ["-c:a", "aac", "-b:a", "192k"] + tail)
+    last_err = None
+    for cmd in attempts:
+        try:
+            run(cmd, timeout=1800)
+        except MediaError as e:
+            last_err = str(e)
+            continue
+        if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+            return probe_audio_duration(dst)
+        last_err = "ffmpeg reported success but wrote no audio"
+        try:
+            os.unlink(dst)          # a 0-byte file would look like a real one
+        except OSError:
+            pass
+    raise MediaError(f"could not extract audio from "
+                     f"{os.path.basename(src)}: {last_err}")
+
+
 _SIL_START = re.compile(r"silence_start:\s*([0-9.]+)")
 _SIL_END = re.compile(r"silence_end:\s*([0-9.]+)")
 

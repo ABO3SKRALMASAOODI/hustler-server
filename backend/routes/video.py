@@ -339,7 +339,11 @@ def _concierge_reply(stage, history, attachments, index_error=None,
             "Once a video is ready you can: cut silences and bad takes, add "
             "word-timed captions (including karaoke word-pop styles), add "
             "background music or voiceover (music can duck smoothly under "
-            "speech, dipping and swelling with the voice), drop one-shot "
+            "speech, dipping and swelling with the voice), use ONLY the "
+            "sound of a video they upload — a TikTok, Reel or YouTube "
+            "download works as the song and its picture never appears in "
+            "the edit, so they never have to convert it to an audio file "
+            "themselves, drop one-shot "
             "sound effects (whooshes, impacts, risers, clicks, dings) on "
             "exact moments from a built-in pack"
             + (", or generate custom sound effects to order from a text "
@@ -1659,6 +1663,20 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
 #  User-authored EDL writes (frame selector, timeline inserts, voiceover)
 # ------------------------------------------------------------------ #
 
+def _pick_audio_error(asset, what):
+    """Why an asset can't be used as sound HERE, and where it can be.
+
+    A video's soundtrack IS usable — the agent lifts it out (worker
+    _audio_from_clip). This service has no ffmpeg, so the timeline route says
+    where the capability lives instead of "pick an audio file", which reads as
+    "your file is no good" and sends the user off to convert it by hand."""
+    if asset and asset["kind"] == "video_clip":
+        return ("That's a video. Ask in chat to use its sound (\"use the song "
+                "from this clip\") and the editor will take the audio out of "
+                "it for you — its picture stays out of the edit.")
+    return f"Pick an uploaded audio file for {what}."
+
+
 def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
                   speech_spans=None):
     """Apply one UI operation to an EDL dict. Returns (new_edl, desc) or
@@ -1914,7 +1932,7 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         # kind 'audio' is the pipeline's extracted source-audio track — it
         # must never be layered back over itself.
         if not asset or asset["kind"] != "music":
-            raise ValueError("Pick an uploaded audio file for the voiceover.")
+            raise ValueError(_pick_audio_error(asset, "the voiceover"))
         vos = list(edl.get("voiceover") or [])
         taken = {v.get("id") for v in vos}
         n = 1
@@ -1931,7 +1949,7 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
     if op == "add_music":
         asset = assets_by_id.get(int(args.get("asset_id") or 0))
         if not asset or asset["kind"] != "music":
-            raise ValueError("Pick an uploaded audio file for the music.")
+            raise ValueError(_pick_audio_error(asset, "the music"))
         prog = wschemas.program_duration(edl)
         start = round(min(max(float(args.get("start") or 0.0), 0.0),
                           max(0.0, prog - 0.2)), 2)

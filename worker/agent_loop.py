@@ -676,6 +676,10 @@ def _assets_made_note(ctx):
     if getattr(ctx, "web_recordings", None):
         made.append(_n(len(ctx.web_recordings),
                        "website recording", "website recordings"))
+    if getattr(ctx, "audio_extracted", None):
+        made.append(_n(len(ctx.audio_extracted),
+                       "soundtrack taken out of a video you uploaded",
+                       "soundtracks taken out of videos you uploaded"))
     if not made:
         return ""
     return (" — but " + " and ".join(made)
@@ -711,6 +715,13 @@ def _turn_facts(ctx, start_version):
                     + ", ".join(r["storage_key"] for r in ctx.web_recordings)
                     + " — a recording is IN the video only if an "
                       "insert_media/add_overlay write also succeeded")
+    if getattr(ctx, "audio_extracted", None):
+        fetched += ("; audio taken out of an uploaded video: "
+                    + ", ".join(f"{a['storage_key']} (from {a['from']})"
+                                for a in ctx.audio_extracted)
+                    + " — that sound is IN the video only if an "
+                      "add_music/add_sfx/add_voiceover write also succeeded, "
+                      "and the source video's PICTURE is not in the edit")
     if ctx.last_preview is not None:
         pv = (f"rendered v{ctx.last_preview.get('edl_version')} "
               f"({ctx.last_preview.get('duration_s')}s)")
@@ -885,7 +896,8 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     wrote = bool(ctx.versions_written)
     acted = bool(ctx.versions_written or ctx.images_generated
                  or ctx.urls_fetched
-                 or getattr(ctx, "web_recordings", None))
+                 or getattr(ctx, "web_recordings", None)
+                 or getattr(ctx, "audio_extracted", None))
     previewed = ctx.last_preview is not None
     viol = _reply_violations(draft, wrote, previewed, acted)
     # Echo detection only polices turns that DID nothing: a working turn's
@@ -929,7 +941,8 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     honesty["false_claims"] += 1
     honesty["corrective_note"] = True
     honesty["discarded_drafts"] = [d for d in (draft, redraft) if d]
-    if wrote or ctx.images_generated or ctx.urls_fetched:
+    if wrote or ctx.images_generated or ctx.urls_fetched \
+            or getattr(ctx, "audio_extracted", None):
         # Real work happened, so the reply is corrected rather than discarded.
         # The note has to say WHICH work, though: routing a fetch-only turn
         # into the fallback below told the user nothing happened and that we
@@ -946,6 +959,9 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
                 made.append("the linked media WAS downloaded")
             if ctx.images_generated:
                 made.append("an image WAS generated")
+            if getattr(ctx, "audio_extracted", None):
+                made.append("the audio WAS taken out of the video you "
+                            "uploaded")
             note = ("this turn did NOT change the edit, but "
                     + " and ".join(made) + " and saved to the project")
         print(f"[honesty] job {ctx.job['id']}: regeneration still misreports "

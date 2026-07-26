@@ -4146,8 +4146,9 @@ check("sfx library: every shipped sound has a real file",
 check("sfx library: every category is one the agent can filter by",
       {t["category"] for t in sfx_library.CATALOG} <= set(sfx_library.CATEGORIES))
 check("_track_name resolves BOTH packs to a title, not a raw ref",
-      _track_name("sfx:whoosh") == "Whoosh"
-      and not _track_name("library:hiphop-abducted").startswith("library:"))
+      _track_name(None, "sfx:whoosh") == "Whoosh"
+      and not _track_name(None,
+                          "library:hiphop-abducted").startswith("library:"))
 
 # --- the WIRING a filtergraph test cannot see ------------------------------
 # The round-25 bug: music_library was imported into the renderer and never

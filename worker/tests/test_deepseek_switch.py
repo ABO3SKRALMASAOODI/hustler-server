@@ -35,13 +35,79 @@ import llm                                                     # noqa: E402
 
 # ── the model actually configured ──────────────────────────────────────
 
-def test_agent_and_vision_are_both_v4_pro():
-    """v4-flash is text-only: it ignores/rejects image parts, which would
-    blind look_at and every contact-sheet read. If AGENT_MODEL is ever moved
-    to flash, VISION_MODEL must NOT follow it."""
+def test_agent_runs_on_v4_pro():
     assert config.AGENT_MODEL == "deepseek-v4-pro"
-    assert config.VISION_MODEL == "deepseek-v4-pro"
     assert config.OPENAI_BASE_URL == "https://api.deepseek.com"
+
+
+def test_vision_does_not_follow_the_agent_onto_deepseek():
+    """CORRECTS THIS FILE'S ORIGINAL CLAIM (round 46): v4-PRO does not accept
+    images either. It rejects an image_url content part at the JSON layer —
+    400 "unknown variant `image_url`, expected `text`" — so from 13:06 UTC on
+    Jul 26 2026 every look_at, look_at_asset and preview self-check failed,
+    59 in a row, and the agent asked users to describe their own footage.
+    Vision keeps its own provider, like image generation does."""
+    assert config.VISION_BASE_URL != config.OPENAI_BASE_URL or \
+        "deepseek" not in config.VISION_BASE_URL
+    assert "deepseek" not in config.VISION_MODEL
+
+
+def test_vision_key_is_never_inherited_across_providers():
+    """A DeepSeek key sent to xAI is a 401 per call. Absent key => capability
+    OFF (vision_available() False, tools say so), never broken."""
+    import llm
+
+    for base, key, expect in (
+            ("https://api.x.ai/v1", "", False),      # no key for that provider
+            ("https://api.x.ai/v1", "xai-k", True),
+    ):
+        old = (config.VISION_BASE_URL, config.VISION_API_KEY)
+        config.VISION_BASE_URL, config.VISION_API_KEY = base, key
+        try:
+            assert llm.vision_available() is expect
+        finally:
+            config.VISION_BASE_URL, config.VISION_API_KEY = old
+
+
+def test_a_provider_that_rejects_images_turns_vision_off():
+    """The 59-doomed-calls-in-a-row failure: one 400 on the image part proves
+    the provider is blind, and every later call would fail identically."""
+    import llm
+
+    old = (config.VISION_MODEL, config.VISION_API_KEY, llm._vision_blind)
+    config.VISION_MODEL, config.VISION_API_KEY = "blind-model", "k"
+    llm._vision_blind = False
+
+    class _Boom:
+        def with_options(self, **_kw):
+            return self
+
+        @property
+        def chat(self):
+            return self
+
+        @property
+        def completions(self):
+            return self
+
+        def create(self, **_kw):
+            raise RuntimeError(
+                "Error code: 400 - {'error': {'message': 'Failed to "
+                "deserialize the JSON body into the target type: messages[0]: "
+                "unknown variant `image_url`, expected `text`'}}")
+
+    real_client, real_part = llm.vision_client, llm.image_part
+    llm.vision_client = lambda: _Boom()
+    llm.image_part = lambda p: {"type": "image_url", "image_url": {"url": ""}}
+    try:
+        assert llm.vision_available() is True
+        assert llm.ask_vision("what is this?", ["a.jpg"]) is None
+        assert llm.vision_available() is False, \
+            "a blind provider must disable vision, not fail once per call"
+    finally:
+        llm.vision_client, llm.image_part = real_client, real_part
+        (config.VISION_MODEL, config.VISION_API_KEY,
+         llm._vision_blind) = old
 
 
 def test_prices_match_the_configured_model():
