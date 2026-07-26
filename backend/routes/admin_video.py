@@ -21,10 +21,16 @@ import storage
 
 admin_video_bp = Blueprint("admin_video", __name__)
 
-# Estimated $ per 1M tokens when the API reports usage (default = Grok 4.5,
-# $2 in / $6 out; override via env if the model or pricing changes).
-PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
-PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
+# Estimated $ per 1M tokens when the API reports usage (default = DeepSeek V4
+# Pro, $1.74 in / $3.48 out; override via env if the model or pricing changes).
+# MUST match worker/config.py + worker/db.py or the admin spend view disagrees
+# with what users were actually charged.
+PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "1.74"))
+PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "3.48"))
+# Cache-hit input price — see worker/config.LLM_PRICE_CACHED_IN_PER_M. Rows
+# carry their cache-hit slice in response->>'cached_in'.
+PRICE_CACHED_IN_PER_M = float(
+    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.003625"))
 
 
 def adb():
@@ -33,7 +39,14 @@ def adb():
 
 
 def _cost_expr():
-    return (f"(COALESCE(SUM(prompt_tokens),0) * {PRICE_IN_PER_M} + "
+    """Same three-part formula as worker/db.charge_turn_credits: cache-HIT
+    input is billed at ~1/480th of a cache miss, so counting every prompt token
+    at the miss price would show a spend several times what users were charged.
+    Rows written before the split simply have no 'cached_in' and price as
+    all-miss, which is what they were."""
+    cached = "COALESCE(SUM((response->>'cached_in')::float),0)"
+    return (f"(GREATEST(COALESCE(SUM(prompt_tokens),0) - {cached}, 0) "
+            f"* {PRICE_IN_PER_M} + {cached} * {PRICE_CACHED_IN_PER_M} + "
             f"COALESCE(SUM(completion_tokens),0) * {PRICE_OUT_PER_M}) "
             "/ 1000000.0")
 
@@ -103,7 +116,12 @@ def video_overview():
             LEFT JOIN (SELECT p4.user_id,
                               SUM(lc.prompt_tokens) AS tokens_in,
                               SUM(lc.completion_tokens) AS tokens_out,
-                              (SUM(COALESCE(lc.prompt_tokens,0)) * %s
+                              (GREATEST(SUM(COALESCE(lc.prompt_tokens,0))
+                                   - SUM(COALESCE(
+                                       (lc.response->>'cached_in')::float,0)),
+                                   0) * %s
+                               + SUM(COALESCE(
+                                   (lc.response->>'cached_in')::float,0)) * %s
                                + SUM(COALESCE(lc.completion_tokens,0)) * %s)
                               / 1000000.0 AS est_cost
                        FROM llm_calls lc
@@ -114,7 +132,7 @@ def video_overview():
                      j.last, m.last
             ORDER BY last_active DESC NULLS LAST
             LIMIT 200
-        """, (PRICE_IN_PER_M, PRICE_OUT_PER_M))
+        """, (PRICE_IN_PER_M, PRICE_CACHED_IN_PER_M, PRICE_OUT_PER_M))
         users = cur.fetchall()
 
         # global ops counters + 14-day trends
@@ -245,12 +263,14 @@ def video_overview():
         """)
         model_rows = cur.fetchall()
 
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 
     def _provider(b):
         b = (b or "").lower()
         if "dashscope" in b:
             return "DashScope (Qwen)"
+        if "deepseek" in b:
+            return "DeepSeek"
         if "x.ai" in b:
             return "xAI (Grok)"
         if "openai" in b:
@@ -308,8 +328,8 @@ def video_overview():
             "configured": {
                 "provider": _provider(base_url),
                 "base_url": base_url,
-                "agent_model": os.getenv("AGENT_MODEL", "grok-4.5"),
-                "vision_model": os.getenv("VISION_MODEL", "grok-4.5"),
+                "agent_model": os.getenv("AGENT_MODEL", "deepseek-v4-pro"),
+                "vision_model": os.getenv("VISION_MODEL", "deepseek-v4-pro"),
                 "image_gen_model": os.getenv("IMAGE_GEN_MODEL",
                                              "grok-imagine-image-quality"),
                 "image_edit_model": os.getenv("IMAGE_EDIT_MODEL", "") or None,
@@ -711,7 +731,9 @@ def video_costs():
         by_purpose = cur.fetchall()
     return jsonify({
         "pricing": {"in_per_m": PRICE_IN_PER_M, "out_per_m": PRICE_OUT_PER_M,
-                    "note": "estimated from API usage fields when present"},
+                    "cached_in_per_m": PRICE_CACHED_IN_PER_M,
+                    "note": "estimated from API usage fields when present; "
+                            "cache-hit input priced separately"},
         "daily": [{**r, "day": r["day"].isoformat(),
                    "est_cost": round(float(r["est_cost"] or 0), 4)}
                   for r in rows],
@@ -833,7 +855,12 @@ def video_users():
             LEFT JOIN (SELECT p4.user_id,
                               SUM(lc.prompt_tokens) AS tokens_in,
                               SUM(lc.completion_tokens) AS tokens_out,
-                              (SUM(COALESCE(lc.prompt_tokens,0)) * %s
+                              (GREATEST(SUM(COALESCE(lc.prompt_tokens,0))
+                                   - SUM(COALESCE(
+                                       (lc.response->>'cached_in')::float,0)),
+                                   0) * %s
+                               + SUM(COALESCE(
+                                   (lc.response->>'cached_in')::float,0)) * %s
                                + SUM(COALESCE(lc.completion_tokens,0)) * %s)
                               / 1000000.0 AS est_cost
                        FROM llm_calls lc
@@ -842,7 +869,8 @@ def video_users():
             WHERE u.email ILIKE %s
             ORDER BY last_active DESC NULLS LAST
             LIMIT 200
-        """, (UPLOAD_KINDS, PRICE_IN_PER_M, PRICE_OUT_PER_M, f"%{search}%"))
+        """, (UPLOAD_KINDS, PRICE_IN_PER_M, PRICE_CACHED_IN_PER_M,
+              PRICE_OUT_PER_M, f"%{search}%"))
         rows = cur.fetchall()
     return jsonify({"users": [
         {"id": r["id"], "email": r["email"],

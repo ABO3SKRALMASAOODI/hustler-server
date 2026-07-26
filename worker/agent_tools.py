@@ -114,13 +114,19 @@ class ToolContext:
         # accumulated by the loop's llm recorder; images are priced flat.
         self.tokens_in = 0
         self.tokens_out = 0
+        # The slice of tokens_in the provider served from its prompt cache.
+        # Billed at LLM_PRICE_CACHED_IN_PER_M, so the cap must know about it or
+        # it would stop a turn on spend the user is never charged for.
+        self.tokens_cached_in = 0
         self.credit_budget = None     # set by run_agent_job; None = uncapped
 
     def running_credits(self):
         """Model cost spent so far this turn, in credits (1 credit = $0.01),
         using the same formula as db.charge_turn_credits so the in-turn cap
         and the final charge agree."""
-        cost = (self.tokens_in * config.LLM_PRICE_IN_PER_M +
+        cached_in = min(max(self.tokens_cached_in, 0), self.tokens_in)
+        cost = ((self.tokens_in - cached_in) * config.LLM_PRICE_IN_PER_M +
+                cached_in * config.LLM_PRICE_CACHED_IN_PER_M +
                 self.tokens_out * config.LLM_PRICE_OUT_PER_M) / 1e6
         cost += len(self.images_generated) * config.IMAGE_PRICE_USD
         cost += self.gen_extra_cost_usd     # generated sfx + video (real $)

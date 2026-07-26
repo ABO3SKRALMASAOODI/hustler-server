@@ -1813,22 +1813,47 @@ import agent_tools as at                                      # noqa: E402
 
 # Endpoint derivation: DashScope bases yield the native image endpoint,
 # anything else disables image features unless IMAGE_API_URL overrides.
-_old = (cfg.IMAGE_API_URL, cfg.OPENAI_BASE_URL, cfg.IMAGE_GEN_MODEL,
-        cfg.OPENAI_API_KEY)
+# NOTE: derivation keys off IMAGE_BASE_URL, not the chat base. The agent runs on
+# DeepSeek, which has no /images/generations endpoint at all, so inheriting the
+# chat base here would 404 every generation instead of disabling the tool.
+_old = (cfg.IMAGE_API_URL, cfg.IMAGE_BASE_URL, cfg.IMAGE_GEN_MODEL,
+        cfg.IMAGE_API_KEY)
 cfg.IMAGE_API_URL = ""
-cfg.OPENAI_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+cfg.IMAGE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 check("image endpoint derived from dashscope-intl base",
       llmmod.image_api_url() == "https://dashscope-intl.aliyuncs.com"
       "/api/v1/services/aigc/multimodal-generation/generation")
-cfg.OPENAI_BASE_URL = "https://api.openai.com/v1"
+cfg.IMAGE_BASE_URL = "https://api.openai.com/v1"
 check("non-dashscope base disables image endpoint",
       llmmod.image_api_url() is None)
 cfg.IMAGE_API_URL = "https://example.com/img"
 check("IMAGE_API_URL overrides derivation",
       llmmod.image_api_url() == "https://example.com/img")
 cfg.IMAGE_API_URL = ""
-cfg.OPENAI_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-cfg.OPENAI_API_KEY = "test-key"
+
+# The chat provider must not decide anything about images: an xAI image base
+# stays 'openai' (and stays usable) while the agent talks to DeepSeek.
+_chat0 = cfg.OPENAI_BASE_URL
+cfg.OPENAI_BASE_URL = "https://api.deepseek.com"
+cfg.IMAGE_BASE_URL = "https://api.x.ai/v1"
+cfg.IMAGE_GEN_MODEL = "grok-imagine-image-quality"
+cfg.IMAGE_API_KEY = ""
+check("image gen is OFF, not broken, when the image key is missing",
+      not llmmod.image_available()
+      and "generate_image" not in at.capabilities_digest()
+      and all(t["function"]["name"] != "generate_image"
+              for t in at.openai_tools()))
+cfg.IMAGE_API_KEY = "xai-test-key"
+check("image gen returns once its own provider key is set",
+      llmmod.image_available() and llmmod.image_provider() == "openai")
+llmmod._image_client = None      # drop the pooled client so it re-reads config
+check("image client points at the IMAGE provider, not the chat provider",
+      str(llmmod.image_client().base_url).rstrip("/") == "https://api.x.ai/v1")
+llmmod._image_client = None
+cfg.OPENAI_BASE_URL = _chat0
+
+cfg.IMAGE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+cfg.IMAGE_API_KEY = "test-key"
 cfg.IMAGE_GEN_MODEL = "qwen-image-plus"
 check("image_available true with key+model+dashscope",
       llmmod.image_available())
@@ -1983,8 +2008,8 @@ try:
           "FAILED" in r and "do NOT claim" in r)
 finally:
     llmmod.generate_image, at.storage.upload_file, at.dbx.insert_asset = _g0
-    (cfg.IMAGE_API_URL, cfg.OPENAI_BASE_URL, cfg.IMAGE_GEN_MODEL,
-     cfg.OPENAI_API_KEY) = _old
+    (cfg.IMAGE_API_URL, cfg.IMAGE_BASE_URL, cfg.IMAGE_GEN_MODEL,
+     cfg.IMAGE_API_KEY) = _old
 
 # Honesty wiring: a truthful "I made an image" on a zero-EDL-write turn is
 # not a fabrication when acted=True; the denial check still keys on the EDL.
@@ -2494,20 +2519,20 @@ try:
 finally:
     media.black_seconds = _ob
 
-print("== Grok/xAI provider switch ==")
+print("== image provider switch (independent of the chat provider) ==")
 import config as _cfg                                         # noqa: E402
 import llm as _llm                                           # noqa: E402
-_save = (_cfg.OPENAI_BASE_URL, _cfg.OPENAI_API_KEY,
+_save = (_cfg.IMAGE_BASE_URL, _cfg.IMAGE_API_KEY,
          _cfg.IMAGE_GEN_MODEL, _cfg.IMAGE_API_URL)
 try:
-    _cfg.OPENAI_API_KEY = "k"
-    _cfg.IMAGE_GEN_MODEL = "grok-2-image"
+    _cfg.IMAGE_API_KEY = "k"
+    _cfg.IMAGE_GEN_MODEL = "grok-imagine-image-quality"
     _cfg.IMAGE_API_URL = ""
-    _cfg.OPENAI_BASE_URL = "https://api.x.ai/v1"
+    _cfg.IMAGE_BASE_URL = "https://api.x.ai/v1"
     check("xAI base -> openai image provider (generate only, no editing)",
           _llm.image_provider() == "openai" and _llm.image_available()
           and not _llm.image_edit_available())
-    _cfg.OPENAI_BASE_URL = \
+    _cfg.IMAGE_BASE_URL = \
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     check("dashscope base -> dashscope provider (editing available)",
           _llm.image_provider() == "dashscope" and _llm.image_available()
@@ -2516,7 +2541,7 @@ try:
     check("empty IMAGE_GEN_MODEL disables image gen everywhere",
           not _llm.image_available())
 finally:
-    (_cfg.OPENAI_BASE_URL, _cfg.OPENAI_API_KEY,
+    (_cfg.IMAGE_BASE_URL, _cfg.IMAGE_API_KEY,
      _cfg.IMAGE_GEN_MODEL, _cfg.IMAGE_API_URL) = _save
 
 print("== Round-13: timeline golden vectors (cross-repo drift tripwire) ==")

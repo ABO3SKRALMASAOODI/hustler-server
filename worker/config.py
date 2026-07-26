@@ -13,19 +13,24 @@ S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "")
 S3_BUCKET = os.getenv("S3_BUCKET", "")
 S3_REGION = os.getenv("S3_REGION", "auto")
 
-# LLM — OpenAI-compatible only. Default: xAI Grok (api.x.ai/v1). The whole
-# stack (agent tool-calling, vision, concierge) is OpenAI-compatible, so
-# pointing OPENAI_BASE_URL + OPENAI_API_KEY at any compatible provider is all
-# that's needed. To run Grok you ONLY set OPENAI_API_KEY (an xAI key); the
-# defaults below already select Grok 4.5. (To go back to DashScope/Qwen, set
-# OPENAI_BASE_URL, AGENT_MODEL, VISION_MODEL and the LLM_PRICE_* below.)
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
+# LLM — OpenAI-compatible only. Default: DeepSeek V4 Pro (api.deepseek.com).
+# The whole stack (agent tool-calling, vision, concierge) is OpenAI-compatible,
+# so pointing OPENAI_BASE_URL + OPENAI_API_KEY at any compatible provider is all
+# that's needed. To run DeepSeek you ONLY set OPENAI_API_KEY (a DeepSeek key);
+# the defaults below already select v4-pro. (For xAI Grok: OPENAI_BASE_URL=
+# https://api.x.ai/v1, AGENT_MODEL=VISION_MODEL=grok-4.5, prices 2.0/6.0.)
+#
+# WHY v4-PRO AND NOT v4-FLASH: flash is text-only — it silently ignores or
+# rejects image_url parts, which would blind look_at and every contact-sheet
+# read. Pro is the only V4 tier that accepts images, so agent and vision share
+# it. Do not "save money" by moving AGENT_MODEL to flash without also proving
+# what happens to VISION_MODEL.
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-AGENT_MODEL = os.getenv("AGENT_MODEL", "grok-4.5")
-# grok-4.5 is multimodal, so it doubles as the vision model. Empty string
-# disables all vision features gracefully. Set to a cheaper vision model if
-# xAI ships one.
-VISION_MODEL = os.getenv("VISION_MODEL", "grok-4.5")
+AGENT_MODEL = os.getenv("AGENT_MODEL", "deepseek-v4-pro")
+# deepseek-v4-pro is multimodal, so it doubles as the vision model. Empty
+# string disables all vision features gracefully.
+VISION_MODEL = os.getenv("VISION_MODEL", "deepseek-v4-pro")
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 # Vision (look_at) is the slowest thing the agent does, so it gets a MORE
@@ -35,8 +40,25 @@ LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 # plus the longer turn wall are what keep vision from running away.
 VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "120"))
 
-# Image generation. Two backends are supported and auto-detected from
-# OPENAI_BASE_URL (see worker/llm.image_provider):
+# Image generation runs on its OWN provider, independent of AGENT_MODEL.
+# DeepSeek publishes no image-generation model (its lineup is v4-pro/v4-flash
+# chat only), so when the agent moved to DeepSeek (Jul 26 2026) inheriting its
+# base URL here would have failed every single generate_image call — the exact
+# silent failure that already cost two multi-week outages (see MODEL ID HISTORY
+# below). An unauthenticated probe of api.deepseek.com/images/generations
+# returns 401 rather than 404, so their gateway auth-checks before routing:
+# you cannot tell from the outside whether the route exists, and there is no
+# model id to send it either way. Images therefore keep their own base URL+key:
+#   IMAGE_BASE_URL  defaults to xAI, which does have the endpoint.
+#   IMAGE_API_KEY   inherits OPENAI_API_KEY only when the two providers are the
+#                   SAME. Cross-provider, it must be set explicitly — and until
+#                   it is, image_available() is False, so generate_image is
+#                   hidden from the model and its prompt paragraph is stripped
+#                   (the honest-off contract). An unset key turns the capability
+#                   OFF; it never turns it into a 404 the user reads as "the
+#                   agent is broken".
+# Two backends are supported and auto-detected from IMAGE_BASE_URL
+# (see worker/llm.image_provider):
 #   * OpenAI-compatible /images/generations (xAI Grok, default) — text-to-image
 #     ONLY; it cannot restyle/edit an existing frame or image.
 #   * DashScope native multimodal-generation — text-to-image AND frame/image
@@ -67,6 +89,10 @@ IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "grok-imagine-image-quality")
 IMAGE_EDIT_MODEL = os.getenv("IMAGE_EDIT_MODEL", "")
 IMAGE_API_URL = os.getenv("IMAGE_API_URL", "")
 IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
+# The image provider's own endpoint + key (see the block comment above).
+IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "https://api.x.ai/v1")
+IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "") or (
+    OPENAI_API_KEY if IMAGE_BASE_URL == OPENAI_BASE_URL else "")
 # 8 (was 4): the real bound is the user's credit budget (_gen_budget_reject
 # prices every image before spending); this stays only as a backstop against
 # a runaway generation loop.
@@ -361,12 +387,21 @@ FULL_INDEX_MAX_CHARS = int(os.getenv("FULL_INDEX_MAX_CHARS", "40000"))
 # $0.01 convention as billing.
 AGENT_TURN_BUDGET_GRACE = float(os.getenv("AGENT_TURN_BUDGET_GRACE", "3"))
 # Model prices ($/1M tokens) for the credit charge — MUST match the model in
-# AGENT_MODEL or credits drift from real cost. Default = Grok 4.5 ($2 in /
-# $6 out). Grok 4.5 is ~5x pricier than Qwen, so a turn costs ~5x the credits;
-# set AGENT_MODEL=grok-4.1-fast + these prices lower for Qwen-like economics.
+# AGENT_MODEL or credits drift from real cost. Default = DeepSeek V4 Pro
+# ($1.74 in / $3.48 out), which is ~13% cheaper in and ~42% cheaper out than
+# the Grok 4.5 it replaced. (For Grok 4.5 set 2.0/6.0; for grok-4.1-fast, lower.)
 # (Must mirror db.charge_turn_credits so the in-turn cap and final charge agree.)
-LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "2.0"))
-LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "6.0"))
+LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "1.74"))
+LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "3.48"))
+# Cached input ($/1M). DeepSeek automatically serves a repeated prompt PREFIX
+# from disk cache at $0.003625/1M — 480x cheaper than a cache miss. An agent
+# turn is a loop that re-sends a growing message list behind an identical
+# system prompt + ~60 tool schemas, so most input tokens after the first
+# iteration are cache HITS. Billing them at the miss rate would overcharge a
+# multi-step turn several-fold, so the charge splits hit from miss. Set equal to
+# LLM_PRICE_IN_PER_M for a provider with no prompt caching (Grok: 2.0).
+LLM_PRICE_CACHED_IN_PER_M = float(
+    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.003625"))
 # Per-image charge (1 credit = $0.01). 0.055 tracks grok-imagine-image-quality
 # (see IMAGE_GEN_MODEL); if you switch IMAGE_GEN_MODEL, set this to that tier's
 # real per-image price or credits drift from cost.

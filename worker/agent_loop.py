@@ -313,6 +313,49 @@ def _activity(worker_db, session_id, name, args, result):
                   {"tool": name, "args": args})
 
 
+def _user_facing_failure(e):
+    """Turn an exception into something a customer can act on.
+
+    This used to be f"({str(e)[:160]})" pasted straight into the chat. When the
+    xAI account hit its spending limit on Jul 26 2026, every user in the product
+    read this, four times in a row, mid-sentence:
+
+        Something went wrong on my end while editing (Error code: 403 -
+        {'code': 'permission-denied', 'error': 'Your team 166666fc-e639-...
+        has either used all available credits or reached its mo). Your video
+        and edit history are safe — try sending that again.
+
+    Three separate failures: it leaks our provider and internal team id, it
+    truncates to garbage so it reads as a corrupted app, and "try sending that
+    again" was a lie — a provider with no credit left fails identically every
+    time, so it invited people to burn their afternoon retrying. The detail
+    still goes to llm_calls and the worker log, where it belongs.
+    """
+    text = f"{type(e).__name__}: {e}".lower()
+    status = getattr(e, "status_code", None) or getattr(e, "code", None)
+    quota = (status in (402, 403) or "permission-denied" in text or
+             any(k in text for k in ("insufficient", "quota", "billing",
+                                     "spending limit", "credit balance",
+                                     "used all available credits",
+                                     "exceeded your current")))
+    if quota:
+        # Ours to fix, not theirs to retry. Say so, and don't imply a retry.
+        return ("I can't reach the editing model right now — that's a problem "
+                "on my side, not with your video. Your footage and edit "
+                "history are safe and this didn't use any of your credits. "
+                "We're on it; please try again a little later.")
+    if status == 429 or "rate limit" in text or "too many requests" in text:
+        return ("I'm being rate-limited by the model right now. Your video and "
+                "edit history are safe and this didn't use any of your "
+                "credits — give it a minute and resend that.")
+    if "timeout" in text or "timed out" in text:
+        return ("That took too long and I had to stop. Your video and edit "
+                "history are safe — try again, and if it keeps timing out "
+                "break the request into smaller steps.")
+    return ("Something went wrong on my end while editing. Your video and "
+            "edit history are safe — try sending that again.")
+
+
 def run_agent_job(worker_db, job):
     project = worker_db.run(dbx.get_project, job["project_id"])
     session_id = project["chat_session_id"]
@@ -373,9 +416,17 @@ def run_agent_job(worker_db, job):
     # spend cap. Payloads are capped + redacted in dbx.insert_llm_call;
     # failures never break the turn.
     def _llm_recorder(purpose, request, response, usage):
+        cached_in = llm.cached_input_tokens(usage)
         if usage:
             ctx.tokens_in += getattr(usage, "prompt_tokens", 0) or 0
             ctx.tokens_out += getattr(usage, "completion_tokens", 0) or 0
+            ctx.tokens_cached_in += cached_in
+        # The cache-hit slice rides in the response payload rather than a new
+        # column: charge_turn_credits reads it back with response->>'cached_in'
+        # and bills it at the (480x cheaper) cache rate. prompt_tokens stays the
+        # true total so admin token counts are unaffected.
+        if cached_in and isinstance(response, dict):
+            response = dict(response, cached_in=cached_in)
         worker_db.run(dbx.insert_llm_call, job["project_id"], job["id"],
                       purpose, (request or {}).get("model"),
                       request, response,
@@ -389,10 +440,12 @@ def run_agent_job(worker_db, job):
     except agent_tools.AskUser:
         raise   # never reaches here (handled in loop), but keep explicit
     except Exception as e:
+        # The full exception goes to the worker log (and llm_calls) — the chat
+        # gets a sentence the user can act on. See _user_facing_failure.
+        print(f"[agent] job {job['id']} failed: {type(e).__name__}: {e}",
+              flush=True)
         worker_db.run(dbx.add_message, session_id, "assistant",
-                      "Something went wrong on my end while editing "
-                      f"({str(e)[:160]}). Your video and edit history are "
-                      "safe — try sending that again.")
+                      _user_facing_failure(e))
         raise
     finally:
         llm.set_recorder(None)

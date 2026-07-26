@@ -77,9 +77,9 @@ VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
 # model call fails. Calls are recorded to llm_calls with job_id NULL:
 # visible in admin, never charged (credit charging sums per agent-turn
 # job).
-CONCIERGE_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
+CONCIERGE_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL",
-                            os.getenv("AGENT_MODEL", "grok-4.5"))
+                            os.getenv("AGENT_MODEL", "deepseek-v4-pro"))
 CONCIERGE_TIMEOUT_S = float(os.getenv("CONCIERGE_TIMEOUT_S", "14"))
 
 _concierge_client = None
@@ -104,16 +104,39 @@ _CONCIERGE_CLAIM = re.compile(
     r"your video is ready)")
 
 
+def _image_base_url():
+    return os.getenv("IMAGE_BASE_URL", "https://api.x.ai/v1")
+
+
+def _image_api_key():
+    """Mirrors config.IMAGE_API_KEY: the chat key is inherited only when the
+    image provider IS the chat provider."""
+    explicit = os.getenv("IMAGE_API_KEY", "")
+    if explicit:
+        return explicit
+    if _image_base_url() == os.getenv("OPENAI_BASE_URL",
+                                      "https://api.deepseek.com"):
+        return os.getenv("OPENAI_API_KEY", "")
+    return ""
+
+
 def _image_gen_enabled():
     """Mirrors the worker's generate_image availability check (worker/llm.
     image_available) so the concierge never promises (or denies) AI images out
     of sync with what the editing agent can actually do. Image gen is available
-    on the DashScope native endpoint OR any OpenAI-compatible base (xAI)."""
-    if not os.getenv("IMAGE_GEN_MODEL", "grok-2-image-1212"):
+    on the DashScope native endpoint OR any OpenAI-compatible base (xAI).
+
+    Image generation has its OWN provider (IMAGE_BASE_URL/IMAGE_API_KEY), which
+    is why this no longer keys off OPENAI_BASE_URL: the chat provider moved to
+    DeepSeek, which ships no image-generation model at all. The key is
+    inherited only when both providers are the same one — otherwise it must be
+    set explicitly, and until it is, images are honestly OFF rather than a 404
+    per attempt. Keep in lockstep with worker/llm.image_available."""
+    if not os.getenv("IMAGE_GEN_MODEL", "grok-imagine-image-quality"):
         return False
-    if os.getenv("IMAGE_API_URL", ""):
-        return True
-    return bool(os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1"))
+    if not _image_api_key():
+        return False
+    return bool(os.getenv("IMAGE_API_URL", "") or _image_base_url())
 
 
 def _url_fetch_enabled():
@@ -137,7 +160,7 @@ def _image_edit_enabled():
         return False
     if os.getenv("IMAGE_API_URL", ""):
         return True
-    return "dashscope" in os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
+    return "dashscope" in _image_base_url()
 
 
 def _sound_gen_enabled():

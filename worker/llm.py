@@ -1,10 +1,15 @@
 """LLM access — OpenAI-compatible SDK only, configured entirely by env.
-Default provider is xAI Grok (api.x.ai/v1); swapping to any OpenAI-compatible
-provider (DashScope/Qwen, OpenAI, ...) is an env change, never code.
-Image generation supports two backends (auto-detected, see image_provider):
-the OpenAI-compatible /images/generations surface (xAI — text-to-image only)
-and DashScope's native multimodal-generation endpoint (text-to-image AND
-frame/image restyling). Editing is unavailable on the OpenAI/xAI backend."""
+Default provider is DeepSeek V4 Pro (api.deepseek.com); swapping to any
+OpenAI-compatible provider (xAI Grok, DashScope/Qwen, OpenAI, ...) is an env
+change, never code.
+
+Image generation runs on a SEPARATE provider (config.IMAGE_BASE_URL /
+IMAGE_API_KEY) because it is not part of the chat-completions surface and not
+every chat provider has it — DeepSeek ships no image model at all. Two
+image backends are auto-detected (see image_provider): the OpenAI-compatible
+/images/generations surface (xAI — text-to-image only) and DashScope's native
+multimodal-generation endpoint (text-to-image AND frame/image restyling).
+Editing is unavailable on the OpenAI/xAI backend."""
 
 import base64
 import json
@@ -19,6 +24,7 @@ import config
 
 
 _client = None
+_image_client = None
 
 # Per-thread model-I/O recorder (set by the agent loop for the duration of a
 # turn). Signature: fn(purpose, request_payload, response_payload, usage).
@@ -57,8 +63,46 @@ def client():
     return _client
 
 
+def image_client():
+    """Separate pooled client for /images/generations — the image provider is
+    configured independently of the chat provider (config.IMAGE_BASE_URL), so
+    this must NOT reuse client()."""
+    global _image_client
+    if _image_client is None:
+        _image_client = OpenAI(base_url=config.IMAGE_BASE_URL,
+                               api_key=config.IMAGE_API_KEY,
+                               timeout=config.IMAGE_TIMEOUT_S,
+                               max_retries=config.LLM_MAX_RETRIES)
+    return _image_client
+
+
 def vision_available():
     return bool(config.VISION_MODEL and config.OPENAI_API_KEY)
+
+
+def cached_input_tokens(usage):
+    """Cache-HIT input tokens from a usage object, across the two spellings
+    OpenAI-compatible providers use: DeepSeek's top-level
+    prompt_cache_hit_tokens, and OpenAI's prompt_tokens_details.cached_tokens.
+    Returns 0 when the provider reports no caching — which makes the cached
+    price a no-op rather than a wrong discount."""
+    if not usage:
+        return 0
+    n = getattr(usage, "prompt_cache_hit_tokens", None)
+    if n is None:
+        details = getattr(usage, "prompt_tokens_details", None)
+        n = getattr(details, "cached_tokens", None) if details else None
+        if n is None and isinstance(details, dict):
+            n = details.get("cached_tokens")
+    try:
+        n = int(n or 0)
+    except (TypeError, ValueError):
+        return 0
+    # Never let a bogus provider number exceed the prompt itself: the charge
+    # subtracts this from prompt_tokens, and a too-large value would credit
+    # the user for tokens they did use.
+    total = getattr(usage, "prompt_tokens", None) or 0
+    return max(0, min(n, int(total)))
 
 
 def image_part(jpeg_path):
@@ -150,14 +194,15 @@ _IMAGE_SIZES_V2 = {"16:9": "2688*1536", "9:16": "1536*2688",
 
 
 def image_provider():
-    """Which image backend to use, inferred from the endpoint:
+    """Which image backend to use, inferred from the IMAGE endpoint (NOT the
+    chat endpoint — they are configured separately):
       'dashscope' — native multimodal-generation (generate AND restyle/edit);
       'openai'    — OpenAI-compatible /images/generations (xAI Grok, etc.);
                     text-to-image ONLY, no editing.
     Returns None when no image backend is resolvable."""
-    if config.IMAGE_API_URL or "dashscope" in (config.OPENAI_BASE_URL or ""):
+    if config.IMAGE_API_URL or "dashscope" in (config.IMAGE_BASE_URL or ""):
         return "dashscope"
-    if config.OPENAI_BASE_URL:
+    if config.IMAGE_BASE_URL:
         return "openai"
     return None
 
@@ -166,7 +211,7 @@ def image_api_url():
     """DashScope native endpoint (only meaningful for the dashscope provider)."""
     if config.IMAGE_API_URL:
         return config.IMAGE_API_URL
-    base = (config.OPENAI_BASE_URL or "").split("/compatible-mode")[0]
+    base = (config.IMAGE_BASE_URL or "").split("/compatible-mode")[0]
     base = base.rstrip("/")
     if "dashscope" not in base:
         return None
@@ -174,7 +219,10 @@ def image_api_url():
 
 
 def image_available():
-    return bool(config.IMAGE_GEN_MODEL and config.OPENAI_API_KEY
+    """IMAGE_API_KEY, not OPENAI_API_KEY: a chat key is not an image key once
+    the two providers differ, and claiming otherwise turns a missing key into a
+    404 per call instead of an honestly-absent capability."""
+    return bool(config.IMAGE_GEN_MODEL and config.IMAGE_API_KEY
                 and image_provider())
 
 
@@ -210,7 +258,7 @@ def _image_call(model, content, purpose, record_request, size=None):
     try:
         resp = requests.post(
             url, json=body, timeout=config.IMAGE_TIMEOUT_S,
-            headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}",
+            headers={"Authorization": f"Bearer {config.IMAGE_API_KEY}",
                      "Content-Type": "application/json"})
         data = resp.json()
     except Exception as e:
@@ -252,9 +300,10 @@ def _download_image(url, out_path):
 
 def _openai_image_gen(model, prompt, out_path):
     """Text-to-image via the OpenAI-compatible /images/generations endpoint
-    (xAI Grok). Uses the same pooled client (same base_url + key)."""
+    (xAI Grok). Uses the IMAGE client — the chat provider may not have this
+    endpoint at all (DeepSeek does not)."""
     try:
-        resp = client().images.generate(model=model, prompt=prompt, n=1)
+        resp = image_client().images.generate(model=model, prompt=prompt, n=1)
         d = resp.data[0]
         b64 = getattr(d, "b64_json", None)
         url = getattr(d, "url", None)
