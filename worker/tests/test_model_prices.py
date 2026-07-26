@@ -204,36 +204,53 @@ def test_a_half_configured_paid_provider_is_treated_as_off(monkeypatch):
     assert llm.agent_client_for(True, "ai_pro")[1] == config.AGENT_MODEL
 
 
-def test_each_plan_gets_the_model_its_card_advertises(monkeypatch):
-    """The pricing page calls the middle card "more intelligence" and the top
-    one "frontier intelligence". That copy is only true while these three land
-    on three different models."""
-    _paid_on(monkeypatch)
+def test_only_frontier_changes_the_model_as_shipped(monkeypatch):
+    """The shipped lineup is TWO volume steps and ONE model step.
+
+    Pro shipped for an afternoon badged "MORE INTELLIGENCE" while resolving to
+    the same model id as Frontier — grok-4.5 is the strongest model anything in
+    this stack points at, so "stronger than Creator" and "the strongest we
+    have" were the same string, and the $100 card's argument was false. Pro
+    went back to selling room. This asserts the routing matches the cards.
+    """
     _frontier_on(monkeypatch)
     try:
-        assert llm.agent_client_for(False, "free")[1] == config.AGENT_MODEL
-        assert llm.agent_client_for(True, "ai")[1] == config.AGENT_MODEL
-        assert llm.agent_client_for(True, "ai_pro")[1] == "grok-4.5"
+        assert config.PAID_PLANS == set(), \
+            "PAID_PLANS must ship empty — see the config comment"
+        for plan in ("free", "ai", "ai_pro"):
+            assert llm.agent_client_for(plan != "free", plan)[1] == \
+                config.AGENT_MODEL, plan
         assert llm.agent_client_for(True, "ai_max")[1] == "grok-4.5"
-        # Frontier is the only plan whose LOOKING is upgraded too — the half of
-        # that promise nobody would notice was missing.
-        assert llm.vision_client_for("ai_max")[1] == "grok-4.5"
-        assert llm.vision_client_for("ai_pro")[1] == config.VISION_MODEL
+    finally:
+        llm._frontier_client = None
+
+
+def test_promoting_pro_to_a_model_tier_is_one_env_var(monkeypatch):
+    """The lane stays wired so Pro can become a model tier the day there IS
+    something between the standard and frontier models."""
+    _paid_on(monkeypatch)
+    monkeypatch.setattr(config, "PAID_PLANS", {"ai_pro"})
+    try:
+        assert llm.agent_client_for(True, "ai_pro")[1] == "grok-4.5"
+        # ...and Creator must NOT come with it.
+        assert llm.agent_client_for(True, "ai")[1] == config.AGENT_MODEL
+    finally:
+        llm._paid_client = None
+
+
+def test_a_trial_previews_its_own_plans_model(monkeypatch):
+    """A Creator trial must NOT be served a better plan's model. Previewing a
+    model the customer stops getting the moment they pay is the bait-and-switch
+    that per-plan routing exists to prevent."""
+    _paid_on(monkeypatch)
+    monkeypatch.setattr(config, "PAID_PLANS", {"ai_pro"})
+    _frontier_on(monkeypatch)
+    try:
+        assert llm.agent_client_for(True, "ai")[1] == config.AGENT_MODEL
         assert llm.frontier_client() is not llm.paid_client()
     finally:
         llm._paid_client = None
         llm._frontier_client = None
-
-
-def test_a_trial_previews_its_own_plans_model(monkeypatch):
-    """A Creator trial must NOT be served the Pro model. Previewing a model the
-    customer stops getting the moment they pay is the bait-and-switch that
-    per-plan routing exists to prevent."""
-    _paid_on(monkeypatch)
-    try:
-        assert llm.agent_client_for(True, "ai")[1] == config.AGENT_MODEL
-    finally:
-        llm._paid_client = None
 
 
 def test_an_unconfigured_tier_degrades_instead_of_401ing(monkeypatch):

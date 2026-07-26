@@ -109,36 +109,34 @@ VISION_API_KEY = (
     or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
     or (IMAGE_API_KEY if VISION_BASE_URL == IMAGE_BASE_URL else ""))
 
-# ── The model the PRO plan gets ──────────────────────────────────────────────
+# ── The optional middle model tier (OFF by default) ──────────────────────────
 #
-# THE PLANS SELL THREE DIFFERENT MODELS (round 49). The pricing page calls the
-# middle card "more intelligence" and the top one "frontier intelligence", and
-# that copy has to be TRUE — a badge claiming a better model on a tier running
-# the identical model is exactly the sort of thing customers find out. So:
+# TWO MODEL TIERS SHIP, NOT THREE (round 49):
 #
-#   Creator  'ai'      AGENT_MODEL   — DeepSeek V4 Pro, the default stack
-#   Pro      'ai_pro'  PAID_*        — the stronger agent model  (here)
-#   Frontier 'ai_max'  FRONTIER_*    — strongest, agent AND vision (below)
+#   free / Creator 'ai' / Pro 'ai_pro'   AGENT_MODEL  — DeepSeek V4 Pro
+#   Frontier 'ai_max'                    FRONTIER_*   — the frontier model
 #
-# This narrowed in round 49. It used to apply to ANY subscriber, on the theory
-# that a trial deciding whether the product is worth $30 should see the best
-# edit we can produce. The problem with that is the trial then previews a model
-# the customer does not get when they pay — which is the bait-and-switch, not
-# the fix for it. A trial now runs its OWN plan's model, so what they try is
-# what they buy. Set PAID_PLANS to 'ai,ai_pro' to restore the old behaviour.
+# Pro is a VOLUME break, not a model break: the same editor and the same model
+# as Creator, with double the credits. That is what its card says ("more room"),
+# and the two have to agree — a badge claiming a better model on a tier running
+# the identical one is exactly what customers find out.
 #
-# The defaults are no longer empty. Round 48 left them off so shipping was a
-# no-op, which was right when this was a silent cost optimisation; it is wrong
-# now that a price tag advertises it, because the failure mode is a customer
-# paying $50 for a tier whose distinguishing feature never turned on. The key
-# is inherited the same way IMAGE_API_KEY and VISION_API_KEY are — only from a
-# provider on the SAME base URL — and the worker already needs an xAI key for
-# vision at all (no DeepSeek V4 tier accepts images), so in practice this
-# lights up from the key that is already there.
+# This lane exists so Pro CAN become a model tier with one env var
+# (PAID_PLANS=ai_pro) and no code change. It ships OFF because the only model
+# worth promoting Pro to is the same one Frontier runs, and a middle tier
+# indistinguishable from the top tier is worse than no middle tier: it makes the
+# $100 card's entire argument false. Give Frontier something genuinely stronger
+# FIRST, then promote Pro into the gap that opens up.
 #
-# Credits stay correct across the split automatically: the charge prices each
+# A trial always runs its OWN plan's model. A trial previewing a model the
+# customer stops getting the moment they pay is the bait-and-switch, not the fix
+# for it.
+#
+# Credits stay correct across any split automatically: the charge prices each
 # llm_calls row from its own `model` column (model_prices.py), which is the
-# entire reason that indirection exists.
+# entire reason that indirection exists. Whatever PAID_AGENT_MODEL is set to
+# MUST be listed in model_prices.MODEL_PRICES, or it silently bills at the
+# LLM_PRICE_* fallback.
 PAID_BASE_URL = os.getenv("PAID_BASE_URL", "https://api.x.ai/v1").strip()
 PAID_AGENT_MODEL = os.getenv("PAID_AGENT_MODEL", "grok-4.5").strip()
 PAID_API_KEY = (
@@ -147,11 +145,10 @@ PAID_API_KEY = (
     or (IMAGE_API_KEY if PAID_BASE_URL == IMAGE_BASE_URL else "")
     or (OPENAI_API_KEY if PAID_BASE_URL == OPENAI_BASE_URL else ""))
 
-# Plans routed to PAID_*. Frontier is NOT here — it has its own provider below
-# and is checked first.
+# EMPTY = this lane is off and every non-Frontier plan runs AGENT_MODEL. The
+# provider above stays configured so switching it on is one variable, not four.
 PAID_PLANS = set(
-    p.strip() for p in os.getenv("PAID_PLANS", "ai_pro").split(",") if p.strip())
-
+    p.strip() for p in os.getenv("PAID_PLANS", "").split(",") if p.strip())
 # ── The model the FRONTIER plan gets ─────────────────────────────────────────
 #
 # 'ai_max' ($100/mo) is sold on the model, not on the credit count: every agent
