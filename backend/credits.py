@@ -129,14 +129,23 @@ def trial_allowance(plan):
         return 0
     return max(1, int(math.ceil(full * TRIAL_CREDIT_FRACTION)))
 
-# The free tier is ONE flat allowance, granted once and never refilled.
+# THERE IS NO FREE CREDIT ALLOWANCE (round 49).
 #
-# It used to be 20/day + a 150 one-time bonus, which made "how much do I have
-# left?" unanswerable: a user who ran out saw the balance climb back to 20
-# overnight, so out-of-credits read as a temporary glitch rather than the end
-# of the trial, and the upgrade prompt never had a moment where it was true.
-# One number, spent once, is honest and is what the paywall can point at.
-FREE_GRANT_CREDITS  = 120
+# It was 120, granted once at registration. That made sense while a free
+# account could spend them; it stopped making sense the moment editing required
+# a plan (FREE_TASTE_TURNS = 0, see backend/plan_gate.py). What was left was a
+# credit bar sitting at 120 / 120, full and green, on an account that could not
+# spend a single one of them — a number that promises something the product
+# then refuses. A founder hit exactly that on his own free account.
+#
+# What a free account gets instead is the part that costs us almost nothing and
+# demonstrates the most: unlimited uploads, a full index of every video, the
+# transcript, and the concierge answering questions about it. The wall is the
+# agent turn, and the number attached to it is the trial's.
+#
+# Existing free balances were drained in the same change (a data migration, not
+# a code path) so no account is left holding a number it cannot use.
+FREE_GRANT_CREDITS  = 0
 FREE_DAILY_CREDITS  = 0     # free credits do NOT refill — see FREE_GRANT_CREDITS
 SUB_DAILY_CREDITS   = 20    # subscribers keep their daily top-up on top of the
                             # monthly pool their plan buys
@@ -302,8 +311,10 @@ def get_balance(conn, user_id: int) -> dict:
     elif is_subscribed:
         plan_limit = SUB_DAILY_CREDITS + monthly
     else:
-        # One flat allowance, so the denominator the UI shows is the grant
-        # itself — not a total nobody can ever hold at once.
+        # 0 since round 49. A free account has no credit allowance at all, so
+        # there is no denominator — the studio hides the bar entirely rather
+        # than drawing an empty one, which reads as a fault rather than a
+        # price. See the note on FREE_GRANT_CREDITS.
         plan_limit = FREE_GRANT_CREDITS
 
     empty = float(balance or 0) < 1

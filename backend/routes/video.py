@@ -1411,15 +1411,6 @@ def post_message(user_id, project_id):
                 return jsonify({"queued": True, "message_id": dup["id"],
                                 "duplicate": True})
 
-        # The plan gate (round 45) sits ABOVE the credits gate, because it is
-        # a different question: credits ask "can this account afford a turn",
-        # this asks "is this account allowed to start one at all yet". It is
-        # below the idempotency check on purpose — a retransmit of a message
-        # accepted before the account lapsed must still resolve to its
-        # original row rather than 402.
-        if plan_gate.needs_plan(conn, user_id):
-            return plan_gate.gate_response(jsonify)
-
         # Rate limit: cap LLM spend per project.
         cur.execute("""SELECT COUNT(*) AS n FROM chat_messages
                        WHERE session_id = %s AND role = 'user'
@@ -1437,11 +1428,30 @@ def post_message(user_id, project_id):
             return jsonify({"error": "The editor is still working on your "
                                      "previous request."}), 409
 
-        # Credits gate — only when an agent turn will actually run (the
-        # worker charges model usage per turn). Pre-index chat stays free:
-        # concierge replies are cheap, rate-limited, and never charged.
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
+
+        # The plan gate, and it hangs off `indexed` for the SAME reason the
+        # credits gate below does: neither question applies until a message
+        # would actually run an agent turn.
+        #
+        # It used to sit above all of this, unconditionally. So a brand-new
+        # account that typed "hi" into an EMPTY project — no upload, nothing to
+        # edit — got 402 plan_required, and the studio answered a greeting with
+        # a paywall headed "I've watched it. Here's what I found." It had
+        # watched nothing. The wall was real but it arrived before the product
+        # had said a single word, which is precisely what round 49 set out to
+        # stop doing.
+        #
+        # Pre-index chat is the concierge: cheap, rate-limited above, and never
+        # charged. Let it answer. The gate closes the moment there is an index,
+        # which is also the moment the card has something true to say.
+        if indexed and plan_gate.needs_plan(conn, user_id):
+            return plan_gate.gate_response(jsonify)
+
+        # Credits gate — same condition, different question: the plan gate asks
+        # "is this account allowed to start a turn at all", this asks "can it
+        # afford one".
         if indexed and not check_and_reserve(conn, user_id,
                                              min_credits=1.0):
             info = get_balance(conn, user_id)

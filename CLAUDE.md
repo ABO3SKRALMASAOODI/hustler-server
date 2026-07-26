@@ -255,7 +255,7 @@ Key columns in `users` table: `credits_daily`, `credits_bonus`, `credits_monthly
 
 | Plan             | Price | Monthly Credits | Model | Status |
 |------------------|-------|-----------------|-------|--------|
-| Free             | $0    | 0 — a flat one-off 120 grant, **no free agent turns** | — | live |
+| Free             | $0    | **0 — no credits at all**, no free agent turns | — | live |
 | Creator (`ai`)   | $30/mo, $300/yr | 2,000 | `AGENT_MODEL` (standard) | live, purchasable |
 | Pro (`ai_pro`)   | $50/mo, $500/yr | 4,000 | `AGENT_MODEL` — same as Creator, "more room" | live, purchasable |
 | Frontier (`ai_max`) | $100/mo, $1000/yr | 10,000 | `FRONTIER_*` — the only model step | live, purchasable |
@@ -288,7 +288,11 @@ Decided in `paddle_webhook._trial_aware_grant`, and three things there are load-
 
 ### The plan gate: free upload, paid editing (round 49)
 
-`FREE_TASTE_TURNS` is now **0**. Round 48's answer to "don't ask for a card before the product has done anything" was five free agent turns — five lots of real model spend per signup, mostly on accounts that never convert. Round 49 gives the free part away somewhere cheaper: **creating a project, uploading and INDEXING are ungated** (the gate was removed from `/projects` and `/uploads` in `video.py`). A new account reaches "here is what I found in your video — 8 shots, 1,553 words, 45 pauses" before it is asked for anything, and *that* screen asks for the trial (`PlanCTACard`, variant `video_ready`). The gate now stands at the agent turn alone.
+**`FREE_GRANT_CREDITS` is 0 and free balances were drained** (164 accounts, ~19.7k credits, `is_subscribed=0 AND trial_status<>'trialing'`). A free account used to be granted 120 and shown a full green credit bar it could not spend a single credit of, because editing needs a plan — a number promising something the next click refuses. The studio now hides the meter entirely for a non-subscriber and shows "Uploading and analysing are free. Start your trial to edit." Drawing the bar at 0/0 instead would just look broken.
+
+**THE GATE HANGS OFF `indexed`**, exactly like the credits gate it sits above, and both live *below* the idempotency and rate-limit checks in `post_message`. It shipped unconditional for an afternoon, so a new account that typed "hi" into an **empty** project — no upload, nothing to edit — got 402 `plan_required`, and the studio answered a greeting with a paywall headed *"I've watched it. Here's what I found."* It had watched nothing. Pre-index chat is the concierge: cheap, rate-limited, never charged — **let it answer**. The gate closes the moment there is an index, which is also the first moment the card has something true to say. The card carries a `titleNoFacts` fallback and the studio checks `indexed` before raising it, so that headline cannot be false even if the index fetch fails.
+
+`FREE_TASTE_TURNS` is **0**. Round 48's answer to "don't ask for a card before the product has done anything" was five free agent turns — five lots of real model spend per signup, mostly on accounts that never convert. Round 49 gives the free part away somewhere cheaper: **creating a project, uploading and INDEXING are ungated** (the gate was removed from `/projects` and `/uploads` in `video.py`). A new account reaches "here is what I found in your video — 8 shots, 1,553 words, 45 pauses" before it is asked for anything, and *that* screen asks for the trial (`PlanCTACard`, variant `video_ready`). The gate now stands at the agent turn alone.
 
 The studio no longer redirects on `needs_plan`; it remembers it and shows the card once per project. Both cards are **dismissible** — the studio behind still works, and the API is the enforcement.
 
