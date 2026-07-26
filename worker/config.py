@@ -416,6 +416,30 @@ INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "1"))
 AGENT_SLOTS = int(os.getenv("WORKER_AGENT_SLOTS", "2"))
 HEARTBEAT_EVERY_S = 20
 
+# ── MCP lane (round 49) ──────────────────────────────────────────────────────
+# One `mcp_tool` row = one tool call from an OUTSIDE model (Claude in the
+# user's own Claude Code session). Its own lane for two reasons: an MCP call
+# must never wait behind a customer's multi-minute agent turn, and it must
+# never take a slot away from one either.
+#
+# The lane polls far faster than the others because a human is watching: at the
+# shared 2s interval, a 40-call editing session would spend over a minute
+# doing nothing but waiting for the next poll. The query is a single indexed
+# SKIP LOCKED update, so 4/s costs nothing.
+MCP_SLOTS = int(os.getenv("WORKER_MCP_SLOTS", "2"))
+MCP_POLL_INTERVAL_S = float(os.getenv("WORKER_MCP_POLL_INTERVAL_S", "0.25"))
+# An MCP call is never retried. Tools are not idempotent — a re-run of
+# add_music adds a SECOND track — and the caller is a live model that can
+# simply try again with what it knows.
+MAX_ATTEMPTS_MCP = 1
+# A project's ToolContext (downloaded proxy, parsed index, cached perception)
+# is kept between calls so a session does not re-download the proxy for every
+# look_at, and swept this long after its last use.
+MCP_SESSION_TTL_S = float(os.getenv("WORKER_MCP_SESSION_TTL_S", "1800"))
+# How many projects may hold a live context at once — each one owns a work dir
+# on the same small disk the renders use.
+MCP_MAX_SESSIONS = int(os.getenv("WORKER_MCP_MAX_SESSIONS", "3"))
+
 # ── Remote executor (round 38): request-based media/index compute ──────────
 # The worker image runs in one of two ROLES, chosen by WORKER_ROLE:
 #   "worker"   (default) — the always-on DISPATCHER. Polls the queue and owns

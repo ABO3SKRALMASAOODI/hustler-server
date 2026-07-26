@@ -19,6 +19,7 @@ from routes.newsletter import newsletter_bp, start_newsletter_scheduler
 from routes.video import video_bp
 from routes.admin_video import admin_video_bp
 from routes.onboarding import onboarding_bp
+from routes.mcp import mcp_bp
 
 load_dotenv()
 
@@ -75,6 +76,9 @@ def create_app():
     # No url_prefix: this blueprint owns routes under BOTH /onboarding and
     # /admin, so the prefixes live on the routes themselves.
     app.register_blueprint(onboarding_bp)
+    # MCP: the editor as tools for an outside model. No UI anywhere; reachable
+    # only with a token the admin account minted (see routes/mcp.py).
+    app.register_blueprint(mcp_bp)
 
     # ── Automated newsletter / lifecycle emails ───────────────────────
     # Started once per gunicorn worker; the advisory lock inside the tick

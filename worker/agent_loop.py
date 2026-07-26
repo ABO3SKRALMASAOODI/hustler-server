@@ -237,14 +237,35 @@ def _attachment_context(worker_db, ctx, user_message):
     return ("\n\n" + "\n".join(notes)) if notes else ""
 
 
-def _build_messages(ctx, worker_db, user_message, attachment_note=""):
+def state_block(ctx, worker_db):
+    """The CURRENT PROJECT STATE message: the footage, its transcript/shots,
+    the current EDL and what is available to place.
+
+    Extracted from _build_messages so the MCP surface (worker/mcp_exec) can
+    hand an OUTSIDE model exactly the state the in-house agent gets — two
+    versions of "what does the model know about this project" would drift
+    within a round.
+    """
     index = ctx.index
-    v = index["video"]
-    video_line = (f"Video: {v['duration']}s ({v['duration']/60:.1f} min), "
-                  f"{v['width']}x{v['height']} @ {v['fps']}fps, "
-                  f"audio={'yes' if v['has_audio'] else 'no'}.")
+    if ctx.has_main_video:
+        v = index["video"]
+        video_line = (f"Video: {v['duration']}s ({v['duration']/60:.1f} min), "
+                      f"{v['width']}x{v['height']} @ {v['fps']}fps, "
+                      f"audio={'yes' if v['has_audio'] else 'no'}.")
+        index_summary = _index_summary(index)
+    else:
+        # A canvas program: no main video, so there is no transcript, no shot
+        # list and no source clock. Everything below still applies — the EDL,
+        # the assets, the music — which is why this is a branch and not an
+        # early return. (It is also why _index_summary is not called with an
+        # empty index: every one of its readers starts at index["video"].)
+        video_line = ("No main video. This is a CANVAS program built from "
+                      "uploaded/generated images, clips and audio — place "
+                      "them with insert_media / add_overlay / add_text.")
+        index_summary = ("TRANSCRIPT / SHOTS / SILENCES: none — there is no "
+                         "indexed main video to read them from.")
     edl = ctx.latest_edl()
-    edl_line = f"v{edl['version']} — {describe_edl(edl['json'], v['duration'])}"
+    edl_line = f"v{edl['version']} — {describe_edl(edl['json'], ctx.duration)}"
     keep = edl["json"].get("keep") or []
     keep_line = json.dumps(keep[:40]) + \
         (f" ...(+{len(keep) - 40} more spans)" if len(keep) > 40 else "")
@@ -257,14 +278,16 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
         f"{m['storage_key']} — {(m.get('meta') or {}).get('filename', '?')}"
         for m in music]
 
-    state = project_state_block(video_line, _index_summary(index), edl_line,
-                                history_lines, music_lines,
-                                keep_line=keep_line,
-                                captions_line=captions_line)
+    return project_state_block(video_line, index_summary, edl_line,
+                               history_lines, music_lines,
+                               keep_line=keep_line,
+                               captions_line=captions_line)
 
-    # Auto-generated from the tool registry every turn — the model checks
-    # requests against this before promising anything.
-    caps = ("CAPABILITIES — the complete list of write operations that "
+
+def capabilities_block():
+    """The CAPABILITIES message — generated from the tool registry, so it can
+    never advertise a tool this deployment turned off. Shared with MCP."""
+    return ("CAPABILITIES — the complete list of write operations that "
             "exist, generated from the tool registry:\n"
             + agent_tools.capabilities_digest()
             + "\nNothing else exists. If the user asks for anything not "
@@ -274,11 +297,13 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
             "change these tools cannot make, and NEVER claim something is "
             "impossible when a tool above covers it.")
 
+
+def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     # system_prompt(), not the raw constant: it drops the built-in-library
     # claims when this image shipped no tracks.
     msgs = [{"role": "system", "content": system_prompt()},
-            {"role": "system", "content": caps},
-            {"role": "system", "content": state}]
+            {"role": "system", "content": capabilities_block()},
+            {"role": "system", "content": state_block(ctx, worker_db)}]
     chat = worker_db.run(dbx.recent_chat, ctx.session_id, 20)
     for m in chat:
         if m["id"] == user_message["id"]:
@@ -292,7 +317,7 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     return msgs
 
 
-def _activity(worker_db, session_id, name, args, result):
+def _activity(worker_db, session_id, name, args, result, source=None):
     res_str = (result or "").replace("\n", " ")
     # Long enough that a diff line PLUS its appended WARNING lines survive —
     # truncating warnings out of the activity feed would hide them from the
@@ -308,9 +333,15 @@ def _activity(worker_db, session_id, name, args, result):
         if len(arg_str) > 160:
             arg_str = arg_str[:160] + "…"
         label = f"{name}{arg_str if arg_str != '{}' else '()'}"
+    meta = {"tool": name, "args": args}
+    if source:
+        # Which driver made this call. The studio renders MCP activity exactly
+        # like the agent's — it IS the same tool doing the same thing — but the
+        # admin views and the logs must be able to tell an outside model's edit
+        # from ours.
+        meta["source"] = source
     worker_db.run(dbx.add_message, session_id, "activity",
-                  f"{label} → {res_str}",
-                  {"tool": name, "args": args})
+                  f"{label} → {res_str}", meta)
 
 
 def _user_facing_failure(e):

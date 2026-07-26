@@ -27,12 +27,14 @@ import agent_loop
 import config
 import db as dbx
 import indexer
+import mcp_exec
 import remote
 import renderer
 
 MEDIA_TYPES = ("preview", "final")
 INDEX_TYPES = ("index",)
 AGENT_TYPES = ("agent_turn",)
+MCP_TYPES = ("mcp_tool",)
 
 
 def _build_runners():
@@ -46,12 +48,17 @@ def _build_runners():
             "preview": remote.run_render_remote,
             "final": remote.run_render_remote,
             "agent_turn": agent_loop.run_agent_job,
+            "mcp_tool": mcp_exec.run_mcp_job,
         }
     return {
         "index": indexer.run_index_job,
         "preview": renderer.run_render_job,
         "final": renderer.run_render_job,
         "agent_turn": agent_loop.run_agent_job,
+        # An MCP tool call runs where an agent turn runs — same process, same
+        # ToolContext, same tools. That is the whole point: the outside model
+        # gets the in-house editor, not a copy of it.
+        "mcp_tool": mcp_exec.run_mcp_job,
     }
 
 
@@ -102,6 +109,8 @@ def process_one(worker_db, job):
         traceback.print_exc()
         max_attempts = (config.MAX_ATTEMPTS_AGENT
                         if job["type"] in AGENT_TYPES
+                        else config.MAX_ATTEMPTS_MCP
+                        if job["type"] in MCP_TYPES
                         else config.MAX_ATTEMPTS_MEDIA)
         if job["attempts"] < max_attempts:
             worker_db.run(dbx.requeue_job, job_id, e)
@@ -160,7 +169,7 @@ def _notify_failure(worker_db, job, err):
         print(f"[notify] {e2}", flush=True)
 
 
-def lane(name, types, max_attempts):
+def lane(name, types, max_attempts, poll_interval=None):
     worker_db = dbx.Db()
     while True:
         try:
@@ -171,7 +180,7 @@ def lane(name, types, max_attempts):
         except Exception as e:
             print(f"[{name}] poll error: {e}", flush=True)
             worker_db.reset()
-        time.sleep(config.POLL_INTERVAL_S)
+        time.sleep(poll_interval or config.POLL_INTERVAL_S)
 
 
 REAPER_NOTES = {
@@ -290,11 +299,23 @@ def main():
                  if config.REMOTE_EXECUTOR_URL else "local")
     print(f"valmera-worker (dispatcher) starting: media_slots={config.MEDIA_SLOTS} "
           f"index_slots={config.INDEX_SLOTS} agent_slots={config.AGENT_SLOTS} "
+          f"mcp_slots={config.MCP_SLOTS} "
           f"media/index={exec_mode} whisper={config.WHISPER_MODEL}/"
           f"{config.WHISPER_DEVICE} agent_model={config.AGENT_MODEL} "
           f"vision={config.VISION_MODEL or 'off'}"
           f"@{config.VISION_BASE_URL if config.VISION_API_KEY else 'NO KEY'}",
           flush=True)
+    # Publish the MCP tool catalog for the backend to serve on tools/list.
+    # Best effort by design: MCP is an optional surface and a missing table
+    # (migration 008 not applied yet) must never stop the worker from booting.
+    try:
+        dbx.Db().run(dbx.publish_mcp_catalog, mcp_exec.catalog())
+        print("[startup] published MCP tool catalog", flush=True)
+    except Exception as e:
+        print(f"[startup] could not publish MCP catalog ({e}) — the MCP "
+              "surface will report itself unavailable until this succeeds",
+              flush=True)
+
     if config.REMOTE_EXECUTOR_URL and not config.REMOTE_EXECUTOR_SECRET:
         print("[dispatcher] WARNING: REMOTE_EXECUTOR_URL set but "
               "REMOTE_EXECUTOR_SECRET is empty — calls will be unauthenticated.",
@@ -320,6 +341,11 @@ def main():
             target=lane, args=(f"agent{i}", AGENT_TYPES,
                                config.MAX_ATTEMPTS_AGENT),
             daemon=True, name=f"agent{i}"))
+    for i in range(config.MCP_SLOTS):
+        threads.append(threading.Thread(
+            target=lane, args=(f"mcp{i}", MCP_TYPES, config.MAX_ATTEMPTS_MCP,
+                               config.MCP_POLL_INTERVAL_S),
+            daemon=True, name=f"mcp{i}"))
     for t in threads:
         t.start()
     while True:

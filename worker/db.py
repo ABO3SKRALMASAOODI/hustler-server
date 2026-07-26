@@ -108,7 +108,8 @@ def fail_exhausted_jobs(conn):
                 error = COALESCE(error, 'Worker died and retries are exhausted')
             WHERE state = 'running'
               AND heartbeat_at < NOW() - make_interval(secs => %s)
-              AND attempts >= CASE WHEN type = 'agent_turn' THEN %s ELSE %s END
+              AND attempts >= CASE WHEN type IN ('agent_turn', 'mcp_tool')
+                                   THEN %s ELSE %s END
             RETURNING id, type, project_id, error, payload
         """, (config.STALE_AFTER_S, config.MAX_ATTEMPTS_AGENT,
               config.MAX_ATTEMPTS_MEDIA))
@@ -198,6 +199,22 @@ def enqueue_job(conn, project_id, user_id, jtype, payload):
                        VALUES (%s, %s, %s, %s) RETURNING id""",
                     (project_id, user_id, jtype, Json(payload)))
         return cur.fetchone()["id"]
+
+
+def publish_mcp_catalog(conn, catalog):
+    """Publish the tool catalog the MCP surface serves (see mcp_exec.catalog).
+
+    Written on every worker boot because only THIS process knows which tools
+    are really available: the honest-off gating depends on the worker's own
+    env (image key, stock key, music pack), and the backend has neither those
+    imports nor those variables. A catalog the backend guessed at would offer
+    the outside model tools that can only answer "unavailable"."""
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO mcp_catalog (id, json, updated_at)
+                       VALUES (1, %s, NOW())
+                       ON CONFLICT (id) DO UPDATE
+                       SET json = EXCLUDED.json, updated_at = NOW()""",
+                    (Json(catalog),))
 
 
 # ------------------------------------------------------------------ #

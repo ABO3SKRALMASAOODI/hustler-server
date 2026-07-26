@@ -821,13 +821,19 @@ def create_upload(user_id, project_id):
     return jsonify(out)
 
 
-@video_bp.route("/projects/<int:project_id>/uploads/complete", methods=["POST"])
-@token_required
-def complete_upload(user_id, project_id):
-    if not storage.is_configured():
-        return jsonify({"error": "Video storage is not configured yet"}), 503
+def complete_upload_core(user_id, project_id, data):
+    """Turn a finished direct-to-storage upload into an asset (+ an index job
+    for a main video). Returns (payload_dict, http_status).
 
-    data = request.get_json() or {}
+    A function rather than route body because the MCP surface (routes/mcp.py)
+    finishes uploads too, and this is the single point where a multi-GB upload
+    becomes a real asset: the idempotency, the size cap, the magic-byte sniff
+    and the per-project lock that stops a duplicate 45-minute index job all
+    live here. Two copies of it would be two different sets of those rules.
+    """
+    if not storage.is_configured():
+        return {"error": "Video storage is not configured yet"}, 503
+
     key = data.get("storage_key") or ""
     kind = data.get("kind") or "original"
     filename = data.get("filename") or ""
@@ -837,12 +843,12 @@ def complete_upload(user_id, project_id):
 
     prefix = storage.KEY_PREFIX.get(kind, "originals")
     if not key.startswith(f"{prefix}/{project_id}/"):
-        return jsonify({"error": "storage_key does not belong to this project"}), 400
+        return {"error": "storage_key does not belong to this project"}, 400
 
     with vdb() as conn:
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
-            return jsonify({"error": "Project not found"}), 404
+            return {"error": "Project not found"}, 404
 
         # Idempotency FIRST: this POST is the single point where a finished
         # multi-GB upload becomes a real asset, so the client retries it on
@@ -861,14 +867,14 @@ def complete_upload(user_id, project_id):
                            ORDER BY id DESC LIMIT 1""",
                         (project_id, dup["id"]))
             ij = cur.fetchone()
-            return jsonify({"asset_id": dup["id"],
-                            "index_job_id": ij["id"] if ij else None,
-                            "kind": dup["kind"], "duplicate": True})
+            return {"asset_id": dup["id"],
+                    "index_job_id": ij["id"] if ij else None,
+                    "kind": dup["kind"], "duplicate": True}, 200
 
         if kind == "original" and \
                 _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
-            return jsonify({"error": "Too many jobs running. "
-                                     "Wait for one to finish."}), 429
+            return {"error": "Too many jobs running. "
+                             "Wait for one to finish."}, 429
 
     if upload_id:
         try:
@@ -879,14 +885,13 @@ def complete_upload(user_id, project_id):
             # this is that retry — proceed. Only abort when it truly failed.
             if storage.head_bytes(key) is None:
                 storage.abort_multipart(key, upload_id)
-                return jsonify({"error": f"Upload could not be "
-                                         f"finalized: {e}"}), 400
+                return {"error": f"Upload could not be finalized: {e}"}, 400
 
     nbytes = storage.head_bytes(key)
     if nbytes is None:
-        return jsonify({"error": "Uploaded file not found in storage"}), 400
+        return {"error": "Uploaded file not found in storage"}, 400
     if nbytes > storage.max_upload_bytes():
-        return jsonify({"error": "File exceeds the upload size limit"}), 400
+        return {"error": "File exceeds the upload size limit"}, 400
 
     # Magic-byte sniff: the extension was validated at presign, but a renamed
     # file (e.g. a .txt renamed to .mp4) would otherwise sail through and fail
@@ -894,11 +899,11 @@ def complete_upload(user_id, project_id):
     # early with a clean message; ambiguous bytes are allowed.
     head = storage.get_range(key, 64)
     if storage.content_matches_kind(head, kind) is False:
-        return jsonify({
+        return {
             "error": "That file's contents don't match its type — it may be "
                      "renamed or corrupted. Please upload a real "
                      f"{'video' if kind in ('original', 'clip') else kind} "
-                     "file."}), 400
+                     "file."}, 400
 
     asset_kind = {"original": "original", "music": "music",
                   "image": "image_ref", "clip": "video_clip"}[kind]
@@ -929,9 +934,9 @@ def complete_upload(user_id, project_id):
                            ORDER BY id DESC LIMIT 1""",
                         (project_id, dup["id"]))
             ij = cur.fetchone()
-            return jsonify({"asset_id": dup["id"],
-                            "index_job_id": ij["id"] if ij else None,
-                            "kind": dup["kind"], "duplicate": True})
+            return {"asset_id": dup["id"],
+                    "index_job_id": ij["id"] if ij else None,
+                    "kind": dup["kind"], "duplicate": True}, 200
         cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
                                            bytes, duration_s, meta)
                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
@@ -944,8 +949,16 @@ def complete_upload(user_id, project_id):
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": asset_id})
 
-    return jsonify({"asset_id": asset_id, "index_job_id": job_id,
-                    "kind": asset_kind})
+    return {"asset_id": asset_id, "index_job_id": job_id,
+            "kind": asset_kind}, 200
+
+
+@video_bp.route("/projects/<int:project_id>/uploads/complete", methods=["POST"])
+@token_required
+def complete_upload(user_id, project_id):
+    payload, status = complete_upload_core(user_id, project_id,
+                                           request.get_json() or {})
+    return jsonify(payload), status
 
 
 # ------------------------------------------------------------------ #
@@ -1420,13 +1433,22 @@ def post_message(user_id, project_id):
             return jsonify({"error": "Message limit reached for this hour. "
                                      "Try again a bit later."}), 429
 
-        # One agent turn at a time per project — EDL writes must not race.
-        cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'agent_turn'
-                         AND state IN ('queued','running')""", (project_id,))
-        if cur.fetchone():
-            return jsonify({"error": "The editor is still working on your "
-                                     "previous request."}), 409
+        # One editor at a time per project — EDL writes must not race. That
+        # includes an outside model driving this project over MCP (round 49):
+        # it holds the timeline for the length of one tool call, and the MCP
+        # side refuses symmetrically while an agent turn is live.
+        cur.execute("""SELECT type FROM video_jobs
+                       WHERE project_id = %s
+                         AND type IN ('agent_turn', 'mcp_tool')
+                         AND state IN ('queued','running')
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        busy = cur.fetchone()
+        if busy:
+            return jsonify({"error": (
+                "Another editing session is working on this project right "
+                "now — give it a moment." if busy["type"] == "mcp_tool"
+                else "The editor is still working on your previous request."
+            )}), 409
 
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
