@@ -367,6 +367,24 @@ MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resen
 
 AGENT_MAX_ITERATIONS = 30
 AGENT_TEMPERATURE = 0.2
+# Completion ceiling for ONE agent step. 8000 (was a hardcoded 2000).
+#
+# A REASONING model spends this budget before it ever reaches `content`: on
+# Jul 26 2026 three turns in a row came back with completion_tokens exactly
+# 2000, empty content and no tool calls — the model thought for 30-40s, hit
+# the ceiling and said nothing, and the loop posted "I only reviewed the video
+# — the edit was not changed" at a paying user who had just said "Well change
+# it". He asked "Why not" and got the same line again. 0 of 703 grok-4.5 calls
+# ever hit the cap; 3 of 113 deepseek-v4-pro calls did, and all 3 killed the
+# turn. You pay only for tokens actually generated, so a high ceiling costs
+# nothing on a normal step — the turn budget and AGENT_MAX_ITERATIONS are what
+# bound spend. AGENT_MAX_TOKENS_CEILING is the retry's second, larger try.
+AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "8000"))
+AGENT_MAX_TOKENS_CEILING = int(os.getenv("AGENT_MAX_TOKENS_CEILING", "16000"))
+# The honesty layer's redraft. Same trap: a reasoning model that burns the
+# budget thinking returns an empty redraft, which is then discarded in favour
+# of the canned fallback — the user reads a non-answer twice over.
+AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
 # Wall-clock ceiling for one agent turn — a generous final backstop, not a
 # leash. On expiry the loop stops, saves whatever it finished, and posts an
 # honest message — never a silent "Editing…" forever.

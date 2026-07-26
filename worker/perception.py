@@ -31,7 +31,10 @@ import threading
 
 import numpy as np
 
-PERCEPTION_VERSION = 1
+# 2 (Jul 26 2026): _onset_env now clips outliers, so every sidecar computed
+# before it — including the ones that recorded "beats: none detected" on real
+# music — must be recomputed rather than read back.
+PERCEPTION_VERSION = 2
 
 SR = 22050
 N_FFT = 2048
@@ -128,11 +131,27 @@ def _stream_frames(path, max_s=MAX_ANALYZE_S):
 
 # ------------------------------------------------------------------ tempo
 def _onset_env(flux):
-    """Trend-removed onset strength (rhythm without the loudness arc)."""
+    """Trend-removed onset strength (rhythm without the loudness arc).
+
+    Then CLIPPED against a robust high percentile, because one outlier frame
+    otherwise decides the tempo. _acf divides by the envelope's variance, and
+    a single click / DC pop / clipped transient can carry more variance than
+    every real beat put together — the periodic component is then a rounding
+    error and the confidence collapses to ~0. A user's uploaded song did
+    exactly this on Jul 26 2026: one burst 67 dB above the music left
+    "87.7 BPM, confidence 0.01, beats: none detected" on a track with an
+    obvious pulse, and the agent had to tell him it could not cut to it.
+    Beats are 1-2% of frames, so p99.5 sits AT beat level; clipping at 3x
+    that leaves every real onset untouched and only squashes the freak."""
     w = max(3, int(round(FPS * 0.5)) | 1)
     kern = np.ones(w, dtype=np.float64) / w
     trend = np.convolve(flux, kern, mode="same")
-    return np.maximum(flux - trend, 0.0)
+    env = np.maximum(flux - trend, 0.0)
+    if env.size:
+        ceiling = 3.0 * float(np.percentile(env, 99.5))
+        if ceiling > 0:
+            env = np.minimum(env, ceiling)
+    return env
 
 
 def _acf(env):

@@ -852,6 +852,17 @@ FALLBACK_REPLY = ("I wasn't able to make that change — it needs a "
                   "capability I don't have yet; nothing was modified this "
                   "turn.")
 
+# Injected when a step burned its whole completion budget without emitting a
+# single token the API would show us. Deliberation is the thing to cut: the
+# model has already read the state (that is what the earlier steps were for),
+# so the useful next move is the smallest concrete write, not more thinking.
+_TRUNCATED_NUDGE = (
+    "Your last step produced NO output at all — it ran past the token limit "
+    "while deliberating. Stop planning and ACT NOW: make ONE tool call that "
+    "starts the user's request, or, if you genuinely need something from "
+    "them, reply in two short sentences saying exactly what. Do not restate "
+    "the plan, do not re-read state you already have.")
+
 
 def _nearest_alternative(user_text):
     for rx, hint in ALTERNATIVE_HINTS:
@@ -925,7 +936,7 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
         resp = client.chat.completions.create(
             model=config.AGENT_MODEL, messages=msgs, tools=tools,
             tool_choice="none", temperature=config.AGENT_TEMPERATURE,
-            max_tokens=800)
+            max_tokens=config.AGENT_REPLY_MAX_TOKENS)
         llm.record("honesty_regen",
                    {"model": config.AGENT_MODEL, "messages": msgs[-2:],
                     "note": "regeneration after turn-facts violation"},
@@ -1039,6 +1050,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     honesty = {"false_claims": 0, "corrective_note": False}
     start_version = ctx.latest_edl()["version"]
     warned = set()                 # time-pressure marks already delivered
+    # Completion budget for this step, and how many times a truncated step has
+    # already been retried with a bigger one. See _TRUNCATED_NUDGE.
+    max_tokens = config.AGENT_MAX_TOKENS
+    truncated_retries = 0
+    truncated_out = False          # last step died at the ceiling, saying nothing
 
     for iteration in range(config.AGENT_MAX_ITERATIONS):
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
@@ -1136,7 +1152,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 messages=messages,
                 tools=tools,
                 temperature=config.AGENT_TEMPERATURE,
-                max_tokens=2000,
+                max_tokens=max_tokens,
             )
         except Exception as e:
             # llm.record only ran on success, so a failing agent call left NO
@@ -1156,14 +1172,39 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         timings["llm_s"] = round(timings["llm_s"] + time.monotonic() - t0, 2)
         timings["llm_calls"] += 1
         msg = resp.choices[0].message
+        finish = getattr(resp.choices[0], "finish_reason", None)
         llm.record("agent",
                    {"model": config.AGENT_MODEL, "messages": messages,
-                    "tools": [t["function"]["name"] for t in tools]},
+                    "tools": [t["function"]["name"] for t in tools],
+                    "max_tokens": max_tokens},
                    {"content": msg.content,
                     "tool_calls": [{"name": tc.function.name,
                                     "arguments": tc.function.arguments}
-                                   for tc in (msg.tool_calls or [])]},
+                                   for tc in (msg.tool_calls or [])],
+                    # Recorded because its absence is what made this class of
+                    # failure invisible: an empty completion at the ceiling and
+                    # a deliberate empty reply look identical without it.
+                    "finish_reason": finish},
                    getattr(resp, "usage", None))
+
+        # A step that hit the token ceiling with NOTHING in it — no text, no
+        # tool call — is not an answer, it is a truncation. A reasoning model
+        # spends the budget deliberating and never reaches `content`. Treating
+        # it as "the model chose to say nothing" is what posted "I only
+        # reviewed the video" three times at a user asking for an edit. Give it
+        # more room and tell it to act; only after that give up, and honestly.
+        if not msg.tool_calls and not (msg.content or "").strip() \
+                and finish == "length":
+            if truncated_retries < 2:
+                truncated_retries += 1
+                max_tokens = min(max_tokens * 2,
+                                 config.AGENT_MAX_TOKENS_CEILING)
+                print(f"[job {job['id']}] step truncated at the token ceiling "
+                      f"with no output — retrying with max_tokens={max_tokens}",
+                      flush=True)
+                messages.append({"role": "system", "content": _TRUNCATED_NUDGE})
+                continue
+            truncated_out = True
 
         if not msg.tool_calls:
             # Auto-render first so the turn facts include the real preview.
@@ -1173,6 +1214,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
                     draft = "Done — check the preview on the right."
+                elif truncated_out:
+                    # NOT "I only reviewed the video": nothing was reviewed and
+                    # nothing was decided. Say what actually happened, and
+                    # invite the one thing that fixes it — asking again.
+                    draft = ("Sorry — I ran out of room working that one out "
+                             "and never got to the edit itself. Nothing was "
+                             f"changed{_assets_made_note(ctx)}. Send it again "
+                             "(one instruction at a time helps) and I'll go "
+                             "straight at it.")
                 else:
                     draft = ("I only reviewed the video — the edit was not "
                              f"changed{_assets_made_note(ctx)}.")
@@ -1187,7 +1237,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "preview": ctx.last_preview})
             return {"status": "replied", "edl_version": latest["version"],
                     "steps": total_steps, "auto_render": ctx.autorendered,
-                    "honesty": honesty, "timings": timings}
+                    "honesty": honesty, "timings": timings,
+                    # A turn that only ever hit the token ceiling delivered
+                    # nothing — no edit, no asset, not even an answer. We paid
+                    # the provider; the user must not. Same principle as
+                    # charge_turn_credits' "a turn that got nothing back costs
+                    # nothing", one layer up where the reason is visible.
+                    "billable": not (truncated_out and not ctx.versions_written
+                                     and not _assets_made_note(ctx)
+                                     and not ctx.last_preview),
+                    "truncated": truncated_out or None}
 
         messages.append({
             "role": "assistant",

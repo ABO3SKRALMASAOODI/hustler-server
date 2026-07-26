@@ -5652,7 +5652,37 @@ def _describe_energy(p):
     rise = _largest_energy_rise(p)
     if rise:
         line += f"; biggest rise: +{rise[1]:g}dB climbing into {rise[0]:g}s"
-    return line
+    return line + _flatline_note(p)
+
+
+def _flatline_note(p):
+    """'This file is not really music' — said plainly, when the measurement
+    says so.
+
+    A track whose whole body sits on a dead-flat level tens of dB under one
+    brief burst has a noise floor, not dynamics. It happened to a real user on
+    Jul 26 2026: a 2-minute mp3 from a link converter decoded as one 1-second
+    blast at 2.2s and 117s of flat -67dB. Every tool then reported perfectly
+    true, perfectly useless facts ("beats: none detected") and the agent had
+    no way to know the FILE was the problem, so it kept trying to work with
+    it. Naming it is the difference between a dead end and a 10-second fix."""
+    energy = p.get("energy") or []
+    if len(energy) < 20:
+        return ""
+    body = sorted(energy)[:int(len(energy) * 0.98)]      # drop the top 2%
+    if not body:
+        return ""
+    mid = body[len(body) // 2]
+    spread = body[int(len(body) * 0.9)] - body[int(len(body) * 0.1)]
+    if mid < -40.0 and spread < 6.0:
+        return (f". WARNING — this file is almost certainly BROKEN, not just "
+                f"quiet: everything except one brief burst sits on a flat "
+                f"level {abs(mid):.0f}dB below it (only {spread:.1f}dB of "
+                f"variation across the whole file). Real music never looks "
+                f"like this. Tell the user the audio file did not convert "
+                f"properly and ask them to re-upload it (or offer a built-in "
+                f"track) — do NOT try to beat-match or score against it")
+    return ""
 
 
 def _asset_audio_analysis(ctx, asset_key):
@@ -5699,11 +5729,28 @@ def _asset_audio_analysis(ctx, asset_key):
             ctx._asset_perception[asset_key] = p
         name = (asset.get("meta") or {}).get("filename") or \
             os.path.basename(asset_key)
-    return _cap(f"Audio analysis of '{name}' (times are seconds INTO THE "
-                "TRACK — e.g. an add_music offset_s to start on the drop):\n"
-                "- " + "\n- ".join([_describe_tempo(p), _describe_beats(p),
-                                    _describe_energy(p)])
-                + "\n(word-stress analysis applies to the main video only)")
+    out = (f"Audio analysis of '{name}' (times are seconds INTO THE "
+           "TRACK — e.g. an add_music offset_s to start on the drop):\n"
+           "- " + "\n- ".join([_describe_tempo(p), _describe_beats(p),
+                               _describe_energy(p)])
+           + "\n(word-stress analysis applies to the main video only)")
+    # Track seconds are useless for PLACING anything — every write tool takes
+    # program seconds. When this track is already in the edit, hand over the
+    # grid in the timeline's own units so the agent can cut/hit on it without
+    # doing offset+loop arithmetic in its head (and getting it wrong).
+    edl = ctx.latest_edl()["json"]
+    if any(m.get("storage_key") == asset_key for m in (edl.get("music") or [])):
+        prog_beats, label, err = _music_program_beats(ctx, edl, key=asset_key)
+        if not err and prog_beats:
+            shown = ", ".join(f"{b:g}" for b in prog_beats[:48])
+            out += (f"\n- IN PROGRAM TIME (what every write tool takes) this "
+                    f"track's beats land at: {shown}"
+                    + (f" … {len(prog_beats)} in total"
+                       if len(prog_beats) > 48 else "")
+                    + f". Grid: {label}. Use these for keep_segments, "
+                      "add_sfx or add_zoom; beat_align_cuts snaps existing "
+                      "cuts to them for you.")
+    return _cap(out)
 
 
 def get_audio_analysis(ctx, asset_key=None):
@@ -5958,7 +6005,180 @@ def sound_design_pass(ctx, intensity="medium"):
     return res
 
 
-def beat_align_cuts(ctx, tolerance_s=0.35):
+def _music_program_beats(ctx, edl, bpm=None, every_s=None, key=None):
+    """(beats in PROGRAM seconds, label, error) for the SONG the viewer hears.
+
+    "Cut it to the beat" means the beat of the music that is playing. When a
+    song is laid over footage, the footage's own transients are not the beat —
+    aligning to them is aligning to the wrong sound entirely, and on Jul 26
+    2026 that is what happened: a user asked for cuts on a 1-second pulse, the
+    tool measured the DRINKS FOOTAGE (80.7 BPM, confidence 0.15), refused, and
+    the song sitting in the same EDL was never looked at.
+
+    bpm/every_s is the user TELLING us the tempo ("there's a beat every
+    second"). That is data, not a guess, so it skips the confidence gate — the
+    gate exists to stop US inventing a pulse, never to overrule the person who
+    can hear the track. Phase comes from where the music starts.
+    """
+    items = [m for m in (edl.get("music") or [])
+             if float(m.get("end") or 0) > float(m.get("start") or 0)
+             and (key is None or m.get("storage_key") == key)]
+    if not items and not (bpm or every_s):
+        return None, None, ("REJECTED: there is no music in this edit to cut "
+                            "to. Add a track with add_music first, or pass "
+                            "bpm/every_s if the user told you the tempo.")
+    item = max(items, key=lambda m: float(m["end"]) - float(m["start"])) \
+        if items else None
+    prog = program_duration(edl)
+    lo = float(item["start"]) if item else 0.0
+    hi = min(float(item["end"]), prog) if item else prog
+
+    if bpm or every_s:
+        try:
+            period = (60.0 / float(bpm)) if bpm else float(every_s)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None, None, ("REJECTED: bpm/every_s must be numbers "
+                                "(bpm 40-220, or every_s 0.15-4).")
+        if not (0.15 <= period <= 4.0):
+            return None, None, (f"REJECTED: that works out to a beat every "
+                                f"{period:.2f}s. Expected 0.15-4s "
+                                f"(bpm 15-400) — check the units.")
+        n = int((hi - lo) / period) + 1
+        beats = [round(lo + k * period, 3) for k in range(n)
+                 if lo + k * period <= hi + 1e-6]
+        src = "the tempo you were given" if not item else \
+            f"the tempo you were given, phased to the music at {lo:g}s"
+        return beats, f"{60.0 / period:.4g} BPM ({src})", None
+
+    p = ctx._asset_perception.get(item["storage_key"])
+    if p is None:
+        try:
+            if music_library.is_library_ref(item["storage_key"]):
+                p = perception.analyze_audio(
+                    music_library.local_path(item["storage_key"]))
+            else:
+                asset = ctx.db.run(dbx.asset_by_key, ctx.project_id,
+                                   item["storage_key"])
+                if not asset:
+                    return None, None, (
+                        "Could not analyze the music in this edit — its file "
+                        "is not a project asset any more.")
+                p = perception.get_or_compute_for_asset(
+                    ctx.db, dbx, asset, _asset_local_path(ctx, asset))
+        except Exception as e:
+            return None, None, (f"Could not analyze the music in this edit "
+                                f"({str(e)[:160]}).")
+        ctx._asset_perception[item["storage_key"]] = p
+    conf = float(p.get("bpm_conf") or 0.0)
+    track_beats = p.get("beats") or []
+    if not track_beats or conf < 0.5:
+        return None, None, (
+            f"REJECTED: the music's own pulse is not clear enough to cut to "
+            f"(bpm {p.get('bpm') or 'none'}, confidence {conf:.2f}; needs "
+            f">= 0.5){_flatline_note(p)}. Do NOT pretend to sync. If the "
+            "user can hear the beat, ask them how often it lands (or pass "
+            "every_s/bpm if they already told you) and this will use it.")
+    # Track seconds -> program seconds. The renderer loops at the demuxer and
+    # trims [offset_s, offset_s + span) out of the repeated stream, so a beat
+    # at track time t is heard at start - offset + t + k*track_length.
+    off = float(item.get("offset_s") or 0.0)
+    # Length of the analyzed audio, straight from the envelope it produced —
+    # the perception sidecar carries no duration of its own, and the asset
+    # row's can be absent on a library track.
+    dur = (len(p.get("energy") or []) * float(p.get("energy_bin_s") or 0.5)
+           or track_beats[-1] + 1.0)
+    beats, cycle = [], 0
+    while True:
+        base = lo - off + cycle * dur
+        if base > hi:
+            break
+        for t in track_beats:
+            pt = base + t
+            if lo - 1e-6 <= pt <= hi + 1e-6:
+                beats.append(round(pt, 3))
+        if not item.get("loop") or cycle > 200:
+            break
+        cycle += 1
+    if not beats:
+        return None, None, ("The music's beat grid does not overlap the part "
+                            "of the program it plays over.")
+    return beats, (f"{p.get('bpm'):g} BPM measured from the music "
+                   f"(confidence {conf:.2f})"), None
+
+
+def _speed_factor_at(tl, seg_i, t):
+    """Playback factor applied at source time t inside segment seg_i, so a
+    move of d PROGRAM seconds becomes d*factor SOURCE seconds."""
+    try:
+        for ps, pe, f in tl.pieces[seg_i]:
+            if ps - 1e-6 <= t <= pe + 1e-6:
+                return float(f) or 1.0
+    except (IndexError, TypeError, ValueError):
+        pass
+    return 1.0
+
+
+def _beat_align_to_music(ctx, edl, beats, label, tol):
+    """Slide each internal cut so it LANDS on a beat of the music.
+
+    Program-time, not source-time: what the viewer hears at a cut is decided
+    by how much footage precedes it, so the thing to adjust is the END of the
+    span before the junction. Junctions are processed left to right and the
+    timeline is recomputed each time, because moving one shifts every later
+    one — the reason a single pass over source times cannot do this.
+    """
+    cur = [list(x) for x in (edl.get("keep") or [])]
+    if len(cur) < 2:
+        return ("NO CHANGE: a single kept span has no internal cut boundaries "
+                "to align (its start and end never move). Make cuts first. Do "
+                "NOT tell the user the cuts were beat-aligned.")
+    inserts, speeds = edl.get("inserts") or [], edl.get("speed") or []
+    words = ctx.index.get("words") or []
+    moved = skipped_tol = skipped_word = already = 0
+    for i in range(len(cur) - 1):
+        tl = Timeline(cur, inserts, speeds)
+        p_at = tl.src_to_out(cur[i][1])
+        if p_at is None:
+            continue
+        b = min(beats, key=lambda t: abs(t - p_at))
+        d = b - p_at
+        if abs(d) < 0.02:
+            already += 1
+            continue
+        if abs(d) > tol:
+            skipped_tol += 1
+            continue
+        cand = round(cur[i][1] + d * _speed_factor_at(tl, i, cur[i][1]), 2)
+        if audit.word_at_boundary(words, cand):
+            skipped_word += 1
+            continue
+        # Never invert the span, and never let it swallow the cut gap after
+        # it — closing a gap silently restores footage the user removed.
+        if not (cur[i][0] + 0.1 <= cand <= cur[i + 1][0] - 0.1):
+            skipped_tol += 1
+            continue
+        cur[i][1] = cand
+        moved += 1
+    if not moved:
+        return (f"NO CHANGE: no cut moved — {already} already on the beat, "
+                f"{skipped_tol} had no beat within {tol}s (or the move would "
+                f"collide with the next span), {skipped_word} would land "
+                f"inside a word. Do NOT tell the user the cuts were "
+                f"beat-aligned.")
+    res = _write_keep(
+        ctx, cur,
+        f"beat-aligned {moved} cut{'' if moved == 1 else 's'} to {label} "
+        f"(tolerance {tol}s)")
+    if res.startswith("EDL v"):
+        res += (f"\nMoved {moved} cut{'' if moved == 1 else 's'} onto the "
+                f"beat; skipped {skipped_word} (would land inside a word) and "
+                f"{skipped_tol} (no beat within {tol}s / would collide); "
+                f"{already} already landed on it. Grid: {label}.")
+    return res
+
+
+def beat_align_cuts(ctx, tolerance_s=0.35, source=None, bpm=None,
+                    every_s=None):
     """Move each INTERNAL keep boundary to the nearest beat within tolerance
     — never the program's first start or last end, never into a word."""
     if not ctx.has_main_video:
@@ -5968,6 +6188,18 @@ def beat_align_cuts(ctx, tolerance_s=0.35):
         tol = min(max(float(tolerance_s), 0.05), 1.0)
     except (TypeError, ValueError):
         return "REJECTED: tolerance_s must be a number of seconds."
+    edl = ctx.latest_edl()["json"]
+    want = (source or "").strip().lower() or None
+    if want not in (None, "music", "video"):
+        return ("REJECTED: source must be 'music' (the song the viewer hears) "
+                "or 'video' (the footage's own audio).")
+    # Auto: if a song is playing, THAT is the beat the user means.
+    if want == "music" or bpm or every_s or (
+            want is None and (edl.get("music") or [])):
+        beats, label, err = _music_program_beats(ctx, edl, bpm, every_s)
+        if err:
+            return err
+        return _beat_align_to_music(ctx, edl, beats, label, tol)
     try:
         p = _get_perception(ctx)
     except Exception as e:
@@ -5975,11 +6207,14 @@ def beat_align_cuts(ctx, tolerance_s=0.35):
     bpm, conf = p.get("bpm"), float(p.get("bpm_conf") or 0.0)
     beats = p.get("beats") or []
     if not bpm or not beats or conf < 0.5:
-        return ("REJECTED: the tempo estimate is not reliable enough to cut "
-                f"to (bpm {bpm or 'none'}, confidence {conf:.2f}; "
-                "beat-aligning needs >= 0.5). 'Syncing' cuts to a pulse "
-                "that isn't really there would be a lie — tell the user "
-                "honestly.")
+        return ("REJECTED: the footage's own audio has no pulse clear enough "
+                f"to cut to (bpm {bpm or 'none'}, confidence {conf:.2f}; "
+                "beat-aligning needs >= 0.5). 'Syncing' cuts to a pulse that "
+                "isn't really there would be a lie. Two real routes: add the "
+                "song they want and call this again (it then cuts to the "
+                "MUSIC), or — if the user has told you the tempo ('there's a "
+                "beat every second') — pass every_s/bpm and it will use "
+                "theirs. Never invent one yourself.")
     cur = ctx.latest_edl()["json"]["keep"]
     if len(cur) < 2:
         return ("NO CHANGE: a single kept span has no internal cut "
@@ -7227,16 +7462,31 @@ TOOLS = {
                           {"intensity": {"type": "string",
                                          "enum": ["light", "medium",
                                                   "strong"]}}),
-    "beat_align_cuts": (beat_align_cuts, "Move each INTERNAL cut boundary "
-                        "(never the program's first start / last end) to "
-                        "the nearest musical beat within tolerance_s "
-                        "(default 0.35s), skipping any move that would "
-                        "land inside a word. Requires a confident tempo "
-                        "(bpm confidence >= 0.5, see get_audio_analysis) — "
-                        "refuses honestly below that rather than 'syncing' "
-                        "to noise. One EDL version; reports moved/skipped "
-                        "counts. THE tool for 'cut to the beat'.",
-                        {"tolerance_s": {"type": "number"}}),
+    "beat_align_cuts": (beat_align_cuts, "THE tool for 'cut to the beat'. "
+                        "Slides each INTERNAL cut (never the program's first "
+                        "start / last end) onto the nearest beat within "
+                        "tolerance_s (default 0.35s), skipping any move that "
+                        "would land inside a word. WHICH beat: when the edit "
+                        "has music it uses the SONG the viewer hears, in "
+                        "program time — that is what 'the beat' means; "
+                        "source='video' forces the footage's own audio "
+                        "instead. If the USER tells you the tempo ('there's "
+                        "a beat every second', 'it's 120 BPM'), pass "
+                        "every_s=1 or bpm=120 — their tempo is data and "
+                        "skips the confidence gate. With no music, no stated "
+                        "tempo and no clear pulse in the footage it refuses "
+                        "honestly rather than 'syncing' to noise — never "
+                        "invent a tempo yourself. Cuts must already exist: "
+                        "this MOVES boundaries, it does not create them (to "
+                        "cut ON every beat, build the spans with "
+                        "keep_segments from the beat times get_audio_analysis "
+                        "reports, then call this to tighten them). One EDL "
+                        "version; reports moved/skipped counts.",
+                        {"tolerance_s": {"type": "number"},
+                         "source": {"type": "string",
+                                    "enum": ["music", "video"]},
+                         "bpm": {"type": "number"},
+                         "every_s": {"type": "number"}}),
     "suggest_emphasis": (suggest_emphasis, "READ: candidate emphasis words "
                          "from the REAL transcript — the most vocally "
                          "stressed words (measured), words with digits, "

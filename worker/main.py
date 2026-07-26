@@ -75,7 +75,8 @@ def process_one(worker_db, job):
             timings = result.setdefault("timings", {})
             timings["queue_wait_s"] = queue_wait
             timings["total_s"] = total
-        if job["type"] == "agent_turn" and isinstance(result, dict):
+        if job["type"] == "agent_turn" and isinstance(result, dict) \
+                and result.get("billable", True):
             try:
                 charged = worker_db.run(dbx.charge_turn_credits,
                                         job["user_id"], job_id)
@@ -84,6 +85,14 @@ def process_one(worker_db, job):
                 # Billing must never fail a finished edit.
                 print(f"[job {job_id}] credit charge failed: {ce}",
                       flush=True)
+        elif job["type"] == "agent_turn" and isinstance(result, dict):
+            # A turn the loop marked unbillable produced nothing the user can
+            # use — see run_agent_job's truncation path. Recorded as 0 rather
+            # than left absent so the admin views show the waiver, not a gap.
+            result["credits_charged"] = 0.0
+            print(f"[job {job_id}] not charged — the turn produced nothing "
+                  f"usable ({result.get('truncated') and 'truncated'})",
+                  flush=True)
         worker_db.run(dbx.finish_job, job_id, "done", None, result)
         print(f"[job {job_id}] done in {total}s "
               f"(queue {queue_wait}s) timings="
