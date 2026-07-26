@@ -323,6 +323,34 @@ CREATE TABLE IF NOT EXISTS user_offers (
 
 ---
 
+### Lifecycle email (round 49 redesign)
+
+`newsletter_content.py` owns the shell, a set of **design blocks** (`eyebrow`,
+`h1`, `p`, `card`, `feature`, `numbered`, `stats`, `price_row`, `cta`) and the
+default templates, which are now **generated from those blocks** rather than
+hand-typed as six giant HTML strings. The stored default is still a plain
+string, so the admin editor is unaffected. Design language is the pricing cards:
+`#0b0b0b` surfaces, `#1e1e1e` hairlines, monospace micro-labels, red accent, and
+a **white pill CTA** (the emails were using a red button, so arriving at
+/subscribe from an email looked like a different product).
+
+**The header wordmark is TEXT.** It used to be one 220x68 PNG containing robot +
+wordmark, so the email opened with an empty box until it loaded — ~1.1s for 15KB
+from valmera.io, plus Gmail's image proxy, ≈3 seconds of blank branding. Now the
+name renders with the HTML and the only fetch is `public/email-robot.png`
+(**5.9KB**, the Rive robot trimmed and sized for a 44px box at 2x). Regenerate it
+by rendering a `.riv` with Playwright + `@rive-app/canvas` and trimming to the
+alpha bbox — see the round-49 memory.
+
+**Why no 50% mail had ever sent:** `offers.py` and the `offer_50` campaign only
+reached production on Jul 27 2026 (round 48 sat committed-but-unpushed for a
+day). The engine itself was healthy the whole time — 222 sends across the other
+five campaigns. Nothing was broken. `run_daily_tick` is **once per day**
+(`already_ran_today`) at `send_hour_utc` (default 15:00), so the first offer send
+is the next tick; 55 accounts were eligible at the time of writing. Verify with
+the `_eligible('offer_50')` predicate rather than guessing — the binding clauses
+are `created_at <= NOW() - 1 day`, `trial_started_at IS NULL`, and `NOT_TODAY`.
+
 ### Required production env (Render)
 
 - **`PADDLE_WEBHOOK_SECRET`** — MUST be set (Paddle → Developer tools → Notifications). The webhook fails OPEN when unset: an unsigned POST is accepted, so anyone could forge `subscription.created` and grant themselves a plan. Code already HMAC-verifies when present — this is pure config.
