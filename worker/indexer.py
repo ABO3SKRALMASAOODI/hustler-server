@@ -438,7 +438,9 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
                       config.AGENT_MODEL,
                       {"system": system, "user": user},
                       {"text": res["text"]} if res
-                      else {"error": "call failed"},
+                      # The REAL provider error, not "call failed" — this row
+                      # is the only trace a failed greeting leaves in admin.
+                      else {"error": llm.last_error() or "call failed"},
                       res["prompt_tokens"] if res else None,
                       res["completion_tokens"] if res else None)
     except Exception as e:

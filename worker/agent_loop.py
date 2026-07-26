@@ -1114,13 +1114,29 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         worker_db.run(dbx.set_progress, job["id"],
                       int(100 * iteration / config.AGENT_MAX_ITERATIONS))
         t0 = time.monotonic()
-        resp = client.chat.completions.create(
-            model=config.AGENT_MODEL,
-            messages=messages,
-            tools=tools,
-            temperature=config.AGENT_TEMPERATURE,
-            max_tokens=2000,
-        )
+        try:
+            resp = client.chat.completions.create(
+                model=config.AGENT_MODEL,
+                messages=messages,
+                tools=tools,
+                temperature=config.AGENT_TEMPERATURE,
+                max_tokens=2000,
+            )
+        except Exception as e:
+            # llm.record only ran on success, so a failing agent call left NO
+            # row anywhere: through the whole Jul 26 2026 provider outage the
+            # admin Model I/O tab showed nothing for the turns users were
+            # watching fail, and the only evidence was the chat message. Record
+            # it (messages tail only — the full list is large and the failure
+            # is what matters), then let it propagate to _user_facing_failure.
+            timings["llm_s"] = round(
+                timings["llm_s"] + time.monotonic() - t0, 2)
+            llm.record("agent",
+                       {"model": config.AGENT_MODEL,
+                        "messages": messages[-2:],
+                        "tools": [t["function"]["name"] for t in tools]},
+                       {"error": f"{type(e).__name__}: {str(e)[:400]}"}, None)
+            raise
         timings["llm_s"] = round(timings["llm_s"] + time.monotonic() - t0, 2)
         timings["llm_calls"] += 1
         msg = resp.choices[0].message

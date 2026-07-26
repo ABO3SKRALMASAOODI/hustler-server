@@ -279,6 +279,135 @@ def test_an_ordinary_bug_keeps_the_old_generic_wording():
                    "and edit history are safe — try sending that again.")
 
 
+# ── an outage has to be VISIBLE in admin ───────────────────────────────
+
+def test_a_failed_agent_call_is_recorded():
+    """llm.record used to run only after a successful call, so during the
+    Jul 26 2026 outage the admin Model I/O tab showed nothing at all for the
+    turns users were watching fail. The error must be recorded before it
+    propagates."""
+    import inspect
+    src = inspect.getsource(agent_loop)
+    call = src.split("resp = client.chat.completions.create(\n"
+                     "                model=config.AGENT_MODEL,")[1][:1600]
+    assert "except Exception" in call
+    assert 'llm.record("agent"' in call
+    assert '"error"' in call
+    assert "raise" in call
+
+
+def test_ask_text_and_vision_publish_their_error():
+    """last_error() is what lets a caller record the real reason instead of a
+    placeholder."""
+    import inspect
+    src = inspect.getsource(llm)
+    assert src.count("_note_error(e)") >= 2
+    assert "def last_error()" in src
+
+
+def test_the_indexer_records_the_real_error_not_call_failed():
+    import inspect
+    import indexer
+    src = inspect.getsource(indexer)
+    assert 'llm.last_error() or "call failed"' in src
+
+
+def test_last_error_is_none_until_something_fails():
+    # Thread-local and unset on a fresh thread: absence must read as None, not
+    # as a stale error from another lane's turn.
+    import threading
+    seen = []
+    t = threading.Thread(target=lambda: seen.append(llm.last_error()))
+    t.start()
+    t.join()
+    assert seen == [None]
+
+
+def test_last_error_captures_the_exception_text():
+    try:
+        raise RuntimeError("Insufficient Balance")
+    except RuntimeError as e:
+        llm._note_error(e)
+    assert "Insufficient Balance" in llm.last_error()
+    assert "RuntimeError" in llm.last_error()
+
+
+class _Cur:
+    """Enough of a psycopg2 cursor to drive charge_turn_credits' first query.
+    If the usage guard works, execute() is called exactly once and no UPDATE
+    ever runs — so recording the statements is the assertion."""
+    def __init__(self, row):
+        self._row = row
+        self.statements = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+
+    def fetchone(self):
+        return self._row
+
+
+class _Conn:
+    def __init__(self, row):
+        self.cur = _Cur(row)
+
+    def cursor(self):
+        return self.cur
+
+
+def _agg(n=1, tin=0, tout=0, cin=0, n_images=0, gen_cost=0):
+    return {"n": n, "tin": tin, "tout": tout, "cin": cin,
+            "n_images": n_images, "gen_cost": gen_cost}
+
+
+def test_a_turn_with_only_error_rows_charges_nothing():
+    """Failed calls now leave llm_calls rows so an outage is visible in admin.
+    Those rows must not trip MIN_TURN_CREDITS: the chat tells the user a failed
+    turn cost them nothing, and that has to be true."""
+    import db
+    conn = _Conn(_agg(n=3))            # three rows, all errors: zero usage
+    assert db.charge_turn_credits(conn, 1, "video:1") == 0.0
+    # It must not have gone on to read or write the user's balance.
+    assert len(conn.cur.statements) == 1
+    assert not any("UPDATE users" in s for s in conn.cur.statements)
+
+
+def test_a_turn_with_no_rows_at_all_still_charges_nothing():
+    import db
+    conn = _Conn(_agg(n=0))
+    assert db.charge_turn_credits(conn, 1, "video:1") == 0.0
+
+
+def test_real_usage_is_still_charged():
+    """The guard must not swallow genuine turns — it keys on usage, not errors."""
+    import db
+    conn = _Conn(_agg(n=2, tin=100_000, tout=5_000))
+    # Reaches the balance lookup, which our stub answers with the same row;
+    # what matters is that it did NOT early-return 0.
+    try:
+        db.charge_turn_credits(conn, 1, "video:1")
+    except Exception:
+        pass
+    assert len(conn.cur.statements) > 1, "a real turn must reach the balance"
+
+
+def test_an_image_only_turn_is_charged():
+    """No tokens, but a real image cost money."""
+    import db
+    conn = _Conn(_agg(n=1, n_images=1))
+    try:
+        db.charge_turn_credits(conn, 1, "video:1")
+    except Exception:
+        pass
+    assert len(conn.cur.statements) > 1
+
+
 def test_no_failure_message_ever_contains_a_stack_or_repr():
     for e in (_Quota(_REAL_403), RuntimeError("boom at 0x7f9"),
               KeyError("k"), TimeoutError("t"), ValueError("v")):

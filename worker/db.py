@@ -632,6 +632,15 @@ def charge_turn_credits(conn, user_id, job_id):
         if not row["n"]:
             # A turn that never reached the model costs nothing.
             return 0.0
+        # ...and neither does a turn that reached it and got nothing back. The
+        # test is real USAGE, not row count: failed calls now leave llm_calls
+        # rows too (so an outage is visible in admin), and counting those as
+        # "n" would have MIN_TURN_CREDITS bill 1 credit for a turn that produced
+        # no tokens, no image and no audio — while the chat tells the user it
+        # didn't cost them anything. That message has to stay true.
+        if not (float(row["tin"] or 0) or float(row["tout"] or 0)
+                or float(row["n_images"] or 0) or float(row["gen_cost"] or 0)):
+            return 0.0
         # prompt_tokens is the TRUE total (admin token views stay honest);
         # 'cached_in' is the slice of it the provider served from cache, billed
         # at the cache rate. clamped in llm.cached_input_tokens, and again here

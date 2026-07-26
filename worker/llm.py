@@ -40,6 +40,22 @@ def get_recorder():
     return getattr(_tls, "recorder", None)
 
 
+def last_error():
+    """The most recent provider error on THIS thread, or None.
+
+    Exists because ask_text returns None on failure, which tells a caller that
+    something broke but not what. The indexer used to record the literal string
+    "call failed" for its greeting, so when the provider ran out of credit on
+    Jul 26 2026 the admin Model I/O tab showed ten rows of "call failed" and not
+    one word about a 403 — the outage was invisible in the only place built to
+    show it. Thread-local because agent lanes run turns concurrently."""
+    return getattr(_tls, "last_error", None)
+
+
+def _note_error(e):
+    _tls.last_error = f"{type(e).__name__}: {str(e)[:400]}"
+
+
 def record(purpose, request, response, usage=None):
     fn = get_recorder()
     if not fn:
@@ -141,6 +157,7 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         return answer
     except Exception as e:
         print(f"[vision] call failed: {e}", flush=True)
+        _note_error(e)
         record(purpose,
                {"model": config.VISION_MODEL, "question": prompt,
                 "images": names},
@@ -173,6 +190,7 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text"):
                                              None)}
     except Exception as e:
         print(f"[llm] ask_text failed: {e}", flush=True)
+        _note_error(e)
         record(purpose,
                {"model": config.AGENT_MODEL, "system": system, "user": user},
                {"error": str(e)[:300]}, None)
