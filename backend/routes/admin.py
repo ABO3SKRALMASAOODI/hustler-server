@@ -6,6 +6,8 @@ import os
 import re
 from datetime import datetime, timedelta
 
+import trial_state
+
 admin_bp = Blueprint('admin', __name__)
 
 ADMIN_EMAIL = "thevalmera@gmail.com"
@@ -1012,6 +1014,7 @@ def list_users():
 
     conn = get_db()
     try:
+        trial_ready = trial_state.columns_ready(conn)
         with conn.cursor() as cur:
             # ONE population, everywhere: real post-relaunch customers, the
             # same _scope every other dashboard already uses (it drops
@@ -1036,10 +1039,19 @@ def list_users():
 
             sort_col = f"u.{sort}" if sort != 'job_count' else 'job_count'
 
+            # Trial state (round 46). Selected only once the columns exist —
+            # they are added by hand in the Render shell, so the deploy can
+            # land first and this page must not 500 in the window between.
+            trial_cols = ("""
+                    u.trial_status, u.trial_started_at, u.trial_ends_at,
+                    u.trial_canceled_at, u.trial_plan,
+            """ if trial_ready else "")
+
             cur.execute(f"""
                 SELECT
                     u.id, u.email, u.plan, u.is_subscribed,
                     u.is_verified, u.auth_provider,
+                    {trial_cols}
                     u.credits_balance, u.credits_daily, u.credits_monthly,
                     u.created_at, u.subscription_expiry,
                     -- Detected from the User-Agent at each auth event, never

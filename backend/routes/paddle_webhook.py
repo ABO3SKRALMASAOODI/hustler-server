@@ -8,6 +8,8 @@ from flask import Blueprint, request
 from models import get_db, update_user_subscription_status
 from datetime import datetime
 
+import trial_state
+
 paddle_webhook = Blueprint('paddle_webhook', __name__)
 
 PLAN_CREDITS = {
@@ -235,6 +237,14 @@ def handle_webhook():
         update_user_subscription_status(
             user_id, True, expiry_date, subscription_id, plan, monthly_credits)
         print(f"✅ User {user_id} on plan {plan} ({billing}) activated (from price). Credits: {monthly_credits}")
+        # Trial bookkeeping + the founder alert. Only subscription.* events
+        # carry the subscription's own status; transaction.completed's
+        # data.status is the TRANSACTION's ('completed'), which would read as
+        # "not trialing" and quietly lose the signal. It never raises — a
+        # missing badge must not cost anyone their plan.
+        if event_type.startswith('subscription.'):
+            trial_state.sync_from_subscription(
+                get_db(), user_id, plan, subscription_id, data)
 
     elif event_type in REFUND_EVENTS:
         if (data.get('action') or '').lower() != 'refund':
@@ -258,6 +268,10 @@ def handle_webhook():
         if stored and subscription_id and stored != subscription_id:
             print(f"↩︎ Stale cancel for {subscription_id} (user {user_id} now on {stored}) — ignored")
             return 'OK', 200
+        # Recorded before the downgrade, because the downgrade is what makes
+        # this event indistinguishable from any other cancellation afterwards.
+        # A no-op unless this user was actually mid-trial.
+        trial_state.record_cancel(get_db(), user_id, subscription_id)
         update_user_subscription_status(user_id, False, None, None, 'free', 0)
         _clawback_monthly_credits(user_id)
         print(f"⚠️ User {user_id} canceled — reverted to free + credits clawed back")
