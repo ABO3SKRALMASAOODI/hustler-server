@@ -9,7 +9,7 @@ paddle_bp = Blueprint('paddle', __name__)
 # ── Plan definitions ──────────────────────────────────────────────────────────
 
 PLANS_LIVE = {
-    # ── The two live plans (round 44) ───────────────────────────────────
+    # ── The two live plans (round 45) ───────────────────────────────────
     # Both carry a 3-DAY FREE TRIAL, configured on the Paddle PRICE itself
     # (trial_period: 3 days, requires_payment_method) — not in this code.
     # Paddle therefore creates the subscription immediately, charges nothing
@@ -17,12 +17,20 @@ PLANS_LIVE = {
     # grants credits on that event, so a trialling user is a paying user as
     # far as the app is concerned and simply stops being one if they cancel.
     #
-    # 'mcp' deliberately carries monthly_credits 0: on that plan the customer
-    # supplies their own model through their own MCP client, so the credit
-    # pool (which exists to meter OUR model spend) must not be topped up.
-    # Metering their own key as if it were ours would overcharge them.
+    # The pricing page now sells ONE product at TWO volumes:
+    #   'ai'     Creator $30/mo, $300/yr — 2,400 credits
+    #   'ai_pro' Pro     $50/mo, $500/yr — 4,000 credits
+    # Credits scale with the price at the same rate (80 credits per dollar,
+    # ~1 credit = $0.01 of model spend), so the margin is identical on both
+    # tiers. Change the number here and PLAN_CREDITS in paddle_webhook.py and
+    # PLAN_MONTHLY_LIMITS in credits.py together — three places, one truth.
+    'ai':     {'price_id': 'pri_01kyde25cwqf7t2bk1ekky2pyp', 'yearly_price_id': 'pri_01kyde25n7rxrhajg5xvxxka7y', 'monthly_credits': 2400},
+    'ai_pro': {'price_id': 'pri_01kye15m5262nbs7hjmazrej7j', 'yearly_price_id': 'pri_01kye15mdacm7wzqp740g3rvy4', 'monthly_credits': 4000},
+    # ── MCP: off the pricing page, kept so the one live subscription resolves.
+    # monthly_credits 0 is deliberate — that customer supplies their own model
+    # through their own MCP client, so the pool (which meters OUR model spend)
+    # must not be topped up.
     'mcp':   {'price_id': 'pri_01kyde24w5s63hgzh7wzn4zwnt', 'yearly_price_id': 'pri_01kyde254pd3z24zqd8mzav861', 'monthly_credits': 0},
-    'ai':    {'price_id': 'pri_01kyde25cwqf7t2bk1ekky2pyp', 'yearly_price_id': 'pri_01kyde25n7rxrhajg5xvxxka7y', 'monthly_credits': 2400},
     # ── Retired tiers, kept so grandfathered subscribers keep working ────
     'plus':  {'price_id': 'pri_01jxj6smtjkfsf22hdr4swyr9j', 'yearly_price_id': 'pri_01kkekq1hcvzvyhh3ffk3nk291', 'monthly_credits': 800},
     'pro':   {'price_id': 'pri_01kk4k4y8c3ygxd620vcxg6ph1', 'yearly_price_id': 'pri_01kkeksjv9pf2nc1gphj67m8ae', 'monthly_credits': 2400},
@@ -41,18 +49,19 @@ PLANS_SANDBOX = {
 
 PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_LIVE
 
-# Only these tiers can be NEWLY purchased or switched to. ultra/titan/ace are
-# retired from the product but stay in PLANS (and PLAN_CREDITS in the webhook)
-# so grandfathered subscribers keep working — they must NOT be reachable via a
-# hand-crafted checkout/change-plan call that mints their live price IDs.
+# Only these tiers can be NEWLY purchased or switched to. plus/pro/ultra/titan/
+# ace are retired from the product but stay in PLANS (and PLAN_CREDITS in the
+# webhook) so grandfathered subscribers keep working — they must NOT be
+# reachable via a hand-crafted checkout/change-plan call that mints their live
+# price IDs.
 # 'mcp' is deliberately NOT here: the MCP server does not exist yet, so a buyer
 # would pay, correctly receive 0 credits (they bring their own model) and have
 # nothing to connect to. The Paddle product, prices and 3-day trial are already
 # live and the plan stays in PLANS, so the one existing MCP subscription keeps
 # renewing and resolving — this only blocks NEW checkouts, including
-# hand-crafted ones that bypass the disabled button on the pricing page.
-# Add 'mcp' back the day the server ships.
-PURCHASABLE_PLANS = {'ai'}
+# hand-crafted ones that bypass the pricing page. Add 'mcp' back the day the
+# server ships.
+PURCHASABLE_PLANS = {'ai', 'ai_pro'}
 
 
 def get_paddle_base():

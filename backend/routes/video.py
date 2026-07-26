@@ -24,6 +24,7 @@ from flask import Blueprint, request, jsonify, current_app
 
 from routes.auth import token_required
 from credits import check_and_reserve, get_balance
+import plan_gate
 import storage
 
 # The EDL schema's single source of truth is worker/schemas.py (pure
@@ -147,6 +148,17 @@ def _sound_gen_enabled():
     return bool(os.getenv("ELEVENLABS_API_KEY", ""))
 
 
+def _web_record_enabled():
+    """Mirrors the worker's website-capture gate (worker/config.
+    WEB_RECORD_ENABLED plus a baked Chromium, which ships in the worker
+    image). Same contract and same reason as _url_fetch_enabled above: the
+    concierge's list reads as exhaustive, so a capability missing from it is
+    actively denied — and 'record my site as a demo' is precisely the request
+    a founder makes BEFORE uploading anything, which is exactly when the
+    concierge, not the agent, is answering."""
+    return os.getenv("WEB_RECORD_ENABLED", "1") == "1"
+
+
 def _video_gen_enabled():
     """Mirrors the worker's generate_video availability (worker/videogen.
     video_gen_available) — a fal.ai key + the fal provider. Empty key: the
@@ -206,6 +218,13 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                        "animate a still image into a moving clip")
     if _sound_gen_enabled():
         gen_now.append("generate custom sound effects from a description")
+    if _web_record_enabled():
+        gen_now.append("record a LIVE WEBSITE straight into the edit from "
+                       "nothing but its address — either a scrolling pan of "
+                       "the page, or a real walkthrough where a visible "
+                       "cursor clicks through the product and the clicks are "
+                       "zoomed and sounded (the way to make a launch or "
+                       "product-demo video)")
 
     if stage == "indexing":
         fallback = ("I'm still analyzing your video — transcribing it and "
@@ -326,6 +345,11 @@ def _concierge_reply(stage, history, attachments, index_error=None,
             "reframing, blur/pixelate/black-out a fixed region to censor "
             "burned-in usernames, watermarks or on-screen text, and splice "
             "uploaded clips or images into the video full-frame"
+            + (", record a live WEBSITE as real video from its address — "
+               "either a scrolling pan of the page or a driven walkthrough "
+               "with a visible cursor clicking through the product, which "
+               "gets cut into a showcase with the clicks zoomed and sounded"
+               if _web_record_enabled() else "")
             + (", and download a video, song or image from a LINK they paste "
                "(direct file links and YouTube/TikTok/Vimeo/SoundCloud pages) "
                "and put it straight into the edit"
@@ -524,6 +548,11 @@ def create_project(user_id):
     data = request.get_json() or {}
     title = (data.get("title") or "").strip() or "Untitled project"
     with vdb() as conn:
+        # Round 45: accounts created after GATE_START pick a plan first. Held
+        # here as well as on the turn, so a gated user never gets as far as
+        # uploading a video into a project they cannot edit.
+        if plan_gate.needs_plan(conn, user_id):
+            return plan_gate.gate_response(jsonify)
         cur = conn.cursor()
         cur.execute("INSERT INTO chat_sessions (user_id, title) VALUES (%s, %s) RETURNING id",
                     (int(user_id), title))
@@ -749,6 +778,10 @@ def create_upload(user_id, project_id):
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
             return jsonify({"error": "Project not found"}), 404
+        # Uploading is where a gated account would otherwise burn a 300MB
+        # transfer and an index slot before discovering it cannot edit.
+        if plan_gate.needs_plan(conn, user_id):
+            return plan_gate.gate_response(jsonify)
 
     key = storage.new_original_key(project_id, ext, kind)
     try:
@@ -1348,6 +1381,15 @@ def post_message(user_id, project_id):
             if dup:
                 return jsonify({"queued": True, "message_id": dup["id"],
                                 "duplicate": True})
+
+        # The plan gate (round 45) sits ABOVE the credits gate, because it is
+        # a different question: credits ask "can this account afford a turn",
+        # this asks "is this account allowed to start one at all yet". It is
+        # below the idempotency check on purpose — a retransmit of a message
+        # accepted before the account lapsed must still resolve to its
+        # original row rather than 402.
+        if plan_gate.needs_plan(conn, user_id):
+            return plan_gate.gate_response(jsonify)
 
         # Rate limit: cap LLM spend per project.
         cur.execute("""SELECT COUNT(*) AS n FROM chat_messages

@@ -254,6 +254,22 @@ WEB_RECORD_MAX_DURATION_S = float(os.getenv("WEB_RECORD_MAX_DURATION_S",
                                             "30"))
 WEB_RECORD_WALL_S = float(os.getenv("WEB_RECORD_WALL_S", "90"))
 
+# ── Driven demos (round 45) ──────────────────────────────────────────────
+# A demo WALKTHROUGH — the browser clicks, types and scrolls through the
+# product while a drawn cursor moves on screen — is a longer shot than the
+# scroll-pan, and its length is decided by the steps rather than asked for
+# up front. So it gets its own, larger ceilings. Both are still bounded:
+# every step is individually deadline-checked against WALL_S, which is what
+# actually stops a hung page from holding an agent slot.
+WEB_DEMO_MAX_DURATION_S = float(os.getenv("WEB_DEMO_MAX_DURATION_S", "75"))
+WEB_DEMO_WALL_S = float(os.getenv("WEB_DEMO_WALL_S", "180"))
+# A runaway backstop on the script itself, not a taste limit: 24 steps is
+# far more than any watchable demo, and the duration ceiling binds first.
+WEB_DEMO_MAX_STEPS = int(os.getenv("WEB_DEMO_MAX_STEPS", "24"))
+# Typing is recorded at human speed or the field fills instantly and reads
+# as a paste. Milliseconds per character.
+WEB_DEMO_TYPE_DELAY_MS = int(os.getenv("WEB_DEMO_TYPE_DELAY_MS", "55"))
+
 # Worker tuning
 TMP_DIR = os.getenv("WORKER_TMP_DIR", "/tmp/valmera")
 POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))

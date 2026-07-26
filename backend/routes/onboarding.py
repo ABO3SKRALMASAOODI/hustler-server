@@ -22,6 +22,8 @@ from functools import wraps
 from flask import Blueprint, request, jsonify, current_app
 from psycopg2.extras import RealDictCursor
 
+import plan_gate
+
 onboarding_bp = Blueprint("onboarding", __name__)
 
 ADMIN_EMAIL = "thevalmera@gmail.com"
@@ -159,8 +161,15 @@ def _clean_other(value):
 @onboarding_bp.route("/onboarding/status", methods=["GET"])
 @token_required
 def status(user_id, email):
-    """Should the studio show the card? Also stamps the device, so a user who
-    signed up before this shipped still gets classified on their next visit."""
+    """What the studio must show before it lets someone in.
+
+    Two gates, in order: the three questions, then the plan choice. They are
+    reported together from one call because the studio needs both before it
+    renders anything — asking twice would flash the editor in between.
+
+    Also stamps the device, so a user who signed up before this shipped still
+    gets classified on their next visit.
+    """
     conn = get_db()
     try:
         stamp_device(conn, user_id, request.headers.get("User-Agent", ""))
@@ -169,7 +178,10 @@ def status(user_id, email):
                         (user_id,))
             answered = cur.fetchone() is not None
         conn.commit()
-        return jsonify({"needs_onboarding": not answered}), 200
+        return jsonify({"needs_onboarding": not answered,
+                        # Advisory only — the API enforces this itself on
+                        # every route that costs money (backend/plan_gate.py).
+                        "needs_plan": plan_gate.needs_plan(conn, user_id)}), 200
     finally:
         conn.close()
 
@@ -225,7 +237,9 @@ def plan_intent():
     """
     data = request.get_json(silent=True) or {}
     plan = (data.get("plan") or "").strip().lower()
-    if plan not in ("mcp", "ai"):
+    # 'mcp' is off the pricing page but stays accepted: historic rows use it,
+    # and rejecting it would only lose a press we could still learn from.
+    if plan not in ("ai", "ai_pro", "mcp"):
         return jsonify({"error": "unknown plan"}), 400
     billing = "annual" if (data.get("billing") == "annual") else "monthly"
 

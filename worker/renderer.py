@@ -1044,7 +1044,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         vlabel = out_lab
     zoom_terms = []
     zoom_targeted = any(z.get("cx") is not None or z.get("cy") is not None
-                        for z in zooms)
+                        or z.get("path") for z in zooms)
     cx_terms, cy_terms = [], []
     for z in zooms:
         a = max(0.0, float(z["start"]))
@@ -1054,6 +1054,41 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         st = float(z.get("strength", 0.25))
         t = f"on/{fps:.3f}"
         zmode = z.get("mode") or "punch"
+        if zmode == "follow":
+            # Round 45. The zoom AMOUNT ramps exactly like 'ease' — the eye
+            # forgives a moving frame but not a jumping one — while the
+            # CENTRE glides along the path, emitted below as piecewise-linear
+            # expressions. This is the screen-recording move: stay pushed in
+            # and travel to the next thing, instead of cutting out and back.
+            r = max(0.15, min(0.4, (b - a) / 4.0))
+            zoom_terms.append(
+                f"{st:.2f}*clip(({t}-{a:.3f})/{r:.3f},0,1)"
+                f"*clip(({b:.3f}-{t})/{r:.3f},0,1)")
+            pts = [p for p in (z.get("path") or [])]
+            for cname, terms in (("cx", cx_terms), ("cy", cy_terms)):
+                if len(pts) < 2:
+                    continue
+                # value(t) = v0 + Σ (v_{i+1}-v_i) * clip((t-t_i)/(dt), 0, 1)
+                # Each completed segment has contributed its whole delta and
+                # the current one contributes its fraction, which IS
+                # piecewise-linear interpolation — and it stays a single
+                # expression ffmpeg can evaluate per frame.
+                v0 = float(pts[0].get(cname, 0.5))
+                parts_expr = [f"{v0 - 0.5:.4f}"]
+                for p0, p1 in zip(pts, pts[1:]):
+                    t0 = a + float(p0["f"]) * (b - a)
+                    t1 = a + float(p1["f"]) * (b - a)
+                    dt = t1 - t0
+                    if dt <= 1e-4:
+                        continue
+                    dv = float(p1.get(cname, 0.5)) - float(p0.get(cname, 0.5))
+                    if abs(dv) < 1e-4:
+                        continue
+                    parts_expr.append(
+                        f"{dv:.4f}*clip(({t}-{t0:.3f})/{dt:.3f},0,1)")
+                expr = "+".join(parts_expr).replace("+-", "-")
+                terms.append(f"({expr})*between({t},{a:.3f},{b:.3f})")
+            continue
         if zmode == "ease":
             # smooth ramp in and out inside the window (0 outside it)
             r = max(0.15, min(0.4, (b - a) / 4.0))

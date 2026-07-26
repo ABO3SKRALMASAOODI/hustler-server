@@ -494,24 +494,51 @@ ZOOM_STRENGTH_MAX = 1.5
 FADE_MAX_S = 10.0
 
 
+# Round 45. A follow-zoom's path is stored as FRACTIONS OF ITS OWN WINDOW,
+# not as absolute program times. That is not a style choice: zooms are
+# content-anchored, so remap_program_items moves start/end whenever an
+# unrelated cut shifts the footage underneath them. Absolute path times would
+# be silently stranded by that move (or would need a second, parallel remap
+# that could disagree with the first). Fractions ride along for free — a
+# window that moves or is trimmed carries its whole path with it, exactly.
+ZOOM_PATH_MAX_POINTS = 24
+
+
+class ZoomPathPoint(BaseModel):
+    """One waypoint of a follow-zoom: at `f` (0 = window start, 1 = window
+    end) the zoom is centred on (cx, cy) in output-frame fractions."""
+    f: float
+    cx: float
+    cy: float
+
+
 class ZoomItem(BaseModel):
     """A zoom over a FINAL-program time range (output seconds). mode:
     'punch' (default, instant step in/out), 'ease' (smoothly ramps in and
     out inside the window), 'push_in' / 'pull_out' (continuous Ken Burns
-    drift across the whole window). Optional so pre-round-9 EDLs keep
-    their signatures.
+    drift across the whole window), 'follow' (round 45: ramps in like ease
+    and GLIDES its centre along `path` while held). Optional so pre-round-9
+    EDLs keep their signatures.
 
     cx/cy (round 35): the zoom TARGET as fractions of the output frame
     (0,0 = top-left). None = center, which is exactly what every earlier
     zoom rendered — so old EDLs keep both their signatures and their look.
+
+    path (round 45): only meaningful with mode 'follow'. Two or more points
+    in ascending `f`. This is what makes a screen-recording zoom watchable —
+    a static punch onto one button has to cut out before the next one, while
+    a follow stays in and travels, which is how a hand-made product demo
+    reads.
     """
     id: str
     start: float
     end: float
     strength: float = 0.25
-    mode: Optional[Literal["punch", "ease", "push_in", "pull_out"]] = None
+    mode: Optional[Literal["punch", "ease", "push_in", "pull_out",
+                           "follow"]] = None
     cx: Optional[float] = None
     cy: Optional[float] = None
+    path: Optional[List[ZoomPathPoint]] = None
 
 
 # Round 35: the junction library grew past the two dips. Every style is
@@ -1380,6 +1407,41 @@ def validate_edl(data, duration=None):
                 if cv is not None:
                     cv = round(min(max(float(cv), 0.0), 1.0), 3)
                     setattr(z, cname, None if abs(cv - 0.5) < 1e-6 else cv)
+            # Round 45: the follow path. A path on any other mode would be
+            # carried in the EDL and silently ignored by the renderer, which
+            # is worse than rejecting it — the agent would believe it had
+            # placed a move that never renders.
+            if z.mode == "follow":
+                pts = z.path or []
+                if len(pts) < 2:
+                    raise EDLValidationError(
+                        f"effects.zooms[{i}]: mode 'follow' needs a path of "
+                        "at least 2 points.")
+                if len(pts) > ZOOM_PATH_MAX_POINTS:
+                    raise EDLValidationError(
+                        f"effects.zooms[{i}]: a follow path is limited to "
+                        f"{ZOOM_PATH_MAX_POINTS} points.")
+                last_f = None
+                for j, pt in enumerate(pts):
+                    pt.f = round(min(max(float(pt.f), 0.0), 1.0), 4)
+                    pt.cx = round(min(max(float(pt.cx), 0.0), 1.0), 3)
+                    pt.cy = round(min(max(float(pt.cy), 0.0), 1.0), 3)
+                    if last_f is not None and pt.f < last_f:
+                        raise EDLValidationError(
+                            f"effects.zooms[{i}].path[{j}]: points must be "
+                            "in ascending f (0 = window start, 1 = end).")
+                    last_f = pt.f
+                if pts[0].f > 0.0 or pts[-1].f < 1.0:
+                    # Clamp rather than reject: a path that does not span its
+                    # whole window still renders correctly (clip() holds the
+                    # end values), and the ends are what the eye reads.
+                    pts[0].f = 0.0
+                    pts[-1].f = 1.0
+            elif z.path:
+                raise EDLValidationError(
+                    f"effects.zooms[{i}]: `path` only applies to mode "
+                    "'follow'; this zoom is "
+                    f"'{z.mode or 'punch'}'.")
         fx.zooms.sort(key=lambda z: z.start)
         if fx.transition is not None:
             tr = fx.transition

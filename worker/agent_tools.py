@@ -39,7 +39,8 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      TRANSITION_MAX_S, OVERLAY_ANIMS, OVERLAY_SCALE_MIN,
                      OVERLAY_SCALE_MAX, SPEED_FACTOR_MIN, SPEED_FACTOR_MAX,
                      STYLIZE_KINDS, TEXT_ANIMS, TEXT_FONTS, TEXT_TEMPLATES,
-                     ZOOM_STRENGTH_MIN, ZOOM_STRENGTH_MAX)
+                     ZOOM_STRENGTH_MIN, ZOOM_STRENGTH_MAX,
+                     ZOOM_PATH_MAX_POINTS)
 from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
@@ -2019,13 +2020,61 @@ def set_color_grade(ctx, preset):
     return ctx.write_edl(edl, f"color grade set to {p or 'none'}")
 
 
-ZOOM_MODES = ("punch", "ease", "push_in", "pull_out")
+ZOOM_MODES = ("punch", "ease", "push_in", "pull_out", "follow")
 ZOOM_MODE_DESC = {"punch": "punch-in", "ease": "eased",
                   "push_in": "Ken Burns push-in",
-                  "pull_out": "Ken Burns pull-out"}
+                  "pull_out": "Ken Burns pull-out",
+                  "follow": "gliding follow"}
 
 
-def add_zoom(ctx, start, end, strength=0.25, mode=None, cx=None, cy=None):
+def _parse_zoom_path(path):
+    """Validate a follow-zoom path into EDL points, or return (None, reason).
+
+    `f` is a fraction of the zoom's OWN window, so the path survives every
+    later cut that moves the window (see the note on ZoomPathPoint). The
+    agent may also pass `t` as a fraction — same thing under the name the
+    event track uses — but never absolute seconds, which would silently
+    become 1.0 after clamping and collapse the whole move into a step.
+    """
+    if not isinstance(path, (list, tuple)) or len(path) < 2:
+        return None, ("REJECTED: mode 'follow' needs `path` — at least two "
+                      "points of {f, cx, cy}, where f is 0 at the start of "
+                      "the zoom's window and 1 at its end, and cx/cy are "
+                      "0-1 fractions of the output frame.")
+    if len(path) > ZOOM_PATH_MAX_POINTS:
+        return None, (f"REJECTED: a follow path takes at most "
+                      f"{ZOOM_PATH_MAX_POINTS} points; {len(path)} were "
+                      "given. Use fewer waypoints — the move is interpolated "
+                      "between them.")
+    out, last = [], None
+    for i, raw in enumerate(path, 1):
+        if not isinstance(raw, dict):
+            return None, f"REJECTED: path point {i} is not an object."
+        try:
+            f = float(raw.get("f", raw.get("t")))
+            cx = float(raw["cx"])
+            cy = float(raw["cy"])
+        except (TypeError, ValueError, KeyError):
+            return None, (f"REJECTED: path point {i} needs numeric f, cx and "
+                          "cy.")
+        if not (0.0 <= f <= 1.0):
+            return None, (f"REJECTED: path point {i} has f={f:g}. f is a "
+                          "FRACTION of the zoom window (0-1), not a time in "
+                          "seconds.")
+        if last is not None and f < last:
+            return None, (f"REJECTED: path point {i} goes backwards in f. "
+                          "Points must be in ascending order.")
+        last = f
+        out.append({"f": round(f, 4),
+                    "cx": round(min(max(cx, 0.0), 1.0), 3),
+                    "cy": round(min(max(cy, 0.0), 1.0), 3)})
+    out[0]["f"] = 0.0
+    out[-1]["f"] = 1.0
+    return out, None
+
+
+def add_zoom(ctx, start, end, strength=0.25, mode=None, cx=None, cy=None,
+             path=None):
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     try:
@@ -2044,7 +2093,8 @@ def add_zoom(ctx, start, end, strength=0.25, mode=None, cx=None, cy=None):
         return (f"REJECTED: mode must be one of {', '.join(ZOOM_MODES)}. "
                 "punch = instant step in/out; ease = smooth ramp in and "
                 "out; push_in / pull_out = continuous Ken Burns drift "
-                "across the window.")
+                "across the window; follow = ramps in and GLIDES its centre "
+                "along `path` (for screen recordings and demos).")
     # Optional zoom TARGET (round 35): fractions of the output frame,
     # (0,0) = top-left. None keeps the legacy center zoom.
     tgt = {}
@@ -2057,6 +2107,20 @@ def add_zoom(ctx, start, end, strength=0.25, mode=None, cx=None, cy=None):
             return ("REJECTED: cx/cy must be numbers 0-1 — fractions of the "
                     "output frame ((0,0) = top-left, (0.5,0.5) = center). "
                     "Use look_at to find the subject first.")
+    pts = None
+    if zmode == "follow":
+        pts, err = _parse_zoom_path(path)
+        if err:
+            return err
+        if tgt:
+            return ("REJECTED: a follow zoom is aimed by its `path`, not by "
+                    "cx/cy — passing both would be two different answers to "
+                    "where the frame should be. Put the first position in "
+                    "path[0].")
+    elif path:
+        return (f"REJECTED: `path` only applies to mode 'follow'; this zoom "
+                f"is '{zmode}'. Use mode='follow' to make the frame travel, "
+                "or drop path for a fixed target.")
     fx = dict(edl.get("effects") or {})
     zooms = [dict(z) for z in (fx.get("zooms") or [])]
     item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
@@ -2064,11 +2128,18 @@ def add_zoom(ctx, start, end, strength=0.25, mode=None, cx=None, cy=None):
     if zmode != "punch":
         item["mode"] = zmode
     item.update(tgt)
+    if pts:
+        item["path"] = pts
     zooms.append(item)
     fx["zooms"] = zooms
     edl["effects"] = fx
-    aimed = (f", aimed at ({tgt.get('cx', 0.5):g}, {tgt.get('cy', 0.5):g}) "
-             "of the frame" if tgt else "")
+    if pts:
+        aimed = (f", travelling ({pts[0]['cx']:g},{pts[0]['cy']:g}) → "
+                 f"({pts[-1]['cx']:g},{pts[-1]['cy']:g}) across "
+                 f"{len(pts)} points")
+    else:
+        aimed = (f", aimed at ({tgt.get('cx', 0.5):g}, {tgt.get('cy', 0.5):g})"
+                 " of the frame" if tgt else "")
     return ctx.write_edl(
         edl, f"{ZOOM_MODE_DESC[zmode]} zoom {int(st * 100)}% on {s}-{e}s "
              f"(output time){aimed} [{item['id']}]")
@@ -4690,22 +4761,24 @@ def add_stock_media(ctx, id):
             "2-6s read best; start it on the words that mention the subject.")
 
 
-def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
-    """Record a scrolling screen capture of a live web page (headless
-    browser) and register it as a project video asset."""
+def _capture_precheck(ctx, url, orientation):
+    """Everything a capture must settle before a browser is worth starting.
+    Returns (url, orientation, None) or (None, None, rejection)."""
     if not webrecord.available():
-        return ("REJECTED: website recording is not available on this "
-                "deployment. Offer the user the alternative: they can screen-"
-                "record the page themselves and upload the file.")
+        return None, None, (
+            "REJECTED: website recording is not available on this "
+            "deployment. Offer the user the alternative: they can screen-"
+            "record the page themselves and upload the file.")
     url = _clean_url(url)
     if not url:
-        return "REJECTED: record_website needs a url."
+        return None, None, "REJECTED: a url is required."
     # Runaway backstop, same contract as MAX_FETCHED_URLS_PER_TURN: each
     # capture is individually wall-clock-bounded; this only stops a loop.
     if len(ctx.web_recordings) >= 3:
-        return ("REJECTED: 3 pages already recorded this turn, which is the "
-                "limit. Place what you have, or ask the user to continue in "
-                "another message.")
+        return None, None, (
+            "REJECTED: 3 pages already recorded this turn, which is the "
+            "limit. Place what you have, or ask the user to continue in "
+            "another message.")
     # Default the viewport to the shape the capture will LAND in — the
     # project's output frame — so a 9:16 edit gets a phone-shaped page
     # capture instead of a squashed desktop one.
@@ -4717,10 +4790,55 @@ def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
                        else "square" if ratio == "1:1" else "landscape")
     elif str(orientation).strip().lower() not in ("landscape", "portrait",
                                                   "square"):
-        return ("REJECTED: orientation must be landscape, portrait or "
-                "square — or omit it to match the project's output frame.")
+        return None, None, (
+            "REJECTED: orientation must be landscape, portrait or "
+            "square — or omit it to match the project's output frame.")
     else:
         orientation = str(orientation).strip().lower()
+    return url, orientation, None
+
+
+def _store_capture(ctx, url, got, kind_word):
+    """Upload a finished capture, register the asset, remember the event
+    track ON THE ASSET. Returns (storage_key, name, None) or (None, None,
+    failure text).
+
+    The events are written into the asset's meta, not just onto ctx: a
+    recording made this turn is very often placed in the NEXT one ("actually,
+    put the demo at the start"), and a track that only lived in turn memory
+    would be gone exactly when showcase_demo needed it.
+    """
+    path = got["path"]
+    key = url_media.storage_key(ctx.project_id, url_media.KIND_VIDEO, path)
+    try:
+        storage.upload_file(path, key, url_media.content_type(path))
+    except Exception as e:
+        return None, None, (
+            f"Recorded the page but could not save the capture "
+            f"({str(e)[:160]}). Do NOT claim it was added; try again.")
+
+    from urllib.parse import urlparse as _up
+    domain = (_up(got.get("final_url") or url).hostname or "site")
+    fname = f"{domain} {kind_word}.mp4"
+    ctx.db.run(dbx.insert_asset, ctx.project_id, url_media.KIND_VIDEO, key,
+               bytes_=None, duration_s=got.get("duration_s"),
+               width=got.get("width"), height=got.get("height"),
+               fps=30.0,
+               meta={"filename": fname, "recorded": True,
+                     "source_url": got.get("final_url") or url,
+                     "page_title": got.get("page_title"),
+                     "demo_events": got.get("events") or []})
+    ctx.web_recordings.append({"storage_key": key, "url": url,
+                               "events": got.get("events") or []})
+    return key, (got.get("page_title") or domain), None
+
+
+def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
+    """Record a scrolling screen capture of a live web page (headless
+    browser) and register it as a project video asset."""
+    url, orientation, rej = _capture_precheck(ctx, url, orientation)
+    if rej:
+        return rej
     try:
         dur = float(duration_s) if duration_s is not None else 12.0
     except (TypeError, ValueError):
@@ -4742,34 +4860,322 @@ def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
         return (f"Could not record that page ({str(e)[:200]}). Tell the "
                 "user it did not work. Do NOT claim anything was added.")
 
-    path = got["path"]
-    key = url_media.storage_key(ctx.project_id, url_media.KIND_VIDEO, path)
     try:
-        storage.upload_file(path, key, url_media.content_type(path))
-    except Exception as e:
-        return (f"Recorded the page but could not save the capture "
-                f"({str(e)[:160]}). Do NOT claim it was added; try again.")
+        key, name, fail = _store_capture(ctx, url, got, "capture")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-
-    from urllib.parse import urlparse as _up
-    domain = (_up(got.get("final_url") or url).hostname or "site")
-    fname = f"{domain} capture.mp4"
-    ctx.db.run(dbx.insert_asset, ctx.project_id, url_media.KIND_VIDEO, key,
-               bytes_=None, duration_s=got.get("duration_s"),
-               width=got.get("width"), height=got.get("height"),
-               fps=30.0,
-               meta={"filename": fname, "recorded": True,
-                     "source_url": got.get("final_url") or url,
-                     "page_title": got.get("page_title")})
-    ctx.web_recordings.append({"storage_key": key, "url": url})
-    return (f"Recorded \"{got.get('page_title') or domain}\" — "
+    if fail:
+        return fail
+    return (f"Recorded \"{name}\" — "
             f"{got['duration_s']:.1f}s at {got['width']}x{got['height']} "
             f"(the page loads, holds, then smooth-scrolls to the bottom): "
             f"storage_key={key}. It is saved to the project but NOT in the "
             "video yet — splice it with insert_media, or lay it over the "
             "footage with add_overlay (fit='cover' for a full-frame "
             "cutaway while the speech continues). The capture is SILENT.")
+
+
+def record_website_demo(ctx, url, steps, orientation=None):
+    """Drive a live web page through a scripted walkthrough with a visible
+    cursor, record it, and register it as a project video asset."""
+    url, orientation, rej = _capture_precheck(ctx, url, orientation)
+    if rej:
+        return rej
+
+    workdir = os.path.join(ctx.workdir, f"webdemo_{uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        got = webrecord.record_demo(url, workdir, steps,
+                                    orientation=orientation)
+    except webrecord.WebRecordError as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f"Could not record that walkthrough — {e}. Tell the user "
+                "plainly what went wrong. Do NOT claim anything was recorded "
+                "or added.")
+    except Exception as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f"Could not record that walkthrough ({str(e)[:200]}). Tell "
+                "the user it did not work. Do NOT claim anything was added.")
+
+    try:
+        key, name, fail = _store_capture(ctx, url, got, "demo")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    if fail:
+        return fail
+
+    events = got.get("events") or []
+    clicks = sum(1 for e in events if e["kind"] == "click")
+    problems = got.get("problems") or []
+    # Every problem is reported verbatim. A demo where two of six clicks
+    # missed is still a usable recording, but the user has to be told which
+    # two — a summary that says "recorded the walkthrough" and nothing else
+    # is the lie this project keeps having to unpick.
+    trouble = ""
+    if problems:
+        trouble = ("\nWHAT DID NOT WORK (tell the user, do not hide it): "
+                   + "; ".join(problems[:6]) + ".")
+    return (
+        f"Recorded a walkthrough of \"{name}\" — "
+        f"{got['duration_s']:.1f}s at {got['width']}x{got['height']}, "
+        f"{clicks} click(s), with the cursor visible on screen: "
+        f"storage_key={key}.\n"
+        f"EVENT TRACK (seconds into THIS capture, positions as 0-1 fractions "
+        f"of its frame): {webrecord.summarize_events(events) or '(none)'}\n"
+        "It is saved to the project but NOT in the video yet. The one-call "
+        "way to place it is showcase_demo(asset_key) — that splices it in "
+        "and uses the track above to glide a zoom onto each click and land a "
+        "click sound on the exact frame. Place it by hand with insert_media "
+        "only if the user wants something other than that. The capture is "
+        "SILENT." + trouble)
+
+
+# ---------------------------------------------------------------- #
+#  Turning a demo capture into an edit                               #
+# ---------------------------------------------------------------- #
+
+# A click every few seconds is a demo; a click every half second is a form
+# being filled, and zooming at each one would be a strobe. Runs are broken
+# when the gap exceeds this, and when the page NAVIGATES — a new page has to
+# be seen whole before it is worth pushing into.
+DEMO_RUN_GAP_S = 4.5
+DEMO_MAX_ZOOMS = 8
+DEMO_MAX_SFX = 16
+# How far ahead of a click the push starts and how long it holds after the
+# last one. Arriving with the pointer and leaving a beat after the result is
+# what makes a demo readable rather than frantic.
+DEMO_ZOOM_LEAD_S = 0.55
+DEMO_ZOOM_TAIL_S = 1.1
+
+
+def _capture_point_mapper(ctx, edl, asset):
+    """Map a point in the CAPTURE's frame to a point in the OUTPUT frame.
+
+    A capture recorded at the project's orientation is the same shape as the
+    output and this is the identity. It is not always: the user can reframe
+    the project after recording, or ask for a landscape capture in a vertical
+    edit. The renderer center-crops (or pads) inserts to fit, and a zoom
+    aimed with unmapped coordinates would then miss the button by exactly the
+    bars — visibly, and in the one shot where precision is the whole point.
+    """
+    _orient, ow, oh = _project_frame(ctx)
+    aw = float(asset.get("width") or 0)
+    ah = float(asset.get("height") or 0)
+    mode = ((edl.get("frame") or {}).get("mode") or "crop")
+    if not (aw > 0 and ah > 0 and ow and oh):
+        return lambda x, y: (x, y)
+    pick = min if mode in ("pad", "pad_blur") else max
+    scale = pick(ow / aw, oh / ah)
+    dw, dh = aw * scale, ah * scale
+    ox, oy = (ow - dw) / 2.0, (oh - dh) / 2.0
+
+    def mapper(x, y):
+        return (min(max((ox + x * dw) / ow, 0.0), 1.0),
+                min(max((oy + y * dh) / oh, 0.0), 1.0))
+    return mapper
+
+
+def _demo_zoom_runs(clicks):
+    """Group clicks into the runs one continuous zoom should cover."""
+    runs, current = [], []
+    for ev in clicks:
+        if current and (ev["t"] - current[-1]["t"]) > DEMO_RUN_GAP_S:
+            runs.append(current)
+            current = []
+        current.append(ev)
+    if current:
+        runs.append(current)
+    return runs
+
+
+def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
+                  click_sounds=True, zooms=True):
+    """Splice a recorded website demo in and cut it like a product video:
+    one gliding zoom per run of clicks, a click sound on each click."""
+    asset, err = _resolve_media_asset(ctx, asset_key, ("video_clip",))
+    if err:
+        return err
+    meta = asset.get("meta") or {}
+    events = meta.get("demo_events") or []
+    if not events:
+        # Fall back to this turn's memory before giving up — an asset written
+        # before demo_events existed still has its track in ctx.
+        for rec in ctx.web_recordings:
+            if rec.get("storage_key") == asset_key:
+                events = rec.get("events") or []
+                break
+    if not events:
+        return ("REJECTED: that asset has no demo event track, so there is "
+                "nothing to sync to. showcase_demo only works on a capture "
+                "made by record_website_demo. Place this one with "
+                "insert_media and add zooms yourself.")
+    try:
+        strength = round(min(max(float(zoom_strength), ZOOM_STRENGTH_MIN),
+                             ZOOM_STRENGTH_MAX), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: zoom_strength must be a number (0.05-1.5)."
+
+    edl0 = ctx.latest_edl()["json"]
+    prog_before = program_duration(edl0)
+    at = prog_before if at_output_s is None else at_output_s
+    try:
+        at = float(at)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s must be a number — where in the FINAL "
+                "edited video the demo goes, in seconds. Omit it to append "
+                "the demo at the end.")
+
+    clip_dur = _asset_media_duration(ctx, asset)
+    before = {i.get("id") for i in (edl0.get("inserts") or [])}
+    placed = insert_media(ctx, asset_key, at, duration_s=clip_dur)
+    if not placed.startswith("EDL v"):
+        return placed                      # REJECTED / failure, verbatim
+
+    edl = dict(ctx.latest_edl()["json"])
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    item = next((i for i in inserts if i.get("id") not in before), None)
+    windows = insert_windows(
+        inserts, Timeline([list(k) for k in (edl.get("keep") or [])],
+                          inserts, edl.get("speed") or [])) if item else {}
+    win = windows.get((item or {}).get("id"))
+    if win is None:
+        return (placed + "\nThe demo is placed, but its position in the "
+                "program could not be resolved, so no zooms or sounds were "
+                "synced. Add them with add_zoom / add_sfx.")
+    base, demo_end = win
+    prog = program_duration(edl)
+    to_frame = _capture_point_mapper(ctx, edl, asset)
+
+    demo_len = max(0.0, demo_end - base)
+
+    def prog_t(t):
+        """Capture time -> program time, clamped inside the demo's window."""
+        return round(min(max(base + float(t), base), demo_end - 0.02), 2)
+
+    def inside(ev):
+        """Events past the end of the placed window are DROPPED, not clamped.
+        Clamping would stack every late click's sound on the final frame —
+        a burst of noise at the cut, which reads as a bug rather than as the
+        truncation it actually is."""
+        return float(ev.get("t", 0.0)) <= demo_len + 0.05
+
+    dropped_late = sum(1 for e in events if not inside(e))
+    events = [e for e in events if inside(e)]
+    if dropped_late:
+        notes_late = (f"{dropped_late} event(s) fell past the end of the "
+                      "placed clip and were not synced")
+    else:
+        notes_late = ""
+
+    fx = dict(edl.get("effects") or {})
+    zlist = [dict(z) for z in (fx.get("zooms") or [])]
+    sfx_items = [dict(s) for s in (edl.get("sfx") or [])]
+    made_zooms, made_sfx = 0, 0
+    notes = [notes_late] if notes_late else []
+
+    clicks = [e for e in events if e.get("kind") == "click"
+              and "x" in e and "y" in e]
+    if zooms and clicks:
+        # A navigation resets the run: the viewer needs the whole new page
+        # before being pushed into a corner of it.
+        navs = [e["t"] for e in events if e.get("kind") == "nav"]
+        runs = []
+        for run in _demo_zoom_runs(clicks):
+            split, current = [], []
+            for ev in run:
+                if current and any(current[-1]["t"] < n <= ev["t"]
+                                   for n in navs):
+                    split.append(current)
+                    current = []
+                current.append(ev)
+            if current:
+                split.append(current)
+            runs.extend(split)
+        for run in runs:
+            if made_zooms >= DEMO_MAX_ZOOMS:
+                notes.append(
+                    f"stopped at {DEMO_MAX_ZOOMS} zooms — the rest of the "
+                    "clicks still have their sounds")
+                break
+            s = prog_t(run[0]["t"] - DEMO_ZOOM_LEAD_S)
+            e = prog_t(run[-1]["t"] + DEMO_ZOOM_TAIL_S)
+            if e - s < 0.45:
+                continue
+            # Non-overlapping by construction: two zoom windows that touch
+            # would step the centre while both are pushed in, which reads as
+            # a jump cut inside a move.
+            if zlist and zlist[-1].get("end", 0) > s - 0.15:
+                s = round(zlist[-1]["end"] + 0.15, 2)
+                if e - s < 0.45:
+                    continue
+            span = e - s
+            pts = []
+            for ev in run:
+                cx, cy = to_frame(ev["x"], ev["y"])
+                f = min(max((prog_t(ev["t"]) - s) / span, 0.0), 1.0)
+                if pts and f - pts[-1]["f"] < 0.02:
+                    continue          # same instant: one waypoint is enough
+                pts.append({"f": round(f, 4), "cx": round(cx, 3),
+                            "cy": round(cy, 3)})
+            if not pts:
+                continue
+            # Hold the first and last positions to the window edges so the
+            # push-in starts and the pull-out ends ON the thing being shown.
+            head = dict(pts[0]); head["f"] = 0.0
+            tail = dict(pts[-1]); tail["f"] = 1.0
+            pts = [head] + [p for p in pts if 0.0 < p["f"] < 1.0] + [tail]
+            item_z = {"id": _next_item_id(zlist, "zm"), "start": s, "end": e,
+                      "strength": strength}
+            if len(pts) >= 2:
+                item_z["mode"] = "follow"
+                item_z["path"] = pts
+            else:
+                item_z["mode"] = "ease"
+                item_z["cx"], item_z["cy"] = pts[0]["cx"], pts[0]["cy"]
+            zlist.append(item_z)
+            made_zooms += 1
+
+    if click_sounds:
+        for ev in events:
+            if made_sfx >= DEMO_MAX_SFX:
+                notes.append(f"stopped at {DEMO_MAX_SFX} sounds")
+                break
+            kind = ev.get("kind")
+            if kind == "click":
+                slug, gain = "click", -13.0
+            elif kind == "nav":
+                slug, gain = "pop", -16.0
+            elif kind == "scroll":
+                slug, gain = "swipe", -20.0
+            else:
+                continue
+            key = sfx_library.ref(slug)
+            sound, serr = _resolve_sfx(ctx, key)
+            if serr:
+                continue           # a pack without this sound: skip silently
+            t = prog_t(ev["t"])
+            if t > max(0.0, prog - 0.05):
+                continue
+            taken = {s.get("id") for s in sfx_items}
+            n = 1
+            while f"sx{n}" in taken:
+                n += 1
+            sfx_items.append({"id": f"sx{n}", "storage_key": key,
+                              "at": t, "gain_db": gain})
+            made_sfx += 1
+
+    fx["zooms"] = zlist
+    edl["effects"] = fx
+    edl["sfx"] = sfx_items
+    written = ctx.write_edl(
+        edl, f"cut the demo like a product video: {made_zooms} gliding "
+             f"zoom(s) onto the clicks and {made_sfx} synced sound(s) across "
+             f"{base}-{demo_end}s")
+    extra = ("\nNOTE: " + "; ".join(notes) + "." if notes else "")
+    return (placed + "\n" + written + extra
+            + f"\nThe demo runs {base}-{demo_end}s in the edit. Tell the user "
+            "what it shows, and that the clicks are zoomed and sounded. "
+            "Adjust any single zoom with remove_zoom / add_zoom.")
 
 
 # ------------------------------------------------------------------ #
@@ -6104,6 +6510,50 @@ TOOLS = {
                                         "enum": ["landscape", "portrait",
                                                  "square"]},
                         "scroll": {"type": "boolean"}}),
+    "record_website_demo": (
+        record_website_demo,
+        "RECORD THE BROWSER USING A SITE — the showcase capture. A headless "
+        "browser opens the URL with a VISIBLE cursor drawn on screen and "
+        "works through `steps` you write: it glides the pointer to a "
+        "button, clicks it, waits for the page to react, "
+        "types into fields at human speed, scrolls between sections. THE "
+        "tool for 'record yourself using my product', a launch/demo video, "
+        "or 'show how it works', where record_website only pans down a "
+        "static page. Steps are objects: {do:'click', text:'Start free "
+        "trial'} (text = the VISIBLE label; or selector: a CSS selector), "
+        "{do:'type', selector:'input[type=email]', text:'you@example.com'}, "
+        "{do:'scroll', to:'Pricing'} or {do:'scroll', by:800}, "
+        "{do:'hover', text:'Plans'}, {do:'press', key:'Enter'}, "
+        "{do:'wait', seconds:1.5}, {do:'goto', url:'…'}. Add "
+        "`seconds` to any step to hold longer after it. It returns an EVENT "
+        "TRACK — every click, scroll and keystroke timestamped with its "
+        "position in the frame — then place it with showcase_demo, which "
+        "uses that track. It records the PUBLIC site as a visitor sees it "
+        "and will not type into password or payment fields. Write 4-10 "
+        "steps that tell one story; a demo that clicks everything shows "
+        "nothing.",
+        {"url": {"type": "string"},
+         "steps": {"type": "array", "items": {"type": "object"}},
+         "orientation": {"type": "string",
+                         "enum": ["landscape", "portrait", "square"]}}),
+    "showcase_demo": (
+        showcase_demo,
+        "PLACE A RECORDED DEMO AND CUT IT LIKE A PRODUCT VIDEO — one call. "
+        "Splices the capture into the edit, then uses its event track to "
+        "glide a zoom onto each click (the frame pushes in and TRAVELS "
+        "between buttons instead of cutting in and out) and land a click "
+        "sound on the exact frame of each press, a soft pop on each page "
+        "change and a swipe under each scroll. Only works on a capture from "
+        "record_website_demo. at_output_s defaults to the END of the "
+        "current edit; zoom_strength 0.05-1.5 (0.4 default — screen text "
+        "needs a real push to read); set zooms=false or click_sounds=false "
+        "to place it plainly. Use insert_media instead only when the user "
+        "wants the raw capture with no treatment.",
+        {"asset_key": {"type": "string"},
+         "at_output_s": {"type": "number"},
+         "zoom_strength": {"type": "number"},
+         "click_sounds": {"type": "boolean"},
+         "zooms": {"type": "boolean"}}),
     "set_color_grade": (set_color_grade, "Apply a color-grade preset to the "
                         "whole video (captions stay unstyled): vibrant, "
                         "warm, cool, bw, vintage, cinematic — or 'none' to "
@@ -6615,6 +7065,8 @@ REQUIRED_ARGS = {
     "set_frame": ["ratio"],
     "auto_reframe": ["ratio"],
     "record_website": ["url"],
+    "record_website_demo": ["url", "steps"],
+    "showcase_demo": ["asset_key"],
     "search_stock": ["query"],
     "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
@@ -6666,7 +7118,8 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "swap_music", "set_music_fit",
                "add_sfx", "move_sfx", "remove_sfx",
                "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
-               "record_website", "add_stock_media",
+               "record_website", "record_website_demo", "showcase_demo",
+               "add_stock_media",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "set_fades", "set_transitions",
@@ -6698,7 +7151,12 @@ def _tool_disabled(name):
         return not videogen.video_gen_available()
     if name == "fetch_url":
         return not config.URL_FETCH_ENABLED
-    if name == "record_website":
+    if name in ("record_website", "record_website_demo"):
+        return not webrecord.available()
+    # showcase_demo can only ever operate on a capture the demo recorder
+    # made, so where that is off it has nothing to act on and must not be
+    # advertised — the same honest-off contract as every other tool here.
+    if name == "showcase_demo":
         return not webrecord.available()
     if name in ("search_stock", "add_stock_media"):
         return not stock.available()
