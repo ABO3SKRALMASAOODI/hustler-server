@@ -393,9 +393,23 @@ REMOTE_EXECUTOR_URL = os.getenv("REMOTE_EXECUTOR_URL", "").strip().rstrip("/")
 # is only a job id + payload — so this guards compute/cost, not data secrecy.
 REMOTE_EXECUTOR_SECRET = os.getenv("REMOTE_EXECUTOR_SECRET", "")
 # Dispatcher-side HTTP timeout awaiting a remote render. Must exceed the longest
-# real encode AND stay under Cloud Run's request cap (3600s). A render on 8 vCPU
-# is minutes; on timeout the dispatcher requeues (renders are idempotent/cached).
-REMOTE_EXECUTOR_TIMEOUT_S = int(os.getenv("REMOTE_EXECUTOR_TIMEOUT_S", "3300"))
+# real encode AND stay UNDER the executor's own request timeout, so that when a
+# job wedges the executor kills it shortly after the dispatcher has given up —
+# rather than leaving an orphan burning 8 vCPU alongside the retry.
+#
+# 1500 (was 3300), paired with `--timeout 1800` on the Cloud Run service.
+# Two wedged finals once ran the old 3600s cap to the second, on a box billed
+# per instance-second, while the longest HEALTHY job on this hardware is ~300s.
+# 1500 is 5x that: generous for a real 4K final, and a wedge now costs 25
+# minutes instead of an hour. On timeout the dispatcher requeues, which is safe
+# because renders are idempotent and cached by fingerprint.
+#
+# CHANGE THE TWO TOGETHER. This is deliberately a code default rather than a
+# Render env var: per-service envs for a paired constant are exactly how
+# PIPELINE_VERSION drifted in July and put every project into a re-index loop.
+# If you raise Cloud Run's --timeout, raise this to match; it must always be
+# the smaller of the two.
+REMOTE_EXECUTOR_TIMEOUT_S = int(os.getenv("REMOTE_EXECUTOR_TIMEOUT_S", "1500"))
 # Port the executor's HTTP server binds (Cloud Run injects $PORT, default 8080).
 EXECUTOR_PORT = int(os.getenv("PORT", "8080"))
 # How many index artifacts (proxy, wav, thumbnails, contact sheets) are PUT to

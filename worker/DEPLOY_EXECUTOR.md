@@ -40,7 +40,7 @@ gcloud run deploy valmera-executor \
   --concurrency 1 \
   --min-instances 0 \
   --max-instances 5 \
-  --timeout 3600 \
+  --timeout 1800 \
   --allow-unauthenticated \
   --set-env-vars "WORKER_ROLE=executor,REMOTE_EXECUTOR_SECRET=$EXEC_SECRET"
 ```
@@ -84,9 +84,16 @@ curl https://valmera-executor-xxxx.a.run.app/health      # -> {"status":"ok",...
   you're back to renting.
 - **`--max-instances 5`** — your cost ceiling and your parallelism ceiling.
   5 × 8 vCPU only ever runs when 5 jobs overlap; tune to taste.
-- **`--timeout 3600`** — Cloud Run's max; well above any real render. The
-  dispatcher's own timeout (`REMOTE_EXECUTOR_TIMEOUT_S`, default 3300s) sits
-  just under it.
+- **`--timeout 1800`** — a wedge ceiling, not a headroom figure. It was 3600
+  (Cloud Run's max) and two wedged finals ran it to the second, on a service
+  billed per instance-second; the longest HEALTHY job on this hardware is
+  ~300s, so 1800 is still 6x. The dispatcher's own timeout
+  (`REMOTE_EXECUTOR_TIMEOUT_S`, default **1500s**) must always sit UNDER this,
+  so that a wedged job is killed by the executor shortly after the dispatcher
+  gave up on it — otherwise the orphan keeps burning 8 vCPU next to the retry.
+  **Change the two together**; the dispatcher side is a code constant in
+  `worker/config.py`, deliberately not a per-service env var (see
+  `PIPELINE_VERSION` for what env drift on a paired constant costs).
 - **`--allow-unauthenticated`** — Render isn't in GCP's IAM, so the endpoint is
   public but guarded by the bearer secret (`/run` returns 401 without it). See
   "Hardening" below to lock it down further later.
