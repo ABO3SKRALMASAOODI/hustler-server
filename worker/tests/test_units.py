@@ -1467,9 +1467,17 @@ tr_edl = validate_edl(
                                 "duration_s": 0.3}}}, 60).model_dump()
 check("transition survives validation",
       tr_edl["effects"]["transition"] == {"style": "dip_black",
-                                          "duration_s": 0.3})
+                                          "duration_s": 0.3,
+                                          "scope": "scene"})
+# Round 48: an EDL written before `scope` existed reads as 'scene'. Every one
+# of those carries the every-cut defect, so defaulting them to the fixed
+# behaviour repairs them on their next render instead of grandfathering a bug.
+check("a scope-less transition defaults to scene, not every cut",
+      tr_edl["effects"]["transition"]["scope"] == "scene")
 check("describe mentions transitions",
       "transitions dip_black 0.3s" in describe_edl(tr_edl, 60))
+check("describe says WHERE the transitions land",
+      "at scene changes" in describe_edl(tr_edl, 60))
 # Round 35: over-long transition durations clamp (cap-removal policy)
 _tc = validate_edl({"keep": [[0, 20]],
                     "effects": {"transition": {"style": "dip_black",
@@ -1533,9 +1541,64 @@ tctx = ToolCtx({"keep": [[0.0, 5.0], [10.0, 20.0]]})
 r = agent_tools.set_transitions(tctx, "dip_black")
 check("set_transitions writes style + default duration",
       tctx.written["effects"]["transition"] == {"style": "dip_black",
-                                                "duration_s": 0.3} and
+                                                "duration_s": 0.3,
+                                                "scope": "scene"} and
       "dip_black" in r)
 check("set_transitions counts the junctions", "1 junction" in r)
+# ── Round 48: a transition marks a SCENE CHANGE, not every cut ──────────
+# A real edit shipped 45 whip pans through one continuous shot: cut_silences
+# leaves one junction per removed pause, and every one of them is a jump cut
+# in the same framing. A jump cut is supposed to be invisible.
+_shots2 = {"shots": [{"id": 1, "start": 0.0, "end": 40.0},
+                     {"id": 2, "start": 40.0, "end": 80.0}]}
+# 5 kept pieces of ONE shot (silence removal) then one piece of the next.
+_jump_edl = {"keep": [[0.0, 2.0], [5.0, 7.0], [10.0, 12.0],
+                      [20.0, 22.0], [30.0, 32.0], [50.0, 52.0]],
+             "effects": {"transition": {"style": "whip_left",
+                                        "duration_s": 0.2}}}
+import timeline as timeline_mod                        # noqa: E402
+_sc = timeline_mod.transition_junctions(_jump_edl, _shots2)
+check("only the real shot change gets a transition", _sc == {4})
+check("the same-shot jump cuts get none", len(_sc) == 1 and 0 not in _sc)
+_every = dict(_jump_edl, effects={"transition": {
+    "style": "whip_left", "duration_s": 0.2, "scope": "every_cut"}})
+check("scope='every_cut' still puts one on all of them",
+      timeline_mod.transition_junctions(_every, _shots2) == {0, 1, 2, 3, 4})
+check("no shots in the index falls back to every junction — never to zero",
+      timeline_mod.transition_junctions(_jump_edl, {}) == {0, 1, 2, 3, 4})
+# An insert is a real scene change on both sides of itself.
+_ins_edl = {"keep": [[0.0, 2.0], [5.0, 7.0]],
+            "inserts": [{"id": "i1", "kind": "image", "at_output_s": 2.0,
+                         "duration_s": 1.5, "storage_key": "k"}],
+            "effects": {"transition": {"style": "dip_black",
+                                       "duration_s": 0.3}}}
+check("both sides of a spliced insert are scene changes",
+      timeline_mod.transition_junctions(_ins_edl, _shots2) == {0, 1})
+# The tool must REFUSE rather than apply 45 whips to one continuous shot.
+_ctxj = ToolCtx({"keep": [[0.0, 2.0], [5.0, 7.0], [10.0, 12.0]]})
+_ctxj.index = _shots2
+_rj = agent_tools.set_transitions(_ctxj, "whip_left", 0.2)
+check("an all-jump-cut edit is NOT given transitions",
+      _rj.startswith("NOT APPLIED") and _ctxj.written is None)
+check("...and it says why, with both real options",
+      "jump cut" in _rj and "every_cut" in _rj)
+_ctxs = ToolCtx(dict(_jump_edl, effects={}))
+_ctxs.index = _shots2
+_rs = agent_tools.set_transitions(_ctxs, "whip_left", 0.2)
+check("the result reports the junctions it ACTUALLY used, not the cut count",
+      "1 of 5 junctions" in _rs)
+check("...and names what it skipped and why", "jump cut inside one" in _rs)
+check("scope is written into the EDL so the renderer cannot guess",
+      _ctxs.written["effects"]["transition"]["scope"] == "scene")
+_ctxe = ToolCtx(dict(_jump_edl, effects={}))
+_ctxe.index = _shots2
+_re = agent_tools.set_transitions(_ctxe, "whip_left", 0.2, scope="every_cut")
+check("explicit every_cut is honoured", "5 of 5 junctions" in _re and
+      _ctxe.written["effects"]["transition"]["scope"] == "every_cut")
+check("an unknown scope is rejected with guidance",
+      agent_tools.set_transitions(ToolCtx({"keep": [[0, 5], [6, 9]]}),
+                                  "dip_black",
+                                  scope="everything").startswith("REJECTED"))
 check("set_transitions rejects crossfade asks with guidance",
       agent_tools.set_transitions(ToolCtx({"keep": [[0.0, 5.0]]}),
                                   "crossfade").startswith("REJECTED"))
@@ -4335,6 +4398,39 @@ check("outro: a deliberately card-less final is NOT re-exported forever "
       _fic({"outro_v": 0}))
 check("outro: a pre-card final (no stamp at all) still re-exports",
       not _fic({"src_sha256": "x"}) and not _fic(None))
+
+# --- round 48: scene-scoped transitions bust the same two caches ----------
+# Renders are cached by (project, variant, EDL VERSION), not by content, so a
+# render-pipeline change is invisible to the cache — exactly the trap the end
+# card fell into. A real customer's preview has 45 whip pans through one
+# continuous shot sitting in that cache right now.
+_TV = wconfig.TRANSITION_VERSION
+_tr_edl = {"effects": {"transition": {"style": "whip_left",
+                                      "duration_s": 0.2}}}
+check("transitions: an EDL with NO transition keeps its cache",
+      renderer.transitions_current(None, {"keep": [[0, 5]]})
+      and renderer.transitions_current({}, {"effects": {}}))
+check("transitions: a pre-round-48 render of a transition EDL is busted",
+      not renderer.transitions_current({"src_sha256": "x"}, _tr_edl)
+      and not renderer.transitions_current(None, _tr_edl))
+check("transitions: a current render is left alone",
+      renderer.transitions_current({"trans_v": _TV}, _tr_edl))
+check("transitions: the render stamps trans_v",
+      '"trans_v": config.TRANSITION_VERSION' in
+      open(os.path.join(os.path.dirname(__file__),
+                        "../renderer.py")).read())
+check("transitions: the backend's TRANSITION_VERSION matches the worker's",
+      f"TRANSITION_VERSION = {_TV}" in _bev)
+_bmod2 = {"TRANSITION_VERSION": _TV}
+exec(compile(_bev[_bev.index("def _transitions_are_current"):
+                  _bev.index("@video_bp.route",
+                             _bev.index("def _transitions_are_current"))],
+             "video.py", "exec"), _bmod2)
+_tic = _bmod2["_transitions_are_current"]
+check("transitions: the backend re-exports a final rendered before the fix",
+      not _tic({"outro_v": _OV}) and not _tic(None))
+check("transitions: the backend leaves a current final alone",
+      _tic({"trans_v": _TV}))
 
 # --- honesty: the agent is told the card exists ---------------------------
 _sp = agent_prompt.system_prompt()

@@ -1279,9 +1279,10 @@ def project_state(user_id, project_id):
             continue
         bv = by_version.setdefault(v, {})
         if variant == "final" and not (_final_is_current(m)
+                                       and _transitions_are_current(m)
                                        and _watermark_is_current(m, _paid,
                                                                  _wm)):
-            continue          # stale end card or wrong watermark: re-export
+            continue          # stale card, transitions or watermark: re-export
         if variant not in bv:
             bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
     # The preview the player should show is the render of the NEWEST edl version
@@ -2204,6 +2205,30 @@ def _final_is_current(meta):
     return v == 0 or v == OUTRO_VERSION
 
 
+# Mirrors worker/config.TRANSITION_VERSION — a worker test asserts they match.
+TRANSITION_VERSION = 1
+
+
+def _transitions_are_current(meta):
+    """Was this final rendered with scene-scoped transitions?
+
+    The backend half of worker/renderer.transitions_current, and it has to
+    exist for the same reason the OUTRO_VERSION half does: the studio
+    short-circuits to presigning an existing final_asset_id and never posts
+    /render/final, so the worker's cache never gets ASKED to bust. A final
+    rendered before round 48 has a junction effect on EVERY cut — 45 whip pans
+    through one continuous shot, on a real customer's edit — and without this
+    it stays downloadable forever.
+
+    Unlike the outro this cannot check the EDL (the caller has only the render
+    meta), so it is stamp-presence: no `trans_v` means the render predates
+    scene scoping. Finals with no transitions at all get re-encoded once
+    unnecessarily as a result. That is the cheap direction of the trade — the
+    expensive one is a customer downloading the broken cut.
+    """
+    return (meta or {}).get("trans_v") == TRANSITION_VERSION
+
+
 # Mirrors worker/config.WATERMARK_VERSION — a worker test asserts they match.
 # The free-tier mark is burned into FINAL renders only (see the worker's
 # renderer.wants_watermark), so this is the backend half of the same rule.
@@ -2315,9 +2340,10 @@ def list_edls(user_id, project_id):
             continue
         bv = by_version.setdefault(v, {})
         if variant == "final" and not (_final_is_current(m)
+                                       and _transitions_are_current(m)
                                        and _watermark_is_current(m, _paid,
                                                                  _wm)):
-            continue          # stale end card or wrong watermark: re-export
+            continue          # stale card, transitions or watermark: re-export
         # Keep the NEWEST asset id per (version, variant): a version can be
         # re-rendered, and the version list must point at the latest encode.
         if r["id"] > bv.get(variant, 0):

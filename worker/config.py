@@ -642,6 +642,19 @@ OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
 # Bump when the shaped-text emission changes again.
 GFX_SHAPING_VERSION = 1
 
+# ── Where transitions land (round 48) ─────────────────────────────────────
+# Stamped as `trans_v` on every render and compared ONLY for EDLs that carry a
+# transition, so nothing else loses its cache. Renders below v1 put a junction
+# effect on EVERY cut — which on a silence-cut talking head is a full-screen
+# effect every couple of seconds through one continuous shot, because
+# cut_silences leaves one junction per removed pause and they are all jump
+# cuts in the same framing. A real customer's preview shipped with 45 whip
+# pans through one shot. Those renders are known-wrong, and the cache is keyed
+# on EDL VERSION rather than content, so without this stamp she would keep
+# being served the broken file forever. Bump if junction selection changes
+# again.
+TRANSITION_VERSION = 1
+
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera
 # agent" sliding out beside it every few seconds and sliding back.

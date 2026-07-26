@@ -558,13 +558,40 @@ TRANSITION_MIN_S = 0.1
 TRANSITION_MAX_S = 1.5
 
 
+# WHICH junctions a transition lands on. This exists because "every cut" was
+# the only option and it was wrong for the commonest edit there is.
+#
+# A talking-head video that has been through cut_silences has one junction per
+# removed pause — 45 of them in a real 3.9-minute prod job — and essentially
+# all of them sit INSIDE one continuous shot: same framing, same subject, same
+# background, the speaker's head half a word further along. That is a jump cut,
+# and the whole point of a jump cut is that it is invisible. Putting a 0.2s
+# whip pan on each one fires a full-screen effect every two seconds through
+# footage that never changed scene, which is what a real user got and correctly
+# called broken.
+#
+#   "scene"     — junctions where the footage genuinely CHANGES: the two sides
+#                 come from different shots in the index, or one side is an
+#                 insert (b-roll, title card, generated clip). This is what
+#                 people mean by "add transitions".
+#   "every_cut" — the old behaviour. Legitimate for a montage assembled from
+#                 many separate clips; it has to be asked for.
+TRANSITION_SCOPES = ("scene", "every_cut")
+
+
 class TransitionSpec(BaseModel):
-    """A junction effect at EVERY cut/insert boundary. Duration-preserving
-    (video animates out/in around each junction; audio is untouched), so no
-    timeline math changes anywhere."""
+    """A junction effect at scene changes (or, opt-in, at every cut).
+    Duration-preserving (video animates out/in around each junction; audio is
+    untouched), so no timeline math changes anywhere."""
     style: Literal["dip_black", "dip_white", "whip_left", "whip_right",
                    "zoom_punch", "glitch", "flash"]
     duration_s: float = 0.3
+    # Absent (older EDLs) reads as "scene". Those EDLs were all written before
+    # scope existed, so every one of them carries the defect above; defaulting
+    # them to the fixed behaviour repairs them on their next render rather than
+    # grandfathering a bug. Already-rendered outputs are untouched — renders
+    # are cached by EDL fingerprint and the stored JSON does not change.
+    scope: Literal["scene", "every_cut"] = "scene"
 
 
 REGION_MODES = ("blur", "pixelate", "black")
@@ -1728,7 +1755,10 @@ def describe_edl(edl_dict, duration=None):
             bits.append("fade " + "/".join(fades))
         if fx.transition:
             bits.append(f"transitions {fx.transition.style} "
-                        f"{fx.transition.duration_s}s")
+                        f"{fx.transition.duration_s}s"
+                        + (" at every cut"
+                           if fx.transition.scope == "every_cut"
+                           else " at scene changes"))
         if fx.regions:
             bits.append("censor region x" + str(len(fx.regions)))
         if fx.stylize:

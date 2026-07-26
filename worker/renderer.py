@@ -32,7 +32,7 @@ import sheets
 import storage
 from schemas import (clean_fingerprint, EDLValidationError,
                      is_canvas_program, speed_pieces, validate_edl)
-from timeline import Timeline, merge_spans
+from timeline import Timeline, merge_spans, transition_junctions
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
 MAX_ENABLE_SPANS = 80
@@ -346,6 +346,27 @@ def shaping_current(meta, edl):
     if not edl_has_shaped_text(edl):
         return True
     return ((meta or {}).get("gfx_shape_v") or 0) == config.GFX_SHAPING_VERSION
+
+
+def transitions_current(meta, edl):
+    """Does this cached render predate scene-scoped transitions?
+
+    Renders are cached by (project, variant, EDL VERSION), not by content, so
+    a render-pipeline change is invisible to the cache — the same problem the
+    end card had. Every render made before round 48 put a junction effect on
+    EVERY cut, which on a silence-cut talking head is a full-screen effect
+    every couple of seconds through one continuous shot. A real customer's
+    preview is sitting in that cache right now; leaving it there means she
+    keeps being served the broken video no matter what she does next.
+
+    Only EDLs that actually carry a transition are ever busted — everything
+    else keeps its cache, same grandfathering discipline as shaping_current
+    and outro_current, and the same reason this is a named function rather
+    than an inline comparison.
+    """
+    if not ((edl or {}).get("effects") or {}).get("transition"):
+        return True
+    return ((meta or {}).get("trans_v") or 0) == config.TRANSITION_VERSION
 
 
 def watermark_font_path():
@@ -794,6 +815,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # Styles that manufacture geometry (whip/zoom_punch) forced do_norm
     # above, so W/H/fps here are the real per-block dimensions.
     trans_post = None    # (style, tdur) applied ONCE after concat, not per block
+    # WHICH junctions get one. Not all of them, by default — after cut_silences
+    # nearly every junction is a jump cut inside one continuous shot, and a
+    # full-screen effect every couple of seconds through footage that never
+    # changed scene is what a real user shipped and called broken. The set is
+    # resolved by timeline.transition_junctions so this and set_transitions'
+    # own count can never disagree; scope 'every_cut' returns all of them.
+    junctions = (transition_junctions(edl, index, n_blocks=len(blocks))
+                 if transition and len(blocks) > 1 else set())
+    if transition and len(blocks) > 1 and not junctions:
+        transition = None       # nothing qualified — emit clean hard cuts
     if transition and len(blocks) > 1:
         tdur = float(transition.get("duration_s") or 0.3)
         style = transition.get("style") or "dip_black"
@@ -810,7 +841,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             faded = []
             for k, (vlab, alab, bd) in enumerate(blocks):
                 td = min(tdur, max(0.0, bd / 2 - 0.05))
-                first, last = k == 0, k == nb - 1
+                # `first`/`last` have always meant "no incoming edge" / "no
+                # outgoing edge" — they were just spelled as the ends of the
+                # timeline because every junction qualified. Now a junction
+                # only exists where transition_junctions says so, and the two
+                # ends fall out for free (junction -1 and junction nb-1 are
+                # never in the set).
+                first = (k - 1) not in junctions
+                last = k not in junctions
                 if td < 0.05 or (first and last):
                     faded.append((vlab, alab, bd))
                     continue
@@ -871,6 +909,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         for k in range(len(blocks) - 1):
             bd_k, bd_n = blocks[k][2], blocks[k + 1][2]
             cum += bd_k
+            # `cum` must keep accumulating for EVERY block — it is the junction's
+            # position in program time. Only whether we emit a whip here is
+            # conditional. Skipping the accumulation instead of the append would
+            # slide every later transition onto the wrong moment.
+            if k not in junctions:
+                continue
             td_o = min(tdur, max(0.0, bd_k / 2 - 0.05))
             td_i = min(tdur, max(0.0, bd_n / 2 - 0.05))
             juncs.append((cum, td_o if td_o >= 0.05 else None,
@@ -1942,6 +1986,7 @@ def run_render_job(worker_db, job):
         # where a missing caption fingerprint is trusted.
         if fp_ok and outro_current(cached.get("meta"), variant) \
                 and shaping_current(cached.get("meta"), edl_row["json"]) \
+                and transitions_current(cached.get("meta"), edl_row["json"]) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings):
             return {"render_asset_id": cached["id"],
@@ -2067,6 +2112,7 @@ def run_render_job(worker_db, job):
                   "outro_v": (config.OUTRO_VERSION
                               if outro_seconds(variant == "preview") else 0),
                   "gfx_shape_v": config.GFX_SHAPING_VERSION,
+                  "trans_v": config.TRANSITION_VERSION,
                   "wm_v": watermark_version(variant, is_paid,
                                             wm_settings)})
         # Reclaim the renders this one just replaced. Unique-per-render keys

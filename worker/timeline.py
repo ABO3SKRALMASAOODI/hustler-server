@@ -582,6 +582,111 @@ def remap_program_items(edl, old_tl, new_tl):
     return region_notes
 
 
+def _shot_at(shots, t):
+    """Which indexed shot contains source second `t`, or None.
+
+    Shots are contiguous and sorted, so a plain scan is fine (a long video has
+    tens of them, not thousands). `t` is nudged INWARD by a frame's worth of
+    time by the caller, because a keep segment's own end lands exactly on a
+    shot boundary about as often as not and the answer there is ambiguous.
+    """
+    for sh in shots:
+        try:
+            if float(sh["start"]) - 1e-6 <= t < float(sh["end"]) + 1e-6:
+                return int(sh["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+# A keep segment's endpoints sit ON the cut. Comparing the exact endpoints
+# would ask "which shot owns this instant", which is ambiguous at a boundary;
+# stepping ~one frame inside each side asks "which shot is the footage either
+# side of this cut from", which is the real question.
+_JUNCTION_EPS = 0.04
+
+
+def transition_junctions(edl, index, n_blocks=None):
+    """Which junctions a transition should land on.
+
+    Returns a set of junction indices, where junction k sits between render
+    block k and block k+1 (blocks are the keep segments with inserts spliced in
+    at their boundaries — the same order build_filtergraph assembles).
+
+    THE POINT OF THIS FUNCTION. After cut_silences a talking-head video has one
+    junction per removed pause, and nearly all of them are inside a single
+    continuous shot. Those are jump cuts, and a jump cut works by being
+    invisible. A whip pan on each one fires a full-screen effect every couple
+    of seconds through footage that never changed scene — a real user shipped
+    exactly that and called it broken. So scope 'scene' keeps only the
+    junctions where the footage genuinely changes:
+
+      * either side is an INSERT (b-roll, title card, generated clip) — always
+        a real scene change;
+      * the two keep segments either side come from DIFFERENT indexed shots.
+
+    With no shots in the index (a canvas program, or an index too old to carry
+    them) there is nothing to distinguish a scene change from a jump cut, so
+    this returns every junction — the honest answer is the previous behaviour,
+    not silently zero transitions.
+    """
+    keep = [(float(k[0]), float(k[1])) for k in (edl.get("keep") or [])
+            if k is not None and len(k) >= 2]
+    inserts = list(edl.get("inserts") or [])
+    scope = ((edl.get("effects") or {}).get("transition") or {}).get("scope") \
+        or "scene"
+
+    # Rebuild the block order build_filtergraph uses: inserts splice in at
+    # their keep boundary, before the segment that starts there. Segment
+    # lengths must be the speed-REMAPPED ones, exactly as the renderer uses,
+    # or an edit with speed spans would place its inserts at the wrong blocks.
+    try:
+        seg_out_len = Timeline(keep, inserts, edl.get("speed")).seg_out_len
+    except Exception:
+        seg_out_len = [max(0.0, e - s) for s, e in keep]
+    at_list = sorted(_ins_tuple(i)[0] for i in inserts)
+    blocks, ins_j, pre = [], 0, 0.0
+    for i, (s, e) in enumerate(keep):
+        while ins_j < len(at_list) and at_list[ins_j] <= pre + 1e-6:
+            blocks.append(("ins", ins_j))
+            ins_j += 1
+        blocks.append(("seg", i))
+        pre += seg_out_len[i] if i < len(seg_out_len) else max(0.0, e - s)
+    while ins_j < len(at_list):
+        blocks.append(("ins", ins_j))
+        ins_j += 1
+    if n_blocks is not None and len(blocks) != n_blocks:
+        # The renderer is authoritative about its own block count. If the two
+        # ever disagree, fall back to every junction rather than dropping
+        # transitions the user asked for at the wrong places.
+        return set(range(max(0, n_blocks - 1)))
+
+    n_junctions = max(0, len(blocks) - 1)
+    if scope == "every_cut":
+        return set(range(n_junctions))
+
+    shots = (index or {}).get("shots") or []
+    if not shots:
+        return set(range(n_junctions))
+
+    out = set()
+    for k in range(n_junctions):
+        a_kind, a_i = blocks[k]
+        b_kind, b_i = blocks[k + 1]
+        if a_kind == "ins" or b_kind == "ins":
+            out.add(k)                      # spliced media: a real change
+            continue
+        a_end = keep[a_i][1] - _JUNCTION_EPS
+        b_start = keep[b_i][0] + _JUNCTION_EPS
+        sa, sb = _shot_at(shots, a_end), _shot_at(shots, b_start)
+        # Unknown on either side (a keep span outside every shot) counts as a
+        # change: a transition the user did not want is a smaller error than
+        # silently dropping one at a real scene boundary.
+        if sa is None or sb is None or sa != sb:
+            out.add(k)
+    return out
+
+
 def merge_spans(spans, gap=0.3):
     """Merge output spans closer than `gap` — keeps ffmpeg enable expressions
     short when there are hundreds of speech spans."""

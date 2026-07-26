@@ -37,7 +37,8 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      output_duration, program_duration, validate_edl,
                      MAX_INSERT_DURATION_S, GAIN_MIN_DB, GAIN_MAX_DB,
                      GRADE_PRESETS, TRANSITION_STYLES, TRANSITION_MIN_S,
-                     TRANSITION_MAX_S, OVERLAY_ANIMS, OVERLAY_SCALE_MIN,
+                     TRANSITION_MAX_S, TRANSITION_SCOPES,
+                     OVERLAY_ANIMS, OVERLAY_SCALE_MIN,
                      OVERLAY_SCALE_MAX, SPEED_FACTOR_MIN, SPEED_FACTOR_MAX,
                      STYLIZE_KINDS, TEXT_ANIMS, TEXT_FONTS, TEXT_TEMPLATES,
                      ZOOM_STRENGTH_MIN, ZOOM_STRENGTH_MAX,
@@ -2433,8 +2434,17 @@ TRANSITION_DESC = {
 }
 
 
-def set_transitions(ctx, style, duration_s=0.3):
+def set_transitions(ctx, style, duration_s=0.3, scope="scene"):
     p = (style or "").strip().lower()
+    sc = (scope or "scene").strip().lower()
+    if sc not in TRANSITION_SCOPES:
+        return (f"REJECTED: scope must be one of "
+                f"{', '.join(TRANSITION_SCOPES)}. 'scene' (the default) puts "
+                "the transition only where the footage actually changes shot "
+                "or an insert splices in. 'every_cut' puts one at every "
+                "junction including the jump cuts left behind by "
+                "cut_silences — only right for a montage built from separate "
+                "clips.")
     edl = dict(ctx.latest_edl()["json"])
     fx = dict(edl.get("effects") or {})
     if p in ("none", "off"):
@@ -2458,13 +2468,45 @@ def set_transitions(ctx, style, duration_s=0.3):
     except (TypeError, ValueError):
         return ("REJECTED: duration_s must be a number of seconds "
                 f"({TRANSITION_MIN_S:g}-{TRANSITION_MAX_S:g}).")
-    fx["transition"] = {"style": p, "duration_s": d}
+    fx["transition"] = {"style": p, "duration_s": d, "scope": sc}
     edl["effects"] = fx
     n_cuts = max(0, len(edl.get("keep") or []) - 1) \
         + len(edl.get("inserts") or [])
+    # How many junctions this ACTUALLY lands on, from the same resolver the
+    # renderer uses — so the sentence the user reads and the video they watch
+    # cannot disagree.
+    try:
+        hit = len(timeline_mod.transition_junctions(edl, ctx.index))
+    except Exception:
+        hit = n_cuts
+    skipped = max(0, n_cuts - hit)
+
+    if sc == "scene" and hit == 0 and n_cuts > 0:
+        # Every junction is a jump cut inside one shot. Applying the transition
+        # anyway is exactly the failure this scope exists to prevent, so don't
+        # — and say why, with the two real options.
+        return (f"NOT APPLIED: this edit has {n_cuts} junctions and every one "
+                "of them is a jump cut INSIDE a single continuous shot (the "
+                "cuts cut_silences left behind), not a scene change. A "
+                f"{d}s {p} on each would fire a full-screen effect every "
+                "couple of seconds through footage that never changes scene, "
+                "which reads as broken. The EDL was NOT changed. Tell the "
+                "user that, and offer either: leave the jump cuts clean (they "
+                "are meant to be invisible), or set_transitions(scope="
+                "'every_cut') if they really do want one on every cut.")
+
+    note = ""
+    if sc == "scene" and skipped:
+        note = (f" — the other {skipped} junction"
+                f"{'s are' if skipped != 1 else ' is'} a jump cut inside one "
+                "continuous shot (left by cut_silences) and deliberately got "
+                "NO transition; those are meant to be invisible. Use "
+                "scope='every_cut' only if the user explicitly wants one on "
+                "every cut.")
+    where = ("every cut" if sc == "every_cut" else "scene changes")
     return ctx.write_edl(
-        edl, f"transitions: {d}s {p} ({TRANSITION_DESC[p]}) at every cut "
-             f"(~{n_cuts} junction{'s' if n_cuts != 1 else ''})")
+        edl, f"transitions: {d}s {p} ({TRANSITION_DESC[p]}) at {where} — "
+             f"{hit} of {n_cuts} junction{'s' if n_cuts != 1 else ''}{note}")
 
 
 REGION_MODES = ("blur", "pixelate", "black")
@@ -7099,10 +7141,29 @@ TOOLS = {
                   "set_fades(fade_in_s=0.5, fade_out_s=0.8).",
                   {"fade_in_s": {"type": "number"},
                    "fade_out_s": {"type": "number"}}),
-    "set_transitions": (set_transitions, "Transitions at EVERY cut point "
-                        "and insert boundary — all duration-preserving "
-                        "junction effects (footage never overlaps, timing "
-                        "never changes). Styles: 'dip_black' = quick dip "
+    "set_transitions": (set_transitions, "Transitions at SCENE CHANGES — "
+                        "junctions where the footage actually changes shot, "
+                        "or where an insert (b-roll, title card, generated "
+                        "clip) splices in. All duration-preserving junction "
+                        "effects (footage never overlaps, timing never "
+                        "changes). IMPORTANT — after cut_silences a "
+                        "talking-head video has one junction per removed "
+                        "pause, and nearly all of them are JUMP CUTS inside "
+                        "one continuous shot: same framing, same subject, "
+                        "the speaker's head half a word further along. A "
+                        "jump cut works by being invisible. Putting a whip "
+                        "or a dip on each one fires a full-screen effect "
+                        "every couple of seconds through footage that never "
+                        "changed scene, and it reads as broken — a real user "
+                        "shipped 45 whips through one continuous shot and "
+                        "said so. scope defaults to 'scene' and handles this "
+                        "for you; the result tells you how many junctions it "
+                        "actually landed on and how many it skipped, so "
+                        "report THAT number, not the cut count. Only pass "
+                        "scope='every_cut' when the user explicitly wants "
+                        "one on every cut, or the edit is a montage "
+                        "assembled from separate clips. Styles: 'dip_black' "
+                        "= quick dip "
                         "through black (calm, universal); 'dip_white' = "
                         "soft white fade-through; 'whip_left'/'whip_right' "
                         "= fast directional slide with motion blur "
@@ -7118,7 +7179,16 @@ TOOLS = {
                         {"style": {"type": "string",
                                    "enum": list(TRANSITION_STYLES)
                                    + ["none"]},
-                         "duration_s": {"type": "number"}}),
+                         "duration_s": {"type": "number"},
+                         "scope": {"type": "string",
+                                   "enum": list(TRANSITION_SCOPES),
+                                   "description":
+                                       "'scene' (default) = only where the "
+                                       "footage changes shot or an insert "
+                                       "splices in. 'every_cut' = every "
+                                       "junction including silence-removal "
+                                       "jump cuts; ask for it only when the "
+                                       "user explicitly wants that."}}),
     "blur_region": (blur_region, "Put a VISIBLE censor over a fixed "
                     "RECTANGLE of the original footage — blur, mosaic or a "
                     "black bar. Use it when the user WANTS the covering to "
