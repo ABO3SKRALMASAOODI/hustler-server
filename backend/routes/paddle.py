@@ -4,7 +4,25 @@ import os
 import jwt
 import datetime
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+import offers
+
 paddle_bp = Blueprint('paddle', __name__)
+
+
+def get_offers_db():
+    """A short-lived connection for offer bookkeeping.
+
+    Deliberately NOT models.get_db(): that one is cached on flask.g for the
+    whole request and shared with the caller, and offers.py rolls back on its
+    own errors — which on a shared connection would discard somebody else's
+    work. A private connection makes the offer path unable to affect anything
+    around it.
+    """
+    return psycopg2.connect(os.environ['DATABASE_URL'],
+                            cursor_factory=RealDictCursor)
 
 # ── Plan definitions ──────────────────────────────────────────────────────────
 
@@ -17,15 +35,25 @@ PLANS_LIVE = {
     # grants credits on that event, so a trialling user is a paying user as
     # far as the app is concerned and simply stops being one if they cancel.
     #
-    # The pricing page now sells ONE product at TWO volumes:
-    #   'ai'     Creator $30/mo, $300/yr — 2,400 credits
-    #   'ai_pro' Pro     $50/mo, $500/yr — 4,000 credits
-    # Credits scale with the price at the same rate (80 credits per dollar,
-    # ~1 credit = $0.01 of model spend), so the margin is identical on both
-    # tiers. Change the number here and PLAN_CREDITS in paddle_webhook.py and
+    # The pricing page sells ONE product at TWO volumes:
+    #   'ai'     Creator $30/mo, $300/yr — 1,500 credits
+    #   'ai_pro' Pro     $50/mo, $500/yr — 3,000 credits
+    #
+    # REBASED FOR MARGIN (round 48). 1 credit is ~$0.01 of real model spend, so
+    # the old 2,400/4,000 grants were $24 and $40 of cost against $30 and $50 of
+    # revenue — a 20% margin at full price, and NEGATIVE for anyone on the
+    # annual price or an intro discount. At 1,500/3,000 the cost is $15 and $30:
+    # a 50% margin on Creator and 40% on Pro, which is the deliberate volume
+    # break that makes Pro worth moving to (60 credits per dollar vs 50).
+    #
+    # NOTE the annual prices are unchanged and are the thin ones: $300/yr is
+    # $25/mo for $15 of cost (40%), $500/yr is $41.67/mo for $30 (28%). Raise
+    # the annual price, not the credits, if that needs fixing.
+    #
+    # Change the number here and PLAN_CREDITS in paddle_webhook.py and
     # PLAN_MONTHLY_LIMITS in credits.py together — three places, one truth.
-    'ai':     {'price_id': 'pri_01kyde25cwqf7t2bk1ekky2pyp', 'yearly_price_id': 'pri_01kyde25n7rxrhajg5xvxxka7y', 'monthly_credits': 2400},
-    'ai_pro': {'price_id': 'pri_01kye15m5262nbs7hjmazrej7j', 'yearly_price_id': 'pri_01kye15mdacm7wzqp740g3rvy4', 'monthly_credits': 4000},
+    'ai':     {'price_id': 'pri_01kyde25cwqf7t2bk1ekky2pyp', 'yearly_price_id': 'pri_01kyde25n7rxrhajg5xvxxka7y', 'monthly_credits': 1500},
+    'ai_pro': {'price_id': 'pri_01kye15m5262nbs7hjmazrej7j', 'yearly_price_id': 'pri_01kye15mdacm7wzqp740g3rvy4', 'monthly_credits': 3000},
     # ── MCP: off the pricing page, kept so the one live subscription resolves.
     # monthly_credits 0 is deliberate — that customer supplies their own model
     # through their own MCP client, so the pool (which meters OUR model spend)
@@ -84,19 +112,6 @@ def decode_token(auth_header):
     return payload.get('sub'), payload.get('email')
 
 
-def _is_within_24h(created_at):
-    """Check if user account was created within the last 24 hours."""
-    if not created_at:
-        return False
-    now = datetime.datetime.utcnow()
-    if isinstance(created_at, str):
-        created_at = datetime.datetime.fromisoformat(created_at)
-    # Make both offset-naive for comparison
-    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is not None:
-        created_at = created_at.replace(tzinfo=None)
-    return (now - created_at).total_seconds() < 86400
-
-
 @paddle_bp.route('/paddle/checkout-config', methods=['POST'])
 def checkout_config():
     """What the browser needs to open an INLINE Paddle checkout itself.
@@ -131,8 +146,35 @@ def checkout_config():
 
     price_id = (PLANS[plan]['yearly_price_id'] if billing == 'yearly'
                 else PLANS[plan]['price_id'])
-    return jsonify({"price_id": price_id, "email": user_email,
-                    "user_id": str(user_id), "plan": plan, "billing": billing})
+    out = {"price_id": price_id, "email": user_email,
+           "user_id": str(user_id), "plan": plan, "billing": billing}
+
+    # The intro discount is decided HERE, by the server, from the user's own
+    # offer row — never from a flag the browser sends. The client cannot ask
+    # for a discount it has not been granted, and cannot keep one past its
+    # expiry, because the only thing it ever receives is an id we chose to put
+    # in this response.
+    #
+    # Monthly only: the discount covers the first billing period, which on an
+    # annual price would be a whole year of credits sold below cost. Paddle
+    # also enforces this via the discount's restrict_to (offers.py), so the two
+    # cannot drift apart.
+    if billing == 'monthly':
+        conn = get_offers_db()
+        try:
+            offer = offers.live_offer(conn, user_id)
+            did = offers.discount_id() if offer else None
+            if offer and did:
+                out["discount_id"] = did
+                out["percent_off"] = offer["percent_off"]
+                out["offer_seconds_remaining"] = offers.seconds_left(offer)
+                offers.mark_served(conn, user_id, offer["kind"])
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return jsonify(out)
 
 
 # ── Create checkout session ───────────────────────────────────────────────────
@@ -149,7 +191,6 @@ def create_checkout_session():
     data = request.json or {}
     plan = data.get('plan', 'plus')
     billing = data.get('billing', 'monthly')  # 'monthly' or 'yearly'
-    use_promo = data.get('use_promo', False)   # 24hr first-month discount
 
     if plan not in PLANS:
         return jsonify({"error": "Invalid plan"}), 400
@@ -170,33 +211,31 @@ def create_checkout_session():
         "checkout": {"success_url": "https://valmera.io/purchase-success"}
     }
 
-    # Apply 24-hour promo: 50% off first month only (monthly plans only)
-    if use_promo and billing == 'monthly':
-        # Check if user is actually within 24h of registration
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
+    # The intro discount, on the HOSTED fallback path. Eligibility is the
+    # server's call from the user's own offer row — `use_promo` from the client
+    # is not consulted at all, because a discount a browser can ask for is a
+    # discount anyone can take. Monthly only, for the reason in offers.py.
+    if billing == 'monthly':
+        conn = None
         try:
-            conn = psycopg2.connect(os.environ['DATABASE_URL'], cursor_factory=RealDictCursor)
-            with conn.cursor() as cur:
-                cur.execute("SELECT created_at FROM users WHERE id = %s", (int(user_id),))
-                row = cur.fetchone()
-            conn.close()
-
-            if row and _is_within_24h(row.get("created_at")):
-                # Inline discount: 50% off, first billing period only
-                body["discount"] = {
-                    "description": "Welcome offer - 50% off first month",
-                    "type": "percentage",
-                    "amount": "50",
-                    "recur": False,
-                }
-                print(f"🎉 Applying 24h promo for user {user_id}")
-            else:
-                print(f"⏰ User {user_id} not eligible for 24h promo")
+            conn = get_offers_db()
+            offer = offers.live_offer(conn, user_id)
+            did = offers.discount_id() if offer else None
+            if offer and did:
+                body["discount_id"] = did
+                offers.mark_served(conn, user_id, offer["kind"])
+                print(f"🎉 {offer['percent_off']}% offer applied for user "
+                      f"{user_id} ({offer['kind']})")
         except Exception as e:
-            print(f"⚠️ Promo check failed: {e}")
+            print(f"⚠️ Offer check failed: {e}")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
-    print(f'🎯 Checkout: plan={plan}, billing={billing}, promo={use_promo}')
+    print(f'🎯 Checkout: plan={plan}, billing={billing}')
 
     response = requests.post(
         f"{get_paddle_base()}/transactions",
@@ -221,50 +260,61 @@ def create_checkout_session():
 
 # ── Check promo eligibility ──────────────────────────────────────────────────
 
-@paddle_bp.route('/paddle/promo-status', methods=['GET'])
-def promo_status():
-    """Return whether the user is eligible for the 24h first-registration promo."""
+@paddle_bp.route('/billing/offer', methods=['GET'])
+def billing_offer():
+    """This account's live discount, if it has one.
+
+    Also MINTS the welcome offer as a side effect. A new account should get its
+    24 hours from the moment it exists, and there are three doors into the
+    product (email verification, Google OAuth, and simply landing on the
+    pricing page); minting here as well means none of them can leave someone
+    without the offer everyone else got. The UNIQUE (user_id, kind) constraint
+    makes the repeat mints free.
+
+    Always 200 with a body — the pricing page renders at list price when
+    `active` is false, and an offer lookup must never be the reason someone
+    cannot see the plans.
+    """
     try:
         user_id, _ = decode_token(request.headers.get('Authorization'))
     except Exception:
-        return jsonify({"eligible": False}), 200
+        return jsonify({"active": False}), 200
     if not user_id:
-        return jsonify({"eligible": False}), 200
+        return jsonify({"active": False}), 200
 
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
+    conn = None
     try:
-        conn = psycopg2.connect(os.environ['DATABASE_URL'], cursor_factory=RealDictCursor)
+        conn = get_offers_db()
+        # Only for accounts that have never subscribed: a paying customer does
+        # not need an acquisition discount, and a trialling one already used
+        # their moment.
         with conn.cursor() as cur:
-            cur.execute("SELECT created_at FROM users WHERE id = %s", (int(user_id),))
-            row = cur.fetchone()
-        conn.close()
-
-        if not row or not row.get("created_at"):
-            return jsonify({"eligible": False}), 200
-
-        created_at = row["created_at"]
-        if isinstance(created_at, str):
-            created_at = datetime.datetime.fromisoformat(created_at)
-        if hasattr(created_at, 'tzinfo') and created_at.tzinfo is not None:
-            created_at = created_at.replace(tzinfo=None)
-
-        now = datetime.datetime.utcnow()
-        elapsed = (now - created_at).total_seconds()
-
-        if elapsed < 86400:
-            remaining = int(86400 - elapsed)
-            return jsonify({
-                "eligible": True,
-                "seconds_remaining": remaining,
-                "created_at": created_at.isoformat(),
-            }), 200
-        else:
-            return jsonify({"eligible": False}), 200
-
+            cur.execute("SELECT is_subscribed FROM users WHERE id = %s",
+                        (int(user_id),))
+            row = cur.fetchone() or {}
+        if not row.get("is_subscribed"):
+            offers.mint(conn, user_id, offers.WELCOME)
+        return jsonify(offers.public(conn, user_id)), 200
     except Exception as e:
-        print(f"⚠️ Promo status check error: {e}")
-        return jsonify({"eligible": False}), 200
+        print(f"⚠️ offer lookup failed: {e}")
+        return jsonify({"active": False}), 200
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# Kept under its old name so an older cached frontend bundle keeps working; the
+# body is the new shape plus the one field that page read.
+@paddle_bp.route('/paddle/promo-status', methods=['GET'])
+def promo_status():
+    resp = billing_offer()
+    body = resp[0].get_json() if isinstance(resp, tuple) else resp.get_json()
+    body = dict(body or {})
+    body["eligible"] = bool(body.get("active"))
+    return jsonify(body), 200
 
 
 # ── Upgrade / downgrade ───────────────────────────────────────────────────────
@@ -428,6 +478,127 @@ def resume_subscription():
         return jsonify({"error": "Could not resume the subscription",
                         "details": res.text[:300]}), 500
     return jsonify({"message": "Your subscription will continue as normal."})
+
+
+@paddle_bp.route('/paddle/cancel-offer', methods=['GET'])
+def cancel_offer():
+    """What the "are you sure?" screen should say before it cancels anything.
+
+    Two different screens, and which one a user gets is a fact about their
+    account, not a guess:
+
+      * they have never redeemed a discount -> offer 50% off their first
+        charge to stay.
+      * they already have one (they started this very trial on the welcome
+        offer) -> NO second discount. Stacking two 50%s on one subscription is
+        the double-discount this whole feature has to avoid, so they get the
+        honest screen instead: what they keep, and until when.
+
+    Returns 200 with a body in both cases. The frontend renders the confirm
+    screen either way; the offer is the only part that varies.
+    """
+    try:
+        user_id, _ = decode_token(request.headers.get('Authorization'))
+    except Exception:
+        return jsonify({"error": "Invalid token"}), 401
+    if not user_id:
+        return jsonify({"error": "Missing token"}), 401
+
+    # subscription_state is a view; on its error paths it returns (body, code).
+    try:
+        raw = subscription_state()
+        state = (raw[0] if isinstance(raw, tuple) else raw).get_json() or {}
+    except Exception as e:
+        print(f"⚠️ cancel-offer state lookup failed: {e}")
+        state = {}
+    out = {"offer": {"active": False},
+           "trialing": bool(state.get("trialing")),
+           "plan": state.get("plan"),
+           "ends_at": state.get("scheduled_cancel_at") or state.get("ends_at"),
+           "already_discounted": False}
+
+    conn = None
+    try:
+        conn = get_offers_db()
+        if offers.has_ever_used(conn, user_id):
+            out["already_discounted"] = True
+            return jsonify(out), 200
+        # Only mint the save offer for someone who actually still has a
+        # subscription to save.
+        if state.get("is_subscribed"):
+            offers.mint(conn, user_id, offers.SAVE)
+            out["offer"] = offers.public(conn, user_id)
+    except Exception as e:
+        print(f"⚠️ cancel-offer lookup failed: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return jsonify(out), 200
+
+
+@paddle_bp.route('/paddle/accept-offer', methods=['POST'])
+def accept_offer():
+    """Take the stay-offer instead of cancelling.
+
+    The user is mid-subscription, so there is no checkout to attach a discount
+    to — it goes onto the SUBSCRIPTION, effective immediately, which makes the
+    charge at the end of their trial the discounted one. Also clears any
+    scheduled cancellation, because someone who accepts an offer to stay
+    plainly means to stay.
+    """
+    try:
+        user_id, _ = decode_token(request.headers.get('Authorization'))
+    except Exception:
+        return jsonify({"error": "Invalid token"}), 401
+
+    from models import get_user_subscription_id
+    subscription_id = get_user_subscription_id(user_id)
+    if not subscription_id:
+        return jsonify({"error": "No active subscription"}), 400
+
+    conn = None
+    try:
+        conn = get_offers_db()
+        # Re-check server-side. The button is only rendered for eligible users,
+        # but eligibility is not the button's to decide.
+        if offers.has_ever_used(conn, user_id):
+            return jsonify({"error": "You've already used a discount on this "
+                                     "account."}), 400
+        offer = offers.mint(conn, user_id, offers.SAVE) or \
+            offers.live_offer(conn, user_id)
+        if not offer:
+            return jsonify({"error": "That offer isn't available right "
+                                     "now."}), 400
+        ok, err = offers.apply_to_subscription(subscription_id)
+        if not ok:
+            return jsonify({"error": err}), 502
+        offers.mark_used(conn, user_id)
+    except Exception as e:
+        print(f"⚠️ accept-offer failed: {e}")
+        return jsonify({"error": "We couldn't apply that just now — please "
+                                 "try again."}), 500
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # Undo a scheduled cancel if one is already pending. Best-effort: the
+    # discount is applied either way, and reporting failure here would tell the
+    # user nothing happened when in fact it did.
+    try:
+        requests.patch(f"{get_paddle_base()}/subscriptions/{subscription_id}",
+                       headers=paddle_headers(),
+                       json={"scheduled_change": None}, timeout=12)
+    except Exception as e:
+        print(f"⚠️ accept-offer resume failed: {e}")
+
+    return jsonify({"message": f"Done — {offers.PERCENT_OFF}% off your next "
+                               "payment, and your plan continues as normal."})
 
 
 @paddle_bp.route('/paddle/cancel-subscription', methods=['POST'])

@@ -145,6 +145,16 @@ def google_callback():
                 user_id = row["id"]
                 plan    = "free"
                 conn.commit()
+                # Brand-new account: same 24-hour discount an email signup
+                # gets, starting now, with the same email. Only on the INSERT
+                # branch — a returning Google user is not a new signup.
+                # Wrapped: an offer must never cost someone their login.
+                try:
+                    import offers
+                    offers.grant_welcome(conn, user_id, email)
+                except Exception as e:
+                    print(f"⚠️ welcome offer failed for {email}: {e}",
+                          flush=True)
 
         # Issue JWT
         token = jwt.encode({

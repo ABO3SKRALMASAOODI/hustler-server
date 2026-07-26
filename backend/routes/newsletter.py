@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 import jwt
 from flask import Blueprint, request, jsonify, current_app, Response
 
+import offers
 from routes.newsletter_content import (
     DEFAULT_TEMPLATES, LIFECYCLE_ORDER, CAMPAIGN_LABELS, DEFAULT_CTA_URL,
     wrap_email, render_tokens,
@@ -164,6 +165,11 @@ def ensure_newsletter_schema(conn):
     cur.execute("INSERT INTO newsletter_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
     conn.commit()
     cur.close()
+    # user_offers, same additive contract. Provisioned from here as well as
+    # lazily from offers.py so the table exists before the first tick queries
+    # it — its eligibility clauses degrade to TRUE without it, which would send
+    # the offer email to people who already hold an offer.
+    offers.ensure_schema(conn)
 
 
 def _brevo_headers():
@@ -324,7 +330,25 @@ def _fetch(conn, sql, params=None):
 def _eligible(conn, campaign, weekly_key=None):
     """Recipients (id, email, credits_balance) eligible for a lifecycle campaign."""
     cols = "SELECT u.id, u.email, u.credits_balance FROM users u WHERE "
-    if campaign == "welcome_activation":
+    if campaign == "offer_50":
+        # The one-time 50% blast: everyone verified who is NOT on a plan right
+        # now (a trialling user already counts as subscribed) and has never
+        # redeemed a discount.
+        #
+        # Accounts younger than a day are excluded because they already got
+        # this email at signup, from offers.send_offer_email — and the
+        # "already holds a live offer" clause catches the rest of that overlap
+        # without needing to reason about timing. `newsletter_sends` makes it
+        # once-per-account forever: re-running the tick sends nothing new,
+        # which is what "one time" has to mean when the tick fires daily.
+        sql = cols + f"""{BASE_FILTER}
+            AND COALESCE(u.is_subscribed, 0) = 0
+            AND u.created_at <= NOW() - INTERVAL '1 day'
+            AND {offers.sql_no_live_offer(conn)}
+            AND {offers.sql_never_used(conn)}
+            AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='offer_50' AND s.status='sent')
+            AND {NOT_TODAY}"""
+    elif campaign == "welcome_activation":
         sql = cols + f"""{BASE_FILTER}
             AND u.created_at >= NOW() - INTERVAL '4 days'
             AND NOT {HAS_PROJECT}
@@ -428,8 +452,19 @@ def run_daily_tick(force=False, dry_run=False):
                     if dry_run:
                         sent += 1
                         continue
-                    subject, html, unsub = _render_for(tmpl, r["email"], r["credits_balance"])
-                    ok = _send_one(r["email"], subject, html, unsub)
+                    if campaign == "offer_50":
+                        # The offer has to EXIST before the email describing it
+                        # goes out, and the email's countdown is filled from
+                        # that row — so the hours in the inbox and the seconds
+                        # on the pricing page are the same number. A mint that
+                        # returns None means the user turned out to be
+                        # ineligible between the query and here; send nothing.
+                        offer = offers.mint(conn, r["id"], offers.WINBACK)
+                        ok = bool(offer) and offers.send_offer_email(
+                            conn, r["id"], r["email"], offers.WINBACK)
+                    else:
+                        subject, html, unsub = _render_for(tmpl, r["email"], r["credits_balance"])
+                        ok = _send_one(r["email"], subject, html, unsub)
                     _record_send(conn, r["id"], r["email"], campaign, "sent" if ok else "failed")
                     if ok:
                         emailed.add(r["id"])

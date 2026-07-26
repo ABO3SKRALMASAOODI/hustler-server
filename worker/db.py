@@ -15,6 +15,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 import config
+import model_prices
 
 # ------------------------------------------------------------------ #
 #  Connections                                                         #
@@ -558,22 +559,24 @@ def user_is_subscribed(conn, user_id):
 # daily -> bonus -> monthly, never below zero. Priced with the same env vars
 # the admin cost views use.
 
-# Default = DeepSeek V4 Pro ($1.74 in / $3.48 out per 1M tokens). MUST match
-# AGENT_MODEL and worker/config.py's LLM_PRICE_* — set all three together via
-# env if you change model (e.g. 2.0/6.0 for grok-4.5).
-LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "1.74"))
-LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "3.48"))
-# Cache-HIT input price. See config.LLM_PRICE_CACHED_IN_PER_M for why this
-# split exists: an agent turn re-sends the same prefix every iteration, so most
-# of its input is cache hits at 1/480th the miss price. Providers that report no
-# caching yield 0 cached tokens, which makes this constant inert.
-LLM_PRICE_CACHED_IN_PER_M = float(
-    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.003625"))
+# Prices come from config so there is ONE source of truth for the fallback, and
+# from model_prices for everything listed — a turn can now run on DeepSeek for a
+# free user and Grok for a subscriber, so a single global rate is wrong for one
+# of them by construction. These names are kept because the tests and the admin
+# notes refer to them; they are the UNLISTED-model fallback, nothing more.
+LLM_PRICE_IN_PER_M = config.LLM_PRICE_IN_PER_M
+LLM_PRICE_OUT_PER_M = config.LLM_PRICE_OUT_PER_M
+LLM_PRICE_CACHED_IN_PER_M = config.LLM_PRICE_CACHED_IN_PER_M
 # Flat price per successful image generation/edit (no token usage is
 # reported for those calls, so they are priced per image). MUST match
 # config.IMAGE_PRICE_USD — 0.055 tracks grok-imagine-image-quality.
 IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.055"))
 MIN_TURN_CREDITS = 1.0
+
+# Built once at import: a per-row USD cost expression that reads each llm_calls
+# row's own `model` column. Contains no percent sign — psycopg2 scans the whole
+# statement for placeholders, so one in here would raise before Postgres saw it.
+_ROW_COST_SQL = model_prices.row_cost_sql(config.PRICE_FALLBACK)
 
 
 def video_settings(conn):
@@ -636,11 +639,15 @@ def charge_turn_credits(conn, user_id, job_id):
     Returns the credits charged (float). Never raises the balance below 0
     and never fails the turn — callers swallow exceptions."""
     with conn.cursor() as cur:
+        # Token cost is summed PER ROW at that row's own model price (see
+        # model_prices.row_cost_sql). Summing tokens first and multiplying once
+        # only works while every row is the same model, which stopped being true
+        # the moment paying users were routed to a different one.
         cur.execute("""SELECT COUNT(*) AS n,
                               COALESCE(SUM(prompt_tokens),0) AS tin,
                               COALESCE(SUM(completion_tokens),0) AS tout,
-                              COALESCE(SUM(
-                                  (response->>'cached_in')::float), 0) AS cin,
+                              COALESCE(SUM(""" + _ROW_COST_SQL + """), 0)
+                                  AS token_cost,
                               COUNT(*) FILTER (
                                   WHERE purpose IN ('image_gen','image_edit')
                                     AND response ? 'image_url') AS n_images,
@@ -662,15 +669,12 @@ def charge_turn_credits(conn, user_id, job_id):
         if not (float(row["tin"] or 0) or float(row["tout"] or 0)
                 or float(row["n_images"] or 0) or float(row["gen_cost"] or 0)):
             return 0.0
-        # prompt_tokens is the TRUE total (admin token views stay honest);
-        # 'cached_in' is the slice of it the provider served from cache, billed
-        # at the cache rate. clamped in llm.cached_input_tokens, and again here
-        # so a stale/oversized value can never make the charge negative.
-        tin = float(row["tin"])
-        cached_in = min(max(float(row["cin"] or 0), 0.0), tin)
-        cost = ((tin - cached_in) * LLM_PRICE_IN_PER_M +
-                cached_in * LLM_PRICE_CACHED_IN_PER_M +
-                float(row["tout"]) * LLM_PRICE_OUT_PER_M) / 1e6
+        # prompt_tokens stays the TRUE total on every row (so admin token views
+        # remain honest); 'cached_in' is the slice of it the provider served
+        # from cache and 'reasoning_out' the thinking tokens some providers
+        # report beside the completion. Both are clamped inside the SQL, so a
+        # stale or oversized provider number can never make a charge negative.
+        cost = float(row["token_cost"] or 0)
         cost += float(row["n_images"] or 0) * IMAGE_PRICE_USD
         # Generated sound effects (flat) + AI video (per-second) — the real USD
         # cost is stored on each generation's llm_calls row by the worker tool.

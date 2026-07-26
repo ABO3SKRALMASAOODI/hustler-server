@@ -17,20 +17,28 @@ from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
 
 from routes.admin import admin_required, _scope, METRICS_EPOCH
+import model_prices
 import storage
 
 admin_video_bp = Blueprint("admin_video", __name__)
 
-# Estimated $ per 1M tokens when the API reports usage (default = DeepSeek V4
-# Pro, $1.74 in / $3.48 out; override via env if the model or pricing changes).
-# MUST match worker/config.py + worker/db.py or the admin spend view disagrees
-# with what users were actually charged.
+# FALLBACK $ per 1M tokens, for a model model_prices.py does not list (default =
+# DeepSeek V4 Pro, $1.74 in / $3.48 out). Every listed model is priced from its
+# OWN row's `model` column instead, because a turn can run on DeepSeek for a
+# free user and Grok for a subscriber and one blended rate is then wrong for
+# both. MUST match worker/config.py or the admin spend view disagrees with what
+# users were actually charged.
 PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "1.74"))
 PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "3.48"))
 # Cache-hit input price — see worker/config.LLM_PRICE_CACHED_IN_PER_M. Rows
-# carry their cache-hit slice in response->>'cached_in'.
+# carry their cache-hit slice in response->>'cached_in' and their reasoning
+# tokens (charged only where the provider bills them separately) in
+# response->>'reasoning_out'.
 PRICE_CACHED_IN_PER_M = float(
     os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.003625"))
+
+PRICE_FALLBACK = {"in": PRICE_IN_PER_M, "cached_in": PRICE_CACHED_IN_PER_M,
+                  "out": PRICE_OUT_PER_M, "reasoning_separate": False}
 
 
 def adb():
@@ -38,17 +46,27 @@ def adb():
                             cursor_factory=RealDictCursor)
 
 
-def _cost_expr():
-    """Same three-part formula as worker/db.charge_turn_credits: cache-HIT
-    input is billed at ~1/480th of a cache miss, so counting every prompt token
-    at the miss price would show a spend several times what users were charged.
-    Rows written before the split simply have no 'cached_in' and price as
-    all-miss, which is what they were."""
-    cached = "COALESCE(SUM((response->>'cached_in')::float),0)"
-    return (f"(GREATEST(COALESCE(SUM(prompt_tokens),0) - {cached}, 0) "
-            f"* {PRICE_IN_PER_M} + {cached} * {PRICE_CACHED_IN_PER_M} + "
-            f"COALESCE(SUM(completion_tokens),0) * {PRICE_OUT_PER_M}) "
-            "/ 1000000.0")
+def _row_cost(alias=""):
+    """USD cost of ONE llm_calls row, priced from that row's own model.
+
+    Identical expression to worker/db.charge_turn_credits, so the admin spend
+    view and the credits actually deducted cannot disagree. Cache-HIT input is
+    billed at a small fraction of a miss, so counting every prompt token at the
+    miss price would show a spend several times what users were charged; rows
+    written before the split simply have no 'cached_in' and price as all-miss,
+    which is what they were.
+
+    `alias` prefixes the column names when the query joins llm_calls.
+    """
+    p = (alias + ".") if alias else ""
+    return model_prices.row_cost_sql(
+        PRICE_FALLBACK, model_col=p + "model", response_col=p + "response",
+        prompt_col=p + "prompt_tokens", completion_col=p + "completion_tokens")
+
+
+def _cost_expr(alias=""):
+    """Aggregate cost over a group of llm_calls rows."""
+    return "COALESCE(SUM(" + _row_cost(alias) + "), 0)"
 
 
 # A user message is "unserved" when no agent_turn job ever picked it up —
@@ -116,14 +134,7 @@ def video_overview():
             LEFT JOIN (SELECT p4.user_id,
                               SUM(lc.prompt_tokens) AS tokens_in,
                               SUM(lc.completion_tokens) AS tokens_out,
-                              (GREATEST(SUM(COALESCE(lc.prompt_tokens,0))
-                                   - SUM(COALESCE(
-                                       (lc.response->>'cached_in')::float,0)),
-                                   0) * %s
-                               + SUM(COALESCE(
-                                   (lc.response->>'cached_in')::float,0)) * %s
-                               + SUM(COALESCE(lc.completion_tokens,0)) * %s)
-                              / 1000000.0 AS est_cost
+                              """ + _cost_expr("lc") + """ AS est_cost
                        FROM llm_calls lc
                        JOIN projects p4 ON p4.id = lc.project_id
                        GROUP BY p4.user_id) l ON l.user_id = u.id
@@ -132,7 +143,7 @@ def video_overview():
                      j.last, m.last
             ORDER BY last_active DESC NULLS LAST
             LIMIT 200
-        """, (PRICE_IN_PER_M, PRICE_CACHED_IN_PER_M, PRICE_OUT_PER_M))
+        """)
         users = cur.fetchall()
 
         # global ops counters + 14-day trends
@@ -716,7 +727,7 @@ def video_costs():
                    COUNT(*) AS calls,
                    COALESCE(SUM(lc.prompt_tokens), 0) AS tokens_in,
                    COALESCE(SUM(lc.completion_tokens), 0) AS tokens_out,
-                   {_cost_expr()} AS est_cost
+                   {_cost_expr("lc")} AS est_cost
             FROM llm_calls lc
             JOIN projects p ON p.id = lc.project_id
             JOIN users u ON u.id = p.user_id
@@ -730,20 +741,50 @@ def video_costs():
             SELECT lc.purpose, COUNT(*) AS calls,
                    COALESCE(SUM(lc.prompt_tokens), 0) AS tokens_in,
                    COALESCE(SUM(lc.completion_tokens), 0) AS tokens_out,
-                   {_cost_expr()} AS est_cost
+                   {_cost_expr("lc")} AS est_cost
             FROM llm_calls lc GROUP BY lc.purpose ORDER BY est_cost DESC
         """)
         by_purpose = cur.fetchall()
+        # Per MODEL, because that is the axis spend now splits on: free
+        # accounts and paying ones can answer on different providers, and the
+        # reasoning column is the evidence for whether a provider bills
+        # thinking tokens on top of the completion (model_prices.py).
+        cur.execute(f"""
+            SELECT COALESCE(NULLIF(lc.model, ''), 'unknown') AS model,
+                   COUNT(*) AS calls,
+                   COALESCE(SUM(lc.prompt_tokens), 0) AS tokens_in,
+                   COALESCE(SUM(COALESCE(
+                       (lc.response->>'cached_in')::float, 0)), 0) AS cached_in,
+                   COALESCE(SUM(lc.completion_tokens), 0) AS tokens_out,
+                   COALESCE(SUM(COALESCE(
+                       (lc.response->>'reasoning_out')::float, 0)), 0)
+                       AS reasoning_out,
+                   {_cost_expr("lc")} AS est_cost
+            FROM llm_calls lc
+            WHERE lc.created_at > NOW() - INTERVAL '30 days'
+            GROUP BY 1 ORDER BY est_cost DESC
+        """)
+        by_model = cur.fetchall()
     return jsonify({
         "pricing": {"in_per_m": PRICE_IN_PER_M, "out_per_m": PRICE_OUT_PER_M,
                     "cached_in_per_m": PRICE_CACHED_IN_PER_M,
-                    "note": "estimated from API usage fields when present; "
-                            "cache-hit input priced separately"},
+                    "models": model_prices.MODEL_PRICES,
+                    "note": "each row is priced from its OWN model; the "
+                            "in/out/cached numbers above are only the fallback "
+                            "for a model not in the table. Cache-hit input is "
+                            "priced separately; reasoning tokens are charged "
+                            "only where the provider bills them on top of "
+                            "completion_tokens."},
         "daily": [{**r, "day": r["day"].isoformat(),
                    "est_cost": round(float(r["est_cost"] or 0), 4)}
                   for r in rows],
         "by_purpose": [{**r, "est_cost": round(float(r["est_cost"] or 0), 4)}
                        for r in by_purpose],
+        "by_model": [{**r,
+                      "cached_in": int(float(r["cached_in"] or 0)),
+                      "reasoning_out": int(float(r["reasoning_out"] or 0)),
+                      "est_cost": round(float(r["est_cost"] or 0), 4)}
+                     for r in by_model],
     })
 
 
@@ -860,22 +901,14 @@ def video_users():
             LEFT JOIN (SELECT p4.user_id,
                               SUM(lc.prompt_tokens) AS tokens_in,
                               SUM(lc.completion_tokens) AS tokens_out,
-                              (GREATEST(SUM(COALESCE(lc.prompt_tokens,0))
-                                   - SUM(COALESCE(
-                                       (lc.response->>'cached_in')::float,0)),
-                                   0) * %s
-                               + SUM(COALESCE(
-                                   (lc.response->>'cached_in')::float,0)) * %s
-                               + SUM(COALESCE(lc.completion_tokens,0)) * %s)
-                              / 1000000.0 AS est_cost
+                              """ + _cost_expr("lc") + """ AS est_cost
                        FROM llm_calls lc
                        JOIN projects p4 ON p4.id = lc.project_id
                        GROUP BY p4.user_id) l ON l.user_id = u.id
             WHERE u.email ILIKE %s
             ORDER BY last_active DESC NULLS LAST
             LIMIT 200
-        """, (UPLOAD_KINDS, PRICE_IN_PER_M, PRICE_CACHED_IN_PER_M,
-              PRICE_OUT_PER_M, f"%{search}%"))
+        """, (UPLOAD_KINDS, f"%{search}%"))
         rows = cur.fetchall()
     return jsonify({"users": [
         {"id": r["id"], "email": r["email"],
@@ -904,8 +937,51 @@ COHORT_STAGES = [
     ("uploaded", "Uploaded a video"),
     ("messaged", "Messaged the editor"),
     ("exported", "Exported a video"),
-    ("paid", "Paid (current)"),
+    ("trial", "Started a trial"),
+    ("paid", "Paid"),
 ]
+
+# TRIAL and PAID are two different questions and were being answered by one
+# number. Every plan sells a 3-day trial, Paddle creates the subscription at
+# checkout, and `is_subscribed` flips on day zero — so the old "Paid" column
+# counted everyone who had ever handed over a card, whether or not a payment
+# ever cleared. On a funnel whose whole purpose is to show whether trials
+# convert, that is the one column that must not blur them.
+#
+#   trial  ever started a trial. The demand signal — it is what the pricing
+#          page and the discount are optimising, and it is worth counting even
+#          for someone who cancelled on day one.
+#   paid   money actually moved: the trial ran its course and Paddle charged
+#          (trial_status='converted'), or the account subscribed without a
+#          trial at all (the grandfathered plans predate trials).
+#
+# Both read `trial_status`, written from Paddle's own subscription status by
+# backend/trial_state.py — never inferred from a timer here.
+COHORT_TRIAL_SQL = "u.trial_started_at IS NOT NULL OR u.trial_status IS NOT NULL"
+COHORT_PAID_SQL = """
+    u.trial_status = 'converted'
+    OR (u.trial_started_at IS NULL
+        AND (COALESCE(u.is_subscribed, 0) = 1
+             OR COALESCE(u.plan, 'free') NOT IN ('free', '')))
+"""
+# Before the round-46 migration those columns do not exist. Falling back keeps
+# the tab rendering (with trial folded into paid, exactly as it read before)
+# instead of 500ing the whole page on a missing column.
+COHORT_TRIAL_FALLBACK = "FALSE"
+COHORT_PAID_FALLBACK = ("COALESCE(u.is_subscribed, 0) = 1 "
+                        "OR COALESCE(u.plan, 'free') NOT IN ('free', '')")
+
+
+def _trial_columns_exist(cur):
+    try:
+        cur.execute("""SELECT COUNT(*) AS n FROM information_schema.columns
+                        WHERE table_name = 'users'
+                          AND column_name IN ('trial_status',
+                                              'trial_started_at')""")
+        row = cur.fetchone()
+        return int((row or {}).get("n") or 0) == 2
+    except Exception:                                       # pragma: no cover
+        return False
 
 # Empty periods to draw BEFORE the metrics epoch. Without a run-up the chart
 # opens on the first real cohort's conversion — a line that starts pinned to the
@@ -929,6 +1005,10 @@ def video_cohorts():
         period = "week"
     with adb() as conn:
         cur = conn.cursor()
+        have_trials = _trial_columns_exist(cur)
+        trial_sql = (COHORT_TRIAL_SQL if have_trials
+                     else COHORT_TRIAL_FALLBACK)
+        paid_sql = COHORT_PAID_SQL if have_trials else COHORT_PAID_FALLBACK
         cur.execute("""
             WITH base AS (
                 SELECT u.id,
@@ -946,9 +1026,8 @@ def video_cohorts():
                            WHERE vj.user_id = u.id AND vj.type = 'final'
                              AND vj.state = 'done')
                         AS exported,
-                    (COALESCE(u.is_subscribed, 0) = 1
-                     OR COALESCE(u.plan, 'free') NOT IN ('free', ''))
-                        AS paid
+                    (""" + trial_sql + """) AS trial,
+                    (""" + paid_sql + """) AS paid
                 FROM users u
                 -- Only real post-relaunch accounts: old-idea signups and the
                 -- long-lived test accounts (all created before the metrics
@@ -962,6 +1041,7 @@ def video_cohorts():
                        COUNT(*) FILTER (WHERE uploaded) AS uploaded,
                        COUNT(*) FILTER (WHERE messaged) AS messaged,
                        COUNT(*) FILTER (WHERE exported) AS exported,
+                       COUNT(*) FILTER (WHERE trial) AS trial,
                        COUNT(*) FILTER (WHERE paid) AS paid
                 FROM base
                 GROUP BY cohort
@@ -983,6 +1063,7 @@ def video_cohorts():
                    COALESCE(a.uploaded, 0) AS uploaded,
                    COALESCE(a.messaged, 0) AS messaged,
                    COALESCE(a.exported, 0) AS exported,
+                   COALESCE(a.trial, 0) AS trial,
                    COALESCE(a.paid, 0) AS paid,
                    (s.cohort < date_trunc(%s, %s::timestamptz)) AS lead_in
             FROM spine s
@@ -998,6 +1079,7 @@ def video_cohorts():
         "uploaded": int(r["uploaded"] or 0),
         "messaged": int(r["messaged"] or 0),
         "exported": int(r["exported"] or 0),
+        "trial": int(r["trial"] or 0),
         "paid": int(r["paid"] or 0),
         # Pre-epoch run-up: real zero for this series, but not a cohort that
         # ever existed — the funnel table below skips these rows.
@@ -1008,11 +1090,19 @@ def video_cohorts():
         "metrics_epoch": METRICS_EPOCH,
         "stages": [{"key": k, "label": lbl} for k, lbl in COHORT_STAGES],
         "cohorts": cohorts,
+        "trial_tracking": have_trials,
         "note": ("Each row is the cohort of users who signed up in that "
                  "period; each stage counts how many of THEM ever reached it "
-                 "(a funnel per cohort, not a running total). \"Paid\" "
-                 "reflects CURRENT subscription state, so a canceled user "
-                 "drops back out of it."),
+                 "(a funnel per cohort, not a running total). \"Started a "
+                 "trial\" is ever-started and never drops back out, so a "
+                 "cancelled trial still counts — it is the demand signal. "
+                 "\"Paid\" is money that actually moved: a trial that "
+                 "converted, or a subscription taken without a trial. The gap "
+                 "between the two columns is your trial conversion rate."
+                 + ("" if have_trials else
+                    " NOTE: the trial columns are not present on this "
+                    "database, so \"Started a trial\" reads 0 and \"Paid\" "
+                    "falls back to current subscription state.")),
     })
 
 

@@ -24,6 +24,7 @@ import config
 
 
 _client = None
+_paid_client = None
 _image_client = None
 _vision_client = None
 
@@ -99,6 +100,39 @@ def image_client():
     return _image_client
 
 
+def paid_client():
+    """Separate pooled client for the model paying/trialling users get
+    (config.PAID_*). Its own base URL and key, so it must NOT reuse client() —
+    the whole point is that it is a different provider from the free one."""
+    global _paid_client
+    if _paid_client is None:
+        _paid_client = OpenAI(base_url=config.PAID_BASE_URL,
+                              api_key=config.PAID_API_KEY,
+                              timeout=config.LLM_TIMEOUT_S,
+                              max_retries=config.LLM_MAX_RETRIES)
+    return _paid_client
+
+
+def paid_available():
+    """True once a paid-tier provider is fully configured. All three parts are
+    required: a half-set trio would send an empty key at a real endpoint and
+    401 every turn for exactly the customers who are paying."""
+    return bool(config.PAID_BASE_URL and config.PAID_API_KEY
+                and config.PAID_AGENT_MODEL)
+
+
+def agent_client_for(subscribed):
+    """(client, model) for one agent turn.
+
+    Free accounts get AGENT_MODEL; trials and paid customers get
+    PAID_AGENT_MODEL when it is configured. With PAID_* unset this returns the
+    same pair for everyone, which is why shipping it is a no-op until the env
+    is set."""
+    if subscribed and paid_available():
+        return paid_client(), config.PAID_AGENT_MODEL
+    return client(), config.AGENT_MODEL
+
+
 def vision_client():
     """Separate pooled client for vision — VISION_BASE_URL is configured
     independently of the chat provider (a text-only chat provider is normal),
@@ -148,6 +182,33 @@ def cached_input_tokens(usage):
     # the user for tokens they did use.
     total = getattr(usage, "prompt_tokens", None) or 0
     return max(0, min(n, int(total)))
+
+
+def reasoning_tokens(usage):
+    """"Thinking" tokens from a usage object, across the spellings
+    OpenAI-compatible providers use: completion_tokens_details.reasoning_tokens
+    (object or dict), and DeepSeek's top-level reasoning_tokens.
+
+    Returns 0 when the provider reports none.
+
+    IMPORTANT: this is recorded, not automatically charged. Whether these
+    tokens are ALREADY inside completion_tokens or sit beside it is a per-model
+    fact — see model_prices.MODEL_PRICES' `reasoning_separate`, and the
+    verification query in that module's docstring. Adding them for a provider
+    that folds them in would double-charge every reasoning turn.
+    """
+    if not usage:
+        return 0
+    details = getattr(usage, "completion_tokens_details", None)
+    n = getattr(details, "reasoning_tokens", None) if details else None
+    if n is None and isinstance(details, dict):
+        n = details.get("reasoning_tokens")
+    if n is None:
+        n = getattr(usage, "reasoning_tokens", None)
+    try:
+        return max(0, int(n or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def image_part(jpeg_path):

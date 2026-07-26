@@ -188,6 +188,10 @@ def _ctx():
     ctx.tokens_in = 0
     ctx.tokens_out = 0
     ctx.tokens_cached_in = 0
+    # Empty per-model breakdown: these tests poke the flat totals directly, so
+    # running_credits falls back to the fallback prices. The per-model path has
+    # its own tests in test_model_prices.py.
+    ctx.model_usage = {}
     ctx.credit_budget = None
     return ctx
 
@@ -237,8 +241,13 @@ def test_the_db_charge_uses_the_same_three_part_formula():
     import db
     src = inspect.getsource(db.charge_turn_credits)
     assert "cached_in" in src
-    assert "LLM_PRICE_CACHED_IN_PER_M" in src
-    assert "LLM_PRICE_IN_PER_M" in src
+    # The three-part split now lives in the shared per-row expression that the
+    # charge SUMs, so assert on THAT rather than on inlined constants.
+    assert "_ROW_COST_SQL" in src
+    assert "cached_in" in db._ROW_COST_SQL
+    assert "reasoning_out" in db._ROW_COST_SQL
+    assert str(config.LLM_PRICE_IN_PER_M) in db._ROW_COST_SQL
+    assert str(config.LLM_PRICE_CACHED_IN_PER_M) in db._ROW_COST_SQL
 
 
 # ── the image provider is independent of the chat provider ─────────────
@@ -354,8 +363,10 @@ def test_a_failed_agent_call_is_recorded():
     propagates."""
     import inspect
     src = inspect.getsource(agent_loop)
+    # `model` is now resolved per user (free vs paid tier), so match on the
+    # call itself rather than on the constant it used to hardcode.
     call = src.split("resp = client.chat.completions.create(\n"
-                     "                model=config.AGENT_MODEL,")[1][:1600]
+                     "                model=model,")[1][:1600]
     assert "except Exception" in call
     assert 'llm.record("agent"' in call
     assert '"error"' in call
@@ -427,8 +438,14 @@ class _Conn:
         return self.cur
 
 
-def _agg(n=1, tin=0, tout=0, cin=0, n_images=0, gen_cost=0):
-    return {"n": n, "tin": tin, "tout": tout, "cin": cin,
+def _agg(n=1, tin=0, tout=0, token_cost=None, n_images=0, gen_cost=0):
+    # token_cost is what the per-row pricing SQL returns (dollars). It defaults
+    # to the fallback rates applied to the flat totals, which is what a
+    # single-model turn on an unlisted model would produce.
+    if token_cost is None:
+        token_cost = (tin * config.LLM_PRICE_IN_PER_M
+                      + tout * config.LLM_PRICE_OUT_PER_M) / 1e6
+    return {"n": n, "tin": tin, "tout": tout, "token_cost": token_cost,
             "n_images": n_images, "gen_cost": gen_cost}
 
 

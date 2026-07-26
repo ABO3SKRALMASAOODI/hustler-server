@@ -108,6 +108,43 @@ VISION_API_KEY = (
     os.getenv("VISION_API_KEY", "")
     or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
     or (IMAGE_API_KEY if VISION_BASE_URL == IMAGE_BASE_URL else ""))
+
+# ── The model PAYING users get ───────────────────────────────────────────────
+#
+# The whole stack moved to DeepSeek V4 Pro for cost. That is the right call for
+# a free user burning a one-off allowance; it is the wrong call for someone
+# three days into a trial deciding whether this product is worth $30/mo, where
+# the only thing that matters is whether the edit comes out right. The prompt
+# and all ~70 tool schemas were written and tuned against Grok's tool-calling.
+#
+# So: route on subscription. A trialling user IS subscribed (Paddle creates the
+# subscription at checkout and charges on day 3 — see backend/plan_gate.py), so
+# this gives the better model to trials and paid customers, and DeepSeek to
+# free accounts. Measured cost of doing so is roughly $4 per trial.
+#
+# ALL THREE default EMPTY, which is the honest-off contract used everywhere
+# here: with PAID_AGENT_MODEL unset, every user goes through llm.client() +
+# AGENT_MODEL and behaviour is byte-identical to today. Ship first, flip the
+# env second. Credits stay correct across the split automatically — the charge
+# prices each llm_calls row from its own `model` column (model_prices.py), which
+# is the reason that indirection exists.
+PAID_BASE_URL = os.getenv("PAID_BASE_URL", "").strip()
+PAID_API_KEY = os.getenv("PAID_API_KEY", "").strip()
+PAID_AGENT_MODEL = os.getenv("PAID_AGENT_MODEL", "").strip()
+
+# reasoning_effort for the agent's tool-dispatch steps.
+#
+# grok-4.5 defaults to "high" and has never been told otherwise: on a measured
+# day that was 521.5K reasoning tokens, ~70% of all output and 16% of the bill.
+# But it is not waste everywhere — iteration ONE is where the model reads the
+# project state and plans the edit, and that is precisely the thinking being
+# paid for. Iterations 2+ are mostly "which tool, which arguments", which xAI's
+# own guidance puts under "low".
+#
+# So this applies from the SECOND iteration on, never the first. Empty (the
+# default) sends no field at all, so a provider that would 400 on an unknown
+# parameter — DeepSeek does — is unaffected until someone opts in.
+AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "").strip()
 # Vision (look_at) is the slowest thing the agent does, so it gets a MORE
 # generous per-call timeout than the text agent (grok multimodal latency is
 # spiky) — retries stay at the client default. The agent isn't capped on how
@@ -361,6 +398,15 @@ REMOTE_EXECUTOR_SECRET = os.getenv("REMOTE_EXECUTOR_SECRET", "")
 REMOTE_EXECUTOR_TIMEOUT_S = int(os.getenv("REMOTE_EXECUTOR_TIMEOUT_S", "3300"))
 # Port the executor's HTTP server binds (Cloud Run injects $PORT, default 8080).
 EXECUTOR_PORT = int(os.getenv("PORT", "8080"))
+# How many index artifacts (proxy, wav, thumbnails, contact sheets) are PUT to
+# object storage at once. They are independent objects and every upload is
+# blocked in a socket with the GIL released, so this is pure network
+# concurrency — it costs no CPU on a box whose CPU is the actual bottleneck.
+# Serial uploads were ~24.5s of an index (about 40% of it) and that time is
+# straight off every user's wait before "your video is ready".
+# Lower it if the storage provider starts rate-limiting; 1 restores the old
+# sequential behaviour exactly.
+UPLOAD_PARALLELISM = int(os.getenv("UPLOAD_PARALLELISM", "8"))
 STALE_AFTER_S = 120           # running + no heartbeat for this long => reclaimable
 MAX_ATTEMPTS_MEDIA = 3        # first run + 2 retries
 MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resend)
@@ -425,22 +471,40 @@ FULL_INDEX_MAX_CHARS = int(os.getenv("FULL_INDEX_MAX_CHARS", "40000"))
 # small balance; a paying user gets the turn they paid for. Same 1 credit =
 # $0.01 convention as billing.
 AGENT_TURN_BUDGET_GRACE = float(os.getenv("AGENT_TURN_BUDGET_GRACE", "3"))
-# Model prices ($/1M tokens) for the credit charge — MUST match the model in
-# AGENT_MODEL or credits drift from real cost. Default = DeepSeek V4 Pro
-# ($1.74 in / $3.48 out), which is ~13% cheaper in and ~42% cheaper out than
-# the Grok 4.5 it replaced. (For Grok 4.5 set 2.0/6.0; for grok-4.1-fast, lower.)
-# (Must mirror db.charge_turn_credits so the in-turn cap and final charge agree.)
+# Model prices ($/1M tokens) — the FALLBACK, for a model that model_prices.py
+# does not list. Every known model is priced from its own row's `model` column
+# (see model_prices.MODEL_PRICES) precisely because one turn can now run on a
+# different model from another: a global constant that is right for DeepSeek is
+# silently wrong for Grok, and a silent constant-factor billing error is the bug
+# class this whole area keeps producing.
+#
+# Default = DeepSeek V4 Pro ($1.74 in / $3.48 out), ~13% cheaper in and ~42%
+# cheaper out than the Grok 4.5 it replaced.
 LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "1.74"))
 LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "3.48"))
-# Cached input ($/1M). DeepSeek automatically serves a repeated prompt PREFIX
-# from disk cache at $0.003625/1M — 480x cheaper than a cache miss. An agent
-# turn is a loop that re-sends a growing message list behind an identical
-# system prompt + ~60 tool schemas, so most input tokens after the first
-# iteration are cache HITS. Billing them at the miss rate would overcharge a
-# multi-step turn several-fold, so the charge splits hit from miss. Set equal to
-# LLM_PRICE_IN_PER_M for a provider with no prompt caching (Grok: 2.0).
+# Cached input ($/1M). A provider that serves a repeated prompt PREFIX from
+# cache charges a fraction of a miss for it — DeepSeek $0.003625/1M (480x
+# cheaper), Grok $0.30/1M (6.7x cheaper). An agent turn re-sends the same system
+# prompt + ~60 tool schemas every iteration, so most input after the first step
+# is a cache HIT, and billing hits at the miss rate over-charges a multi-step
+# turn several-fold.
+#
+# DO NOT set this equal to LLM_PRICE_IN_PER_M "because provider X has no
+# caching" — that is what the previous comment here said about Grok, and it was
+# wrong: Grok's invoice bills cached input as its own line at $0.30/1M, and
+# 86.6% of input hits it. Setting 2.0 would have re-created the exact
+# over-charge that had just been fixed. Per-model rates live in
+# model_prices.MODEL_PRICES; this constant only covers unlisted models, and for
+# one that genuinely has no caching the reported hit count is 0, which makes the
+# rate inert anyway.
 LLM_PRICE_CACHED_IN_PER_M = float(
     os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.003625"))
+
+# What price_for() falls back to for a model that is not in MODEL_PRICES.
+PRICE_FALLBACK = {"in": LLM_PRICE_IN_PER_M,
+                  "cached_in": LLM_PRICE_CACHED_IN_PER_M,
+                  "out": LLM_PRICE_OUT_PER_M,
+                  "reasoning_separate": False}
 # Per-image charge (1 credit = $0.01). 0.055 tracks grok-imagine-image-quality
 # (see IMAGE_GEN_MODEL); if you switch IMAGE_GEN_MODEL, set this to that tier's
 # real per-image price or credits drift from cost.

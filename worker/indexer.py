@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import time
+from concurrent import futures
 
 import audit
 import config
@@ -242,52 +243,93 @@ def run_index_job(worker_db, job):
         worker_db.run(dbx.set_progress, job_id, 85)
         _mark("sheets_vision_s")
 
-        # 8. Upload artifacts
-        storage.upload_file(proxy_local, proxy_key, "video/mp4")
-        audio_key = None
-        if wav_local:
-            audio_key = f"audio/{project_id}/{sha}.wav"
-            storage.upload_file(wav_local, audio_key, "audio/wav")
-        # Thumbnails are a convenience artifact — the transcript, sentences,
-        # shots and silences ARE the analysis and they are already complete by
-        # now. So a thumbnail that can't be made or uploaded degrades to a
-        # warning; it must never fail the job. It used to: one un-extractable
-        # 320px jpeg raised FileNotFoundError here and buried ~200s of good
-        # analysis under "I couldn't analyze that video. Try a different format
-        # like mp4" — advice that could not have helped, for a video that was
-        # in fact analyzed fine.
-        missing = []
-        for shot in shots:
-            tp = thumb_paths.get(shot.id)
-            if not tp:
-                missing.append(shot.id)
-                continue
-            try:
-                tkey = f"thumbs/{project_id}/{sha}/shot_{shot.id}.jpg"
-                storage.upload_file(tp, tkey, "image/jpeg")
-                shot.thumb_key = tkey
-            except Exception as e:
-                missing.append(shot.id)
-                print(f"[index {job_id}] thumb upload failed for shot "
-                      f"{shot.id}: {e}", flush=True)
+        # 8. Upload artifacts — ALL AT ONCE.
+        #
+        # These PUTs used to run one after another, and they are the last thing
+        # standing between the user and "your video is ready": a ~7MB proxy, a
+        # wav, dozens of thumbnails and a handful of contact sheets, each
+        # waiting for the previous round trip to finish. Measured at ~24.5s of
+        # an index, roughly 40% of its cost, and almost all of it network wait
+        # on a box that is otherwise idle.
+        #
+        # They are completely independent objects, so the wall clock should be
+        # the slowest single upload, not their sum. Threads (not processes) are
+        # right here because every one of them is blocked in a socket with the
+        # GIL released.
+        #
+        # The failure contract is UNCHANGED and is the reason each group is
+        # collected separately below: the proxy is load-bearing and a failure
+        # must fail the job, while thumbnails and contact sheets are
+        # conveniences the agent can re-derive — one un-extractable 320px jpeg
+        # once raised FileNotFoundError here and buried ~200s of good analysis
+        # under "I couldn't analyze that video. Try a different format like
+        # mp4", advice that could not possibly have helped for a video that had
+        # in fact been analyzed fine.
+        audio_key = f"audio/{project_id}/{sha}.wav" if wav_local else None
+        thumb_jobs = [(shot, thumb_paths.get(shot.id),
+                       f"thumbs/{project_id}/{sha}/shot_{shot.id}.jpg")
+                      for shot in shots]
+        sheet_jobs = [(sp, f"sheets/{project_id}/{sha}/sheet_{i}.jpg")
+                      for i, (sp, _ids) in enumerate(sheet_list, start=1)]
+
+        with futures.ThreadPoolExecutor(
+                max_workers=config.UPLOAD_PARALLELISM) as pool:
+            # Required: the job dies if either of these does.
+            required = {pool.submit(storage.upload_file, proxy_local,
+                                    proxy_key, "video/mp4"): "proxy"}
+            if audio_key:
+                required[pool.submit(storage.upload_file, wav_local,
+                                     audio_key, "audio/wav")] = "audio"
+            # Best-effort: a failure drops the key and adds a warning.
+            thumb_futs = {
+                pool.submit(storage.upload_file, tp, tkey, "image/jpeg"):
+                    (shot, tkey)
+                for shot, tp, tkey in thumb_jobs if tp}
+            sheet_futs = {
+                pool.submit(storage.upload_file, sp, skey, "image/jpeg"):
+                    (i, skey)
+                for i, (sp, skey) in enumerate(sheet_jobs)}
+
+            # Resolve the required ones FIRST so a storage outage still fails
+            # fast and loudly, exactly as it did when these ran in sequence.
+            for fut, what in required.items():
+                try:
+                    fut.result()
+                except Exception:
+                    print(f"[index {job_id}] {what} upload failed",
+                          flush=True)
+                    raise
+
+            missing = [shot.id for shot, tp, _k in thumb_jobs if not tp]
+            for fut, (shot, tkey) in thumb_futs.items():
+                try:
+                    fut.result()
+                    shot.thumb_key = tkey
+                except Exception as e:
+                    missing.append(shot.id)
+                    print(f"[index {job_id}] thumb upload failed for shot "
+                          f"{shot.id}: {e}", flush=True)
+
+            # Contact sheets keep their ORDER: sheet_keys is positional (the
+            # agent asks for "sheet 3"), so collect by index and then compact,
+            # never by completion order.
+            ok_sheets = {}
+            for fut, (i, skey) in sheet_futs.items():
+                try:
+                    fut.result()
+                    ok_sheets[i] = skey
+                except Exception as e:
+                    print(f"[index {job_id}] sheet upload failed ({skey}): {e}",
+                          flush=True)
+
         if missing:
             warnings.append(
                 f"{len(missing)} of {len(shots)} shot thumbnails could not be "
                 "made — those shots have no still image (the transcript and "
                 "cut points are unaffected)")
         sheet_keys = []
-        for i, (sp, _ids) in enumerate(sheet_list, start=1):
-            skey = f"sheets/{project_id}/{sha}/sheet_{i}.jpg"
-            # Same contract as thumbs: a contact sheet is a convenience the
-            # agent can re-derive, so a failed upload drops the key (never
-            # record one for an object that isn't there) instead of failing.
-            # A real storage outage still fails the job on the proxy above.
-            try:
-                storage.upload_file(sp, skey, "image/jpeg")
-            except Exception as e:
-                print(f"[index {job_id}] sheet upload failed ({skey}): {e}",
-                      flush=True)
-                continue
+        for i in sorted(ok_sheets):
+            sp, skey = sheet_jobs[i]
             sheet_keys.append(skey)
             # Record contact sheets as assets so admin storage totals count
             # them and any future DB-driven cleanup finds them (thumbs are

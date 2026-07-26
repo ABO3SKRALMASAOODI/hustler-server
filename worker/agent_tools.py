@@ -17,6 +17,7 @@ import eleven
 import inpaint
 import llm
 import media
+import model_prices
 import music_library
 import perception
 import sfx_library
@@ -119,19 +120,62 @@ class ToolContext:
         self.tokens_in = 0
         self.tokens_out = 0
         # The slice of tokens_in the provider served from its prompt cache.
-        # Billed at LLM_PRICE_CACHED_IN_PER_M, so the cap must know about it or
-        # it would stop a turn on spend the user is never charged for.
+        # Billed at the (far cheaper) cache rate, so the cap must know about it
+        # or it would stop a turn on spend the user is never charged for.
         self.tokens_cached_in = 0
+        # Same three numbers again, but split BY MODEL — a turn can legitimately
+        # touch two providers (the agent on one, vision on another, and paying
+        # users on a different agent model from free ones), and one blended rate
+        # is wrong for at least one of them. Keyed by model id:
+        #   {model: {"in": n, "out": n, "cached": n, "reasoning": n}}
+        self.model_usage = {}
         self.credit_budget = None     # set by run_agent_job; None = uncapped
+        # The client + model THIS turn talks to, resolved from the user's plan
+        # by run_agent_job (llm.agent_client_for). Defaults keep any caller that
+        # builds a context without going through run_agent_job working.
+        self.llm_client = None
+        self.agent_model = config.AGENT_MODEL
+        # Does this user hold a plan (a trial counts)? Decides the model above
+        # and what the out-of-credits message may honestly promise — a
+        # subscriber's pool comes back, a free account's does not.
+        self.subscribed = False
+
+    def add_usage(self, model, tokens_in, tokens_out, cached_in=0,
+                  reasoning=0):
+        """Record one model call's usage, for the in-turn spend cap."""
+        self.tokens_in += tokens_in or 0
+        self.tokens_out += tokens_out or 0
+        self.tokens_cached_in += cached_in or 0
+        slot = self.model_usage.setdefault(
+            (model or "").strip().lower(),
+            {"in": 0, "out": 0, "cached": 0, "reasoning": 0})
+        slot["in"] += tokens_in or 0
+        slot["out"] += tokens_out or 0
+        slot["cached"] += cached_in or 0
+        slot["reasoning"] += reasoning or 0
 
     def running_credits(self):
         """Model cost spent so far this turn, in credits (1 credit = $0.01),
-        using the same formula as db.charge_turn_credits so the in-turn cap
-        and the final charge agree."""
-        cached_in = min(max(self.tokens_cached_in, 0), self.tokens_in)
-        cost = ((self.tokens_in - cached_in) * config.LLM_PRICE_IN_PER_M +
-                cached_in * config.LLM_PRICE_CACHED_IN_PER_M +
-                self.tokens_out * config.LLM_PRICE_OUT_PER_M) / 1e6
+        using the same per-model prices as db.charge_turn_credits so the in-turn
+        cap and the final charge agree.
+
+        Falls back to the flat totals when nothing has been recorded per model —
+        that path only runs for callers that poke the counters directly."""
+        cost = 0.0
+        if self.model_usage:
+            for model, u in self.model_usage.items():
+                p = model_prices.price_for(model, config.PRICE_FALLBACK)
+                cached = min(max(u["cached"], 0), u["in"])
+                out = u["out"] + (u["reasoning"]
+                                  if p.get("reasoning_separate") else 0)
+                cost += ((u["in"] - cached) * p["in"]
+                         + cached * p["cached_in"]
+                         + out * p["out"]) / 1e6
+        else:
+            cached_in = min(max(self.tokens_cached_in, 0), self.tokens_in)
+            cost = ((self.tokens_in - cached_in) * config.LLM_PRICE_IN_PER_M +
+                    cached_in * config.LLM_PRICE_CACHED_IN_PER_M +
+                    self.tokens_out * config.LLM_PRICE_OUT_PER_M) / 1e6
         cost += len(self.images_generated) * config.IMAGE_PRICE_USD
         cost += self.gen_extra_cost_usd     # generated sfx + video (real $)
         return round(cost / 0.01, 2)

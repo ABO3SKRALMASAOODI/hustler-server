@@ -2666,17 +2666,31 @@ for node in ast.walk(ast.parse(_idx_src)):
     if isinstance(node, ast.FunctionDef) and node.name == "run_index_job":
         _thumb_fn = node
 check("index job found", _thumb_fn is not None)
-# every storage.upload_file for a thumb/sheet sits inside a try
+# The uploads run concurrently now (one PUT per artifact, all in flight at
+# once), so the isolation moved from the call to the RESULT: every best-effort
+# artifact's fut.result() must sit inside a try, and there must be at least one
+# per group (thumbs, sheets). The property under test is unchanged — a cosmetic
+# artifact failing must never fail the job.
 _guarded = []
 for node in ast.walk(_thumb_fn):
     if isinstance(node, ast.Try):
         for sub in ast.walk(node):
             if (isinstance(sub, ast.Call) and
-                    getattr(sub.func, "attr", "") == "upload_file"):
+                    getattr(sub.func, "attr", "") in ("upload_file",
+                                                      "result")):
                 _guarded.append(sub.lineno)
-check("thumb + sheet uploads are inside try blocks", len(_guarded) >= 2)
+check("thumb + sheet uploads are isolated from the job's fate",
+      len(_guarded) >= 2)
 check("a thumb failure degrades to a warning",
       "shot thumbnails could not be" in _idx_src)
+# ...and the load-bearing ones are NOT best-effort: a proxy that never reached
+# storage is an index that cannot be previewed or looked at, so it must raise.
+check("the proxy upload still fails the job",
+      "required" in _idx_src and "raise" in _idx_src)
+# Contact sheets are addressed positionally by the agent ("sheet 3"), so
+# completion order must not become key order.
+check("sheet keys stay in sheet order",
+      "for i in sorted(ok_sheets)" in _idx_src)
 check("thumbnail seeks are clamped to the proxy's real duration",
       "seek_ceiling" in _idx_src and "min(mid, seek_ceiling)" in _idx_src)
 

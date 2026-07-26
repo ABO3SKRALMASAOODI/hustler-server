@@ -8,6 +8,7 @@ from flask import Blueprint, request
 from models import get_db, update_user_subscription_status
 from datetime import datetime
 
+import offers
 import trial_state
 
 paddle_webhook = Blueprint('paddle_webhook', __name__)
@@ -15,8 +16,9 @@ paddle_webhook = Blueprint('paddle_webhook', __name__)
 PLAN_CREDITS = {
     # The two live tiers. Keep in step with PLANS in paddle.py (the checkout)
     # and PLAN_MONTHLY_LIMITS in credits.py (the denominator the studio shows).
-    'ai':     2400,     # Creator $30
-    'ai_pro': 4000,     # Pro     $50
+    # Rebased in round 48 for a real margin — see the note in paddle.py.
+    'ai':     1500,     # Creator $30  -> $15 of model cost, 50% margin
+    'ai_pro': 3000,     # Pro     $50  -> $30 of model cost, 40% margin
     # 'mcp' grants 0 ON PURPOSE. Credits meter OUR model spend, and on the
     # MCP plan the customer's own key pays for the model — topping up a pool
     # they never draw from would be meaningless, and metering their key as
@@ -153,6 +155,26 @@ def _clawback_monthly_credits(user_id):
     cur.close()
 
 
+def _record_discount_use(user_id, data):
+    """Mark the account's intro offer redeemed if this event carries a discount.
+
+    Both shapes are checked because both occur: a SUBSCRIPTION object carries
+    `discount: {id, starts_at, ends_at}`, while a TRANSACTION carries
+    `discount_id` at the top level. Never raises — an offer that stays
+    un-burned is a bookkeeping wrinkle; an exception here is a failed
+    activation and a Paddle retry loop.
+    """
+    try:
+        discount = data.get('discount') or {}
+        did = discount.get('id') if isinstance(discount, dict) else None
+        did = did or data.get('discount_id')
+        if not did:
+            return
+        offers.mark_used(get_db(), user_id)
+    except Exception as e:
+        print(f"⚠️ [offers] could not record discount use for {user_id}: {e}")
+
+
 def _verify_paddle_signature(req):
     header = req.headers.get("Paddle-Signature", "")
     parts = dict(p.split("=", 1) for p in header.split(";") if "=" in p)
@@ -245,6 +267,12 @@ def handle_webhook():
         if event_type.startswith('subscription.'):
             trial_state.sync_from_subscription(
                 get_db(), user_id, plan, subscription_id, data)
+        # Burn the intro offer the moment Paddle confirms a discount is on this
+        # subscription. Paddle is the only authority for this: we hand a
+        # discount id to a checkout, but plenty of checkouts are abandoned and
+        # some are completed without it. Marking on "we offered" instead of "it
+        # was taken" would quietly deny people a discount they never received.
+        _record_discount_use(user_id, data)
 
     elif event_type in REFUND_EVENTS:
         if (data.get('action') or '').lower() != 'refund':

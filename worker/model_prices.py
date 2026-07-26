@@ -1,0 +1,172 @@
+"""Model prices, keyed on the model id that is ALREADY on every llm_calls row.
+
+WHY THIS REPLACED FOUR ENV CONSTANTS
+------------------------------------
+`LLM_PRICE_IN_PER_M` and friends were process-global: one number, applied to
+every row, in four different files. That was fine while exactly one model ever
+answered. It stops being fine the moment a single turn can run on a different
+model from the one the env var was set for — which is exactly what plan-based
+routing does (free -> DeepSeek, trial/paid -> Grok) and what vision already
+does today (its own provider, its own model, priced at the agent's rate).
+
+A global constant that is right for one model is silently WRONG for the other,
+and "silently wrong by a constant factor" is the precise bug class that cost a
+day when cached input was billed at the miss rate. So price is looked up per
+ROW, from the model id the worker already stores.
+
+Unknown model -> the env constants, so a provider nobody listed here keeps
+working exactly as before instead of pricing at zero.
+
+THIS FILE IS MIRRORED
+---------------------
+`worker/model_prices.py` and `backend/model_prices.py` are byte-identical: the
+worker charges credits, the backend renders the admin cost views, and they are
+separate services that cannot import each other. `worker/tests/
+test_model_prices.py` loads both by path and fails if they ever drift — the
+same guard OUTRO_VERSION uses. Edit one, copy it to the other.
+
+REASONING TOKENS
+----------------
+Some providers report "thinking" tokens OUTSIDE completion_tokens; others fold
+them in. Both spellings exist in the wild and the difference is a 2-4x charge,
+so it is a per-model FACT, not a global assumption:
+
+  * folded (reasoning_separate False) -- completion_tokens already contains
+    them. Adding the reasoning count would DOUBLE-CHARGE. This is the default
+    for anything unlisted, because over-charging a customer is the worse of the
+    two errors.
+  * separate (reasoning_separate True) -- completion_tokens excludes them and
+    they are billed at the output rate, so leaving them out UNDER-charges. xAI
+    invoices list "completion" and "reasoning" as two lines, which is what put
+    grok in this column.
+
+`reasoning_out` is recorded on every row either way (worker/llm.reasoning_tokens
+-> the recorded response payload), so the flag can be checked against reality
+before it is trusted. Run this for a full day on a provider and compare with
+its dashboard's two output lines:
+
+    SELECT model,
+           SUM(completion_tokens) AS completion,
+           SUM(COALESCE((response->>'reasoning_out')::float, 0)) AS reasoning
+      FROM llm_calls
+     WHERE created_at > NOW() - INTERVAL '1 day'
+     GROUP BY 1;
+
+If the dashboard's output total matches `completion` alone, the model is folded
+and the flag must be False. If it matches completion + reasoning, it is
+separate and the flag must be True.
+"""
+
+# model id (lowercased, exact) -> price in USD per 1M tokens.
+#
+#   in         cache-MISS input
+#   cached_in  cache-HIT input (a repeated prompt prefix)
+#   out        completion
+#
+# Keep every number sourced from the provider's own price page or a real
+# invoice. A guessed price is a silent, permanent billing error.
+MODEL_PRICES = {
+    # DeepSeek V4 Pro -- the default agent model since Jul 26 2026.
+    # Disk-cached prefix hits are 480x cheaper than a miss, which is why the
+    # three-part charge exists at all: an agent turn re-sends the same system
+    # prompt and tool schemas every iteration.
+    "deepseek-v4-pro": {
+        "in": 1.74, "cached_in": 0.003625, "out": 3.48,
+        "reasoning_separate": False,
+    },
+    # Grok 4.5 -- what trial and paid users get once PAID_AGENT_MODEL is set.
+    #
+    # cached_in is 0.30, NOT 2.0. The comment this replaces said to set the
+    # cached price equal to the miss price for Grok, i.e. "Grok has no prompt
+    # caching". That is false: the invoice bills cached input as its own line,
+    # and the overwhelming majority of an agent turn's input hits it. Pricing
+    # those at 2.0 would over-charge cached tokens by ~6.7x, which is the exact
+    # failure that was just fixed for DeepSeek.
+    "grok-4.5": {
+        "in": 2.00, "cached_in": 0.30, "out": 6.00,
+        # xAI reports reasoning tokens separately from completion_tokens.
+        # Verify with the query in this module's docstring before trusting it
+        # on a new xAI tier -- see also AGENT_REASONING_EFFORT, which is what
+        # actually shrinks this line.
+        "reasoning_separate": True,
+    },
+}
+
+_FIELDS = ("in", "cached_in", "out")
+
+
+def normalize(model):
+    return (model or "").strip().lower()
+
+
+def price_for(model, fallback):
+    """Prices for `model`, or `fallback` (a dict with the same keys) when the
+    model is not listed. Never raises -- an unpriced model must degrade to the
+    env constants, not to zero."""
+    row = MODEL_PRICES.get(normalize(model))
+    if not row:
+        out = dict(fallback)
+        out.setdefault("reasoning_separate", False)
+        return out
+    return dict(row)
+
+
+# ---------------------------------------------------------------------------
+#  SQL
+# ---------------------------------------------------------------------------
+# The charge and every admin cost view price llm_calls rows in SQL. Doing it
+# per ROW (rather than summing tokens and multiplying once) is what makes the
+# per-model table work at all, and it is strictly more accurate even on a
+# single-model deployment.
+#
+# NOTE: the expressions below contain NO percent sign, deliberately. psycopg2
+# scans the whole statement for its own placeholders, so a stray percent -- even
+# inside a comment -- raises before Postgres ever sees the query. That has taken
+# a page down here before.
+
+
+def _lit(text):
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def _case(field, model_col, fallback):
+    """CASE that maps a row's model id to one price field."""
+    whens = " ".join(
+        "WHEN {} THEN {}".format(_lit(mid), float(cfg[field]))
+        for mid, cfg in sorted(MODEL_PRICES.items()))
+    return "(CASE lower(COALESCE({}, '')) {} ELSE {} END)".format(
+        model_col, whens, float(fallback[field]))
+
+
+def _reasoning_case(model_col):
+    """1 when this row's model bills reasoning ON TOP of completion_tokens,
+    0 when it folds them in. Unlisted models fold (never over-charge)."""
+    whens = " ".join(
+        "WHEN {} THEN {}".format(_lit(mid),
+                                 1 if cfg.get("reasoning_separate") else 0)
+        for mid, cfg in sorted(MODEL_PRICES.items()))
+    return "(CASE lower(COALESCE({}, '')) {} ELSE 0 END)".format(
+        model_col, whens)
+
+
+def row_cost_sql(fallback, model_col="model", response_col="response",
+                 prompt_col="prompt_tokens", completion_col="completion_tokens"):
+    """USD cost of ONE llm_calls row, as a SQL expression.
+
+    Three-part input charge (miss / hit) plus output, each at this row's own
+    model price. `cached_in` is clamped to the prompt itself so a bogus provider
+    number can never make a charge negative, and reasoning tokens are added only
+    for models that report them outside completion_tokens.
+    """
+    cached = ("LEAST(GREATEST(COALESCE(({}->>'cached_in')::float, 0), 0), "
+              "COALESCE({}, 0))").format(response_col, prompt_col)
+    reasoning = ("GREATEST(COALESCE(({}->>'reasoning_out')::float, 0), 0) * {}"
+                 ).format(response_col, _reasoning_case(model_col))
+    return (
+        "((GREATEST(COALESCE({p}, 0) - {cached}, 0) * {p_in}"
+        " + {cached} * {p_cached}"
+        " + (COALESCE({c}, 0) + {reason}) * {p_out}) / 1000000.0)"
+    ).format(p=prompt_col, c=completion_col, cached=cached, reason=reasoning,
+             p_in=_case("in", model_col, fallback),
+             p_cached=_case("cached_in", model_col, fallback),
+             p_out=_case("out", model_col, fallback))

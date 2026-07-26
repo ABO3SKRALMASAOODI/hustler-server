@@ -20,12 +20,20 @@ the rule turns on. (Schema changes here are run by hand through the Render
 shell; deriving the gate from a column that already exists means this ships as
 one deploy with nothing to run first.)
 
+ROUND 48 adds a third clause: a new account gets FREE_TASTE_TURNS agent turns
+before the wall comes down. Gating at turn one puts the first screen that costs
+the visitor something ahead of the first screen that gives them anything, and
+the free export is watermarked, so the taste doubles as distribution. Same
+column-free rule: the count comes from `video_jobs`, which already records
+every turn.
+
 A trialling user IS a subscribed user — Paddle creates the subscription at
 checkout and only charges on day 3 — so `is_subscribed` is the right column
 and someone on day one of their trial passes the gate.
 """
 
 import datetime
+import os
 
 # Accounts created from this instant on must choose a plan. It is a UTC
 # timestamp, not a date, because `users.created_at` is a timestamp and a bare
@@ -35,12 +43,26 @@ import datetime
 # were promised the free allowance; don't, without deciding to do that.
 GATE_START = datetime.datetime(2026, 7, 26, 12, 0, 0)
 
+# A FREE TASTE before the wall.
+#
+# Gating at turn 1 asks someone to enter a card before the product has done
+# anything for them — the pricing page is the first screen that costs the
+# visitor something, and it arrives before the first screen that gives them
+# anything. Data from the launch says users reach their first export in about
+# 2.3 agent turns, so five turns is enough to actually finish a video and see
+# it work, and the free export is watermarked (round 41) — which makes the
+# taste a distribution channel rather than a giveaway.
+#
+# Counted on agent turns, not on time or projects, because a turn is the unit
+# that costs us model money. Gate closes on turn 6.
+FREE_TASTE_TURNS = int(os.getenv("FREE_TASTE_TURNS", "5"))
+
 # What the frontend and the API both say when the gate closes. One string, so
 # the 402 body and the pricing page cannot drift apart.
 GATE_CODE = "plan_required"
-GATE_MESSAGE = ("Pick a plan to start your 3-day free trial — it takes a "
-                "minute and you can cancel inside the trial without being "
-                "charged.")
+GATE_MESSAGE = ("That's your free edits used up. Start your 3-day free trial "
+                "to keep going — you can cancel inside the trial without "
+                "being charged.")
 
 
 def _naive_utc(value):
@@ -99,7 +121,51 @@ def needs_plan(conn, user_id):
         # An account with no registration timestamp predates this gate by
         # definition — the column has been written on every insert for years.
         return False
-    return created >= GATE_START
+    if created < GATE_START:
+        return False
+    return turns_used(conn, user_id) >= FREE_TASTE_TURNS
+
+
+def turns_used(conn, user_id):
+    """Agent turns this account has ever started.
+
+    Counts every agent_turn row, including failed ones, deliberately: a turn
+    that failed still spent model money, and a gate that only counted successes
+    would hand an unlucky user unlimited retries. Fails to a LARGE number on
+    error, i.e. closed — the fail-open decision belongs to needs_plan's caller,
+    which already swallows lookup failures above; if we cannot count turns we
+    must not hand out an unbounded free tier.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM video_jobs "
+                    "WHERE user_id = %s AND type = 'agent_turn'",
+                    (int(user_id),))
+        row = cur.fetchone()
+        cur.close()
+    except Exception as e:                                  # pragma: no cover
+        print(f"[plan_gate] turn count failed for user {user_id}: {e}",
+              flush=True)
+        return FREE_TASTE_TURNS
+    if row is None:
+        return 0
+    try:
+        return int(row[0] if not isinstance(row, dict)
+                   else next(iter(row.values())))
+    except (TypeError, ValueError, StopIteration):
+        return 0
+
+
+def taste_state(conn, user_id):
+    """{used, total, remaining} for the free taste — what the studio shows so
+    the wall is never a surprise. Safe for any user; a subscriber simply has
+    remaining=None because the taste does not apply to them."""
+    try:
+        used = turns_used(conn, user_id)
+    except Exception:                                       # pragma: no cover
+        return {"used": 0, "total": FREE_TASTE_TURNS, "remaining": None}
+    return {"used": used, "total": FREE_TASTE_TURNS,
+            "remaining": max(0, FREE_TASTE_TURNS - used)}
 
 
 def gate_response(jsonify):

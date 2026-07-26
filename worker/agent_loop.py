@@ -411,24 +411,58 @@ def run_agent_job(worker_db, job):
     balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
     ctx.credit_budget = float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE
 
+    # Which model answers this turn. Trials and paid customers get the stronger
+    # provider when one is configured (config.PAID_*); free accounts get
+    # AGENT_MODEL. A trialling user IS is_subscribed — Paddle creates the
+    # subscription at checkout and only charges on day 3 — so this one boolean
+    # is the whole rule. Fails to the FREE model on any error: the wrong side of
+    # that is a slightly cheaper turn, never a 401 storm at a paying customer.
+    try:
+        subscribed = bool(worker_db.run(dbx.user_is_subscribed,
+                                        job["user_id"]))
+    except Exception as e:
+        print(f"[agent] subscription lookup failed for job {job['id']}: {e}",
+              flush=True)
+        subscribed = False
+    ctx.subscribed = subscribed
+    ctx.llm_client, ctx.agent_model = llm.agent_client_for(subscribed)
+    if ctx.agent_model != config.AGENT_MODEL:
+        print(f"[agent] job {job['id']}: paid tier -> {ctx.agent_model}",
+              flush=True)
+
     # Persist every model call this turn (agent, honesty regen, vision) to
     # llm_calls for the admin inspector, and accumulate token usage for the
     # spend cap. Payloads are capped + redacted in dbx.insert_llm_call;
     # failures never break the turn.
     def _llm_recorder(purpose, request, response, usage):
         cached_in = llm.cached_input_tokens(usage)
+        reasoning = llm.reasoning_tokens(usage)
+        model = (request or {}).get("model")
         if usage:
-            ctx.tokens_in += getattr(usage, "prompt_tokens", 0) or 0
-            ctx.tokens_out += getattr(usage, "completion_tokens", 0) or 0
-            ctx.tokens_cached_in += cached_in
-        # The cache-hit slice rides in the response payload rather than a new
-        # column: charge_turn_credits reads it back with response->>'cached_in'
-        # and bills it at the (480x cheaper) cache rate. prompt_tokens stays the
-        # true total so admin token counts are unaffected.
-        if cached_in and isinstance(response, dict):
-            response = dict(response, cached_in=cached_in)
+            ctx.add_usage(model,
+                          getattr(usage, "prompt_tokens", 0) or 0,
+                          getattr(usage, "completion_tokens", 0) or 0,
+                          cached_in, reasoning)
+        # The cache-hit slice and the reasoning count ride in the response
+        # payload rather than in new columns: charge_turn_credits reads them
+        # back with response->>'cached_in' / ->>'reasoning_out' and prices each
+        # row from its own model. prompt_tokens stays the true total so admin
+        # token counts are unaffected.
+        #
+        # reasoning_out is recorded for EVERY provider, including the ones that
+        # already fold it into completion_tokens — it is only charged where
+        # model_prices says the provider bills it separately. Recording it
+        # unconditionally is what makes that flag checkable against reality
+        # instead of assumed.
+        if isinstance(response, dict) and (cached_in or reasoning):
+            extra = {}
+            if cached_in:
+                extra["cached_in"] = cached_in
+            if reasoning:
+                extra["reasoning_out"] = reasoning
+            response = dict(response, **extra)
         worker_db.run(dbx.insert_llm_call, job["project_id"], job["id"],
-                      purpose, (request or {}).get("model"),
+                      purpose, model,
                       request, response,
                       getattr(usage, "prompt_tokens", None) if usage else None,
                       getattr(usage, "completion_tokens", None) if usage else None)
@@ -932,13 +966,14 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
          "do not claim anything the facts do not show."},
     ]
     redraft = ""
+    model = ctx.agent_model or config.AGENT_MODEL
     try:
         resp = client.chat.completions.create(
-            model=config.AGENT_MODEL, messages=msgs, tools=tools,
+            model=model, messages=msgs, tools=tools,
             tool_choice="none", temperature=config.AGENT_TEMPERATURE,
             max_tokens=config.AGENT_REPLY_MAX_TOKENS)
         llm.record("honesty_regen",
-                   {"model": config.AGENT_MODEL, "messages": msgs[-2:],
+                   {"model": model, "messages": msgs[-2:],
                     "note": "regeneration after turn-facts violation"},
                    {"content": (resp.choices[0].message.content or "")},
                    getattr(resp, "usage", None))
@@ -1041,7 +1076,10 @@ def _time_pressure_note(result, t_start, warned):
 
 def _run_loop(ctx, worker_db, job, session_id, user_message,
               attachment_note=""):
-    client = llm.client()
+    # Resolved from the user's plan in run_agent_job. _build_messages and the
+    # tool schemas are model-agnostic and do not change with it.
+    client = ctx.llm_client or llm.client()
+    model = ctx.agent_model or config.AGENT_MODEL
     messages = _build_messages(ctx, worker_db, user_message, attachment_note)
     tools = agent_tools.openai_tools()
     total_steps = 0
@@ -1103,11 +1141,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # "credits refresh daily" to someone whose one-time allowance is
             # spent is simply false, and it teaches them to wait instead of
             # deciding.
-            try:
-                subscribed = worker_db.run(dbx.user_is_subscribed,
-                                           job["user_id"])
-            except Exception:
-                subscribed = False
+            # Already resolved once at the top of the turn (it also chooses
+            # which model answered) — no second query at the worst moment.
+            subscribed = bool(getattr(ctx, "subscribed", False))
             _refill = ("Your credits refresh on your plan's cycle — or "
                        "upgrade for a bigger monthly pool to keep editing now."
                        if subscribed else
@@ -1146,13 +1182,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         worker_db.run(dbx.set_progress, job["id"],
                       int(100 * iteration / config.AGENT_MAX_ITERATIONS))
         t0 = time.monotonic()
+        # reasoning_effort, from the SECOND iteration on. Iteration 0 is where
+        # the model reads the project state and plans the edit — that is the
+        # thinking worth paying for. Everything after is tool dispatch, which
+        # the providers themselves put under "low". Empty config sends no field
+        # at all, so a provider that would reject an unknown parameter is
+        # untouched until someone opts in.
+        extra = {}
+        if config.AGENT_REASONING_EFFORT and iteration > 0:
+            extra["reasoning_effort"] = config.AGENT_REASONING_EFFORT
         try:
             resp = client.chat.completions.create(
-                model=config.AGENT_MODEL,
+                model=model,
                 messages=messages,
                 tools=tools,
                 temperature=config.AGENT_TEMPERATURE,
                 max_tokens=max_tokens,
+                **extra,
             )
         except Exception as e:
             # llm.record only ran on success, so a failing agent call left NO
@@ -1164,7 +1210,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             timings["llm_s"] = round(
                 timings["llm_s"] + time.monotonic() - t0, 2)
             llm.record("agent",
-                       {"model": config.AGENT_MODEL,
+                       {"model": model,
                         "messages": messages[-2:],
                         "tools": [t["function"]["name"] for t in tools]},
                        {"error": f"{type(e).__name__}: {str(e)[:400]}"}, None)
@@ -1174,9 +1220,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         msg = resp.choices[0].message
         finish = getattr(resp.choices[0], "finish_reason", None)
         llm.record("agent",
-                   {"model": config.AGENT_MODEL, "messages": messages,
+                   {"model": model, "messages": messages,
                     "tools": [t["function"]["name"] for t in tools],
-                    "max_tokens": max_tokens},
+                    "max_tokens": max_tokens,
+                    **({"reasoning_effort": extra["reasoning_effort"]}
+                       if extra else {})},
                    {"content": msg.content,
                     "tool_calls": [{"name": tc.function.name,
                                     "arguments": tc.function.arguments}

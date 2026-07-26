@@ -77,8 +77,8 @@ PLAN_MONTHLY_LIMITS = {
     # that one GRANTS the credits, this one is the denominator the studio shows.
     # They were missing here, so an 'ai' subscriber paying $30 would have seen a
     # limit of 20 (the daily top-up alone) even while holding 2,400 credits.
-    "ai":     2400,     # Creator $30
-    "ai_pro": 4000,     # Pro     $50
+    "ai":     1500,     # Creator $30 — rebased round 48, see paddle.py
+    "ai_pro": 3000,     # Pro     $50
     # 'mcp' is 0 on purpose: that plan brings its own model, so it never draws
     # on our metered pool.
     "mcp":   0,

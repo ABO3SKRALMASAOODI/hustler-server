@@ -98,9 +98,26 @@ def verify_code():
     cursor.execute("UPDATE users SET is_verified = 1 WHERE email = %s", (email,))
     cursor.execute("DELETE FROM email_codes WHERE email = %s", (email,))
     conn.commit()
+    cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+    new_user = cursor.fetchone()
     cursor.close()
-    conn.close()
 
+    # The account is real from this moment, so this is where its 24-hour
+    # discount starts and where the email announcing it goes out.
+    #
+    # BEFORE conn.close(), deliberately: get_db() caches one connection on
+    # flask.g and hands the same object to every caller, so anything asking for
+    # a connection after that close gets the closed one back.
+    #
+    # Wrapped because a verification must never fail over a marketing offer.
+    if new_user:
+        try:
+            import offers
+            offers.grant_welcome(conn, new_user['id'], email)
+        except Exception as e:
+            print(f"⚠️ welcome offer failed for {email}: {e}", flush=True)
+
+    conn.close()
     return jsonify({'message': 'Email verified successfully'}), 200
 
 # (debug email-codes route removed — it let unauthenticated callers dump
