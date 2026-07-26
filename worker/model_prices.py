@@ -112,6 +112,40 @@ def price_for(model, fallback):
 
 
 # ---------------------------------------------------------------------------
+#  What a credit is worth
+# ---------------------------------------------------------------------------
+# A credit is spent at TWICE the model's real cost (round 49). This single
+# number is the entire margin of the business, so it lives beside the prices it
+# is derived from rather than as a literal in the two places that divide by it.
+#
+# It used to be 0.01 -- one credit, one cent of real spend -- which made the
+# grant and the cost the same number and left the margin to come from the
+# bundle size alone. That worked out at 50%/40% on the monthly prices and
+# 40%/28% on the annual ones, and an intro discount on top of an annual plan
+# was sold BELOW cost. Doubling the burn rate fixed all four at once without
+# moving a sticker price: the customer sees a bigger credit grant, and each
+# credit buys half as much model.
+#
+# Everything downstream reads this, so the two must never be set independently:
+#   worker/db.charge_turn_credits       what the user is actually charged
+#   worker/agent_tools.running_credits  the in-turn cap, same units
+# and PLAN_CREDITS / PLAN_MONTHLY_LIMITS are chosen against it (see the margin
+# table in backend/routes/paddle.py). Halving it back to 0.01 doubles every
+# plan's real cost and takes Frontier to a 0% margin.
+USD_PER_CREDIT = 0.005
+
+
+def usd_to_credits(usd, ndigits=2):
+    """Model spend in dollars -> credits. The one conversion, used by the
+    charge and by every projection shown to a user, so a quote and an invoice
+    cannot use different arithmetic."""
+    try:
+        return round(float(usd) / USD_PER_CREDIT, ndigits)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
 #  SQL
 # ---------------------------------------------------------------------------
 # The charge and every admin cost view price llm_calls rows in SQL. Doing it

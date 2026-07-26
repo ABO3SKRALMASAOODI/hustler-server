@@ -147,7 +147,7 @@ def test_the_cap_prices_a_mixed_model_turn_per_model():
     expect = ((20_000 * ds["in"] + 80_000 * ds["cached_in"]
                + 5_000 * ds["out"]) +
               (20_000 * gk["in"] + 2_000 * gk["out"])) / 1e6
-    assert ctx.running_credits() == round(expect / 0.01, 2)
+    assert ctx.running_credits() == model_prices.usd_to_credits(expect)
 
 
 def test_reasoning_is_charged_only_where_the_provider_bills_it_separately():
@@ -181,37 +181,68 @@ def test_totals_are_kept_alongside_the_breakdown():
 
 # ── plan-based routing ──────────────────────────────────────────────────
 
-def test_routing_is_a_no_op_until_the_paid_provider_is_configured():
-    """Shipping this must change nothing. All three PAID_* vars default empty,
-    so a subscriber and a free user get the identical client and model."""
-    assert not llm.paid_available()
-    free = llm.agent_client_for(False)
-    paid = llm.agent_client_for(True)
-    assert free[1] == paid[1] == config.AGENT_MODEL
-    assert free[0] is paid[0]
+def _paid_on(monkeypatch, key="xai-test-key"):
+    monkeypatch.setattr(config, "PAID_BASE_URL", "https://api.x.ai/v1")
+    monkeypatch.setattr(config, "PAID_AGENT_MODEL", "grok-4.5")
+    monkeypatch.setattr(config, "PAID_API_KEY", key)
+    monkeypatch.setattr(llm, "_paid_client", None)
+
+
+def _frontier_on(monkeypatch, key="xai-test-key"):
+    monkeypatch.setattr(config, "FRONTIER_BASE_URL", "https://api.x.ai/v1")
+    monkeypatch.setattr(config, "FRONTIER_AGENT_MODEL", "grok-4.5")
+    monkeypatch.setattr(config, "FRONTIER_VISION_MODEL", "grok-4.5")
+    monkeypatch.setattr(config, "FRONTIER_API_KEY", key)
+    monkeypatch.setattr(llm, "_frontier_client", None)
 
 
 def test_a_half_configured_paid_provider_is_treated_as_off(monkeypatch):
     """A base URL with no key would 401 every turn — for paying customers
     specifically. Off is the only safe reading of a partial config."""
-    monkeypatch.setattr(config, "PAID_BASE_URL", "https://api.x.ai/v1")
-    monkeypatch.setattr(config, "PAID_AGENT_MODEL", "grok-4.5")
-    monkeypatch.setattr(config, "PAID_API_KEY", "")
+    _paid_on(monkeypatch, key="")
     assert not llm.paid_available()
-    assert llm.agent_client_for(True)[1] == config.AGENT_MODEL
+    assert llm.agent_client_for(True, "ai_pro")[1] == config.AGENT_MODEL
 
 
-def test_subscribers_get_the_paid_model_once_it_is_configured(monkeypatch):
-    monkeypatch.setattr(config, "PAID_BASE_URL", "https://api.x.ai/v1")
-    monkeypatch.setattr(config, "PAID_AGENT_MODEL", "grok-4.5")
-    monkeypatch.setattr(config, "PAID_API_KEY", "xai-test-key")
-    monkeypatch.setattr(llm, "_paid_client", None)
+def test_each_plan_gets_the_model_its_card_advertises(monkeypatch):
+    """The pricing page calls the middle card "more intelligence" and the top
+    one "frontier intelligence". That copy is only true while these three land
+    on three different models."""
+    _paid_on(monkeypatch)
+    _frontier_on(monkeypatch)
     try:
-        assert llm.paid_available()
-        assert llm.agent_client_for(True)[1] == "grok-4.5"
-        assert llm.agent_client_for(False)[1] == config.AGENT_MODEL
+        assert llm.agent_client_for(False, "free")[1] == config.AGENT_MODEL
+        assert llm.agent_client_for(True, "ai")[1] == config.AGENT_MODEL
+        assert llm.agent_client_for(True, "ai_pro")[1] == "grok-4.5"
+        assert llm.agent_client_for(True, "ai_max")[1] == "grok-4.5"
+        # Frontier is the only plan whose LOOKING is upgraded too — the half of
+        # that promise nobody would notice was missing.
+        assert llm.vision_client_for("ai_max")[1] == "grok-4.5"
+        assert llm.vision_client_for("ai_pro")[1] == config.VISION_MODEL
+        assert llm.frontier_client() is not llm.paid_client()
     finally:
         llm._paid_client = None
+        llm._frontier_client = None
+
+
+def test_a_trial_previews_its_own_plans_model(monkeypatch):
+    """A Creator trial must NOT be served the Pro model. Previewing a model the
+    customer stops getting the moment they pay is the bait-and-switch that
+    per-plan routing exists to prevent."""
+    _paid_on(monkeypatch)
+    try:
+        assert llm.agent_client_for(True, "ai")[1] == config.AGENT_MODEL
+    finally:
+        llm._paid_client = None
+
+
+def test_an_unconfigured_tier_degrades_instead_of_401ing(monkeypatch):
+    """No key anywhere: every plan falls back to the base model. A worse edit
+    is recoverable; a 401 on every turn of a $100 plan is not."""
+    _paid_on(monkeypatch, key="")
+    monkeypatch.setattr(config, "FRONTIER_API_KEY", "")
+    for plan in ("ai", "ai_pro", "ai_max"):
+        assert llm.agent_client_for(True, plan)[1] == config.AGENT_MODEL
 
 
 def test_the_paid_model_is_priced():
@@ -234,3 +265,41 @@ def test_reasoning_effort_never_applies_to_the_first_iteration():
     import agent_loop
     src = inspect.getsource(agent_loop._run_loop)
     assert "AGENT_REASONING_EFFORT and iteration > 0" in src
+
+
+# ── the burn rate and what the plans are priced against ─────────────────────
+
+def test_a_credit_burns_at_twice_the_models_cost():
+    """This one constant IS the margin. At 0.01 (one credit, one cent of real
+    spend) the annual tiers sat at 28-40% and an intro discount on an annual
+    plan was a below-cost sale; at 0.005 every plan clears 40%."""
+    assert model_prices.USD_PER_CREDIT == 0.005
+    assert model_prices.usd_to_credits(1.00) == 200.0
+    assert model_prices.usd_to_credits(0.0) == 0.0
+    # Junk in must not raise inside a charge.
+    assert model_prices.usd_to_credits(None) == 0.0
+
+
+def test_the_charge_and_the_in_turn_cap_use_the_SAME_divisor():
+    """Two divisors here would stop a turn at a number the invoice contradicts.
+    Both must go through usd_to_credits, not a literal."""
+    import inspect
+    import db as worker_db_mod
+    for src in (inspect.getsource(worker_db_mod.charge_turn_credits),
+                inspect.getsource(agent_tools.ToolContext.running_credits)):
+        assert "usd_to_credits" in src
+        assert "/ 0.01" not in src
+
+
+def test_every_live_plan_clears_a_forty_percent_margin():
+    """The plan table and the burn rate are set in different files and only
+    make sense together — this is the assertion that ties them."""
+    backend = _load_backend_copy()
+    assert backend.USD_PER_CREDIT == model_prices.USD_PER_CREDIT
+    for plan, price, granted in (("ai", 30, 2000), ("ai_pro", 50, 4000),
+                                 ("ai_max", 100, 10000)):
+        cost = granted * model_prices.USD_PER_CREDIT
+        assert cost <= price * 0.60, (plan, cost, price)
+        # ...and the annual price (ten months of the monthly one) too, which is
+        # the one that used to go negative.
+        assert cost <= (price * 10 / 12.0) * 0.75, (plan, cost)

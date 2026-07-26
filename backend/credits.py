@@ -12,10 +12,11 @@ Anthropic pricing (per million tokens):
   Sonnet 4.6        $3.00   $15.00  $3.75        $0.30
   Opus 4.6          $5.00   $25.00  $6.25        $0.50
 
-1 credit = $0.01
-
-Margin comes entirely from selling credit bundles at a premium price.
-No markup is applied here — credits reflect actual API cost.
+1 credit = $0.005 of real model cost (model_prices.USD_PER_CREDIT), i.e. a
+credit is spent at TWICE what the model costs us. That factor IS the margin —
+see the plan table in routes/paddle.py. It was 1:1 with cost until round 49,
+which left the annual tiers at 28-40% and made an intro discount on an annual
+plan a below-cost sale.
 
 Free users   : 20 credits / day (resets daily, never accumulates) + 80 one-time bonus
 Subscribed   : 20 credits / day (resets daily) + monthly pool from plan + remaining bonus
@@ -26,6 +27,13 @@ Bonus pool   : one-time 80 credits on registration, never refills
 
 import datetime
 import math
+
+# A credit costs the user twice what the model costs us (round 49). Imported
+# rather than restated so the legacy app-builder lane and the video lane cannot
+# drift into meaning two different things by the word "credit" — the worker
+# charges video turns through this same constant (worker/db.charge_turn_credits,
+# via the byte-identical worker/model_prices.py).
+from model_prices import USD_PER_CREDIT
 
 # ── Per-model pricing (per million tokens) ────────────────────────────────────
 
@@ -73,12 +81,13 @@ PLAN_MODELS = {
 # what actually grants the monthly pool on renewal.
 PLAN_MONTHLY_LIMITS = {
     "free":  0,
-    # The two live plans. Keep in step with PLAN_CREDITS in paddle_webhook.py —
-    # that one GRANTS the credits, this one is the denominator the studio shows.
-    # They were missing here, so an 'ai' subscriber paying $30 would have seen a
-    # limit of 20 (the daily top-up alone) even while holding 2,400 credits.
-    "ai":     1500,     # Creator $30 — rebased round 48, see paddle.py
-    "ai_pro": 3000,     # Pro     $50
+    # The three live plans. Keep in step with PLAN_CREDITS in paddle_webhook.py
+    # — that one GRANTS the credits, this one is the denominator the studio
+    # shows. They were missing here, so an 'ai' subscriber paying $30 would have
+    # seen a limit of 20 (the daily top-up alone) even while holding 2,400.
+    "ai":     2000,     # Creator  $30 — round 49, see the table in paddle.py
+    "ai_pro": 4000,     # Pro      $50
+    "ai_max": 10000,    # Frontier $100
     # 'mcp' is 0 on purpose: that plan brings its own model, so it never draws
     # on our metered pool.
     "mcp":   0,
@@ -89,8 +98,36 @@ PLAN_MONTHLY_LIMITS = {
     "ace":   30000,
 }
 
-DOLLARS_PER_CREDIT  = 0.01
-MARKUP              = 1.0   # No markup — margin comes from bundle pricing
+DOLLARS_PER_CREDIT  = USD_PER_CREDIT
+MARKUP              = 1.0   # No markup — the margin is in the burn rate above
+
+# ── The trial allowance ───────────────────────────────────────────────────────
+#
+# A trial is three days of the real product, not three days of the whole
+# month's pool. Before this, a trialling account was granted the FULL monthly
+# grant and could burn every credit of it before Paddle had charged a cent —
+# $50 of model spend on a Frontier trial somebody then cancels.
+#
+# So a trial grants TRIAL_CREDIT_FRACTION of the plan, and conversion to paid
+# is what releases the rest (backend/routes/paddle_webhook.py grants the full
+# figure the moment Paddle reports status 'active'). 10% is still a genuinely
+# usable window — 200 credits on Creator is several complete edits at the
+# measured cost of a turn — and it is spent at the plan's own model, so what
+# they are trying is what they would buy.
+TRIAL_CREDIT_FRACTION = 0.10
+
+
+def trial_allowance(plan):
+    """Credits a trialling account on `plan` may spend before it converts.
+
+    Rounded UP so no plan can ever land on a 0-credit trial through a rounding
+    edge, and floored at 1 for the same reason: a trial that cannot run a
+    single turn is worse than no trial, because the user finds out only after
+    entering a card."""
+    full = PLAN_MONTHLY_LIMITS.get(plan, 0)
+    if full <= 0:
+        return 0
+    return max(1, int(math.ceil(full * TRIAL_CREDIT_FRACTION)))
 
 # The free tier is ONE flat allowance, granted once and never refilled.
 #
@@ -136,7 +173,8 @@ def is_model_allowed(plan, V_model):
 
 # ── Daily refresh ─────────────────────────────────────────────────────────────
 
-def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
+def refresh_daily_credits(conn, user_id: int, is_subscribed: bool,
+                          daily_top_up: bool = None):
     """
     Every day: reset a SUBSCRIBER's daily pool to 20 (never accumulates).
     Free users are not topped up at all — their allowance is the one-time
@@ -144,9 +182,18 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
     goes down. Monthly pool is untouched here — managed by webhook only.
     Combined balance shown to user = daily + bonus + monthly.
 
+    `daily_top_up` separates "is a subscriber" from "gets 20 a day", which
+    stopped being the same question when trials were capped at 10% of the plan
+    (round 49). A trialling account IS subscribed, so without this it collects
+    20 more credits every day of a 3-day trial — 60 on top of a 200-credit cap,
+    which is 30% more than the paywall says it is. Defaults to is_subscribed,
+    so every existing caller behaves exactly as before.
+
     Only hits the DB with a write when the date has actually changed,
     avoiding unnecessary FOR UPDATE locks on every status poll.
     """
+    if daily_top_up is None:
+        daily_top_up = is_subscribed
     today = datetime.date.today()
 
     with conn.cursor() as cur:
@@ -173,7 +220,7 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
         # advance — otherwise this branch re-runs on every poll, taking a write
         # lock each time. Whatever is left in their daily column (legacy users
         # carry up to 20) is theirs to spend; it just never grows back.
-        if (reset_date is None or reset_date < today) and not is_subscribed:
+        if (reset_date is None or reset_date < today) and not daily_top_up:
             cur.execute(
                 "UPDATE users SET credits_daily_reset = %s, "
                 "credits_balance = credits_daily + credits_bonus "
@@ -207,6 +254,27 @@ def refresh_daily_credits(conn, user_id: int, is_subscribed: bool):
 
 # ── Get balance ───────────────────────────────────────────────────────────────
 
+def _trial_status(conn, user_id: int):
+    """This account's Paddle-reported trial status, or None.
+
+    Its own query rather than a column on the main SELECT because the trial
+    columns are added by hand in the Render shell (see trial_state.py) and this
+    function must keep working on a database where they do not exist yet.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT trial_status FROM users WHERE id = %s",
+                        (user_id,))
+            row = cur.fetchone()
+        return (row or {}).get("trial_status")
+    except Exception:
+        try:
+            conn.rollback()     # a missing column poisons the transaction
+        except Exception:
+            pass
+        return None
+
+
 def get_balance(conn, user_id: int) -> dict:
     with conn.cursor() as cur:
         cur.execute(
@@ -219,25 +287,41 @@ def get_balance(conn, user_id: int) -> dict:
 
     is_subscribed = bool(row["is_subscribed"])
     plan = row.get("plan") or "free"
-    balance = refresh_daily_credits(conn, user_id, is_subscribed)
+    trialing = is_subscribed and _trial_status(conn, user_id) == "trialing"
+    # A trial gets no daily top-up — otherwise three days of 20 lands 30% on
+    # top of the 10% cap the paywall quotes.
+    balance = refresh_daily_credits(conn, user_id, is_subscribed,
+                                    daily_top_up=is_subscribed and not trialing)
 
     monthly = PLAN_MONTHLY_LIMITS.get(plan, 0)
-    if is_subscribed:
+    if trialing:
+        # The denominator during a trial is the trial allowance itself. Showing
+        # "x / 2,000" to someone who can only spend 200 of them is the kind of
+        # number that reads as a bug the moment the wall arrives.
+        plan_limit = trial_allowance(plan)
+    elif is_subscribed:
         plan_limit = SUB_DAILY_CREDITS + monthly
     else:
         # One flat allowance, so the denominator the UI shows is the grant
         # itself — not a total nobody can ever hold at once.
         plan_limit = FREE_GRANT_CREDITS
 
+    empty = float(balance or 0) < 1
     return {
         "balance": balance,
         "is_subscribed": is_subscribed,
         "plan": plan,
         "plan_limit": plan_limit,
+        "trialing": trialing,
         # The free allowance is spent and does not come back — the studio uses
         # this to offer the trial instead of telling people to wait for a
         # refresh that will never arrive.
-        "free_trial_exhausted": (not is_subscribed) and float(balance or 0) < 1,
+        "free_trial_exhausted": (not is_subscribed) and empty,
+        # Spent the trial slice. A DIFFERENT wall from both of the above: these
+        # users already entered a card, so the answer is not "start a trial"
+        # (they are in one) and not "wait for your cycle" (the rest of the plan
+        # is released by converting, not by waiting).
+        "trial_cap_reached": trialing and empty,
     }
 
 

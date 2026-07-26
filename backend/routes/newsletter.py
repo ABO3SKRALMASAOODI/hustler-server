@@ -42,6 +42,7 @@ import jwt
 from flask import Blueprint, request, jsonify, current_app, Response
 
 import offers
+import trial_state
 from routes.newsletter_content import (
     DEFAULT_TEMPLATES, LIFECYCLE_ORDER, CAMPAIGN_LABELS, DEFAULT_CTA_URL,
     wrap_email, render_tokens,
@@ -327,23 +328,58 @@ def _fetch(conn, sql, params=None):
     return rows
 
 
+def _never_trialled(conn, alias="u"):
+    """SQL predicate: this account has never started a trial.
+
+    Degrades to TRUE when the trial columns are absent (they are added by hand
+    in the Render shell — see trial_state.py), so the campaign keeps working on
+    a database that has not had the migration yet. The is_subscribed clause
+    beside it already excludes anyone trialling RIGHT NOW; this additionally
+    excludes someone who trialled and let it lapse, because they have seen the
+    product and had their chance to buy — the cancel screen is where they are
+    offered a discount, and there is only one per account.
+    """
+    if not trial_state.columns_ready(conn):
+        return "TRUE"
+    return alias + ".trial_started_at IS NULL"
+
+
 def _eligible(conn, campaign, weekly_key=None):
     """Recipients (id, email, credits_balance) eligible for a lifecycle campaign."""
     cols = "SELECT u.id, u.email, u.credits_balance FROM users u WHERE "
     if campaign == "offer_50":
-        # The one-time 50% blast: everyone verified who is NOT on a plan right
-        # now (a trialling user already counts as subscribed) and has never
-        # redeemed a discount.
+        # THE ONLY PLACE A DISCOUNT IS OFFERED UNPROMPTED (round 49).
         #
-        # Accounts younger than a day are excluded because they already got
-        # this email at signup, from offers.send_offer_email — and the
-        # "already holds a live offer" clause catches the rest of that overlap
-        # without needing to reason about timing. `newsletter_sends` makes it
-        # once-per-account forever: re-running the tick sends nothing new,
-        # which is what "one time" has to mean when the tick fires daily.
+        # It used to be minted at signup as well, so every new account saw a
+        # struck-through price and a countdown on the first screen it ever
+        # reached. That sells the discount before the product: the visitor has
+        # not seen an edit yet, so 50% off is not an incentive, it is just a
+        # cheaper unknown — and it spends the one discount this account will
+        # ever get (offers.mint refuses a second) at the moment it is worth
+        # least. Now the pricing page opens at full price, and the discount is
+        # held back for the two moments where it answers a real hesitation:
+        # here, and on the cancel screen.
+        #
+        # WHO GETS IT: verified, 24 hours past registration, and did nothing —
+        #
+        #   is_subscribed = 0     not on a plan. A TRIALLING user is
+        #                         is_subscribed (Paddle creates the
+        #                         subscription at checkout), so this clause
+        #                         alone keeps the mail away from live trials.
+        #   never trialled        starting a trial IS taking action, and
+        #                         someone who trialled and cancelled has seen
+        #                         the product and priced it. They are offered
+        #                         the save discount at the cancel screen
+        #                         instead — one 50% per account, ever.
+        #   never redeemed        the account-level guarantee.
+        #
+        # `newsletter_sends` makes it once-per-account forever, so re-running
+        # the tick sends nothing new — which is what "one time" has to mean
+        # when the tick fires daily.
         sql = cols + f"""{BASE_FILTER}
             AND COALESCE(u.is_subscribed, 0) = 0
             AND u.created_at <= NOW() - INTERVAL '1 day'
+            AND {_never_trialled(conn)}
             AND {offers.sql_no_live_offer(conn)}
             AND {offers.sql_never_used(conn)}
             AND NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id AND s.campaign='offer_50' AND s.status='sent')

@@ -1,14 +1,28 @@
 """The 50%-off offer: who has one, how long it lives, and how it reaches Paddle.
 
-Round 48. Three moments now carry the same offer:
+Round 49. TWO moments carry it, and neither of them is signup:
 
-  welcome   a new account gets one the moment it exists, live for 24 hours.
-            The countdown on the pricing page and the email both read from
-            here, so they cannot disagree.
-  winback   a ONE-OFF broadcast to everyone who has never subscribed. Same
-            discount, same 24 hours, sent by the newsletter engine.
+  winback   24 hours after registering, to an account that started no trial.
+            Sent by the newsletter engine (routes/newsletter._eligible), which
+            mints the offer first so the hours quoted in the inbox and the
+            seconds counting down on the pricing page are the same row.
   save      a trialling user who presses cancel is offered it instead of being
             let go silently.
+
+  welcome   RETIRED as a mint. Nothing creates this kind any more — it stays
+            in KINDS only so the rows already in production still read back.
+            It used to be minted the instant an account existed, which put a
+            struck-through price and a countdown on the first screen a visitor
+            ever saw. That sells the discount before the product: they have not
+            watched an edit come out right yet, so 50% off is not an incentive,
+            just a cheaper unknown. It also spent the ONE offer this account
+            can ever hold (see below) at the moment it was worth least, leaving
+            nothing to say to them 24 hours later or at the cancel screen.
+
+THE PRICING PAGE OPENS AT FULL PRICE
+------------------------------------
+For everyone, always, unless they hold an offer earned by one of the two
+moments above. `live_offer()` is read-only; nothing in a page load mints.
 
 ONE 50% PER ACCOUNT, EVER
 -------------------------
@@ -67,6 +81,8 @@ import requests
 PERCENT_OFF = int(os.getenv("OFFER_PERCENT_OFF", "50"))
 OFFER_HOURS = int(os.getenv("OFFER_HOURS", "24"))
 
+# WELCOME is retired as a mint (round 49) and kept only so rows already in
+# production read back — see the module docstring. Nothing should create one.
 WELCOME = "welcome"
 WINBACK = "winback"
 SAVE = "save"
@@ -426,25 +442,6 @@ def send_offer_email(conn, user_id, email, kind=WELCOME):
     return ok
 
 
-def grant_welcome(conn, user_id, email):
-    """Mint a new account's 24-hour offer and email it. Idempotent, silent on
-    failure, and safe to call from every signup path there is.
-
-    Called at the moment an account becomes real — email verification and the
-    Google callback — because that is when the clock should start and when the
-    email is worth sending. The UNIQUE constraint makes the second and third
-    caller free, and nothing here can fail a signup: an account created without
-    an offer is a missed discount, an exception on this line is a user who
-    cannot get in.
-    """
-    try:
-        offer = mint(conn, user_id, WELCOME)
-        if offer:
-            send_offer_email(conn, user_id, email, WELCOME)
-    except Exception as e:                                  # pragma: no cover
-        print(f"[offers] welcome grant failed for {user_id}: {e}", flush=True)
-
-
 def _fill(text, ctx):
     """The two tokens this email adds on top of the shared set. Kept out of
     newsletter_content.render_tokens because they only mean anything here."""
@@ -468,18 +465,33 @@ def _headers():
             "Content-Type": "application/json"}
 
 
-def _monthly_price_ids():
-    """The prices the discount may be applied to: monthly only.
+# Which plans a 50% intro may be applied to. NOT every purchasable plan:
+# Frontier is deliberately absent. It is priced at a 50% margin (10,000 credits
+# at USD_PER_CREDIT is $50 of model spend against $100), so half off is a month
+# sold at exactly cost — and the model it promises is the expensive one, so the
+# first month of a Frontier trial is where an abused discount hurts most. The
+# discount is an acquisition tool for the entry tiers; the top tier is bought
+# by people who already know what they want.
+DISCOUNTABLE_PLANS = ("ai", "ai_pro")
 
-    Enforced at PADDLE, not just in our UI, because `recur: false` on an annual
-    price would discount twelve months of credits — which cost more than the
-    discounted year brings in.
+
+def _monthly_price_ids():
+    """The prices the discount may be applied to: the entry tiers, monthly only.
+
+    Enforced at PADDLE via restrict_to, not just in our UI, because a discount
+    that our checkout declines to attach is still a discount someone can type
+    the code into. Two independent reasons a price is excluded:
+
+      * ANNUAL — `recur: false` discounts the first billing PERIOD, which on a
+        yearly price is twelve months of credits for half of one year's money.
+      * FRONTIER — see DISCOUNTABLE_PLANS above.
     """
     try:
         from routes.paddle import PLANS, PURCHASABLE_PLANS
     except Exception:                                       # pragma: no cover
         return []
-    return [PLANS[p]["price_id"] for p in sorted(PURCHASABLE_PLANS)
+    plans = [p for p in DISCOUNTABLE_PLANS if p in PURCHASABLE_PLANS]
+    return [PLANS[p]["price_id"] for p in plans
             if PLANS.get(p, {}).get("price_id")]
 
 

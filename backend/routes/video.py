@@ -575,11 +575,12 @@ def create_project(user_id):
     data = request.get_json() or {}
     title = (data.get("title") or "").strip() or "Untitled project"
     with vdb() as conn:
-        # Round 45: accounts created after GATE_START pick a plan first. Held
-        # here as well as on the turn, so a gated user never gets as far as
-        # uploading a video into a project they cannot edit.
-        if plan_gate.needs_plan(conn, user_id):
-            return plan_gate.gate_response(jsonify)
+        # DELIBERATELY UNGATED (round 49). Creating a project and uploading a
+        # video are now free for everyone; the wall is the agent TURN, and
+        # nothing before it. See plan_gate.py — the gate used to stand here and
+        # at /uploads, which meant a new account met a pricing page before it
+        # had shown us a single frame. The card that asks for the trial now
+        # arrives AFTER indexing, and it can describe the user's own video.
         cur = conn.cursor()
         cur.execute("INSERT INTO chat_sessions (user_id, title) VALUES (%s, %s) RETURNING id",
                     (int(user_id), title))
@@ -805,10 +806,10 @@ def create_upload(user_id, project_id):
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
             return jsonify({"error": "Project not found"}), 404
-        # Uploading is where a gated account would otherwise burn a 300MB
-        # transfer and an index slot before discovering it cannot edit.
-        if plan_gate.needs_plan(conn, user_id):
-            return plan_gate.gate_response(jsonify)
+        # DELIBERATELY UNGATED (round 49) — uploading and indexing are the
+        # demo. The cost of an index is ours to spend on someone deciding
+        # whether to buy; the cost of an agent turn is not, and that is where
+        # the gate now stands.
 
     key = storage.new_original_key(project_id, ext, kind)
     try:
@@ -1445,6 +1446,21 @@ def post_message(user_id, project_id):
                                              min_credits=1.0):
             info = get_balance(conn, user_id)
             spent = info.get("free_trial_exhausted")
+            # Three different walls, three different true things to say. A
+            # trialling user has already entered a card, so "start a trial" is
+            # nonsense to them and "wait for your cycle" is worse — the rest of
+            # their plan is released by CONVERTING, which is a thing they can
+            # do right now.
+            if info.get("trial_cap_reached"):
+                return jsonify({
+                    "error": ("That's the credits included with your free "
+                              "trial. Your plan starts the moment you keep "
+                              "it — no waiting, and the full monthly pool "
+                              "unlocks straight away."),
+                    "trial_cap_reached": True,
+                    "plan": info.get("plan"),
+                    "trial_credits": info.get("plan_limit"),
+                    "code": "trial_cap_reached"}), 402
             return jsonify({
                 "error": ("You're out of credits."
                           if spent else

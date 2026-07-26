@@ -140,6 +140,12 @@ class ToolContext:
         # and what the out-of-credits message may honestly promise — a
         # subscriber's pool comes back, a free account's does not.
         self.subscribed = False
+        # Which plan, and whether it is still in its 3 free days. `plan` picks
+        # the provider (Frontier runs agent AND vision on the frontier model);
+        # `trialing` is the third out-of-credits truth — that pool is 10% of
+        # the plan and the rest is released by converting, not by waiting.
+        self.plan = "free"
+        self.trialing = False
 
     def add_usage(self, model, tokens_in, tokens_out, cached_in=0,
                   reasoning=0):
@@ -156,9 +162,11 @@ class ToolContext:
         slot["reasoning"] += reasoning or 0
 
     def running_credits(self):
-        """Model cost spent so far this turn, in credits (1 credit = $0.01),
-        using the same per-model prices as db.charge_turn_credits so the in-turn
-        cap and the final charge agree.
+        """Model cost spent so far this turn, in credits, using the same
+        per-model prices AND the same burn rate (model_prices.USD_PER_CREDIT)
+        as db.charge_turn_credits — so the in-turn cap and the final charge
+        agree. Two different divisors here would mean the cap stops a turn at a
+        number the invoice never shows.
 
         Falls back to the flat totals when nothing has been recorded per model —
         that path only runs for callers that poke the counters directly."""
@@ -179,7 +187,7 @@ class ToolContext:
                     self.tokens_out * config.LLM_PRICE_OUT_PER_M) / 1e6
         cost += len(self.images_generated) * config.IMAGE_PRICE_USD
         cost += self.gen_extra_cost_usd     # generated sfx + video (real $)
-        return round(cost / 0.01, 2)
+        return model_prices.usd_to_credits(cost)
 
     def over_budget(self):
         return (self.credit_budget is not None and
@@ -4557,7 +4565,7 @@ def _gen_budget_reject(ctx, projected_usd, what):
     fal/ElevenLabs charges are irreversible real USD, so they need a pre-check."""
     if ctx.credit_budget is None:
         return None
-    projected = round(float(projected_usd) / 0.01, 2)
+    projected = model_prices.usd_to_credits(projected_usd)
     if ctx.running_credits() + projected > ctx.credit_budget:
         return (f"REJECTED: not enough credits to {what} (it costs about "
                 f"{projected:.0f} credits and the balance won't cover it). Tell "

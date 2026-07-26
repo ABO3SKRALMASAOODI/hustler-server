@@ -109,28 +109,80 @@ VISION_API_KEY = (
     or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
     or (IMAGE_API_KEY if VISION_BASE_URL == IMAGE_BASE_URL else ""))
 
-# ── The model PAYING users get ───────────────────────────────────────────────
+# ── The model the PRO plan gets ──────────────────────────────────────────────
 #
-# The whole stack moved to DeepSeek V4 Pro for cost. That is the right call for
-# a free user burning a one-off allowance; it is the wrong call for someone
-# three days into a trial deciding whether this product is worth $30/mo, where
-# the only thing that matters is whether the edit comes out right. The prompt
-# and all ~70 tool schemas were written and tuned against Grok's tool-calling.
+# THE PLANS SELL THREE DIFFERENT MODELS (round 49). The pricing page calls the
+# middle card "more intelligence" and the top one "frontier intelligence", and
+# that copy has to be TRUE — a badge claiming a better model on a tier running
+# the identical model is exactly the sort of thing customers find out. So:
 #
-# So: route on subscription. A trialling user IS subscribed (Paddle creates the
-# subscription at checkout and charges on day 3 — see backend/plan_gate.py), so
-# this gives the better model to trials and paid customers, and DeepSeek to
-# free accounts. Measured cost of doing so is roughly $4 per trial.
+#   Creator  'ai'      AGENT_MODEL   — DeepSeek V4 Pro, the default stack
+#   Pro      'ai_pro'  PAID_*        — the stronger agent model  (here)
+#   Frontier 'ai_max'  FRONTIER_*    — strongest, agent AND vision (below)
 #
-# ALL THREE default EMPTY, which is the honest-off contract used everywhere
-# here: with PAID_AGENT_MODEL unset, every user goes through llm.client() +
-# AGENT_MODEL and behaviour is byte-identical to today. Ship first, flip the
-# env second. Credits stay correct across the split automatically — the charge
-# prices each llm_calls row from its own `model` column (model_prices.py), which
-# is the reason that indirection exists.
-PAID_BASE_URL = os.getenv("PAID_BASE_URL", "").strip()
-PAID_API_KEY = os.getenv("PAID_API_KEY", "").strip()
-PAID_AGENT_MODEL = os.getenv("PAID_AGENT_MODEL", "").strip()
+# This narrowed in round 49. It used to apply to ANY subscriber, on the theory
+# that a trial deciding whether the product is worth $30 should see the best
+# edit we can produce. The problem with that is the trial then previews a model
+# the customer does not get when they pay — which is the bait-and-switch, not
+# the fix for it. A trial now runs its OWN plan's model, so what they try is
+# what they buy. Set PAID_PLANS to 'ai,ai_pro' to restore the old behaviour.
+#
+# The defaults are no longer empty. Round 48 left them off so shipping was a
+# no-op, which was right when this was a silent cost optimisation; it is wrong
+# now that a price tag advertises it, because the failure mode is a customer
+# paying $50 for a tier whose distinguishing feature never turned on. The key
+# is inherited the same way IMAGE_API_KEY and VISION_API_KEY are — only from a
+# provider on the SAME base URL — and the worker already needs an xAI key for
+# vision at all (no DeepSeek V4 tier accepts images), so in practice this
+# lights up from the key that is already there.
+#
+# Credits stay correct across the split automatically: the charge prices each
+# llm_calls row from its own `model` column (model_prices.py), which is the
+# entire reason that indirection exists.
+PAID_BASE_URL = os.getenv("PAID_BASE_URL", "https://api.x.ai/v1").strip()
+PAID_AGENT_MODEL = os.getenv("PAID_AGENT_MODEL", "grok-4.5").strip()
+PAID_API_KEY = (
+    os.getenv("PAID_API_KEY", "").strip()
+    or (VISION_API_KEY if PAID_BASE_URL == VISION_BASE_URL else "")
+    or (IMAGE_API_KEY if PAID_BASE_URL == IMAGE_BASE_URL else "")
+    or (OPENAI_API_KEY if PAID_BASE_URL == OPENAI_BASE_URL else ""))
+
+# Plans routed to PAID_*. Frontier is NOT here — it has its own provider below
+# and is checked first.
+PAID_PLANS = set(
+    p.strip() for p in os.getenv("PAID_PLANS", "ai_pro").split(",") if p.strip())
+
+# ── The model the FRONTIER plan gets ─────────────────────────────────────────
+#
+# 'ai_max' ($100/mo) is sold on the model, not on the credit count: every agent
+# turn AND every look at the footage runs on the frontier provider. That is the
+# only plan where the model is the product, so unlike PAID_* above it is not a
+# cost optimisation with a fallback — it is a promise attached to a price.
+#
+# Which is why the defaults here are NOT empty. PAID_* defaults off because
+# shipping it must be a no-op; this defaults ON (xAI + grok-4.5) because a
+# Frontier subscriber silently served DeepSeek is a refund, and because the key
+# is usually already present: VISION_API_KEY has to be an xAI key for vision to
+# work at all (no DeepSeek V4 tier accepts images), and it inherits from there.
+#
+# The inheritance follows the same rule as IMAGE_API_KEY and VISION_API_KEY —
+# a key is only ever taken from a provider on the SAME base URL, never handed
+# across providers. With no key on any of them, llm.frontier_available() is
+# False and Frontier falls back to the PAID_* tier and then to AGENT_MODEL, and
+# says so loudly in the log on every turn rather than 401ing the customer.
+FRONTIER_BASE_URL = os.getenv("FRONTIER_BASE_URL", "https://api.x.ai/v1").strip()
+FRONTIER_AGENT_MODEL = os.getenv("FRONTIER_AGENT_MODEL", "grok-4.5").strip()
+FRONTIER_VISION_MODEL = os.getenv("FRONTIER_VISION_MODEL", "grok-4.5").strip()
+FRONTIER_API_KEY = (
+    os.getenv("FRONTIER_API_KEY", "").strip()
+    or (VISION_API_KEY if FRONTIER_BASE_URL == VISION_BASE_URL else "")
+    or (IMAGE_API_KEY if FRONTIER_BASE_URL == IMAGE_BASE_URL else "")
+    or (PAID_API_KEY if FRONTIER_BASE_URL == PAID_BASE_URL else "")
+    or (OPENAI_API_KEY if FRONTIER_BASE_URL == OPENAI_BASE_URL else ""))
+
+# Plans that route to the frontier provider. A set, so adding a higher tier
+# later is one edit and no new branch.
+FRONTIER_PLANS = {"ai_max"}
 
 # reasoning_effort for the agent's tool-dispatch steps.
 #

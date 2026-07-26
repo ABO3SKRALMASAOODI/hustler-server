@@ -31,6 +31,7 @@ import agent_loop                                              # noqa: E402
 import agent_tools                                             # noqa: E402
 import config                                                  # noqa: E402
 import llm                                                     # noqa: E402
+import model_prices                                            # noqa: E402
 
 
 # ── the model actually configured ──────────────────────────────────────
@@ -200,7 +201,7 @@ def _expected_credits(tin, cached, tout):
     cost = ((tin - cached) * config.LLM_PRICE_IN_PER_M +
             cached * config.LLM_PRICE_CACHED_IN_PER_M +
             tout * config.LLM_PRICE_OUT_PER_M) / 1e6
-    return round(cost / 0.01, 2)
+    return model_prices.usd_to_credits(cost)
 
 
 def test_running_credits_discounts_cache_hits():
@@ -221,8 +222,9 @@ def test_running_credits_matches_all_miss_when_nothing_is_cached():
     it was before this change."""
     ctx = _ctx()
     ctx.tokens_in, ctx.tokens_out, ctx.tokens_cached_in = 300_000, 10_000, 0
-    legacy = round(((300_000 * config.LLM_PRICE_IN_PER_M +
-                     10_000 * config.LLM_PRICE_OUT_PER_M) / 1e6) / 0.01, 2)
+    legacy = model_prices.usd_to_credits(
+        (300_000 * config.LLM_PRICE_IN_PER_M +
+         10_000 * config.LLM_PRICE_OUT_PER_M) / 1e6)
     assert ctx.running_credits() == legacy
 
 

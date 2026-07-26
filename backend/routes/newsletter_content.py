@@ -123,9 +123,17 @@ DEFAULT_TEMPLATES = {
         "body_html": "<h1 style=\"margin:14px 0 10px;font:800 26px/1.25 Arial,Helvetica,sans-serif;color:#ffffff;\">An hour of editing. Three messages.</h1>\n\n<p style=\"margin:0 0 16px;font:400 16px/1.62 Arial,Helvetica,sans-serif;color:#c9c9c9;\">You shot a long talking-head take. Normally that's an hour of scrubbing, cutting, and captioning. This week, hand it to the agent instead &mdash; type these three messages, then export. Here's the exact recipe.</p>\n\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin:0 0 11px;\"><tr><td valign=\"top\" style=\"width:22px;font:700 16px Arial,Helvetica,sans-serif;color:#dc2626;\">1</td><td style=\"font:400 15px/1.55 Arial,Helvetica,sans-serif;color:#c9c9c9;\"><strong style=\"color:#ffffff;\">&ldquo;Cut all the silences and filler words&rdquo;</strong> &mdash; dead air and every &ldquo;um&rdquo; gone. Your take gets tight in one pass.</td></tr></table>\n\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin:0 0 11px;\"><tr><td valign=\"top\" style=\"width:22px;font:700 16px Arial,Helvetica,sans-serif;color:#dc2626;\">2</td><td style=\"font:400 15px/1.55 Arial,Helvetica,sans-serif;color:#c9c9c9;\"><strong style=\"color:#ffffff;\">&ldquo;Add Beast-style captions&rdquo;</strong> &mdash; bold, animated word-pop captions that hold attention all the way through.</td></tr></table>\n\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin:0 0 11px;\"><tr><td valign=\"top\" style=\"width:22px;font:700 16px Arial,Helvetica,sans-serif;color:#dc2626;\">3</td><td style=\"font:400 15px/1.55 Arial,Helvetica,sans-serif;color:#c9c9c9;\"><strong style=\"color:#ffffff;\">&ldquo;Make it 9:16 and add a subtle zoom&rdquo;</strong> &mdash; reframed for Reels, TikTok, and Shorts with a slow cinematic push.</td></tr></table>\n\n<p style=\"margin:16px 0 16px;font:400 16px/1.62 Arial,Helvetica,sans-serif;color:#c9c9c9;\">Then one word: <strong style=\"color:#fff;\">&ldquo;export&rdquo;</strong> &mdash; and you download the finished vertical short, branded end card and all.</p>\n\n<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin:6px 0 22px;\"><tr><td align=\"center\" bgcolor=\"#dc2626\" style=\"border-radius:10px;\"><a href=\"{{CTA_URL}}\" style=\"display:inline-block;padding:14px 32px;font:700 15px Arial,Helvetica,sans-serif;color:#ffffff;text-decoration:none;border-radius:10px;\">Open Valmera &rarr;</a></td></tr></table>\n\n<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin:6px 0 22px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;\"><tr><td style=\"padding:16px 20px;font:400 15px/1.55 Arial,Helvetica,sans-serif;color:#c9c9c9;\">Each edit costs about <strong style=\"color:#fff;\">1&ndash;2 credits</strong>, so the whole recipe barely dents your balance of <strong style=\"color:#fff;\">{{CREDITS}}</strong>. No timeline, no scrubbing &mdash; just the messages.</td></tr></table>\n\n<p style=\"margin:0 0 8px;font:400 15px/1.55 Arial,Helvetica,sans-serif;color:#8a8a8a;\">Try it on your next long take. It's done before your coffee's cold.</p>",
     },
     # ── the 50%-off intro offer ──────────────────────────────────────────
-    # Sent twice over: immediately to a brand-new account (backend/offers.py
-    # mints the offer and sends this the moment the account exists), and once
-    # ever to every existing non-trial user as the `offer_50` campaign.
+    # ONE send, at ONE moment (round 49): 24 hours after an account registers,
+    # if it never started a trial. It used to also go out the instant an
+    # account existed, which meant the discount arrived before the product had
+    # done anything — see the docstring in backend/offers.py for why that was
+    # the wrong trade. The segment is routes/newsletter._eligible('offer_50'),
+    # and a live trial can never match it (a trialling user is is_subscribed).
+    #
+    # The struck-through prices below cover Creator and Pro only. Frontier is
+    # deliberately not discountable (offers.DISCOUNTABLE_PLANS) — do not add it
+    # to this copy, because Paddle's restrict_to would refuse the checkout the
+    # email had just promised.
     #
     # {{OFFER_PERCENT}} and {{OFFER_HOURS}} are substituted by offers._fill,
     # from the offer ROW — so the number of hours in the email is the real time
@@ -152,7 +160,7 @@ LIFECYCLE_ORDER = ["offer_50", "welcome_activation", "export_nudge", "dormant",
 
 # Human labels for the admin UI.
 CAMPAIGN_LABELS = {
-    "offer_50": "50% intro offer (one-time)",
+    "offer_50": "50% intro offer (24h after signup, no trial started)",
     "welcome_activation": "Welcome / Activation",
     "export_nudge": "Export nudge",
     "dormant": "Dormant win-back",

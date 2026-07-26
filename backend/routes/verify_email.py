@@ -105,17 +105,15 @@ def verify_code():
     # The account is real from this moment, so this is where its 24-hour
     # discount starts and where the email announcing it goes out.
     #
-    # BEFORE conn.close(), deliberately: get_db() caches one connection on
-    # flask.g and hands the same object to every caller, so anything asking for
-    # a connection after that close gets the closed one back.
+    # NO WELCOME DISCOUNT HERE (round 49). A new account used to be minted a
+    # 24-hour 50% offer at this exact line, which meant the very first pricing
+    # page a visitor ever saw was already discounted. That sells the discount
+    # before the product — the visitor has not seen an edit yet, so half price
+    # is not an incentive, just a cheaper unknown — and it burns the one offer
+    # this account will ever get at the moment it is worth least.
     #
-    # Wrapped because a verification must never fail over a marketing offer.
-    if new_user:
-        try:
-            import offers
-            offers.grant_welcome(conn, new_user['id'], email)
-        except Exception as e:
-            print(f"⚠️ welcome offer failed for {email}: {e}", flush=True)
+    # The offer now waits 24 hours and only reaches people who did nothing with
+    # it: routes/newsletter._eligible('offer_50'). See backend/offers.py.
 
     conn.close()
     return jsonify({'message': 'Email verified successfully'}), 200

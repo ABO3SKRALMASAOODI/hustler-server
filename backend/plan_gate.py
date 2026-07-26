@@ -20,12 +20,13 @@ the rule turns on. (Schema changes here are run by hand through the Render
 shell; deriving the gate from a column that already exists means this ships as
 one deploy with nothing to run first.)
 
-ROUND 48 adds a third clause: a new account gets FREE_TASTE_TURNS agent turns
-before the wall comes down. Gating at turn one puts the first screen that costs
-the visitor something ahead of the first screen that gives them anything, and
-the free export is watermarked, so the taste doubles as distribution. Same
-column-free rule: the count comes from `video_jobs`, which already records
-every turn.
+ROUND 49 moved the wall rather than softening it. Uploading and INDEXING are
+free for everybody now (the gate no longer stands at /projects or /uploads),
+so a new account reaches a screen that tells it what is actually in its own
+video before it is asked for anything. The gate stands at the agent turn alone
+— the one operation that spends model money per call — and FREE_TASTE_TURNS
+is therefore 0 by default. The free part of the funnel is an index, which
+costs CPU we already own, instead of five LLM turns we rent.
 
 A trialling user IS a subscribed user — Paddle creates the subscription at
 checkout and only charges on day 3 — so `is_subscribed` is the right column
@@ -43,26 +44,30 @@ import os
 # were promised the free allowance; don't, without deciding to do that.
 GATE_START = datetime.datetime(2026, 7, 26, 12, 0, 0)
 
-# A FREE TASTE before the wall.
+# Free agent turns before the wall. ZERO since round 49 — but the wall moved.
 #
-# Gating at turn 1 asks someone to enter a card before the product has done
-# anything for them — the pricing page is the first screen that costs the
-# visitor something, and it arrives before the first screen that gives them
-# anything. Data from the launch says users reach their first export in about
-# 2.3 agent turns, so five turns is enough to actually finish a video and see
-# it work, and the free export is watermarked (round 41) — which makes the
-# taste a distribution channel rather than a giveaway.
+# The round-48 answer to "don't ask for a card before the product has done
+# anything" was five free agent turns. It solved the right problem the
+# expensive way: five turns is five lots of real model spend per signup, most
+# of it on accounts that were never going to convert, and it still left the
+# first pricing page arriving cold, in the middle of an edit, with no argument
+# attached to it.
 #
-# Counted on agent turns, not on time or projects, because a turn is the unit
-# that costs us model money. Gate closes on turn 6.
-FREE_TASTE_TURNS = int(os.getenv("FREE_TASTE_TURNS", "5"))
+# Round 49 solves the same problem with no free turns at all, by giving the
+# free part away somewhere cheaper: creating a project, uploading, and INDEXING
+# are now ungated (routes/video.py). So a new account gets all the way to "here
+# is what I found in your video — 3 shots, 412 words, 2 long silences" before
+# it is asked for anything. That is a screen that has already given the visitor
+# something, and it is the one that asks for the trial.
+#
+# Set the env var to bring free turns back if the trade turns out wrong.
+FREE_TASTE_TURNS = int(os.getenv("FREE_TASTE_TURNS", "0"))
 
 # What the frontend and the API both say when the gate closes. One string, so
 # the 402 body and the pricing page cannot drift apart.
 GATE_CODE = "plan_required"
-GATE_MESSAGE = ("That's your free edits used up. Start your 3-day free trial "
-                "to keep going — you can cancel inside the trial without "
-                "being charged.")
+GATE_MESSAGE = ("Start your 3-day free trial to edit this video — you can "
+                "cancel inside the trial without being charged.")
 
 
 def _naive_utc(value):

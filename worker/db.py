@@ -553,11 +553,49 @@ def user_is_subscribed(conn, user_id):
         return bool(row and row["is_subscribed"])
 
 
+def user_billing(conn, user_id):
+    """(is_subscribed, plan, trialing) — everything the turn needs about who is
+    paying, in one query.
+
+    The plan is here because routing stopped being a boolean in round 49: the
+    Frontier tier ('ai_max') runs its agent AND its vision on the frontier
+    provider, so "which model answers" now depends on WHICH plan, not merely on
+    whether there is one.
+
+    `trialing` is here because "you're out of credits" has a third truth. A
+    trialling account is is_subscribed, but its pool is 10% of the plan and the
+    rest is released by converting — so telling that user their credits
+    "refresh on your plan's cycle" points them at waiting when the thing that
+    helps is one click away.
+
+    Degrades rather than raises: a missing trial_status column (they are added
+    by hand in the Render shell) yields trialing=False and the old behaviour.
+    """
+    with conn.cursor() as cur:
+        try:
+            cur.execute("SELECT is_subscribed, plan, trial_status "
+                        "FROM users WHERE id = %s", (user_id,))
+            row = cur.fetchone()
+        except Exception:
+            conn.rollback()     # a missing column poisons the transaction
+            cur.execute("SELECT is_subscribed, plan FROM users WHERE id = %s",
+                        (user_id,))
+            row = cur.fetchone()
+    if not row:
+        return False, "free", False
+    return (bool(row["is_subscribed"]),
+            (row.get("plan") or "free"),
+            bool(row["is_subscribed"]) and row.get("trial_status") == "trialing")
+
+
 # ── Credits ──────────────────────────────────────────────────────────────────
-# 1 credit = $0.01 of model cost (same convention as backend/credits.py).
+# A credit is model_prices.USD_PER_CREDIT of model cost -- $0.005 since round
+# 49, i.e. a credit burns at TWICE what the model actually costs, which is
+# where the plans' margin comes from. Do not re-introduce a literal here: the
+# in-turn cap (agent_tools.running_credits) divides by the same constant, and
+# if the two ever differ a turn is stopped at a number the invoice contradicts.
 # Charged from actual llm_calls usage after each agent turn, spending
-# daily -> bonus -> monthly, never below zero. Priced with the same env vars
-# the admin cost views use.
+# daily -> bonus -> monthly, never below zero.
 
 # Prices come from config so there is ONE source of truth for the fallback, and
 # from model_prices for everything listed — a turn can now run on DeepSeek for a
@@ -679,7 +717,8 @@ def charge_turn_credits(conn, user_id, job_id):
         # Generated sound effects (flat) + AI video (per-second) — the real USD
         # cost is stored on each generation's llm_calls row by the worker tool.
         cost += float(row["gen_cost"] or 0)
-        credits = max(MIN_TURN_CREDITS, round(cost / 0.01, 1))
+        credits = max(MIN_TURN_CREDITS,
+                      model_prices.usd_to_credits(cost, ndigits=1))
         cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
                        FROM users WHERE id = %s FOR UPDATE""", (user_id,))
         u = cur.fetchone()

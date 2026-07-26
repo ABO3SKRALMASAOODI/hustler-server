@@ -8,17 +8,79 @@ from flask import Blueprint, request
 from models import get_db, update_user_subscription_status
 from datetime import datetime
 
+import credits as credits_mod
 import offers
 import trial_state
 
 paddle_webhook = Blueprint('paddle_webhook', __name__)
 
+
+# Subscriber daily top-up, and the 0 that replaces it during a trial. Named
+# here so the two callers below cannot disagree about what "no top-up" means.
+SUB_DAILY_CREDITS = 20
+TRIAL_DAILY_CREDITS = 0
+
+
+def _trial_aware_grant(user_id, plan, subscription_id, event_type, data):
+    """How many credits this grant event should leave the user holding.
+
+    Returns (credits, daily_top_up, preserve_existing_balance, reason).
+
+    A TRIAL gets credits.trial_allowance(plan) — 10% of the plan — and no daily
+    top-up. Paddle creates the subscription at checkout and charges nothing for
+    three days, so before this a trialling account could spend the ENTIRE
+    monthly grant (up to $50 of model spend on Frontier) and then cancel having
+    paid nothing. Conversion is what releases the rest.
+
+    Two facts have to be read carefully to get this right:
+
+      * The subscription's status only appears on subscription.* events.
+        transaction.completed carries the TRANSACTION's status ('completed'),
+        which reads as "not trialing" and would hand a trialling user the full
+        pool. So a recorded trial counts as trialing too.
+      * The grant is a SET. That is what makes Paddle's repeated events
+        idempotent, and it is also what would refill a half-spent trial every
+        time the subscription is touched — so a repeat event for a trial that
+        is already running preserves the balance instead.
+
+    The order the webhook runs in matters and is load-bearing: the grant
+    happens BEFORE trial_state.sync_from_subscription records the trial. So on
+    the very first subscription.created the recorded-trial check is False, the
+    trial is granted fresh (not preserved), and every event after it preserves.
+    That also self-heals the race where a transaction event arrives first and
+    wrongly grants the full pool: the subscription.created that follows sets it
+    back down to the trial slice, seconds later.
+    """
+    full = PLAN_CREDITS.get(plan, 0)
+    status = (data.get('status') or '').lower()
+    if not event_type.startswith('subscription.'):
+        status = ''             # not the subscription's status — see above
+    if status == 'active':
+        # Paddle charged. Release the plan in full; this is also the event that
+        # ends a trial, so the pool must be reset rather than preserved.
+        return full, SUB_DAILY_CREDITS, False, 'paid'
+    try:
+        already = trial_state.is_recorded_trial(get_db(), user_id,
+                                                subscription_id)
+    except Exception as e:                                  # pragma: no cover
+        print(f"⚠️ [trial] grant check failed for {user_id}: {e}", flush=True)
+        already = False
+    if status == 'trialing' or already:
+        allowance = credits_mod.trial_allowance(plan)
+        if already:
+            return allowance, TRIAL_DAILY_CREDITS, True, 'trial (unchanged)'
+        return allowance, TRIAL_DAILY_CREDITS, False, 'trial allowance'
+    return full, SUB_DAILY_CREDITS, False, 'full plan'
+
 PLAN_CREDITS = {
-    # The two live tiers. Keep in step with PLANS in paddle.py (the checkout)
+    # The three live tiers. Keep in step with PLANS in paddle.py (the checkout)
     # and PLAN_MONTHLY_LIMITS in credits.py (the denominator the studio shows).
-    # Rebased in round 48 for a real margin — see the note in paddle.py.
-    'ai':     1500,     # Creator $30  -> $15 of model cost, 50% margin
-    'ai_pro': 3000,     # Pro     $50  -> $30 of model cost, 40% margin
+    # Round 49: credits burn at TWICE the model's real cost
+    # (credits.USD_PER_CREDIT = $0.005), so the cost column below is half what
+    # the credit count suggests. See the margin table in paddle.py.
+    'ai':     2000,     # Creator  $30  -> $10 of model cost, 67% margin
+    'ai_pro': 4000,     # Pro      $50  -> $20 of model cost, 60% margin
+    'ai_max': 10000,    # Frontier $100 -> $50 of model cost, 50% margin
     # 'mcp' grants 0 ON PURPOSE. Credits meter OUR model spend, and on the
     # MCP plan the customer's own key pays for the model — topping up a pool
     # they never draw from would be meaningless, and metering their key as
@@ -247,7 +309,6 @@ def handle_webhook():
             print("⛔ Grant event with no known price id — granting 0 credits")
             plan = 'free'
         billing = custom_data.get('billing', 'monthly')
-        monthly_credits = PLAN_CREDITS.get(plan, 0)
         expiry_date_str = data.get('next_billed_at')
         expiry_date = None
         if expiry_date_str:
@@ -256,9 +317,13 @@ def handle_webhook():
                     expiry_date_str.replace("Z", "+00:00"))
             except Exception as e:
                 print(f"⚠️ Date parse error: {e}")
+        grant, daily, preserve, why = _trial_aware_grant(
+            user_id, plan, subscription_id, event_type, data)
         update_user_subscription_status(
-            user_id, True, expiry_date, subscription_id, plan, monthly_credits)
-        print(f"✅ User {user_id} on plan {plan} ({billing}) activated (from price). Credits: {monthly_credits}")
+            user_id, True, expiry_date, subscription_id, plan, grant,
+            daily_credits=daily, preserve_credits=preserve)
+        print(f"✅ User {user_id} on plan {plan} ({billing}) activated "
+              f"(from price). Credits: {grant} ({why})")
         # Trial bookkeeping + the founder alert. Only subscription.* events
         # carry the subscription's own status; transaction.completed's
         # data.status is the TRANSACTION's ('completed'), which would read as

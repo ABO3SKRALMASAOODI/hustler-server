@@ -25,6 +25,7 @@ import config
 
 _client = None
 _paid_client = None
+_frontier_client = None
 _image_client = None
 _vision_client = None
 
@@ -114,21 +115,64 @@ def paid_client():
 
 
 def paid_available():
-    """True once a paid-tier provider is fully configured. All three parts are
+    """True once the Pro-tier provider is fully configured. All three parts are
     required: a half-set trio would send an empty key at a real endpoint and
     401 every turn for exactly the customers who are paying."""
     return bool(config.PAID_BASE_URL and config.PAID_API_KEY
                 and config.PAID_AGENT_MODEL)
 
 
-def agent_client_for(subscribed):
+def is_paid_tier(plan):
+    return (plan or "") in config.PAID_PLANS
+
+
+def frontier_client():
+    """Separate pooled client for the Frontier plan's provider
+    (config.FRONTIER_*). Serves both its agent turns and its vision calls —
+    same endpoint, same key, two different models."""
+    global _frontier_client
+    if _frontier_client is None:
+        _frontier_client = OpenAI(base_url=config.FRONTIER_BASE_URL,
+                                  api_key=config.FRONTIER_API_KEY,
+                                  timeout=config.LLM_TIMEOUT_S,
+                                  max_retries=config.LLM_MAX_RETRIES)
+    return _frontier_client
+
+
+def frontier_available():
+    """True once the Frontier provider is fully configured. Unlike PAID_*, the
+    base URL and models have real defaults, so in practice this is asking
+    whether a key is reachable — which it is whenever the worker already has an
+    xAI key for vision or image generation."""
+    return bool(config.FRONTIER_BASE_URL and config.FRONTIER_API_KEY
+                and config.FRONTIER_AGENT_MODEL)
+
+
+def is_frontier(plan):
+    return (plan or "") in config.FRONTIER_PLANS
+
+
+def agent_client_for(subscribed, plan=None):
     """(client, model) for one agent turn.
 
-    Free accounts get AGENT_MODEL; trials and paid customers get
-    PAID_AGENT_MODEL when it is configured. With PAID_* unset this returns the
-    same pair for everyone, which is why shipping it is a no-op until the env
-    is set."""
-    if subscribed and paid_available():
+    One tier per plan, most specific first — this IS the "more intelligence" /
+    "frontier intelligence" the pricing page sells, so the mapping is the
+    product, not an optimisation:
+
+      Frontier 'ai_max'   FRONTIER_* — strongest, and vision too.
+      Pro      'ai_pro'   PAID_*     — the stronger agent model.
+      Creator / free      AGENT_MODEL.
+
+    A trial runs its OWN plan's model, because a trial that previews a better
+    model than the plan delivers is the bait-and-switch it was meant to avoid.
+
+    Every branch falls through to the next when its provider is not configured,
+    so a missing key degrades the model rather than 401ing the turn. `plan`
+    defaults to None so any two-tier caller keeps working unchanged.
+    """
+    if subscribed and is_frontier(plan) and frontier_available():
+        return frontier_client(), config.FRONTIER_AGENT_MODEL
+    if subscribed and is_paid_tier(plan) and paid_available():
         return paid_client(), config.PAID_AGENT_MODEL
     return client(), config.AGENT_MODEL
 
@@ -146,6 +190,49 @@ def vision_client():
     return _vision_client
 
 
+def vision_client_for(plan):
+    """(client, model) for one vision call.
+
+    Frontier buys the frontier model for LOOKING at the footage as well as for
+    reasoning about it — which is the half of that promise that would be
+    easiest to quietly not deliver, since vision has always had its own
+    provider and nobody would see the difference in the chat. Everyone else
+    gets the shared VISION_* provider.
+    """
+    if is_frontier(plan) and frontier_available() and config.FRONTIER_VISION_MODEL:
+        return frontier_client(), config.FRONTIER_VISION_MODEL
+    return vision_client(), config.VISION_MODEL
+
+
+# Which plan the turn running on THIS THREAD belongs to.
+#
+# Thread-local, not a module global: the worker runs its lanes as threads
+# (worker/main.py), so two agent turns can be in flight at once and a global
+# would hand one user's turn the other user's model — and, because credits are
+# priced from the model recorded on each row, the other user's price.
+#
+# It exists because vision is reached from eight different call sites across
+# three modules, none of which know or should know about billing. Setting it
+# once where the turn's plan is already resolved beats threading a `plan`
+# argument through every look, reframe and contact sheet.
+_turn = threading.local()
+
+
+def set_turn_plan(plan):
+    """Called once at the top of an agent turn. Pair with clear_turn_plan() in
+    a finally — worker threads are reused, so a plan left behind would apply to
+    the next job that lands on this thread."""
+    _turn.plan = plan or ""
+
+
+def clear_turn_plan():
+    _turn.plan = ""
+
+
+def turn_plan():
+    return getattr(_turn, "plan", "") or ""
+
+
 # The provider's own words for "I do not take images". Matched on the error
 # body because the only honest source for this is the API itself: a model card
 # claiming multimodality is not evidence (deepseek-v4-pro claimed it and 400s).
@@ -154,7 +241,19 @@ _BLIND_MARKERS = ("unknown variant `image_url`", "unknown variant 'image_url'",
                   "vision is not supported")
 
 
-def vision_available():
+def vision_available(plan=None):
+    """Can THIS turn look at pictures?
+
+    Reads the thread-local plan by default so the ~dozen tools that ask this
+    (to decide whether to offer visual inspection at all) get the right answer
+    without any of them learning about billing. A Frontier turn can see even
+    when the shared VISION_* provider is unconfigured or has been latched
+    blind, because it is a different endpoint with a different key.
+    """
+    plan = turn_plan() if plan is None else plan
+    if (is_frontier(plan) and frontier_available()
+            and config.FRONTIER_VISION_MODEL):
+        return True
     return bool(config.VISION_MODEL and config.VISION_API_KEY
                 and not _vision_blind)
 
@@ -228,20 +327,25 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
     content = [{"type": "text", "text": prompt}]
     content += [image_part(p) for p in image_paths]
     names = image_names or [str(p).rsplit("/", 1)[-1] for p in image_paths]
+    # The Frontier plan looks at footage with the frontier model too, not just
+    # reasons with it. The model recorded below MUST be the one that actually
+    # answered — every credit charge and admin cost view prices a row from its
+    # own `model` column.
+    vclient, vmodel = vision_client_for(turn_plan())
     try:
         # Vision gets a MORE generous timeout than the text agent (spiky grok
         # multimodal latency); retries stay at the client default.
-        resp = vision_client().with_options(
+        resp = vclient.with_options(
             timeout=config.VISION_TIMEOUT_S
         ).chat.completions.create(
-            model=config.VISION_MODEL,
+            model=vmodel,
             messages=[{"role": "user", "content": content}],
             max_tokens=max_tokens,
             temperature=0.1,
         )
         answer = (resp.choices[0].message.content or "").strip() or None
         record(purpose,
-               {"model": config.VISION_MODEL, "question": prompt,
+               {"model": vmodel, "question": prompt,
                 "images": names},
                {"answer": answer}, getattr(resp, "usage", None))
         return answer
@@ -253,7 +357,11 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         # it will reject every future call identically. Stop asking, and let
         # vision_available() tell the tools so they say "no vision configured"
         # rather than "the model didn't answer" over and over.
-        if any(m in msg for m in _BLIND_MARKERS):
+        #
+        # Only the SHARED provider may latch this process-wide. A Frontier-only
+        # failure must not blind every other user's turns — and a shared-model
+        # 400 says nothing about the frontier one.
+        if any(m in msg for m in _BLIND_MARKERS) and vmodel == config.VISION_MODEL:
             _vision_blind = True
             print(f"[vision] {config.VISION_MODEL} at {config.VISION_BASE_URL} "
                   "does not accept images — vision DISABLED for this process. "
@@ -261,7 +369,7 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
                   "multimodal provider.", flush=True)
         _note_error(e)
         record(purpose,
-               {"model": config.VISION_MODEL, "question": prompt,
+               {"model": vmodel, "question": prompt,
                 "images": names, "base_url": config.VISION_BASE_URL},
                {"error": msg[:300],
                 "provider_cannot_see": _vision_blind or None}, None)

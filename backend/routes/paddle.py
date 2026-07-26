@@ -27,33 +27,44 @@ def get_offers_db():
 # ── Plan definitions ──────────────────────────────────────────────────────────
 
 PLANS_LIVE = {
-    # ── The two live plans (round 45) ───────────────────────────────────
-    # Both carry a 3-DAY FREE TRIAL, configured on the Paddle PRICE itself
+    # ── The three live plans (round 49) ─────────────────────────────────
+    # All carry a 3-DAY FREE TRIAL, configured on the Paddle PRICE itself
     # (trial_period: 3 days, requires_payment_method) — not in this code.
     # Paddle therefore creates the subscription immediately, charges nothing
     # until day 3, and fires subscription.created right away; the webhook
     # grants credits on that event, so a trialling user is a paying user as
     # far as the app is concerned and simply stops being one if they cancel.
     #
-    # The pricing page sells ONE product at TWO volumes:
-    #   'ai'     Creator $30/mo, $300/yr — 1,500 credits
-    #   'ai_pro' Pro     $50/mo, $500/yr — 3,000 credits
+    # The pricing page sells ONE product at THREE volumes:
+    #   'ai'     Creator  $30/mo,   $300/yr —  2,000 credits
+    #   'ai_pro' Pro      $50/mo,   $500/yr —  4,000 credits
+    #   'ai_max' Frontier $100/mo, $1000/yr — 10,000 credits
     #
-    # REBASED FOR MARGIN (round 48). 1 credit is ~$0.01 of real model spend, so
-    # the old 2,400/4,000 grants were $24 and $40 of cost against $30 and $50 of
-    # revenue — a 20% margin at full price, and NEGATIVE for anyone on the
-    # annual price or an intro discount. At 1,500/3,000 the cost is $15 and $30:
-    # a 50% margin on Creator and 40% on Pro, which is the deliberate volume
-    # break that makes Pro worth moving to (60 credits per dollar vs 50).
+    # THE MARGIN IS IN THE BURN RATE, NOT THE GRANT (round 49). A credit is
+    # spent at TWICE the model's real cost — credits.USD_PER_CREDIT is $0.005,
+    # so 2,000 credits is $10 of API spend, not $20. That one constant is what
+    # makes these numbers work, and it is the thing to check before believing
+    # any margin claim here:
     #
-    # NOTE the annual prices are unchanged and are the thin ones: $300/yr is
-    # $25/mo for $15 of cost (40%), $500/yr is $41.67/mo for $30 (28%). Raise
-    # the annual price, not the credits, if that needs fixing.
+    #        plan      price   credits   real cost   margin
+    #        Creator    $30     2,000      $10        67%
+    #        Pro        $50     4,000      $20        60%
+    #        Frontier  $100    10,000      $50        50%
+    #
+    # The annual prices are ten months of the monthly one, so they land at 60%
+    # / 52% / 40% — all positive, which is new. Under the old 1-credit-per-cent
+    # burn the annual tiers were the thin ones (40% and 28%) and an intro
+    # discount on top went negative; doubling the burn rate is what fixed that
+    # without moving a single sticker price.
     #
     # Change the number here and PLAN_CREDITS in paddle_webhook.py and
     # PLAN_MONTHLY_LIMITS in credits.py together — three places, one truth.
-    'ai':     {'price_id': 'pri_01kyde25cwqf7t2bk1ekky2pyp', 'yearly_price_id': 'pri_01kyde25n7rxrhajg5xvxxka7y', 'monthly_credits': 1500},
-    'ai_pro': {'price_id': 'pri_01kye15m5262nbs7hjmazrej7j', 'yearly_price_id': 'pri_01kye15mdacm7wzqp740g3rvy4', 'monthly_credits': 3000},
+    'ai':     {'price_id': 'pri_01kyde25cwqf7t2bk1ekky2pyp', 'yearly_price_id': 'pri_01kyde25n7rxrhajg5xvxxka7y', 'monthly_credits': 2000},
+    'ai_pro': {'price_id': 'pri_01kye15m5262nbs7hjmazrej7j', 'yearly_price_id': 'pri_01kye15mdacm7wzqp740g3rvy4', 'monthly_credits': 4000},
+    # Frontier runs the agent AND vision on the frontier model (worker/llm.py
+    # routes 'ai_max' to FRONTIER_BASE_URL). Product pro_01kyg21hq9mbaj7pk3y1ewmzxp,
+    # prices created 2026-07-27 with the same 3-day trial as the other two.
+    'ai_max': {'price_id': 'pri_01kyg21hzbbz360kn0ptjnpdar', 'yearly_price_id': 'pri_01kyg21j78jk6tpkkcpkrysvc4', 'monthly_credits': 10000},
     # ── MCP: off the pricing page, kept so the one live subscription resolves.
     # monthly_credits 0 is deliberate — that customer supplies their own model
     # through their own MCP client, so the pool (which meters OUR model spend)
@@ -89,7 +100,7 @@ PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_L
 # renewing and resolving — this only blocks NEW checkouts, including
 # hand-crafted ones that bypass the pricing page. Add 'mcp' back the day the
 # server ships.
-PURCHASABLE_PLANS = {'ai', 'ai_pro'}
+PURCHASABLE_PLANS = {'ai', 'ai_pro', 'ai_max'}
 
 
 def get_paddle_base():
@@ -155,11 +166,13 @@ def checkout_config():
     # expiry, because the only thing it ever receives is an id we chose to put
     # in this response.
     #
-    # Monthly only: the discount covers the first billing period, which on an
-    # annual price would be a whole year of credits sold below cost. Paddle
-    # also enforces this via the discount's restrict_to (offers.py), so the two
-    # cannot drift apart.
-    if billing == 'monthly':
+    # Monthly only, and entry tiers only: the discount covers the first billing
+    # period, which on an annual price would be a whole year of credits sold
+    # below cost, and on Frontier would be a month sold at exactly cost.
+    # offers.DISCOUNTABLE_PLANS is the list, and Paddle enforces the same thing
+    # via the discount's restrict_to — so a checkout that slipped past this
+    # branch would still be refused rather than honoured.
+    if billing == 'monthly' and plan in offers.DISCOUNTABLE_PLANS:
         conn = get_offers_db()
         try:
             offer = offers.live_offer(conn, user_id)
@@ -214,8 +227,8 @@ def create_checkout_session():
     # The intro discount, on the HOSTED fallback path. Eligibility is the
     # server's call from the user's own offer row — `use_promo` from the client
     # is not consulted at all, because a discount a browser can ask for is a
-    # discount anyone can take. Monthly only, for the reason in offers.py.
-    if billing == 'monthly':
+    # discount anyone can take. Monthly + entry tiers only (offers.py).
+    if billing == 'monthly' and plan in offers.DISCOUNTABLE_PLANS:
         conn = None
         try:
             conn = get_offers_db()
@@ -264,12 +277,17 @@ def create_checkout_session():
 def billing_offer():
     """This account's live discount, if it has one.
 
-    Also MINTS the welcome offer as a side effect. A new account should get its
-    24 hours from the moment it exists, and there are three doors into the
-    product (email verification, Google OAuth, and simply landing on the
-    pricing page); minting here as well means none of them can leave someone
-    without the offer everyone else got. The UNIQUE (user_id, kind) constraint
-    makes the repeat mints free.
+    READ-ONLY since round 49. It used to mint a welcome offer as a side effect,
+    so merely LOADING the pricing page started a 24-hour countdown and struck
+    through the price for someone who had not yet seen the product work. The
+    pricing page now opens at full price for everyone; a discount exists only
+    if it was earned by one of the two moments that mint one:
+
+      * 24 hours after signing up having started no trial — the offer_50
+        campaign in routes/newsletter.py.
+      * pressing cancel during a trial — /paddle/cancel-offer below.
+
+    So an `active: false` here is the normal answer, not a failure.
 
     Always 200 with a body — the pricing page renders at list price when
     `active` is false, and an offer lookup must never be the reason someone
@@ -285,15 +303,6 @@ def billing_offer():
     conn = None
     try:
         conn = get_offers_db()
-        # Only for accounts that have never subscribed: a paying customer does
-        # not need an acquisition discount, and a trialling one already used
-        # their moment.
-        with conn.cursor() as cur:
-            cur.execute("SELECT is_subscribed FROM users WHERE id = %s",
-                        (int(user_id),))
-            row = cur.fetchone() or {}
-        if not row.get("is_subscribed"):
-            offers.mint(conn, user_id, offers.WELCOME)
         return jsonify(offers.public(conn, user_id)), 200
     except Exception as e:
         print(f"⚠️ offer lookup failed: {e}")

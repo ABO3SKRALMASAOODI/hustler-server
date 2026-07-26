@@ -411,23 +411,38 @@ def run_agent_job(worker_db, job):
     balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
     ctx.credit_budget = float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE
 
-    # Which model answers this turn. Trials and paid customers get the stronger
-    # provider when one is configured (config.PAID_*); free accounts get
-    # AGENT_MODEL. A trialling user IS is_subscribed — Paddle creates the
-    # subscription at checkout and only charges on day 3 — so this one boolean
-    # is the whole rule. Fails to the FREE model on any error: the wrong side of
+    # Which model answers this turn. Three tiers, resolved from ONE query:
+    # Frontier ('ai_max') gets the frontier provider for its agent AND its
+    # vision; trials and other paid customers get config.PAID_* when it is
+    # configured; free accounts get AGENT_MODEL. A trialling user IS
+    # is_subscribed — Paddle creates the subscription at checkout and only
+    # charges on day 3. Fails to the FREE model on any error: the wrong side of
     # that is a slightly cheaper turn, never a 401 storm at a paying customer.
     try:
-        subscribed = bool(worker_db.run(dbx.user_is_subscribed,
-                                        job["user_id"]))
+        subscribed, plan, trialing = worker_db.run(dbx.user_billing,
+                                                   job["user_id"])
     except Exception as e:
-        print(f"[agent] subscription lookup failed for job {job['id']}: {e}",
+        print(f"[agent] billing lookup failed for job {job['id']}: {e}",
               flush=True)
-        subscribed = False
+        subscribed, plan, trialing = False, "free", False
     ctx.subscribed = subscribed
-    ctx.llm_client, ctx.agent_model = llm.agent_client_for(subscribed)
+    ctx.plan = plan
+    ctx.trialing = trialing
+    ctx.llm_client, ctx.agent_model = llm.agent_client_for(subscribed, plan)
+    # Vision is reached from eight places that know nothing about plans, so the
+    # plan is published to this THREAD for the duration of the turn and cleared
+    # in the finally below (worker threads are reused across jobs).
+    llm.set_turn_plan(plan if subscribed else "")
     if ctx.agent_model != config.AGENT_MODEL:
-        print(f"[agent] job {job['id']}: paid tier -> {ctx.agent_model}",
+        print(f"[agent] job {job['id']}: plan {plan} -> {ctx.agent_model}",
+              flush=True)
+    elif subscribed and (llm.is_frontier(plan) or llm.is_paid_tier(plan)):
+        # A tier SOLD on its model, not delivering it. Loud, because the
+        # customer cannot see this and the fix is one env var on the worker.
+        print(f"[agent] job {job['id']}: plan {plan} promises a better model "
+              f"but its provider is not configured — serving "
+              f"{config.AGENT_MODEL}. Set FRONTIER_API_KEY / PAID_API_KEY (or "
+              "VISION_API_KEY on the same base URL, which they inherit).",
               flush=True)
 
     # Persist every model call this turn (agent, honesty regen, vision) to
@@ -483,6 +498,9 @@ def run_agent_job(worker_db, job):
         raise
     finally:
         llm.set_recorder(None)
+        # Worker threads are reused across jobs — a plan left on this thread
+        # would give the NEXT user's turn this user's vision provider.
+        llm.clear_turn_plan()
         shutil.rmtree(workdir, ignore_errors=True)
 
 
@@ -1144,7 +1162,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # Already resolved once at the top of the turn (it also chooses
             # which model answered) — no second query at the worst moment.
             subscribed = bool(getattr(ctx, "subscribed", False))
-            _refill = ("Your credits refresh on your plan's cycle — or "
+            trialing = bool(getattr(ctx, "trialing", False))
+            # Three states, three different true sentences. A trialling user has
+            # already entered a card, so "start your trial" is nonsense to them
+            # and "wait for your cycle" is worse — the rest of their plan is
+            # released by KEEPING it, which they can do this second.
+            _refill = ("That's the credits included with your free trial. "
+                       "Keep your plan and the full monthly pool unlocks "
+                       "straight away — no waiting."
+                       if trialing else
+                       "Your credits refresh on your plan's cycle — or "
                        "upgrade for a bigger monthly pool to keep editing now."
                        if subscribed else
                        "Start your trial to keep editing.")
@@ -1156,7 +1183,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         "finished are saved and previewed below. " + _refill,
                         "budget", total_steps, timings, honesty,
                         extra_meta={"credits_exhausted": True,
-                                    "free_trial_exhausted": not subscribed})
+                                    "free_trial_exhausted": not subscribed,
+                                    "trial_cap_reached": trialing})
                 return _finalize(
                     ctx, worker_db, session_id,
                     "I've hit my budget for this request, so I'm stopping "
@@ -1169,7 +1197,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                               "changing anything. " + _refill,
                               {"error": "turn_budget",
                                "credits_exhausted": True,
-                               "free_trial_exhausted": not subscribed})
+                               "free_trial_exhausted": not subscribed,
+                               "trial_cap_reached": trialing})
             else:
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "This request needed more work than its budget "

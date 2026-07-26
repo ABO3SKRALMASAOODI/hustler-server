@@ -22,19 +22,42 @@ def upgrade_user_to_premium(user_id, expiry_date=None):
     cursor.close()
 
 
-def update_user_subscription_status(user_id, is_subscribed, expiry_date=None, subscription_id=None, plan='free', monthly_credits=0):
-    """Update user's subscription status, expiry, and ID."""
+def update_user_subscription_status(user_id, is_subscribed, expiry_date=None, subscription_id=None, plan='free', monthly_credits=0, daily_credits=20, preserve_credits=False):
+    """Update user's subscription status, expiry, and ID.
+
+    `daily_credits` is the per-day top-up a subscriber gets on top of their
+    monthly pool. It is 0 during a trial: the trial allowance is deliberately a
+    fixed slice of the plan (credits.trial_allowance), and a daily top-up would
+    quietly add three more days' worth to a three-day trial — roughly a third
+    again on top of the cap, which would make the number the paywall quotes
+    wrong.
+
+    `preserve_credits` leaves the balance completely alone and updates only the
+    subscription facts. The grant here is a SET rather than an add, which is
+    what makes repeated Paddle events idempotent — but during a trial that same
+    property refills a pool the user has been spending, so a trial could be
+    reset indefinitely by ordinary subscription.updated traffic. The caller
+    (paddle_webhook._grant_credits) passes True exactly when this event is a
+    repeat for a trial that is already running.
+    """
     conn = get_db()
     cursor = conn.cursor()
-    if is_subscribed:
+    if is_subscribed and preserve_credits:
+        cursor.execute('''
+            UPDATE users
+            SET is_subscribed = 1, subscription_expiry = %s, subscription_id = %s, plan = %s,
+                credits_monthly_limit = %s
+            WHERE id = %s
+        ''', (expiry_date, subscription_id, plan, monthly_credits, user_id))
+    elif is_subscribed:
         cursor.execute('''
             UPDATE users
             SET is_subscribed = 1, subscription_expiry = %s, subscription_id = %s, plan = %s,
                 credits_monthly_limit = %s, credits_monthly = %s,
-                credits_daily = 20,
-                credits_balance = 20 + COALESCE(credits_bonus, 0) + %s
+                credits_daily = %s,
+                credits_balance = %s + COALESCE(credits_bonus, 0) + %s
             WHERE id = %s
-        ''', (expiry_date, subscription_id, plan, monthly_credits, monthly_credits, monthly_credits, user_id))
+        ''', (expiry_date, subscription_id, plan, monthly_credits, monthly_credits, daily_credits, daily_credits, monthly_credits, user_id))
     else:
         cursor.execute('''
             UPDATE users

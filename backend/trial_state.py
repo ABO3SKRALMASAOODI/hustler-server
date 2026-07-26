@@ -54,7 +54,7 @@ TRIAL_COLUMNS = ("trial_status", "trial_started_at", "trial_ends_at",
 # the authoritative plan → credits mapping lives in paddle_webhook.PLAN_CREDITS
 # and is derived from the price the customer actually paid.
 PLAN_LABELS = {
-    'ai': 'Creator', 'ai_pro': 'Pro', 'mcp': 'MCP',
+    'ai': 'Creator', 'ai_pro': 'Pro', 'ai_max': 'Frontier', 'mcp': 'MCP',
     'plus': 'Plus', 'pro': 'Pro (retired)', 'ultra': 'Ultra (retired)',
     'titan': 'Titan (retired)', 'ace': 'Ace (retired)',
 }
@@ -161,6 +161,49 @@ def _record_start(conn, user_id, plan, subscription_id, starts_at, ends_at):
     conn.commit()
     cur.close()
     return started
+
+
+def is_recorded_trial(conn, user_id, subscription_id=None):
+    """True when this account is ALREADY recorded as trialling.
+
+    The credit grant needs this for two different questions and gets both from
+    one fact (see paddle_webhook._grant_credits):
+
+      * 'transaction.completed' carries the TRANSACTION's status, never the
+        subscription's, so it cannot tell on its own whether the money it
+        represents is a real charge or the $0 that opens a trial. A recorded
+        trial answers that.
+      * a repeat 'trialing' event must not RE-GRANT the trial pool. The grant
+        is a SET, not an add, so without this a user who spent 180 of their 200
+        trial credits gets them back the next time Paddle touches the
+        subscription — an unbounded trial in three or four events.
+
+    Fails to False, which grants rather than withholds: a user wrongly given
+    their pool back is a bounded cost; a paying customer wrongly left at 10% of
+    what they bought is a support ticket and a refund.
+    """
+    try:
+        if not columns_ready(conn):
+            return False
+        cur = conn.cursor()
+        if subscription_id:
+            cur.execute("""SELECT 1 FROM users
+                            WHERE id = %s AND trial_status = 'trialing'
+                              AND (trial_subscription_id IS NULL
+                                   OR trial_subscription_id = %s)""",
+                        (user_id, subscription_id))
+        else:
+            cur.execute("SELECT 1 FROM users "
+                        "WHERE id = %s AND trial_status = 'trialing'",
+                        (user_id,))
+        found = cur.fetchone() is not None
+        cur.close()
+        return found
+    except Exception as e:                                  # pragma: no cover
+        _safe_rollback(conn)
+        print(f"⚠️ [trial] recorded-trial check failed for {user_id}: {e}",
+              flush=True)
+        return False
 
 
 def _record_cancel(conn, user_id, subscription_id):
