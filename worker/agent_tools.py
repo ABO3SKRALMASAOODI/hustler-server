@@ -2789,6 +2789,12 @@ def _run_clean(ctx, regions, cursor=None):
             "frames are touched.)")
     out = os.path.join(ctx.workdir, f"clean_{fp[:8]}.mp4")
     prox = os.path.join(ctx.workdir, f"clean_{fp[:8]}_proxy.mp4")
+    if not regions and not cursor:
+        # Callers all guard this, but an unbound `stats` below would be a
+        # NameError inside a turn that was only ever a no-op — fail with the
+        # sentence that says what actually went wrong.
+        raise ValueError("nothing to derive: no erase regions and no cursor "
+                         "pass. Clear source_clean instead.")
     mid = None
     if regions and cursor:
         # Two passes, so the intermediate is a full-res file on disk and never
