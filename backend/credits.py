@@ -18,11 +18,11 @@ see the plan table in routes/paddle.py. It was 1:1 with cost until round 49,
 which left the annual tiers at 28-40% and made an intro discount on an annual
 plan a below-cost sale.
 
-Free users   : 20 credits / day (resets daily, never accumulates) + 80 one-time bonus
+Free users   : FREE_GRANT_CREDITS once, in the bonus pool, never refilled
 Subscribed   : 20 credits / day (resets daily) + monthly pool from plan + remaining bonus
 Spend order  : daily first → bonus → monthly pool
 Monthly pool : wiped and refreshed on each billing cycle (handled by webhook)
-Bonus pool   : one-time 80 credits on registration, never refills
+Bonus pool   : the one-time free taste on registration, never refills
 """
 
 import datetime
@@ -129,23 +129,26 @@ def trial_allowance(plan):
         return 0
     return max(1, int(math.ceil(full * TRIAL_CREDIT_FRACTION)))
 
-# THERE IS NO FREE CREDIT ALLOWANCE (round 49).
+# THE FREE TASTE: 50 credits, once, and they are SPENDABLE (round 50).
 #
-# It was 120, granted once at registration. That made sense while a free
-# account could spend them; it stopped making sense the moment editing required
-# a plan (FREE_TASTE_TURNS = 0, see backend/plan_gate.py). What was left was a
-# credit bar sitting at 120 / 120, full and green, on an account that could not
-# spend a single one of them — a number that promises something the product
-# then refuses. A founder hit exactly that on his own free account.
+# Round 49 set this to 0 for a good reason and a bad outcome. The reason was
+# real — a bar reading 120/120 on an account that could not spend a single one
+# of them is a number promising something the next click refuses. The outcome
+# was that nobody could try the editor at all: uploading and indexing were
+# free, but the first thing anyone actually came here to do cost a card.
 #
-# What a free account gets instead is the part that costs us almost nothing and
-# demonstrates the most: unlimited uploads, a full index of every video, the
-# transcript, and the concierge answering questions about it. The wall is the
-# agent turn, and the number attached to it is the trial's.
+# So the fix is not to hide the number, it is to make it TRUE. 50 credits is
+# 50 × USD_PER_CREDIT = $0.25 of model spend per signup — a few real agent
+# turns on their own footage — and `backend/plan_gate.py` now opens the gate
+# for exactly as long as this pool lasts. The bar can be full and green again
+# because every credit in it buys something.
 #
-# Existing free balances were drained in the same change (a data migration, not
-# a code path) so no account is left holding a number it cannot use.
-FREE_GRANT_CREDITS  = 0
+# It does NOT refill. One grant, at registration (routes/auth.py and
+# routes/google_auth.py both write it explicitly), and when it is gone the ask
+# is the trial. Existing accounts were topped up to the same 50 by a data
+# migration (migrations/010_free_taste_credits.sql), so "all users" means all
+# users and not just the ones who arrived after the deploy.
+FREE_GRANT_CREDITS  = 50
 FREE_DAILY_CREDITS  = 0     # free credits do NOT refill — see FREE_GRANT_CREDITS
 SUB_DAILY_CREDITS   = 20    # subscribers keep their daily top-up on top of the
                             # monthly pool their plan buys
@@ -311,10 +314,9 @@ def get_balance(conn, user_id: int) -> dict:
     elif is_subscribed:
         plan_limit = SUB_DAILY_CREDITS + monthly
     else:
-        # 0 since round 49. A free account has no credit allowance at all, so
-        # there is no denominator — the studio hides the bar entirely rather
-        # than drawing an empty one, which reads as a fault rather than a
-        # price. See the note on FREE_GRANT_CREDITS.
+        # The free taste (round 50): the denominator is the one-time grant, so
+        # the studio's meter reads "37 / 50" and drains toward the wall the
+        # user is actually going to hit. See the note on FREE_GRANT_CREDITS.
         plan_limit = FREE_GRANT_CREDITS
 
     empty = float(balance or 0) < 1

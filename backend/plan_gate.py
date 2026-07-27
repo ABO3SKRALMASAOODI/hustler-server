@@ -1,89 +1,45 @@
 """Who has to pick a plan before they can use the editor.
 
-Round 45. New accounts now answer the three onboarding questions and then land
-on the pricing page: they choose Creator or Pro, the 3-day trial starts, and
-only then does the studio open. That is a product decision, not a technical
-one, and it needs two properties the frontend alone cannot give it:
+ROUND 50 — THE GATE IS THE FREE CREDITS RUNNING OUT, AND NOTHING ELSE.
 
-  1. IT MUST BE SERVER-ENFORCED. A gate that lives in the studio page is a
-     `localStorage.removeItem` away from being no gate at all — and the thing
-     it is protecting (an agent turn) costs us real model money per call.
-  2. IT MUST NOT TOUCH ANYONE WHO ALREADY SIGNED UP. Every existing account
-     was promised a free allowance and is mid-edit on it. Locking them out
-     retroactively to sell a plan would be a bait-and-switch on people who are
-     already customers-in-waiting.
+Every account, old or new, holds `credits.FREE_GRANT_CREDITS` (50) it can
+actually spend on real agent turns. While there is a credit left, there is no
+gate: the visitor edits their own footage, watches the preview come back, and
+decides what this product is worth from the thing itself. The moment the pool
+is empty the gate closes and the ask is the 3-day trial.
 
-Both fall out of one rule: the gate applies only to accounts created at or
-after GATE_START, and only while they hold no subscription. No new column, no
-migration, no backfill — `users.created_at` already records exactly the fact
-the rule turns on. (Schema changes here are run by hand through the Render
-shell; deriving the gate from a column that already exists means this ships as
-one deploy with nothing to run first.)
+That replaces two earlier rules, both of which are now gone:
 
-ROUND 49 moved the wall rather than softening it. Uploading and INDEXING are
-free for everybody now (the gate no longer stands at /projects or /uploads),
-so a new account reaches a screen that tells it what is actually in its own
-video before it is asked for anything. The gate stands at the agent turn alone
-— the one operation that spends model money per call — and FREE_TASTE_TURNS
-is therefore 0 by default. The free part of the funnel is an index, which
-costs CPU we already own, instead of five LLM turns we rent.
+  * GATE_START / `created_at` — round 45 gated only accounts created after the
+    deploy so it would not retroactively lock out people mid-edit on the old
+    free allowance. Everybody now holds the same 50 credits (existing rows were
+    topped up by migrations/010_free_taste_credits.sql), so the cutoff no
+    longer separates two groups that are treated differently — it only
+    separated two groups that got a DIFFERENT ERROR MESSAGE for the same wall,
+    which is drift, not policy.
+
+  * FREE_TASTE_TURNS — a turn counter. Counting turns prices a 6-second clip
+    the same as a 20-minute documentary; counting credits prices what each turn
+    actually costs us. Same idea, honest denominator.
 
 A trialling user IS a subscribed user — Paddle creates the subscription at
-checkout and only charges on day 3 — so `is_subscribed` is the right column
-and someone on day one of their trial passes the gate.
+checkout and only charges on day 3 — so `is_subscribed` passes the gate and a
+spent trial is a different wall with its own message (see routes/video.py).
+
+WHAT THIS GATE IS NOT: the credit check. `credits.check_and_reserve` still runs
+below it in routes/video.py and covers subscribers who have spent their pool.
+This one answers "does this account have a plan-shaped reason to be refused",
+so the studio can answer with the trial card rather than a refresh notice.
 """
 
-import datetime
-import os
-
-# Accounts created from this instant on must choose a plan. It is a UTC
-# timestamp, not a date, because `users.created_at` is a timestamp and a bare
-# date would sweep in everyone who signed up earlier the same day.
-#
-# Set to the round-45 deploy. Moving it EARLIER retroactively gates people who
-# were promised the free allowance; don't, without deciding to do that.
-GATE_START = datetime.datetime(2026, 7, 26, 12, 0, 0)
-
-# Free agent turns before the wall. ZERO since round 49 — but the wall moved.
-#
-# The round-48 answer to "don't ask for a card before the product has done
-# anything" was five free agent turns. It solved the right problem the
-# expensive way: five turns is five lots of real model spend per signup, most
-# of it on accounts that were never going to convert, and it still left the
-# first pricing page arriving cold, in the middle of an edit, with no argument
-# attached to it.
-#
-# Round 49 solves the same problem with no free turns at all, by giving the
-# free part away somewhere cheaper: creating a project, uploading, and INDEXING
-# are now ungated (routes/video.py). So a new account gets all the way to "here
-# is what I found in your video — 3 shots, 412 words, 2 long silences" before
-# it is asked for anything. That is a screen that has already given the visitor
-# something, and it is the one that asks for the trial.
-#
-# Set the env var to bring free turns back if the trade turns out wrong.
-FREE_TASTE_TURNS = int(os.getenv("FREE_TASTE_TURNS", "0"))
+import credits
 
 # What the frontend and the API both say when the gate closes. One string, so
 # the 402 body and the pricing page cannot drift apart.
 GATE_CODE = "plan_required"
-GATE_MESSAGE = ("Start your 3-day free trial to edit this video — you can "
-                "cancel inside the trial without being charged.")
-
-
-def _naive_utc(value):
-    """Postgres may hand back either an aware or a naive timestamp depending
-    on the column type; GATE_START is naive UTC, and comparing the two kinds
-    raises. Normalise rather than assume."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        try:
-            value = datetime.datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    if getattr(value, "tzinfo", None) is not None:
-        value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-    return value
+GATE_MESSAGE = ("That's your free credits used up. Start your 3-day free "
+                "trial to keep editing — cancel inside the trial and you're "
+                "not charged.")
 
 
 def _row_get(row, key, index):
@@ -101,16 +57,22 @@ def _row_get(row, key, index):
 
 
 def needs_plan(conn, user_id):
-    """True when this user must choose a plan before using the editor.
+    """True when this user has spent the free taste and holds no subscription.
+
+    Reads `credits_balance` directly rather than going through
+    `credits.get_balance`: that function takes write locks to roll the daily
+    pool over, and this is called on a status poll as well as on the send path.
+    The column is authoritative for a free account — nothing refills it, and
+    every deduction rewrites it in the same transaction.
 
     Fails OPEN on any error: a database hiccup must never lock a paying
-    customer out of their own project. The worst case of an open failure is
-    one free agent turn; the worst case of a closed one is a customer who
-    cannot reach work they already paid for.
+    customer out of their own project. The worst case of an open failure is one
+    free agent turn; the worst case of a closed one is a customer who cannot
+    reach work they already paid for.
     """
     try:
         cur = conn.cursor()
-        cur.execute("SELECT created_at, is_subscribed FROM users "
+        cur.execute("SELECT is_subscribed, credits_balance FROM users "
                     "WHERE id = %s", (int(user_id),))
         row = cur.fetchone()
         cur.close()
@@ -119,62 +81,46 @@ def needs_plan(conn, user_id):
         return False
     if row is None:
         return False
-    if _row_get(row, "is_subscribed", 1):
+    if _row_get(row, "is_subscribed", 0):
         return False
-    created = _naive_utc(_row_get(row, "created_at", 0))
-    if created is None:
-        # An account with no registration timestamp predates this gate by
-        # definition — the column has been written on every insert for years.
+    try:
+        balance = float(_row_get(row, "credits_balance", 1) or 0)
+    except (TypeError, ValueError):                         # pragma: no cover
         return False
-    if created < GATE_START:
-        return False
-    return turns_used(conn, user_id) >= FREE_TASTE_TURNS
+    # Less than a whole credit cannot fund a turn (min_credits=1.0 everywhere
+    # that spends), so that is the wall — not zero, which a fractional
+    # remainder would never quite reach.
+    return balance < 1.0
 
 
-def turns_used(conn, user_id):
-    """Agent turns this account has ever started.
-
-    Counts every agent_turn row, including failed ones, deliberately: a turn
-    that failed still spent model money, and a gate that only counted successes
-    would hand an unlucky user unlimited retries. Fails to a LARGE number on
-    error, i.e. closed — the fail-open decision belongs to needs_plan's caller,
-    which already swallows lookup failures above; if we cannot count turns we
-    must not hand out an unbounded free tier.
-    """
+def free_state(conn, user_id):
+    """{grant, remaining} — what the studio shows so the wall is never a
+    surprise. Safe for any user; a subscriber's remaining is None because the
+    free taste does not describe their balance."""
     try:
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM video_jobs "
-                    "WHERE user_id = %s AND type = 'agent_turn'",
-                    (int(user_id),))
+        cur.execute("SELECT is_subscribed, credits_balance FROM users "
+                    "WHERE id = %s", (int(user_id),))
         row = cur.fetchone()
         cur.close()
-    except Exception as e:                                  # pragma: no cover
-        print(f"[plan_gate] turn count failed for user {user_id}: {e}",
-              flush=True)
-        return FREE_TASTE_TURNS
-    if row is None:
-        return 0
-    try:
-        return int(row[0] if not isinstance(row, dict)
-                   else next(iter(row.values())))
-    except (TypeError, ValueError, StopIteration):
-        return 0
-
-
-def taste_state(conn, user_id):
-    """{used, total, remaining} for the free taste — what the studio shows so
-    the wall is never a surprise. Safe for any user; a subscriber simply has
-    remaining=None because the taste does not apply to them."""
-    try:
-        used = turns_used(conn, user_id)
     except Exception:                                       # pragma: no cover
-        return {"used": 0, "total": FREE_TASTE_TURNS, "remaining": None}
-    return {"used": used, "total": FREE_TASTE_TURNS,
-            "remaining": max(0, FREE_TASTE_TURNS - used)}
+        return {"grant": credits.FREE_GRANT_CREDITS, "remaining": None}
+    if row is None or _row_get(row, "is_subscribed", 0):
+        return {"grant": credits.FREE_GRANT_CREDITS, "remaining": None}
+    try:
+        remaining = float(_row_get(row, "credits_balance", 1) or 0)
+    except (TypeError, ValueError):                         # pragma: no cover
+        remaining = None
+    return {"grant": credits.FREE_GRANT_CREDITS, "remaining": remaining}
 
 
 def gate_response(jsonify):
     """The 402 body every gated route returns. `jsonify` is passed in so this
-    module stays importable without a Flask app context."""
+    module stays importable without a Flask app context.
+
+    `free_credits` rides along so the studio can say "that's your 50" without
+    hardcoding 50 in the frontend — the grant is defined once, in credits.py.
+    """
     return jsonify({"error": GATE_MESSAGE, "code": GATE_CODE,
-                    "plan_required": True}), 402
+                    "plan_required": True,
+                    "free_credits": credits.FREE_GRANT_CREDITS}), 402

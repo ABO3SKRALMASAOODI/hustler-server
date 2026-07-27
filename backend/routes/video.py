@@ -1453,9 +1453,10 @@ def post_message(user_id, project_id):
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
 
-        # The plan gate, and it hangs off `indexed` for the SAME reason the
-        # credits gate below does: neither question applies until a message
-        # would actually run an agent turn.
+        # The plan gate — round 50: "this account has spent its 50 free
+        # credits and holds no plan". It hangs off `indexed` for the SAME
+        # reason the credits gate below does: neither question applies until a
+        # message would actually run an agent turn.
         #
         # It used to sit above all of this, unconditionally. So a brand-new
         # account that typed "hi" into an EMPTY project — no upload, nothing to
@@ -1471,9 +1472,10 @@ def post_message(user_id, project_id):
         if indexed and plan_gate.needs_plan(conn, user_id):
             return plan_gate.gate_response(jsonify)
 
-        # Credits gate — same condition, different question: the plan gate asks
-        # "is this account allowed to start a turn at all", this asks "can it
-        # afford one".
+        # Credits gate — same condition, different question: the plan gate
+        # above answers for anyone with NO plan (their free 50 are spent), this
+        # one answers for everybody else — a spent trial slice, or a subscriber
+        # who has burned this cycle's pool.
         if indexed and not check_and_reserve(conn, user_id,
                                              min_credits=1.0):
             info = get_balance(conn, user_id)
@@ -1647,15 +1649,24 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                 # charges credits per turn exactly like any edit, so reserve
                 # first and fail honestly if they're tapped out or already busy.
                 if not check_and_reserve(conn, ctx["user_id"], min_credits=1.0):
-                    spent = get_balance(
-                        conn, ctx["user_id"]).get("free_trial_exhausted")
-                    _say(("You're out of credits."
+                    info = get_balance(conn, ctx["user_id"])
+                    spent = info.get("free_trial_exhausted")
+                    # A trialling account reaches here too, and neither of the
+                    # other two sentences is addressed to it: they have already
+                    # entered a card, and the rest of their pool is released by
+                    # KEEPING the plan, not by waiting for a cycle. The studio
+                    # picks the card variant off exactly these three flags.
+                    trial = info.get("trial_cap_reached")
+                    _say(("That's the credits included with your free trial."
+                          if trial else
+                          "You're out of credits."
                           if spent else
                           "You're out of credits — they refresh on your "
                           "plan's cycle, or upgrade for a bigger monthly pool "
                           "to keep creating."),
                          {"kind": "concierge", "credits_exhausted": True,
-                          "free_trial_exhausted": bool(spent)})
+                          "free_trial_exhausted": bool(spent),
+                          "trial_cap_reached": bool(trial)})
                 elif (_running_jobs_count(cur, ctx["user_id"])
                       >= MAX_CONCURRENT_JOBS_PER_USER):
                     _say("I've got a couple of things still processing — I'll "
