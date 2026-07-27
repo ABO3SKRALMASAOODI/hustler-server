@@ -50,15 +50,19 @@ class _Cur:
     distinctive fragment of each so the test breaks loudly if a query is
     rewritten into something that no longer asks the same question."""
 
-    def __init__(self, *, transition_versions=(), confirmed=(), paid=False):
+    def __init__(self, *, transition_versions=(), confirmed=(), paid=False,
+                 pipeline_emits=True):
         self._tr = list(transition_versions)
         self._conf = list(confirmed)
         self._paid = paid
+        self._emits = pipeline_emits
         self._rows = []
         self._one = None
 
     def execute(self, sql, params=None):
-        if "'transition'" in sql:
+        if "bool_or" in sql:                  # the pipeline probe
+            self._one = {"emits": self._emits}
+        elif "'transition'" in sql:
             self._rows = [{"version": v, "has_transition": True}
                           for v in self._tr]
         elif "render_asset_id" in sql:
@@ -81,7 +85,12 @@ class _Cur:
 def _gate(paid=True, **kw):
     """Paid by default so the watermark stamp is satisfied (wm_v 0 is correct
     for a subscriber) and each test isolates the one rule it is about. The
-    watermark tests below say `paid=` explicitly."""
+    watermark tests below say `paid=` explicitly.
+
+    The probe cache is process-global with a 60s TTL, so it MUST be cleared per
+    gate or the first test to run would decide the answer for all the others.
+    """
+    video._pipeline_probe.clear()
     return video._final_gate(_Cur(paid=paid, **kw), project_id=1, user_id=7)
 
 
@@ -152,6 +161,63 @@ def test_the_loop_breaker_covers_every_stamp_not_just_transitions():
     file wins once the worker has refused to rebuild it."""
     ok = _gate(confirmed=(100,))
     assert ok(asset_id=100, meta={"outro_v": 99, "wm_v": 5}, version=3)
+
+
+# ── a gate may not demand what the pipeline cannot write ────────────────────
+
+def test_a_stamp_the_pipeline_never_writes_does_not_hide_anything():
+    """The wasted press, measured.
+
+    With the executor frozen a round behind, a user pressed Download, the
+    pipeline built a brand new final at his request, and the gate hid it one
+    second later for missing a stamp that build does not write. The only way
+    out was a second press that proved, via `cached: true`, what was already
+    knowable: nothing newer can be made.
+    """
+    ok = _gate(transition_versions=(3,), pipeline_emits=False)
+    assert ok(asset_id=100, meta=STALE_STAMP, version=3)
+
+
+def test_the_gate_re_arms_by_itself_once_the_pipeline_stamps_again():
+    """No flag to remember to unset: redeploy the executor, renders carry the
+    stamp, and the check resumes busting the old ones exactly once."""
+    ok = _gate(transition_versions=(3,), pipeline_emits=True)
+    assert not ok(asset_id=100, meta=STALE_STAMP, version=3)
+
+
+def test_the_probe_never_disables_the_other_stamps():
+    """Scoped to trans_v on purpose. The watermark gate is revenue, not craft —
+    a free user's unmarked export must still re-encode, and the loop-breaker
+    already stops that gate from spinning forever."""
+    ok = _gate(paid=False, pipeline_emits=False)
+    assert not ok(asset_id=100, meta=STALE_STAMP, version=3)      # wm_v 0/wants 2
+    ok = _gate(pipeline_emits=False)
+    assert not ok(asset_id=100,
+                  meta={"outro_v": video.OUTRO_VERSION - 1, "wm_v": 0},
+                  version=3)                                       # old end card
+
+
+def test_a_first_install_with_no_renders_keeps_its_gates_armed():
+    """bool_or over an empty sample is NULL, which is "no evidence", not
+    "the pipeline is broken"."""
+    cur = _Cur(paid=True)
+    cur.execute("SELECT bool_or(meta ? %s) ...")
+    cur._one = {"emits": None}
+    video._pipeline_probe.clear()
+    assert video._pipeline_emits(cur, "trans_v") is True
+
+
+def test_the_probe_result_is_cached_not_queried_per_asset():
+    """/state is polled every 2s per open studio; this must not become a query
+    per render row."""
+    video._pipeline_probe.clear()
+    cur = _Cur(pipeline_emits=False)
+    calls = []
+    inner = cur.execute
+    cur.execute = lambda sql, params=None: (calls.append(sql), inner(sql, params))[1]
+    assert video._pipeline_emits(cur, "trans_v") is False
+    assert video._pipeline_emits(cur, "trans_v") is False
+    assert len(calls) == 1
 
 
 # ── the other two stamps still bite ─────────────────────────────────────────

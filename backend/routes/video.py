@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 
@@ -2308,6 +2309,64 @@ def _versions_with_transition(cur, project_id):
     return {r["version"] for r in cur.fetchall() if r["has_transition"]}
 
 
+# How long a pipeline probe is trusted, and how many recent renders it reads.
+# /state is polled every 2s per open studio, so this has to collapse to about
+# one query a minute per process rather than one per poll.
+_PIPELINE_PROBE_TTL_S = 60
+_PIPELINE_PROBE_SAMPLE = 25
+_pipeline_probe = {}          # key -> (checked_at_monotonic, emits: bool)
+
+
+def _pipeline_emits(cur, key):
+    """Does the render service actually WRITE this stamp?
+
+    A gate must never demand something the producer cannot make. These stamps
+    are the backend's GUESS about what the render pipeline emits — but the
+    backend is not the pipeline. Renders are produced by the remote executor,
+    which is deployed by hand and can sit rounds behind the auto-deployed
+    backend. When it does, the guess is wrong for every render ever made, and
+    a gate built on it hides files that nothing can replace.
+
+    That is not the theory, it is the measured behaviour: with the executor
+    frozen at round 41, a user pressed Download, the pipeline built a brand new
+    final at his request, and the gate hid it one second later for missing a
+    stamp that build does not write. Re-rendering could only ever produce the
+    same file again — which is exactly what the second press proved, and why it
+    took two presses and two queues to get one download.
+
+    So the stamp gates learn what the pipeline emits by looking at what it just
+    emitted. If none of the last few renders carries the key, this deployment
+    does not write it, and demanding it is demanding the impossible: the check
+    disables itself until the executor is redeployed, then re-arms on its own
+    the moment a render carries the stamp again. `any` over a sample rather
+    than the single newest row, so a mid-rollout mix arms the gate rather than
+    disarming it — the safe direction is the gate being ON.
+
+    Key PRESENCE, never its value: `outro_v: 0` and `wm_v: 0` are meaningful
+    values, so "does the pipeline write this at all" is the only question a
+    probe can honestly answer. Whether the value is CURRENT stays with the
+    per-stamp checks.
+    """
+    hit = _pipeline_probe.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < _PIPELINE_PROBE_TTL_S:
+        return hit[1]
+    try:
+        cur.execute("""SELECT bool_or(meta ? %s) AS emits FROM (
+                           SELECT meta FROM assets WHERE kind = 'render'
+                           ORDER BY id DESC LIMIT %s) t""",
+                    (key, _PIPELINE_PROBE_SAMPLE))
+        row = cur.fetchone()
+        # No renders at all yet: nothing to contradict the gate, so leave it
+        # armed. A fresh install must not start out with its checks disabled.
+        emits = True if not row or row["emits"] is None else bool(row["emits"])
+    except Exception as e:                                # pragma: no cover
+        current_app.logger.warning("pipeline probe for %s failed: %s", key, e)
+        return True                                       # fail toward the gate
+    _pipeline_probe[key] = (now, emits)
+    return emits
+
+
 def _worker_confirmed_current(cur, project_id):
     """Render assets the WORKER has already declared current, after being asked.
 
@@ -2436,14 +2495,19 @@ def _final_gate(cur, project_id, user_id):
     Both callers have already run _project_for_user, so `user_id` is the
     project's owner and the watermark rule reads the right plan.
 
-    Returns a predicate over a render asset row. Its two set lookups are one
-    query each — /state is polled every 2s per open studio, so this stays two
-    indexed reads by project, never a per-asset query.
+    Returns a predicate over a render asset row. Every lookup it needs happens
+    once, here — /state is polled every 2s per open studio, so this stays a
+    handful of indexed reads per poll (the pipeline probe is cached across
+    them) and never becomes a query per render row.
     """
-    with_transition = _versions_with_transition(cur, project_id)
     confirmed = _worker_confirmed_current(cur, project_id)
     is_paid = _user_is_paid(cur, user_id)
     wm = _watermark_settings(cur)
+    # Only ask the EDLs which versions carry a transition when the answer can
+    # still change something — with the stamp unwritten the check is off anyway.
+    stamps_transitions = _pipeline_emits(cur, "trans_v")
+    with_transition = (_versions_with_transition(cur, project_id)
+                       if stamps_transitions else set())
 
     def ok(asset_id, meta, version):
         if asset_id in confirmed:
