@@ -4354,22 +4354,32 @@ def add_aspect_shift(ctx, at_output_s, ratio, duration_s=0.8, zoom=True,
         return "REJECTED: color must be #RRGGBB hex (the bars' colour)."
 
     _orient, ow, oh = _project_frame(ctx)
-    wf, hf = screenframe.ratio_window(r, ow or 1280, oh or 720)
-    if abs(wf - 1.0) < 1e-4 and abs(hf - 1.0) < 1e-4:
-        # The honest refusal: this project's output frame ALREADY is that
-        # shape, so there is nothing to morph and a silently-applied no-op
-        # would have the agent reporting a change the user cannot see.
-        existing = [s for s in ((edl.get("effects") or {})
-                                .get("frame_shifts") or [])]
-        if not existing:
+    fx = dict(edl.get("effects") or {})
+    shifts = [dict(s) for s in (fx.get("frame_shifts") or [])]
+    # THE HONEST REFUSAL. A shift whose target is the shape the frame is
+    # already in at that moment writes an item the renderer emits nothing for —
+    # a zero-delta segment costs nothing, which is exactly the problem: the
+    # agent would report a change the user cannot see anywhere. So the state
+    # immediately BEFORE this shift is resolved (the canvas, unless an earlier
+    # shift already moved it) and compared with the target.
+    target = screenframe.ratio_window(r, ow or 1280, oh or 720)
+    prior = [s for s in shifts if float(s.get("at", 0.0)) <= at]
+    prior.sort(key=lambda s: float(s.get("at", 0.0)))
+    now = (screenframe.ratio_window(prior[-1].get("ratio"), ow or 1280,
+                                    oh or 720)
+           if prior else (1.0, 1.0))
+    if abs(target[0] - now[0]) < 1e-4 and abs(target[1] - now[1]) < 1e-4:
+        if not prior:
             return (f"REJECTED: this edit already renders at {r} "
                     f"({ow}x{oh}), so there is nothing to shift to. To change "
                     "the aspect of the WHOLE video use set_frame or "
                     "auto_reframe; use this tool to go to a DIFFERENT shape "
                     "for part of it and back.")
-
-    fx = dict(edl.get("effects") or {})
-    shifts = [dict(s) for s in (fx.get("frame_shifts") or [])]
+        return (f"REJECTED: the frame is already {r} at {at}s — "
+                f"{prior[-1]['id']} put it there at {prior[-1]['at']}s. "
+                "Shifting to the shape it is already in would change nothing "
+                "on screen. Pick a different ratio, or move this earlier than "
+                f"{prior[-1]['at']}s.")
     item = {"id": _next_item_id(shifts, "as"), "at": at, "ratio": r,
             "duration_s": dur, "zoom": bool(zoom), "color": col}
     shifts.append(item)

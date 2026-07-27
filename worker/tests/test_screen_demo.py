@@ -615,6 +615,49 @@ def test_overlapping_aspect_shifts_are_rejected():
         validate_edl(bad, 20.0)
 
 
+def test_a_shift_to_the_shape_it_is_already_in_is_refused():
+    """A zero-delta shift emits nothing, costs nothing and would have the
+    agent reporting a change that exists nowhere on screen."""
+    import agent_tools
+    from schemas import EDLValidationError as _E
+
+    class _Ctx:
+        project_id, duration, workdir = 1, 20.0, "/tmp"
+
+        def __init__(self):
+            self._edl = validate_edl({"keep": [[0.0, 20.0]]},
+                                     20.0).model_dump()
+            self.v = 1
+
+        def latest_edl(self):
+            return {"version": self.v, "json": self._edl}
+
+        def write_edl(self, edl, desc):
+            try:
+                self._edl = validate_edl(edl, 20.0).model_dump()
+            except _E as e:
+                return f"REJECTED (EDL v{self.v} unchanged): {e}"
+            self.v += 1
+            return f"EDL v{self.v - 1} -> v{self.v}: {desc}"
+
+    orig = agent_tools._project_frame
+    agent_tools._project_frame = lambda ctx: ("landscape", 1920, 1080)
+    try:
+        c = _Ctx()
+        # the project is already 16:9
+        assert agent_tools.add_aspect_shift(c, 3.0, "16:9").startswith(
+            "REJECTED")
+        assert agent_tools.add_aspect_shift(c, 3.0, "9:16").startswith("EDL v")
+        # …and now it is already 9:16 at 9s, because of that shift
+        out = agent_tools.add_aspect_shift(c, 9.0, "9:16")
+        assert out.startswith("REJECTED") and "as1" in out, out
+        # going back out is a real change
+        assert agent_tools.add_aspect_shift(c, 9.0, "source").startswith(
+            "EDL v")
+    finally:
+        agent_tools._project_frame = orig
+
+
 def test_ratio_window_maths():
     # 9:16 inside a 16:9 canvas: pillars, full height
     wf, hf = screenframe.ratio_window("9:16", 1920, 1080)
