@@ -1,0 +1,345 @@
+"""The editorial critic: deterministic taste checks over a finished EDL.
+
+Round 52. Every audit that already existed asks "is this edit CORRECT?" — no
+mid-word boundary, no repeated phrase, captions that actually have words to
+burn. Nothing asked "is this edit any GOOD?", and a day of real customer
+transcripts is what that costs: a preacher's reel, a Valorant montage, a plant
+timelapse, a soda taste-test and a gym reel all came back with the SAME edit —
+cinematic grade, vignette, 1s fade in from black, punch zooms on the loudest
+words, dip-to-black at the cuts, music ducked, -14 LUFS. Two of those briefs
+said in writing "no black screens at the start" and got a fade from black
+anyway. That is not a model that lacks capability; it is a model with no taste
+and nothing telling it so.
+
+So this module is the reviewer for craft, in the same shape as audit.py: pure
+functions over plain data, no LLM, no network, no I/O. render_preview stamps
+the findings into the tool result, exactly like the mid-word and repetition
+audits, and the system prompt makes acting on them non-optional. A finding is
+never a hard block — the user's own instruction always wins, and every finding
+says what to do instead in one clause, so the agent can fix it in one call or
+tell the user why it kept it.
+
+Each check earns its place by having actually shipped as a defect:
+
+  * fade-in from black on a short-form vertical  (3 real edits, 2 of which
+    explicitly forbade it in the brief)
+  * a punch zoom landing at 0.3s / 0.8s / 1.0s — a shove, not an emphasis
+  * 45 whip transitions through one continuous shot (round 48) and its
+    sequel, 10 whips on jump cuts inside one talking-head take
+  * 9 slurp sound effects the user removed as mistimed, placed one per sip
+  * "cinematic" grade (crushed, desaturated) on a bright kitchen taste-test
+  * captions burned into the bottom 6% of a 9:16 frame, i.e. under the
+    TikTok/Reels UI
+  * a 4:50 "reel"
+  * every zoom identical: same 35%, same mode, five times
+"""
+
+from timeline import transition_junctions
+
+# What counts as short-form: a vertical or square output, which on every
+# platform that takes one is a feed video watched thumb-down and muted.
+SHORT_FORM_MAX_S = 180.0
+
+# Platform chrome eats the bottom of a vertical frame (caption text, the
+# username, the action rail). Anything burned below this is under the UI.
+VERTICAL_UNSAFE_BOTTOM_FRAC = 0.13
+
+# One zoom per this many seconds of programme is already a lot. Past it the
+# picture never sits still and nothing reads as emphasis any more.
+ZOOM_MIN_SPACING_S = 6.0
+ZOOM_PER_S = 11.0
+# A zoom that lands before the viewer has seen the shot is a shove.
+ZOOM_MIN_START_S = 1.2
+
+SFX_PER_S = 8.0
+SFX_MIN_SPACING_S = 0.35
+
+# More than this many whole-programme finishing effects and the footage is
+# wearing the look rather than the look serving the footage.
+MAX_GLOBAL_STYLIZE = 2
+
+# Speech that starts later than this into the programme is a cold open the
+# viewer did not ask for.
+HOOK_DEAD_AIR_S = 1.5
+
+_AGGRESSIVE_STYLIZE = ("flash", "chromatic", "vhs", "shake", "glitch")
+
+
+def _num(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ratio_wh(edl, src_w, src_h):
+    """(w, h) of the OUTPUT frame — the EDL's ratio when it sets one, else the
+    source's own shape. Returns (None, None) when neither is knowable."""
+    ratio = ((edl.get("frame") or {}).get("ratio")) or None
+    if ratio and ratio != "source" and ":" in str(ratio):
+        try:
+            a, b = str(ratio).split(":")
+            return float(a), float(b)
+        except (TypeError, ValueError):
+            pass
+    if src_w and src_h:
+        return float(src_w), float(src_h)
+    return None, None
+
+
+def describe_format(edl, index, out_duration, src_w=None, src_h=None):
+    """What KIND of video this is, from measurable facts only.
+
+    The agent gets this at the top of the audit because most taste rules are
+    conditional on it: a fade from black is right for a 3-minute cinematic
+    landscape piece and wrong for a 40-second reel, and no amount of prompt
+    prose makes that distinction reliably without the numbers in front of it.
+    """
+    w, h = _ratio_wh(edl, src_w, src_h)
+    vertical = bool(w and h and h > w * 1.05)
+    square = bool(w and h and abs(w - h) <= w * 0.05)
+    words = index.get("words") or []
+    n_words = len(words)
+    shots = index.get("shots") or []
+    has_music = bool(edl.get("music"))
+    wpm = (n_words / out_duration * 60.0) if out_duration > 0 else 0.0
+    short_form = (vertical or square) and out_duration <= SHORT_FORM_MAX_S
+
+    if n_words == 0:
+        kind = "no-speech piece (montage / b-roll / music-led)"
+    elif wpm >= 60 and len(shots) <= 3:
+        kind = "talking head"
+    elif wpm >= 40:
+        kind = "narrated piece"
+    else:
+        kind = "sparse-speech piece (visual-led)"
+    return {"vertical": vertical, "square": square, "short_form": short_form,
+            "kind": kind, "n_words": n_words, "n_shots": len(shots),
+            "has_music": has_music, "duration": out_duration}
+
+
+def _speech_starts_at(index, tl):
+    """Programme second of the first surviving spoken word, or None."""
+    # kept_words returns {'w','t0','t1'} already mapped to PROGRAMME time, so
+    # the first entry's t0 is the second the viewer first hears a word.
+    words = tl.kept_words(index.get("words") or []) if tl else []
+    return float(words[0]["t0"]) if words else None
+
+
+def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
+    """Craft findings for a rendered EDL. Returns a list of one-line strings.
+
+    `user_asked` is the user's own message for this turn, lowercased by the
+    caller or not — it is only ever used to SUPPRESS a finding, never to raise
+    one, so that asking for a thing is always allowed. "Do only what the user
+    asked" is the standing rule; a critic that argued with an explicit
+    instruction would be worse than no critic.
+    """
+    ask = (user_asked or "").lower()
+    out_dur = float(getattr(tl, "out_duration", 0.0) or 0.0)
+    fmt = describe_format(edl, index, out_dur, src_w, src_h)
+    fx = edl.get("effects") or {}
+    found = []
+
+    def add(msg):
+        found.append(msg)
+
+    # ── the opening ──────────────────────────────────────────────────────
+    fade_in = _num(fx.get("fade_in_s"))
+    if fade_in > 0.05 and fmt["short_form"] and "fade in" not in ask:
+        add(f"opens with a {fade_in:.1f}s fade from BLACK on a "
+            f"{'vertical' if fmt['vertical'] else 'square'} short-form edit — "
+            "the first second is the only one every viewer watches and this "
+            "spends it on nothing. Drop it (set_fades fade_in_s=0) and open "
+            "on the picture, unless the user asked for the fade.")
+
+    speech_at = _speech_starts_at(index, tl) if fmt["n_words"] else None
+    if speech_at is not None and speech_at > HOOK_DEAD_AIR_S \
+            and fmt["short_form"]:
+        add(f"the first words land at {speech_at:.1f}s — everything before "
+            "that is dead air at the most expensive moment of the video. "
+            "Cut into the strongest line, or move it to the front.")
+
+    zooms = sorted((fx.get("zooms") or []),
+                   key=lambda z: _num(z.get("start")))
+    if zooms:
+        first = _num(zooms[0].get("start"))
+        if first < ZOOM_MIN_START_S:
+            add(f"the first zoom fires at {first:.1f}s, before the viewer has "
+                "read the shot — a push that early reads as a camera bump, "
+                "not emphasis. Move it past 1.5s or drop it.")
+
+    # ── zoom rhythm ──────────────────────────────────────────────────────
+    if out_dur > 0 and len(zooms) > max(2, int(out_dur / ZOOM_PER_S)):
+        add(f"{len(zooms)} zooms across {out_dur:.0f}s is roughly one every "
+            f"{out_dur / max(1, len(zooms)):.0f}s — when the frame is always "
+            "moving, none of the moves mean anything. Keep the 2-3 that land "
+            "on the real turns and remove the rest.")
+    tight = [(a, b) for a, b in zip(zooms, zooms[1:])
+             if _num(b.get("start")) - _num(a.get("start"))
+             < ZOOM_MIN_SPACING_S]
+    if tight:
+        a, b = tight[0]
+        add(f"two zooms {_num(b.get('start')) - _num(a.get('start')):.1f}s "
+            f"apart (at {_num(a.get('start')):.1f}s and "
+            f"{_num(b.get('start')):.1f}s) — back-to-back pushes fight each "
+            "other. Space them out or keep the stronger one.")
+    if len(zooms) >= 3:
+        shapes = {(round(_num(z.get("strength")), 2), z.get("mode") or "punch")
+                  for z in zooms}
+        if len(shapes) == 1:
+            s, m = next(iter(shapes))
+            add(f"all {len(zooms)} zooms are the identical {int(s * 100)}% "
+                f"'{m}' — repetition with no variation reads as an automated "
+                "pass, not an edit. Vary strength and mode (a slow push_in "
+                "under a line, one hard punch on the peak).")
+
+    # ── junction effects ─────────────────────────────────────────────────
+    trans = fx.get("transition") or None
+    if trans:
+        n_blocks = len(edl.get("keep") or []) + len(edl.get("inserts") or [])
+        try:
+            juncs = transition_junctions(edl, index, n_blocks=n_blocks)
+        except Exception:
+            juncs = set()
+        scope = (trans.get("scope") or "scene")
+        if scope == "every_cut" and len(juncs) > 6 and fmt["n_shots"] <= 3:
+            add(f"a '{trans.get('style')}' transition fires on all "
+                f"{len(juncs)} cuts, but the index sees only "
+                f"{fmt['n_shots']} shot(s) — those cuts are jump cuts inside "
+                "one continuous take and are supposed to be INVISIBLE. A "
+                "full-screen effect every few seconds through footage that "
+                "never changed scene is the single most common 'this looks "
+                "broken' complaint. Use scope='scene'.")
+
+    # ── the ending ───────────────────────────────────────────────────────
+    fade_out = _num(fx.get("fade_out_s"))
+    if fade_out > 0.05 and fmt["short_form"] and "fade out" not in ask \
+            and "fade to black" not in ask:
+        add(f"ends on a {fade_out:.1f}s fade to BLACK — short-form loops, so "
+            "the fade plays into the restart and reads as a stall. End on "
+            "the last word or beat (set_fades fade_out_s=0) unless the user "
+            "wants the fade.")
+
+    # ── sound ────────────────────────────────────────────────────────────
+    sfx = sorted((edl.get("sfx") or []), key=lambda s: _num(s.get("at")))
+    if out_dur > 0 and len(sfx) > max(3, int(out_dur / SFX_PER_S)):
+        add(f"{len(sfx)} sound effects in {out_dur:.0f}s — accents stop being "
+            "accents when they are constant. 3-6 placed on the real moments "
+            "beat one on every cut.")
+    stacked = [(a, b) for a, b in zip(sfx, sfx[1:])
+               if _num(b.get("at")) - _num(a.get("at")) < SFX_MIN_SPACING_S]
+    if stacked:
+        a, b = stacked[0]
+        add(f"two sound effects {_num(b.get('at')) - _num(a.get('at')):.2f}s "
+            f"apart at {_num(a.get('at')):.1f}s — they land as one muddy hit. "
+            "Keep one.")
+
+    music = edl.get("music") or []
+    if music and fmt["n_words"] > 20:
+        loud = [m for m in music
+                if _num(m.get("gain_db"), -18.0) > -10.0 and m.get("duck")
+                is not True]
+        if loud:
+            add("music sits at "
+                f"{_num(loud[0].get('gain_db'), -18.0):.0f}dB with no ducking "
+                "under a video that has speech — the voice is what people "
+                "came for. Duck it (set_music_fit duck_mode='smooth') or drop "
+                "the bed to around -18dB.")
+    for m in music:
+        m_end = _num(m.get("end"), out_dur)
+        if out_dur - m_end > max(2.0, out_dur * 0.12):
+            add(f"the music stops at {m_end:.0f}s but the video runs to "
+                f"{out_dur:.0f}s — the last "
+                f"{out_dur - m_end:.0f}s play dry, which sounds like a "
+                "mistake. Extend it (set_music_fit) or fade it out on "
+                "purpose.")
+            break
+
+    # ── the look ─────────────────────────────────────────────────────────
+    stylize = fx.get("stylize") or []
+    global_kinds = {s.get("kind") for s in stylize
+                    if s.get("start") is None and s.get("end") is None}
+    if len(global_kinds) > MAX_GLOBAL_STYLIZE:
+        add(f"{len(global_kinds)} finishing effects run over the WHOLE video "
+            f"({', '.join(sorted(k for k in global_kinds if k))}) — stacked "
+            "full-length passes read as a broken TV, not a look. Keep one, "
+            "maybe two.")
+    aggressive = sorted({s.get("kind") for s in stylize
+                         if s.get("kind") in _AGGRESSIVE_STYLIZE})
+    t_style = (trans or {}).get("style")
+    if t_style in ("flash", "glitch") and aggressive:
+        add(f"'{t_style}' transitions AND {', '.join(aggressive)} stylize are "
+            "both running — pick ONE aggressive device for the whole video. "
+            "Two is where an edit stops looking deliberate.")
+
+    grade = fx.get("grade")
+    gc = fx.get("grade_custom") or {}
+    if grade == "cinematic" and _num(gc.get("saturation"), 1.0) > 1.15:
+        add("a 'cinematic' grade (which desaturates and crushes) is being "
+            "re-saturated by grade_custom — the two cancel out and the result "
+            "is muddy. Pick one: cinematic for mood, or 'vibrant' plus "
+            "contrast for punch.")
+    # No blanket rule against any one grade: 'cinematic' is genuinely right
+    # for a lot of footage, and a critic that fires on a defensible choice
+    # teaches the agent to ignore the whole audit.
+
+    # ── captions ─────────────────────────────────────────────────────────
+    caps = edl.get("captions")
+    caps_on = (isinstance(caps, dict)
+               and caps.get("mode") == "from_transcript") \
+        or (isinstance(caps, list) and bool(caps))
+    if fmt["short_form"] and fmt["n_words"] >= 25 and not caps_on \
+            and "no caption" not in ask and "sin subtítulo" not in ask:
+        add("a talking short-form video with no captions — most of the feed "
+            "watches muted, so uncaptioned speech is watched by nobody. "
+            "add_captions('from_transcript') with a premium preset unless the "
+            "user asked for none.")
+
+    # ── overlapping text ────────────────────────────────────────────────
+    texts = edl.get("texts") or []
+    mutes = edl.get("caption_mutes") or []
+    if caps_on and texts:
+        clashes = []
+        for t in texts:
+            ts, te = _num(t.get("start")), _num(t.get("end"))
+            if te <= ts:
+                continue
+            covered = any(_num(ms) <= ts + 0.05 and _num(me) >= te - 0.05
+                          for ms, me in mutes)
+            if not covered:
+                clashes.append((ts, te, t.get("text") or ""))
+        if clashes:
+            ts, te, txt = clashes[0]
+            add(f"a text card ('{txt[:28]}') runs {ts:.1f}-{te:.1f}s while "
+                "spoken-word captions are still burning over the same frames "
+                f"({len(clashes)} such windows) — two layers of text on top "
+                "of each other. set_caption_mutes those windows.")
+
+    # ── pacing ───────────────────────────────────────────────────────────
+    speed = edl.get("speed") or []
+    slow = [s for s in speed if 0 < _num(s.get("factor"), 1.0) < 0.6]
+    if slow:
+        add(f"a {_num(slow[0].get('factor'), 1.0):.2f}x slow-motion span — "
+            "this pipeline duplicates frames rather than synthesizing them, "
+            "so below 0.6x the motion visibly steps. Use 0.6-0.8x, or tell "
+            "the user the tradeoff.")
+    if fmt["vertical"] and out_dur > SHORT_FORM_MAX_S:
+        add(f"a vertical edit running {out_dur / 60:.1f} minutes — vertical "
+            "feeds are watched thumb-down and the drop-off is brutal past a "
+            "minute or two. Say so and offer a tighter cut, or a series.")
+
+    return found
+
+
+def audit_line(findings, limit=4):
+    """One compact string for a tool result, or '' when the edit is clean."""
+    if not findings:
+        return ""
+    head = findings[:limit]
+    more = len(findings) - len(head)
+    line = " TASTE AUDIT (craft, not correctness — fix what the user did not "
+    line += "explicitly ask for): " + "; ".join(head)
+    if more:
+        line += f"; (+{more} more)"
+    return line + " Re-render after fixing."

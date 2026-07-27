@@ -23,6 +23,8 @@ import perception
 import sfx_library
 import stock
 import storage
+import subject
+import taste
 import videogen
 import cursor as cursorlib
 import screenframe
@@ -97,6 +99,11 @@ class ToolContext:
         self._asset_perception = {}   # asset/library key -> audio analysis
         self.last_preview = None      # set by render_preview
         self.last_selfcheck = None    # vision one-liner from the last preview
+        # What the user asked for THIS turn, verbatim. Read only to SUPPRESS
+        # taste findings (round 52): a fade from black is a defect on a reel
+        # right up until the moment somebody asks for one, and a critic that
+        # argues with an explicit instruction is worse than no critic.
+        self.user_message = ""
         self.versions_written = []    # EDL versions created this turn
         # Every EDL state visited this turn -> the version it was first seen
         # at. A write that lands on a state already in here is a CYCLE: the
@@ -1306,6 +1313,77 @@ def merge_caption_style(captions, partial):
     return out
 
 
+def set_caption_fixes(ctx, replacements=None, clear=False):
+    """Correct the SPELLING of burned captions without touching their timing.
+
+    "En el subtítulo tienes que escribir Dios, Ecuador, Jesús." Two users asked
+    for this on the same day — one twice, in two different projects — and the
+    answer was that captions burn the transcript's own words and their case
+    could not be changed. It is the single most visible thing on the screen and
+    the transcriber gets names wrong by design: it writes what it heard, in
+    lower case, with no idea that Dios is a name.
+
+    Timings are never touched, so word-by-word presets stay frame-accurate.
+    """
+    edl = dict(ctx.latest_edl()["json"])
+    caps = edl.get("captions")
+    if not isinstance(caps, dict) or caps.get("mode") != "from_transcript":
+        return ("REJECTED: text fixes apply to from_transcript captions "
+                "only — call add_captions('from_transcript') first. For "
+                "captions you dictated yourself, edit the item's text.")
+    if clear:
+        merged = dict(caps)
+        merged["text_fixes"] = None
+        edl["captions"] = merged
+        return ctx.write_edl(edl, "cleared caption text fixes")
+    if not isinstance(replacements, list) or not replacements:
+        return ("REJECTED: replacements must be a non-empty array of "
+                "[wrong, right] pairs, e.g. "
+                "[[\"dios\",\"Dios\"],[\"ushula\",\"Ujjwala\"]]. Pass "
+                "clear=true to remove all fixes.")
+    pairs, bad = [], []
+    for r in replacements:
+        try:
+            src, dst = ((r.get("from"), r.get("to")) if isinstance(r, dict)
+                        else (r[0], r[1]))
+            src, dst = str(src).strip(), str(dst).strip()
+        except (IndexError, KeyError, TypeError, ValueError):
+            bad.append(str(r)[:40])
+            continue
+        if not src or not dst:
+            bad.append(str(r)[:40])
+        elif len(src.split()) != len(dst.split()):
+            bad.append(f"'{src}' -> '{dst}'")
+        else:
+            pairs.append([src, dst])
+    if not pairs:
+        return ("REJECTED: no usable pairs. Each must be [wrong, right] with "
+                "the SAME number of words on both sides (a replacement that "
+                "changes the word count would have to delete a word that "
+                "still has time on the clock). Rejected: "
+                + "; ".join(bad[:5]) + ".")
+    existing = [list(p) for p in (caps.get("text_fixes") or [])]
+    by_src = {p[0].casefold(): p for p in existing}
+    for p in pairs:
+        by_src[p[0].casefold()] = p
+    merged = dict(caps)
+    merged["text_fixes"] = list(by_src.values())
+    edl["captions"] = merged
+    shown = ", ".join(f"'{s}'->'{d}'" for s, d in pairs[:6])
+    res = ctx.write_edl(edl, f"caption text fixes: {shown}"
+                             + (f" (+{len(pairs) - 6} more)"
+                                if len(pairs) > 6 else ""))
+    if res.startswith("EDL v"):
+        res += ("\nOnly the burned TEXT changes — word timings, the audio and "
+                "the cut are untouched, so word-by-word presets stay in sync. "
+                "Matching ignores case and punctuation, so one pair fixes "
+                "every occurrence.")
+        if bad:
+            res += ("\nSkipped (both sides must have the same word count): "
+                    + "; ".join(bad[:4]) + ".")
+    return res
+
+
 def set_caption_style(ctx, style=None, emphasis_words=None):
     if emphasis_words is not None:
         if not isinstance(emphasis_words, list) \
@@ -1588,11 +1666,32 @@ def list_music_library(ctx, mood=None):
     if not hits:
         return (f"No '{m}' tracks. Available moods: "
                 + ", ".join(sorted({t['mood'] for t in music_library.CATALOG})))
+    # What this user has already been given, in their OTHER projects. Nothing
+    # in a turn could see that before, so the same handful of tracks came back
+    # video after video until a customer wrote "do not use the exact background
+    # music as previous projects". Marked, not hidden: a repeat is fine when
+    # the track is genuinely right, and it is their call, not ours.
+    used = set()
+    try:
+        used = set(ctx.db.run(dbx.music_used_by_user, ctx.job["user_id"],
+                              ctx.project_id))
+    except Exception:
+        used = set()
     head = (f"{len(hits)} built-in track(s)"
             + (f" for mood '{m}'" if m else "") +
             ". Pass the library: reference to add_music.\n")
-    return head + "\n".join(
-        f"  library:{t['slug']} — {music_library.describe(t)}" for t in hits)
+    lines = []
+    for t in hits:
+        ref = f"library:{t['slug']}"
+        tag = "  [ALREADY USED in this user's earlier projects]" \
+            if ref in used else ""
+        lines.append(f"  {ref} — {music_library.describe(t)}{tag}")
+    if used & {f"library:{t['slug']}" for t in hits}:
+        head += ("Tracks marked ALREADY USED were scored onto this user's "
+                 "other videos — prefer a fresh one unless they asked for "
+                 "that specific track, so their videos do not all sound the "
+                 "same.\n")
+    return head + "\n".join(lines)
 
 
 def _speech_overlap_s(ctx, edl, start_out, end_out):
@@ -2177,12 +2276,6 @@ def auto_reframe(ctx, ratio="9:16", mode="crop"):
         return set_frame(ctx, ratio, mode)
     if not ctx.has_main_video:
         return set_frame(ctx, ratio, "crop")
-    if not llm.vision_available():
-        res = set_frame(ctx, ratio, "crop")
-        if res.startswith("EDL v"):
-            res += ("\nNote: no vision model is configured, so the crop is "
-                    "the plain CENTER crop — auto framing needs vision.")
-        return res
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
@@ -2219,6 +2312,56 @@ def auto_reframe(ctx, ratio="9:16", mode="crop"):
             res += ("\nNote: could not extract frames, so the crop is the "
                     "plain CENTER crop.")
         return res
+
+    # MEASURE FIRST (round 52). A face is found in the pixels, in milliseconds,
+    # with no provider and no credits — and on the footage people actually
+    # reframe (someone talking) that measurement beats asking a multimodal
+    # model to estimate a coordinate. The vision path below is now the fallback
+    # for footage with no face in it, not the only route: for five users on one
+    # day it was the only route, it was unconfigured, and every one of them got
+    # a dead-centre crop with an apology attached.
+    pts, method = subject.points_from_frames(frames)
+    if method == "faces":
+        pt = subject.median_point(pts)
+        drift = subject.spread(pts)
+        res = set_frame(ctx, ratio, "crop", focus_x=pt[0], focus_y=pt[1])
+        if res.startswith("EDL v"):
+            res += (f"\nMeasured from the pixels: a face was detected in "
+                    f"{len(pts)} of {len(frames)} sampled frames, sitting at "
+                    f"({pt[0]:.2f}, {pt[1]:.2f}) of the source frame — the "
+                    "crop follows it instead of the frame center. No vision "
+                    "model was needed.")
+            if drift > 0.18:
+                res += (f" The subject MOVES across the samples (spread "
+                        f"{drift:.2f} of the frame), and the focus is one "
+                        "FIXED point for the whole video — say so and offer "
+                        "pad_blur if the framing looks tight anywhere.")
+        return res
+
+    if not llm.vision_available():
+        # No face and no vision: the gradient-energy centroid is still a
+        # measurement of where the picture's detail is, which beats the middle
+        # of the frame — but it is a weaker claim and is described as one.
+        pt = subject.median_point(pts) if pts else None
+        res = set_frame(ctx, ratio, "crop",
+                        focus_x=pt[0] if pt else None,
+                        focus_y=pt[1] if pt else None)
+        if res.startswith("EDL v"):
+            if pt:
+                res += (f"\nNo face was found in the sampled frames and no "
+                        f"vision model is configured, so the crop is aimed at "
+                        f"where the picture's DETAIL sits ({pt[0]:.2f}, "
+                        f"{pt[1]:.2f}) rather than at the frame center. Tell "
+                        "the user it is an estimate and offer set_frame with "
+                        "your own focus_x/focus_y, or pad_blur, if the "
+                        "framing misses.")
+            else:
+                res += ("\nCould not measure a subject and no vision model is "
+                        "configured, so this is the plain CENTER crop — say "
+                        "so, and offer pad_blur (which keeps the whole "
+                        "picture) for footage where the center is wrong.")
+        return res
+
     prompt = (f"These are {len(frames)} frames sampled across one video. "
               "For EACH frame, give the position of the MAIN SUBJECT "
               "(the person/face if there is one, else the visual focal "
@@ -4705,6 +4848,193 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
     return result
 
 
+def _freeze_frame_asset(ctx, src_t, blur=0.0, darken=0.0):
+    """Grab the frame at `src_t` from the ORIGINAL video and store it as a
+    project image, optionally blurred and darkened.
+
+    From the original, not the proxy: the proxy is a 540p analysis artefact and
+    a still is looked at, not glanced past — a soft freeze frame in an
+    otherwise sharp edit reads as a rendering fault.
+
+    The treatment is baked into the PNG rather than layered at render time. A
+    freeze frame is one still, so blurring it once here costs nothing, needs no
+    filtergraph, and — the part that matters — cannot leak onto the moving
+    footage around it, which is exactly what happened when the agent faked this
+    with a windowed dream_blur over live video.
+    """
+    ck = (round(float(src_t), 2), round(float(blur), 2), round(float(darken), 2))
+    cache = getattr(ctx, "_freeze_assets", None)
+    if cache is None:
+        cache = ctx._freeze_assets = {}
+    if ck in cache:
+        return cache[ck], None
+    try:
+        src = _original_local(ctx)
+    except Exception:
+        try:
+            src = ctx.proxy_path()
+        except Exception as e:
+            return None, (f"Could not read the video to freeze a frame "
+                          f"({str(e)[:120]}).")
+    raw = os.path.join(ctx.workdir, f"freeze_{uuid.uuid4().hex[:8]}.png")
+    try:
+        media.frame_at(src, float(src_t), raw)
+    except media.MediaError as e:
+        return None, (f"Could not grab the frame at {float(src_t):.2f}s "
+                      f"({str(e)[:120]}). Pick a moment inside the kept "
+                      "footage.")
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter
+        img = Image.open(raw).convert("RGB")
+        if blur > 0:
+            # Radius scales with the frame so the look is identical on a 540p
+            # proxy grab and a 4K original.
+            img = img.filter(ImageFilter.GaussianBlur(
+                radius=max(1.0, min(img.size) * 0.012 * float(blur) * 4)))
+        if darken > 0:
+            img = ImageEnhance.Brightness(img).enhance(
+                max(0.15, 1.0 - float(darken)))
+        w, h = img.size
+        path = os.path.join(ctx.workdir, f"freeze_t_{uuid.uuid4().hex[:8]}.png")
+        img.save(path)
+    except Exception as e:
+        return None, f"Could not treat the frozen frame ({str(e)[:120]})."
+    key = f"generated/{ctx.project_id}/freeze-{uuid.uuid4().hex[:12]}.png"
+    try:
+        storage.upload_file(path, key, "image/png")
+    except Exception as e:
+        return None, (f"The frozen frame was built but could not be saved "
+                      f"({str(e)[:120]}). Try again.")
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "image_ref", key,
+               bytes_=os.path.getsize(path), width=w, height=h,
+               meta={"filename": f"freeze-{float(src_t):.2f}s.png",
+                     "caption": (f"Frozen frame from {float(src_t):.2f}s"
+                                 + (" (blurred)" if blur else "")
+                                 + (" (darkened)" if darken else "")),
+                     "generated": True, "model": "local:freeze"})
+    cache[ck] = key
+    return key, None
+
+
+def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
+                     subtitle=None, blur=0.0, darken=0.0, motion="zoom_in",
+                     template="title", color=None, accent_color=None,
+                     font=None):
+    """FREEZE THE PICTURE on a moment and hold it — with an optional line of
+    text over the held frame.
+
+    Three separate users asked for exactly this on one day, in the same words:
+    "congela el fotograma exacto y úsalo como fondo, aplica un desenfoque
+    suave, muestra la frase en el centro". The agent's answer was "no existe
+    herramienta para capturar un frame del video como imagen" — and then it
+    faked it with a dream_blur over LIVE footage, which is a different effect
+    (the picture keeps moving under the words) and which it then had to
+    disclose as not-what-was-asked in every reply.
+
+    It is a real cut: the programme pauses on the still for `duration_s` and
+    everything after shifts later, exactly like a title card — which is why
+    captions never land on it and no mute is needed.
+    """
+    try:
+        at = float(at_output_s)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s must be a number — the moment in the "
+                "FINAL edited video to freeze, in seconds.")
+    try:
+        dur = round(min(max(float(duration_s), 0.3), 10.0), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: duration_s must be a number of seconds."
+    try:
+        blur = min(max(float(blur or 0.0), 0.0), 1.0)
+        darken = min(max(float(darken or 0.0), 0.0), 0.85)
+    except (TypeError, ValueError):
+        return "REJECTED: blur and darken must be numbers 0-1."
+    if not ctx.has_main_video:
+        return ("REJECTED: there is no main video to freeze a frame from. "
+                "insert_media an image instead.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    if prog <= 0.2:
+        return "REJECTED: there is no program yet to freeze."
+    at = round(min(max(at, 0.0), max(0.0, prog - 0.05)), 2)
+    tl = Timeline([list(k) for k in (edl.get("keep") or [])],
+                  edl.get("inserts") or [], edl.get("speed") or [])
+    src_t = tl.out_to_src(at)
+    if src_t is None:
+        return (f"REJECTED: {at}s of the program does not sit on the main "
+                "video (it lands on inserted media), so there is no source "
+                "frame to freeze there. Pick a moment on the footage.")
+    key, err = _freeze_frame_asset(ctx, src_t, blur, darken)
+    if err:
+        return err
+
+    before = {i.get("id") for i in (edl.get("inserts") or [])}
+    placed = insert_media(ctx, key, at, duration_s=dur,
+                          motion=(motion or None))
+    if not placed.startswith("EDL v"):
+        return placed
+    treat = []
+    if blur:
+        treat.append(f"blurred {blur:g}")
+    if darken:
+        treat.append(f"darkened {darken:g}")
+    note = (f"\nFroze the frame at {at}s of the program (source "
+            f"{src_t:.2f}s) and held it for {dur:g}s"
+            + (" — " + ", ".join(treat) if treat else "")
+            + ". The picture is genuinely STILL (it is that exact frame, not "
+            "the moving footage), everything after shifts "
+            f"{dur:g}s later, and spoken-word captions never land on it.")
+
+    t = (text or "").strip()
+    if not t:
+        return placed.split(". Before:")[0] + note
+    # Bind the words to the frozen frame the same way a title card does, so a
+    # later insert cannot leave them stranded on the moving footage.
+    edl = dict(ctx.latest_edl()["json"])
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    item = next((i for i in inserts if i.get("id") not in before), None)
+    windows = insert_windows(
+        inserts, Timeline([list(k) for k in (edl.get("keep") or [])],
+                          inserts, edl.get("speed") or [])) if item else {}
+    win = windows.get(item["id"]) if item else None
+    if win is None:
+        return (placed.split(". Before:")[0] + note
+                + " The text could not be anchored to it — add it with "
+                  "add_text over the frozen window.")
+    tpl = (template or "title").strip().lower()
+    if tpl not in TEXT_TEMPLATES:
+        tpl = "title"
+    texts = [dict(tx) for tx in (edl.get("texts") or [])]
+    ts, te = card_text_window(*win)
+    made = []
+    tx_item = {"id": _next_item_id(texts, "tx"), "text": t[:200],
+               "start": ts, "end": te, "template": tpl, "x": 0.5, "y": 0.5,
+               "size_scale": None, "color": color,
+               "accent_color": accent_color, "font": font,
+               "entrance": "fade", "exit": "fade", "uppercase": None,
+               "box": None, "anchor_insert": item["id"]}
+    texts.append(tx_item)
+    made.append(f"{tpl} \"{t[:40]}\"")
+    sub = (subtitle or "").strip()
+    if sub:
+        texts.append({"id": _next_item_id(texts, "tx"), "text": sub[:200],
+                      "start": ts, "end": te, "template": "subtitle",
+                      "x": 0.5, "y": 0.635, "size_scale": None,
+                      "color": color, "accent_color": accent_color,
+                      "font": None, "entrance": "fade", "exit": "fade",
+                      "uppercase": None, "box": None,
+                      "anchor_insert": item["id"]})
+        made.append(f"subtitle \"{sub[:30]}\"")
+    edl["texts"] = texts
+    result = ctx.write_edl(edl, f"{' + '.join(made)} on the frozen frame at "
+                                f"{win[0]}-{win[1]}s [{tx_item['id']}]")
+    if not result.startswith("EDL v"):
+        return placed.split(". Before:")[0] + note + "\n" + result
+    return result.split(". Before:")[0] + note + (
+        " The words are BOUND to the frozen frame, so later inserts move them "
+        "with it.")
+
+
 def add_stylize(ctx, kind, start=None, end=None, intensity=None):
     """A windowed finishing effect on the program picture."""
     k = (kind or "").strip().lower()
@@ -4740,6 +5070,54 @@ def add_stylize(ctx, kind, start=None, end=None, intensity=None):
     shown = inten if inten is not None else 0.5
     return ctx.write_edl(
         edl, f"stylize {k}{window}, intensity {shown:g} [{item['id']}]")
+
+
+def enhance_video(ctx, sharpen=0.5, denoise=0.0, start=None, end=None):
+    """"Make it clearer / sharper / better quality / HD" — the request five
+    different users made in one day, to an agent that had no tool for it and
+    answered with a colour grade, a contrast bump, or "the source is only
+    576x1024, I can't invent pixels".
+
+    Both halves of that answer were true and neither was useful. A phone's
+    encoder genuinely smears fine detail, and a 5x5 unsharp pass genuinely
+    brings it back — that is restoration, not upscaling, and it is what every
+    "enhance" button in every consumer editor actually does. Denoise first when
+    the footage is grainy, because sharpening noise makes it crawl.
+
+    What it will NOT do is add resolution, and the tool says so in its result
+    so the agent repeats the honest version rather than promising HD.
+    """
+    try:
+        sh = min(max(float(sharpen if sharpen is not None else 0.0), 0.0), 1.0)
+        dn = min(max(float(denoise if denoise is not None else 0.0), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return "REJECTED: sharpen and denoise must be numbers 0-1."
+    if sh <= 0.0 and dn <= 0.0:
+        return ("REJECTED: pass sharpen and/or denoise above 0 — with both at "
+                "0 there is nothing to apply. To UNDO an enhancement, "
+                "remove_stylize its id.")
+    if (start is None) != (end is None):
+        return ("REJECTED: pass both start and end (program seconds), or "
+                "neither for the whole video.")
+    # Denoise must run BEFORE sharpen in the filter chain, and the chain order
+    # is the list order, so it is added first.
+    notes = []
+    if dn > 0:
+        res = add_stylize(ctx, "denoise", start, end, dn)
+        if not res.startswith("EDL v"):
+            return res
+        notes.append(f"denoise {dn:g}")
+    if sh > 0:
+        res = add_stylize(ctx, "sharpen", start, end, sh)
+        if not res.startswith("EDL v"):
+            return res
+        notes.append(f"sharpen {sh:g}")
+    return (res + "\nEnhanced (" + ", ".join(notes) + "). This recovers "
+            "detail the camera's encoder smeared and makes the picture read "
+            "crisper — it does NOT add resolution, so tell the user plainly "
+            "that a low-resolution source stays low-resolution. If they also "
+            "asked for 'no filters', check get_edl and remove any colour "
+            "grade: enhancement is not a look.")
 
 
 def remove_stylize(ctx, id):
@@ -6136,6 +6514,22 @@ def render_preview(ctx):
                              "repeats.")
             except Exception:
                 pass
+            # Taste audit (round 52): the craft reviewer. Everything above
+            # asks whether the edit is CORRECT; this asks whether it is any
+            # GOOD, which is the difference between an edit that renders and
+            # an edit someone wants to post. It runs on a REAL render only —
+            # a cached one was reviewed when it was made.
+            try:
+                edl = row["json"]
+                tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                              edl.get("speed") or [])
+                note += taste.audit_line(taste.critique(
+                    edl, ctx.index, tl,
+                    src_w=(ctx.index.get("video") or {}).get("width"),
+                    src_h=(ctx.index.get("video") or {}).get("height"),
+                    user_asked=ctx.user_message or ""))
+            except Exception:
+                pass
             return note
         if j["state"] == "failed":
             return (f"Preview render FAILED: {j.get('error')}. "
@@ -6727,6 +7121,25 @@ def _music_program_beats(ctx, edl, bpm=None, every_s=None, key=None):
     conf = float(p.get("bpm_conf") or 0.0)
     track_beats = p.get("beats") or []
     if not track_beats or conf < 0.5:
+        # A LIBRARY track was measured once, offline, over its whole length,
+        # by a stronger estimator than anything an agent turn can afford. Look
+        # that up before refusing: "Abducted" scored 0.44 here and 0.62 there,
+        # and a real montage was told its own soundtrack had no beat.
+        lib = (music_library.measured_tempo(item["storage_key"])
+               if item and music_library.is_library_ref(item["storage_key"])
+               else None)
+        if lib and lib[1] >= 0.5:
+            period = 60.0 / lib[0]
+            n = int((hi - lo) / period) + 1
+            beats = [round(lo + k * period, 3) for k in range(n)
+                     if lo + k * period <= hi + 1e-6]
+            if beats:
+                return beats, (f"{lib[0]:g} BPM, measured for this library "
+                               f"track offline (confidence {lib[1]:.2f}) — "
+                               "the in-turn estimate on the streamed audio "
+                               f"was weaker ({conf:.2f}), so the catalogue "
+                               "measurement is used. Phase starts where the "
+                               "music starts."), None
         return None, None, (
             f"REJECTED: the music's own pulse is not clear enough to cut to "
             f"(bpm {p.get('bpm') or 'none'}, confidence {conf:.2f}; needs "
@@ -8174,12 +8587,64 @@ TOOLS = {
                           {"spans": {"type": "array",
                                      "items": {"type": "array",
                                                "items": {"type": "number"}}}}),
+    "set_caption_fixes": (set_caption_fixes, "Correct the SPELLING or "
+                          "capitalization of burned captions: replacements is "
+                          "an array of [wrong, right] pairs, e.g. "
+                          "[[\"dios\",\"Dios\"],[\"ushula\",\"Ujjwala\"]]. "
+                          "Use it whenever a user says a caption spells a "
+                          "name wrong, or when the transcript lower-cases "
+                          "names that must be capitalized (people, places, "
+                          "brands, religious names). Matching ignores case "
+                          "and punctuation and fixes every occurrence; both "
+                          "sides must have the SAME word count. Word timings "
+                          "are never touched. clear=true removes all fixes.",
+                          {"replacements": {"type": "array",
+                                            "items": {"type": "array",
+                                                      "items": {"type":
+                                                                "string"}}},
+                           "clear": {"type": "boolean"}}),
+    "add_freeze_frame": (add_freeze_frame, "FREEZE the picture on a moment "
+                         "and hold it, optionally with a line of text over "
+                         "the held frame — the 'pearl' / power-phrase move: "
+                         "the frame stops, blurs and darkens behind big "
+                         "centred words, then the video continues. "
+                         "at_output_s is the moment in the EDITED video to "
+                         "freeze; duration_s 2-4s reads well; blur 0-1 and "
+                         "darken 0-0.85 treat the still (0.45/0.35 is the "
+                         "classic look, 0/0 keeps it clean); motion "
+                         "zoom_in/zoom_out/pan_left/pan_right gives the still "
+                         "a slow drift so it does not sit dead; text + "
+                         "subtitle are burned centred and BOUND to the frozen "
+                         "frame. It is a real cut — the program pauses and "
+                         "everything after shifts later — so spoken-word "
+                         "captions never land on it and no mute is needed.",
+                         {"at_output_s": {"type": "number"},
+                          "duration_s": {"type": "number"},
+                          "text": {"type": "string"},
+                          "subtitle": {"type": "string"},
+                          "blur": {"type": "number"},
+                          "darken": {"type": "number"},
+                          "motion": {"type": "string",
+                                     "enum": list(INSERT_MOTIONS)},
+                          "template": {"type": "string",
+                                       "enum": list(TEXT_TEMPLATES)},
+                          "color": {"type": "string"},
+                          "accent_color": {"type": "string"},
+                          "font": {"type": "string",
+                                   "enum": list(TEXT_FONTS)}}),
     "add_stylize": (add_stylize, "Layer a windowed finishing effect on the "
                     "program picture: 'grain' (film grain), 'vignette' "
                     "(darkened corners), 'glow' (soft bloom), 'chromatic' "
                     "(RGB fringe), 'dream_blur' (soft dreamy diffusion), "
                     "'vhs' (tape look), 'flash' (strobe pop), 'shake' "
-                    "(camera shake). start/end are PROGRAM seconds — omit "
+                    "(adds camera shake), 'sharpen' / 'denoise' (picture "
+                    "quality — prefer enhance_video, which orders them "
+                    "correctly), 'motion_blur' (real frame blending; only "
+                    "reads on movement, does nothing on a static shot), "
+                    "'stabilize' (smooths a HANDHELD wobble via deshake — it "
+                    "crops a few percent at the edges and cannot fix a whip, "
+                    "a walk or rolling shutter; say that rather than "
+                    "promising stabilization). start/end are PROGRAM seconds — omit "
                     "both for the whole video. intensity 0.05-1.0 (default "
                     "0.5). Content-anchored: a stylized moment follows its "
                     "footage through later cuts. One or two layered "
@@ -8189,6 +8654,20 @@ TOOLS = {
                      "start": {"type": "number"},
                      "end": {"type": "number"},
                      "intensity": {"type": "number"}}),
+    "enhance_video": (enhance_video, "PICTURE QUALITY, not a look — the right "
+                      "answer to 'make it clearer / sharper / better quality "
+                      "/ HD / enhance this'. sharpen 0-1 (default 0.5) "
+                      "recovers detail the camera's encoder smeared; denoise "
+                      "0-1 (default 0) cleans grainy low-light footage and "
+                      "should be raised BEFORE sharpening noisy video. "
+                      "start/end are PROGRAM seconds; omit both for the whole "
+                      "video. It cannot add resolution — say that plainly "
+                      "instead of promising HD from a small source. Never "
+                      "answer a clarity request with a colour grade.",
+                      {"sharpen": {"type": "number"},
+                       "denoise": {"type": "number"},
+                       "start": {"type": "number"},
+                       "end": {"type": "number"}}),
     "remove_stylize": (remove_stylize, "Remove one stylize effect by its id "
                        "(see get_edl).", {"id": {"type": "string"}}),
     "set_grade_custom": (set_grade_custom, "Continuous color controls on "
@@ -8372,6 +8851,9 @@ REQUIRED_ARGS = {
     "add_corrupt_screen": ["at_output_s"],
     "set_caption_mutes": ["spans"],
     "add_stylize": ["kind"],
+    "add_freeze_frame": ["at_output_s"],
+    "set_caption_fixes": [],
+    "enhance_video": [],
     "remove_stylize": ["id"],
     "set_grade_custom": [],
     "set_master_loudness": ["enabled"],
@@ -8416,7 +8898,9 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "add_text", "remove_text",
                "add_title_card", "add_color_screen", "add_corrupt_screen",
                "set_caption_mutes",
-               "add_stylize", "remove_stylize",
+               "add_stylize", "add_freeze_frame", "enhance_video",
+               "set_caption_fixes",
+               "remove_stylize",
                "set_grade_custom", "set_master_loudness",
                "punch_in_on_emphasis", "sound_design_pass",
                "beat_align_cuts", "apply_look",

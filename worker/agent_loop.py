@@ -427,6 +427,7 @@ def run_agent_job(worker_db, job):
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"] if index_row else None,
                                   workdir)
+    ctx.user_message = (user_message.get("content") or "")[:4000]
     # A turn spends what the user can PAY FOR — balance + a small grace — and
     # nothing else bounds it.
     #

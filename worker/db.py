@@ -438,6 +438,38 @@ def latest_edl(conn, project_id):
         return cur.fetchone()
 
 
+def music_used_by_user(conn, user_id, exclude_project_id=None, limit=12):
+    """Library tracks this user has scored their OTHER projects with.
+
+    Round 52. "Do not use the exact background music as previous projects" is
+    a real sentence a real customer typed, and it is the first thing anyone
+    notices about a tool that scores video: the same 24 tracks, and one of them
+    keeps coming back. The agent could not have honoured it — nothing in a turn
+    can see any project but this one.
+
+    Returns newest-first storage_keys, so the agent can pick something else
+    without being told to.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (m.key) m.key, e.created_at
+              FROM edls e
+              JOIN projects p ON p.id = e.project_id
+              CROSS JOIN LATERAL jsonb_array_elements(
+                     COALESCE(e.json->'music', '[]'::jsonb)) AS mi(item)
+              CROSS JOIN LATERAL (SELECT mi.item->>'storage_key' AS key) m
+             WHERE p.user_id = %s
+               AND (%s::int IS NULL OR e.project_id <> %s)
+               AND m.key LIKE 'library:%%'
+             ORDER BY m.key, e.created_at DESC
+        """, (user_id, exclude_project_id, exclude_project_id))
+        rows = cur.fetchall() or []
+    rows = sorted(rows, key=lambda r: r[1] if not isinstance(r, dict)
+                  else r["created_at"], reverse=True)
+    keys = [r[0] if not isinstance(r, dict) else r["key"] for r in rows]
+    return keys[:limit]
+
+
 def get_edl_version(conn, project_id, version):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM edls

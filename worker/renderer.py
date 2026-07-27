@@ -15,6 +15,7 @@ Every render also emits a 3x3 contact sheet for the agent's self-check.
 """
 
 import hashlib
+import json
 import os
 import shutil
 import time
@@ -1103,6 +1104,30 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[glA{si}][glG{si}]blend=all_mode=screen"
                          f":all_opacity={0.25 + 0.4 * i_:.2f}{en}"
                          f"[{out_lab}]")
+        elif kind == "sharpen":
+            # unsharp with a 5x5 kernel: the honest answer to "make it
+            # clearer". It recovers apparent detail a phone's encoder smeared;
+            # it does NOT add resolution, and past ~0.8 it starts ringing on
+            # edges, which is why the amount tops out below the filter's own
+            # maximum.
+            parts.append(f"[{vlabel}]unsharp=5:5:{0.35 + 1.05 * i_:.2f}"
+                         f":5:5:{0.15 + 0.45 * i_:.2f}{en}[{out_lab}]")
+        elif kind == "denoise":
+            # hqdn3d before sharpening is what stops a sharpen pass from
+            # amplifying sensor noise into crawling grain. Low-light phone
+            # footage is the case; it costs detail, so the default is gentle.
+            parts.append(f"[{vlabel}]hqdn3d={1.5 + 3.5 * i_:.2f}"
+                         f":{1.0 + 2.5 * i_:.2f}:{4.0 + 6.0 * i_:.2f}"
+                         f":{3.0 + 5.0 * i_:.2f}{en}[{out_lab}]")
+        elif kind == "motion_blur":
+            # Real frame blending — each output frame is the average of the
+            # last N — which is what "motion blur" means on already-shot
+            # footage. Only reads on MOVEMENT (a whip, a sprint, a speed ramp);
+            # on a static shot it does nothing, which is correct and worth
+            # telling the user.
+            n = 2 + int(round(3 * i_))
+            parts.append(f"[{vlabel}]tmix=frames={n}:weights='"
+                         + " ".join(["1"] * n) + f"'{en}[{out_lab}]")
         elif kind == "shake":
             # Windowed handheld wobble via zoompan: z=1 outside the window,
             # so there is NO hidden crop on the rest of the program (a naive
@@ -1719,7 +1744,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
     cmd = ["ffmpeg", "-y", *extra_inputs,
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
-           *encode, "-movflags", "+faststart",
+           *encode, *_output_clock(fps), "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
     media.run(cmd, progress_cb=progress_cb,
               expected_out_s=tl.out_duration + outro_s)
@@ -1916,7 +1941,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 
     cmd = ["ffmpeg", "-y", "-i", src_path, *extra_inputs,
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
-           *encode, "-movflags", "+faststart",
+           *encode, *_output_clock(fps), "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
     # Progress is percent-of-expected, so it must be the RENDERED length. Left
     # at the programme duration the bar hits 99.9% at programme end and then
@@ -1929,6 +1954,60 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 # ------------------------------------------------------------------ #
 #  Job entrypoint (types: preview | final)                             #
 # ------------------------------------------------------------------ #
+
+def _output_clock(fps):
+    """Output timing options for every render.
+
+    Round 52. The rendered file's length should come from the filtergraph's
+    TIMESTAMPS and nothing else. Left unpinned it also depends on the frame
+    rate the last filter link happens to ADVERTISE, because ffmpeg's default
+    frame handling re-times the stream to that declared rate — so a link whose
+    declared rate disagrees with the PTS it is carrying stretches or squeezes
+    the whole video, which is exactly what a wrong-length export is.
+
+    Two real exports failed verification on 2026-07-27 — 102.40s for a 93.50s
+    edit, 47.11s for a 45.38s one — and one user pressed Download ten times for
+    the same message. BE PRECISE ABOUT WHAT IS KNOWN: their PREVIEWS were
+    correct and repeatable, both stored EDLs render to the exact expected
+    length here against synthetic CFR, VFR and short-picture-track sources, and
+    the customers' originals are not reachable from a dev box, so the specific
+    property of those two files was never reproduced. What IS established is
+    the structural asymmetry — a preview renders from our own proxy, whose
+    encode already pins `-fps_mode cfr -r` for anything it detected as VFR, and
+    a final renders from the customer's original, which nothing pinned.
+
+    So this closes the whole family rather than one instance: the output clock
+    is now declared, both paths agree, and frames are duplicated or dropped
+    only where the timestamps say to. If a length mismatch survives it,
+    _stream_report names the offending stream in the worker log — which is the
+    datum this investigation did not have.
+    """
+    return ["-fps_mode", "cfr", "-r", f"{max(1.0, min(float(fps or 30.0), 120.0)):.3f}"]
+
+
+def _stream_report(path):
+    """Per-stream durations, rates and frame counts of a rendered file, as one
+    log line. Best-effort: a diagnostic must never be the thing that fails."""
+    try:
+        out = media.run(["ffprobe", "-v", "error", "-print_format", "json",
+                         "-show_format", "-show_streams",
+                         "-count_frames" if os.path.getsize(path) < 60_000_000
+                         else "-show_format", path], timeout=120)
+        data = json.loads(out)
+    except Exception as e:
+        return f"stream probe failed ({str(e)[:80]})"
+    bits = [f"container={float(data.get('format', {}).get('duration') or 0):.2f}s"]
+    for st in data.get("streams", []):
+        kind = st.get("codec_type")
+        if kind not in ("video", "audio"):
+            continue
+        piece = f"{kind}={float(st.get('duration') or 0):.2f}s"
+        if kind == "video":
+            piece += (f" r={st.get('r_frame_rate')} avg={st.get('avg_frame_rate')}"
+                      f" frames={st.get('nb_read_frames') or st.get('nb_frames') or '?'}")
+        bits.append(piece)
+    return " ".join(bits)
+
 
 def _verify_render(edl_json, out_path, out_dur, job_id, variant,
                    src_path=None, src_dur=None):
@@ -1957,6 +2036,15 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
     tol = max(config.RENDER_DURATION_TOLERANCE_S,
               config.RENDER_DURATION_TOLERANCE_FRAC * expected)
     if abs(out_dur - expected) > tol:
+        # Name the stream before failing. "The render is the wrong length" was
+        # all a user got, ten times in a row, while pressing Download — and it
+        # was all WE got too, which is why the cause took a day of forensics to
+        # narrow. Which stream is long (and by how many frames) separates the
+        # three possible causes — a stretched picture clock, an audio tail that
+        # outruns the programme, or a genuinely mis-built graph — in one line.
+        print(f"[render {job_id}] LENGTH MISMATCH {variant}: "
+              f"{_stream_report(out_path)} | expected {expected:.2f}s "
+              f"(programme {program:.2f}s + outro {outro:.2f}s)", flush=True)
         raise media.MediaError(
             f"{variant} render duration check failed: output is "
             f"{out_dur:.2f}s but the edit is {expected:.2f}s "

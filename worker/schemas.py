@@ -351,8 +351,30 @@ class CaptionsFromTranscript(BaseModel):
     # agent from the REAL transcript; words containing digits are always
     # emphasized. Ignored without a preset. None/[] = no keyword emphasis.
     emphasis_words: Optional[List[str]] = None
+    # Round 52 — spelling/capitalization corrections for the burned words,
+    # [[from, to], ...]. TEXT ONLY: word timings are never touched, so a fix
+    # cannot desync a karaoke preset. None (never []) so an EDL written before
+    # this existed keeps its exact signature and its cached render.
+    text_fixes: Optional[List[List[str]]] = None
 
     _style = field_validator("style", mode="before")(_coerce_style)
+
+    @field_validator("text_fixes")
+    @classmethod
+    def _fixes_norm(cls, v):
+        if not v:
+            return None
+        out = []
+        for pair in v:
+            try:
+                src, dst = str(pair[0]).strip(), str(pair[1]).strip()
+            except (IndexError, TypeError, ValueError):
+                continue
+            # Same-word-count pairs only: see captions.apply_text_fixes for
+            # why a 2-into-1 replacement cannot be honoured.
+            if src and dst and len(src.split()) == len(dst.split()):
+                out.append([src[:80], dst[:80]])
+        return out[:80] or None
 
     @field_validator("emphasis_words")
     @classmethod
@@ -653,14 +675,24 @@ class RegionItem(BaseModel):
 # default. start/end are FINAL-program seconds; both None = whole program.
 # CONTENT-anchored (like zooms): a stylized moment follows its footage
 # through later cuts.
+# Round 52 adds the three that were missing and that users asked for by name
+# five times in one day — "improve clarity", "sharpen the image", "make it HD",
+# "mejorar la calidad", "enhance the whole video". The agent had nothing to
+# offer and reached for contrast/saturation instead, which is a filter, not
+# clarity. sharpen/denoise are RESTORATION (they make the picture read better
+# without pretending to add resolution); motion_blur is the real thing the
+# montage briefs meant, which had been faked with dream_blur — a soft dreamy
+# haze over the WHOLE frame, the opposite of motion.
 STYLIZE_KINDS = ("grain", "vignette", "glow", "chromatic", "dream_blur",
-                 "vhs", "flash", "shake")
+                 "vhs", "flash", "shake", "sharpen", "denoise", "motion_blur",
+                 "stabilize")
 
 
 class StylizeItem(BaseModel):
     id: str
     kind: Literal["grain", "vignette", "glow", "chromatic", "dream_blur",
-                  "vhs", "flash", "shake"]
+                  "vhs", "flash", "shake", "sharpen", "denoise", "motion_blur",
+                  "stabilize"]
     start: Optional[float] = None
     end: Optional[float] = None
     intensity: Optional[float] = None      # None = the kind's default (0.5)

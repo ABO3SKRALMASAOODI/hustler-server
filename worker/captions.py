@@ -48,6 +48,27 @@ FONT_SIZES = {"s": 30, "m": 40, "l": 52, "xl": 68}
 ALIGNMENTS = {"bottom": 2, "top": 8, "middle": 5}
 # middle (Alignment 5) is vertically centered; libass ignores MarginV there.
 MARGIN_V = {"bottom": 46, "top": 40, "middle": 0}
+# Round 52. A VERTICAL output is watched inside a platform's own furniture:
+# TikTok prints the creator's caption, @handle and hashtags across the bottom
+# of the frame, Reels and Shorts do the same, and the action rail sits over the
+# right edge. 46/720 puts a bottom-anchored caption 6.4% from the bottom, i.e.
+# UNDER all of it — the premium presets already anchor at 0.80 of the height
+# (PREMIUM_ANCHOR_Y) and are clear, so this only ever moved the legacy/classic
+# path, which was burning text into the one band of a 9:16 frame nobody can
+# read. Landscape is untouched: there is no chrome there, and lifting it would
+# change every existing 16:9 render for no reason.
+VERTICAL_BOTTOM_SAFE_FRAC = 0.13
+
+
+def bottom_margin_v(position, play_res):
+    """MarginV in output pixels for `position`, honouring the vertical-video
+    safe area. One function so the style line and slide_up's \\move anchor can
+    never disagree about where the text actually sits."""
+    fy = play_res[1] / BASE_PLAY_RES[1]
+    base = round(MARGIN_V.get(position, 46) * fy)
+    if position != "bottom" or play_res[1] <= play_res[0] * 1.05:
+        return base
+    return max(base, int(round(play_res[1] * VERTICAL_BOTTOM_SAFE_FRAC)))
 
 DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
                  "dynamic": False, "highlight_color": None, "animation": None,
@@ -378,9 +399,8 @@ def _anim_prefix(anim, style, play_res):
         # \move needs the real anchor point: derive it from the alignment
         # + margins exactly as style_line computes them.
         s = _norm_style(style)
-        fy = play_res[1] / BASE_PLAY_RES[1]
         cx = int(play_res[0] / 2)
-        margin_v = round(MARGIN_V.get(s["position"], 46) * fy)
+        margin_v = bottom_margin_v(s["position"], play_res)
         if s["position"] == "top":
             y = margin_v
         elif s["position"] == "middle":
@@ -404,7 +424,7 @@ def style_line(name, style, play_res=BASE_PLAY_RES):
     f = max(fx, fy)
     font = max(10, round(FONT_SIZES.get(s["size"], 40) * f * _size_scale(s)))
     margin_lr = max(10, round(60 * fx))
-    margin_v = round(MARGIN_V.get(s["position"], 46) * fy)
+    margin_v = bottom_margin_v(s["position"], play_res)
     outline = max(1.2, round(2.4 * f, 1))
     # Honour an explicit font on the plain (non-preset) path too. Without this
     # a bare `font` override rendered DejaVu Sans while the agent reported the
@@ -626,6 +646,75 @@ def _norm_word(w):
 
 def _word_has_digit(w):
     return any(c.isdigit() for c in (w or ""))
+
+
+def _split_affixes(tok):
+    """('leading punct', 'core', 'trailing punct') for one transcript token."""
+    core = (tok or "").strip()
+    lead = ""
+    while core and core[0] in _STRIP_PUNCT:
+        lead, core = lead + core[0], core[1:]
+    trail = ""
+    while core and core[-1] in _STRIP_PUNCT:
+        trail, core = core[-1] + trail, core[:-1]
+    return lead, core, trail
+
+
+def apply_text_fixes(words, fixes):
+    """Rewrite caption TEXT (never timing) from [[from, to], ...] pairs.
+
+    Round 52. The transcriber writes what it heard, in lower case, and users
+    care about this more than about any effect: one asked twice, in two
+    projects, for "dios" to read "Dios" and "jesus" to read "Jesús"; another
+    corrected a misheard name ("Ushula" -> "Ujjwala"). The honest answer at the
+    time was "the system burns the real words of the transcript and I have no
+    control over their capitalization", which is a strange thing for a video
+    editor to say about the words on screen.
+
+    Only the DISPLAYED string changes. Word timings are untouched, so karaoke
+    and reveal presets stay in sync to the frame, and the audio still says what
+    it always said. Matching ignores case and surrounding punctuation, and the
+    punctuation is put back — "dios," becomes "Dios,".
+
+    Multi-word pairs match consecutive tokens and are only accepted when both
+    sides have the same word count (the tool rejects the rest), because a
+    2-into-1 replacement would have to delete a word that still has time on the
+    clock — and an empty caption event with a duration is a blink, not a fix.
+    """
+    if not words or not fixes:
+        return words
+    rules = []
+    for pair in fixes:
+        try:
+            src, dst = (pair[0], pair[1]) if not isinstance(pair, dict) \
+                else (pair.get("from"), pair.get("to"))
+        except (IndexError, TypeError):
+            continue
+        s_toks = [t for t in str(src or "").split() if t]
+        d_toks = [t for t in str(dst or "").split() if t]
+        if not s_toks or not d_toks or len(s_toks) != len(d_toks):
+            continue
+        rules.append(([_norm_word(t) for t in s_toks], d_toks))
+    if not rules:
+        return words
+    # Longest match first: "espiritu santo" must win over a bare "espiritu".
+    rules.sort(key=lambda r: -len(r[0]))
+    out = [dict(w) for w in words]
+    i = 0
+    while i < len(out):
+        for src_toks, dst_toks in rules:
+            n = len(src_toks)
+            if i + n > len(out):
+                continue
+            if all(_norm_word(out[i + k].get("w")) == src_toks[k]
+                   for k in range(n)):
+                for k in range(n):
+                    lead, _core, trail = _split_affixes(out[i + k].get("w"))
+                    out[i + k]["w"] = lead + dst_toks[k] + trail
+                i += n - 1
+                break
+        i += 1
+    return out
 
 
 def _display_word(w, upper):
@@ -1362,6 +1451,10 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
     if isinstance(captions, dict) and captions.get("mode") == "from_transcript":
         out_words = _mark_insert_breaks(tl.kept_words(index.get("words", [])),
                                         tl)
+        # Text corrections (round 52) are applied to the DISPLAYED words only,
+        # before any grouping, so every preset family inherits them and the
+        # timings they were grouped by never move.
+        out_words = apply_text_fixes(out_words, captions.get("text_fixes"))
         global_style = captions.get("style")
         if _preset_of(_norm_style(global_style)):
             events = events_premium(
