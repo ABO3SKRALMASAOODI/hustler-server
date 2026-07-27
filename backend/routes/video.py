@@ -2628,6 +2628,82 @@ def client_event(user_id, project_id):
 #  Assets                                                              #
 # ------------------------------------------------------------------ #
 
+@video_bp.route("/projects/<int:project_id>/filmstrip", methods=["GET"])
+@token_required
+def filmstrip(user_id, project_id):
+    """The sprite sheet of frames the studio timeline draws itself from.
+
+    Poll-shaped on purpose, and the shape is the whole design: the FIRST call
+    for a video enqueues a worker job and answers `building`; every call after
+    it answers `ready` from a finished job row, with no work done at all. The
+    studio asks on every project open, so the common path has to be a single
+    indexed SELECT.
+
+    Every failure mode answers 200 with available=false and a reason. A
+    filmstrip is decoration: the timeline it decorates has drawn perfectly good
+    blocks since round 5, and a 500 here would take the whole panel down (its
+    SectionBoundary catches a crash, not a rejected fetch) over thumbnails.
+    That includes the case where migration 011 has not been applied yet — the
+    enqueue raises, and the answer is "not available", not an error page.
+    """
+    if not storage.is_configured():
+        return jsonify({"available": False,
+                        "reason": "storage is not configured"})
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+        cur.execute("""SELECT result FROM video_jobs
+                       WHERE project_id = %s AND type = 'filmstrip'
+                         AND state = 'done'
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        done = cur.fetchone()
+        if done and (done.get("result") or {}).get("available"):
+            res = dict(done["result"])
+            key = res.pop("key", None)
+            # A replaced upload keeps the project and its EDL but is a
+            # different video, so a strip built from the old one would draw the
+            # WRONG frames under the user's cuts. The key carries the source
+            # sha; when it no longer matches, fall through and rebuild.
+            cur.execute("""SELECT sha256, duration_s FROM assets
+                           WHERE project_id = %s AND kind = 'original'
+                           ORDER BY id DESC LIMIT 1""", (project_id,))
+            src = cur.fetchone() or {}
+            stale = bool(src.get("sha256")) and \
+                (src["sha256"] or "")[:16] not in (key or "")
+            if key and not stale:
+                return jsonify({"available": True, "state": "ready",
+                                "url": storage.presign_get(key),
+                                "expires_in": storage.PRESIGN_GET_EXPIRY,
+                                **res})
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'filmstrip'
+                         AND state IN ('queued','running')
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        if cur.fetchone():
+            return jsonify({"available": False, "state": "building"})
+        cur.execute("""SELECT id FROM assets
+                       WHERE project_id = %s AND kind IN ('proxy','original')
+                       LIMIT 1""", (project_id,))
+        if not cur.fetchone():
+            return jsonify({"available": False, "state": "no_video"})
+        try:
+            cur.execute("""INSERT INTO video_jobs
+                             (project_id, user_id, type, state, payload)
+                           VALUES (%s, %s, 'filmstrip', 'queued', %s)
+                           RETURNING id""",
+                        (project_id, int(user_id), Json({})))
+            cur.fetchone()
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            current_app.logger.warning(
+                "filmstrip enqueue failed for project %s: %s "
+                "(is migration 011 applied?)", project_id, e)
+            return jsonify({"available": False, "state": "unavailable"})
+    return jsonify({"available": False, "state": "building"})
+
+
 @video_bp.route("/assets/<int:asset_id>/url", methods=["GET"])
 @token_required
 def asset_url(user_id, asset_id):

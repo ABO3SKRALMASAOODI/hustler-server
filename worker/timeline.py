@@ -375,6 +375,40 @@ def remap_program_items(edl, old_tl, new_tl):
         if rg_changed:
             fx["regions"] = kept_regs
             fx_changed = True
+    if fx.get("frame_shifts"):
+        # CONTENT-anchored POINT, exactly like an sfx: "go vertical when he
+        # says X" belongs to the moment he says it. Left in program time, a cut
+        # made earlier would have the frame close in over the wrong sentence —
+        # and unlike a drifting sound, a drifting matte is a full-screen
+        # change nobody could mistake for anything but a bug.
+        kept_fs, fs_changed = [], False
+        for sh in fx["frame_shifts"]:
+            sh = dict(sh)
+            at = float(sh["at"])
+            src = old_tl.out_to_src(at)
+            new_at = new_tl.src_to_out(src) if src is not None else at
+            if new_at is None:
+                region_notes.append(
+                    f"note: aspect shift {sh.get('id')} was removed — the "
+                    "moment it was placed on is no longer in the edit.")
+                fs_changed = True
+                continue
+            if abs(new_at - at) > 0.01:
+                region_notes.append(
+                    f"note: aspect shift {sh.get('id')} moved to "
+                    f"{round(new_at, 2)}s so it stays on the same moment.")
+                fs_changed = True
+            sh["at"] = round(new_at, 2)
+            if sh["at"] > max(0.0, prog - 0.05):
+                region_notes.append(
+                    f"note: aspect shift {sh.get('id')} was removed — it "
+                    "sits after the end of the shortened edit.")
+                fs_changed = True
+                continue
+            kept_fs.append(sh)
+        if fs_changed:
+            fx["frame_shifts"] = kept_fs or None
+            fx_changed = True
     if fx_changed:
         edl["effects"] = fx
 

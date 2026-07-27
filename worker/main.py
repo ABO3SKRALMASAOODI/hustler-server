@@ -26,12 +26,20 @@ from datetime import datetime, timezone
 import agent_loop
 import config
 import db as dbx
+import filmstrip
 import indexer
 import mcp_exec
 import remote
 import renderer
 
-MEDIA_TYPES = ("preview", "final")
+# A filmstrip is a few seconds of ffmpeg on an already-small proxy, and the
+# studio asks for one every time a project is opened. It rides the MEDIA lane
+# rather than getting its own slot budget: it is the same shape of work as a
+# render, and giving it its own concurrency on a box whose CPU is the ceiling
+# would let a hundred project-opens starve the previews people are waiting on.
+# A failed one is deliberately absent from FAIL_NOTES/REAPER_NOTES — a missing
+# strip is a cosmetic degradation, not something to put in a user's chat.
+MEDIA_TYPES = ("preview", "final", "filmstrip")
 INDEX_TYPES = ("index",)
 AGENT_TYPES = ("agent_turn",)
 MCP_TYPES = ("mcp_tool",)
@@ -49,6 +57,10 @@ def _build_runners():
             "final": remote.run_render_remote,
             "agent_turn": agent_loop.run_agent_job,
             "mcp_tool": mcp_exec.run_mcp_job,
+            # Local even with a remote executor: it reads the proxy, runs one
+            # ffmpeg and uploads a JPEG. Shipping that to an 8-vCPU box costs
+            # more in round trips than it saves in encode time.
+            "filmstrip": filmstrip.run_filmstrip_job,
         }
     return {
         "index": indexer.run_index_job,
@@ -59,6 +71,7 @@ def _build_runners():
         # ToolContext, same tools. That is the whole point: the outside model
         # gets the in-house editor, not a copy of it.
         "mcp_tool": mcp_exec.run_mcp_job,
+        "filmstrip": filmstrip.run_filmstrip_job,
     }
 
 

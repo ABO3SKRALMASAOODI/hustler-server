@@ -254,7 +254,17 @@ def test_zoom_path_parser_pins_the_ends():
 # ── honesty gate ───────────────────────────────────────────────────────
 
 def test_demo_tools_track_browser_availability_exactly():
+    """record_website_demo NEEDS the browser; showcase_demo no longer does.
+
+    Round 51 cut showcase_demo loose from this gate on purpose. It used to be
+    hidden wherever the recorder was unconfigured, on the reasoning that it
+    could only ever act on a capture the recorder made — but the commonest
+    input is a screen recording the USER made and uploaded, and on those
+    deployments the tool was invisible for exactly the footage it is most
+    useful on. It now takes any clip (plus an optional click_times array), so
+    the browser's absence has nothing to do with whether it can run.
+    """
     import agent_tools
-    want = not webrecord.available()
-    for name in ("record_website_demo", "showcase_demo"):
-        assert agent_tools._tool_disabled(name) is want, name
+    assert agent_tools._tool_disabled("record_website_demo") is \
+        (not webrecord.available())
+    assert agent_tools._tool_disabled("showcase_demo") is False

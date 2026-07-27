@@ -24,7 +24,10 @@ import sfx_library
 import stock
 import storage
 import videogen
+import cursor as cursorlib
+import screenframe
 import timeline as timeline_mod
+import travel
 import url_media
 import webrecord
 from captions import KARAOKE_HARD_MAX
@@ -42,7 +45,11 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      OVERLAY_SCALE_MAX, SPEED_FACTOR_MIN, SPEED_FACTOR_MAX,
                      STYLIZE_KINDS, TEXT_ANIMS, TEXT_FONTS, TEXT_TEMPLATES,
                      ZOOM_STRENGTH_MIN, ZOOM_STRENGTH_MAX,
-                     ZOOM_PATH_MAX_POINTS)
+                     ZOOM_PATH_MAX_POINTS,
+                     CURSOR_SCALE_MIN, CURSOR_SCALE_MAX, CURSOR_MAX_CLICKS,
+                     FRAME_SHIFT_RATIOS, FRAME_SHIFT_MIN_S, FRAME_SHIFT_MAX_S,
+                     SCREEN_FRAME_INSET_MIN, SCREEN_FRAME_INSET_MAX,
+                     SCREEN_FRAME_RADIUS_MAX)
 from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
@@ -2403,6 +2410,122 @@ def remove_zoom(ctx, id):
         edl, f"removed zoom {id} ({hit['start']}-{hit['end']}s)")
 
 
+# ── The keyframed travelling zoom (round 51) ────────────────────────────────
+# add_zoom aims at ONE point for a window. That is the right shape for "punch
+# in on that line" and the wrong one for every screen recording, where the
+# thing worth looking at moves: the cursor crosses to a button, the button
+# opens a panel, the panel fills in. Cutting between static punches to follow
+# that reads as three separate shots of one continuous action.
+#
+# showcase_demo has had this motion since round 45, but only for captures
+# record_website_demo made — it is driven off that recorder's event track. The
+# motion itself has nothing to do with where the footage came from, so it now
+# lives in worker/travel.py and BOTH tools call it.
+
+def add_zoom_path(ctx, keyframes, ease=None):
+    """A zoom whose centre AND strength travel through a list of keyframes,
+    interpolated, in output seconds."""
+    if not isinstance(keyframes, list) or len(keyframes) < 2:
+        return ("REJECTED: keyframes must be a list of at least two points, "
+                "each {t, cx, cy, strength}. t is OUTPUT-timeline seconds; "
+                "cx/cy are 0-1 fractions of the output frame ((0,0) = "
+                "top-left, the same convention as add_zoom); strength is "
+                "0-1.5. The window runs from the first t to the last.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    clean = []
+    for i, kf in enumerate(keyframes):
+        if not isinstance(kf, dict):
+            return (f"REJECTED: keyframes[{i}] must be an object "
+                    "{t, cx, cy, strength}.")
+        try:
+            t = float(kf["t"])
+            cx = float(kf["cx"])
+            cy = float(kf["cy"])
+        except (KeyError, TypeError, ValueError):
+            return (f"REJECTED: keyframes[{i}] needs numeric t, cx and cy. "
+                    "cx/cy are fractions of the output frame (0-1) — use "
+                    "look_at to find what you are aiming at.")
+        s = kf.get("strength")
+        if s is None:
+            s = 0.25
+        try:
+            s = float(s)
+        except (TypeError, ValueError):
+            return (f"REJECTED: keyframes[{i}].strength must be a number "
+                    f"({ZOOM_STRENGTH_MIN}-{ZOOM_STRENGTH_MAX}), or omit it.")
+        # 0 is legal here and is NOT legal on add_zoom: it means "no push at
+        # this instant", which is how a travelling zoom starts from and
+        # returns to the untouched frame without a visible step.
+        s = 0.0 if s <= 0.0 else min(max(s, ZOOM_STRENGTH_MIN),
+                                     ZOOM_STRENGTH_MAX)
+        clean.append({"t": t, "cx": cx, "cy": cy, "strength": s})
+    clean.sort(key=lambda p: p["t"])
+    start = round(min(max(clean[0]["t"], 0.0), max(0.0, prog - 0.2)), 2)
+    end = round(min(max(clean[-1]["t"], start), prog), 2)
+    if end - start < 0.2:
+        return (f"REJECTED: the keyframes span {end - start:.2f}s — a zoom "
+                "needs at least 0.2s. Spread the first and last t further "
+                "apart.")
+    ez = (ease or travel.DEFAULT_EASE).strip().lower()
+    if ez not in travel.EASES:
+        return (f"REJECTED: ease must be one of {', '.join(travel.EASES)}. "
+                "'cubic_in_out' (default) settles at each keyframe — the "
+                "frame arrives somewhere, rests, and moves on. 'linear' holds "
+                "one speed straight through them, for a steady scan.")
+    pts, err = travel.waypoints_to_path(clean, start, end, with_strength=True)
+    if err:
+        return "REJECTED: " + err
+
+    fx = dict(edl.get("effects") or {})
+    zooms = [dict(z) for z in (fx.get("zooms") or [])]
+    item = {"id": _next_item_id(zooms, "zp"), "start": start, "end": end,
+            # `strength` stays the fallback the schema requires; the per-point
+            # `s` values are what actually render.
+            "strength": round(max(p["s"] for p in pts), 2) or ZOOM_STRENGTH_MIN,
+            "mode": "path", "ease": ez, "path": pts}
+    zooms.append(item)
+    fx["zooms"] = zooms
+    edl["effects"] = fx
+    written = ctx.write_edl(
+        edl, f"keyframed zoom on {start}-{end}s (output time), "
+             f"{travel.describe(item)}, {ez} [{item['id']}]")
+    if not written.startswith("EDL v"):
+        return written
+    note = ""
+    if pts[0].get("s", 0) > 0.02 or pts[-1].get("s", 0) > 0.02:
+        note = ("\nNOTE: this path starts at "
+                f"{int(pts[0]['s'] * 100)}% and ends at "
+                f"{int(pts[-1]['s'] * 100)}% zoom, so the frame STEPS in at "
+                f"{start}s and out at {end}s. That is exactly what the "
+                "keyframes say — no ramp is added, because the whole point of "
+                "this tool is that the frame is where you put it. For a "
+                "seamless entry and exit, give the first and last keyframe "
+                "strength 0.")
+    return (written + note
+            + "\nThe frame travels between the keyframes; remove the whole "
+              f"move with remove_zoom_path('{item['id']}').")
+
+
+def remove_zoom_path(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    zooms = [dict(z) for z in (fx.get("zooms") or [])]
+    hit = next((z for z in zooms if z.get("id") == id), None)
+    if not hit:
+        paths = [z.get("id", "?") for z in zooms if z.get("mode") == "path"]
+        have = ", ".join(paths) or "none"
+        return (f"REJECTED: no keyframed zoom with id '{id}'. Existing "
+                f"keyframed zooms: {have}. Call get_edl to see them.")
+    if hit.get("mode") != "path":
+        return (f"REJECTED: '{id}' is a {hit.get('mode') or 'punch'} zoom, "
+                "not a keyframed path. Remove it with remove_zoom.")
+    fx["zooms"] = [z for z in zooms if z.get("id") != id]
+    edl["effects"] = fx
+    return ctx.write_edl(
+        edl, f"removed keyframed zoom {id} ({hit['start']}-{hit['end']}s)")
+
+
 def set_fades(ctx, fade_in_s=None, fade_out_s=None):
     if fade_in_s is None and fade_out_s is None:
         return ("REJECTED: pass fade_in_s and/or fade_out_s in seconds "
@@ -2607,33 +2730,48 @@ def _original_local(ctx):
     return local
 
 
-def _clean_fp(sha, regions):
+def _clean_fp(sha, regions, cursor=None):
     # One implementation, shared with the renderer: it proves at render time
     # that the cleaned file is a repaint of THIS project's current video.
-    return clean_fingerprint(sha, regions)
+    return clean_fingerprint(sha, regions, cursor)
 
 
-def _run_clean(ctx, regions):
-    """Produce (asset_key, proxy_key, fp) for this exact region list.
+def _run_clean(ctx, regions, cursor=None):
+    """Produce (asset_key, proxy_key, fp) for this exact derivation.
 
     Cached on the fingerprint: re-erasing the same rectangle, or undoing one of
     three and putting it back, costs nothing the second time.
+
+    Round 51: `cursor` is a second derivation pass over the SAME file. The two
+    chain in a fixed order — repaint first, then the pointer — because the
+    detector must not be shown a frame with a repainted patch where the
+    pointer was, and because a caption erased from under a redrawn cursor
+    would have the cursor repainted away with it.
     """
     src = _original_local(ctx)
-    fp = _clean_fp(getattr(ctx, "_orig_sha", ""), regions)
+    fp = _clean_fp(getattr(ctx, "_orig_sha", ""), regions, cursor)
     key = f"cleaned/{ctx.project_id}/{fp[:16]}.mp4"
     pkey = f"cleaned/{ctx.project_id}/{fp[:16]}_proxy.mp4"
     if storage.exists(key) and storage.exists(pkey):
         return key, pkey, fp
+    # The length/pixel budget is the same for both passes — they are the same
+    # frame-by-frame work — but the ALTERNATIVES are not, and handing a user
+    # who asked to enlarge their cursor an offer to blur a rectangle is the
+    # kind of non-sequitur that reads as the tool not having understood.
+    alt = ("Offer the alternatives honestly: cover the area with blur_region, "
+           "or crop it out of frame with auto_reframe/set_frame."
+           if regions else
+           "Offer what does work at this length: a zoom that follows the "
+           "action (add_zoom_path), or the floating frame "
+           "(set_screen_frame).")
+    what = "repainting" if regions else "redrawing the cursor"
     info = media.probe(src)
     if float(info["duration"]) > config.CLEAN_MAX_SOURCE_S:
         raise ValueError(
             f"this video is {info['duration'] / 60:.1f} min long and "
-            f"repainting works frame by frame — above "
+            f"{what} works frame by frame — above "
             f"{config.CLEAN_MAX_SOURCE_S / 60:.0f} min it does not finish "
-            "inside one edit turn. Offer the alternatives honestly: cover the "
-            "area with blur_region, or crop it out of frame with "
-            "auto_reframe/set_frame.")
+            f"inside one edit turn. {alt}")
     # Duration is only half the cost. A 4K frame is 8x a 1080p one to decode,
     # repaint and re-encode, and two turns died of exactly this on 2026-07-25:
     # the box ran out of memory, so the WORKER died rather than the job — every
@@ -2644,16 +2782,35 @@ def _run_clean(ctx, regions):
         raise ValueError(
             f"this video is {info['width']}x{info['height']} for "
             f"{float(info['duration']) / 60:.1f} min, which is more pixels "
-            "than a frame-by-frame repaint can finish inside one edit turn "
+            "than a frame-by-frame pass can finish inside one edit turn "
             f"(about {config.CLEAN_MAX_MPX_SECONDS / (int(info['width']) * int(info['height']) / 1e6) / 60:.0f} "
-            "min at this resolution). Offer the alternatives honestly: cover "
-            "the area with blur_region, or crop it out of frame with "
-            "auto_reframe/set_frame. (Passing start/end does NOT help — the "
-            "whole file is still re-encoded; it only narrows which frames get "
-            "repainted.)")
+            f"min at this resolution). {alt} (Passing start/end does NOT "
+            "help — the whole file is still re-encoded; it only narrows which "
+            "frames are touched.)")
     out = os.path.join(ctx.workdir, f"clean_{fp[:8]}.mp4")
     prox = os.path.join(ctx.workdir, f"clean_{fp[:8]}_proxy.mp4")
-    stats = inpaint.clean_video(src, regions, out, prox)
+    mid = None
+    if regions and cursor:
+        # Two passes, so the intermediate is a full-res file on disk and never
+        # two live x264 encoders (the OOM that took the whole worker down on
+        # 2026-07-25). The proxy is derived once, at the end of the chain.
+        mid = os.path.join(ctx.workdir, f"clean_{fp[:8]}_mid.mp4")
+        stats = inpaint.clean_video(src, regions, mid)
+    elif regions:
+        stats = inpaint.clean_video(src, regions, out, prox)
+    if cursor:
+        stats = cursorlib.enhance(
+            mid or src, out, prox,
+            scale=float(cursor.get("scale", 2.0)),
+            smoothing=float(cursor.get("smoothing", 0.5)),
+            click_highlight=bool(cursor.get("click_highlight", True)),
+            click_times=cursor.get("click_times") or [])
+        ctx._cursor_stats = stats
+        if mid:
+            try:
+                os.remove(mid)
+            except OSError:
+                pass
     storage.upload_file(out, key, "video/mp4")
     storage.upload_file(prox, pkey, "video/mp4")
     # Asset rows are BOOKKEEPING here, not the contract: the EDL carries the
@@ -2669,7 +2826,9 @@ def _run_clean(ctx, regions):
                    width=stats["width"], height=stats["height"],
                    fps=stats["fps"],
                    meta={"filename": "cleaned-source.mp4", "clean_fp": fp,
-                         "generated": True, "model": "local:inpaint",
+                         "generated": True,
+                         "model": ("local:cursor" if cursor
+                                   else "local:inpaint"),
                          "regions": len(regions)})
         ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_proxy", pkey,
                    bytes_=os.path.getsize(prox), duration_s=stats["duration_s"],
@@ -2693,23 +2852,36 @@ def _run_clean(ctx, regions):
     return key, pkey, fp
 
 
-def _apply_clean(ctx, regions, what):
-    """Re-clean from the original for `regions` and write the EDL.
+_KEEP_CURSOR = object()
+
+
+def _edl_cursor(edl):
+    return ((edl.get("source_clean") or {}).get("cursor")) or None
+
+
+def _apply_clean(ctx, regions, what, cursor=_KEEP_CURSOR):
+    """Re-derive the source for `regions` (+ the cursor pass) and write the EDL.
 
     `regions` is the COMPLETE list for this project (not a delta), because the
-    cleaned file is one artifact: every erase re-derives it from the untouched
-    original.
+    derived file is one artifact: every erase re-derives it from the untouched
+    original. `cursor` defaults to whatever the EDL already carries, so an
+    erase never silently drops a cursor pass the user asked for two turns ago
+    — and vice versa.
     """
     edl = dict(ctx.latest_edl()["json"])
-    if not regions:
+    if cursor is _KEEP_CURSOR:
+        cursor = _edl_cursor(edl)
+    if not regions and not cursor:
         edl["source_clean"] = None
         return ctx.write_edl(edl, f"restored the original pixels ({what})")
     src = _original_local(ctx)
     before = [inpaint.text_energy(src, (r["x"], r["y"], r["w"], r["h"]),
                                   samples=5) for r in regions]
-    key, pkey, fp = _run_clean(ctx, regions)
+    key, pkey, fp = _run_clean(ctx, regions, cursor)
     edl["source_clean"] = {"asset_key": key, "proxy_key": pkey, "fp": fp,
                            "regions": regions}
+    if cursor:
+        edl["source_clean"]["cursor"] = cursor
     result = ctx.write_edl(edl, what)
     if not result.startswith("EDL v"):
         return result
@@ -3036,6 +3208,141 @@ def remove_erase(ctx, id=None):
         regions, what = [], f"put back all {len(regions)} erased region(s)"
     try:
         return _apply_clean(ctx, regions, what)
+    except Exception as e:
+        return f"Could not rebuild the video ({str(e)[:180]}). Nothing changed."
+
+
+# ── The pointer pass (round 51) ─────────────────────────────────────────────
+# "The cursor is too small" and "the cursor is too jittery" are the two things
+# people say about their own screen recordings, and until now both were a no.
+# The pointer is found in the source frames, its path is filtered, and it is
+# redrawn bigger — into the same derived-source file the erase writes, so a
+# video can be both de-captioned and cursor-enhanced without either pass
+# fighting the other.
+
+def enhance_cursor(ctx, scale=None, smoothing=None, click_highlight=None,
+                   click_times=None):
+    """Find the mouse pointer in the source, smooth its path and redraw it
+    bigger, with a ripple at each supplied click time."""
+    edl = dict(ctx.latest_edl()["json"])
+    cur = dict(_edl_cursor(edl) or {})
+    spec = {"scale": cur.get("scale", 2.0),
+            "smoothing": cur.get("smoothing", 0.5),
+            "click_highlight": cur.get("click_highlight", True),
+            "click_times": list(cur.get("click_times") or [])}
+    if scale is not None:
+        try:
+            spec["scale"] = round(min(max(float(scale), CURSOR_SCALE_MIN),
+                                      CURSOR_SCALE_MAX), 2)
+        except (TypeError, ValueError):
+            return (f"REJECTED: scale must be a number "
+                    f"({CURSOR_SCALE_MIN}-{CURSOR_SCALE_MAX}) — how many "
+                    "times bigger the pointer is redrawn. 2 is the usual "
+                    "answer for 'the cursor is too small'.")
+    if smoothing is not None:
+        try:
+            spec["smoothing"] = round(min(max(float(smoothing), 0.0), 1.0), 3)
+        except (TypeError, ValueError):
+            return ("REJECTED: smoothing must be 0-1. 0 keeps the pointer's "
+                    "real path; 1 holds a resting hand still. Fast "
+                    "deliberate moves stay sharp at any setting.")
+    if click_highlight is not None:
+        spec["click_highlight"] = bool(click_highlight)
+    if click_times is not None:
+        if not isinstance(click_times, list):
+            return ("REJECTED: click_times must be a list of SOURCE-video "
+                    "seconds — the moments the mouse was actually pressed. "
+                    "There is no way to see a click in the pixels, so these "
+                    "have to be told to me: record_website_demo returns them, "
+                    "and for a recording the user made, ask them (or leave "
+                    "them out and just fix the size).")
+        times = []
+        for i, t in enumerate(click_times):
+            try:
+                times.append(round(max(0.0, float(t)), 2))
+            except (TypeError, ValueError):
+                return (f"REJECTED: click_times[{i}] is not a number of "
+                        "seconds.")
+        if len(times) > CURSOR_MAX_CLICKS:
+            return (f"REJECTED: at most {CURSOR_MAX_CLICKS} click times "
+                    f"({len(times)} given).")
+        spec["click_times"] = sorted(set(times))
+
+    if spec["scale"] <= 1.0 and spec["smoothing"] <= 0.0 \
+            and not spec["click_times"]:
+        return ("REJECTED: with scale 1, no smoothing and no click times this "
+                "would re-encode the whole video to change nothing. Raise "
+                "scale (2 is the usual answer), raise smoothing, or pass "
+                "click_times.")
+
+    regions = [dict(r) for r in
+               ((edl.get("source_clean") or {}).get("regions") or [])]
+    ctx._cursor_stats = None
+    try:
+        key, pkey, fp = _run_clean(ctx, regions, spec)
+    except Exception as e:
+        return (f"Could not run the cursor pass ({str(e)[:200]}). Nothing "
+                "changed — do NOT tell the user the cursor was enhanced.")
+    # None means UNKNOWN, not zero: _run_clean short-circuits on a cached
+    # fingerprint and never opens the video. The previously recorded fraction
+    # is the right answer there (same fingerprint = same detection); with
+    # neither, nothing about coverage is claimed.
+    stats = getattr(ctx, "_cursor_stats", None) or {}
+    found = stats.get("found_frac", cur.get("found_frac"))
+    # THE HONEST FLOOR. A recording with no visible pointer (a phone capture, a
+    # tap-driven demo, an app that hides the cursor) produces a file identical
+    # to the source, and writing it would bill a re-encode and report a change
+    # nobody can see. Refuse and say why instead.
+    if found is not None and found < 0.15:
+        return (f"NOT APPLIED: I could only find a mouse pointer in "
+                f"{int(found * 100)}% of the frames, so there is nothing to "
+                "enlarge — this looks like a recording with no visible cursor "
+                "(a phone/tablet capture, or an app that hides it). Tell the "
+                "user that plainly and offer what does work on this footage: "
+                "a zoom that follows the action (add_zoom_path), or the "
+                "floating frame (set_screen_frame). The edit is unchanged.")
+
+    edl["source_clean"] = {"asset_key": key, "proxy_key": pkey, "fp": fp,
+                           "regions": regions,
+                           "cursor": dict(spec, found_frac=found)}
+    bits = [f"{spec['scale']:g}x"]
+    if spec["smoothing"] > 0:
+        bits.append(f"smoothing {spec['smoothing']:g}")
+    if spec["click_highlight"] and spec["click_times"]:
+        bits.append(f"{len(spec['click_times'])} click ripple(s)")
+    written = ctx.write_edl(edl, "cursor pass: " + ", ".join(bits))
+    if not written.startswith("EDL v"):
+        return written
+    note = ""
+    if found is not None and found < 0.75:
+        note = (f"\nThe pointer was found in {int(found * 100)}% of frames — "
+                "in the rest its position is interpolated between the frames "
+                "either side, which is right for a pointer crossing a busy "
+                "area and wrong if it genuinely left the screen. Look at the "
+                "preview and say what you see.")
+    if not spec["click_times"]:
+        note += ("\nNo click ripples were added, because clicks are not "
+                 "visible in a recording — nothing in the pixels tells a "
+                 "press from a hover. If the user wants them, ask WHEN the "
+                 "clicks happen (source seconds) and call this again with "
+                 "click_times.")
+    return (written + note + "\nThis is baked into the source the render "
+            "reads, so every cut keeps it and no timestamp moved. Undo it "
+            "with remove_cursor_enhance.")
+
+
+def remove_cursor_enhance(ctx):
+    edl = dict(ctx.latest_edl()["json"])
+    if not _edl_cursor(edl):
+        return ("NO CHANGE: the cursor on this video has not been enhanced. "
+                "Do NOT tell the user you restored anything.")
+    regions = [dict(r) for r in
+               ((edl.get("source_clean") or {}).get("regions") or [])]
+    try:
+        # Re-derives from the untouched original, exactly like remove_erase —
+        # never by un-drawing a cursor from an already-drawn file.
+        return _apply_clean(ctx, regions, "removed the cursor pass "
+                            "(the original pointer is back)", cursor=None)
     except Exception as e:
         return f"Could not rebuild the video ({str(e)[:180]}). Nothing changed."
 
@@ -3878,28 +4185,14 @@ def _color_card_asset(ctx, color, color2=None, direction="vertical"):
 
 
 def _gradient_image(w, h, rgb1, rgb2, direction):
-    """A two-colour linear/radial gradient. numpy-vectorised (already a hard
-    dependency of the worker) so a 1080x1920 card builds in a few ms."""
-    import numpy as np
-    from PIL import Image
-    if direction == "radial":
-        yy, xx = np.mgrid[0:h, 0:w]
-        cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
-        d = np.sqrt(((xx - cx) / cx) ** 2 + ((yy - cy) / cy) ** 2)
-        t = np.clip(d / np.sqrt(2.0), 0.0, 1.0)
-    elif direction == "horizontal":
-        t = np.tile(np.linspace(0.0, 1.0, w), (h, 1))
-    elif direction == "diagonal":
-        gx = np.linspace(0.0, 1.0, w)[None, :]
-        gy = np.linspace(0.0, 1.0, h)[:, None]
-        t = np.clip((gx + gy) / 2.0, 0.0, 1.0)
-    else:                                            # vertical (default)
-        t = np.tile(np.linspace(0.0, 1.0, h), (w, 1)).T
-    t = t[..., None]
-    c1 = np.array(rgb1, dtype=np.float32)
-    c2 = np.array(rgb2, dtype=np.float32)
-    arr = (c1 * (1.0 - t) + c2 * t).astype(np.uint8)
-    return Image.fromarray(arr, "RGB")
+    """A two-colour linear/radial gradient.
+
+    Round 51 moved the implementation to worker/screenframe.py so the floating
+    frame's backdrop and this card come out of ONE renderer — a second copy
+    would drift, and "the same gradient as my interstitial" would stop being
+    true the first time either was touched.
+    """
+    return screenframe.gradient_image(w, h, rgb1, rgb2, direction)
 
 
 # Back-compat alias: add_title_card was written against the solid-only helper.
@@ -3954,6 +4247,163 @@ def add_color_screen(ctx, at_output_s, duration_s=2.0, color="#000000",
                "captions do not appear on it (inserted media is never "
                "captioned), so nothing overlaps.")
     return result
+
+
+# ── The floating rounded window, and mid-video aspect changes (round 51) ────
+# Both are OUTPUT-FRAME treatments: they change how the finished picture sits
+# in the frame without touching a single timestamp. That is what makes them
+# safe to apply to a finished edit and instant to preview.
+
+def set_screen_frame(ctx, inset=None, radius=None, shadow=None,
+                     background=None, background2=None, direction=None):
+    """Inset the picture, round its corners, drop a shadow and float it on a
+    solid or gradient backdrop. Re-applying replaces the settings."""
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    cur = dict(fx.get("screen_frame") or {})
+    spec = {"inset": cur.get("inset", 0.08),
+            "radius": cur.get("radius", 0.04),
+            "shadow": cur.get("shadow", 0.5),
+            "background": cur.get("background", "#0B0B0B"),
+            "background2": cur.get("background2"),
+            "direction": cur.get("direction", "vertical")}
+    for name, val, lo, hi in (("inset", inset, SCREEN_FRAME_INSET_MIN,
+                               SCREEN_FRAME_INSET_MAX),
+                              ("radius", radius, 0.0,
+                               SCREEN_FRAME_RADIUS_MAX),
+                              ("shadow", shadow, 0.0, 1.0)):
+        if val is None:
+            continue
+        try:
+            spec[name] = round(min(max(float(val), lo), hi), 3)
+        except (TypeError, ValueError):
+            return (f"REJECTED: {name} must be a number between {lo} and "
+                    f"{hi}.")
+    for name, val in (("background", background),
+                      ("background2", background2)):
+        if val is None:
+            continue
+        v = str(val).strip().upper()
+        if v in ("", "NONE") and name == "background2":
+            spec["background2"] = None      # explicit "make it flat again"
+            continue
+        if not HEX_COLOR.match(v):
+            return (f"REJECTED: {name} must be #RRGGBB hex — e.g. "
+                    "background='#0B0B0B', background2='#2B1B4B' for a "
+                    "gradient. Pass background2='none' to go back to a flat "
+                    "colour.")
+        spec[name] = v
+    if direction is not None:
+        d = str(direction).strip().lower()
+        if d not in screenframe.GRADIENT_DIRECTIONS:
+            return (f"REJECTED: direction must be one of "
+                    f"{', '.join(screenframe.GRADIENT_DIRECTIONS)}.")
+        spec["direction"] = d
+
+    fx["screen_frame"] = spec
+    edl["effects"] = fx
+    look = (f"{spec['background']}->{spec['background2']} "
+            f"{spec['direction']} gradient" if spec["background2"]
+            else f"solid {spec['background']}")
+    written = ctx.write_edl(
+        edl, f"floating frame: picture inset {int(spec['inset'] * 100)}%, "
+             f"corners {spec['radius']:g}, shadow {spec['shadow']:g}, on a "
+             f"{look}")
+    if not written.startswith("EDL v"):
+        return written
+    return (written + "\nThe WHOLE finished picture floats — captions, "
+            "overlays and titles scale with it, because they are inside the "
+            "window. Nothing about the timing changes. Remove it with "
+            "remove_screen_frame.")
+
+
+def remove_screen_frame(ctx):
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    if not fx.get("screen_frame"):
+        return ("REJECTED: there is no floating frame on this edit. Call "
+                "get_edl to see what is set.")
+    fx["screen_frame"] = None
+    edl["effects"] = fx
+    return ctx.write_edl(edl, "removed the floating frame (full-bleed again)")
+
+
+def add_aspect_shift(ctx, at_output_s, ratio, duration_s=0.8, zoom=True,
+                     color="#000000"):
+    """Morph the visible frame to another aspect ratio mid-video, smoothly."""
+    r = str(ratio or "").strip().lower()
+    if r not in FRAME_SHIFT_RATIOS:
+        return (f"REJECTED: ratio must be one of "
+                f"{', '.join(FRAME_SHIFT_RATIOS)}. Use 'source' to open back "
+                "out to the full frame.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    try:
+        at = round(min(max(float(at_output_s), 0.0), max(0.0, prog)), 2)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s must be a number — where in the FINAL "
+                "edited video the frame starts changing, in seconds.")
+    try:
+        dur = round(min(max(float(duration_s), FRAME_SHIFT_MIN_S),
+                        FRAME_SHIFT_MAX_S), 2)
+    except (TypeError, ValueError):
+        return (f"REJECTED: duration_s must be a number of seconds "
+                f"({FRAME_SHIFT_MIN_S}-{FRAME_SHIFT_MAX_S}).")
+    col = str(color or "#000000").strip().upper()
+    if not HEX_COLOR.match(col):
+        return "REJECTED: color must be #RRGGBB hex (the bars' colour)."
+
+    _orient, ow, oh = _project_frame(ctx)
+    wf, hf = screenframe.ratio_window(r, ow or 1280, oh or 720)
+    if abs(wf - 1.0) < 1e-4 and abs(hf - 1.0) < 1e-4:
+        # The honest refusal: this project's output frame ALREADY is that
+        # shape, so there is nothing to morph and a silently-applied no-op
+        # would have the agent reporting a change the user cannot see.
+        existing = [s for s in ((edl.get("effects") or {})
+                                .get("frame_shifts") or [])]
+        if not existing:
+            return (f"REJECTED: this edit already renders at {r} "
+                    f"({ow}x{oh}), so there is nothing to shift to. To change "
+                    "the aspect of the WHOLE video use set_frame or "
+                    "auto_reframe; use this tool to go to a DIFFERENT shape "
+                    "for part of it and back.")
+
+    fx = dict(edl.get("effects") or {})
+    shifts = [dict(s) for s in (fx.get("frame_shifts") or [])]
+    item = {"id": _next_item_id(shifts, "as"), "at": at, "ratio": r,
+            "duration_s": dur, "zoom": bool(zoom), "color": col}
+    shifts.append(item)
+    fx["frame_shifts"] = shifts
+    edl["effects"] = fx
+    written = ctx.write_edl(
+        edl, f"frame morphs to {r} at {at}s over {dur}s"
+             + (" (pushing in as it narrows)" if zoom else "")
+             + f" [{item['id']}]")
+    if not written.startswith("EDL v"):
+        return written
+    return (written + f"\nThe file is still {ow}x{oh} — it has to be, a video "
+            "has one resolution — so the change is the FRAME closing in over "
+            f"{dur}s, which is what a smooth aspect change looks like. It "
+            "stays at that shape until the next shift; add another with "
+            "ratio='source' to open back out. Nothing about the timing, the "
+            "audio or the captions moves. Remove it with remove_aspect_shift"
+            f"('{item['id']}').")
+
+
+def remove_aspect_shift(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    shifts = [dict(s) for s in (fx.get("frame_shifts") or [])]
+    hit = next((s for s in shifts if s.get("id") == id), None)
+    if not hit:
+        have = ", ".join(s.get("id", "?") for s in shifts) or "none"
+        return (f"REJECTED: no aspect shift with id '{id}'. Existing: "
+                f"{have}. Call get_edl to see them.")
+    rest = [s for s in shifts if s.get("id") != id]
+    fx["frame_shifts"] = rest or None
+    edl["effects"] = fx
+    return ctx.write_edl(
+        edl, f"removed the {hit['ratio']} aspect shift at {hit['at']}s ({id})")
 
 
 # ── Corrupt-screen "glitch" moments (round 37) ──────────────────────────────
@@ -5289,9 +5739,9 @@ def _demo_zoom_runs(clicks):
 
 
 def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
-                  click_sounds=True, zooms=True):
-    """Splice a recorded website demo in and cut it like a product video:
-    one gliding zoom per run of clicks, a click sound on each click."""
+                  click_sounds=True, zooms=True, click_times=None):
+    """Splice a screen recording in and cut it like a product video: one
+    gliding zoom per run of clicks, a click sound on each click."""
     asset, err = _resolve_media_asset(ctx, asset_key, ("video_clip",))
     if err:
         return err
@@ -5304,11 +5754,45 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
             if rec.get("storage_key") == asset_key:
                 events = rec.get("events") or []
                 break
-    if not events:
-        return ("REJECTED: that asset has no demo event track, so there is "
-                "nothing to sync to. showcase_demo only works on a capture "
-                "made by record_website_demo. Place this one with "
-                "insert_media and add zooms yourself.")
+    # Round 51: a capture the user made themselves is the COMMON case, and
+    # refusing it was the tool refusing to do its job on the footage most
+    # people have. Two levels of graceful degradation, in order:
+    #
+    #   1. caller-supplied click_times  -> full treatment (zooms + sounds),
+    #      minus the click POSITIONS, which record_website_demo knows and a
+    #      user's recording does not. So the zooms are centre-weighted eased
+    #      punches at the clicks instead of a path between them: the moment is
+    #      still emphasised, and nothing is invented about WHERE on screen it
+    #      happened. The agent can add the travel itself with add_zoom_path
+    #      once look_at has told it where the buttons are.
+    #   2. nothing at all -> place it and say plainly what was NOT synced.
+    #
+    # It never claims a click it was not told about.
+    supplied = None
+    if click_times is not None:
+        if not isinstance(click_times, list):
+            return ("REJECTED: click_times must be a list of seconds INTO "
+                    "THE CLIP (0 = its first frame) — the moments the mouse "
+                    "was pressed. Clicks cannot be seen in the pixels, so if "
+                    "the user made this recording themselves, ask them when "
+                    "the clicks were, or omit click_times.")
+        supplied = []
+        for i, t in enumerate(click_times):
+            try:
+                supplied.append(round(max(0.0, float(t)), 2))
+            except (TypeError, ValueError):
+                return (f"REJECTED: click_times[{i}] is not a number of "
+                        "seconds.")
+        supplied = sorted(set(supplied))[:DEMO_MAX_SFX]
+    # True when this is footage the USER supplied rather than a capture the
+    # demo recorder made — decided BEFORE the synthesised events below, which
+    # would otherwise make every clip look like a recorded demo.
+    own_recording = not events
+    if not events and supplied:
+        # Synthesised events carry NO x/y — that absence is load-bearing
+        # downstream, where a run with no positions becomes an eased punch
+        # rather than a path to a made-up coordinate.
+        events = [{"kind": "click", "t": t} for t in supplied]
     try:
         strength = round(min(max(float(zoom_strength), ZOOM_STRENGTH_MIN),
                              ZOOM_STRENGTH_MAX), 2)
@@ -5330,6 +5814,21 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
     placed = insert_media(ctx, asset_key, at, duration_s=clip_dur)
     if not placed.startswith("EDL v"):
         return placed                      # REJECTED / failure, verbatim
+
+    if not events:
+        # Placed, and NOTHING claimed about clicks. The clip is in the edit —
+        # which is what the user asked for — and the reply says exactly which
+        # half of the treatment did not happen and how to get it.
+        return (placed + "\nThe clip is in the edit, but there was nothing to "
+                "sync to: this capture carries no click track (it was not "
+                "made by record_website_demo), so NO zooms and NO click "
+                "sounds were added. Do not tell the user the clicks were "
+                "sounded or zoomed. To finish the treatment, either ask them "
+                "WHEN the clicks happen and call showcase_demo again with "
+                "click_times=[...] (seconds into the clip), or use look_at on "
+                "the clip and place the movement yourself with add_zoom_path. "
+                "If the pointer is hard to see, enhance_cursor makes it "
+                "bigger and steadier.")
 
     edl = dict(ctx.latest_edl()["json"])
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
@@ -5373,8 +5872,40 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
     made_zooms, made_sfx = 0, 0
     notes = [notes_late] if notes_late else []
 
+    # Positioned clicks drive a TRAVELLING zoom (the frame glides between the
+    # buttons); positionless ones — a user's own recording, where we were told
+    # WHEN but can never know WHERE — drive an eased centre punch over the same
+    # window. Both are the same shared move from worker/travel.py; the only
+    # difference is that nothing is invented about where on screen the click
+    # landed.
     clicks = [e for e in events if e.get("kind") == "click"
               and "x" in e and "y" in e]
+    blind_clicks = [e for e in events if e.get("kind") == "click"
+                    and not ("x" in e and "y" in e)]
+    if zooms and not clicks and blind_clicks:
+        for run in _demo_zoom_runs(blind_clicks):
+            if made_zooms >= DEMO_MAX_ZOOMS:
+                notes.append(
+                    f"stopped at {DEMO_MAX_ZOOMS} zooms — the rest of the "
+                    "clicks still have their sounds")
+                break
+            s = prog_t(run[0]["t"] - DEMO_ZOOM_LEAD_S)
+            e = prog_t(run[-1]["t"] + DEMO_ZOOM_TAIL_S)
+            if e - s < 0.45:
+                continue
+            if zlist and zlist[-1].get("end", 0) > s - 0.15:
+                s = round(zlist[-1]["end"] + 0.15, 2)
+                if e - s < 0.45:
+                    continue
+            zlist.append({"id": _next_item_id(zlist, "zm"), "start": s,
+                          "end": e, "strength": strength, "mode": "ease"})
+            made_zooms += 1
+        if made_zooms:
+            notes.append(
+                "the zooms are centred eased punches, not a travelling move — "
+                "I was told when the clicks are but not where on screen. Use "
+                "look_at on the clip and add_zoom_path to make the frame "
+                "travel between the buttons")
     if zooms and clicks:
         # A navigation resets the run: the viewer needs the whole new page
         # before being pushed into a corner of it.
@@ -5467,15 +5998,29 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
     fx["zooms"] = zlist
     edl["effects"] = fx
     edl["sfx"] = sfx_items
+    moved = "gliding" if clicks else "eased"
     written = ctx.write_edl(
-        edl, f"cut the demo like a product video: {made_zooms} gliding "
+        edl, f"cut the demo like a product video: {made_zooms} {moved} "
              f"zoom(s) onto the clicks and {made_sfx} synced sound(s) across "
              f"{base}-{demo_end}s")
+    if not written.startswith("EDL v"):
+        # Placed but nothing synced (every event fell outside the window, or
+        # the sound pack is missing). Say so rather than returning a no-op
+        # diff the agent would read as success.
+        return (placed + "\nThe clip is placed, but no zoom or sound was "
+                "actually added"
+                + (" — " + "; ".join(notes) if notes else "")
+                + ". Do not claim the clicks were zoomed or sounded.")
     extra = ("\nNOTE: " + "; ".join(notes) + "." if notes else "")
     return (placed + "\n" + written + extra
             + f"\nThe demo runs {base}-{demo_end}s in the edit. Tell the user "
-            "what it shows, and that the clicks are zoomed and sounded. "
-            "Adjust any single zoom with remove_zoom / add_zoom.")
+            f"what it shows, and that {made_zooms} zoom(s) and {made_sfx} "
+            "click sound(s) were synced — those numbers, not \"the clicks\". "
+            "Adjust any single zoom with remove_zoom / add_zoom."
+            + ("\nThis was the user's own recording, not a capture I made: "
+               "everything above came from the click times they gave, and "
+               "nothing was assumed about the rest of it."
+               if own_recording else ""))
 
 
 # ------------------------------------------------------------------ #
@@ -7096,22 +7641,29 @@ TOOLS = {
                          "enum": ["landscape", "portrait", "square"]}}),
     "showcase_demo": (
         showcase_demo,
-        "PLACE A RECORDED DEMO AND CUT IT LIKE A PRODUCT VIDEO — one call. "
-        "Splices the capture into the edit, then uses its event track to "
-        "glide a zoom onto each click (the frame pushes in and TRAVELS "
-        "between buttons instead of cutting in and out) and land a click "
-        "sound on the exact frame of each press, a soft pop on each page "
-        "change and a swipe under each scroll. Only works on a capture from "
-        "record_website_demo. at_output_s defaults to the END of the "
-        "current edit; zoom_strength 0.05-1.5 (0.4 default — screen text "
-        "needs a real push to read); set zooms=false or click_sounds=false "
-        "to place it plainly. Use insert_media instead only when the user "
-        "wants the raw capture with no treatment.",
+        "PLACE A SCREEN RECORDING AND CUT IT LIKE A PRODUCT VIDEO — one call. "
+        "Splices the clip into the edit, then puts a zoom on each run of "
+        "clicks and lands a click sound on the exact frame of each press. "
+        "Works on ANY video clip, not just a record_website_demo capture. On "
+        "a capture I made, the event track is exact: the frame pushes in and "
+        "TRAVELS between the buttons, with a soft pop on each page change and "
+        "a swipe under each scroll. On a recording the USER made, pass "
+        "click_times=[...] (seconds into the clip) and it does the same job "
+        "minus the travel — clicks cannot be seen in pixels, so I know when "
+        "but not where, and the zooms are eased centre punches instead of a "
+        "path to a coordinate I would have had to invent. With neither, it "
+        "still places the clip and tells you plainly that nothing was synced. "
+        "at_output_s defaults to the END of the current edit; zoom_strength "
+        "0.05-1.5 (0.4 default — screen text needs a real push to read); set "
+        "zooms=false or click_sounds=false to place it plainly. Follow up "
+        "with add_zoom_path to make the frame travel on a user recording, and "
+        "enhance_cursor if the pointer is too small to follow.",
         {"asset_key": {"type": "string"},
          "at_output_s": {"type": "number"},
          "zoom_strength": {"type": "number"},
          "click_sounds": {"type": "boolean"},
-         "zooms": {"type": "boolean"}}),
+         "zooms": {"type": "boolean"},
+         "click_times": {"type": "array", "items": {"type": "number"}}}),
     "set_color_grade": (set_color_grade, "Apply a color-grade preset to the "
                         "whole video (captions stay unstyled): vibrant, "
                         "warm, cool, bw, vintage, cinematic — or 'none' to "
@@ -7144,6 +7696,109 @@ TOOLS = {
                   "cy": {"type": "number"}}),
     "remove_zoom": (remove_zoom, "Remove one zoom by its id (see "
                     "get_edl).", {"id": {"type": "string"}}),
+    "add_zoom_path": (
+        add_zoom_path,
+        "A ZOOM THAT MOVES — THE tool for 'make the zoom follow the cursor' / "
+        "'move the zoom between buttons' on ANY footage, including a screen "
+        "recording the user made themselves. add_zoom aims at one point and "
+        "has to cut out before it can aim somewhere else; this one stays "
+        "pushed in and TRAVELS, which is the difference between a product "
+        "demo that reads as one continuous action and three disconnected "
+        "shots of it. keyframes is a list of at least two "
+        "{t, cx, cy, strength}: t is OUTPUT-timeline seconds, cx/cy are 0-1 "
+        "fractions of the output frame ((0,0) = top-left — the same "
+        "convention as add_zoom, and look_at is how you find them), strength "
+        "is 0-1.5 and is interpolated between the keyframes too, so the frame "
+        "can push in as it arrives and ease out as it leaves. The window runs "
+        "from the first t to the last. NO ramp is added at the edges: the "
+        "frame is exactly where and how close the keyframes say, so give the "
+        "first and last keyframe strength 0 for a seamless entry and exit. "
+        "ease: 'cubic_in_out' (default — settles at each keyframe, the right "
+        "answer for stopping at buttons) or 'linear' (constant speed, for a "
+        "steady scan across a wide screenshot). It re-anchors across later "
+        "cuts exactly like add_zoom, so cutting elsewhere never strands it. "
+        "Remove the whole move with remove_zoom_path.",
+        {"keyframes": {"type": "array", "items": {"type": "object"}},
+         "ease": {"type": "string", "enum": ["cubic_in_out", "linear"]}}),
+    "remove_zoom_path": (
+        remove_zoom_path,
+        "Remove one keyframed travelling zoom by its id (see get_edl). Use "
+        "remove_zoom for ordinary punch/ease zooms.",
+        {"id": {"type": "string"}}),
+    "enhance_cursor": (
+        enhance_cursor,
+        "MAKE THE MOUSE POINTER BIGGER AND STEADIER — THE tool for 'the "
+        "cursor is too small' / 'too jittery' on a screen recording. It finds "
+        "the pointer in the source frames, repaints the original out, and "
+        "redraws it at `scale`x (1-4; 2 is the usual answer) along a path "
+        "filtered to remove hand tremor — `smoothing` 0-1, where fast "
+        "deliberate moves stay sharp at any setting. click_times is a list of "
+        "SOURCE-video seconds that get an expanding ripple: I CANNOT see "
+        "clicks in the pixels (nothing distinguishes a press from a hover), "
+        "so either pass the times record_website_demo reported, or ask the "
+        "user when the clicks were — never guess them. Set "
+        "click_highlight=false to skip the ripples. This bakes into the "
+        "source copy the render reads, so every cut keeps it and no timestamp "
+        "moves; it reports what fraction of frames the pointer was actually "
+        "found in and refuses outright on footage that has no visible cursor. "
+        "Undo with remove_cursor_enhance.",
+        {"scale": {"type": "number"}, "smoothing": {"type": "number"},
+         "click_highlight": {"type": "boolean"},
+         "click_times": {"type": "array", "items": {"type": "number"}}}),
+    "remove_cursor_enhance": (
+        remove_cursor_enhance,
+        "Put the original mouse pointer back (re-derives from the untouched "
+        "source).", {}),
+    "set_screen_frame": (
+        set_screen_frame,
+        "THE tool for 'that floating rounded window on a gradient' look — the "
+        "standard treatment for a screen recording or app demo. The finished "
+        "picture is inset, its corners rounded, a soft shadow dropped under "
+        "it, and it floats on a solid colour or a two-colour gradient. "
+        "inset 0.02-0.35 (0.08 default — how much room the backdrop gets); "
+        "radius 0-0.25 as a fraction of the picture's short side; shadow 0-1; "
+        "background/background2 are #RRGGBB (pass background2 for a gradient, "
+        "or 'none' to go flat) with direction vertical/horizontal/diagonal/"
+        "radial — the same gradient renderer add_color_screen uses, so a "
+        "backdrop can match an interstitial exactly. Calling it again edits "
+        "the settings rather than stacking. It applies to the WHOLE finished "
+        "picture (captions and overlays scale with it, because they are "
+        "inside the window) and changes no timing at all. Remove with "
+        "remove_screen_frame.",
+        {"inset": {"type": "number"}, "radius": {"type": "number"},
+         "shadow": {"type": "number"}, "background": {"type": "string"},
+         "background2": {"type": "string"},
+         "direction": {"type": "string",
+                       "enum": ["vertical", "horizontal", "diagonal",
+                                "radial"]}}),
+    "remove_screen_frame": (
+        remove_screen_frame,
+        "Remove the floating rounded window — the picture goes back to "
+        "full-bleed.", {}),
+    "add_aspect_shift": (
+        add_aspect_shift,
+        "CHANGE THE ASPECT RATIO MID-VIDEO, SMOOTHLY — THE tool for 'go "
+        "vertical for this bit' / 'squeeze to square here and back'. At "
+        "at_output_s the visible frame MORPHS to `ratio` over duration_s "
+        "(0.1-4s, 0.8 default) with an eased close-in, and stays there until "
+        "the next shift; add another with ratio='source' to open back out. "
+        "The rendered file keeps ONE resolution — it has to, that is what a "
+        "video file is — so the change is the frame itself closing in, which "
+        "is exactly what a smooth aspect change looks like and is why it "
+        "cannot desync audio or move a caption. zoom=true (default) pushes "
+        "the picture in as the frame narrows so the subject holds its size. "
+        "color is the bars' colour. For changing the aspect of the WHOLE "
+        "video use set_frame or auto_reframe instead. Remove one with "
+        "remove_aspect_shift.",
+        {"at_output_s": {"type": "number"},
+         "ratio": {"type": "string",
+                   "enum": ["source", "16:9", "9:16", "1:1", "4:5", "4:3"]},
+         "duration_s": {"type": "number"}, "zoom": {"type": "boolean"},
+         "color": {"type": "string"}}),
+    "remove_aspect_shift": (
+        remove_aspect_shift,
+        "Remove one mid-video aspect change by its id (see get_edl).",
+        {"id": {"type": "string"}}),
     "set_fades": (set_fades, "Fade from black at the start and/or to black "
                   "at the end (video + audio). Seconds; 0 clears. Example: "
                   "set_fades(fade_in_s=0.5, fade_out_s=0.8).",
@@ -7669,6 +8324,14 @@ REQUIRED_ARGS = {
     "record_website": ["url"],
     "record_website_demo": ["url", "steps"],
     "showcase_demo": ["asset_key"],
+    "add_zoom_path": ["keyframes"],
+    "remove_zoom_path": ["id"],
+    "enhance_cursor": [],
+    "remove_cursor_enhance": [],
+    "set_screen_frame": [],
+    "remove_screen_frame": [],
+    "add_aspect_shift": ["at_output_s", "ratio"],
+    "remove_aspect_shift": ["id"],
     "search_stock": ["query"],
     "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
@@ -7724,7 +8387,11 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "add_stock_media",
                "insert_media", "remove_insert", "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
-               "remove_zoom", "set_fades", "set_transitions",
+               "remove_zoom", "add_zoom_path", "remove_zoom_path",
+               "enhance_cursor", "remove_cursor_enhance",
+               "set_screen_frame", "remove_screen_frame",
+               "add_aspect_shift", "remove_aspect_shift",
+               "set_fades", "set_transitions",
                "blur_region", "remove_blur",
                "erase_burned_text", "erase_region", "remove_erase",
                "reset_edit",
@@ -7754,11 +8421,6 @@ def _tool_disabled(name):
     if name == "fetch_url":
         return not config.URL_FETCH_ENABLED
     if name in ("record_website", "record_website_demo"):
-        return not webrecord.available()
-    # showcase_demo can only ever operate on a capture the demo recorder
-    # made, so where that is off it has nothing to act on and must not be
-    # advertised — the same honest-off contract as every other tool here.
-    if name == "showcase_demo":
         return not webrecord.available()
     if name in ("search_stock", "add_stock_media"):
         return not stock.available()

@@ -28,8 +28,10 @@ import graphics
 import media
 import music_library
 import sfx_library
+import screenframe
 import sheets
 import storage
+import travel
 from schemas import (clean_fingerprint, EDLValidationError,
                      is_canvas_program, speed_pieces, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
@@ -243,6 +245,32 @@ ENDCARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # so the corner watermark and the brand are one character.
 ROBOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "brand", "robot.png")
+
+
+def _screen_frame_input(edl, workdir, W, H, fps, out_dur, extra_inputs,
+                        next_idx):
+    """Build the floating-window plate and append it as a looped still input.
+
+    Returns (input_index, (pw, ph, ox, oy)) or (None, None). A plate that
+    cannot be drawn degrades to NO framing rather than failing the render —
+    the same contract endcard_path() documents: the user loses a cosmetic
+    treatment, not their export.
+    """
+    sf = ((edl.get("effects") or {}).get("screen_frame")) or None
+    if not sf or not W or not H:
+        return None, None
+    path = screenframe.plate_path(workdir, W, H, sf)
+    try:
+        if not os.path.exists(path):
+            screenframe.build_plate(path, W, H, sf)
+        box = screenframe.picture_box(W, H, float(sf.get("inset", 0.08)))
+    except Exception as e:
+        print(f"[render] screen_frame plate could not be built "
+              f"({str(e)[:160]}) — rendering without it", flush=True)
+        return None, None
+    extra_inputs += ["-loop", "1", "-t", f"{out_dur + 5.0:.3f}",
+                     "-r", f"{fps:.3f}", "-i", path]
+    return next_idx, box
 
 
 def robot_path():
@@ -536,7 +564,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
                       src_sar=1.0, src_fps=None,
                       overlay_inputs=None, gfx_ass_path=None,
-                      frame_focus=None, robot_idx=None, wm_ass_path=None):
+                      frame_focus=None, robot_idx=None, wm_ass_path=None,
+                      plate_idx=None, plate_box=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -598,9 +627,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     master = edl.get("master") or {}
     transition = fx.get("transition") or None
     tstyle = (transition or {}).get("style")
+    shifts = fx.get("frame_shifts") or []
+    screen_frame = fx.get("screen_frame") or None
+    # An aspect shift pushes the picture in via the same zoompan the zooms use,
+    # and the floating frame scales the finished picture to an exact WxH box —
+    # both need the CFR WxH guarantee every other geometry effect needs.
     do_norm = (bool(insert_inputs) or frame_mode is not None or bool(zooms)
                or bool(speed) or bool(overlay_inputs)
                or tstyle in ("whip_left", "whip_right", "zoom_punch")
+               or bool(shifts) or screen_frame is not None
                or any(s.get("kind") == "shake" for s in stylize))
     mode = frame_mode or "crop"
 
@@ -1098,40 +1133,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         st = float(z.get("strength", 0.25))
         t = f"on/{fps:.3f}"
         zmode = z.get("mode") or "punch"
-        if zmode == "follow":
-            # Round 45. The zoom AMOUNT ramps exactly like 'ease' — the eye
-            # forgives a moving frame but not a jumping one — while the
-            # CENTRE glides along the path, emitted below as piecewise-linear
-            # expressions. This is the screen-recording move: stay pushed in
-            # and travel to the next thing, instead of cutting out and back.
-            r = max(0.15, min(0.4, (b - a) / 4.0))
-            zoom_terms.append(
-                f"{st:.2f}*clip(({t}-{a:.3f})/{r:.3f},0,1)"
-                f"*clip(({b:.3f}-{t})/{r:.3f},0,1)")
-            pts = [p for p in (z.get("path") or [])]
-            for cname, terms in (("cx", cx_terms), ("cy", cy_terms)):
-                if len(pts) < 2:
-                    continue
-                # value(t) = v0 + Σ (v_{i+1}-v_i) * clip((t-t_i)/(dt), 0, 1)
-                # Each completed segment has contributed its whole delta and
-                # the current one contributes its fraction, which IS
-                # piecewise-linear interpolation — and it stays a single
-                # expression ffmpeg can evaluate per frame.
-                v0 = float(pts[0].get(cname, 0.5))
-                parts_expr = [f"{v0 - 0.5:.4f}"]
-                for p0, p1 in zip(pts, pts[1:]):
-                    t0 = a + float(p0["f"]) * (b - a)
-                    t1 = a + float(p1["f"]) * (b - a)
-                    dt = t1 - t0
-                    if dt <= 1e-4:
-                        continue
-                    dv = float(p1.get(cname, 0.5)) - float(p0.get(cname, 0.5))
-                    if abs(dv) < 1e-4:
-                        continue
-                    parts_expr.append(
-                        f"{dv:.4f}*clip(({t}-{t0:.3f})/{dt:.3f},0,1)")
-                expr = "+".join(parts_expr).replace("+-", "-")
-                terms.append(f"({expr})*between({t},{a:.3f},{b:.3f})")
+        if zmode in ("follow", "path"):
+            # Round 45 / round 51. The travelling zoom: the CENTRE glides
+            # along the waypoints while the frame stays pushed in, instead of
+            # cutting out and back between two subjects. 'follow' holds one
+            # strength and ramps it at the window edges; 'path' keyframes the
+            # strength too. Both shapes — and both callers, showcase_demo and
+            # add_zoom_path — go through worker/travel.py, which emits ONE
+            # expression per axis. Legacy 'follow' zooms come back out of it
+            # character-for-character, so their cached renders still match.
+            zoom_terms.append(travel.strength_term(z, t, a, b))
+            cxe, cye = travel.centre_terms(z, t, a, b)
+            if cxe:
+                cx_terms.append(cxe)
+            if cye:
+                cy_terms.append(cye)
             continue
         if zmode == "ease":
             # smooth ramp in and out inside the window (0 outside it)
@@ -1162,6 +1178,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             if cy is not None and abs(float(cy) - 0.5) > 1e-6:
                 cy_terms.append(f"{float(cy) - 0.5:.3f}"
                                 f"*between({t},{a:.3f},{b:.3f})")
+    # An aspect shift optionally pushes the picture in as the frame narrows, so
+    # the subject holds its size instead of just losing its sides. It rides the
+    # SAME zoompan as the zooms (one geometry filter, not two) and is emitted
+    # as one more term — which also means a zoom and a shift over the same
+    # moment compose rather than fight.
+    shift_w, shift_h, shift_z = ([], [], [])
+    if shifts:
+        shift_w, shift_h, shift_z = screenframe.shift_tracks(
+            shifts, W or 1280, H or 720, tl.out_duration)
+        if screenframe.track_varies(shift_z):
+            zexp = travel.path_value_expr(
+                shift_z, "v", f"on/{fps:.3f}", 0.0, tl.out_duration,
+                default=0.0, ease="cubic_in_out")
+            if zexp:
+                zoom_terms.append(f"({zexp})")
     if zoom_terms:
         zexpr = "1+" + "+".join(zoom_terms)
         if zoom_targeted:
@@ -1254,6 +1285,66 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{vlabel}]subtitles=filename='{gfx_ass_path}'"
                      f":fontsdir='{caplib.FONTS_DIR}'[vgfx]")
         vlabel = "vgfx"
+    # ---- mid-video aspect change (round 51) -----------------------------
+    # The bars go on ABOVE the captions on purpose: when the frame narrows to
+    # 9:16, anything outside the new window is outside the FRAME, and a caption
+    # half-hanging into the letterbox is the single artefact that would give
+    # the effect away as a matte rather than a reframe.
+    if shifts:
+        # NOT drawbox. drawbox evaluates x/y/w/h ONCE, at configuration time —
+        # verified against ffmpeg, where a box with w='320*t/2' renders at a
+        # constant width for the whole clip (and w=0 means "the input's full
+        # width", so a zero-thickness bar blanks the frame instead of
+        # disappearing). overlay DOES re-evaluate its position per frame with
+        # eval=frame, so each bar is a full-frame colour plate slid in from
+        # off-screen: the visible part of it IS the bar, and its thickness
+        # animates because its position does.
+        col = (shifts[0].get("color") or "#000000").lstrip("#")
+        # The expressions are resolved BEFORE the split is emitted. Deciding
+        # how many bar copies to fan out and then skipping one in the loop
+        # would leave a split output unconnected, which ffmpeg rejects — the
+        # whole render dies rather than one effect being missing.
+        axes = []
+        for axis, pts, dim in (("w", shift_w, W or 1280),
+                               ("h", shift_h, H or 720)):
+            if not screenframe.track_varies(pts):
+                continue
+            expr = travel.path_value_expr(pts, "v", "t", 0.0, tl.out_duration,
+                                          default=1.0, ease="cubic_in_out")
+            if expr:
+                axes.append((axis, dim, expr))
+        if axes:
+            n_bars = 2 * len(axes)
+            parts.append(
+                f"color=c=0x{col}:s={W or 1280}x{H or 720}:r={fps:.3f}:"
+                f"d={tl.out_duration + 1.0:.3f},format=rgba,split"
+                + (f"={n_bars}" if n_bars > 2 else "")
+                + "".join(f"[fsb{i}]" for i in range(n_bars)))
+        bar_i = 0
+        for axis, dim, expr in axes:
+            # bar thickness = half of what the target aspect gives up
+            thick = f"({dim}*(1-({expr}))/2)"
+            for k, pos in enumerate((f"({thick})-{dim}", f"{dim}-({thick})")):
+                out_lab = f"vfs{axis}{k}"
+                xy = (f"x='{pos}':y=0" if axis == "w"
+                      else f"x=0:y='{pos}'")
+                parts.append(
+                    f"[{vlabel}][fsb{bar_i}]overlay={xy}:eval=frame:"
+                    f"format=auto[{out_lab}]")
+                vlabel = out_lab
+                bar_i += 1
+    # ---- the floating rounded window (round 51) -------------------------
+    # ONE composite: the finished picture is scaled into the plate's hole and
+    # the plate — backdrop, shadow and rounded corners already drawn — is laid
+    # over it. Applied after captions and graphics so the whole finished video
+    # is what floats, which is what the look means.
+    if plate_idx is not None and plate_box:
+        pw, ph, ox, oy = plate_box
+        parts.append(f"[{vlabel}]scale={pw}:{ph},setsar=1[vsfp]")
+        parts.append(f"[vsfp]pad={W}:{H}:{ox}:{oy}:color=black[vsfb]")
+        parts.append(f"[{plate_idx}:v]format=rgba[vsfpl]")
+        parts.append("[vsfb][vsfpl]overlay=0:0:format=auto[vsf]")
+        vlabel = "vsf"
     fade_in = float(fx.get("fade_in_s") or 0.0)
     fade_out = float(fx.get("fade_out_s") or 0.0)
     if fade_in:
@@ -1599,6 +1690,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         wm_ass_path = build_watermark_ass(
             os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H)
 
+    plate_idx, plate_box = _screen_frame_input(
+        edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx)
+    if plate_idx is not None:
+        next_idx += 1
+
     graph = build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
                               music_inputs, {}, preview,
                               W=W, H=H, fps=fps, frame_mode=None,
@@ -1609,7 +1705,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                               card_idx=card_idx, src_sar=1.0, src_fps=fps,
                               overlay_inputs=overlay_inputs,
                               gfx_ass_path=gfx_path, robot_idx=robot_idx,
-                              wm_ass_path=wm_ass_path)
+                              wm_ass_path=wm_ass_path,
+                              plate_idx=plate_idx, plate_box=plate_box)
 
     if preview:
         encode = ["-c:v", "libx264", "-preset", config.PREVIEW_PRESET,
@@ -1784,6 +1881,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         wm_ass_path = build_watermark_ass(
             os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H)
 
+    plate_idx, plate_box = _screen_frame_input(
+        edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx)
+    if plate_idx is not None:
+        next_idx += 1
+
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
@@ -1797,7 +1899,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               overlay_inputs=overlay_inputs,
                               gfx_ass_path=gfx_path,
                               frame_focus=frame_focus, robot_idx=robot_idx,
-                              wm_ass_path=wm_ass_path)
+                              wm_ass_path=wm_ass_path,
+                              plate_idx=plate_idx, plate_box=plate_box)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).

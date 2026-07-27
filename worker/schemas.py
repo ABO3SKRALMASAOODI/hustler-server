@@ -505,11 +505,19 @@ ZOOM_PATH_MAX_POINTS = 24
 
 
 class ZoomPathPoint(BaseModel):
-    """One waypoint of a follow-zoom: at `f` (0 = window start, 1 = window
-    end) the zoom is centred on (cx, cy) in output-frame fractions."""
+    """One waypoint of a traveling zoom: at `f` (0 = window start, 1 = window
+    end) the zoom is centred on (cx, cy) in output-frame fractions.
+
+    s (round 51) is the zoom STRENGTH at this waypoint, and it only exists for
+    mode 'path' — a 'follow' zoom holds one strength for its whole window and
+    ramps it at the edges. Optional and None-by-default on purpose: _sig_canon
+    drops nested None keys, so every follow path written by showcase_demo since
+    round 45 dumps exactly the keys it always did and keeps its cached render.
+    """
     f: float
     cx: float
     cy: float
+    s: Optional[float] = None
 
 
 class ZoomItem(BaseModel):
@@ -524,21 +532,34 @@ class ZoomItem(BaseModel):
     (0,0 = top-left). None = center, which is exactly what every earlier
     zoom rendered — so old EDLs keep both their signatures and their look.
 
-    path (round 45): only meaningful with mode 'follow'. Two or more points
-    in ascending `f`. This is what makes a screen-recording zoom watchable —
-    a static punch onto one button has to cut out before the next one, while
-    a follow stays in and travels, which is how a hand-made product demo
-    reads.
+    path (round 45): meaningful with mode 'follow' and mode 'path'. Two or
+    more points in ascending `f`. This is what makes a screen-recording zoom
+    watchable — a static punch onto one button has to cut out before the next
+    one, while a traveling zoom stays in and moves, which is how a hand-made
+    product demo reads.
+
+    mode 'path' (round 51) is the KEYFRAMED traveling zoom: the strength moves
+    between the waypoints too (each carries its own `s`), and no ramp is added
+    at the window edges — the frame is exactly where and how close the
+    keyframes say, at the times they say. 'follow' is the simpler shape
+    showcase_demo writes: one strength, ramped in and out, centre travelling.
+    Both render through worker/travel.py; there is one traveling zoom.
+
+    ease (round 51) selects the curve BETWEEN waypoints for mode 'path':
+    'cubic_in_out' (the default the tool writes) settles at each keyframe,
+    'linear' holds a constant velocity through them. None on a 'follow' zoom
+    means the round-45 linear interpolation, byte-for-byte.
     """
     id: str
     start: float
     end: float
     strength: float = 0.25
     mode: Optional[Literal["punch", "ease", "push_in", "pull_out",
-                           "follow"]] = None
+                           "follow", "path"]] = None
     cx: Optional[float] = None
     cy: Optional[float] = None
     path: Optional[List[ZoomPathPoint]] = None
+    ease: Optional[Literal["cubic_in_out", "linear"]] = None
 
 
 # Round 35: the junction library grew past the two dips. Every style is
@@ -657,6 +678,67 @@ class GradeCustom(BaseModel):
     tint: Optional[float] = None           # -1 (green) .. 1 (magenta)
 
 
+# ── The floating window (round 51) ──────────────────────────────────────────
+# The single most-requested look for a screen recording: the picture inset a
+# little, its corners rounded, a soft shadow under it, floating on a colour or
+# gradient backdrop. It is applied at the very END of the picture chain — after
+# captions and graphics — so the "window" is the FINISHED video, which is what
+# the look means and what makes it predictable (everything the user sees inside
+# the frame scales together, nothing is half-in and half-out).
+#
+# It is ONE overlay of ONE pre-built RGBA plate: backdrop and shadow are baked
+# into the plate's opaque pixels and the picture area is a rounded transparent
+# hole, so the rounded corners, the shadow and the gradient cost exactly one
+# composite per frame instead of a geq pass. That matters on the 1-vCPU box.
+SCREEN_FRAME_INSET_MIN = 0.02
+SCREEN_FRAME_INSET_MAX = 0.35
+SCREEN_FRAME_RADIUS_MAX = 0.25
+
+
+class ScreenFrame(BaseModel):
+    """inset: how much of the frame the backdrop takes, as a fraction of the
+    output width (0.08 = the picture is 92% as wide, centred). radius: corner
+    rounding as a fraction of the INSET PICTURE's short side. shadow: 0 = none,
+    1 = heavy. background / background2 + direction reuse the colour-card
+    gradient renderer — one gradient implementation, shared with
+    add_color_screen."""
+    inset: float = 0.08
+    radius: float = 0.04
+    shadow: float = 0.5
+    background: str = "#0B0B0B"
+    background2: Optional[str] = None
+    direction: Literal["vertical", "horizontal", "diagonal", "radial"] = \
+        "vertical"
+
+
+# ── Mid-video aspect change (round 51) ──────────────────────────────────────
+# "Go vertical for this bit." A rendered file has ONE resolution for its whole
+# duration — that is the container, not a choice — so a mid-video aspect change
+# is an animated MATTE inside the fixed canvas: the bars close in (or open out)
+# over `duration_s`, and the picture optionally pushes in by exactly the amount
+# that keeps the subject the same size on screen as the frame narrows.
+#
+# The bars are drawbox with time expressions (one filter, four numbers per
+# frame), not a second render at another size. Nothing about the timeline
+# changes, which is why this can never desync audio or move a caption.
+FRAME_SHIFT_RATIOS = ("source", "16:9", "9:16", "1:1", "4:5", "4:3")
+FRAME_SHIFT_MIN_S = 0.1
+FRAME_SHIFT_MAX_S = 4.0
+
+
+class FrameShift(BaseModel):
+    """At `at` (output seconds) the visible frame morphs to `ratio` over
+    `duration_s` and stays there until the next shift (or the end).
+    `zoom` pushes the picture in as the frame narrows so the subject holds
+    its size; `color` is what the new bars are filled with."""
+    id: str
+    at: float
+    ratio: Literal["source", "16:9", "9:16", "1:1", "4:5", "4:3"]
+    duration_s: float = 0.8
+    zoom: bool = True
+    color: str = "#000000"
+
+
 class Effects(BaseModel):
     """Whole-program visual effects. grade is a color-grade preset applied
     to all footage (never to burned captions); zooms are punch-in/eased/
@@ -675,6 +757,12 @@ class Effects(BaseModel):
     regions: Optional[List[RegionItem]] = None
     stylize: Optional[List[StylizeItem]] = None
     grade_custom: Optional[GradeCustom] = None
+    # Round 51. Both Optional-None (never an empty list default): _sig_canon
+    # drops nested None keys but keeps an empty list, so a `[]` default here
+    # would change the signature of every EDL that has any effects at all and
+    # re-render the lot.
+    screen_frame: Optional[ScreenFrame] = None
+    frame_shifts: Optional[List[FrameShift]] = None
 
 
 # Canvas (round 34) — output geometry for a program that has NO main source
@@ -829,7 +917,7 @@ class Master(BaseModel):
 CLEAN_FILLS = ("text", "box")
 
 
-def clean_fingerprint(src_sha, regions):
+def clean_fingerprint(src_sha, regions, cursor=None):
     """Identity of a repainted source: (which video, which rectangles).
 
     Shared by the tool that WRITES the cleaned file and the renderer that
@@ -842,6 +930,15 @@ def clean_fingerprint(src_sha, regions):
     payload = json.dumps([{k: r.get(k) for k in
                            ("x", "y", "w", "h", "start", "end", "fill")}
                           for r in (regions or [])], sort_keys=True)
+    # Round 51: the cursor pass is a SECOND way the source can be derived, and
+    # it shares this one identity because there is one derived file. Appending
+    # only when a cursor pass exists is what keeps every fingerprint written
+    # before round 51 identical — the cleaned objects already in storage stay
+    # addressable, so no erase silently re-runs on the next render.
+    if cursor:
+        payload += json.dumps({k: cursor.get(k) for k in
+                               ("scale", "smoothing", "click_highlight",
+                                "click_times")}, sort_keys=True)
     return hashlib.sha1(((src_sha or "") + payload).encode()).hexdigest()
 
 
@@ -869,6 +966,35 @@ class CleanRegion(BaseModel):
     kind: Optional[str] = None          # what the detector called it
 
 
+# ── The cursor pass (round 51) ──────────────────────────────────────────────
+# On a screen recording the pointer is the narrator, and at 1080p scaled into a
+# phone-sized player it is roughly four pixels of grey. This finds it in the
+# SOURCE frames, smooths the hand jitter out of its path, and redraws it big.
+#
+# SOURCE time throughout — click_times are moments in the footage, not in the
+# edit, so the pass survives every later cut for free (it is baked into the
+# derived source, which every kept segment reads through).
+CURSOR_SCALE_MIN = 1.0
+CURSOR_SCALE_MAX = 4.0
+CURSOR_MAX_CLICKS = 60
+
+
+class CursorPass(BaseModel):
+    """scale: how many times bigger the redrawn pointer is. smoothing: 0 = the
+    detected path untouched, 1 = heavily filtered (a one-euro filter, so fast
+    deliberate moves stay sharp while a resting hand stops shaking).
+    click_highlight draws an expanding ring at each time in click_times."""
+    scale: float = 2.0
+    smoothing: float = 0.5
+    click_highlight: bool = True
+    click_times: List[float] = Field(default_factory=list)
+    # Recorded by the pass, never sent by a caller: the fraction of frames the
+    # pointer was actually located in. The tool reports it verbatim rather than
+    # claiming a clean result — a recording with no visible cursor (a phone
+    # screen capture, a tap-driven demo) has to say so.
+    found_frac: Optional[float] = None
+
+
 class SourceClean(BaseModel):
     """Pointer to the repainted source this EDL renders from.
 
@@ -882,6 +1008,14 @@ class SourceClean(BaseModel):
     proxy_key: Optional[str] = None
     fp: str
     regions: List[CleanRegion] = Field(default_factory=list)
+    # Round 51 — the cursor pass. It lives HERE, next to the erase regions,
+    # rather than in a second `source_cursor` field, because there is exactly
+    # one derived source file and the renderer must never have to decide which
+    # of two derivations wins. The passes chain in a fixed order (repaint,
+    # then cursor), both re-derive from the untouched original, and one
+    # fingerprint identifies the result. None on every pre-round-51 EDL, and
+    # _sig_canon drops nested None, so signatures are untouched.
+    cursor: Optional[CursorPass] = None
 
 
 class EDL(BaseModel):
@@ -1438,21 +1572,24 @@ def validate_edl(data, duration=None):
             # carried in the EDL and silently ignored by the renderer, which
             # is worse than rejecting it — the agent would believe it had
             # placed a move that never renders.
-            if z.mode == "follow":
+            if z.mode in ("follow", "path"):
                 pts = z.path or []
                 if len(pts) < 2:
                     raise EDLValidationError(
-                        f"effects.zooms[{i}]: mode 'follow' needs a path of "
+                        f"effects.zooms[{i}]: mode '{z.mode}' needs a path of "
                         "at least 2 points.")
                 if len(pts) > ZOOM_PATH_MAX_POINTS:
                     raise EDLValidationError(
-                        f"effects.zooms[{i}]: a follow path is limited to "
+                        f"effects.zooms[{i}]: a travelling path is limited to "
                         f"{ZOOM_PATH_MAX_POINTS} points.")
                 last_f = None
                 for j, pt in enumerate(pts):
                     pt.f = round(min(max(float(pt.f), 0.0), 1.0), 4)
                     pt.cx = round(min(max(float(pt.cx), 0.0), 1.0), 3)
                     pt.cy = round(min(max(float(pt.cy), 0.0), 1.0), 3)
+                    if pt.s is not None:
+                        pt.s = round(min(max(float(pt.s), 0.0),
+                                         ZOOM_STRENGTH_MAX), 3)
                     if last_f is not None and pt.f < last_f:
                         raise EDLValidationError(
                             f"effects.zooms[{i}].path[{j}]: points must be "
@@ -1464,11 +1601,22 @@ def validate_edl(data, duration=None):
                     # end values), and the ends are what the eye reads.
                     pts[0].f = 0.0
                     pts[-1].f = 1.0
+                # A per-waypoint strength on a 'follow' zoom would be carried
+                # and ignored (follow holds one strength by definition) — the
+                # same silent-no-op this block already refuses for `path`.
+                if z.mode == "follow" and any(p.s is not None for p in pts):
+                    raise EDLValidationError(
+                        f"effects.zooms[{i}]: per-point strength (`s`) needs "
+                        "mode 'path'; a 'follow' zoom holds one strength for "
+                        "its window.")
             elif z.path:
                 raise EDLValidationError(
                     f"effects.zooms[{i}]: `path` only applies to mode "
-                    "'follow'; this zoom is "
+                    "'follow' or 'path'; this zoom is "
                     f"'{z.mode or 'punch'}'.")
+            if z.ease is not None and z.mode != "path":
+                raise EDLValidationError(
+                    f"effects.zooms[{i}]: `ease` only applies to mode 'path'.")
         fx.zooms.sort(key=lambda z: z.start)
         if fx.transition is not None:
             tr = fx.transition
@@ -1553,12 +1701,59 @@ def validate_edl(data, duration=None):
                                 prog_dur)
             if not fx.regions:
                 fx.regions = None       # [] is the absence of regions
+        if fx.screen_frame is not None:
+            sf = fx.screen_frame
+            sf.inset = round(min(max(float(sf.inset), SCREEN_FRAME_INSET_MIN),
+                                 SCREEN_FRAME_INSET_MAX), 3)
+            sf.radius = round(min(max(float(sf.radius), 0.0),
+                                  SCREEN_FRAME_RADIUS_MAX), 3)
+            sf.shadow = round(min(max(float(sf.shadow), 0.0), 1.0), 3)
+            for cname in ("background", "background2"):
+                cv = getattr(sf, cname)
+                if cv is None:
+                    continue
+                cv = str(cv).strip().upper()
+                if not HEX_COLOR.match(cv):
+                    raise EDLValidationError(
+                        f"effects.screen_frame.{cname} must be #RRGGBB hex.")
+                setattr(sf, cname, cv)
+        if fx.frame_shifts is not None:
+            seen_fs = set()
+            for i, fsh in enumerate(fx.frame_shifts):
+                if not fsh.id or fsh.id in seen_fs:
+                    raise EDLValidationError(
+                        f"effects.frame_shifts[{i}].id must be non-empty and "
+                        "unique.")
+                seen_fs.add(fsh.id)
+                fsh.at = _r(min(max(float(fsh.at), 0.0), max(0.0, prog_dur)))
+                fsh.duration_s = _r(min(max(float(fsh.duration_s),
+                                            FRAME_SHIFT_MIN_S),
+                                        FRAME_SHIFT_MAX_S))
+                fsh.color = str(fsh.color).strip().upper()
+                if not HEX_COLOR.match(fsh.color):
+                    raise EDLValidationError(
+                        f"effects.frame_shifts[{i}].color must be #RRGGBB "
+                        "hex.")
+            fx.frame_shifts.sort(key=lambda s: (s.at, s.id))
+            # Two shifts inside one another's morph would have the bars
+            # animating to two places at once; the second would win per frame
+            # in an order nobody can predict from the EDL.
+            for a, b in zip(fx.frame_shifts, fx.frame_shifts[1:]):
+                if b.at < a.at + a.duration_s - 1e-6:
+                    raise EDLValidationError(
+                        f"effects.frame_shifts[{b.id}] starts at {b.at}s, "
+                        f"inside the {a.duration_s}s morph that "
+                        f"{a.id} begins at {a.at}s. Aspect changes cannot "
+                        "overlap — move it later or shorten the first.")
+            if not fx.frame_shifts:
+                fx.frame_shifts = None
         # all-empty effects is the absence of effects — normalize so old
         # EDLs and cleared-effects EDLs compare identical.
         if fx.grade is None and not fx.zooms and fx.fade_in_s is None \
                 and fx.fade_out_s is None and fx.transition is None \
                 and fx.regions is None and fx.stylize is None \
-                and fx.grade_custom is None:
+                and fx.grade_custom is None and fx.screen_frame is None \
+                and fx.frame_shifts is None:
             edl.effects = None
 
     if edl.source_clean is not None:
@@ -1596,6 +1791,28 @@ def validate_edl(data, duration=None):
                 if cr.end <= cr.start:
                     raise EDLValidationError(
                         f"source_clean.regions[{i}]: end must be after start.")
+        if sc.cursor is not None:
+            cu = sc.cursor
+            cu.scale = round(min(max(float(cu.scale), CURSOR_SCALE_MIN),
+                                 CURSOR_SCALE_MAX), 2)
+            cu.smoothing = round(min(max(float(cu.smoothing), 0.0), 1.0), 3)
+            times = sorted({_r(max(0.0, float(t)))
+                            for t in (cu.click_times or [])})
+            if len(times) > CURSOR_MAX_CLICKS:
+                raise EDLValidationError(
+                    f"source_clean.cursor: at most {CURSOR_MAX_CLICKS} click "
+                    f"times ({len(times)} given).")
+            cu.click_times = times
+            if cu.found_frac is not None:
+                cu.found_frac = round(min(max(float(cu.found_frac), 0.0),
+                                          1.0), 3)
+        if not sc.regions and sc.cursor is None:
+            # A derived source with nothing deriving it is the absence of one.
+            # (The tools clear the whole field, but the UI ops write EDLs too.)
+            raise EDLValidationError(
+                "source_clean has neither regions nor a cursor pass — clear "
+                "the field instead of pointing at a derivation that says "
+                "nothing was done.")
 
     return edl
 
@@ -1747,8 +1964,10 @@ def describe_edl(edl_dict, duration=None):
         if fx.zooms:
             tgt = sum(1 for z in fx.zooms
                       if z.cx is not None or z.cy is not None)
+            travel = sum(1 for z in fx.zooms if z.mode in ("follow", "path"))
             bits.append(f"zoom x{len(fx.zooms)}"
-                        + (f" ({tgt} targeted)" if tgt else ""))
+                        + (f" ({tgt} targeted)" if tgt else "")
+                        + (f" ({travel} travelling)" if travel else ""))
         fades = [n for n, v in (("in", fx.fade_in_s),
                                 ("out", fx.fade_out_s)) if v]
         if fades:
@@ -1766,9 +1985,28 @@ def describe_edl(edl_dict, duration=None):
                                if s.start is not None else "")
                      for s in fx.stylize]
             bits.append("stylize " + "+".join(names))
+        if fx.screen_frame:
+            sf = fx.screen_frame
+            bits.append(
+                f"floating frame (inset {int(sf.inset * 100)}%, radius "
+                f"{sf.radius:g}, on {sf.background}"
+                + (f"->{sf.background2} {sf.direction}" if sf.background2
+                   else "") + ")")
+        if fx.frame_shifts:
+            bits.append("aspect shifts: " + ", ".join(
+                f"{s.ratio}@{s.at:g}s over {s.duration_s:g}s"
+                for s in fx.frame_shifts))
         parts.append(", ".join(bits))
     if edl.master and edl.master.loudness:
         parts.append(f"mastered ({edl.master.loudness} loudness)")
+    if edl.source_clean and edl.source_clean.cursor:
+        cu = edl.source_clean.cursor
+        parts.append(
+            f"cursor enhanced ({cu.scale:g}x"
+            + (f", {len(cu.click_times)} click ripple(s)"
+               if cu.click_highlight and cu.click_times else "")
+            + (f", found in {int(cu.found_frac * 100)}% of frames"
+               if cu.found_frac is not None else "") + ")")
     if edl.source_clean and edl.source_clean.regions:
         # Named as ERASED, never as "censored"/"blurred": these pixels are
         # repainted in the file the render reads, and describing that as a
