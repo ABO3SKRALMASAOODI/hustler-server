@@ -1273,8 +1273,7 @@ def project_state(user_id, project_id):
                                       'video_clip', 'image_ref')
                        ORDER BY id DESC LIMIT 150""", (project_id,))
         extra = cur.fetchall()
-        _paid = _user_is_paid(cur, user_id)
-        _wm = _watermark_settings(cur)
+        _gate = _final_gate(cur, project_id, user_id)
 
     renders = [a for a in extra if a["kind"] == "render"]
     by_version = {}
@@ -1292,10 +1291,7 @@ def project_state(user_id, project_id):
         except (TypeError, ValueError):
             continue
         bv = by_version.setdefault(v, {})
-        if variant == "final" and not (_final_is_current(m)
-                                       and _transitions_are_current(m)
-                                       and _watermark_is_current(m, _paid,
-                                                                 _wm)):
+        if variant == "final" and not _gate(a["id"], m, v):
             continue          # stale card, transitions or watermark: re-export
         if variant not in bv:
             bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
@@ -2268,7 +2264,7 @@ def _final_is_current(meta):
 TRANSITION_VERSION = 1
 
 
-def _transitions_are_current(meta):
+def _transitions_are_current(meta, edl_has_transition=True):
     """Was this final rendered with scene-scoped transitions?
 
     The backend half of worker/renderer.transitions_current, and it has to
@@ -2279,13 +2275,70 @@ def _transitions_are_current(meta):
     through one continuous shot, on a real customer's edit — and without this
     it stays downloadable forever.
 
-    Unlike the outro this cannot check the EDL (the caller has only the render
-    meta), so it is stamp-presence: no `trans_v` means the render predates
-    scene scoping. Finals with no transitions at all get re-encoded once
-    unnecessarily as a result. That is the cheap direction of the trade — the
-    expensive one is a customer downloading the broken cut.
+    `edl_has_transition` is the half this shipped WITHOUT, and its absence took
+    Download down for every user on the platform. The worker only ever busts an
+    EDL that actually carries a transition; this side demanded the stamp on
+    EVERY final, so the moment renders stopped carrying it (a render image
+    older than round 48 — see _worker_confirmed_current) not one export in the
+    product was reported as current. The rule has to be the SAME rule on both
+    sides, so the caller passes what the worker reads off the EDL. Grandfathers
+    exactly what the worker grandfathers, and nothing more.
     """
+    if not edl_has_transition:
+        return True
     return (meta or {}).get("trans_v") == TRANSITION_VERSION
+
+
+def _versions_with_transition(cur, project_id):
+    """EDL versions whose json carries a transition, as worker/renderer reads it.
+
+    Evaluated in SQL rather than by pulling the EDLs: /state is polled every 2s
+    per open studio and an EDL is a large document, so shipping 100 of them per
+    poll to test one key would be the expensive way to ask a cheap question.
+    The comparison mirrors Python truthiness on the shapes a transition can
+    take — absent, null, or an empty object all mean "no transition".
+    """
+    cur.execute("""SELECT version,
+                          COALESCE(json -> 'effects' -> 'transition',
+                                   'null'::jsonb)
+                          NOT IN ('null'::jsonb, 'false'::jsonb, '{}'::jsonb,
+                                  '[]'::jsonb, '""'::jsonb, '0'::jsonb)
+                            AS has_transition
+                   FROM edls WHERE project_id = %s""", (project_id,))
+    return {r["version"] for r in cur.fetchall() if r["has_transition"]}
+
+
+def _worker_confirmed_current(cur, project_id):
+    """Render assets the WORKER has already declared current, after being asked.
+
+    This is the loop-breaker, and it exists because the deadlock the
+    _watermark_wanted docstring warns about has now shipped twice. The gates
+    above are not truth — they are a REQUEST: hide a final so the studio posts
+    /render/final and the worker's cache is finally asked to bust. When the two
+    services disagree about a stamp there is no way out. The gate hides the
+    file, the studio asks for a re-render, the worker answers `cached: true`
+    with the very same asset, the gate hides it again. Download spins forever
+    and no file is ever produced. Users press it ten, thirteen, seventeen times
+    and leave.
+
+    A `cached: true` result is the worker saying, with full sight of the EDL and
+    its own pipeline stamps, "this file is current". At that point the backend's
+    opinion is stale metadata, not a fact, and re-rendering cannot help because
+    the worker has already declined to. So the user wins: serve the file they
+    have. Worst case they download a render one pipeline revision old; the
+    alternative on offer is nothing, forever.
+
+    Deliberately keyed on `cached`, not merely on "a job produced this asset":
+    a legitimately stale render still gets re-encoded fresh exactly once, which
+    is what the gates are for. Only the SECOND identical answer is the loop.
+    """
+    cur.execute("""SELECT DISTINCT (result ->> 'render_asset_id')::int AS aid
+                   FROM video_jobs
+                   WHERE project_id = %s AND type = 'final' AND state = 'done'
+                     AND result ->> 'cached' = 'true'
+                     AND result ->> 'render_asset_id' ~ '^[0-9]+$'""",
+                (project_id,))
+    return {r["aid"] for r in cur.fetchall()}
 
 
 # Mirrors worker/config.WATERMARK_VERSION — a worker test asserts they match.
@@ -2371,6 +2424,36 @@ def _watermark_is_current(meta, is_paid, settings=None):
     return ((meta or {}).get("wm_v") or 0) == want
 
 
+def _final_gate(cur, project_id, user_id):
+    """The one place that decides whether a rendered final is downloadable.
+
+    Both /state and /edls answer this question, and they MUST answer it the
+    same way — the studio arms its Download button off /state and fires it off
+    the version list, so a disagreement is a button that is enabled and does
+    nothing. They were two copies of the same three-way `and`; now they are one
+    function, and a fourth stamp is added in one place.
+
+    Both callers have already run _project_for_user, so `user_id` is the
+    project's owner and the watermark rule reads the right plan.
+
+    Returns a predicate over a render asset row. Its two set lookups are one
+    query each — /state is polled every 2s per open studio, so this stays two
+    indexed reads by project, never a per-asset query.
+    """
+    with_transition = _versions_with_transition(cur, project_id)
+    confirmed = _worker_confirmed_current(cur, project_id)
+    is_paid = _user_is_paid(cur, user_id)
+    wm = _watermark_settings(cur)
+
+    def ok(asset_id, meta, version):
+        if asset_id in confirmed:
+            return True           # the worker has already declined to re-render
+        return (_final_is_current(meta)
+                and _transitions_are_current(meta, version in with_transition)
+                and _watermark_is_current(meta, is_paid, wm))
+    return ok
+
+
 @video_bp.route("/projects/<int:project_id>/edls", methods=["GET"])
 @token_required
 def list_edls(user_id, project_id):
@@ -2386,8 +2469,7 @@ def list_edls(user_id, project_id):
                        WHERE project_id = %s AND kind = 'render'""",
                     (project_id,))
         renders = cur.fetchall()
-        _paid = _user_is_paid(cur, user_id)
-        _wm = _watermark_settings(cur)
+        _gate = _final_gate(cur, project_id, user_id)
 
     by_version = {}
     for r in renders:
@@ -2398,10 +2480,7 @@ def list_edls(user_id, project_id):
         except (TypeError, ValueError):
             continue
         bv = by_version.setdefault(v, {})
-        if variant == "final" and not (_final_is_current(m)
-                                       and _transitions_are_current(m)
-                                       and _watermark_is_current(m, _paid,
-                                                                 _wm)):
+        if variant == "final" and not _gate(r["id"], m, v):
             continue          # stale card, transitions or watermark: re-export
         # Keep the NEWEST asset id per (version, variant): a version can be
         # re-rendered, and the version list must point at the latest encode.
