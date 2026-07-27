@@ -206,6 +206,34 @@ REAPER_NOTES = {
 }
 
 
+_catalog_published = False
+
+
+def publish_mcp_catalog(worker_db):
+    """Publish the MCP tool catalog, and keep trying until it lands.
+
+    Boot alone is not enough. The FIRST deploy of this feature booted before
+    its migration had been applied: the table did not exist, the publish failed
+    honestly, and the MCP surface then reported itself unavailable for as long
+    as the worker happened to stay up — with the schema already fixed and
+    nothing left to do but restart a healthy process. Order-of-operations
+    between a deploy and a migration is not something to get right by hand, so
+    the retry lives here (in the reaper, the janitor thread) and costs one
+    UPSERT, once, the first time it can succeed."""
+    global _catalog_published
+    if _catalog_published:
+        return
+    try:
+        worker_db.run(dbx.publish_mcp_catalog, mcp_exec.catalog())
+        _catalog_published = True
+        print("[mcp] published tool catalog", flush=True)
+    except Exception as e:
+        print(f"[mcp] could not publish tool catalog ({e}) — the MCP surface "
+              "reports itself unavailable until this succeeds; retrying",
+              flush=True)
+        worker_db.reset()
+
+
 def reaper():
     """Every job must terminate VISIBLY: when a stale job's retries are
     exhausted, tell the user in chat instead of leaving the UI on 'Editing…'
@@ -213,6 +241,7 @@ def reaper():
     worker_db = dbx.Db()
     while True:
         time.sleep(60)
+        publish_mcp_catalog(worker_db)
         try:
             rows = worker_db.run(dbx.fail_exhausted_jobs) or []
             for row in rows:
@@ -306,15 +335,10 @@ def main():
           f"@{config.VISION_BASE_URL if config.VISION_API_KEY else 'NO KEY'}",
           flush=True)
     # Publish the MCP tool catalog for the backend to serve on tools/list.
-    # Best effort by design: MCP is an optional surface and a missing table
-    # (migration 008 not applied yet) must never stop the worker from booting.
-    try:
-        dbx.Db().run(dbx.publish_mcp_catalog, mcp_exec.catalog())
-        print("[startup] published MCP tool catalog", flush=True)
-    except Exception as e:
-        print(f"[startup] could not publish MCP catalog ({e}) — the MCP "
-              "surface will report itself unavailable until this succeeds",
-              flush=True)
+    # Best effort by design — a missing table (migration not applied yet) must
+    # never stop the worker from booting — and retried by the reaper until it
+    # lands, so applying the migration after the deploy still ends up correct.
+    publish_mcp_catalog(dbx.Db())
 
     if config.REMOTE_EXECUTOR_URL and not config.REMOTE_EXECUTOR_SECRET:
         print("[dispatcher] WARNING: REMOTE_EXECUTOR_URL set but "
