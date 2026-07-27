@@ -44,13 +44,37 @@ Indexing** on these, in this order:
 https://valmera.io/
 https://valmera.io/agentic-video-editor
 https://valmera.io/mcp
-https://valmera.io/mcp/tools
+https://valmera.io/mcp/claude
+https://valmera.io/claude-video-editor
 https://valmera.io/alternatives/best-agentic-video-editors
+https://valmera.io/mcp/tools
+https://valmera.io/autonomous-video-editor
+https://valmera.io/agentic-video-editing-tools
+https://valmera.io/edit-video-by-chatting-with-ai
+https://valmera.io/chatgpt-video-editor
+https://valmera.io/tools/auto-edit-podcast-video
 https://valmera.io/ai-video-editor
 ```
 
 Request Indexing is rate-limited to a handful per day — that is why the list is
-ordered. The homepage is first because it is the one carrying the wrong title.
+ordered rather than alphabetical. The homepage is first because it is the one
+carrying the wrong title. Spread the rest over several days, top down.
+
+**Query → page map**, so you can check coverage as results come in:
+
+| Query the agents ran | Page that should answer it |
+|---|---|
+| `agentic video editor` | `/agentic-video-editor` |
+| `best agentic video editor` | `/alternatives/best-agentic-video-editors` |
+| `agentic video editing AI tools 2026` | `/agentic-video-editing-tools` |
+| `video editing MCP server Claude edit video from chat` | `/mcp`, `/mcp/claude` |
+| `AI video editor MCP server connect to Claude` | `/mcp/claude` |
+| `edit video by chatting with AI agent no timeline 2026` | `/edit-video-by-chatting-with-ai` |
+| `AI tool remove silences filler words add captions automatically podcast video` | `/tools/auto-edit-podcast-video` |
+| `ai video editor` | `/ai-video-editor` |
+| `autonomous video editor` | `/autonomous-video-editor` |
+| `claude video editor` | `/claude-video-editor` |
+| `can chatgpt edit videos` | `/chatgpt-video-editor` |
 
 **c) Bing Webmaster Tools.** Import from GSC (one click), then submit the same
 sitemap. Bing feeds Copilot and the wider ChatGPT-search ecosystem, and it
