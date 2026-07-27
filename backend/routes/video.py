@@ -1752,12 +1752,19 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
             return edl, "output frame back to source"
         frame = {"ratio": ratio, "mode": mode}
         # Subject-aware crop focus (round 36) — same field the agent's
-        # auto_reframe writes; the UI passes it through when it has one.
+        # auto_reframe writes. Round 54 gave the STUDIO a way to send one too:
+        # the reframe panel's crop box is this pair, so a user can aim the
+        # crop at their subject instead of accepting the dead-centre window
+        # that made every reframe look like a zoom into the middle.
         for k in ("focus_x", "focus_y"):
             if args.get(k) is not None:
                 frame[k] = float(args[k])
         edl["frame"] = frame
-        return edl, f"output frame {ratio} ({mode})"
+        aim = ""
+        if mode == "crop" and ("focus_x" in frame or "focus_y" in frame):
+            aim = (f", aimed at {round(frame.get('focus_x', 0.5) * 100)}%"
+                   f"/{round(frame.get('focus_y', 0.5) * 100)}%")
+        return edl, f"output frame {ratio} ({mode}{aim})"
 
     if op == "split_keep":
         # Split the take under the playhead into two clips — the CapCut
@@ -2771,10 +2778,80 @@ def client_event(user_id, project_id):
 #  Assets                                                              #
 # ------------------------------------------------------------------ #
 
+# Mirrors worker/filmstrip.TIMELINE_MEDIA_VERSION — a worker test asserts they
+# match. Unlike OUTRO_VERSION this gate never WITHHOLDS anything: a strip built
+# by an older worker keeps serving its frames while the richer one is built.
+# That is the round-53 lesson applied before it could bite again — a version
+# gate that hides finished work until some other service catches up is how
+# Download became a platform-wide no-op.
+TIMELINE_MEDIA_VERSION = 1
+
+# Builds this route will ever run for ONE asset set. Any gate that asks for a
+# rebuild must be able to give up: if a worker somehow never writes the stamp,
+# the alternative is a job enqueued on every project open forever. Counting per
+# SIG rather than per project is what keeps that safety valve from also
+# blocking the legitimate case — a user who adds a tenth clip has a genuinely
+# new asset set and gets a genuinely new build, however many came before.
+MAX_FILMSTRIP_BUILDS_PER_SIG = 2
+
+# Asset kinds that can appear as a block on the timeline.
+_TIMELINE_ASSET_KINDS = ("video_clip", "image_ref", "music", "audio")
+
+
+def _timeline_media_sig(cur, project_id):
+    """A fingerprint of everything the timeline could need artwork for.
+
+    Computed HERE and handed to the worker, which echoes it back untouched —
+    so the value the gate compares against is the value the gate itself
+    produced. A worker that recomputed it could disagree by one asset forever,
+    and each disagreement would be a rebuild.
+    """
+    cur.execute("""SELECT storage_key FROM assets
+                   WHERE project_id = %s AND kind = ANY(%s)
+                   ORDER BY storage_key""",
+                (project_id, list(_TIMELINE_ASSET_KINDS)))
+    keys = [r["storage_key"] for r in cur.fetchall() if r.get("storage_key")]
+    # Bundled library tracks are not assets; the only record that one is on
+    # this timeline is the live EDL.
+    cur.execute("""SELECT COALESCE(json -> 'music', '[]'::jsonb) AS m
+                   FROM edls WHERE project_id = %s
+                   ORDER BY version DESC LIMIT 1""", (project_id,))
+    row = cur.fetchone()
+    for item in (row and row["m"]) or []:
+        k = (item or {}).get("storage_key")
+        if k:
+            keys.append(k)
+    import hashlib
+    return hashlib.sha1("\n".join(sorted(set(keys)))
+                        .encode("utf-8")).hexdigest()[:16]
+
+
+def _presigned_timeline_media(res):
+    """Turn a filmstrip job result into what the studio draws from.
+
+    Sheets become URLs; waveforms are already inline (see worker/filmstrip.py
+    — an envelope is smaller than the presigned URL that would fetch it).
+    """
+    out = dict(res)
+    key = out.pop("key", None)
+    out.pop("sig", None)
+    out["url"] = storage.presign_get(key) if key else None
+    assets = {}
+    for ref, a in (out.get("assets") or {}).items():
+        a = dict(a)
+        akey = a.pop("key", None)
+        if akey:
+            a["url"] = storage.presign_get(akey)
+        assets[ref] = a
+    out["assets"] = assets
+    return out
+
+
 @video_bp.route("/projects/<int:project_id>/filmstrip", methods=["GET"])
 @token_required
 def filmstrip(user_id, project_id):
-    """The sprite sheet of frames the studio timeline draws itself from.
+    """Everything the studio timeline draws itself from: the sprite sheet of
+    frames, the audio envelopes, and the per-asset artwork.
 
     Poll-shaped on purpose, and the shape is the whole design: the FIRST call
     for a video enqueues a worker job and answers `building`; every call after
@@ -2782,9 +2859,9 @@ def filmstrip(user_id, project_id):
     studio asks on every project open, so the common path has to be a single
     indexed SELECT.
 
-    Every failure mode answers 200 with available=false and a reason. A
-    filmstrip is decoration: the timeline it decorates has drawn perfectly good
-    blocks since round 5, and a 500 here would take the whole panel down (its
+    Every failure mode answers 200 with available=false and a reason. This is
+    decoration: the timeline it decorates has drawn perfectly good blocks since
+    round 5, and a 500 here would take the whole panel down (its
     SectionBoundary catches a crash, not a rejected fetch) over thumbnails.
     That includes the case where migration 011 has not been applied yet — the
     enqueue raises, and the answer is "not available", not an error page.
@@ -2796,14 +2873,18 @@ def filmstrip(user_id, project_id):
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
             return jsonify({"error": "Project not found"}), 404
+        try:
+            want_sig = _timeline_media_sig(cur, project_id)
+        except Exception:
+            want_sig = None
         cur.execute("""SELECT result FROM video_jobs
                        WHERE project_id = %s AND type = 'filmstrip'
                          AND state = 'done'
                        ORDER BY id DESC LIMIT 1""", (project_id,))
         done = cur.fetchone()
+        payload = None
         if done and (done.get("result") or {}).get("available"):
             res = dict(done["result"])
-            key = res.pop("key", None)
             # A replaced upload keeps the project and its EDL but is a
             # different video, so a strip built from the old one would draw the
             # WRONG frames under the user's cuts. The key carries the source
@@ -2813,29 +2894,48 @@ def filmstrip(user_id, project_id):
                            ORDER BY id DESC LIMIT 1""", (project_id,))
             src = cur.fetchone() or {}
             stale = bool(src.get("sha256")) and \
-                (src["sha256"] or "")[:16] not in (key or "")
-            if key and not stale:
-                return jsonify({"available": True, "state": "ready",
-                                "url": storage.presign_get(key),
-                                "expires_in": storage.PRESIGN_GET_EXPIRY,
-                                **res})
-        cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'filmstrip'
-                         AND state IN ('queued','running')
-                       ORDER BY id DESC LIMIT 1""", (project_id,))
-        if cur.fetchone():
-            return jsonify({"available": False, "state": "building"})
+                (src["sha256"] or "")[:16] not in (res.get("key") or "")
+            if res.get("key") and not stale:
+                payload = {"available": True, "state": "ready",
+                           "expires_in": storage.PRESIGN_GET_EXPIRY,
+                           **_presigned_timeline_media(res)}
+                # Fresh enough to draw, but built before the waveforms existed
+                # or before the newest asset landed? Ask for ONE rebuild and
+                # serve what we have in the same breath.
+                fresh = (res.get("tm_v") == TIMELINE_MEDIA_VERSION
+                         and (want_sig is None or res.get("sig") == want_sig))
+                if fresh:
+                    return jsonify(payload)
+
+        cur.execute("""SELECT COUNT(*) FILTER (
+                                  WHERE state IN ('queued','running')) AS live,
+                              COUNT(*) FILTER (
+                                  WHERE payload ->> 'sig'
+                                        IS NOT DISTINCT FROM %s) AS same_sig
+                       FROM video_jobs
+                       WHERE project_id = %s AND type = 'filmstrip'""",
+                    (want_sig, project_id))
+        counts = cur.fetchone() or {"live": 0, "same_sig": 0}
+        if counts["live"]:
+            return jsonify(dict(payload, rebuilding=True) if payload
+                           else {"available": False, "state": "building"})
+        if counts["same_sig"] >= MAX_FILMSTRIP_BUILDS_PER_SIG:
+            # Out of budget for this exact asset set. Serving the older
+            # artwork beats serving nothing, and beats asking forever.
+            return jsonify(payload or {"available": False,
+                                       "state": "unavailable"})
         cur.execute("""SELECT id FROM assets
                        WHERE project_id = %s AND kind IN ('proxy','original')
                        LIMIT 1""", (project_id,))
         if not cur.fetchone():
-            return jsonify({"available": False, "state": "no_video"})
+            return jsonify(payload or {"available": False,
+                                       "state": "no_video"})
         try:
             cur.execute("""INSERT INTO video_jobs
                              (project_id, user_id, type, state, payload)
                            VALUES (%s, %s, 'filmstrip', 'queued', %s)
                            RETURNING id""",
-                        (project_id, int(user_id), Json({})))
+                        (project_id, int(user_id), Json({"sig": want_sig})))
             cur.fetchone()
             conn.commit()
         except Exception as e:
@@ -2843,8 +2943,13 @@ def filmstrip(user_id, project_id):
             current_app.logger.warning(
                 "filmstrip enqueue failed for project %s: %s "
                 "(is migration 011 applied?)", project_id, e)
-            return jsonify({"available": False, "state": "unavailable"})
-    return jsonify({"available": False, "state": "building"})
+            return jsonify(payload or {"available": False,
+                                       "state": "unavailable"})
+    # `rebuilding` keeps the studio polling on a project that ALREADY has
+    # artwork: without it the client stops the moment available=true and the
+    # richer artwork it just asked for would not appear until the next open.
+    return jsonify(dict(payload, rebuilding=True) if payload
+                   else {"available": False, "state": "building"})
 
 
 @video_bp.route("/assets/<int:asset_id>/url", methods=["GET"])
