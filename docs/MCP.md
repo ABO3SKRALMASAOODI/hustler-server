@@ -30,7 +30,9 @@ headless model cannot: `list_projects`, `open_project`, `create_project`,
 
 ## Turning it on (once)
 
-**1. Apply both migrations.** Render shell on the backend service:
+**1. Apply both migrations** — DONE on production 2026-07-27, do not re-run
+(they are idempotent, but the CHECK swap takes a brief ACCESS EXCLUSIVE lock on
+`video_jobs`; if you ever do re-run them, keep the `SET LOCAL lock_timeout`).
 
 ```bash
 psql $DATABASE_URL -f backend/migrations/008_mcp.sql
@@ -41,9 +43,17 @@ psql $DATABASE_URL -f backend/migrations/009_mcp_oauth.sql
 `mcp_tokens` + `mcp_catalog` — without it every call fails at the INSERT. 009
 adds the four OAuth tables claude.ai needs.
 
-**2. Deploy** backend + worker (push to `main`). The worker publishes its tool
-catalog on boot — look for `published MCP tool catalog` in its log. If it says
-it could not, step 1 has not run.
+**2. Deploy** backend + worker (push to `main`) — DONE. The worker publishes
+its tool catalog on boot and, if that fails (migration not applied yet), keeps
+retrying from the reaper until it lands: look for `[mcp] published tool
+catalog`. Verified live on 2026-07-27 serving **87 tools** (10 session + 77
+editor).
+
+**Capabilities currently OFF on the worker**, so they are hidden from the
+connector rather than failing when called: `search_stock` / `add_stock_media`
+(needs `PEXELS_API_KEY` or `PIXABAY_API_KEY`) and `generate_image` (needs
+`IMAGE_API_KEY` — an xAI key, since DeepSeek publishes no image model). Vision
+(`look_at`) IS on.
 
 **3a. Connect from claude.ai** (the Claude app — web, desktop, mobile):
 
