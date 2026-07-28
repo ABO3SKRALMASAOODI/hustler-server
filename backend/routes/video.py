@@ -1222,6 +1222,32 @@ def project_state(user_id, project_id):
         indexed = bool(idx_row)
         edl = _latest_edl(cur, project_id)
 
+        # SELF-HEAL: the current edit must always have a render on the way.
+        #
+        # Belt to the braces above. Any path that fails to enqueue a preview —
+        # the concurrency cap that used to skip it, a 500 between the EDL
+        # insert and the enqueue, a future caller that simply forgets — leaves
+        # the newest EDL with no job, and the studio waits on a render that
+        # will never be requested. There is no error to see and no button to
+        # press: the progress bar just sits full.
+        #
+        # Naturally idempotent, which is what makes it safe to run on every
+        # poll: the moment a job row exists for that version the condition is
+        # false. A FAILED job also counts as existing, so a render that keeps
+        # dying is never re-queued in a loop here — that is the retry path's
+        # job, and it has its own bounded budget.
+        if edl and indexed:
+            cur.execute("""SELECT 1 FROM video_jobs
+                           WHERE project_id = %s AND type = 'preview'
+                             AND (payload->>'edl_version')::int = %s
+                           LIMIT 1""", (project_id, edl["version"]))
+            if not cur.fetchone():
+                print(f"[state] project {project_id}: EDL v{edl['version']} "
+                      f"had no preview job — enqueuing one", flush=True)
+                _enqueue(cur, project_id, user_id, "preview",
+                         {"edl_version": edl["version"],
+                          "source": "user_edit", "self_heal": True})
+
         cur.execute("""
             SELECT DISTINCT ON (type) id, type, state, progress, error,
                    updated_at
@@ -2280,13 +2306,41 @@ def user_edl_write(user_id, project_id):
                     (project_id, project_id, Json(normalized)))
         version = cur.fetchone()["version"]
 
-        preview_job = None
-        if _running_jobs_count(cur, user_id) < MAX_CONCURRENT_JOBS_PER_USER:
-            # source='user_edit' lets the worker post a chat note if THIS
-            # preview fails (agent-enqueued previews react inline instead).
-            preview_job = _enqueue(cur, project_id, user_id, "preview",
-                                   {"edl_version": version,
-                                    "source": "user_edit"})
+        # A QUEUED PREVIEW OF AN OLDER VERSION IS ALREADY WORTHLESS.
+        #
+        # Retire them before counting. Two things go wrong without this, and
+        # one of them strands the user permanently: cutting twice in a few
+        # seconds enqueued a preview per version, the user hit
+        # MAX_CONCURRENT_JOBS_PER_USER on the LAST one, and the cap below
+        # silently skipped it — the EDL committed, no render was ever
+        # requested, and nothing re-enqueues. The studio then waits forever for
+        # a preview of the current version. (Observed on project 229: v2/v3/v4
+        # each got a job, v5 arrived 3s later at exactly 3 running jobs and got
+        # none.) The other is pure waste: rendering v2 after v5 exists burns a
+        # slot and real money on frames nobody will ever see.
+        #
+        # Marked 'done' rather than 'failed' — the state check allows no
+        # 'cancelled', and a failure would land in the admin attention feed as
+        # if something had broken.
+        cur.execute("""UPDATE video_jobs
+                          SET state = 'done', result = %s, updated_at = NOW()
+                        WHERE project_id = %s AND type = 'preview'
+                          AND state = 'queued'
+                          AND (payload->>'edl_version')::int < %s""",
+                    (Json({"superseded_by": version}), project_id, version))
+        superseded = cur.rowcount
+
+        # Enqueued UNCONDITIONALLY, and that is safe because of the sweep
+        # above: a project can hold at most one queued preview at a time, so a
+        # user hammering the timeline cannot pile up work. The cap still
+        # governs everything expensive (agent turns, indexes, finals); what it
+        # must never do is leave the CURRENT edit with no way to be seen.
+        #
+        # source='user_edit' lets the worker post a chat note if THIS preview
+        # fails (agent-enqueued previews react inline instead).
+        preview_job = _enqueue(cur, project_id, user_id, "preview",
+                               {"edl_version": version,
+                                "source": "user_edit"})
         cur.execute("""INSERT INTO chat_messages (session_id, role, content,
                                                   meta)
                        VALUES (%s, 'activity', %s, %s)""",
