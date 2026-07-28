@@ -1,14 +1,10 @@
 #!/bin/bash
 
-# Copy template outputs to persistent disk if they don't exist
-for dir in /opt/render/project/src/outputs_template/*/; do
-  job_id=$(basename "$dir")
-  target="/opt/render/project/src/outputs/$job_id"
-  if [ ! -d "$target" ]; then
-    echo "Restoring template: $job_id"
-    cp -r "$dir" "$target"
-  fi
-done
+# The app-builder's six template projects used to be restored to the
+# persistent disk here on every boot. They were retired with the rest of the
+# builder; `outputs_template/` no longer exists in the repo, and an unmatched
+# glob would have made this loop try to copy a directory literally named "*"
+# and print a failure on every deploy.
 
 # ── Clean up orphaned "running" jobs from previous deploys ──────────────
 # When Render redeploys, any AA.py subprocess is killed mid-build.

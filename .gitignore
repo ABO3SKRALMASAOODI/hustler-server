@@ -16,3 +16,14 @@ test_clip_long.mp4
 
 # build-tool font cache (fetched on demand, only rendered pixels ship)
 worker/tools/PJS.ttf
+
+# ---- local-only, never in the repo -------------------------------------
+# A virtualenv (1.0GB) and a browser profile are not source. tiktok_sessions/
+# in particular is a live Chrome profile: it holds logged-in session cookies,
+# so committing it would publish working credentials to GitHub. These are
+# listed rather than deleted — they are working state on the machine.
+venv/
+tiktok_sessions/
+tiktok_state/
+_to_delete/
+backend/backend/
