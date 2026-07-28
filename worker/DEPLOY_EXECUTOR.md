@@ -105,7 +105,23 @@ curl https://valmera-executor-xxxx.a.run.app/health      # -> {"status":"ok",...
 - **`--allow-unauthenticated`** — Render isn't in GCP's IAM, so the endpoint is
   public but guarded by the bearer secret (`/run` returns 401 without it). See
   "Hardening" below to lock it down further later.
-- **`--memory 32Gi`** — Cloud Run's `/tmp` is an **in-memory** filesystem, and a
+- **`--execution-environment gen2`** — REQUIRED, and not for speed. On **gen1**
+  the workdir is a gVisor overlay whose `statvfs` reports the **host's** disk:
+  the live executor claimed **1001 GB free on a 32 GiB instance**. Any capacity
+  check that believed it would wave through a job that then gets the container
+  OOM-killed — silently, because an OOM produces no error at all. On gen2 the
+  same call reports **32.0 GB**, exactly the memory limit, which is the truth.
+  Verify with `curl .../health | jq .workdir` — `fstype` and `free_gb` are
+  reported precisely so this is checkable instead of assumed.
+- **`--memory 32Gi`** — this is **the flag that sets the maximum video length**,
+  because the workdir is sized by it. `storage.MAX_UPLOAD_GB` (14) is derived
+  from it: 32 GiB / `WORKDIR_HEADROOM` 2.2 = 14.5 GB, which `/health` reports as
+  `max_source_gb`. **Raising the upload cap without raising this first just
+  moves the refusal to after the user has spent 40 minutes uploading.** 32Gi is
+  Cloud Run's per-instance maximum, so going beyond ~14 GB sources means
+  mounting a volume for `WORKER_TMP_DIR`, not more RAM. Memory is the cheap
+  axis: ~$0.00008/s against ~$0.000192/s for 8 vCPU.
+- **(historical)** Cloud Run's `/tmp` is an **in-memory** filesystem, and a
   job downloads the ORIGINAL video there (plus writes the proxy, plus whisper
   holds ~2 GB if it runs locally). This is the flag that decides how long a
   video the product can accept: at 16Gi the upload cap could not safely exceed

@@ -308,7 +308,7 @@ WHISPER_COMPRESSION_RATIO_THRESHOLD = (
 # Mirrors backend/storage.MAX_UPLOAD_GB — the backend is what enforces it at
 # presign; this copy exists for the worker's own sanity checks. Raised from 2,
 # which contradicted MAX_DURATION_S below: 2 GiB over 3 hours is 1.6 Mbps.
-MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "16"))
+MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "14"))
 MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
 
 # Fetching media from a URL the user pasted (worker/url_media.py).

@@ -51,10 +51,29 @@ def test_the_byte_cap_can_hold_the_advertised_duration_at_a_real_bitrate():
 
 
 def test_an_hour_of_4k_fits():
-    """~35 Mbps is a phone or mirrorless camera shooting 4K. This is the case
-    that has to work for 'upload an hour of whatever I shot' to be true, and it
-    is the one that sets the cap: 1h x 35 Mbps is 15.75 GB."""
-    assert storage.max_upload_bytes() >= 35e6 / 8 * 3600
+    """~30 Mbps is a phone or mirrorless camera shooting 4K30. This is the case
+    that has to work for 'upload an hour of what I shot' to be true.
+
+    The ceiling above it is not a product choice: the executor's workdir is
+    sized by its Cloud Run --memory (32 GiB) and a job needs WORKDIR_HEADROOM
+    (2.2x) for what it writes beside the source, so 14.5 GB is the largest
+    source that instance can stage — measured, via /health's max_source_gb.
+    An hour of 4K60 at 50 Mbps (22 GB) genuinely does not fit and is refused
+    honestly rather than accepted and then killed.
+    """
+    assert storage.max_upload_bytes() >= 30e6 / 8 * 3600
+
+
+def test_the_cap_stays_within_what_the_executor_can_stage():
+    """The cap and the machine are a PAIR, exactly like the executor timeouts.
+
+    32 GiB of workdir / 2.2x headroom = 14.5 GB. A cap above that accepts an
+    upload the render service cannot process — the refusal just moves to after
+    the user has spent 40 minutes sending it, which is the worst place for it.
+    """
+    executor_workdir_gb = 32.0          # Cloud Run --memory on valmera-executor
+    headroom = 2.2                      # worker/config.WORKDIR_HEADROOM
+    assert storage.MAX_UPLOAD_GB <= executor_workdir_gb / headroom
 
 
 def test_an_hour_of_ordinary_1080p_fits():

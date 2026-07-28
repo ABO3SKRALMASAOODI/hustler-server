@@ -98,9 +98,19 @@ def client(public=False):
 # MAX_DURATION_S. Bytes only cost storage and the user's own upload time, so
 # this number just has to be big enough to stop being the thing that says no.
 #
-# 16 GB covers 1 hour of 4K at 35 Mbps, 10 minutes of 4K at 200 Mbps, and an
-# hour of 1080p at any bitrate a camera actually produces.
-MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "16"))
+# 14 GB is not a round number, it is a MEASURED one. The executor's workdir is
+# sized by its Cloud Run `--memory` (32 GiB), and a job needs room for the
+# source plus what it writes beside it (config.WORKDIR_HEADROOM, 2.2x — a final
+# can export at roughly the source's own size). 32 / 2.2 = 14.5, confirmed by
+# the executor's /health `max_source_gb`. Raising this without raising that
+# first just moves the refusal later, to after the user has spent 40 minutes
+# uploading.
+#
+# It covers 1 hour of 4K at 30 Mbps, 10 minutes of 4K at 195 Mbps, and 3 hours
+# of 1080p. It does NOT cover an hour of 4K60 at 50 Mbps (22 GB) — that needs a
+# volume mounted for WORKER_TMP_DIR, since 32 GiB is Cloud Run's per-instance
+# maximum.
+MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "14"))
 
 # Mirrors worker/config.MAX_DURATION_S. Enforced for real in the indexer (it
 # needs a probe); carried here so the API and the studio can refuse a 5-hour
