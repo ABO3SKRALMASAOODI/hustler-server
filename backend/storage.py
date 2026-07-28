@@ -58,6 +58,11 @@ ALLOWED_IMAGE_EXT = {
 MUSIC_MAX_BYTES = 50 * 1024 * 1024
 IMAGE_MAX_BYTES = 10 * 1024 * 1024
 CLIP_MAX_BYTES = 500 * 1024 * 1024   # clips spliced into the edit
+# A 540p rendition the BROWSER made with its own hardware decoder, uploaded
+# ahead of the original so indexing can start immediately (the proxy workflow
+# Premiere, Descript and Frame.io all run). 3 hours of 540p at ~1 Mbps is
+# ~1.3 GB, so 2 GB is generous; it is not a place for a full-size upload.
+PROXY_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def is_configured():
@@ -137,6 +142,7 @@ def upload_limits():
         "max_bytes_label": _size_label(max_upload_bytes()),
         "max_duration_s": MAX_DURATION_S,
         "clip_max_bytes": CLIP_MAX_BYTES,
+        "proxy_max_bytes": PROXY_MAX_BYTES,
         "music_max_bytes": MUSIC_MAX_BYTES,
         "image_max_bytes": IMAGE_MAX_BYTES,
         "video_ext": sorted(ALLOWED_VIDEO_EXT),
@@ -152,6 +158,7 @@ def validate_upload(filename, nbytes, kind):
         "music": (ALLOWED_MUSIC_EXT, MUSIC_MAX_BYTES),
         "image": (ALLOWED_IMAGE_EXT, IMAGE_MAX_BYTES),
         "clip": (ALLOWED_VIDEO_EXT, CLIP_MAX_BYTES),
+        "proxy": (ALLOWED_VIDEO_EXT, PROXY_MAX_BYTES),
     }.get(kind, (ALLOWED_VIDEO_EXT, max_upload_bytes()))
     if ext not in allowed:
         raise ValueError(f"File type {ext or '(none)'} not supported. "
@@ -165,7 +172,7 @@ def validate_upload(filename, nbytes, kind):
 
 
 KEY_PREFIX = {"original": "originals", "music": "music", "image": "images",
-              "clip": "clips"}
+              "clip": "clips", "proxy": "proxies"}
 
 
 def new_original_key(project_id, ext, kind="original"):

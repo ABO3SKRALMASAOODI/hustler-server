@@ -949,7 +949,8 @@ def complete_upload_core(user_id, project_id, data):
                      "file."}, 400
 
     asset_kind = {"original": "original", "music": "music",
-                  "image": "image_ref", "clip": "video_clip"}[kind]
+                  "image": "image_ref", "clip": "video_clip",
+                  "proxy": "proxy"}[kind]
     try:
         duration_s = min(max(float(duration_s), 0.1), 4 * 3600) \
             if duration_s else None
@@ -980,17 +981,49 @@ def complete_upload_core(user_id, project_id, data):
             return {"asset_id": dup["id"],
                     "index_job_id": ij["id"] if ij else None,
                     "kind": dup["kind"], "duplicate": True}, 200
+        asset_meta = {"filename": filename}
+        if kind == "proxy":
+            # What the BROWSER measured about the original while transcoding
+            # it. The indexer reads the source's shape from here, because the
+            # 540p proxy cannot tell it what the export resolution is. Every
+            # value is a claim until the original lands and is probed.
+            asset_meta["source"] = "client"
+            for k in ("source_sha256", "source_duration_s", "source_width",
+                      "source_height", "source_fps", "source_bytes"):
+                if data.get(k) is not None:
+                    asset_meta[k] = data.get(k)
         cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
                                            bytes, duration_s, meta)
                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
                     (project_id, asset_kind, key, nbytes,
                      duration_s if kind in ("music", "clip") else None,
-                     Json({"filename": filename})))
+                     Json(asset_meta)))
         asset_id = cur.fetchone()["id"]
         job_id = None
-        if kind == "original":
+        if kind == "proxy":
+            # INDEXING STARTS HERE, not when the original arrives. That is the
+            # whole point of the proxy-first upload: the browser's 540p
+            # rendition is ~50 MB and lands in seconds, while the original is
+            # still going up in the background. Everything downstream — shots,
+            # thumbnails, contact sheets, previews — already reads the proxy.
             job_id = _enqueue(cur, project_id, user_id, "index",
-                              {"asset_id": asset_id})
+                              {"asset_id": asset_id, "client_proxy": True})
+        elif kind == "original":
+            # If a client proxy has already kicked off the index, the original
+            # must NOT start a second one — it would redo everything the fast
+            # path just did, from the 4 GB file, which is exactly the work this
+            # avoids. It still needs PROBING though: the index is currently
+            # describing the source using numbers the browser reported, and
+            # those stay unverified until we look at the real file.
+            cur.execute("""SELECT id FROM assets
+                           WHERE project_id = %s AND kind = 'proxy'
+                             AND meta->>'source' = 'client'
+                           ORDER BY id DESC LIMIT 1""", (project_id,))
+            client_proxy = cur.fetchone()
+            job_id = _enqueue(
+                cur, project_id, user_id, "index",
+                {"asset_id": asset_id, "verify_original": True}
+                if client_proxy else {"asset_id": asset_id})
 
     return {"asset_id": asset_id, "index_job_id": job_id,
             "kind": asset_kind}, 200

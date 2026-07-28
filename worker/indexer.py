@@ -69,32 +69,97 @@ def run_index_job(worker_db, job):
         timings[stage] = round(time.monotonic() - _t, 2)
         _t = time.monotonic()
 
+    # THE CLIENT MAY HAVE ALREADY MADE THE PROXY (round 57).
+    #
+    # This is the standard proxy workflow every serious editor runs — Premiere
+    # generates proxies on ingest and swaps the originals back for export;
+    # Descript builds its "optimized assets" ON THE USER'S DEVICE, edits from
+    # those, and exports from the original; Frame.io's Camera-to-Cloud uploads
+    # the PROXY first precisely so people can start editing before the camera
+    # original has moved.
+    #
+    # It matters here because of what the numbers said: a 5m55s 4K upload cost
+    # ~12 minutes of browser upload and then 386.8s of server-side 4K decode,
+    # and that decode has no headroom left (it is 94% of the encode and already
+    # frame-threaded across every core). The only way to make it faster is to
+    # not do it. When the browser hands us a 540p rendition it made with its
+    # own hardware decoder, indexing skips BOTH the 4 GB download and the
+    # entire proxy encode, and can start while the original is still uploading.
+    #
+    # Everything downstream of here already works off the proxy — shots,
+    # thumbnails, contact sheets, and every preview render — so this branch
+    # only has to satisfy the three things step 1-3 would have produced: a
+    # source hash, the ORIGINAL's dimensions/duration/fps, and a local proxy.
+    client_proxy = bool(job["payload"].get("client_proxy"))
+
+    if job["payload"].get("verify_original"):
+        return _verify_client_proxy(worker_db, job, asset, project_id)
+
     try:
-        # 1. Pull original + hash it
-        src = os.path.join(workdir,
-                           "src" + os.path.splitext(asset["storage_key"])[1])
-        storage.download_to(asset["storage_key"], src)
-        worker_db.run(dbx.set_progress, job_id, 8)
-        _mark("download_s")
-        sha = media.sha256_file(src)
-        _mark("sha256_s")
+        if client_proxy:
+            # One small download instead of the original's several GB.
+            src = os.path.join(workdir, "proxy.mp4")
+            storage.download_to(asset["storage_key"], src)
+            worker_db.run(dbx.set_progress, job_id, 8)
+            _mark("download_s")
+            meta = asset.get("meta") or {}
+            # The client hashed the original as it streamed it through the
+            # decoder — it was reading every byte anyway. UNVERIFIED until the
+            # original lands, which is why the cross-project cache lookup is
+            # skipped below: `get_index_by_sha` is global, so honouring a
+            # client-supplied hash there would hand one account another
+            # account's transcript for the price of guessing a hash.
+            sha = meta.get("source_sha256") or media.sha256_file(src)
+            _mark("sha256_s")
+            probed = media.probe(src)
+            # The ORIGINAL's shape, as the client measured it. The proxy's own
+            # duration is the fallback, and its dimensions never are — a 540p
+            # proxy would otherwise tell the renderer the export is 540p.
+            info = dict(probed)
+            info["duration"] = float(meta.get("source_duration_s")
+                                     or probed["duration"])
+            info["width"] = int(meta.get("source_width") or probed["width"])
+            info["height"] = int(meta.get("source_height") or probed["height"])
+            info["fps"] = float(meta.get("source_fps") or probed["fps"])
+        else:
+            # 1. Pull original + hash it
+            src = os.path.join(workdir,
+                               "src" + os.path.splitext(asset["storage_key"])[1])
+            storage.download_to(asset["storage_key"], src)
+            worker_db.run(dbx.set_progress, job_id, 8)
+            _mark("download_s")
+            sha = media.sha256_file(src)
+            _mark("sha256_s")
 
         # 2. Probe (also enforces the duration quota)
-        info = media.probe(src)
+        if not client_proxy:
+            info = media.probe(src)
         if info["duration"] > config.MAX_DURATION_S:
             raise RuntimeError(
                 f"Video is {info['duration']/3600:.1f}h — the limit is "
                 f"{config.MAX_DURATION_S/3600:.0f}h")
-        worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
-                      info["width"], info["height"], info["fps"], sha)
+        # Only the ORIGINAL's row carries the source's shape. A client proxy's
+        # asset row must keep its own 540p dimensions, or the renderer would
+        # read them back as the export size.
+        if not client_proxy:
+            worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
+                          info["width"], info["height"], info["fps"], sha)
         worker_db.run(dbx.set_progress, job_id, 12)
 
-        proxy_key = f"proxies/{project_id}/{sha}.mp4"
+        proxy_key = (asset["storage_key"] if client_proxy
+                     else f"proxies/{project_id}/{sha}.mp4")
 
         # Cache hit: this exact file was indexed before (any project) BY THE
         # CURRENT PIPELINE. An index built by an older pipeline version is
         # stale (different segmentation/VAD rules) and gets rebuilt.
-        cached = worker_db.run(dbx.get_index_by_sha, sha)
+        #
+        # SKIPPED for a client proxy: the hash came from the browser and has
+        # not been checked against the original yet, and this lookup is global
+        # across projects — honouring an unverified hash here would serve one
+        # account another account's transcript, shots and captions to anyone
+        # who could name their video's hash.
+        cached = None if client_proxy else worker_db.run(dbx.get_index_by_sha,
+                                                         sha)
         if cached and cached.get("pipeline_version", 1) == \
                 config.PIPELINE_VERSION:
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
@@ -120,9 +185,16 @@ def run_index_job(worker_db, job):
 
         # 3. Proxy (VFR -> CFR here) + 16k mono wav
         proxy_local = os.path.join(workdir, "proxy.mp4")
-        media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
-                         info["has_audio"], duration=info["duration"],
-                         progress_cb=_stage_progress(worker_db, job_id, 12, 30))
+        if client_proxy:
+            # Already have it — this is the 386.8s that disappears. `src` IS
+            # the proxy here, and it is already the object at proxy_key, so
+            # there is nothing to encode and nothing to upload.
+            proxy_local = src
+        else:
+            media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
+                             info["has_audio"], duration=info["duration"],
+                             progress_cb=_stage_progress(worker_db, job_id,
+                                                         12, 30))
         # Probed here, not at upload time: step 6 needs the proxy's REAL
         # duration to keep thumbnail seeks inside it.
         proxy_info = media.probe(proxy_local)
@@ -341,9 +413,14 @@ def run_index_job(worker_db, job):
 
         with futures.ThreadPoolExecutor(
                 max_workers=config.UPLOAD_PARALLELISM) as pool:
-            # Required: the job dies if either of these does.
-            required = {pool.submit(storage.upload_file, proxy_local,
-                                    proxy_key, "video/mp4"): "proxy"}
+            # Required: the job dies if either of these does. A client proxy is
+            # ALREADY the object at proxy_key — the browser PUT it there — so
+            # re-uploading it would be a pointless round trip of the one file
+            # this whole path exists to avoid moving twice.
+            required = {}
+            if not client_proxy:
+                required[pool.submit(storage.upload_file, proxy_local,
+                                     proxy_key, "video/mp4")] = "proxy"
             if audio_key:
                 required[pool.submit(storage.upload_file, wav_local,
                                      audio_key, "audio/wav")] = "audio"
@@ -414,11 +491,17 @@ def run_index_job(worker_db, job):
                 pass
         worker_db.run(dbx.set_progress, job_id, 92)
 
-        worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,
-                      bytes_=os.path.getsize(proxy_local),
-                      duration_s=proxy_info["duration"],
-                      width=proxy_info["width"], height=proxy_info["height"],
-                      fps=proxy_info["fps"], sha256=sha)
+        # The client proxy already HAS its asset row (created when the browser
+        # finished uploading it); a second one would give the project two proxy
+        # assets and `latest_asset(project, 'proxy')` would start returning
+        # whichever was inserted last.
+        if not client_proxy:
+            worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,
+                          bytes_=os.path.getsize(proxy_local),
+                          duration_s=proxy_info["duration"],
+                          width=proxy_info["width"],
+                          height=proxy_info["height"],
+                          fps=proxy_info["fps"], sha256=sha)
         if audio_key:
             worker_db.run(dbx.insert_asset, project_id, "audio", audio_key,
                           bytes_=os.path.getsize(wav_local),
@@ -469,6 +552,53 @@ def run_index_job(worker_db, job):
                 "timings": timings}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+# How far the original may differ from what the browser said before the index
+# is considered a description of a different video. Duration is the one that
+# matters — every cut, caption and zoom is a timestamp into it.
+VERIFY_DURATION_TOL_S = 0.5
+VERIFY_DURATION_FRAC = 0.01
+
+
+def _verify_client_proxy(worker_db, job, asset, project_id):
+    """Check the original against what the browser claimed while transcoding.
+
+    Frame.io's relink rule for camera-to-cloud proxies is that the proxy and
+    the original must agree on clipname, timecode and start/stop; ours is the
+    same idea with the fields we have. Until this runs, the index describes the
+    source using numbers a client supplied, and the client is not trusted.
+
+    Deliberately cheap: ffprobe reads the moov atom over HTTP, so this costs a
+    few hundred KB and a second — NOT a download of the several-GB original,
+    which is the cost the whole proxy-first path exists to avoid.
+    """
+    url = storage.presign_get(asset["storage_key"], expires=3600)
+    info = media.probe(url)
+    worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
+                  info["width"], info["height"], info["fps"],
+                  asset.get("sha256"))
+
+    proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
+    claimed = (proxy or {}).get("meta") or {}
+    said = float(claimed.get("source_duration_s") or 0)
+    drift = abs(info["duration"] - said) if said else 0.0
+    tol = max(VERIFY_DURATION_TOL_S, VERIFY_DURATION_FRAC * info["duration"])
+    ok = bool(said) and drift <= tol
+
+    if not ok:
+        # The index describes a video the original is not. Rebuild it properly
+        # from the original — the slow path, but correct, and it is the only
+        # honest response to "the timestamps might be wrong".
+        print(f"[index {job['id']}] client proxy DISAGREES with the original "
+              f"(browser said {said:.2f}s, file is {info['duration']:.2f}s) — "
+              f"re-indexing from the original", flush=True)
+        worker_db.run(dbx.enqueue_job, project_id, job.get("user_id"), "index",
+                      {"asset_id": asset["id"], "reindex": True})
+    return {"verified": ok, "source_duration_s": info["duration"],
+            "claimed_duration_s": said or None,
+            "drift_s": round(drift, 3), "width": info["width"],
+            "height": info["height"], "fps": info["fps"]}
 
 
 def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
