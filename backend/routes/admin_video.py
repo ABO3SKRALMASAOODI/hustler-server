@@ -293,6 +293,24 @@ def video_overview():
         """)
         model_rows = cur.fetchall()
 
+        # Vision liveness, inferred from behaviour. A day with agent turns but
+        # not one vision call is the signature of a lost vision key: on a
+        # healthy day look_at runs on roughly a third of turns. Requiring a
+        # meaningful number of agent calls first is what stops a quiet weekend
+        # from reading as an outage.
+        cur.execute("""
+            SELECT COUNT(*) FILTER (WHERE purpose = 'agent') AS agent_calls,
+                   COUNT(*) FILTER (WHERE purpose LIKE 'vision%') AS vision_calls
+            FROM llm_calls
+            WHERE created_at > NOW() - INTERVAL '24 hours'
+        """)
+        vrow = cur.fetchone() or {}
+        _agent_n = int(vrow.get("agent_calls") or 0)
+        _vision_n = int(vrow.get("vision_calls") or 0)
+        # None = "not enough traffic to say", which must not render as a
+        # red light. Only a confident zero is an outage.
+        vision_live = None if _agent_n < 25 else bool(_vision_n)
+
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 
     def _provider(b):
@@ -322,6 +340,16 @@ def video_overview():
             "storage_configured": bool(os.getenv("S3_ENDPOINT")
                                        and os.getenv("S3_BUCKET")),
             "llm_configured": bool(os.getenv("OPENAI_API_KEY")),
+            # IS THE AGENT STILL LOOKING AT THE FOOTAGE. Vision is honest-off
+            # by contract — when its provider is unconfigured every tool says
+            # "visual inspection unavailable" and nothing fails — which is
+            # right for the user and invisible to us. The Jul 26 2026 provider
+            # switch dropped the dispatcher's inherited vision key and it took
+            # TWO DAYS and 419 agent calls with zero look_at to notice.
+            # Inferred from behaviour, not from this service's env: the worker
+            # is a different service with different variables, so its env is
+            # not ours to read and its BEHAVIOUR is the only truth available.
+            "vision_live": vision_live,
         },
         "users": [{**u, "last_active": u["last_active"].isoformat()
                    if u.get("last_active") else None,

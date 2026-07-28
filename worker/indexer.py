@@ -221,6 +221,17 @@ def run_index_job(worker_db, job):
         # Only sample + caption when vision is actually configured — otherwise
         # caption_shots is a no-op and any "sampled N sheets" warning would
         # falsely claim captioning happened.
+        #
+        # AND RECORD WHAT IT SPENDS. llm.record() no-ops when no recorder is
+        # installed, and only agent_loop and mcp_exec ever installed one — so
+        # every contact-sheet caption call an index has ever made was invisible
+        # in llm_calls. That is not a cosmetic gap: `SELECT ... FROM llm_calls
+        # WHERE purpose='vision...'` is the documented way to check whether
+        # vision is alive after a provider change, and it read ZERO for a
+        # capability that was working perfectly. It also means every admin cost
+        # view has been under-reporting index spend. Same recorder shape as the
+        # agent turn's, minus the per-turn usage accumulation (an index is not
+        # charged to a user).
         if llm.vision_available():
             cap = max(1, config.MAX_VISION_SHEETS)   # 0/negative would divide by zero
             to_caption = sheet_list
@@ -233,6 +244,24 @@ def run_index_job(worker_db, job):
                     f"visual captioning sampled {len(to_caption)} of "
                     f"{len(sheet_list)} contact sheets to bound cost — some "
                     "shots have no visual description")
+            def _index_recorder(purpose, request, response, usage):
+                model = (request or {}).get("model")
+                cached_in = llm.cached_input_tokens(usage)
+                reasoning = llm.reasoning_tokens(usage)
+                if isinstance(response, dict) and (cached_in or reasoning):
+                    extra = {}
+                    if cached_in:
+                        extra["cached_in"] = cached_in
+                    if reasoning:
+                        extra["reasoning_out"] = reasoning
+                    response = dict(response, **extra)
+                worker_db.run(
+                    dbx.insert_llm_call, project_id, job_id, purpose, model,
+                    request, response,
+                    getattr(usage, "prompt_tokens", None) if usage else None,
+                    getattr(usage, "completion_tokens", None) if usage else None)
+
+            llm.set_recorder(_index_recorder)
             try:
                 sheets.caption_shots(to_caption, {s.id: s for s in shots})
             except Exception as e:
@@ -240,6 +269,27 @@ def run_index_job(worker_db, job):
                                 "shots have no visual description")
                 print(f"[index {job_id}] vision captioning degraded: {e}",
                       flush=True)
+            finally:
+                llm.set_recorder(None)
+        else:
+            # SAY IT. Vision going dark is silent by design everywhere else
+            # (the honest-off contract: tools report "visual inspection
+            # unavailable" rather than failing), and the cost of that silence
+            # was measured: after the Jul 26 2026 provider switch the
+            # dispatcher lost its inherited vision key and ran 419 agent calls
+            # across two days with ZERO look_at, while indexes quietly shipped
+            # without a single visual description. Nothing anywhere said so.
+            # An index with no captions is a materially worse index — the agent
+            # is left with transcript and timings and no idea what is on
+            # screen — so it belongs in the warnings an admin already reads.
+            warnings.append(
+                "no visual descriptions: the vision provider is not "
+                "configured on this service (set VISION_API_KEY, or point "
+                "VISION_BASE_URL at a provider whose key it can inherit) — "
+                "shots have timings but no description of what is on screen")
+            print(f"[index {job_id}] VISION UNAVAILABLE — indexing without "
+                  f"shot captions (VISION_MODEL={config.VISION_MODEL!r}, "
+                  f"key set={bool(config.VISION_API_KEY)})", flush=True)
         worker_db.run(dbx.set_progress, job_id, 85)
         _mark("sheets_vision_s")
 
