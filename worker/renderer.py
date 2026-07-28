@@ -130,7 +130,7 @@ def frame_dims(src_w, src_h, ratio):
 
 
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
-                     focus=None):
+                     focus=None, seg_dur=None):
     """Append graph parts that bring in_label to exactly WxH @ fps, sar 1.
     mode: crop (center-crop), pad (black bars), pad_blur (blurred backdrop).
 
@@ -138,8 +138,40 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
     centers on, or None for the legacy center crop. Only the crop mode uses
     it — pad modes never discard picture. None/center emits the EXACT legacy
     filter string, so every stored EDL (all focus-less) renders
-    byte-identically."""
-    tail = f"fps={fps:.3f},setsar=1,format=yuv420p"
+    byte-identically.
+
+    seg_dur (round 56): this block's own PROGRAM length, when the block is
+    about to become a `concat` segment. `fps` is what makes that concat legal
+    — kept spans, a looped PNG title card and a clip from another file all
+    arrive at different rates and concat needs one — but on **ffmpeg 5.1.9**
+    (Debian bookworm, which is what this image installs) `fps` after a
+    `setpts=PTS-STARTPTS` emits frames PAST the segment's real content, and
+    concat then honours that longer duration when placing the next segment.
+
+    Three things kept it hidden for a day of forensics:
+      * ffmpeg 8.1.2 renders the IDENTICAL graph to the correct length, so it
+        never reproduced on a dev machine.
+      * Video alone is correct even on 5.1 — the stretch appears only when
+        audio shares the concat, because that is when the padded video is what
+        the segment's length is taken from.
+      * A preview renders from our own proxy and a final from the customer's
+        original, which made it look like a property of their file.
+
+    Measured on the export that exposed it (project 226, 14 kept spans + a 1.5s
+    title card): 158.58s for a 150.48s edit on 5.1.9, +0.6s per segment
+    compounding, and 150.53s from the same graph on 8.1.2. It failed
+    verification three times and the user was told only "the render is the
+    wrong length".
+
+    So the block is bounded to the length the EDL says it is. On 5.1 that
+    discards the padding; on 8.1 there is nothing to discard and the trim is a
+    no-op — which is what makes it safe to apply unconditionally instead of
+    sniffing an ffmpeg version into a filter chain. Verified on both builds
+    against the real EDL: 150.60s and 150.53s for 150.48s expected.
+    """
+    bound = ("" if seg_dur is None
+             else f"trim=end={float(seg_dur):.3f},setpts=PTS-STARTPTS,")
+    tail = f"fps={fps:.3f},{bound}setsar=1,format=yuv420p"
     if mode == "pad":
         parts.append(
             f"[{in_label}]scale={W}:{H}:force_original_aspect_ratio=decrease,"
@@ -786,7 +818,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # measured on the source video, so inserts (below) keep the
             # center crop.
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
-                             mode, f"s{i}", focus=frame_focus)
+                             mode, f"s{i}", focus=frame_focus,
+                             seg_dur=seg_out_len[i])
 
     # insert blocks: trim to their window (source_start_s picks where in
     # the clip the window starts), normalize like everything else
@@ -802,7 +835,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         motion = item.get("motion") if item["kind"] == "image" else None
         norm_out = f"v_insn{j}" if motion else f"v_ins{j}"
         _normalize_video(parts, f"insv{j}", norm_out, W, H, fps,
-                         mode, f"i{j}")
+                         mode, f"i{j}", seg_dur=dur)
         if motion:
             nframes = max(1, int(round(dur * fps)))
             prog = f"(on/{nframes})"
