@@ -551,6 +551,11 @@ EXECUTOR_PORT = int(os.getenv("PORT", "8080"))
 # Lower it if the storage provider starts rate-limiting; 1 restores the old
 # sequential behaviour exactly.
 UPLOAD_PARALLELISM = int(os.getenv("UPLOAD_PARALLELISM", "8"))
+# Shot thumbnails extracted at once. One per shot and there can be hundreds:
+# pulled serially, a real 141-shot upload spent 48s seeking before it had even
+# started uploading them. Each is an independent ffmpeg seek that is mostly
+# I/O and single-threaded decode, so they overlap well.
+THUMB_PARALLELISM = int(os.getenv("THUMB_PARALLELISM", "4"))
 STALE_AFTER_S = 120           # running + no heartbeat for this long => reclaimable
 MAX_ATTEMPTS_MEDIA = 3        # first run + 2 retries
 MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resend)
@@ -676,6 +681,7 @@ VIDEO_PRICE_USD_PER_SEC = float(os.getenv("VIDEO_PRICE_USD_PER_SEC", "0.07"))
 PROXY_HEIGHT = int(os.getenv("PROXY_HEIGHT", "540"))
 PROXY_PRESET = os.getenv("PROXY_PRESET", "veryfast")
 PROXY_CRF = int(os.getenv("PROXY_CRF", "25"))
+
 
 # Round 39 — repainting burned-in text/objects out of the source (inpaint.py).
 # The clean pass decodes every frame, repaints the marked rectangles and

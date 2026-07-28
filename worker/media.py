@@ -233,14 +233,42 @@ def probe(path):
     }
 
 
-def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
-                  expected_out_s=None):
-    h = config.PROXY_HEIGHT
+def _proxy_vf(h, pad_s=0.0):
     vf = rf"scale=-2:min({h}\,floor(ih/2)*2)"
     if pad_s > 0:
         # Clone the last frame forward. After scale, so it clones a proxy frame.
         vf += f",tpad=stop_mode=clone:stop_duration={pad_s:.3f}"
-    cmd = ["ffmpeg", "-y", "-i", src, "-vf", vf,
+    return vf
+
+
+def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
+                  expected_out_s=None):
+    # DO NOT SLICE THIS ENCODE ACROSS CORES. It was tried and MEASURED, on a
+    # 90s 3840x2160 95Mbps file (the profile of the customer upload that spent
+    # 386.8s of a 493s index right here):
+    #
+    #   serial                     37.3s
+    #   8 slices, 1 thread each    53.0s
+    #   8 slices, auto threads     53.1s
+    #   4 slices, 2 threads each   50.9s
+    #   2 slices, auto threads     53.5s
+    #
+    # Every slicing arrangement was SLOWER. The reason is the shape of the
+    # cost, which the next two numbers pin exactly: decoding alone, with no
+    # scale and no encode, is 34.9s of that 37.3s — 94% — and decoding with
+    # `-threads 1` is 125.4s against 34.9s on auto. So the expensive stage is
+    # the 4K decode, it already frame-threads across every core, and running N
+    # ffmpegs simply makes them contend for cores one of them was already
+    # using. Scaler choice is noise for the same reason (bicubic 37.1s,
+    # fast_bilinear 43.9s, bilinear 48.7s, area 44.2s — the default is also
+    # the fastest).
+    #
+    # The honest conclusion: there is no CPU-side headroom here. Making 4K
+    # indexing dramatically faster means not decoding 4K on a CPU at all —
+    # hardware decode, or a proxy produced by the client's own GPU before
+    # upload — not a cleverer arrangement of this loop.
+    cmd = ["ffmpeg", "-y", "-i", src, "-vf",
+           _proxy_vf(config.PROXY_HEIGHT, pad_s),
            "-c:v", "libx264", "-preset", config.PROXY_PRESET,
            "-crf", str(config.PROXY_CRF), "-pix_fmt", "yuv420p"]
     if vfr:

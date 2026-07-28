@@ -196,17 +196,34 @@ def run_index_job(worker_db, job):
         # lot) shorter. Seeking past its last frame yields no frame at all.
         proxy_dur = proxy_info["duration"]
         seek_ceiling = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
-        for shot in shots:
+
+        # ONE THUMBNAIL PER SHOT, AND THERE CAN BE HUNDREDS. Pulled serially
+        # this was ~1s each — 141 shots on a real 4-minute upload cost 48s of
+        # seeking plus 139s of uploading, more than the whole rest of the
+        # index. Each seek is an independent ffmpeg that spends most of its
+        # life in I/O and single-threaded decode, so they run concurrently on
+        # a box with cores to spare. Bounded by the same knob the artifact
+        # uploads use, since both are "many small independent jobs".
+        def _thumb(shot):
             mid = (shot.start + shot.end) / 2.0
             if seek_ceiling is not None:
                 mid = min(mid, seek_ceiling)
             tp = os.path.join(thumb_dir, f"shot_{shot.id}.jpg")
             try:
                 media.frame_at(proxy_local, mid, tp, width=320)
-                thumb_paths[shot.id] = tp
+                return shot.id, tp
             except media.MediaError as e:
                 print(f"[index {job_id}] no thumbnail for shot {shot.id} "
                       f"@{mid:.2f}s (proxy {proxy_dur}s): {e}", flush=True)
+                return shot.id, None
+
+        if shots:
+            with futures.ThreadPoolExecutor(
+                    max_workers=max(1, min(len(shots),
+                                           config.THUMB_PARALLELISM))) as pool:
+                for sid, tp in pool.map(_thumb, shots):
+                    if tp:
+                        thumb_paths[sid] = tp
         worker_db.run(dbx.set_progress, job_id, 75)
         _mark("shots_s")
 
