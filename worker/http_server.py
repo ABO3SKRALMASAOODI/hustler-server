@@ -23,6 +23,7 @@ Routes:
 import hmac
 import json
 import os
+import shutil
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -80,6 +81,29 @@ class Handler(BaseHTTPRequestHandler):
                 body.update(version.version_report())
             except Exception as e:
                 body["version_error"] = str(e)[:200]
+            # HOW BIG A VIDEO CAN THIS INSTANCE ACTUALLY STAGE. On Cloud Run
+            # TMP_DIR is an in-memory filesystem sized by `--memory`, so this
+            # is the number that decides whether the upload cap is real — and
+            # it lived nowhere: the only way to discover it was to send a job
+            # big enough to get the container OOM-killed, which produces no
+            # error at all. Same reasoning as the code fingerprint above: make
+            # the answer one curl instead of an incident.
+            try:
+                import storage as _storage
+                free = _storage.free_workdir_bytes()
+                total = shutil.disk_usage(config.TMP_DIR).total
+                gb = 1024 ** 3
+                body["workdir"] = {
+                    "path": config.TMP_DIR,
+                    "free_gb": round((free or 0) / gb, 1),
+                    "total_gb": round(total / gb, 1),
+                    # The largest source this instance could stage right now,
+                    # given the artifacts a job writes beside it.
+                    "max_source_gb": round(
+                        (free or 0) / gb / config.WORKDIR_HEADROOM, 1),
+                }
+            except Exception as e:
+                body["workdir_error"] = str(e)[:200]
             self._send(200, body)
         else:
             self._send(404, {"error": "not found"})
