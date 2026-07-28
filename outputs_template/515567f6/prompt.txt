@@ -1,1 +1,0 @@
-Analytics Dashboard "Build an analytics dashboard with a dark background, red accent color, sidebar navigation, stat cards showing revenue users and conversions, a line chart, a bar chart, and a recent activity table"

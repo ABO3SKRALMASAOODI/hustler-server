@@ -1,4 +1,0 @@
-Developer Portfolio
-
-
-"Build a developer portfolio with a dark black background, red accent color, hero with name and title, skills section, projects grid with cards, and a contact section"
