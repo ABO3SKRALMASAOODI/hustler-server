@@ -305,7 +305,10 @@ WHISPER_COMPRESSION_RATIO_THRESHOLD = (
     None if _crt in ("", "none", "off") else float(_crt))
 
 # Quotas / limits
-MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "2"))
+# Mirrors backend/storage.MAX_UPLOAD_GB — the backend is what enforces it at
+# presign; this copy exists for the worker's own sanity checks. Raised from 2,
+# which contradicted MAX_DURATION_S below: 2 GiB over 3 hours is 1.6 Mbps.
+MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "16"))
 MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
 
 # Fetching media from a URL the user pasted (worker/url_media.py).
@@ -405,6 +408,16 @@ WEB_DEMO_TYPE_DELAY_MS = int(os.getenv("WEB_DEMO_TYPE_DELAY_MS", "55"))
 
 # Worker tuning
 TMP_DIR = os.getenv("WORKER_TMP_DIR", "/tmp/valmera")
+
+# Scratch space a job is assumed to need, as a multiple of its SOURCE size:
+# the original, plus the artifacts written beside it (proxy, wav, thumbnails,
+# or the render output). 2.2x comfortably covers a final (source + an H.264
+# export of a cut-down programme) and an index (source + a 540p proxy + a 16k
+# mono wav). Used by storage.check_workdir_capacity to refuse a job that cannot
+# fit BEFORE it gets OOM-killed — on Cloud Run TMP_DIR is RAM, so running out
+# kills the container rather than raising, and the job's only epitaph is
+# "Worker died and retries are exhausted".
+WORKDIR_HEADROOM = float(os.getenv("WORKDIR_HEADROOM", "2.2"))
 POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
 # The media lane runs preview + final encodes. Indexing gets its OWN lane
 # (INDEX_SLOTS) so a multi-minute whisper index can never wedge interactive
@@ -483,6 +496,50 @@ REMOTE_EXECUTOR_SECRET = os.getenv("REMOTE_EXECUTOR_SECRET", "")
 # If you raise Cloud Run's --timeout, raise this to match; it must always be
 # the smaller of the two.
 REMOTE_EXECUTOR_TIMEOUT_S = int(os.getenv("REMOTE_EXECUTOR_TIMEOUT_S", "1500"))
+
+# ONE TIMEOUT FOR EVERY JOB KIND WAS THE THING THAT CAPPED VIDEO LENGTH
+# (round 57).
+#
+# A 20-second reel's preview and a 1-hour final are not the same wait, and
+# sizing a single number for both means sizing it for the short one: 1500s is
+# five minutes more than the longest healthy job we had ever SEEN, which is a
+# different thing from the longest job that should be ALLOWED. Measured on the
+# executor, encodes run 0.5-1.8x realtime (filters, not pixels: a 270x480
+# source still took 0.93x), so an hour-long programme needs a budget in the
+# thousands of seconds or it cannot finish at all — and the failure arrives
+# after the user has already waited.
+#
+# The pairing invariant is unchanged and still load-bearing: the dispatcher
+# must give up BEFORE the executor, or a wedged job is requeued while the
+# original keeps burning 8 vCPU beside the retry. So every value here must stay
+# under EXECUTOR_REQUEST_TIMEOUT_S, which mirrors Cloud Run's `--timeout`.
+# worker/tests/test_executor_timeouts.py asserts both the ordering and that
+# DEPLOY_EXECUTOR.md still documents the same number.
+#
+# Raising the cap back toward Cloud Run's 3600s maximum is safer than it was in
+# round 48, when two wedged finals ran the old cap to the second. What changed
+# is that the encodes that could wedge now run under media.run()'s stall
+# watchdog (it fires on ffmpeg producing NO progress, long before any of these
+# ceilings), so these are a backstop for a pathological job rather than the
+# primary defence they used to be.
+EXECUTOR_REQUEST_TIMEOUT_S = int(
+    os.getenv("EXECUTOR_REQUEST_TIMEOUT_S", "3600"))
+REMOTE_EXECUTOR_TIMEOUTS = {
+    # A preview is deliberately the impatient one: it renders from the 540p
+    # proxy and a user is watching a spinner while it runs.
+    "preview": int(os.getenv("REMOTE_TIMEOUT_PREVIEW_S", "1500")),
+    # A final renders the customer's ORIGINAL at source resolution — the one
+    # job worth waiting an hour for, because the alternative is telling someone
+    # their finished edit cannot be exported.
+    "final": int(os.getenv("REMOTE_TIMEOUT_FINAL_S", "3400")),
+    # An index is once per video and everything else waits on it.
+    "index": int(os.getenv("REMOTE_TIMEOUT_INDEX_S", "3400")),
+}
+
+
+def executor_timeout_for(job_type):
+    """Dispatcher-side HTTP timeout for one job kind."""
+    return REMOTE_EXECUTOR_TIMEOUTS.get(job_type, REMOTE_EXECUTOR_TIMEOUT_S)
 # Port the executor's HTTP server binds (Cloud Run injects $PORT, default 8080).
 EXECUTOR_PORT = int(os.getenv("PORT", "8080"))
 # How many index artifacts (proxy, wav, thumbnails, contact sheets) are PUT to

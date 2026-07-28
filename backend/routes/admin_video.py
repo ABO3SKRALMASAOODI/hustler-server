@@ -234,6 +234,25 @@ def video_overview():
                   AND ((vj.heartbeat_at IS NULL
                         AND vj.created_at < NOW() - INTERVAL '10 minutes')
                        OR vj.heartbeat_at < NOW() - INTERVAL '10 minutes')
+                UNION ALL
+                SELECT 'upload_failed', ce.project_id, p.title, u.email,
+                       -- Every JSON accessor is parenthesised on purpose:
+                       -- `||` binds tighter than `->>`, so the unparenthesised
+                       -- form parses as (' - ' || ce.detail) ->> 'filename'
+                       -- and dies with "invalid input syntax for type json"
+                       -- at RUNTIME, taking the whole overview page with it.
+                       COALESCE((ce.detail->>'reason'), ce.kind)
+                         || COALESCE(' - ' || (ce.detail->>'filename'), '')
+                         || COALESCE(' (' || ROUND(
+                              (CASE WHEN (ce.detail->>'bytes') ~ '^[0-9]+$'
+                                    THEN (ce.detail->>'bytes')::numeric
+                               END) / 1073741824.0, 2) || ' GB)', ''),
+                       ce.created_at
+                FROM client_events ce
+                LEFT JOIN projects p ON p.id = ce.project_id
+                LEFT JOIN users u ON u.id = ce.user_id
+                WHERE ce.kind IN ('upload_rejected', 'upload_failed')
+                  AND ce.created_at > NOW() - INTERVAL '7 days'
             ) t
             ORDER BY happened_at DESC NULLS LAST
             LIMIT 40
@@ -611,10 +630,25 @@ def video_project_detail(project_id):
         "last_at": last_export.isoformat() if last_export else None,
     }
 
+    # Uploads that never became an asset, in the project they were aimed at.
+    # Shown beside the chat because that is where the absence shows: a project
+    # whose whole story is "user tried to add a video and nothing happened".
+    with adb() as conn2:
+        cur2 = conn2.cursor()
+        cur2.execute("""SELECT id, kind, detail, created_at, project_id
+                        FROM client_events
+                        WHERE project_id = %s AND kind = ANY(%s)
+                        ORDER BY id DESC LIMIT 50""",
+                     (project_id, list(UPLOAD_EVENT_KINDS)))
+        upload_events = [_upload_event_row(e) for e in cur2.fetchall()]
+
     return jsonify({
         "project": {"id": p["id"], "title": p["title"], "email": p["email"],
                     "created_at": p["created_at"].isoformat()},
         "exports": exports,
+        "upload_events": upload_events,
+        "upload_failures": len([e for e in upload_events
+                                if e["kind"] in UPLOAD_FAILURE_KINDS]),
         "messages": [
             {"id": m["id"], "role": m["role"], "content": m["content"],
              "meta": m["meta"], "created_at": m["created_at"].isoformat()}
@@ -641,6 +675,92 @@ def video_project_detail(project_id):
         # then answered fine. Name the in-flight turn so the two are never
         # confused again.
         "live_turn": live_turn,
+    })
+
+
+# ── Upload failures (round 57) ───────────────────────────────────────────
+# A file the user tried to give us that never became an asset. This is the
+# blind spot that mattered most: 201 of 203 index jobs have ever succeeded, so
+# nothing server-side was failing — the losses were in the browser, where a
+# size or duration refusal fired before a project existed and left no trace at
+# all. 65 of 214 accounts have no project, and until now every one of them read
+# as "signed up and never tried".
+UPLOAD_FAILURE_KINDS = ("upload_rejected", "upload_failed")
+UPLOAD_EVENT_KINDS = UPLOAD_FAILURE_KINDS + ("upload_started",)
+
+
+def _upload_event_row(e):
+    d = e["detail"] or {}
+    return {
+        "id": e["id"], "kind": e["kind"],
+        "created_at": e["created_at"].isoformat(),
+        "project_id": e.get("project_id"),
+        "filename": d.get("filename"),
+        "bytes": d.get("bytes"),
+        "duration_s": d.get("duration_s"),
+        "reason": d.get("reason"),
+        "stage": d.get("stage"),
+        "origin": d.get("origin"),
+        "detail": d,
+    }
+
+
+@admin_video_bp.route("/admin/video/upload_failures", methods=["GET"])
+@admin_required
+def video_upload_failures():
+    """Every upload that did not land, newest first, with who and what.
+
+    Includes `upload_started` so the ratio is readable: a start with no
+    matching asset is an upload that died in transit, which no error message
+    anywhere would ever have shown us.
+    """
+    limit = min(int(request.args.get("limit", 200)), 500)
+    days = min(int(request.args.get("days", 30)), 365)
+    failures_only = request.args.get("failures_only", "1") != "0"
+    kinds = UPLOAD_FAILURE_KINDS if failures_only else UPLOAD_EVENT_KINDS
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT e.id, e.kind, e.detail, e.created_at,
+                              e.project_id, e.user_id, u.email, p.title
+                       FROM client_events e
+                       LEFT JOIN users u ON u.id = e.user_id
+                       LEFT JOIN projects p ON p.id = e.project_id
+                       WHERE e.kind = ANY(%s)
+                         AND e.created_at > NOW() - (%s || ' days')::interval
+                       ORDER BY e.id DESC LIMIT %s""",
+                    (list(kinds), str(days), limit))
+        rows = cur.fetchall()
+
+        cur.execute("""SELECT kind,
+                              COUNT(*) AS n,
+                              COUNT(DISTINCT user_id) AS users
+                       FROM client_events
+                       WHERE kind = ANY(%s)
+                         AND created_at > NOW() - (%s || ' days')::interval
+                       GROUP BY kind""",
+                    (list(UPLOAD_EVENT_KINDS), str(days)))
+        totals = {r["kind"]: {"events": r["n"], "users": r["users"]}
+                  for r in cur.fetchall()}
+
+        # The reasons, ranked. This is the answer to "what is actually
+        # stopping people", which is the whole point of the surface.
+        cur.execute("""SELECT COALESCE(detail->>'reason', '(none)') AS reason,
+                              COUNT(*) AS n, COUNT(DISTINCT user_id) AS users
+                       FROM client_events
+                       WHERE kind = ANY(%s)
+                         AND created_at > NOW() - (%s || ' days')::interval
+                       GROUP BY 1 ORDER BY 2 DESC LIMIT 20""",
+                    (list(UPLOAD_FAILURE_KINDS), str(days)))
+        by_reason = [{"reason": r["reason"], "events": r["n"],
+                      "users": r["users"]} for r in cur.fetchall()]
+
+    return jsonify({
+        "days": days,
+        "totals": totals,
+        "by_reason": by_reason,
+        "events": [dict(_upload_event_row(e),
+                        user_id=e["user_id"], email=e["email"],
+                        project_title=e["title"]) for e in rows],
     })
 
 
@@ -1162,6 +1282,17 @@ def video_user_detail(user_id):
                        ORDER BY created_at DESC LIMIT 50""", (user_id,))
         ledger = cur.fetchall()
 
+        # Every upload this account attempted, including the ones that never
+        # reached a project. For an account with no projects at all this is the
+        # ONLY row that distinguishes "tried and was refused" from "signed up
+        # and left" — which is the difference between a bug and a bounce.
+        cur.execute("""SELECT id, kind, detail, created_at, project_id
+                       FROM client_events
+                       WHERE user_id = %s AND kind = ANY(%s)
+                       ORDER BY id DESC LIMIT 100""",
+                    (user_id, list(UPLOAD_EVENT_KINDS)))
+        upload_events = [_upload_event_row(e) for e in cur.fetchall()]
+
     return jsonify({
         "user": {"id": u["id"], "email": u["email"],
                  "created_at": u["created_at"].isoformat(),
@@ -1187,6 +1318,9 @@ def video_user_detail(user_id):
         # user had uploaded a file the AGENT had built in their project.
         "uploads": [_asset_row(a) for a in assets if not _is_machine(a)],
         "generated": [_asset_row(a) for a in assets if _is_machine(a)],
+        "upload_events": upload_events,
+        "upload_failures": len([e for e in upload_events
+                                if e["kind"] in UPLOAD_FAILURE_KINDS]),
         "ledger": [
             {"job_id": l["job_id"],
              "credits_used": float(l["credits_used"] or 0),

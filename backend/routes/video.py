@@ -566,6 +566,19 @@ def video_health():
     })
 
 
+@video_bp.route("/video/limits", methods=["GET"])
+def video_limits():
+    """What the studio is allowed to upload. Deliberately unauthenticated and
+    deliberately the ONLY place the numbers come from.
+
+    The studio used to carry its own `2 * 1024 * 1024 * 1024` literal, so the
+    server's cap and the cap a user actually hit were two different values that
+    nobody had to keep in step. Raising MAX_UPLOAD_GB on Render would have
+    changed nothing anyone could see.
+    """
+    return jsonify(storage.upload_limits())
+
+
 # ------------------------------------------------------------------ #
 #  Projects                                                            #
 # ------------------------------------------------------------------ #
@@ -801,6 +814,12 @@ def create_upload(user_id, project_id):
     try:
         ext, content_type = storage.validate_upload(filename, nbytes, kind)
     except ValueError as e:
+        # Recorded server-side as well as client-side: this is the twin of the
+        # studio's own pre-flight check, and it is the copy that survives a
+        # user closing the tab the instant their file is refused.
+        record_client_event(user_id, project_id, "upload_rejected", detail={
+            "reason": str(e), "filename": filename, "bytes": nbytes,
+            "kind": kind, "stage": "presign"}, origin="server")
         return jsonify({"error": str(e)}), 400
 
     with vdb() as conn:
@@ -819,6 +838,13 @@ def create_upload(user_id, project_id):
         current_app.logger.exception("presign failed")
         return jsonify({"error": f"Could not prepare upload: {e}"}), 502
     out["kind"] = kind
+    # The one beacon that is NOT a failure. Without a start there is no
+    # denominator: an upload that dies mid-transfer looks identical to one that
+    # was never attempted, and "how many big uploads never finish" is the
+    # question this whole surface exists to answer.
+    record_client_event(user_id, project_id, "upload_started", detail={
+        "filename": filename, "bytes": nbytes, "kind": kind,
+        "mode": out.get("mode")}, origin="server")
     return jsonify(out)
 
 
@@ -886,12 +912,25 @@ def complete_upload_core(user_id, project_id, data):
             # this is that retry — proceed. Only abort when it truly failed.
             if storage.head_bytes(key) is None:
                 storage.abort_multipart(key, upload_id)
+                record_client_event(user_id, project_id, "upload_failed",
+                                    detail={"reason": str(e)[:300],
+                                            "filename": filename, "kind": kind,
+                                            "stage": "complete_multipart"},
+                                    origin="server")
                 return {"error": f"Upload could not be finalized: {e}"}, 400
 
     nbytes = storage.head_bytes(key)
     if nbytes is None:
+        record_client_event(user_id, project_id, "upload_failed", detail={
+            "reason": "object missing in storage after upload",
+            "filename": filename, "kind": kind, "stage": "head"},
+            origin="server")
         return {"error": "Uploaded file not found in storage"}, 400
     if nbytes > storage.max_upload_bytes():
+        record_client_event(user_id, project_id, "upload_rejected", detail={
+            "reason": "over size cap at completion", "filename": filename,
+            "bytes": nbytes, "cap_bytes": storage.max_upload_bytes(),
+            "kind": kind, "stage": "complete"}, origin="server")
         return {"error": "File exceeds the upload size limit"}, 400
 
     # Magic-byte sniff: the extension was validated at presign, but a renamed
@@ -900,6 +939,9 @@ def complete_upload_core(user_id, project_id, data):
     # early with a clean message; ambiguous bytes are allowed.
     head = storage.get_range(key, 64)
     if storage.content_matches_kind(head, kind) is False:
+        record_client_event(user_id, project_id, "upload_rejected", detail={
+            "reason": "magic bytes do not match kind", "filename": filename,
+            "bytes": nbytes, "kind": kind, "stage": "sniff"}, origin="server")
         return {
             "error": "That file's contents don't match its type — it may be "
                      "renamed or corrupted. Please upload a real "
@@ -2735,30 +2777,36 @@ def render_preview_endpoint(user_id, project_id):
 # API sees nothing but a user who says "it's broken". This records them.
 # Best-effort by contract — a beacon must NEVER surface an error to the user or
 # block the UI it is reporting on.
+#
+# TWO FAMILIES, and the second one is why the first was not enough:
+#   player_*  — playback failures (the round-33 MediaError code-4 saga).
+#   upload_*  — a file that never became an asset. 201 of 203 index jobs have
+#               ever succeeded, so the drop-off between "signed up" and "has a
+#               video" was NEVER server-side; it happened in the browser, where
+#               nothing was recorded. A client-side size/duration rejection
+#               fires before a project even exists, so those users were
+#               indistinguishable from someone who signed up and walked away —
+#               65 of 214 accounts sit in that bucket.
 CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
-                      "player_recovered", "attach_failed"}
+                      "player_recovered", "attach_failed",
+                      "upload_started", "upload_rejected", "upload_failed"}
+
+# The kinds that mean "a user tried to give us a video and we did not take it".
+# Surfaced in admin on their own rather than mixed into the rest, because these
+# are the ones nobody goes looking for.
+UPLOAD_FAILURE_KINDS = ("upload_rejected", "upload_failed")
 
 
-@video_bp.route("/projects/<int:project_id>/client-event", methods=["POST"])
-@token_required
-def client_event(user_id, project_id):
-    data = request.get_json(silent=True) or {}
-    kind = str(data.get("kind") or "")[:40]
-    if kind not in CLIENT_EVENT_KINDS:
-        return jsonify({"ok": True, "ignored": True})
-    try:
-        asset_id = int(data.get("asset_id"))
-    except (TypeError, ValueError):
-        asset_id = None
-    detail = data.get("detail")
+def _clean_event_detail(detail):
+    """Cap what a client can write: this is user-controlled input landing in a
+    table an admin will read. Scalars only, bounded count and length. Numbers
+    are range-checked rather than trusted — JSON has no integer bound, so a
+    bare `{"n": <4000-digit number>}` passed an isinstance(int) check and
+    landed in the row at full length, sailing past the 300-char cap that
+    exists precisely to stop that.
+    """
     if not isinstance(detail, dict):
-        detail = {}
-    # Cap what a client can write: this is user-controlled input landing in a
-    # table an admin will read. Scalars only, bounded count and length. Numbers
-    # are range-checked rather than trusted — JSON has no integer bound, so a
-    # bare `{"n": <4000-digit number>}` passed an isinstance(int) check and
-    # landed in the row at full length, sailing past the 300-char cap that
-    # exists precisely to stop that.
+        return {}
     clean = {}
     for k, v in list(detail.items())[:20]:
         key = str(k)[:40]
@@ -2768,23 +2816,40 @@ def client_event(user_id, project_id):
             clean[key] = v if -1e15 < v < 1e15 else str(v)[:300]
         else:
             clean[key] = str(v)[:300]
+    return clean
+
+
+def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
+                        origin="client"):
+    """Write one forensics row. NEVER raises and never blocks a caller.
+
+    Shared by the two beacon routes and by the server's OWN upload rejections,
+    so a failure is recorded whether or not the browser cooperates — a user who
+    closes the tab the moment their 4 GB file is refused still leaves a trace.
+    `project_id` may be None: the client-side caps fire before ensureProject.
+    """
+    if kind not in CLIENT_EVENT_KINDS:
+        return False
+    clean = _clean_event_detail(detail)
+    clean["origin"] = origin
     try:
         with vdb() as conn:
             cur = conn.cursor()
-            if not _project_for_user(cur, project_id, user_id):
-                return jsonify({"ok": True, "ignored": True})
-            # Telemetry must never become a write amplifier: this endpoint is
-            # cheap to call in a loop from a page the user already controls.
+            if project_id is not None and \
+                    not _project_for_user(cur, project_id, user_id):
+                return False
+            # Telemetry must never become a write amplifier: these endpoints
+            # are cheap to call in a loop from a page the user controls.
             cur.execute("""SELECT COUNT(*) AS n FROM client_events
                            WHERE user_id = %s
                              AND created_at > NOW() - INTERVAL '1 hour'""",
                         (int(user_id),))
             if (cur.fetchone() or {}).get("n", 0) >= MAX_CLIENT_EVENTS_PER_HOUR:
-                return jsonify({"ok": True, "throttled": True})
+                return False
             # An asset_id from the client is a claim, not a fact. Storing an
             # unverified one lets a forensics row point at another tenant's
             # asset — and this table exists to be TRUSTED during an incident.
-            if asset_id is not None:
+            if asset_id is not None and project_id is not None:
                 cur.execute("""SELECT 1 FROM assets
                                WHERE id = %s AND project_id = %s""",
                             (asset_id, project_id))
@@ -2795,6 +2860,9 @@ def client_event(user_id, project_id):
                     # useful to an incident than a silent NULL.
                     clean["asset_id_unverified"] = asset_id
                     asset_id = None
+            elif asset_id is not None:
+                clean["asset_id_unverified"] = asset_id
+                asset_id = None
             cur.execute("""INSERT INTO client_events
                                (user_id, project_id, kind, asset_id, detail)
                            VALUES (%s, %s, %s, %s, %s)""",
@@ -2802,8 +2870,46 @@ def client_event(user_id, project_id):
                          json.dumps(clean)))
     except Exception as exc:      # never let telemetry break the studio
         print(f"[client_event] dropped ({kind}): {exc}", flush=True)
-        return jsonify({"ok": True, "stored": False})
-    return jsonify({"ok": True, "stored": True})
+        return False
+    return True
+
+
+def _event_request_args(data):
+    kind = str(data.get("kind") or "")[:40]
+    try:
+        asset_id = int(data.get("asset_id"))
+    except (TypeError, ValueError):
+        asset_id = None
+    return kind, asset_id, data.get("detail")
+
+
+@video_bp.route("/projects/<int:project_id>/client-event", methods=["POST"])
+@token_required
+def client_event(user_id, project_id):
+    kind, asset_id, detail = _event_request_args(request.get_json(silent=True)
+                                                 or {})
+    if kind not in CLIENT_EVENT_KINDS:
+        return jsonify({"ok": True, "ignored": True})
+    stored = record_client_event(user_id, project_id, kind, asset_id, detail)
+    return jsonify({"ok": True, "stored": stored})
+
+
+@video_bp.route("/client-event", methods=["POST"])
+@token_required
+def client_event_no_project(user_id):
+    """The same beacon for failures that happen BEFORE a project exists.
+
+    The studio validates size, type and duration before it calls
+    ensureProject — deliberately, so a refused file never strands an empty
+    project. That ordering is also why the most important failure we have was
+    the one we could not record: there was no project to hang it on.
+    """
+    kind, _asset_id, detail = _event_request_args(request.get_json(silent=True)
+                                                  or {})
+    if kind not in CLIENT_EVENT_KINDS:
+        return jsonify({"ok": True, "ignored": True})
+    stored = record_client_event(user_id, None, kind, None, detail)
+    return jsonify({"ok": True, "stored": stored})
 
 
 # ------------------------------------------------------------------ #

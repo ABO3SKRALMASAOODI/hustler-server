@@ -1,6 +1,9 @@
 """Worker-side object storage: stream downloads to disk, upload artifacts.
 Media bytes only ever live on the worker's ephemeral disk during a job."""
 
+import os
+import shutil
+
 import boto3
 from botocore.config import Config
 
@@ -20,7 +23,64 @@ def client():
     )
 
 
-def download_to(key, path):
+def object_bytes(key):
+    """Size of one object, or None if it cannot be read."""
+    try:
+        return int(client().head_object(
+            Bucket=config.S3_BUCKET, Key=key)["ContentLength"])
+    except Exception:
+        return None
+
+
+def free_workdir_bytes(path=None):
+    """Bytes available where jobs stage their media."""
+    try:
+        return shutil.disk_usage(path or config.TMP_DIR).free
+    except Exception:
+        return None
+
+
+class WorkdirTooSmall(RuntimeError):
+    """Raised INSTEAD of being OOM-killed. See check_workdir_capacity."""
+
+
+def check_workdir_capacity(need_bytes, path=None, headroom=None):
+    """Refuse a job we cannot physically stage, with a message that names the fix.
+
+    ON CLOUD RUN `/tmp` IS AN IN-MEMORY FILESYSTEM: every byte a job writes
+    there is RAM, counted against the instance's `--memory`. Exceeding it does
+    not raise — the kernel kills the container, the request dies with no body,
+    and the dispatcher records "Worker died and retries are exhausted". That is
+    indistinguishable from a crash, so the one failure that is trivially fixable
+    by an operator (raise --memory, or mount a volume for WORKER_TMP_DIR) has
+    been arriving as the least actionable error we produce.
+
+    So: measure first, and if it will not fit, say exactly that. `headroom`
+    covers the artifacts written BESIDE the source — a proxy, a wav, the render
+    output — which are small next to the original but not nothing.
+    """
+    headroom = config.WORKDIR_HEADROOM if headroom is None else headroom
+    if not need_bytes:
+        return
+    free = free_workdir_bytes(path)
+    if free is None:
+        return                      # cannot measure: never block on a guess
+    need = int(need_bytes * headroom)
+    if free >= need:
+        return
+    gb = 1024 ** 3
+    raise WorkdirTooSmall(
+        f"this job needs about {need / gb:.1f} GB of scratch space in "
+        f"{path or config.TMP_DIR} and only {free / gb:.1f} GB is free. On "
+        f"Cloud Run that space is RAM: raise the executor's --memory (32Gi is "
+        f"the maximum) or mount a volume for WORKER_TMP_DIR. See "
+        f"worker/DEPLOY_EXECUTOR.md.")
+
+
+def download_to(key, path, check_capacity=True):
+    """Stream one object to local scratch, refusing up front if it cannot fit."""
+    if check_capacity:
+        check_workdir_capacity(object_bytes(key), os.path.dirname(path) or None)
     client().download_file(config.S3_BUCKET, key, path)
 
 

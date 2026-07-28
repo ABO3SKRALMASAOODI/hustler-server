@@ -106,9 +106,13 @@ def _run_remote(job):
     if config.REMOTE_EXECUTOR_SECRET:
         headers["Authorization"] = f"Bearer {config.REMOTE_EXECUTOR_SECRET}"
     try:
+        # Per-kind: a preview is a user staring at a spinner, a final is an
+        # hour-long export nobody wants refused at minute 25. One number for
+        # both was sized for the short one.
         resp = requests.post(url, json={"job": _job_payload(job)},
                              headers=headers,
-                             timeout=config.REMOTE_EXECUTOR_TIMEOUT_S)
+                             timeout=config.executor_timeout_for(
+                                 job.get("type")))
     except requests.RequestException as e:
         # A transport failure (timeout, connection reset, cold-start slowness)
         # raises so process_one requeues within the media attempt budget — a

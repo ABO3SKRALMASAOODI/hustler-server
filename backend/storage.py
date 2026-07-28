@@ -87,26 +87,69 @@ def client(public=False):
     )
 
 
+# THE MAIN VIDEO'S CAP IS AN ABUSE GUARD, NOT THE PRODUCT LIMIT.
+#
+# It was 2 GB, which contradicted the 3-hour duration limit it shipped beside:
+# 2 GiB over 3 hours is 1.6 Mbps, and even ONE hour only fit under 4.7 Mbps.
+# So the advertised "up to 2GB or 3 hours" could not both be true, and an
+# ordinary 1-hour 1080p recording (~8-20 Mbps) was refused by a platform whose
+# own copy said it took 3-hour videos. What actually costs us is DURATION —
+# it drives index time and render time — and that is bounded separately by
+# MAX_DURATION_S. Bytes only cost storage and the user's own upload time, so
+# this number just has to be big enough to stop being the thing that says no.
+#
+# 16 GB covers 1 hour of 4K at 35 Mbps, 10 minutes of 4K at 200 Mbps, and an
+# hour of 1080p at any bitrate a camera actually produces.
+MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "16"))
+
+# Mirrors worker/config.MAX_DURATION_S. Enforced for real in the indexer (it
+# needs a probe); carried here so the API and the studio can refuse a 5-hour
+# file BEFORE the user spends 40 minutes uploading it, which is the only point
+# at which refusing is a kindness.
+MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
+
+
 def max_upload_bytes():
-    return int(float(os.getenv("MAX_UPLOAD_GB", "2")) * 1024 ** 3)
+    return int(MAX_UPLOAD_GB * 1024 ** 3)
+
+
+def _size_label(nbytes):
+    gb = nbytes / 1024 ** 3
+    return f"{gb:.0f} GB" if gb >= 1 else f"{nbytes / 1024 ** 2:.0f} MB"
+
+
+def upload_limits():
+    """The caps, as the API reports them. ONE source of truth: the studio used
+    to carry its own hardcoded 2 GiB literal, so raising the server's cap would
+    have changed nothing a user could see."""
+    return {
+        "max_bytes": max_upload_bytes(),
+        "max_bytes_label": _size_label(max_upload_bytes()),
+        "max_duration_s": MAX_DURATION_S,
+        "clip_max_bytes": CLIP_MAX_BYTES,
+        "music_max_bytes": MUSIC_MAX_BYTES,
+        "image_max_bytes": IMAGE_MAX_BYTES,
+        "video_ext": sorted(ALLOWED_VIDEO_EXT),
+        "music_ext": sorted(ALLOWED_MUSIC_EXT),
+        "image_ext": sorted(ALLOWED_IMAGE_EXT),
+    }
 
 
 def validate_upload(filename, nbytes, kind):
     """Returns (ext, content_type) or raises ValueError with a user-facing reason."""
     ext = os.path.splitext(filename or "")[1].lower()
-    allowed, cap, cap_label = {
-        "music": (ALLOWED_MUSIC_EXT, MUSIC_MAX_BYTES, "50 MB"),
-        "image": (ALLOWED_IMAGE_EXT, IMAGE_MAX_BYTES, "10 MB"),
-        "clip": (ALLOWED_VIDEO_EXT, CLIP_MAX_BYTES, "500 MB"),
-    }.get(kind, (ALLOWED_VIDEO_EXT, max_upload_bytes(),
-                 f"{os.getenv('MAX_UPLOAD_GB', '2')} GB"))
+    allowed, cap = {
+        "music": (ALLOWED_MUSIC_EXT, MUSIC_MAX_BYTES),
+        "image": (ALLOWED_IMAGE_EXT, IMAGE_MAX_BYTES),
+        "clip": (ALLOWED_VIDEO_EXT, CLIP_MAX_BYTES),
+    }.get(kind, (ALLOWED_VIDEO_EXT, max_upload_bytes()))
     if ext not in allowed:
         raise ValueError(f"File type {ext or '(none)'} not supported. "
                          f"Allowed: {', '.join(sorted(allowed))}")
     if not isinstance(nbytes, int) or nbytes <= 0:
         raise ValueError("File size missing or invalid")
     if nbytes > cap:
-        raise ValueError(f"File is larger than the {cap_label} limit "
+        raise ValueError(f"File is larger than the {_size_label(cap)} limit "
                          f"for {kind or 'video'} uploads")
     return ext, allowed[ext]
 

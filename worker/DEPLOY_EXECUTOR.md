@@ -36,11 +36,11 @@ cd hustler-server            # repo root (worker/Dockerfile builds the image)
 gcloud run deploy valmera-executor \
   --source worker/ \
   --region us-central1 \
-  --cpu 8 --memory 16Gi \
+  --cpu 8 --memory 32Gi \
   --concurrency 1 \
   --min-instances 0 \
   --max-instances 5 \
-  --timeout 1800 \
+  --timeout 3600 \
   --allow-unauthenticated \
   --set-env-vars "WORKER_ROLE=executor,REMOTE_EXECUTOR_SECRET=$EXEC_SECRET"
 ```
@@ -84,25 +84,44 @@ curl https://valmera-executor-xxxx.a.run.app/health      # -> {"status":"ok",...
   you're back to renting.
 - **`--max-instances 5`** — your cost ceiling and your parallelism ceiling.
   5 × 8 vCPU only ever runs when 5 jobs overlap; tune to taste.
-- **`--timeout 1800`** — a wedge ceiling, not a headroom figure. It was 3600
-  (Cloud Run's max) and two wedged finals ran it to the second, on a service
-  billed per instance-second; the longest HEALTHY job on this hardware is
-  ~300s, so 1800 is still 6x. The dispatcher's own timeout
-  (`REMOTE_EXECUTOR_TIMEOUT_S`, default **1500s**) must always sit UNDER this,
-  so that a wedged job is killed by the executor shortly after the dispatcher
-  gave up on it — otherwise the orphan keeps burning 8 vCPU next to the retry.
-  **Change the two together**; the dispatcher side is a code constant in
+- **`--timeout 3600`** — Cloud Run's maximum, and now genuinely needed. Encodes
+  measured on this service run **0.5–1.8× realtime**, and it is the
+  FILTERGRAPH that costs rather than the pixels (a 270×480 source still
+  encoded at 0.93× realtime), so an hour-long programme needs a budget in the
+  thousands of seconds. It was lowered to 1800 in round 48 after two wedged
+  finals ran the old cap to the second — but the thing that actually catches a
+  wedge is `media.run()`'s stall watchdog, which fires on ffmpeg emitting no
+  progress at all, long before any of these ceilings. Treat these as the
+  backstop, not the defence.
+  The dispatcher's own timeouts (`config.REMOTE_EXECUTOR_TIMEOUTS`, per job
+  kind: preview 1500 / final 3400 / index 3400) must always sit UNDER this, so
+  that a wedged job is killed by the executor shortly after the dispatcher gave
+  up on it — otherwise the orphan keeps burning 8 vCPU next to the retry.
+  **Change them together**; the dispatcher side is a code constant in
   `worker/config.py`, deliberately not a per-service env var (see
-  `PIPELINE_VERSION` for what env drift on a paired constant costs).
+  `PIPELINE_VERSION` for what env drift on a paired constant costs), and
+  `worker/tests/test_executor_timeouts.py` FAILS if this doc and those
+  constants disagree.
 - **`--allow-unauthenticated`** — Render isn't in GCP's IAM, so the endpoint is
   public but guarded by the bearer secret (`/run` returns 401 without it). See
   "Hardening" below to lock it down further later.
-- **`--memory 16Gi`** — Cloud Run's `/tmp` is an **in-memory** filesystem, and a
+- **`--memory 32Gi`** — Cloud Run's `/tmp` is an **in-memory** filesystem, and a
   job downloads the ORIGINAL video there (plus writes the proxy, plus whisper
-  holds ~2 GB if it runs locally). 16 GiB comfortably fits one short-form job.
-  If very large uploads OOM the instance, raise memory (and CPU scales with it),
-  or mount a Cloud Run gen2 volume for the workdir. Because `--concurrency 1`,
-  only ever one job's files sit in memory at a time.
+  holds ~2 GB if it runs locally). This is the flag that decides how long a
+  video the product can accept: at 16Gi the upload cap could not safely exceed
+  ~6 GB, which is a 1-hour recording at 13 Mbps — below what an ordinary phone
+  or camera produces, so "we support 3-hour videos" was never true. 32Gi (the
+  per-instance maximum) covers the 16 GB upload cap with room for the render
+  output beside it. Memory is the cheap axis here: 8 vCPU costs ~$0.000192/s
+  against ~$0.00008/s for 32 GiB, so this is roughly a 20% bump on instance
+  cost, not a doubling.
+  **Past 32Gi the answer is a volume, not more RAM** — mount one for
+  `WORKER_TMP_DIR` and the workdir stops being memory at all. Either way the
+  job no longer dies silently: `storage.check_workdir_capacity` measures the
+  free space before staging a source and fails with a message naming this flag,
+  because an OOM kill on Cloud Run produces no error at all — the container
+  just dies and the dispatcher records "Worker died and retries are exhausted".
+  Because `--concurrency 1`, only ever one job's files sit in memory at a time.
 
 ---
 
