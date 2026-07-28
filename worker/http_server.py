@@ -95,8 +95,14 @@ class Handler(BaseHTTPRequestHandler):
                 gb = 1024 ** 3
                 body["workdir"] = {
                     "path": config.TMP_DIR,
+                    # tmpfs => staging costs RAM and the memory limit binds;
+                    # anything else => it is real disk. The deploy doc assumed
+                    # tmpfs unconditionally and the live service disagreed.
+                    "fstype": _storage.workdir_fstype(),
                     "free_gb": round((free or 0) / gb, 1),
-                    "total_gb": round(total / gb, 1),
+                    "fs_total_gb": round(total / gb, 1),
+                    "mem_available_gb": round(
+                        (_storage._cgroup_memory_available() or 0) / gb, 1),
                     # The largest source this instance could stage right now,
                     # given the artifacts a job writes beside it.
                     "max_source_gb": round(

@@ -32,12 +32,75 @@ def object_bytes(key):
         return None
 
 
-def free_workdir_bytes(path=None):
-    """Bytes available where jobs stage their media."""
+def workdir_fstype(path=None):
+    """Filesystem backing the workdir ('tmpfs', 'overlay', 'ext4', ...).
+
+    This decides whether staging a file costs RAM or disk, and it is not a
+    detail: the deploy doc assumed Cloud Run's /tmp is always an in-memory
+    tmpfs, but the live executor reports a **755 GB** filesystem there, which
+    no 32 GiB instance could back with memory. Guessing either way is wrong in
+    one of the two worlds — on tmpfs, statvfs is a memory budget; on a real
+    disk, bounding by memory would refuse work that fits fine.
+    """
+    target = os.path.realpath(path or config.TMP_DIR)
+    best, best_type = "", None
     try:
-        return shutil.disk_usage(path or config.TMP_DIR).free
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount, fstype = parts[1], parts[2]
+                # Longest matching mount point wins — "/" matches everything.
+                if (target == mount or target.startswith(mount.rstrip("/") + "/")) \
+                        and len(mount) >= len(best):
+                    best, best_type = mount, fstype
     except Exception:
         return None
+    return best_type
+
+
+def _cgroup_memory_available():
+    """Bytes of RAM this container may still use, or None if not in a cgroup."""
+    for limit_p, usage_p in (
+            ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+            ("/sys/fs/cgroup/memory/memory.limit_in_bytes",
+             "/sys/fs/cgroup/memory/memory.usage_in_bytes")):
+        try:
+            with open(limit_p) as f:
+                raw = f.read().strip()
+            if raw == "max":
+                continue
+            limit = int(raw)
+            # cgroup v1 writes a huge sentinel for "unlimited".
+            if limit <= 0 or limit >= 1 << 50:
+                continue
+            with open(usage_p) as f:
+                used = int(f.read().strip())
+            return max(0, limit - used)
+        except Exception:
+            continue
+    return None
+
+
+def free_workdir_bytes(path=None):
+    """Bytes a job may actually stage in the workdir.
+
+    On a MEMORY-BACKED workdir (tmpfs) the real ceiling is the container's
+    memory limit, not what statvfs advertises — and it is stricter, because
+    ffmpeg's own buffers and any resident model are spending the same budget.
+    On a real disk, statvfs is the truth and memory is irrelevant.
+    """
+    try:
+        free = shutil.disk_usage(path or config.TMP_DIR).free
+    except Exception:
+        free = None
+    if workdir_fstype(path) != "tmpfs":
+        return free
+    mem = _cgroup_memory_available()
+    if mem is None:
+        return free
+    return mem if free is None else min(free, mem)
 
 
 class WorkdirTooSmall(RuntimeError):

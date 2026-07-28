@@ -62,3 +62,65 @@ def test_an_unknown_source_size_never_blocks_a_job(monkeypatch):
     monkeypatch.setattr(storage, "free_workdir_bytes", lambda path=None: 1)
     storage.check_workdir_capacity(None)
     storage.check_workdir_capacity(0)
+
+
+# ── what actually backs the workdir ─────────────────────────────────────────
+# The deploy doc asserted Cloud Run's /tmp is always an in-memory tmpfs. The
+# live executor reported a 755 GB filesystem there, which no 32 GiB instance
+# could back with memory. Both worlds are real and the correct bound differs:
+# on tmpfs the memory limit binds (and is STRICTER than statvfs, because
+# ffmpeg's buffers spend the same budget); on a real disk memory is irrelevant
+# and bounding by it would refuse work that fits fine.
+
+class _FakeUsage:
+    def __init__(self, free):
+        self.free, self.total, self.used = free, free, 0
+
+
+def test_a_memory_backed_workdir_is_bounded_by_the_memory_limit(monkeypatch):
+    gb = 1024 ** 3
+    monkeypatch.setattr(storage, "workdir_fstype", lambda path=None: "tmpfs")
+    monkeypatch.setattr(storage, "_cgroup_memory_available", lambda: 20 * gb)
+    monkeypatch.setattr(storage.shutil, "disk_usage",
+                        lambda p: _FakeUsage(700 * gb))
+    # statvfs says 700 GB, but every byte is RAM and only 20 GB of RAM is left.
+    assert storage.free_workdir_bytes() == 20 * gb
+
+
+def test_a_disk_backed_workdir_ignores_the_memory_limit(monkeypatch):
+    gb = 1024 ** 3
+    monkeypatch.setattr(storage, "workdir_fstype", lambda path=None: "overlay")
+    monkeypatch.setattr(storage, "_cgroup_memory_available", lambda: 20 * gb)
+    monkeypatch.setattr(storage.shutil, "disk_usage",
+                        lambda p: _FakeUsage(700 * gb))
+    # Real disk: staging 100 GB costs no RAM, so the memory limit must not
+    # shrink the budget or a 16 GB upload gets refused on a healthy instance.
+    assert storage.free_workdir_bytes() == 700 * gb
+
+
+def test_no_cgroup_falls_back_to_the_filesystem(monkeypatch):
+    gb = 1024 ** 3
+    monkeypatch.setattr(storage, "workdir_fstype", lambda path=None: "tmpfs")
+    monkeypatch.setattr(storage, "_cgroup_memory_available", lambda: None)
+    monkeypatch.setattr(storage.shutil, "disk_usage",
+                        lambda p: _FakeUsage(12 * gb))
+    assert storage.free_workdir_bytes() == 12 * gb
+
+
+def test_fstype_picks_the_longest_matching_mount(tmp_path, monkeypatch):
+    """'/' matches every path, so a naive scan would report the root's type for
+    a workdir that is really its own mount."""
+    mounts = tmp_path / "mounts"
+    mounts.write_text(
+        "overlay / overlay rw 0 0\n"
+        "tmpfs /tmp tmpfs rw 0 0\n")
+    real_open = open
+
+    def fake_open(path, *a, **kw):
+        if path == "/proc/mounts":
+            return real_open(mounts, *a, **kw)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(storage.os.path, "realpath", lambda p: "/tmp/valmera")
+    assert storage.workdir_fstype("/tmp/valmera") == "tmpfs"
