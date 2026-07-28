@@ -1236,7 +1236,14 @@ def project_state(user_id, project_id):
         # false. A FAILED job also counts as existing, so a render that keeps
         # dying is never re-queued in a loop here — that is the retry path's
         # job, and it has its own bounded budget.
-        if edl and indexed:
+        # Scoped to USER edits deliberately. An agent turn enqueues its own
+        # preview and has its own retry path, so healing those would (a) race
+        # a turn that is about to enqueue one for the same version, and (b)
+        # speculatively render every project whose last EDL was the agent's
+        # opening version — 56 of them at the time of writing, none of which
+        # anyone had asked to see. The bug was in the user-edit path, where
+        # this write is the only thing that ever enqueues.
+        if edl and indexed and edl["created_by"] == "user":
             cur.execute("""SELECT 1 FROM video_jobs
                            WHERE project_id = %s AND type = 'preview'
                              AND (payload->>'edl_version')::int = %s
