@@ -31,6 +31,7 @@ import config
 import db as dbx
 import indexer
 import renderer
+import version
 
 # Only the compute runners are exposed remotely. agent_turn stays on the
 # dispatcher (network-bound), so it is intentionally NOT in this map.
@@ -68,7 +69,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.rstrip("/") in ("/health", "/healthz", ""):
-            self._send(200, {"status": "ok", "role": "executor"})
+            # WHAT CODE IS THIS. Unauthenticated on purpose: it is the probe
+            # Cloud Run itself calls, it leaks nothing (a hash of public
+            # source and four integers), and the whole point is that anyone
+            # holding a terminal can answer "is the render service current?"
+            # in one curl instead of a day of database forensics. Best effort
+            # — a health endpoint that can 500 is not a health endpoint.
+            body = {"status": "ok", "role": "executor"}
+            try:
+                body.update(version.version_report())
+            except Exception as e:
+                body["version_error"] = str(e)[:200]
+            self._send(200, body)
         else:
             self._send(404, {"error": "not found"})
 
@@ -119,7 +131,8 @@ def serve():
     port = config.EXECUTOR_PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"valmera-executor listening on :{port} "
-          f"(whisper={config.WHISPER_MODEL}/{config.WHISPER_DEVICE})",
+          f"(code={version.code_version()} "
+          f"whisper={config.WHISPER_MODEL}/{config.WHISPER_DEVICE})",
           flush=True)
     srv.serve_forever()
 

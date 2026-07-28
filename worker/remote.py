@@ -13,13 +13,75 @@ The executor reads the job's real state from the shared Postgres, so the body
 we POST is only what the runner needs to identify the work — never asset bytes.
 """
 
+import threading
+
 import requests
 
 import config
+import version
 
 
 class RemoteExecutorError(RuntimeError):
     pass
+
+
+# The last version skew observed against the executor, or "" when the two
+# services agree (or when we have not been able to ask). Written by
+# check_executor_version, read by _run_remote so that a job which fails on a
+# stale executor SAYS SO in the error the admin job list shows. Round 55's
+# customer got "the render is the wrong length" three times; so did we, and it
+# was the only thing either of us had.
+_skew_note = ""
+_skew_lock = threading.Lock()
+
+
+def executor_health(timeout=20):
+    """GET /health on the executor. Returns the parsed body, or raises."""
+    if not config.REMOTE_EXECUTOR_URL:
+        raise RemoteExecutorError("REMOTE_EXECUTOR_URL is not set")
+    resp = requests.get(f"{config.REMOTE_EXECUTOR_URL}/health", timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def check_executor_version(quiet=False):
+    """Compare the executor's code with ours and remember the answer.
+
+    NEVER BLOCKS ANYTHING. It does not gate dispatch, delay a job or fail a
+    render — a skewed executor still serves most work correctly, and refusing
+    to use it would take the whole product down to prevent a subset of edits
+    from being wrong. That is the round-53 mistake exactly: a version check
+    whose only move was "no" hid every finished export on the platform. This
+    one's only move is "say so".
+
+    Returns the skew note ("" when the two agree, or when the executor could
+    not be reached — an unreachable executor is a different problem with its
+    own loud failure path, and guessing skew from a timeout would be a lie).
+    """
+    global _skew_note
+    mine = version.code_version()
+    try:
+        theirs = executor_health()
+    except Exception as e:
+        if not quiet:
+            print(f"[dispatcher] executor version check failed: "
+                  f"{str(e)[:200]}", flush=True)
+        return ""
+    remote_v = str(theirs.get("code_version") or "unknown")
+    note = ""
+    if mine != "unknown" and remote_v != "unknown" and mine != remote_v:
+        note = (f"the render executor is running DIFFERENT code than this "
+                f"dispatcher (executor {remote_v}, dispatcher {mine}) — "
+                f"redeploy it: see worker/DEPLOY_EXECUTOR.md")
+        if not quiet:
+            print(f"[dispatcher] *** VERSION SKEW *** {note}\n"
+                  f"[dispatcher]     executor reports: {theirs}", flush=True)
+    elif not quiet:
+        print(f"[dispatcher] executor code={remote_v} (matches dispatcher)",
+              flush=True)
+    with _skew_lock:
+        _skew_note = note
+    return note
 
 
 def _job_payload(job):
@@ -65,7 +127,20 @@ def _run_remote(job):
         # The runner itself raised on the executor (e.g. "EDL version not
         # found"). Surface it as an error so the dispatcher's normal failure
         # path — requeue then reaper note — runs, identical to a local raise.
-        raise RemoteExecutorError(str(data["error"])[:500])
+        #
+        # And ASK WHOSE CODE FAILED, right here, while the instance that just
+        # ran the job is still warm. A stale executor produces errors that read
+        # as ordinary defects — "the render is the wrong length", "EDL shape
+        # invalid: kind should be one of ..." — and are nothing of the kind:
+        # they are this dispatcher handing work to a build that predates the
+        # fix. Both times that happened the missing sentence was this one, and
+        # both times it cost a day to reconstruct from the database. It is one
+        # cheap GET on a failure path, so it never touches a healthy render.
+        msg = str(data["error"])[:500]
+        skew = check_executor_version(quiet=True)
+        if skew:
+            msg = f"{msg} [{skew}]"
+        raise RemoteExecutorError(msg)
     return data.get("result")
 
 

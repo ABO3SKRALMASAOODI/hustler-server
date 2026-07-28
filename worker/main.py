@@ -31,6 +31,7 @@ import indexer
 import mcp_exec
 import remote
 import renderer
+import version
 
 # A filmstrip is a few seconds of ffmpeg on an already-small proxy, and the
 # studio asks for one every time a project is opened. It rides the MEDIA lane
@@ -339,7 +340,8 @@ def main():
     signal.signal(signal.SIGINT, _on_shutdown)
     exec_mode = ("remote executor " + config.REMOTE_EXECUTOR_URL
                  if config.REMOTE_EXECUTOR_URL else "local")
-    print(f"valmera-worker (dispatcher) starting: media_slots={config.MEDIA_SLOTS} "
+    print(f"valmera-worker (dispatcher) starting: code={version.code_version()} "
+          f"media_slots={config.MEDIA_SLOTS} "
           f"index_slots={config.INDEX_SLOTS} agent_slots={config.AGENT_SLOTS} "
           f"mcp_slots={config.MCP_SLOTS} "
           f"media/index={exec_mode} whisper={config.WHISPER_MODEL}/"
@@ -357,6 +359,23 @@ def main():
         print("[dispatcher] WARNING: REMOTE_EXECUTOR_URL set but "
               "REMOTE_EXECUTOR_SECRET is empty — calls will be unauthenticated.",
               flush=True)
+
+    if config.REMOTE_EXECUTOR_URL:
+        # Say, on every boot, whether the service that actually makes the
+        # pixels is running this code. A push deploys the dispatcher
+        # automatically and the executor not at all, so the moment a deploy is
+        # most likely to be half-done is exactly here. Threaded because it is a
+        # cold-start HTTP call to a scale-to-zero service and a diagnostic must
+        # not delay the lanes; best effort because it must never stop a boot.
+        def _probe():
+            try:
+                remote.check_executor_version()
+            except Exception as e:
+                print(f"[dispatcher] version probe error: {str(e)[:200]}",
+                      flush=True)
+
+        threading.Thread(target=_probe, daemon=True,
+                         name="version-probe").start()
 
     threads = [
         threading.Thread(target=dbx.heartbeat_forever, daemon=True,

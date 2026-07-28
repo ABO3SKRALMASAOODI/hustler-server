@@ -148,6 +148,59 @@ network-bound agent turns.
 
 ---
 
+## 3b. REDEPLOY THIS AFTER EVERY PUSH THAT TOUCHES `worker/`
+
+**This is the single most dangerous property of the split.** Render redeploys
+the dispatcher automatically on push to `main`. Cloud Run does not. So a normal
+push updates the queue, the agent and the tools while leaving the code that
+actually makes the pixels on whatever was built last — and the two halves
+disagree silently. It has cost real customers twice:
+
+| | What the executor was missing | What users got |
+|---|---|---|
+| round 53 | the code that writes the `trans_v` render stamp | **41 of 41** finished exports undownloadable; one customer pressed Download 17 times |
+| round 55 | round 52's `_output_clock` + the new `stylize` kinds | a 150.48s edit exported at 158.58s and failed verification **3 times**; his previews rejected outright as "EDL shape invalid" |
+
+Both looked like ordinary render bugs. Neither was: the fixes were written,
+tested, pushed and live on the dispatcher the whole time.
+
+Redeploy (env vars are preserved across a `--source` deploy):
+
+```bash
+cd hustler-server
+gcloud run deploy valmera-executor --source worker/ --region us-central1
+```
+
+### Check which code each side is running
+
+`/health` reports a fingerprint of the executor's worker source — no auth, no
+setup, one curl:
+
+```bash
+curl -s "$(gcloud run services describe valmera-executor --region us-central1 \
+  --format 'value(status.url)')/health"
+# {"status":"ok","role":"executor","code_version":"016bcde97910",
+#  "pipeline_version":7,"outro_version":2,...}
+```
+
+Compare with the dispatcher's, which it prints on every boot
+(`valmera-worker (dispatcher) starting: code=…`) and re-checks against the
+executor in the same line. Locally: `cd worker && python -c "import version;
+print(version.code_version())"`.
+
+The fingerprint is a hash of the top-level `worker/*.py`, so it moves for **any**
+code change — unlike `PIPELINE_VERSION` / `OUTRO_VERSION` / `TRANSITION_VERSION`
+/ `TIMELINE_MEDIA_VERSION`, which only catch skew when somebody remembers to
+bump them, and neither incident above involved a bump.
+
+**The check never withholds work.** A skewed executor keeps getting jobs — it
+renders most things correctly, and refusing to use it would take the product
+down to prevent a subset of edits from being wrong. It only ever *says so*: a
+loud dispatcher boot line, and the skew appended to the error of any remote job
+that fails, so it lands in the admin job list next to the failure it explains.
+
+---
+
 ## 4. Hardening (optional, later)
 
 The bearer secret over HTTPS guards compute/cost; the body is only a job id +
