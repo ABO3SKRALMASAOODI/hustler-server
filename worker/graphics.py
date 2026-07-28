@@ -338,10 +338,20 @@ def _wrap_hard(text, line_chars):
     return lines or [""]
 
 
-def _compile_item(tx, out_dur, play_res):
-    """One TextItem dict -> event dict {start, end, text, font} or None
-    (fully outside the program). All geometry is resolved HERE, at compile
-    time, from concrete EDL data — nothing is left for the renderer."""
+def _compile_item(tx, out_dur, play_res, y_shift=0.0):
+    """One TextItem dict -> event dict or None (fully outside the program).
+
+    All geometry is resolved HERE, at compile time, from concrete EDL data —
+    nothing is left for the renderer. The returned dict carries the item's
+    MEASURED box (`top`, `bottom`, `left`, `right` in output pixels) alongside
+    the event, because two items that share a moment have to be laid out
+    against each other and only this function knows how tall either one came
+    out. See `_stack_concurrent`.
+
+    y_shift moves the block by that many pixels before the on-frame clamp. It
+    is 0 for every item that does not collide with another, so an edit whose
+    texts never overlap compiles byte-identically to before.
+    """
     W, H = play_res
     fx, fy = W / BASE_PLAY_RES[0], H / BASE_PLAY_RES[1]
     f = max(fx, fy)
@@ -448,7 +458,7 @@ def _compile_item(tx, out_dur, play_res):
         max_w, block_h = measure()
 
     # ── anchor: clamped fully on-frame (\an5 block-center / \an7 top-left)
-    cy = y_frac * H
+    cy = y_frac * H + float(y_shift or 0.0)
     lo, hi = edge_y + block_h / 2, H - edge_y - block_h / 2
     cy = H / 2 if lo > hi else min(max(cy, lo), hi)
     if tpl["align"] == "left":
@@ -550,8 +560,113 @@ def _compile_item(tx, out_dur, play_res):
         out_lines.append(seg(sec_lines[0], tags))
         out_lines.extend(seg(l) for l in sec_lines[1:])
 
+    # The measured box, in output pixels. \an5 anchors the block CENTER and
+    # \an7 its top-left corner, so both are normalized to one band here —
+    # the stacker must not have to know which anchor a template uses.
+    top = (ay - block_h / 2.0) if an == 5 else float(ay)
+    left = (ax - max_w / 2.0) if an == 5 else float(ax)
     return {"start": start, "end": end, "font": font,
-            "text": "{" + head + "}" + r"\N".join(out_lines)}
+            "text": "{" + head + "}" + r"\N".join(out_lines),
+            "top": top, "bottom": top + block_h,
+            "left": left, "right": left + max_w,
+            "height": block_h}
+
+
+# Breathing room between two stacked blocks, as a fraction of the taller
+# one's height. Two lines of text touching at the ascenders reads as one
+# broken paragraph, not as two graphics.
+STACK_GAP_FRAC = 0.18
+
+
+def _overlaps(a, b, pad=0.0):
+    """Do two compiled events share both a moment and a patch of frame?
+
+    Time first (cheapest), then the horizontal band — a left-anchored lower
+    third and a centred callout can happily share a second because they never
+    share a column — then the vertical band, which is the axis the stacker
+    resolves on.
+    """
+    if a["end"] <= b["start"] + 0.04 or b["end"] <= a["start"] + 0.04:
+        return False
+    if a["right"] <= b["left"] or b["right"] <= a["left"]:
+        return False
+    return a["bottom"] + pad > b["top"] and b["bottom"] + pad > a["top"]
+
+
+def _stack_concurrent(items, out_dur, play_res, max_passes=4):
+    """Lay concurrent text items out so they cannot burn on top of each other.
+
+    Every item used to be compiled in isolation, which is correct for its own
+    geometry and blind to everyone else's: a template's `y` is a fixed
+    fraction of the frame, so whether two of them collide depends entirely on
+    how tall each one WRAPPED, which nothing measured. On a 9:16 frame the
+    title "MOSKOV CRITICAL BUILD" wraps to three 176px lines spanning
+    675-1245px while `add_title_card`'s subtitle sits at a hardcoded
+    1167-1271px — 78 pixels of "BUILD" burned straight through "Worth to
+    try?", on the FIRST frame of the video. Three more texts piled up the same
+    way over the last 1.5 seconds of that edit.
+
+    So: compile, measure, and where two items genuinely share a moment AND a
+    patch of frame, push them apart. The group is centred on its members'
+    average anchor, so a pair reads as one designed stack rather than as one
+    graphic that got shoved. Items are shifted in (start, id) order, which
+    keeps the EARLIER graphic where the editor put it and moves the later one
+    — the same precedence the events already have.
+
+    Returns the list of compiled events. An item that collides with nobody is
+    never recompiled, so an edit with no overlapping text is byte-identical to
+    what this module produced before.
+    """
+    H = play_res[1]
+    shifts = [0.0] * len(items)
+    events = [_compile_item(tx, out_dur, play_res) for tx in items]
+    live = [i for i, ev in enumerate(events) if ev]
+    for _ in range(max_passes):
+        # Groups of mutually-overlapping items, by transitive closure: three
+        # stacked graphics must be laid out as one column of three, not as
+        # two independent pairs that shift into each other.
+        groups, seen = [], set()
+        for i in live:
+            if i in seen:
+                continue
+            group, stack = [], [i]
+            while stack:
+                k = stack.pop()
+                if k in seen:
+                    continue
+                seen.add(k)
+                group.append(k)
+                stack.extend(j for j in live if j not in seen
+                             and _overlaps(events[k], events[j]))
+            if len(group) > 1:
+                groups.append(sorted(group))
+        if not groups:
+            break
+        moved = False
+        for group in groups:
+            blocks = [events[i] for i in group]
+            gap = STACK_GAP_FRAC * max(b["height"] for b in blocks)
+            total = sum(b["height"] for b in blocks) + gap * (len(blocks) - 1)
+            # Centre the stack where the group already sits, then clamp it
+            # fully on-frame — a four-deep stack on a short frame lands
+            # against the top edge rather than half off it.
+            centre = sum((b["top"] + b["bottom"]) / 2.0 for b in blocks) \
+                / len(blocks)
+            edge = 0.03 * H
+            top = centre - total / 2.0
+            top = min(max(top, edge), max(edge, H - edge - total))
+            for i, b in zip(group, blocks):
+                want = top + b["height"] / 2.0
+                have = (b["top"] + b["bottom"]) / 2.0
+                if abs(want - have) > 0.5:
+                    shifts[i] += want - have
+                    events[i] = _compile_item(items[i], out_dur, play_res,
+                                              y_shift=shifts[i])
+                    moved = True
+                top += b["height"] + gap
+        if not moved:
+            break
+    return events
 
 
 def build_gfx_ass(edl, out_duration_s, path, play_res=BASE_PLAY_RES):
@@ -565,14 +680,12 @@ def build_gfx_ass(edl, out_duration_s, path, play_res=BASE_PLAY_RES):
     texts = edl.get("texts") or []
     if not texts or out_duration_s is None or out_duration_s <= GFX_MIN_EVENT_S:
         return None
-    events = []
     # validate_edl already sorts texts by (start, id); re-sorting here makes
     # the output independent of dict-source ordering (determinism backstop).
-    for tx in sorted(texts, key=lambda t: (float(t.get("start") or 0.0),
-                                           str(t.get("id") or ""))):
-        ev = _compile_item(tx, float(out_duration_s), play_res)
-        if ev:
-            events.append(ev)
+    ordered = sorted(texts, key=lambda t: (float(t.get("start") or 0.0),
+                                           str(t.get("id") or "")))
+    events = [ev for ev in _stack_concurrent(ordered, float(out_duration_s),
+                                             play_res) if ev]
     if not events:
         return None
 

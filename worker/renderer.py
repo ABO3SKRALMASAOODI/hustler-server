@@ -34,7 +34,7 @@ import sheets
 import storage
 import travel
 from schemas import (clean_fingerprint, EDLValidationError,
-                     is_canvas_program, speed_pieces, validate_edl)
+                     is_canvas_program, quad_bbox, speed_pieces, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -56,6 +56,141 @@ GRADE_FILTERS = {
 
 def _enable_expr(spans):
     return "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in spans)
+
+
+# ── The screen takeover (round 55) ──────────────────────────────────────────
+# Transparent border, in pixels, padded around the asset before it is warped.
+# `perspective` samples outside the source by CLAMPING to the edge pixel, so
+# without this the pixels outside the destination quad are the asset's own
+# opaque border smeared across the whole frame — the base video disappears.
+# Two is enough to give the interpolator something transparent to reach for,
+# and small enough that the compensation below is sub-pixel honest.
+SCREEN_PAD_PX = 2
+
+
+def _ease_expr(kind, p):
+    """The move's shape as an ffmpeg expression over p (already clipped 0-1).
+
+    'smooth' is smoothstep — zero velocity at both ends, which is what stops a
+    push from starting with a visible lurch and stopping with a visible thud.
+    """
+    if kind == "linear":
+        return p
+    if kind == "accelerate":
+        return f"({p})*({p})"
+    return f"({p})*({p})*(3-2*({p}))"
+
+
+def _screen_lock_ease(lock, tvar, t0, dur, fps):
+    """The eased 0-1 progress of a takeover, as an expression over `tvar`.
+
+    The denominator is the window MINUS one frame, not the window: the last
+    frame a filter emits inside [t0, t0+dur] sits at t0+dur-1/fps, so dividing
+    by the full window means the move stops just short of arriving and the pin
+    hands off a pixel or two out of register. Both the camera push and the
+    corner pin call this — the same string, so they cannot drift apart even by
+    a rounding.
+    """
+    span = max(dur - 1.0 / max(fps, 1e-6), dur * 0.5, 1e-3)
+    p = f"clip(({tvar}-{t0:.3f})/{span:.5f},0,1)" if t0 else \
+        f"clip(({tvar})/{span:.5f},0,1)"
+    return _ease_expr(lock.get("ease") or "smooth", p)
+
+
+def screen_lock_geometry(lock):
+    """The two numbers a screen takeover is defined by, from its quad alone.
+
+    Returns (cx, cy, zoom_end): where the camera aims, and how far in it goes
+    for the quad to exactly fill the frame. ONE function, called by the zoom
+    stage AND by the corner pin, so the camera and the content cannot be
+    computed from different arithmetic — that is the whole reason the takeover
+    is a single EDL item and not a zoom sitting next to an overlay.
+    """
+    corners = [float(v) for v in lock["corners"]]
+    x, y, w, h = quad_bbox(corners)
+    cx, cy = x + w / 2.0, y + h / 2.0
+    # max, not min: the quad must COVER the frame at the end, so the push is
+    # driven by whichever side of it is furthest from filling.
+    span = max(w, h, 1e-4)
+    z_full = 1.0 / span
+    push = min(max(float(lock.get("push", 1.0)), 0.0), 1.0)
+    return cx, cy, 1.0 + push * (z_full - 1.0)
+
+
+def _screen_lock_terms(lock, t, a, b, fps):
+    """(strength_term, cx_term, cy_term) for the shared zoompan.
+
+    The takeover's camera push is emitted as one more term of the SAME zoompan
+    every other zoom rides, so a takeover and an unrelated zoom compose instead
+    of fighting over the geometry filter — and so there is exactly one place
+    the frame's crop is decided.
+    """
+    cx, cy, z_end = screen_lock_geometry(lock)
+    e = _screen_lock_ease(lock, t, a, b - a, fps)
+    win = f"between({t},{a:.3f},{b:.3f})"
+    strength = f"{z_end - 1.0:.5f}*({e})*{win}"
+    cxt = (f"{cx - 0.5:.5f}*{win}" if abs(cx - 0.5) > 1e-6 else None)
+    cyt = (f"{cy - 0.5:.5f}*{win}" if abs(cy - 0.5) > 1e-6 else None)
+    return strength, cxt, cyt
+
+
+def screen_lock_corner_paths(lock, W, H, fps, dur):
+    """The eight per-frame `perspective` expressions that pin the content.
+
+    Geometry, once, so the next reader does not have to re-derive it:
+
+    The base is zoomed about (cx, cy) by z(t). The renderer's targeted zoom
+    crops at offset (1-1/z)*cx and shows a window 1/z wide, so a point at frame
+    fraction u lands on screen at (u - (1-1/z)*cx)*z. Note what that gives for
+    u = cx: the quad's CENTRE is pinned at cx for every z — the screen does not
+    drift across the frame as the camera pushes, it only grows. That is the
+    property that makes the move read as a dolly rather than a pan.
+
+    At z_end the quad exactly fills the frame in its longer dimension. Whatever
+    is left over — the short dimension of a screen that is not the output's
+    aspect, and the SKEW of a screen shot at an angle — is closed by adding the
+    quad's own end-state error, weighted by g. Writing the correction as
+    (frame_corner - lock_corner_at_end) and not as a blend toward the frame is
+    what keeps a frontal, output-aspect screen glued to the glass for the whole
+    push: its error is zero, so the correction term is identically zero and the
+    content never detaches. An angled screen's error is its skew, and g rides
+    it out over the tail of the move — the glass flattening into the frame,
+    which IS the transition people mean when they say "it opens up".
+
+    g is the ease SQUARED on purpose: the un-skew has to happen late, while the
+    screen is already large and the correction is least visible.
+
+    Expressions are in `on/fps`, not `t`: vf_perspective exposes W, H, `in` and
+    `on` — there is no `t` variable. The chain forces CFR at the render rate
+    first, so on/fps is exactly the local second.
+    """
+    cx, cy, z_end = screen_lock_geometry(lock)
+    corners = [float(v) for v in lock["corners"]]
+    e = _screen_lock_ease(lock, f"on/{fps:.3f}", 0.0, dur, fps)
+    z = f"(1+{z_end - 1.0:.5f}*({e}))"
+    g = f"(({e})*({e}))"
+    # The destination is grown by the transparent border's share so the CONTENT
+    # (which sits inset by SCREEN_PAD_PX) lands where the quad says. Without
+    # this the takeover hands off two pixels small and the cut shows.
+    kx = W / max(1.0, W - 2.0 * SCREEN_PAD_PX)
+    ky = H / max(1.0, H - 2.0 * SCREEN_PAD_PX)
+    out = []
+    # Storage order is the filter's order (TL, TR, BL, BR); the frame corner
+    # each one has to arrive at follows the same order.
+    frame_corners = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
+    for i, (fx, fy) in enumerate(frame_corners):
+        qx, qy = corners[2 * i], corners[2 * i + 1]
+        # where this corner sits on screen under the push, and where it ends up
+        lock_x = f"(({qx:.5f}-(1-1/{z})*{cx:.5f})*{z})"
+        lock_y = f"(({qy:.5f}-(1-1/{z})*{cy:.5f})*{z})"
+        end_x = (qx - (1.0 - 1.0 / z_end) * cx) * z_end
+        end_y = (qy - (1.0 - 1.0 / z_end) * cy) * z_end
+        ex = f"({lock_x}+{g}*{fx - end_x:.5f})"
+        ey = f"({lock_y}+{g}*{fy - end_y:.5f})"
+        # fractions -> pixels, expanded about the frame centre by the border
+        out.append(f"{W}*(0.5+({ex}-0.5)*{kx:.6f})")
+        out.append(f"{H}*(0.5+({ey}-0.5)*{ky:.6f})")
+    return out
 
 
 def _even(x):
@@ -657,6 +792,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     stylize = fx.get("stylize") or []
     grade_custom = fx.get("grade_custom") or {}
     overlay_inputs = overlay_inputs or []
+    # A screen takeover is an overlay that carries a ScreenLock. It leaves the
+    # ordinary PIP loop entirely: it needs the zoom stage to have already run
+    # (its corner path is expressed in POST-push screen space) and it must not
+    # pick up the PIP loop's static scale/position, which the pin overrides.
+    takeovers = [(i, it) for i, it in overlay_inputs if it.get("screen")]
+    overlay_inputs = [(i, it) for i, it in overlay_inputs
+                      if not it.get("screen")]
     master = edl.get("master") or {}
     transition = fx.get("transition") or None
     tstyle = (transition or {}).get("style")
@@ -666,7 +808,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # and the floating frame scales the finished picture to an exact WxH box —
     # both need the CFR WxH guarantee every other geometry effect needs.
     do_norm = (bool(insert_inputs) or frame_mode is not None or bool(zooms)
-               or bool(speed) or bool(overlay_inputs)
+               or bool(speed) or bool(overlay_inputs) or bool(takeovers)
                or tstyle in ("whip_left", "whip_right", "zoom_punch")
                or bool(shifts) or screen_frame is not None
                or any(s.get("kind") == "shake" for s in stylize))
@@ -1180,8 +1322,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             continue
         vlabel = out_lab
     zoom_terms = []
-    zoom_targeted = any(z.get("cx") is not None or z.get("cy") is not None
-                        or z.get("path") for z in zooms)
+    # A takeover always aims (at the screen), so it forces the targeted branch
+    # for the whole zoompan. It must be decided BEFORE the zoom loop: that loop
+    # only emits a zoom's own cx/cy terms when the graph is already targeted,
+    # so flipping this afterwards would silently drop them.
+    zoom_targeted = bool(takeovers) or any(
+        z.get("cx") is not None or z.get("cy") is not None or z.get("path")
+        for z in zooms)
     cx_terms, cy_terms = [], []
     for z in zooms:
         a = max(0.0, float(z["start"]))
@@ -1241,6 +1388,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # SAME zoompan as the zooms (one geometry filter, not two) and is emitted
     # as one more term — which also means a zoom and a shift over the same
     # moment compose rather than fight.
+    # A screen takeover's camera push is a zoom term like any other — one
+    # geometry filter, and the same resolver the corner pin below reads, so the
+    # shot and the content it is pinned to can never be computed differently.
+    for idx, item in takeovers:
+        a = max(0.0, float(item["start"]))
+        b = min(tl.out_duration, a + float(item["duration_s"]))
+        if b - a < 0.05:
+            continue
+        st, cxt, cyt = _screen_lock_terms(item["screen"], f"on/{fps:.3f}",
+                                          a, b, fps)
+        zoom_terms.append(st)
+        if cxt:
+            cx_terms.append(cxt)
+        if cyt:
+            cy_terms.append(cyt)
     shift_w, shift_h, shift_z = ([], [], [])
     if shifts:
         shift_w, shift_h, shift_z = screenframe.shift_tracks(
@@ -1266,6 +1428,48 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      f":x='{xexpr}':y='{yexpr}'"
                      f":d=1:s={W}x{H}:fps={fps:.3f}[vzoom]")
         vlabel = "vzoom"
+    # ---- screen takeovers (round 55): content pinned INTO the footage ----
+    # Emitted after the zoom because the corner path is written in POST-push
+    # screen space, and before the PIP overlays because a takeover is the
+    # PICTURE for its window — a logo or a caption still belongs on top of it.
+    for j, (idx, item) in enumerate(takeovers):
+        o_start = float(item["start"])
+        o_dur = float(item["duration_s"])
+        lock = item["screen"]
+        pad = SCREEN_PAD_PX
+        iw_, ih_ = _even((W or 1280) - 2 * pad), _even((H or 720) - 2 * pad)
+        chain = []
+        if item["kind"] != "image":
+            off = float(item.get("source_start_s") or 0.0)
+            chain.append(f"trim=start={off:.3f}:end={off + o_dur:.3f}")
+            chain.append("setpts=PTS-STARTPTS")
+        # The content is cover-fitted to the OUTPUT frame, not to the screen's
+        # shape: the takeover ENDS full-frame, and an asset that changed aspect
+        # on the way there would have to squash to get out of the glass.
+        chain.append(f"scale={iw_}:{ih_}:force_original_aspect_ratio=increase")
+        chain.append(f"crop={iw_}:{ih_}")
+        chain.append("format=rgba")
+        chain.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
+        # vf_perspective has no `t` — only `on` — so the frames reaching it
+        # have to be at the render rate or every corner expression is off by
+        # the ratio of the asset's fps to ours.
+        chain.append(f"fps={fps:.3f}")
+        cs = screen_lock_corner_paths(lock, W or 1280, H or 720, fps, o_dur)
+        chain.append(
+            "perspective=" + ":".join(
+                f"{k}='{v}'" for k, v in zip(
+                    ("x0", "y0", "x1", "y1", "x2", "y2", "x3", "y3"), cs))
+            + ":sense=destination:eval=frame:interpolation=cubic")
+        op = item.get("opacity")
+        if op is not None and float(op) < 0.999:
+            chain.append(f"colorchannelmixer=aa={float(op):.3f}")
+        chain.append(f"setpts=PTS+{o_start:.3f}/TB")
+        parts.append(f"[{idx}:v]{','.join(chain)}[tko{j}]")
+        parts.append(
+            f"[{vlabel}][tko{j}]overlay=0:0:eof_action=pass"
+            f":enable='between(t,{o_start:.3f},{o_start + o_dur:.3f})'"
+            f"[vtk{j}]")
+        vlabel = f"vtk{j}"
     # ---- overlays (round 35): PIP / b-roll / logo layer -----------------
     for j, (idx, item) in enumerate(overlay_inputs):
         o_start = float(item["start"])

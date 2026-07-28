@@ -843,6 +843,65 @@ OVERLAY_SCALE_MIN = 0.05
 OVERLAY_SCALE_MAX = 1.0
 
 
+# ── The screen takeover (round 55) ──────────────────────────────────────────
+# "You're filming a laptop; push into the screen and let what's ON the screen
+# become the whole video." Every piece of this already existed separately — an
+# overlay, a targeted zoom, a spliced clip — and putting them side by side is
+# exactly what does NOT work: an overlay is drawn ABOVE the zoom, so the
+# content sits flat on the glass while the shot pushes past it, and the cut to
+# full-screen lands as a jump because nothing guarantees the two frames match.
+#
+# What makes it read as one move is that the content is CORNER-PINNED to the
+# screen and the pin travels with the push. The corners are a real per-frame
+# projective map (ffmpeg's `perspective`, eval=frame), so an angled screen is
+# skewed onto the glass and UNSKEWS as the frame arrives — the flattening IS
+# the transition. Three consequences worth knowing before changing any of it:
+#
+#   * The camera push and the pin are ONE resolver (renderer._screen_lock_terms).
+#     A separate ZoomItem beside the overlay could be remapped by a later cut
+#     while the overlay was only clamped, and the content would slide off the
+#     screen it is pinned to. The zoom does not exist as its own item at all.
+#   * The pin ENDS on the identity map — the last frame of the takeover is the
+#     asset rendered 1:1 at full frame, pixel-identical to the first frame of
+#     the clip that follows it. That is what makes the handoff invisible, and
+#     it is why the takeover needs no crossfade to hide a scale mismatch.
+#   * `perspective` clamps samples outside the source to its EDGE pixels, so
+#     the asset is padded with a transparent border and the destination quad
+#     is grown by exactly that border's share. Without the border the whole
+#     frame comes out opaque (the base disappears); without the compensation
+#     the handoff is off by the border's width.
+SCREEN_TAKEOVER_MIN_S = 0.4
+SCREEN_TAKEOVER_MAX_S = 5.0
+# Below this the screen is too small a target: the push would be a >12x blowup
+# of the base, which is mush long before the content covers it.
+SCREEN_QUAD_MIN_FRAC = 0.08
+
+
+class ScreenLock(BaseModel):
+    """Pins this overlay into a quadrilateral of the PROGRAM picture (a device
+    screen in the shot) and rides the push into it.
+
+    corners: 8 numbers — x0,y0,x1,y1,x2,y2,x3,y3 as fractions of the OUTPUT
+    frame, in ffmpeg's `perspective` order: top-left, top-right, BOTTOM-LEFT,
+    bottom-right. That order is deliberately not the intuitive clockwise one —
+    it is kept identical to the filter's so there is exactly one convention
+    between the tool, the detector and the graph and no re-ordering step that
+    could silently transpose two corners into a bow-tie.
+
+    push: how far the camera travels, 0-1 of the distance that makes the quad
+    fill the frame. At 1 the push alone delivers the takeover and the content
+    never leaves the glass; below 1 the content finishes the journey itself
+    over the tail of the window.
+
+    ease: the shape of the move. 'smooth' (smoothstep) is the default and the
+    right answer nearly always; 'accelerate' dives; 'linear' is for matching
+    an external move.
+    """
+    corners: List[float]
+    push: float = 1.0
+    ease: Literal["smooth", "accelerate", "linear"] = "smooth"
+
+
 class OverlayItem(BaseModel):
     id: str
     asset_key: str
@@ -868,6 +927,13 @@ class OverlayItem(BaseModel):
     # Video overlays are silent v1 (their audio never mixes) — a PIP that
     # suddenly talks over the program is almost never what "add b-roll"
     # means, and the honest tool result says so.
+    #
+    # Round 55. When set, this overlay is CORNER-PINNED into the footage and
+    # carries its own camera push (see ScreenLock). x/y/scale/rotation/fit are
+    # all ignored — the pin owns the geometry — and the renderer emits it from
+    # a different branch. None on every overlay ever written, and _sig_canon
+    # drops nested None keys, so no stored EDL changes signature.
+    screen: Optional[ScreenLock] = None
 
 
 # ── Text overlays (round 35): the motion-graphics layer ──────────────────
@@ -1178,6 +1244,79 @@ def _check_span(name, s, e, max_end, min_len=MIN_SPAN_S):
     if max_end is not None and e > max_end + 0.01:
         raise EDLValidationError(
             f"{name}: end {e} exceeds the limit {round(max_end, 2)}s.")
+
+
+def quad_bbox(corners):
+    """(x, y, w, h) of a screen quad's axis-aligned bounds, in frame
+    fractions. The one place the 8-number layout is unpacked."""
+    xs = corners[0::2]
+    ys = corners[1::2]
+    return (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+
+
+def quad_is_sane(corners):
+    """A quad the perspective filter can actually invert: no crossed sides, no
+    corner folded past another. Returns (ok, why).
+
+    The check is the SIGN of the cross product at each corner walked in
+    boundary order (TL -> TR -> BR -> BL, which is NOT the storage order — see
+    ScreenLock). All four the same sign means convex and consistently wound; a
+    mixed sign means the caller handed over a bow-tie, which `perspective`
+    renders as a torn smear rather than refusing, so it has to be caught here.
+    """
+    x0, y0, x1, y1, x2, y2, x3, y3 = corners
+    pts = [(x0, y0), (x1, y1), (x3, y3), (x2, y2)]     # boundary order
+    signs = []
+    for i in range(4):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % 4]
+        cx, cy = pts[(i + 2) % 4]
+        cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+        if abs(cross) < 1e-7:
+            return False, "three of its corners are on one line"
+        signs.append(cross > 0)
+    if len(set(signs)) != 1:
+        return False, ("its corners are crossed — the order is top-left, "
+                       "top-right, BOTTOM-LEFT, bottom-right")
+    return True, ""
+
+
+def _check_screen_lock(lock, name, window_s):
+    if not isinstance(lock.corners, list) or len(lock.corners) != 8:
+        raise EDLValidationError(
+            f"{name}.corners must be exactly 8 numbers — x0,y0,x1,y1,x2,y2,"
+            "x3,y3 as fractions of the output frame (top-left, top-right, "
+            "bottom-left, bottom-right).")
+    try:
+        vals = [float(v) for v in lock.corners]
+    except (TypeError, ValueError):
+        raise EDLValidationError(f"{name}.corners must all be numbers.")
+    for v in vals:
+        if v != v or v in (float("inf"), float("-inf")):
+            raise EDLValidationError(f"{name}.corners has a non-finite value.")
+        if not (-0.5 <= v <= 1.5):
+            raise EDLValidationError(
+                f"{name}.corners are FRACTIONS of the frame (0-1); got {v}. "
+                "Pass pixel coordinates divided by the frame width/height.")
+    lock.corners = [round(v, 4) for v in vals]
+    ok, why = quad_is_sane(lock.corners)
+    if not ok:
+        raise EDLValidationError(f"{name}.corners do not form a usable "
+                                 f"quadrilateral: {why}.")
+    _x, _y, qw, qh = quad_bbox(lock.corners)
+    if qw < SCREEN_QUAD_MIN_FRAC or qh < SCREEN_QUAD_MIN_FRAC:
+        raise EDLValidationError(
+            f"{name}: the screen is only {qw:.2f}x{qh:.2f} of the frame — "
+            f"below {SCREEN_QUAD_MIN_FRAC} the push has to blow the shot up "
+            "more than 12x to reach it, which is mush. Start the takeover "
+            "from a closer shot of the screen.")
+    lock.push = round(min(max(float(lock.push), 0.0), 1.0), 3)
+    if not (SCREEN_TAKEOVER_MIN_S - 0.01 <= window_s
+            <= SCREEN_TAKEOVER_MAX_S + 0.01):
+        raise EDLValidationError(
+            f"{name}: the takeover runs {window_s}s — it must be "
+            f"{SCREEN_TAKEOVER_MIN_S}-{SCREEN_TAKEOVER_MAX_S}s. Under half a "
+            "second reads as a cut, over five it stalls.")
 
 
 def validate_edl(data, duration=None):
@@ -1521,6 +1660,9 @@ def validate_edl(data, duration=None):
                     f"overlays[{i}].source_start_s must be >= 0.")
             if ov.kind == "image" or ov.source_start_s == 0.0:
                 ov.source_start_s = None
+        if ov.screen is not None:
+            _check_screen_lock(ov.screen, f"overlays[{i}].screen",
+                               ov.duration_s)
     edl.overlays.sort(key=lambda o: (o.start, o.id))
 
     # Text overlays: program-time windows, template-driven geometry.
@@ -1973,7 +2115,13 @@ def describe_edl(edl_dict, duration=None):
         for ov in edl.overlays:
             name = ov.asset_key.split("/")[-1]
             anim = "*" if (is_animated(ov.x) or is_animated(ov.y)) else ""
-            bits.append(f"{name}@{ov.start:g}s {ov.scale:g}w{anim}")
+            if ov.screen is not None:
+                # A pinned overlay's scale means nothing — say what it IS, so
+                # the agent reading its own diff can tell a takeover from a PIP.
+                bits.append(f"{name}@{ov.start:g}s screen-takeover "
+                            f"{ov.duration_s:g}s")
+            else:
+                bits.append(f"{name}@{ov.start:g}s {ov.scale:g}w{anim}")
         parts.append(f"overlays x{len(edl.overlays)} ({', '.join(bits)})")
     if edl.texts:
         bits = [f"{tx.template} \"{tx.text[:24]}\"@{tx.start:g}-{tx.end:g}s"

@@ -1853,6 +1853,18 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         prog = wschemas.program_duration(edl)
         for ov in (edl.get("overlays") or []):
             if ov.get("id") == args.get("id"):
+                if ov.get("screen"):
+                    # A screen takeover has to END exactly where the clip it
+                    # pushes into begins — dragging its block in the timeline
+                    # would slide the push off the cut and turn the one join
+                    # it exists to hide into a jump. Same rule the agent tool
+                    # applies (agent_tools.move_overlay); one policy, both
+                    # surfaces.
+                    raise ValueError(
+                        "This block is a screen takeover — its timing is "
+                        "locked to the clip it pushes into, so it can't be "
+                        "dragged on its own. Ask me to move the takeover and "
+                        "I'll move both together.")
                 if args.get("start") is not None:
                     ov["start"] = round(min(max(float(args["start"]), 0.0),
                                             max(0.0, prog - 0.2)), 2)
@@ -1878,10 +1890,30 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
 
     if op == "remove_overlay":
         before = edl.get("overlays") or []
+        hit = next((o for o in before if o.get("id") == args.get("id")), None)
         edl["overlays"] = [o for o in before
                            if o.get("id") != args.get("id")]
         if len(edl["overlays"]) == len(before):
             return edl, "overlay already gone"
+        if hit and hit.get("screen"):
+            # Deleting the pin alone would leave the clip it pushed into
+            # cutting in cold, with the shot still zoomed into a screen —
+            # so the handoff goes with it, exactly as remove_screen_takeover
+            # does on the agent side.
+            hand = round(float(hit["start"]) + float(hit["duration_s"]), 2)
+            tl = wtimeline.Timeline(edl.get("keep") or [],
+                                    edl.get("inserts") or [],
+                                    edl.get("speed") or [])
+            wins = wtimeline.insert_windows(edl.get("inserts") or [], tl)
+            drop = next((i.get("id") for i in (edl.get("inserts") or [])
+                         if i.get("asset_key") == hit.get("asset_key")
+                         and wins.get(i.get("id"))
+                         and abs(wins[i["id"]][0] - hand) < 0.06), None)
+            if drop:
+                edl["inserts"] = [i for i in (edl.get("inserts") or [])
+                                  if i.get("id") != drop]
+                return edl, ("removed the screen takeover and the clip it "
+                             "pushed into")
         return edl, f"removed overlay {args.get('id')}"
 
     if op == "retime_text":

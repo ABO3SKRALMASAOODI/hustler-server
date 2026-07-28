@@ -153,14 +153,100 @@ def points_from_frames(paths, max_width=640):
         ex, ey = _energy_point(np, gray)
         energy_pts.append((round(ex, 4), round(ey, 4)))
 
-    # Faces win whenever they were found in a meaningful share of the samples:
-    # one lucky detection across ten frames is noise, but half of them is a
-    # person who is in this video.
-    if face_pts and len(face_pts) >= max(1, len(paths) // 3):
+    # Faces win only when they were found in a meaningful share of the
+    # samples. This threshold used to be `max(1, len(paths) // 3)`, which for
+    # the 5 frames auto_reframe samples evaluates to ONE — so a single Haar
+    # false positive was enough to declare "a person is in this video". That
+    # is not hypothetical: a Mobile Legends gameplay recording, which contains
+    # no faces at all, matched in 1 of 5 frames and aimed a 9:16 crop at
+    # (0.39, 0.20) — the top-left corner of a HUD. A cascade's false-positive
+    # rate is per-frame and independent; a real face in a video someone wants
+    # reframed is in most of the frames, so requiring two agreeing detections
+    # costs a genuine subject nothing and costs a phantom everything.
+    quorum = 1 if len(paths) < 3 else max(2, len(paths) // 3)
+    if face_pts and len(face_pts) >= quorum and spread(face_pts) <= 0.5:
         return face_pts, "faces"
     if energy_pts:
         return energy_pts, "energy"
     return (face_pts, "faces") if face_pts else ([], None)
+
+
+def crop_detail_kept(paths, out_w, out_h, focus=None, max_width=640):
+    """How much of the picture's DETAIL survives a crop to out_w:out_h.
+
+    Round 55. A crop is the right way to change aspect only when the frame has
+    a subject to follow. When it does not, "reframing" 16:9 to 9:16 is just
+    truncation: the crop window is 31.6% of the source width, and the other
+    68% — on a game or a screen recording, that is the HUD, the minimap, the
+    score, the entire UI — is simply gone. A real user delivered a wide Mobile
+    Legends recording, got back a cropped 9:16, and described it exactly: "it
+    is not adjusting the video to the dimensions, it is just truncating it."
+
+    So measure it rather than assume. Gradient energy is already this module's
+    proxy for where the content is (see _energy_point); integrating it over
+    the crop window answers the only question that matters — would a crop cut
+    off things the viewer needs? A centre-weighted shot (a person talking)
+    keeps most of its detail through a vertical crop. A shot whose detail runs
+    edge to edge does not, and that is the footage that must be FITTED into
+    the new frame instead of cut down to it.
+
+    Returns a fraction 0-1 (1.0 = the crop discards nothing, which is also
+    what a widening or unchanged aspect returns), or None when nothing could
+    be measured. `focus` is the (x, y) the crop would be aimed at; None means
+    centre.
+    """
+    cv2 = _cv2()
+    if cv2 is None or not paths or not out_w or not out_h:
+        return None
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    fx, fy = (focus or (0.5, 0.5))
+    kept = []
+    for p in paths:
+        try:
+            img = cv2.imread(p)
+        except Exception:
+            img = None
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        if w > max_width:
+            try:
+                img = cv2.resize(img, (max_width,
+                                       max(1, int(h * max_width / float(w)))))
+            except Exception:
+                pass
+            h, w = img.shape[:2]
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            continue
+        g = gray.astype("float32")
+        gx = abs(g[:, 2:] - g[:, :-2])
+        gy = abs(g[2:, :] - g[:-2, :])
+        e = gx[1:-1, :] ** 2 + gy[:, 1:-1] ** 2
+        total = float(e.sum())
+        if total <= 0:
+            continue
+        eh, ew = e.shape
+        # The crop window the renderer would take: the largest out_w:out_h
+        # rectangle that fits, positioned on the focus point and clamped
+        # fully inside the frame. Mirrors renderer.frame_dims' geometry.
+        want = float(out_w) / float(out_h)
+        have = ew / float(eh)
+        if want < have:                      # narrower output: cut the sides
+            cw, ch = eh * want, float(eh)
+        else:                                # wider output: cut top/bottom
+            cw, ch = float(ew), ew / want
+        x0 = min(max(fx * ew - cw / 2.0, 0.0), max(0.0, ew - cw))
+        y0 = min(max(fy * eh - ch / 2.0, 0.0), max(0.0, eh - ch))
+        win = e[int(y0):int(y0 + ch), int(x0):int(x0 + cw)]
+        kept.append(min(1.0, float(win.sum()) / total))
+    if not kept:
+        return None
+    return round(sorted(kept)[len(kept) // 2], 3)
 
 
 def median_point(points):

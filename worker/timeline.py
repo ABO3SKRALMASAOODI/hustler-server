@@ -34,6 +34,14 @@ def _ins_id(i):
     return i.get("id") if isinstance(i, dict) else getattr(i, "id", None)
 
 
+def _ins_asset(inserts, iid):
+    for i in (inserts or []):
+        if _ins_id(i) == iid:
+            return (i.get("asset_key") if isinstance(i, dict)
+                    else getattr(i, "asset_key", None))
+    return None
+
+
 def insert_windows(inserts, tl):
     """{insert id: (program_start, program_end)} for a Timeline built from
     the SAME insert list.
@@ -504,8 +512,42 @@ def remap_program_items(edl, old_tl, new_tl):
         edl["sfx"] = kept_sfx
     if edl.get("overlays"):
         kept_ov = []
+        # A screen takeover is pinned to a clip, not to a span of the edit: its
+        # window has to END exactly where the clip it hands off to begins, or
+        # the one join the effect exists to hide becomes a jump. So it follows
+        # the CLIP through the remap and is re-derived from where that clip
+        # ended up, rather than being clamped like an ordinary overlay — and
+        # when the clip is gone, so is the takeover. Clamping it (the generic
+        # path below) would leave a push into a screen that hands off to
+        # nothing, which renders as the shot snapping back at full zoom.
+        tk_windows = insert_windows(edl.get("inserts"), new_tl)
         for ov in edl["overlays"]:
             ov = dict(ov)
+            if ov.get("screen"):
+                win = next((w for iid, w in tk_windows.items()
+                            if _ins_asset(edl.get("inserts"), iid)
+                            == ov.get("asset_key")
+                            and abs(w[0] - (float(ov["start"])
+                                            + float(ov["duration_s"]))) < 2.5),
+                           None)
+                if win is None:
+                    region_notes.append(
+                        f"note: screen takeover {ov.get('id')} was removed — "
+                        "the clip it pushed into is no longer in the edit.")
+                    continue
+                new_start = round(win[0] - float(ov["duration_s"]), 2)
+                if new_start < 0.0:
+                    region_notes.append(
+                        f"note: screen takeover {ov.get('id')} was removed — "
+                        "there is no longer room before the clip for the push.")
+                    continue
+                if abs(new_start - float(ov["start"])) > 0.01:
+                    region_notes.append(
+                        f"note: screen takeover {ov.get('id')} moved to "
+                        f"{new_start}-{win[0]}s, staying joined to its clip.")
+                    ov["start"] = new_start
+                kept_ov.append(ov)
+                continue
             if float(ov["start"]) > max(0.0, prog - 0.2):
                 region_notes.append(
                     f"note: overlay {ov.get('id')} was removed — it starts "
@@ -696,15 +738,46 @@ def transition_junctions(edl, index, n_blocks=None):
         return set(range(max(0, n_blocks - 1)))
 
     n_junctions = max(0, len(blocks) - 1)
+
+    # A SCREEN TAKEOVER'S HANDOFF IS NOT A CUT (round 55). The clip a takeover
+    # hands off to is spliced in like any other, so every rule above calls its
+    # junction a scene change — and a dip to black or a whip pan lands in the
+    # exact middle of the one join the whole effect exists to make invisible.
+    # It is also the junction a user is least likely to spot in a tool result
+    # and most likely to describe as "the transition is broken". These are
+    # excluded before scope is even consulted, so 'every_cut' cannot reinstate
+    # them either: nothing about a takeover is a cut the user chose.
+    ends = set()
+    for ov in (edl.get("overlays") or []):
+        if isinstance(ov, dict) and ov.get("screen"):
+            ends.add(round(float(ov["start"]) + float(ov["duration_s"]), 2))
+    protected = set()
+    if ends:
+        ins_durs = [d for _at, d in sorted(_ins_tuple(i) for i in inserts)]
+        acc, starts = 0.0, []
+        for kind, i in blocks:
+            starts.append(round(acc, 2))
+            if kind == "seg":
+                acc += (seg_out_len[i] if i < len(seg_out_len)
+                        else max(0.0, keep[i][1] - keep[i][0]))
+            else:
+                acc += ins_durs[i] if i < len(ins_durs) else 0.0
+        for k in range(n_junctions):
+            # junction k sits at the START of block k+1
+            if any(abs(starts[k + 1] - e) < 0.06 for e in ends):
+                protected.add(k)
+
     if scope == "every_cut":
-        return set(range(n_junctions))
+        return set(range(n_junctions)) - protected
 
     shots = (index or {}).get("shots") or []
     if not shots:
-        return set(range(n_junctions))
+        return set(range(n_junctions)) - protected
 
     out = set()
     for k in range(n_junctions):
+        if k in protected:
+            continue
         a_kind, a_i = blocks[k]
         b_kind, b_i = blocks[k + 1]
         if a_kind == "ins" or b_kind == "ins":

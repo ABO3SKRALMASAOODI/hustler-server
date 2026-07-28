@@ -41,6 +41,24 @@ def test_the_backend_mirror_has_not_drifted():
     assert backend.row_cost_sql(fb) == model_prices.row_cost_sql(fb)
 
 
+@pytest.fixture(autouse=True)
+def _default_lane_has_a_key(monkeypatch):
+    """These tests assert ROUTING — which model id each plan resolves to — and
+    never make a call. But agent_client_for builds the default lane's client on
+    the way, and the OpenAI SDK refuses to construct one with no key, so they
+    were passing only because some test that happened to run earlier had
+    already primed llm._client. That made them order-dependent: adding an
+    unrelated test FILE ahead of this one in collection order was enough to
+    turn five of them red on a machine with no OPENAI_API_KEY set. A test about
+    which model id we pick must not depend on the ambient environment.
+    """
+    if not config.OPENAI_API_KEY:
+        monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key-not-used")
+        monkeypatch.setattr(llm, "_client", None)
+    yield
+    llm._client = None
+
+
 def test_the_default_agent_model_is_priced():
     """An unlisted AGENT_MODEL silently falls back to the env constants. That
     is the right degradation, but it must not be the DEFAULT state."""

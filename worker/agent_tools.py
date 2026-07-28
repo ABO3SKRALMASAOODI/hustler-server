@@ -20,6 +20,10 @@ import media
 import model_prices
 import music_library
 import perception
+# The takeover's geometry (how far the camera travels, where it aims) is
+# renderer arithmetic, and the tool has to quote the SAME numbers the graph
+# will use — importing the resolver is the only way those two cannot drift.
+import renderer
 import sfx_library
 import stock
 import storage
@@ -27,6 +31,7 @@ import subject
 import taste
 import videogen
 import cursor as cursorlib
+import screendet
 import screenframe
 import timeline as timeline_mod
 import travel
@@ -51,7 +56,9 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      CURSOR_SCALE_MIN, CURSOR_SCALE_MAX, CURSOR_MAX_CLICKS,
                      FRAME_SHIFT_RATIOS, FRAME_SHIFT_MIN_S, FRAME_SHIFT_MAX_S,
                      SCREEN_FRAME_INSET_MIN, SCREEN_FRAME_INSET_MAX,
-                     SCREEN_FRAME_RADIUS_MAX)
+                     SCREEN_FRAME_RADIUS_MAX,
+                     SCREEN_QUAD_MIN_FRAC, SCREEN_TAKEOVER_MIN_S,
+                     SCREEN_TAKEOVER_MAX_S, quad_bbox, quad_is_sane)
 from timeline import Timeline, card_text_window, insert_windows
 
 # Karaoke grouping: the renderer's legacy clamp (captions.KARAOKE_HARD_MAX,
@@ -99,6 +106,16 @@ class ToolContext:
         self._asset_perception = {}   # asset/library key -> audio analysis
         self.last_preview = None      # set by render_preview
         self.last_selfcheck = None    # vision one-liner from the last preview
+        # Craft findings from the most recent REAL preview render, and the EDL
+        # version they were measured on. The loop reads these to stop a turn
+        # ending on an edit the audit already objected to — see
+        # agent_loop._taste_pushback. Round 55: the audit fired correctly on a
+        # gameplay montage ("5 sound effects in 30s", "3 zooms across 30s",
+        # dead air at the open) and the agent replied "Preview is ready" and
+        # shipped it, because a finding in a tool result is only as binding as
+        # the model's mood. It is now a thing the turn has to answer for.
+        self.last_taste = []
+        self.last_taste_version = None
         # What the user asked for THIS turn, verbatim. Read only to SUPPRESS
         # taste findings (round 52): a fade from black is a defect on a reel
         # right up until the moment somebody asks for one, and a critic that
@@ -2261,21 +2278,77 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None):
                 "auto_reframe to aim the crop at the subject, or pass "
                 "focus_x/focus_y yourself (fractions of the source frame, "
                 "from look_at).")
+        # Say HOW MUCH picture the crop costs. "Center crop" is abstract;
+        # "this discards 75% of the width" is the fact that decides whether
+        # crop was the right operation, and a user whose wide gameplay
+        # recording came back as a narrow slice of itself was told neither.
+        try:
+            v = ctx.index.get("video") or {}
+            sw, sh = float(v.get("width") or 0), float(v.get("height") or 0)
+            rw, rh = (float(x) for x in frame.ratio.split(":"))
+            if sw > 0 and sh > 0:
+                src_ar, out_ar = sw / sh, rw / rh
+                lost = 1.0 - min(src_ar, out_ar) / max(src_ar, out_ar)
+                if lost > 0.3:
+                    res += (f" It also DISCARDS {lost * 100:.0f}% of the "
+                            f"source picture ({int(sw)}x{int(sh)} -> "
+                            f"{frame.ratio}). That is correct for footage "
+                            "with one subject and wrong for footage whose "
+                            "content fills the frame (gameplay and its HUD, a "
+                            "screen recording, a wide scene) — there, fitting "
+                            "the whole picture in with mode='pad_blur' is the "
+                            "honest conversion. auto_reframe measures which "
+                            "case this is instead of guessing.")
+        except (TypeError, ValueError, AttributeError):
+            pass
     return res
 
 
-def auto_reframe(ctx, ratio="9:16", mode="crop"):
-    """Convert the output frame AND aim the crop at the real subject: sample
-    frames across the kept footage, ask the vision model where the subject
-    sits, write set_frame with that focus. The honest fix for '9:16 just
-    cut the middle of the screen'."""
+# Below this share of the picture's detail surviving the crop window, a crop
+# is not reframing — it is truncation, and the whole frame should be FITTED
+# into the new aspect instead. Calibrated on the footage that produced the
+# complaint: a wide game recording keeps ~0.35 of its detail through a 9:16
+# crop (HUD, minimap and score all sit outside the window), while a
+# centre-weighted talking head keeps well over 0.6.
+CROP_DETAIL_KEEP_MIN = 0.55
+
+
+def auto_reframe(ctx, ratio="9:16", mode="auto"):
+    """Convert the output frame to `ratio` and choose HOW honestly.
+
+    Round 55. This tool only ever cropped, and aimed the crop as well as it
+    could. That is right for a person — a vertical crop of a talking head is
+    what vertical video IS — and wrong for everything whose content fills the
+    frame. A user handed us a wide Mobile Legends recording, asked for 9:16,
+    and got back a video with two thirds of its width cut off: "the dimensions
+    part is corrupted, it's not adjusting the video to the new dimension it's
+    just truncating it."
+
+    Both halves of that are now measured rather than assumed:
+
+      * WHERE the subject is — faces (subject.points_from_frames), now behind
+        a real quorum so one Haar false positive on a HUD can no longer aim
+        the crop at a corner, which is exactly what happened here;
+      * WHETHER a crop is the right operation at all — subject.crop_detail_kept
+        integrates the picture's gradient energy over the window the renderer
+        would actually take. Detail that falls outside it is content the user
+        would lose.
+
+    mode='auto' (the default) picks crop or pad_blur from those two numbers.
+    An explicit mode always wins — asking for a crop gets a crop.
+    """
     if str(ratio) == "source":
         return set_frame(ctx, "source")
-    if str(mode or "crop") != "crop":
+    mode = str(mode or "auto").lower()
+    if mode not in ("auto", "crop", "pad", "pad_blur"):
+        return ("REJECTED: mode must be 'auto' (measure the footage and "
+                "choose), 'crop' (fill the frame, cutting the sides), 'pad' "
+                "or 'pad_blur' (fit the WHOLE picture into the new frame).")
+    if mode in ("pad", "pad_blur"):
         # pad modes never discard picture, so there is nothing to aim.
         return set_frame(ctx, ratio, mode)
     if not ctx.has_main_video:
-        return set_frame(ctx, ratio, "crop")
+        return set_frame(ctx, ratio, "crop" if mode == "auto" else mode)
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
@@ -2321,6 +2394,35 @@ def auto_reframe(ctx, ratio="9:16", mode="crop"):
     # day it was the only route, it was unconfigured, and every one of them got
     # a dead-centre crop with an apology attached.
     pts, method = subject.points_from_frames(frames)
+
+    def _kept(focus):
+        """Share of the picture's detail the crop window would keep."""
+        try:
+            rw, rh = (int(x) for x in str(ratio).split(":"))
+        except (TypeError, ValueError):
+            return None
+        try:
+            return subject.crop_detail_kept(frames, rw, rh, focus=focus)
+        except Exception:
+            return None
+
+    def _fit_instead(focus, why):
+        """The honest answer when a crop would cut off content: fit the WHOLE
+        picture into the new frame over a blurred backdrop. Nothing is lost,
+        and the tool says exactly what it measured and how to override."""
+        res = set_frame(ctx, ratio, "pad_blur")
+        if res.startswith("EDL v"):
+            res += ("\nFITTED, NOT CROPPED — measured, not assumed. " + why +
+                    " So the whole frame is scaled into the new "
+                    f"{ratio} output over a blurred copy of itself, and NO "
+                    "part of the picture is cut off. Tell the user the video "
+                    "was re-fitted to the new dimensions rather than "
+                    "truncated, and that the soft bands are the same footage "
+                    "blurred. If they want it filled edge-to-edge instead, "
+                    "accepting that the sides are lost, that is "
+                    f"set_frame('{ratio}', 'crop').")
+        return res
+
     if method == "faces":
         pt = subject.median_point(pts)
         drift = subject.spread(pts)
@@ -2338,11 +2440,26 @@ def auto_reframe(ctx, ratio="9:16", mode="crop"):
                         "pad_blur if the framing looks tight anywhere.")
         return res
 
+    # NO FACE. Before aiming a crop at a guess, ask whether a crop is the
+    # right operation at all — this is the branch the gameplay recording took,
+    # and the branch that used to truncate two thirds of it away.
+    energy_pt = subject.median_point(pts) if pts else None
+    if mode == "auto":
+        keep = _kept(energy_pt or (0.5, 0.5))
+        if keep is not None and keep < CROP_DETAIL_KEEP_MIN:
+            return _fit_instead(
+                energy_pt,
+                f"No face is in this footage, and a {ratio} crop of it would "
+                f"keep only {keep * 100:.0f}% of the picture's detail — the "
+                "content runs to the edges of the frame (a game HUD, a screen "
+                "recording, a wide scene), so cropping would cut off things "
+                "the viewer needs rather than reframe them.")
+
     if not llm.vision_available():
         # No face and no vision: the gradient-energy centroid is still a
         # measurement of where the picture's detail is, which beats the middle
         # of the frame — but it is a weaker claim and is described as one.
-        pt = subject.median_point(pts) if pts else None
+        pt = energy_pt
         res = set_frame(ctx, ratio, "crop",
                         focus_x=pt[0] if pt else None,
                         focus_y=pt[1] if pt else None)
@@ -2387,6 +2504,19 @@ def auto_reframe(ctx, ratio="9:16", mode="crop"):
     # off every talking-head frame.
     xs, ys = sorted(p[0] for p in pts), sorted(p[1] for p in pts)
     fx, fy = xs[len(xs) // 2], ys[len(ys) // 2]
+    # Vision naming a focal point does not make a crop the right operation:
+    # asked where to look in a game frame it will happily point at the
+    # character, and the HUD around it still gets cut off. The same
+    # measurement gates this branch.
+    if mode == "auto":
+        keep = _kept((fx, fy))
+        if keep is not None and keep < CROP_DETAIL_KEEP_MIN:
+            return _fit_instead(
+                (fx, fy),
+                f"The vision model put the focal point at ({fx:.2f}, "
+                f"{fy:.2f}), but a {ratio} crop aimed there would still keep "
+                f"only {keep * 100:.0f}% of the picture's detail — this "
+                "footage fills its frame edge to edge.")
     res = set_frame(ctx, ratio, "crop", focus_x=round(fx, 3),
                     focus_y=round(fy, 3))
     if res.startswith("EDL v"):
@@ -2707,6 +2837,25 @@ TRANSITION_DESC = {
     "flash": "additive white pop peaking on the cut",
 }
 
+# One definition, in taste.py, shared by the tool result and the render
+# audit — so what set_transitions calls "too often" and what the audit calls
+# "too often" cannot drift apart.
+TRANSITION_MIN_SPACING_S = taste.TRANSITION_MIN_SPACING_S
+
+# Where a card's SUBTITLE is anchored: the same point as its title, so the two
+# are one group rather than two independent guesses.
+#
+# This was 0.635 — a fixed fraction chosen without knowing how tall the title
+# above it would wrap. On a 9:16 frame "MOSKOV CRITICAL BUILD" wraps to three
+# 176px lines spanning 675-1245px, and the subtitle sat at 1167-1271px, so the
+# video OPENED on two lines of text burned through each other. The height of a
+# wrapped title is not knowable here (only graphics.py measures it), and that
+# is exactly why nothing here should be pretending to place text relative to
+# it: declaring both on the card's centre hands the layout to
+# graphics._stack_concurrent, which measures both blocks and stacks them —
+# centred on the card, whatever the title turns out to be.
+CARD_SUBTITLE_Y = 0.5
+
 
 def set_transitions(ctx, style, duration_s=0.3, scope="scene"):
     p = (style or "").strip().lower()
@@ -2778,9 +2927,35 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene"):
                 "scope='every_cut' only if the user explicitly wants one on "
                 "every cut.")
     where = ("every cut" if sc == "every_cut" else "scene changes")
-    return ctx.write_edl(
+    res = ctx.write_edl(
         edl, f"transitions: {d}s {p} ({TRANSITION_DESC[p]}) at {where} — "
              f"{hit} of {n_cuts} junction{'s' if n_cuts != 1 else ''}{note}")
+
+    # CADENCE, not just count (round 55). 'scene' bounds transitions to real
+    # shot changes, which is the right rule and is not a rule about DENSITY:
+    # a montage assembled from nine far-apart source spans has nine genuine
+    # scene changes, so all nine qualified and a 30s edit fired a whip pan
+    # every 3.3 seconds. The user's words were "look at how fast the scene
+    # transitions are — it's literally putting one every second". The count
+    # alone ("9 of 9") reads like success; the interval is the number that
+    # shows it is not.
+    if res.startswith("EDL v") and hit >= 3:
+        prog = program_duration(edl)
+        if prog > 0:
+            every = prog / hit
+            res += (f"\nCadence: {hit} transitions across {prog:.0f}s of "
+                    f"programme is one every {every:.1f}s.")
+            if every < TRANSITION_MIN_SPACING_S:
+                res += (" THAT IS TOO OFTEN — a full-screen effect at that "
+                        "rate is the effect the viewer watches instead of the "
+                        "video, and it is the single most common 'this looks "
+                        "broken' report. A transition should mark a change "
+                        "the viewer needs to feel, not punctuate every clip. "
+                        "Unless the user asked for exactly this, either drop "
+                        "them (set_transitions('none') — hard cuts are the "
+                        "montage default and read as faster, not slower) or "
+                        "keep the edit and let the cuts do the work.")
+    return res
 
 
 REGION_MODES = ("blur", "pixelate", "black")
@@ -4085,11 +4260,414 @@ def remove_overlay(ctx, id):
         have = ", ".join(o.get("id") or "?" for o in items) or "none"
         return (f"REJECTED: no overlay with id '{id}'. Existing overlays: "
                 f"{have}. Call get_edl to see them.")
+    if hit.get("screen"):
+        # Dropping the pin alone leaves the handoff clip cutting in cold, with
+        # no push into it — a jump cut the user never asked for, from a tool
+        # they used to undo something.
+        return (f"REJECTED: '{id}' is a screen takeover, not a plain overlay. "
+                f"Use remove_screen_takeover('{id}') — it takes the camera "
+                "push and the clip it hands off to with it.")
     edl["overlays"] = [o for o in items if o.get("id") != id]
     return ctx.write_edl(
         edl, f"removed overlay {id} "
              f"('{os.path.basename(hit['asset_key'])}', "
              f"{hit['start']}-{round(float(hit['start']) + float(hit['duration_s']), 2)}s)")
+
+
+# ── The screen takeover (round 55) ──────────────────────────────────────────
+# "Here is a video of my laptop — zoom into the screen and let the other clip
+# take over from there, smoothly." Everything the move needs already existed
+# and none of it worked, because the pieces are drawn in the wrong order: an
+# overlay sits ABOVE the zoom, so content dropped on the screen stays flat and
+# still while the shot pushes past it, and the cut to full-screen is a jump
+# because nothing makes the two frames line up. The answer is not more
+# arguments on add_overlay — it is one item that owns the camera AND the
+# content, so the two are derived from the same numbers. See schemas.ScreenLock
+# and renderer.screen_lock_corner_paths.
+
+
+def _out_frac_from_source(ctx, edl, sx, sy):
+    """Map a SOURCE-frame fraction to an OUTPUT-frame fraction.
+
+    Everything the detector measures is in source pixels; everything the pin
+    consumes is in output pixels, and between them sits whatever `frame` the
+    project is rendering at. A 16:9 shot reframed to 9:16 throws away 44% of
+    the width — a screen quad handed straight through would be pinned to the
+    wrong half of the picture. Returns None when the point is cropped away.
+    """
+    fr = edl.get("frame") or {}
+    ratio = fr.get("ratio") or "source"
+    if ratio == "source":
+        return sx, sy
+    info = ctx.index.get("video") or {}
+    sw = float(info.get("width") or 0) or 1920.0
+    sh = float(info.get("height") or 0) or 1080.0
+    W, H = renderer.frame_dims(sw, sh, ratio)
+    mode = fr.get("mode") or "crop"
+    if mode == "crop":
+        s = max(W / sw, H / sh)
+        scaled_w, scaled_h = sw * s, sh * s
+        fx = fr.get("focus_x")
+        fy = fr.get("focus_y")
+        fx = 0.5 if fx is None else float(fx)
+        fy = 0.5 if fy is None else float(fy)
+        x0 = min(max(scaled_w * fx - W / 2.0, 0.0), scaled_w - W)
+        y0 = min(max(scaled_h * fy - H / 2.0, 0.0), scaled_h - H)
+        ox = (sx * scaled_w - x0) / W
+        oy = (sy * scaled_h - y0) / H
+    else:                                       # pad / pad_blur: fit + bars
+        s = min(W / sw, H / sh)
+        scaled_w, scaled_h = sw * s, sh * s
+        ox = (sx * scaled_w + (W - scaled_w) / 2.0) / W
+        oy = (sy * scaled_h + (H - scaled_h) / 2.0) / H
+    if not (-0.02 <= ox <= 1.02 and -0.02 <= oy <= 1.02):
+        return None
+    return min(max(ox, 0.0), 1.0), min(max(oy, 0.0), 1.0)
+
+
+def _detect_screen(ctx, edl, src_t):
+    """Measure the device screen around SOURCE second src_t. Returns
+    (corners_in_output_fractions, info_dict) or (None, reason)."""
+    try:
+        path = ctx.proxy_path()
+    except Exception:
+        try:
+            path = _original_local(ctx)
+        except Exception as e:
+            return None, (f"could not open the footage to look at it "
+                          f"({str(e)[:120]})")
+    dur = float(ctx.duration or 0.0)
+    # Three frames spread over a second of the same shot: one frame can catch
+    # a glare flash or a hand crossing the bezel, and how well the three AGREE
+    # is the only honest confidence signal there is.
+    offsets = [-0.4, 0.0, 0.4]
+    frames = []
+    for i, off in enumerate(offsets):
+        t = min(max(src_t + off, 0.0), max(0.0, dur - 0.05))
+        fp = os.path.join(ctx.workdir, f"screendet_{i}_{int(t * 100)}.jpg")
+        try:
+            media.frame_at(path, t, fp)
+        except Exception:
+            continue
+        frames.append(fp)
+    if not frames:
+        return None, "could not extract frames from the footage at that moment"
+    res = screendet.find_screen(frames)
+    if res.get("error"):
+        return None, res["error"]
+    if res["confidence"] < screendet.MIN_CONFIDENCE:
+        return None, (f"the best screen-shaped region scored only "
+                      f"{res['confidence']:.2f} confidence")
+    out = []
+    for i in range(4):
+        pt = _out_frac_from_source(ctx, edl, res["corners"][2 * i],
+                                   res["corners"][2 * i + 1])
+        if pt is None:
+            return None, ("the screen I found is outside the output frame — "
+                          "this project is reframed, and the screen has been "
+                          "cropped away")
+        out.extend([round(pt[0], 4), round(pt[1], 4)])
+    return out, res
+
+
+def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
+                        corners=None, clip_start_s=None, hold_s=None,
+                        push=1.0, ease="smooth"):
+    """Push into a device screen in the footage and let an asset playing ON
+    that screen become the whole video, in one continuous move."""
+    asset, err = _resolve_media_asset(ctx, asset_key,
+                                      ("video_clip", "image_ref"))
+    if err:
+        return err
+    kind = "image" if asset["kind"] == "image_ref" else "video"
+    name = (asset.get("meta") or {}).get("filename") or \
+        os.path.basename(asset_key)
+    if not ctx.has_main_video:
+        return ("REJECTED: a screen takeover pushes into a screen that is IN "
+                "the footage, and this project has no main video to push "
+                "into. Place the shot of the device first.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    try:
+        at = round(min(max(float(at_output_s), 0.0), prog), 2)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s must be a number — the moment in the "
+                "FINAL edited video where the takeover FINISHES and the asset "
+                "is full screen, in seconds.")
+    try:
+        dur = round(float(duration_s if duration_s is not None else 1.2), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: duration_s must be a number of seconds."
+    if not (SCREEN_TAKEOVER_MIN_S <= dur <= SCREEN_TAKEOVER_MAX_S):
+        return (f"REJECTED: duration_s must be "
+                f"{SCREEN_TAKEOVER_MIN_S}-{SCREEN_TAKEOVER_MAX_S}s. Under "
+                "half a second the push reads as a cut; over five it stalls. "
+                "1.0-1.5s is the move people mean.")
+    es = str(ease or "smooth").strip().lower()
+    if es not in ("smooth", "accelerate", "linear"):
+        return ("REJECTED: ease must be 'smooth' (default — eases in and out, "
+                "right nearly always), 'accelerate' (dives into the screen) "
+                "or 'linear'.")
+    try:
+        pu = round(min(max(float(push if push is not None else 1.0), 0.0),
+                       1.0), 3)
+    except (TypeError, ValueError):
+        return "REJECTED: push must be a number 0-1."
+    if at - dur < 0.05:
+        return (f"REJECTED: the takeover needs {dur}s of footage BEFORE "
+                f"{at}s to push through, and there is only {at}s of program "
+                "there. Move at_output_s later or shorten duration_s.")
+
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    # Detect on the footage that is on screen at the MIDDLE of the push: the
+    # start of the window is where the screen is smallest and hardest to
+    # measure, and the end is where the content has already covered it.
+    probe_out = max(0.0, at - dur * 0.5)
+    src_t = tl.out_to_src(probe_out)
+    if src_t is None:
+        return (f"REJECTED: {round(probe_out, 2)}s of the program is inside a "
+                "spliced-in clip, not the main footage — there is no shot of "
+                "a device there to push into. Point at_output_s at a moment "
+                "where the main video is playing.")
+
+    detected = None
+    if corners is not None:
+        quad, cerr = _parse_screen_corners(corners)
+        if cerr:
+            return cerr
+    else:
+        quad, why = _detect_screen(ctx, edl, src_t)
+        if quad is None:
+            return (f"REJECTED: I could not measure a screen in the frame at "
+                    f"{round(probe_out, 2)}s — {why}. I will not guess a "
+                    "rectangle: the corners are the whole effect, and one that "
+                    "is 2% out slides visibly once the push magnifies it. "
+                    "Either call look_at on that moment to read the screen's "
+                    "four corners and pass them as `corners` (8 numbers, "
+                    "fractions of the frame: top-left, top-right, BOTTOM-LEFT, "
+                    "bottom-right), or ask the user where the screen is.")
+        detected = why
+
+    ok, why = quad_is_sane(quad)
+    if not ok:
+        return (f"REJECTED: those corners do not form a usable quadrilateral "
+                f"— {why}. The order is top-left, top-right, BOTTOM-LEFT, "
+                "bottom-right.")
+    qx, qy, qw, qh = quad_bbox(quad)
+    if qw < SCREEN_QUAD_MIN_FRAC or qh < SCREEN_QUAD_MIN_FRAC:
+        return (f"REJECTED: that screen is {qw:.2f}x{qh:.2f} of the frame. "
+                f"Pushing into something under {SCREEN_QUAD_MIN_FRAC} of the "
+                "frame means blowing the shot up more than 12x, which is "
+                "mush by the time it arrives. Start the takeover from a "
+                "closer shot of the screen, or use insert_media for a plain "
+                "cut to the clip.")
+
+    # The asset must have enough footage to cover the push AND still be worth
+    # cutting to. Its source time runs continuously across the handoff, which
+    # is what makes the handoff invisible.
+    off = 0.0
+    if kind == "video":
+        clip_dur = _asset_media_duration(ctx, asset)
+        if clip_start_s is not None:
+            try:
+                off = round(max(0.0, float(clip_start_s)), 2)
+            except (TypeError, ValueError):
+                return ("REJECTED: clip_start_s must be a number of seconds "
+                        "— where in the asset the takeover starts playing.")
+        if off + dur >= clip_dur - 0.05:
+            return (f"REJECTED: '{name}' is {clip_dur:.1f}s long and the "
+                    f"takeover alone would consume {off + dur:.1f}s of it, "
+                    "leaving nothing to cut to. Use a longer clip or a "
+                    "shorter duration_s.")
+    try:
+        hold = round(max(0.0, float(hold_s)), 2) if hold_s is not None else None
+    except (TypeError, ValueError):
+        return "REJECTED: hold_s must be a number of seconds."
+
+    # ── 1. the handoff, placed FIRST ────────────────────────────────────────
+    # insert_media snaps to segment boundaries and to word edges, so where the
+    # clip actually lands is not necessarily where it was asked to land. The
+    # takeover is then built backwards from the position the insert REALLY
+    # took — the pin's last frame and the clip's first frame have to be the
+    # same frame, and a quarter-second snap nobody read back would break
+    # exactly that.
+    ins_dur = hold
+    if ins_dur is None:
+        ins_dur = (round(min(clip_dur - off - dur, MAX_INSERT_DURATION_S), 2)
+                   if kind == "video" else 4.0)
+    before_ids = {i.get("id") for i in (edl.get("inserts") or [])}
+    before_keep = [list(k) for k in edl["keep"]]
+    res = insert_media(ctx, asset_key, at, duration_s=ins_dur,
+                       clip_start_s=(round(off + dur, 2)
+                                     if kind == "video" else None))
+    if not res.startswith("EDL v"):
+        return (f"REJECTED: could not place the clip the takeover hands off "
+                f"to — {res}")
+    edl = dict(ctx.latest_edl()["json"])
+
+    def _undo(reason):
+        """Put the edit back the way it was before the clip was spliced.
+
+        insert_media has already written a version by this point, so a bare
+        REJECTED here would leave the user with a clip cutting in cold and no
+        push into it — a change they did not ask for, from a call that said it
+        failed. The keep list goes back too, because insert_media may have
+        SPLIT a take to land the clip mid-sentence.
+        """
+        back = dict(ctx.latest_edl()["json"])
+        back["inserts"] = [i for i in (back.get("inserts") or [])
+                           if i.get("id") in before_ids]
+        back["keep"] = before_keep
+        ctx.write_edl(back, "undid the handoff clip — the takeover could not "
+                            "be built")
+        return f"REJECTED: {reason} Nothing was changed."
+
+    new_ids = {i.get("id") for i in (edl.get("inserts") or [])} - before_ids
+    if not new_ids:
+        return _undo("the handoff clip did not survive the write.")
+    # Diff the id sets rather than matching on asset_key: the same clip may
+    # already be spliced in elsewhere, and picking "the last one with this
+    # asset" would build the takeover around somebody else's insert.
+    ins = next(i for i in edl["inserts"] if i.get("id") in new_ids)
+    tl2 = Timeline(edl["keep"], edl.get("inserts") or [],
+                   edl.get("speed") or [])
+    windows = insert_windows(edl.get("inserts") or [], tl2)
+    if ins["id"] not in windows:
+        return _undo("I could not locate the clip on the timeline after "
+                     "placing it.")
+    hand = windows[ins["id"]][0]
+    start = round(hand - dur, 2)
+    if start < 0.0:
+        return _undo(f"the clip snapped to the nearest cut at {hand}s, and a "
+                     f"{dur}s push does not fit before it — move at_output_s "
+                     "later or shorten duration_s.")
+
+    # ── 2. the pin, built backwards from where the clip really landed ───────
+    overlays = [dict(o) for o in (edl.get("overlays") or [])]
+    item = {"id": _next_item_id(overlays, "tk"), "asset_key": asset_key,
+            "kind": kind, "start": start, "duration_s": dur,
+            "x": 0.5, "y": 0.5, "scale": 1.0, "fit": None, "opacity": None,
+            "entrance": None, "exit": None,
+            "source_start_s": off if kind == "video" else None,
+            "screen": {"corners": quad, "push": pu, "ease": es}}
+    overlays.append(item)
+    edl["overlays"] = overlays
+    written = ctx.write_edl(
+        edl, f"screen takeover: '{name}' pinned into the screen at "
+             f"{start}-{hand}s and pushed to full frame [{item['id']}]")
+    if not written.startswith("EDL v"):
+        # The clip is already spliced at this point. Leaving it there would
+        # hand the user a cut they never asked for from a call that reported
+        # failure, so it goes back out before the rejection is returned.
+        return _undo(f"the takeover would not validate — {written}")
+
+    _cx, _cy, z_end = renderer.screen_lock_geometry(item["screen"])
+    bits = [written]
+    if detected:
+        bits.append(
+            f"The screen was MEASURED, not estimated: corners agreed across "
+            f"{detected['agreement']} of {detected['n_frames']} sampled "
+            f"frames at {detected['confidence']:.2f} confidence "
+            f"({detected['method']} detector). It occupies "
+            f"{qw:.2f}x{qh:.2f} of the frame.")
+    bits.append(
+        f"From {start}s the clip plays ON the screen inside the shot, the "
+        f"camera pushes {z_end:.1f}x into it over {dur}s, and the picture "
+        f"arrives full frame at exactly {hand}s — where '{name}' cuts in and "
+        f"keeps playing from the same instant ({round(off + dur, 2)}s into "
+        "the clip). The last frame of the push and the first frame of the "
+        "clip are the SAME frame, which is what makes the join invisible; "
+        "the clip's own sound starts there too.")
+    bits.append(
+        "The push and the pin are one item — remove it with "
+        f"remove_screen_takeover('{item['id']}'), which also takes the "
+        f"handoff clip ({ins['id']}) out. Do NOT add a zoom over "
+        f"{start}-{hand}s: it would move the shot out from under the content "
+        "pinned to it.")
+    return "\n".join(bits)
+
+
+def _parse_screen_corners(corners):
+    """8 numbers, or 4 [x, y] pairs, or a {x, y, w, h} rectangle."""
+    if isinstance(corners, dict):
+        try:
+            x = float(corners["x"])
+            y = float(corners["y"])
+            w = float(corners["w"])
+            h = float(corners["h"])
+        except (KeyError, TypeError, ValueError):
+            return None, ("REJECTED: a rectangle needs x, y, w and h as "
+                          "fractions of the frame.")
+        return [round(v, 4) for v in
+                (x, y, x + w, y, x, y + h, x + w, y + h)], None
+    if not isinstance(corners, (list, tuple)):
+        return None, ("REJECTED: corners must be 8 numbers "
+                      "(x0,y0,x1,y1,x2,y2,x3,y3), four [x, y] pairs, or a "
+                      "{x, y, w, h} rectangle — all as fractions of the "
+                      "frame.")
+    flat = []
+    for c in corners:
+        if isinstance(c, (list, tuple)) and len(c) == 2:
+            flat.extend(c)
+        else:
+            flat.append(c)
+    if len(flat) != 8:
+        return None, (f"REJECTED: corners needs exactly 8 numbers "
+                      f"(x0,y0,x1,y1,x2,y2,x3,y3 — top-left, top-right, "
+                      f"BOTTOM-LEFT, bottom-right); got {len(flat)}.")
+    try:
+        vals = [round(float(v), 4) for v in flat]
+    except (TypeError, ValueError):
+        return None, "REJECTED: every corner coordinate must be a number."
+    for v in vals:
+        if not (-0.5 <= v <= 1.5):
+            return None, (f"REJECTED: corners are FRACTIONS of the frame "
+                          f"(0-1); got {v}. Divide pixel coordinates by the "
+                          "frame width/height.")
+    return vals, None
+
+
+def remove_screen_takeover(ctx, id, keep_clip=False):
+    """Undo a screen takeover — the pin, its camera push, and (unless
+    keep_clip) the clip it handed off to."""
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(o) for o in (edl.get("overlays") or [])]
+    hit = next((o for o in items if o.get("id") == id and o.get("screen")),
+               None)
+    if not hit:
+        have = ", ".join(o.get("id") or "?" for o in items if o.get("screen"))
+        return (f"REJECTED: no screen takeover with id '{id}'. Existing "
+                f"takeovers: {have or 'none'}. (Use remove_overlay for an "
+                "ordinary overlay.) Call get_edl to see them.")
+    hand = round(float(hit["start"]) + float(hit["duration_s"]), 2)
+    edl["overlays"] = [o for o in items if o.get("id") != id]
+    dropped = ""
+    if not keep_clip:
+        tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        # The handoff is the insert sitting exactly where the push ended and
+        # carrying the same asset — matching on both is what stops this from
+        # deleting an unrelated clip that happens to share the boundary.
+        windows = insert_windows(edl.get("inserts") or [], tl)
+        target = None
+        for cand in (edl.get("inserts") or []):
+            win = windows.get(cand.get("id"))
+            if not win or abs(win[0] - hand) > 0.05:
+                continue
+            if cand.get("asset_key") == hit["asset_key"]:
+                target = cand
+                break
+        if target is not None:
+            edl["inserts"] = [i for i in (edl.get("inserts") or [])
+                              if i.get("id") != target["id"]]
+            dropped = f" and its handoff clip ({target['id']})"
+    written = ctx.write_edl(
+        edl, f"removed the screen takeover at {hit['start']}-{hand}s "
+             f"({id}){dropped}")
+    if written.startswith("EDL v") and keep_clip:
+        written += ("\nThe handoff clip is still spliced in — it now arrives "
+                    "as a plain cut.")
+    return written
 
 
 def move_overlay(ctx, id, start=None, x=None, y=None, scale=None):
@@ -4102,6 +4680,15 @@ def move_overlay(ctx, id, start=None, x=None, y=None, scale=None):
         have = ", ".join(o.get("id") or "?" for o in items) or "none"
         return (f"REJECTED: no overlay with id '{id}'. Existing overlays: "
                 f"{have}. Call get_edl to see them.")
+    if hit.get("screen"):
+        # x/y/scale are not what a pinned overlay is made of, and moving its
+        # start without moving the clip it hands off to desyncs the one join
+        # the whole effect exists to hide.
+        return (f"REJECTED: '{id}' is a screen takeover — its position and "
+                "size come from the screen it is pinned to, not from x/y/"
+                "scale, and its timing is locked to the clip it hands off to. "
+                f"Remove it with remove_screen_takeover('{id}') and add it "
+                "again at the moment you want.")
     prog = program_duration(edl)
     before = dict(hit)
     note = ""
@@ -4823,7 +5410,7 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
     if sub:
         texts.append({"id": _next_item_id(texts, "tx"), "text": sub[:200],
                       "start": ts, "end": te, "template": "subtitle",
-                      "x": 0.5, "y": 0.635, "size_scale": None,
+                      "x": 0.5, "y": CARD_SUBTITLE_Y, "size_scale": None,
                       "color": color, "accent_color": accent_color,
                       "font": None, "entrance": entrance, "exit": exit,
                       "uppercase": None, "box": None,
@@ -5019,7 +5606,7 @@ def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
     if sub:
         texts.append({"id": _next_item_id(texts, "tx"), "text": sub[:200],
                       "start": ts, "end": te, "template": "subtitle",
-                      "x": 0.5, "y": 0.635, "size_scale": None,
+                      "x": 0.5, "y": CARD_SUBTITLE_Y, "size_scale": None,
                       "color": color, "accent_color": accent_color,
                       "font": None, "entrance": "fade", "exit": "fade",
                       "uppercase": None, "box": None,
@@ -6523,11 +7110,16 @@ def render_preview(ctx):
                 edl = row["json"]
                 tl = Timeline(edl["keep"], edl.get("inserts") or [],
                               edl.get("speed") or [])
-                note += taste.audit_line(taste.critique(
+                findings = taste.critique(
                     edl, ctx.index, tl,
                     src_w=(ctx.index.get("video") or {}).get("width"),
                     src_h=(ctx.index.get("video") or {}).get("height"),
-                    user_asked=ctx.user_message or ""))
+                    user_asked=ctx.user_message or "")
+                # Published to the loop as well as printed here: a finding the
+                # model can read and skip past is not a review.
+                ctx.last_taste = list(findings)
+                ctx.last_taste_version = row.get("version")
+                note += taste.audit_line(findings)
             except Exception:
                 pass
             return note
@@ -7895,21 +8487,26 @@ TOOLS = {
                             "enum": ["crop", "pad", "pad_blur"]},
                    "focus_x": {"type": "number"},
                    "focus_y": {"type": "number"}}),
-    "auto_reframe": (auto_reframe, "Convert the output frame AND aim the "
-                     "crop at the real subject: samples frames across the "
-                     "kept footage, asks the vision model where the subject "
-                     "sits, and writes set_frame with that focus. THE tool "
-                     "for 'make it 9:16 / vertical / for TikTok' on real "
-                     "footage — a plain center crop chops off-center "
-                     "subjects. The focus is one fixed point (it does not "
-                     "track motion); it reports the measured position so "
-                     "you can judge and adjust with set_frame focus_x/"
-                     "focus_y.",
+    "auto_reframe": (auto_reframe, "THE tool for 'make it 9:16 / vertical / "
+                     "for TikTok'. It samples frames across the kept footage "
+                     "and MEASURES two things before writing the frame: where "
+                     "the subject is (faces found in the pixels; vision or a "
+                     "detail-energy estimate only when there is no face), and "
+                     "whether a crop is the right operation at all — how much "
+                     "of the picture's detail would survive the crop window. "
+                     "With mode='auto' (default) footage with a subject gets "
+                     "a crop aimed at it, and footage whose content runs to "
+                     "the edges (gameplay, screen recordings, wide scenes) is "
+                     "FITTED into the new frame over a blurred backdrop so "
+                     "nothing is cut off — cropping those is the 'it just "
+                     "truncated my video instead of adjusting it' complaint. "
+                     "Pass mode explicitly to force one. Read what it reports "
+                     "and repeat THAT.",
                      {"ratio": {"type": "string",
                                 "enum": ["9:16", "1:1", "4:5", "16:9",
                                          "source"]},
                       "mode": {"type": "string",
-                               "enum": ["crop", "pad", "pad_blur"]}}),
+                               "enum": ["auto", "crop", "pad", "pad_blur"]}}),
     "insert_media": (insert_media, "Splice an uploaded video clip or image "
                      "INTO the edit at ANY position in the FINAL edited "
                      "video — mid-take positions split the take cleanly at a "
@@ -8464,6 +9061,50 @@ TOOLS = {
                       "scale": {"type": "number"}}),
     "remove_overlay": (remove_overlay, "Remove one overlay by its id (see "
                        "get_edl).", {"id": {"type": "string"}}),
+    "add_screen_takeover": (
+        add_screen_takeover,
+        "PUSH INTO A SCREEN IN THE SHOT AND LET WHAT IS ON IT BECOME THE "
+        "WHOLE VIDEO — THE tool for 'zoom into the laptop and continue with "
+        "the other scene', 'make it go into the phone screen', 'transition "
+        "into the monitor smoothly', and every request that describes the "
+        "camera travelling INTO a device and the content taking over. It is "
+        "ONE continuous move, not a zoom plus a cut: the asset is corner-"
+        "pinned onto the glass so it plays ON the screen inside the shot, the "
+        "camera pushes in, the picture flattens out of the screen into the "
+        "full frame, and the clip cuts in on the SAME frame the push ends on "
+        "— which is why the join cannot be seen. Do NOT build this out of "
+        "add_zoom + insert_media: an overlay is drawn ABOVE the zoom, so the "
+        "content sits flat and still while the shot pushes past it, and the "
+        "cut lands as a jump. "
+        "at_output_s is where in the FINAL video the takeover FINISHES and "
+        "the asset is full screen (the push happens in the duration_s before "
+        "it). duration_s 0.4-5, default 1.2 — 1.0-1.5 is the move people "
+        "mean. I MEASURE the screen's four corners from the frames myself; "
+        "pass `corners` only to override that (8 numbers x0,y0,x1,y1,x2,y2,"
+        "x3,y3 as FRACTIONS of the frame in the order top-left, top-right, "
+        "BOTTOM-LEFT, bottom-right — or a {x,y,w,h} rectangle). clip_start_s "
+        "picks where in the asset the takeover starts playing; hold_s is how "
+        "long the asset stays full screen afterwards (default: the rest of "
+        "it). push 0-1 is how far the camera travels (1 = all the way, the "
+        "default). ease: 'smooth' (default), 'accelerate', 'linear'. "
+        "It REFUSES rather than guessing when it cannot measure the screen, "
+        "and refuses when the screen is under 8% of the frame (the push "
+        "would be a >12x blowup). Undo with remove_screen_takeover.",
+        {"asset_key": {"type": "string"},
+         "at_output_s": {"type": "number"},
+         "duration_s": {"type": "number"},
+         "corners": {"type": "array", "items": {"type": "number"}},
+         "clip_start_s": {"type": "number"},
+         "hold_s": {"type": "number"},
+         "push": {"type": "number"},
+         "ease": {"type": "string",
+                  "enum": ["smooth", "accelerate", "linear"]}}),
+    "remove_screen_takeover": (
+        remove_screen_takeover,
+        "Undo a screen takeover by its id (see get_edl): the corner pin, the "
+        "camera push and the clip it handed off to all go together. Pass "
+        "keep_clip=true to leave the clip spliced in as a plain cut.",
+        {"id": {"type": "string"}, "keep_clip": {"type": "boolean"}}),
     "add_text": (add_text, "Burn a designed motion-graphics TEXT template "
                  "over a PROGRAM-time window — separate from captions "
                  "(spoken words) and overlays (media). Templates: 'title' "
@@ -8844,6 +9485,8 @@ REQUIRED_ARGS = {
     "add_overlay": ["asset_key", "start"],
     "move_overlay": ["id"],
     "remove_overlay": ["id"],
+    "add_screen_takeover": ["asset_key", "at_output_s"],
+    "remove_screen_takeover": ["id"],
     "add_text": ["text", "start", "end"],
     "remove_text": ["id"],
     "add_title_card": ["text", "at_output_s"],
@@ -8895,6 +9538,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "reset_edit",
                "set_speed", "remove_speed",
                "add_overlay", "move_overlay", "remove_overlay",
+               "add_screen_takeover", "remove_screen_takeover",
                "add_text", "remove_text",
                "add_title_card", "add_color_screen", "add_corrupt_screen",
                "set_caption_mutes",

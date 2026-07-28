@@ -1124,6 +1124,50 @@ def _time_pressure_note(result, t_start, warned):
     return result
 
 
+_TASTE_PUSHBACK = """[system: the TASTE AUDIT on the preview you just \
+rendered is still outstanding. These are craft defects in YOUR edit — things \
+the user did not ask for — and the turn does not end with them unanswered:
+
+{findings}
+
+Do ONE of two things now, not neither:
+  1. FIX them — remove the devices that are not earning their place, then \
+render_preview again. Removing is a normal edit: remove_sfx, remove_zoom, \
+remove_stylize, set_transitions('none'), set_fades(0, 0). An edit gets good by \
+having things taken OUT of it.
+  2. KEEP one deliberately — only when the user's own request requires it — \
+and say which one and why, in one clause, in your reply.
+
+What you may not do is reply as though the preview came back clean. \
+"Preview is ready" over an audit like this is how an edit nobody wants gets \
+handed over as finished.]"""
+
+
+def _taste_pushback(ctx, messages, t_start, pushed):
+    """Refuse to let a turn end on an edit its own audit objected to.
+
+    Round 55. The audit was already right about this exact edit — it reported
+    the dead air at the open, three zooms in thirty seconds and five sound
+    effects nobody asked for — and the agent read all of it, changed nothing,
+    and told the user "Preview is ready at 30s. Here's the edit:". A review
+    that the reviewed party may silently decline is not a review; it is a
+    comment. So the findings come back once, as work to be done.
+
+    Once per turn, and never when there is no time left to act on it — a
+    pushback that cannot be answered before the turn times out would trade a
+    flawed edit for no edit, which is a worse deal for the user.
+    """
+    if pushed or not ctx.last_taste:
+        return False
+    left = config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start)
+    if left < config.AGENT_TURN_TIMEOUT_S * 0.25:
+        return False
+    lines = "\n".join(f"  - {f}" for f in ctx.last_taste[:6])
+    messages.append({"role": "system",
+                     "content": _TASTE_PUSHBACK.format(findings=lines)})
+    return True
+
+
 def _run_loop(ctx, worker_db, job, session_id, user_message,
               attachment_note=""):
     # Resolved from the user's plan in run_agent_job. _build_messages and the
@@ -1143,6 +1187,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     max_tokens = config.AGENT_MAX_TOKENS
     truncated_retries = 0
     truncated_out = False          # last step died at the ceiling, saying nothing
+    taste_pushed = False           # the craft audit was handed back once
 
     for iteration in range(config.AGENT_MAX_ITERATIONS):
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
@@ -1316,6 +1361,18 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             truncated_out = True
 
         if not msg.tool_calls:
+            # Before anything else: if the preview this turn rendered came
+            # back with craft findings, the turn is not finished. Send them
+            # back once as work rather than as commentary.
+            if _taste_pushback(ctx, messages, t_start, taste_pushed):
+                taste_pushed = True
+                print(f"[job {job['id']}] taste audit outstanding "
+                      f"({len(ctx.last_taste)} finding(s)) — pushing back "
+                      "before the reply", flush=True)
+                if (msg.content or "").strip():
+                    messages.append({"role": "assistant",
+                                     "content": msg.content})
+                continue
             # Auto-render first so the turn facts include the real preview.
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings)

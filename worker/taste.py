@@ -54,6 +54,34 @@ ZOOM_MIN_START_S = 1.2
 SFX_PER_S = 8.0
 SFX_MIN_SPACING_S = 0.35
 
+# Programme seconds per junction effect, below which transitions stop marking
+# anything and become the thing being watched. Defined HERE and imported by
+# agent_tools (which already imports this module), so the sentence
+# set_transitions prints and the sentence this audit prints cannot disagree
+# about what "too often" means. 5s is deliberately permissive — a hype
+# montage lives at the fast end — and the real defect it catches sat at 3.3s.
+TRANSITION_MIN_SPACING_S = 5.0
+
+# EVERY attention-grabbing device counted together, per programme second.
+# 'scene' scope bounds transitions correctly and bounds nothing else: the
+# edit that produced this check had 9 transitions + 3 zooms + 3 stylize
+# windows + 5 sfx over 30 seconds — 20 devices, one every 1.5s — while every
+# individual rule was either satisfied or only mildly over. Users do not
+# experience the categories separately; they experience the rate.
+DEVICE_MIN_SPACING_S = 2.5
+
+# Words that mean the user actually wants sound effects. Sfx are OPT-IN: they
+# are the loudest unrequested thing an edit can do, they are what people
+# notice first when they are wrong, and an editor who adds them uninvited to
+# someone's footage is not showing taste.
+SFX_REQUEST_HINTS = (
+    "sfx", "sound effect", "sound fx", "soundeffect", "whoosh", "swoosh",
+    "impact", "boom", "riser", "sound design", "sounddesign", "efecto de "
+    "sonido", "efectos de sonido", "efek suara", "sonido", "sfx-", "swoosh",
+    "add sound", "sounds on", "punchy sound", "hit sound", "click sound",
+    "مؤثرات", "مؤثر صوتي",
+)
+
 # More than this many whole-programme finishing effects and the footage is
 # wearing the look rather than the look serving the footage.
 MAX_GLOBAL_STYLIZE = 2
@@ -211,6 +239,23 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
                 "full-screen effect every few seconds through footage that "
                 "never changed scene is the single most common 'this looks "
                 "broken' complaint. Use scope='scene'.")
+        # CADENCE, independent of scope. 'scene' asks whether a junction has
+        # earned an effect and says nothing about how often that comes round:
+        # a montage cut from nine far-apart source spans has nine REAL scene
+        # changes, so all nine qualified and a 30s edit fired a whip every
+        # 3.3s. "Look at how fast the scene transitions are — it's literally
+        # putting one every second" is a rate complaint, and only a rate
+        # check catches it.
+        if out_dur > 0 and len(juncs) >= 3 \
+                and out_dur / len(juncs) < TRANSITION_MIN_SPACING_S:
+            add(f"{len(juncs)} '{trans.get('style')}' transitions across "
+                f"{out_dur:.0f}s — one every "
+                f"{out_dur / len(juncs):.1f}s. Even where every junction is a "
+                "real scene change, a full-screen effect at that rate is what "
+                "the viewer watches instead of the video. A montage is "
+                "carried by HARD cuts; keep the effect for the two or three "
+                "changes that need to be felt, or drop them entirely "
+                "(set_transitions('none')).")
 
     # ── the ending ───────────────────────────────────────────────────────
     fade_out = _num(fx.get("fade_out_s"))
@@ -223,6 +268,21 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
 
     # ── sound ────────────────────────────────────────────────────────────
     sfx = sorted((edl.get("sfx") or []), key=lambda s: _num(s.get("at")))
+    # SFX ARE OPT-IN (round 55). Five whooshes and booms went onto a montage
+    # nobody had asked for sound effects on, and the user's instruction was
+    # unambiguous: "it is adding sound effects badly, it has no taste at all,
+    # it should not add them unless requested explicitly." The rule that
+    # follows is therefore about CONSENT, not about count — and like every
+    # rule here it is suppressed the moment the user does ask.
+    if sfx and not any(h in ask for h in SFX_REQUEST_HINTS):
+        add(f"{len(sfx)} sound effect{'s' if len(sfx) != 1 else ''} "
+            "were added and the user did not ask for any. Sound effects are "
+            "the loudest uninvited thing an edit can do and the first thing "
+            "people notice when they are wrong — they belong on a moment the "
+            "viewer can SEE, at the user's request, not sprinkled through a "
+            "cut. Remove them (remove_sfx) unless a specific one is landing "
+            "on a real hit you can point at, and offer them instead of "
+            "adding them.")
     if out_dur > 0 and len(sfx) > max(3, int(out_dur / SFX_PER_S)):
         add(f"{len(sfx)} sound effects in {out_dur:.0f}s — accents stop being "
             "accents when they are constant. 3-6 placed on the real moments "
@@ -299,6 +359,37 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     # ── overlapping text ────────────────────────────────────────────────
     texts = edl.get("texts") or []
     mutes = edl.get("caption_mutes") or []
+    # TEXT ON TOP OF TEXT. graphics._stack_concurrent now pushes colliding
+    # graphics apart so this can no longer RENDER as a pile-up, but a stack
+    # of three simultaneous cards is still a composition nobody chose: the
+    # edit that prompted this had a title, a subtitle and a callout all
+    # burning over the last 1.5 seconds. Report the intent, not just the
+    # collision — the renderer has already saved the frame.
+    concurrent = []
+    for i, a in enumerate(texts):
+        for b in texts[i + 1:]:
+            # A title card's own title + subtitle share its anchor and ARE one
+            # designed graphic. Flagging that pair would fire on every correct
+            # card and teach the agent to ignore the whole audit.
+            ins = a.get("anchor_insert")
+            if ins and ins == b.get("anchor_insert"):
+                continue
+            a0, a1 = _num(a.get("start")), _num(a.get("end"))
+            b0, b1 = _num(b.get("start")), _num(b.get("end"))
+            if min(a1, b1) - max(a0, b0) > 0.25:
+                concurrent.append((a, b))
+    if concurrent:
+        a, b = concurrent[0]
+        add(f"{len(concurrent)} pair(s) of text cards are on screen at the "
+            f"same time (e.g. '{str(a.get('text'))[:20]}' and "
+            f"'{str(b.get('text'))[:20]}' around "
+            f"{max(_num(a.get('start')), _num(b.get('start'))):.1f}s). They "
+            "are laid out so they cannot overlap, but two or three lines "
+            "competing in one frame is still one message too many — the "
+            "viewer reads none of them. Keep the one that matters and "
+            "remove_text the rest, or space them out. (A title card's own "
+            "title + subtitle pair is fine; a third line on top of it is "
+            "not.)")
     if caps_on and texts:
         clashes = []
         for t in texts:
@@ -328,6 +419,63 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
         add(f"a vertical edit running {out_dur / 60:.1f} minutes — vertical "
             "feeds are watched thumb-down and the drop-off is brutal past a "
             "minute or two. Say so and offer a tighter cut, or a series.")
+
+    # ── the frame ────────────────────────────────────────────────────────
+    # A crop is a CHOICE to lose the sides, right only when the frame has a
+    # subject to follow. auto_reframe measures that in the pixels; this module
+    # is pure and cannot, so it checks the one thing visible in the EDL: was
+    # the crop AIMED at anything? A crop with no focus point on a big aspect
+    # change is a dead-centre window nobody verified — the shape that lands as
+    # "it just cut my video down the middle". A crop WITH a focus came from a
+    # measurement and is left alone, which is also why the audit stays quiet
+    # on the ordinary talking-head reel.
+    frame = edl.get("frame") or {}
+    aimed = frame.get("focus_x") is not None or frame.get("focus_y") is not None
+    if frame.get("mode") == "crop" and not aimed and src_w and src_h:
+        rw, rh = _ratio_wh(edl, None, None)
+        if rw and rh:
+            src_ar, out_ar = float(src_w) / float(src_h), rw / rh
+            keep_frac = min(src_ar, out_ar) / max(src_ar, out_ar)
+            if keep_frac < 0.7 and "crop" not in ask:
+                add(f"the output is centre-CROPPED from "
+                    f"{int(src_w)}x{int(src_h)} to {frame.get('ratio')}, "
+                    f"throwing away {(1 - keep_frac) * 100:.0f}% of the "
+                    "picture, and nothing measured whether the part being "
+                    "kept is the part that matters. On a game capture, a "
+                    "screen recording or a wide scene the score, the HUD and "
+                    "the action at the edges ARE the content, and cutting "
+                    "them off is what users call 'it truncated my video "
+                    "instead of adjusting it'. Call auto_reframe(ratio) — it "
+                    "measures the footage and either aims the crop at a real "
+                    "subject or fits the whole frame in over a blurred "
+                    "backdrop.")
+
+    # ── the RATE of everything, together ─────────────────────────────────
+    # Every rule above bounds ONE category, and a viewer does not experience
+    # categories. The edit this check exists for passed or barely tripped each
+    # of them separately — 9 transitions, 3 zooms, 3 stylize windows, 5 sfx —
+    # and landed as a device every 1.5 seconds. That is the video the user
+    # described as "putting a sound and a transition every second".
+    if out_dur > 4:
+        devices = len(zooms) + len(sfx) + len([s for s in stylize
+                                               if s.get("start") is not None])
+        if trans:
+            try:
+                devices += len(transition_junctions(
+                    edl, index,
+                    n_blocks=len(edl.get("keep") or [])
+                    + len(edl.get("inserts") or [])))
+            except Exception:
+                pass
+        if devices >= 6 and out_dur / devices < DEVICE_MIN_SPACING_S:
+            add(f"{devices} attention-grabbing devices across {out_dur:.0f}s "
+                f"(transitions, zooms, windowed stylize passes and sound "
+                f"effects together) — one every "
+                f"{out_dur / devices:.1f}s. Each kind may look reasonable on "
+                "its own; stacked they are a video that never sits still, and "
+                "nothing in it can register as emphasis because everything "
+                "is. Strip it back to the few beats that carry the piece — "
+                "restraint is the look.")
 
     return found
 
