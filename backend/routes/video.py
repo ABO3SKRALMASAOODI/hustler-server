@@ -811,6 +811,11 @@ def create_upload(user_id, project_id):
     if kind not in ("original", "music", "image", "clip", "proxy"):
         return jsonify({"error": "kind must be original, music, image, "
                                  "clip or proxy"}), 400
+    if kind == "proxy" and not storage.PROXY_FIRST_UPLOADS:
+        # The studio reads this off /video/limits and never asks, but a stale
+        # bundle in an open tab would. Refuse here too rather than accept bytes
+        # the indexer is not yet deployed to understand.
+        return jsonify({"error": "Prepared uploads are not enabled"}), 400
 
     try:
         ext, content_type = storage.validate_upload(filename, nbytes, kind)
@@ -1014,7 +1019,8 @@ def complete_upload_core(user_id, project_id, data):
     # the user watch 4 GiB move before they can do anything is the entire
     # problem this path exists to remove.
     client_proxy_key = (data.get("client_proxy_key") or "").strip()
-    pending_original = bool(data.get("original_pending")) and kind == "original"
+    pending_original = (bool(data.get("original_pending")) and kind == "original"
+                        and storage.PROXY_FIRST_UPLOADS)
     if pending_original:
         if not client_proxy_key:
             return {"error": "A deferred original needs a client_proxy_key"}, 400

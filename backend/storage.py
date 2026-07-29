@@ -65,6 +65,24 @@ CLIP_MAX_BYTES = 500 * 1024 * 1024   # clips spliced into the edit
 # a working limit — a proxy anywhere near it is not a proxy.
 PROXY_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
+# PROXY-FIRST UPLOADS SHIP OFF, AND THE REASON IS THE DEPLOY ORDER.
+#
+# Render redeploys this service on push. Cloud Run does NOT redeploy the
+# executor — that is a manual `gcloud run deploy`, and it has bitten this
+# product twice (41 of 41 exports hidden behind a stamp the executor predated;
+# two users' previews rejected by a schema 19 hours older than the code that
+# wrote them). An executor that has not been redeployed does not understand
+# `client_proxy_key`: it would go looking for an original whose bytes are still
+# in the browser, and FAIL EVERY LARGE UPLOAD.
+#
+# With this off, nothing changes for anyone. Turn it on only after the executor
+# is redeployed — `/health` reports the fingerprint that proves which code it
+# is running. The failure mode of "off" is "the old speed"; the failure mode of
+# shipping it on against a stale executor is "no big video can be uploaded at
+# all", so this defaults to the one that cannot hurt.
+PROXY_FIRST_UPLOADS = os.getenv("PROXY_FIRST_UPLOADS", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+
 
 def is_configured():
     return all(os.getenv(k) for k in (
@@ -149,7 +167,7 @@ def upload_limits():
         # Advertises that this server understands a browser-built proxy and a
         # deferred original. The studio checks it before spending the user's
         # CPU on a transcode this API would then have no way to accept.
-        "proxy_first": True,
+        "proxy_first": PROXY_FIRST_UPLOADS,
         "video_ext": sorted(ALLOWED_VIDEO_EXT),
         "music_ext": sorted(ALLOWED_MUSIC_EXT),
         "image_ext": sorted(ALLOWED_IMAGE_EXT),
