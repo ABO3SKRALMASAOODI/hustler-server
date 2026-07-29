@@ -241,6 +241,41 @@ _BLIND_MARKERS = ("unknown variant `image_url`", "unknown variant 'image_url'",
                   "vision is not supported")
 
 
+# An OpenAI-compatible provider that does not know a request field says so in
+# one of a few shapes. Matched on the error body for the same reason as the
+# blind markers above: the API is the only honest source for what it accepts.
+_BAD_PARAM_MARKERS = ("unrecognized request argument", "unknown parameter",
+                      "unknown field", "unexpected keyword argument",
+                      "extra inputs are not permitted", "unknown argument",
+                      "is not supported", "invalid_request_error")
+
+# Models whose provider has told us it does not accept reasoning_effort. Latched
+# per process so one rejection is one wasted call, not one per iteration.
+_no_reasoning_effort = set()
+
+
+def looks_like_bad_parameter(exc, field):
+    """Is `exc` the provider refusing a request FIELD, rather than failing?
+
+    Deliberately narrow. Latching on any 400 would silently disable a setting
+    because of an unrelated bad request, and treating a real outage as "the
+    parameter is unsupported" would hide the outage. The field name must appear
+    in the error, alongside a phrase that means "I do not know this".
+    """
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    if field.lower() not in msg:
+        return False
+    return any(m in msg for m in _BAD_PARAM_MARKERS)
+
+
+def reasoning_effort_rejected(model):
+    return model in _no_reasoning_effort
+
+
+def mark_reasoning_effort_rejected(model):
+    _no_reasoning_effort.add(model)
+
+
 def vision_available(plan=None):
     """Can THIS turn look at pictures?
 

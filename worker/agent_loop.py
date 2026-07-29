@@ -1295,17 +1295,51 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # at all, so a provider that would reject an unknown parameter is
         # untouched until someone opts in.
         extra = {}
-        if config.AGENT_REASONING_EFFORT and iteration > 0:
+        if config.AGENT_REASONING_EFFORT and iteration > 0 \
+                and not llm.reasoning_effort_rejected(model):
             extra["reasoning_effort"] = config.AGENT_REASONING_EFFORT
         try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                temperature=config.AGENT_TEMPERATURE,
-                max_tokens=max_tokens,
-                **extra,
-            )
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    temperature=config.AGENT_TEMPERATURE,
+                    max_tokens=max_tokens,
+                    **extra,
+                )
+            except Exception as e:
+                # THE KNOB HAS TO BE SAFE TO TURN ON.
+                #
+                # Reasoning is 402 of the 646 output tokens an average agent
+                # call produces, and output generation is what the user's 13
+                # seconds per round trip actually buys — so this is the single
+                # biggest latency lever there is. But it is an env var someone
+                # sets on Render against a provider we cannot test from here,
+                # and a provider that rejects the parameter would 400 EVERY
+                # iteration after the first, on every turn, for every user.
+                #
+                # So a rejection retries once without it and latches for the
+                # process: the setting degrades to "no effect", exactly like a
+                # missing capability elsewhere in this codebase, instead of
+                # taking the product down. Only the unknown-parameter shape is
+                # caught — a real API failure must still propagate.
+                if not extra or not llm.looks_like_bad_parameter(e,
+                                                                 "reasoning_effort"):
+                    raise
+                llm.mark_reasoning_effort_rejected(model)
+                print(f"[agent {job['id']}] provider rejected "
+                      f"reasoning_effort={config.AGENT_REASONING_EFFORT!r} for "
+                      f"{model} — retrying without it and not sending it again",
+                      flush=True)
+                extra = {}
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    temperature=config.AGENT_TEMPERATURE,
+                    max_tokens=max_tokens,
+                )
         except Exception as e:
             # llm.record only ran on success, so a failing agent call left NO
             # row anywhere: through the whole Jul 26 2026 provider outage the

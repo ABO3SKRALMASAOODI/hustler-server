@@ -365,14 +365,18 @@ def test_a_failed_agent_call_is_recorded():
     propagates."""
     import inspect
     src = inspect.getsource(agent_loop)
-    # `model` is now resolved per user (free vs paid tier), so match on the
-    # call itself rather than on the constant it used to hardcode.
-    call = src.split("resp = client.chat.completions.create(\n"
-                     "                model=model,")[1][:1600]
-    assert "except Exception" in call
-    assert 'llm.record("agent"' in call
-    assert '"error"' in call
-    assert "raise" in call
+    # Anchored on the RECORDING, not on the shape of the call above it. It used
+    # to split the source at an exact `create(\n model=model,` snippet, which
+    # broke the moment the call was wrapped (in a retry for a provider that
+    # rejects reasoning_effort) and reindented — a green test turning red for a
+    # change that did not touch the behaviour it exists to protect.
+    assert 'llm.record("agent"' in src
+    tail = src.split('{"error": f"{type(e).__name__}: {str(e)[:400]}"}')[1][:400]
+    assert "raise" in tail, (
+        "the failure must be recorded and then PROPAGATE — swallowing it here "
+        "is what would hide an outage from the admin Model I/O tab")
+    head = src.split('{"error": f"{type(e).__name__}: {str(e)[:400]}"}')[0]
+    assert "except Exception as e:" in head
 
 
 def test_ask_text_and_vision_publish_their_error():
