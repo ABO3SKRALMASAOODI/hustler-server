@@ -1962,11 +1962,24 @@ def post_message(user_id, project_id):
                                              min_credits=1.0):
             info = get_balance(conn, user_id)
             spent = info.get("free_trial_exhausted")
-            # Three different walls, three different true things to say. A
-            # trialling user has already entered a card, so "start a trial" is
-            # nonsense to them and "wait for your cycle" is worse — the rest of
-            # their plan is released by CONVERTING, which is a thing they can
-            # do right now.
+            # FOUR walls now, four different true things to say. A refused card
+            # is the newest and the most specific: this person tried to pay,
+            # the payment did not go through, and neither "start a trial" nor
+            # "you're out of credits" is a description of that. Telling them to
+            # subscribe when they already have would be the same class of lie
+            # the admin was telling about them.
+            if info.get("payment_failed"):
+                return jsonify({
+                    "error": (f"{info.get('payment_failed_message')} "
+                              "Your credits are on hold until it clears — "
+                              "updating your card puts everything back."),
+                    "payment_failed": True,
+                    "plan": info.get("billing_plan") or info.get("plan"),
+                    "code": "payment_failed"}), 402
+            # A trialling user has already entered a card, so "start a trial"
+            # is nonsense to them and "wait for your cycle" is worse — the rest
+            # of their plan is released by CONVERTING, which is a thing they
+            # can do right now.
             if info.get("trial_cap_reached"):
                 return jsonify({
                     "error": ("That's the credits included with your free "
@@ -2139,7 +2152,12 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                     # KEEPING the plan, not by waiting for a cycle. The studio
                     # picks the card variant off exactly these three flags.
                     trial = info.get("trial_cap_reached")
-                    _say(("That's the credits included with your free trial."
+                    declined = info.get("payment_failed")
+                    _say((f"{info.get('payment_failed_message')} Your credits "
+                          "are on hold until it clears — updating your card "
+                          "puts everything back."
+                          if declined else
+                          "That's the credits included with your free trial."
                           if trial else
                           "You're out of credits."
                           if spent else
@@ -2148,6 +2166,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                           "to keep creating."),
                          {"kind": "concierge", "credits_exhausted": True,
                           "free_trial_exhausted": bool(spent),
+                          "payment_failed": bool(declined),
                           "trial_cap_reached": bool(trial)})
                 elif (_running_jobs_count(cur, ctx["user_id"])
                       >= MAX_CONCURRENT_JOBS_PER_USER):

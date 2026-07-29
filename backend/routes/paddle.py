@@ -391,6 +391,57 @@ def _plan_from_price(price_id):
     return None
 
 
+@paddle_bp.route('/paddle/update-payment-method', methods=['GET'])
+def update_payment_method():
+    """What the browser needs to let a customer fix a refused card.
+
+    Paddle Billing has NO endpoint that forces a retry — its dunning engine
+    owns the attempts (7 over 30 days) and there is no "charge now" for a
+    past_due subscription. What it does have is
+    `GET /subscriptions/{id}/update-payment-method-transaction`, which returns
+    a transaction created for exactly this purpose. Hand the id to Paddle.js
+    and the customer gets an inline checkout that captures a new card; Paddle
+    collects the outstanding amount against it.
+
+    So this is the honest shape of "try to charge him again": we cannot, and
+    saying we did would be a lie. We can put the one button in front of him
+    that does, in the app and in the daily email, and let Paddle's retries run
+    underneath.
+
+    Returns 404 when there is nothing to fix, so the studio can call it
+    unconditionally and show the banner only on a 200.
+    """
+    try:
+        user_id, _ = decode_token(request.headers.get('Authorization'))
+    except Exception:
+        return jsonify({"error": "Invalid token"}), 401
+    if not user_id:
+        return jsonify({"error": "Missing token"}), 401
+
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    conn = psycopg2.connect(os.environ['DATABASE_URL'],
+                            cursor_factory=RealDictCursor)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT subscription_id FROM users WHERE id = %s",
+                        (user_id,))
+            row = cur.fetchone()
+        sub_id = (row or {}).get('subscription_id')
+        if not sub_id:
+            return jsonify({"error": "no subscription"}), 404
+        import billing_sync
+        url, txn_id = billing_sync.update_payment_method_link(sub_id)
+        if not txn_id and not url:
+            # Honest-off: no invented link. The account page still lets them
+            # manage the subscription, and a dead button is worse than none.
+            return jsonify({"error": "unavailable"}), 503
+        return jsonify({"transaction_id": txn_id, "checkout_url": url,
+                        "subscription_id": sub_id}), 200
+    finally:
+        conn.close()
+
+
 @paddle_bp.route('/paddle/subscription-state', methods=['GET'])
 def subscription_state():
     """The REAL state of the subscription, read from Paddle.

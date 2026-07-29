@@ -6,6 +6,7 @@ import os
 import re
 from datetime import datetime, timedelta
 
+import billing
 import trial_state
 
 admin_bp = Blueprint('admin', __name__)
@@ -57,6 +58,111 @@ def _scope(alias="u"):
 
 def get_db():
     return psycopg2.connect(current_app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  MONEY (round 59)
+#
+#  Two numbers, and they answer different questions. Keeping them apart is the
+#  whole point: the admin used to have only the first, computed off a price map
+#  of three retired plans, so it read $0 while also insisting a customer had
+#  converted.
+#
+#    _live_mrr        — what the ACTIVE, PAYING subscriptions are worth per
+#                       month. Forward-looking. Excludes trials, past_due and
+#                       canceled, because none of them are money.
+#    _collected       — what actually hit the account, from `payments`. This is
+#                       the only figure on the system that cannot be wrong
+#                       about a refused card: it sums the amounts Paddle told
+#                       us it captured.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _billing_ready(cur):
+    """True once migration 012 has run. Every money query degrades to the old
+    is_subscribed-only shape until then, rather than 500ing on a missing
+    column — prod schema is applied by hand, so that window is real."""
+    try:
+        cur.execute("""SELECT COUNT(*) AS n FROM information_schema.columns
+                        WHERE table_name = 'users'
+                          AND column_name IN ('billing_status',
+                                              'billing_plan',
+                                              'billing_period')""")
+        return (cur.fetchone()['n'] or 0) == 3
+    except Exception:
+        return False
+
+
+def _paying_predicate(alias='u'):
+    """SQL for "this subscription is genuinely being paid for".
+
+    `billing_status = 'active'` is Paddle's own word. The NULL branch carries
+    the grandfathered rows that predate the billing columns: they are
+    subscribed, they never had a trial recorded, and the hourly reconciler will
+    give them a real status within the hour. Counting them meanwhile is the
+    honest read — they were paying yesterday.
+    """
+    p = f"{alias}." if alias else ""
+    return (f"({p}is_subscribed = 1 AND ("
+            f"{p}billing_status = 'active' OR ("
+            f"{p}billing_status IS NULL AND {p}trial_status IS DISTINCT FROM 'trialing')))")
+
+
+def _live_mrr(cur, scope, alias=''):
+    """Monthly recurring revenue in whole USD, from the paying subscriptions."""
+    if not _billing_ready(cur):
+        # Pre-migration: the best available answer is plan counts at real
+        # prices. Still infinitely better than the retired-plan map, which
+        # could only ever return 0.
+        cur.execute(f"SELECT plan, COUNT(*) AS c FROM users "
+                    f"WHERE is_subscribed = 1 AND {scope} GROUP BY plan")
+        return round(sum(billing.monthly_value(r['plan']) * r['c']
+                         for r in cur.fetchall()), 2)
+    cur.execute(f"""
+        SELECT COALESCE(billing_plan, plan) AS plan,
+               COALESCE(billing_period, 'monthly') AS period,
+               COUNT(*) AS c
+          FROM users u
+         WHERE {_paying_predicate('u')} AND {scope}
+         GROUP BY 1, 2
+    """)
+    return round(sum(billing.monthly_value(r['plan'], r['period']) * r['c']
+                     for r in cur.fetchall()), 2)
+
+
+def _collected(cur, since_days=None):
+    """Money actually captured, in whole USD. {} when the ledger is absent."""
+    try:
+        cur.execute("SELECT to_regclass('public.payments') AS t")
+        if not cur.fetchone()['t']:
+            return {}
+        window = (f"AND occurred_at >= NOW() - INTERVAL '{int(since_days)} days'"
+                  if since_days else "")
+        # amount_cents is Paddle's grand_total in MINOR units — "3000" is
+        # $30.00. The `> 0` is not an optimisation: a trial opens with a real
+        # `completed` transaction for $0.00, so without it "completed
+        # transactions" counts trials as sales.
+        cur.execute(f"""
+            SELECT COALESCE(SUM(amount_cents), 0) AS cents,
+                   COUNT(*) AS n
+              FROM payments
+             WHERE status = 'completed' AND amount_cents > 0 {window}
+        """)
+        row = cur.fetchone()
+        cur.execute("""
+            SELECT COUNT(*) AS n,
+                   COALESCE(SUM(amount_cents), 0) AS cents
+              FROM payments
+             WHERE status IN ('past_due', 'canceled') AND amount_cents > 0
+        """)
+        failed = cur.fetchone()
+        return {
+            'collected_usd': round((row['cents'] or 0) / 100.0, 2),
+            'collected_payments': row['n'] or 0,
+            'failed_usd': round((failed['cents'] or 0) / 100.0, 2),
+            'failed_payments': failed['n'] or 0,
+        }
+    except Exception:
+        return {}
 
 
 def admin_required(f):
@@ -242,8 +348,21 @@ def overview():
             """)
             plan_breakdown = {r['plan']: r['count'] for r in cur.fetchall()}
 
-            plan_prices = {'plus': 20, 'pro': 50, 'ultra': 100}
-            mrr = sum(plan_prices.get(p, 0) * c for p, c in plan_breakdown.items())
+            # ── MRR ────────────────────────────────────────────────────────
+            # This was `{'plus': 20, 'pro': 50, 'ultra': 100}` — three RETIRED
+            # plans. Every live customer is on ai / ai_pro / ai_max, none of
+            # which had an entry, so MRR summed to exactly $0 no matter who
+            # paid. It looked like "nobody has paid", which was true for a
+            # different reason, and the two wrongs agreeing is why it went
+            # unnoticed. Prices now come from billing.PLAN_PRICES_USD, the one
+            # place they are written down.
+            #
+            # And it counts PAYING subscriptions only. A trialling account is
+            # `is_subscribed` from the moment of checkout and has been charged
+            # nothing, so counting it as MRR books revenue for money that may
+            # never arrive — which, on Jul 29 2026, is exactly what it did not
+            # arrive.
+            mrr = _live_mrr(cur, scope)
             conversion_rate = round((total_subscribed / max(1, total_users)) * 100, 1)
 
             # ── Jobs ──
@@ -512,21 +631,33 @@ def chart_mrr():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            # The three plans hardcoded here — plus/pro/ultra — are all
+            # RETIRED, so this chart drew a flat zero for every real customer.
+            # Prices come from billing.PLAN_PRICES_USD now, injected as a VALUES
+            # list so there is still only one place they are written down.
+            price_rows = ",".join(
+                f"('{p}',{billing.monthly_value(p, 'monthly')},"
+                f"{billing.monthly_value(p, 'yearly')})"
+                for p in billing.PLAN_PRICES_USD)
+            # Pre-migration the billing columns do not exist; fall back to
+            # `plan` at the monthly price rather than 500ing the chart.
+            plan_col = ("COALESCE(u.billing_plan, u.plan)" if _billing_ready(cur)
+                        else "u.plan")
+            period_col = ("COALESCE(u.billing_period, 'monthly')"
+                          if _billing_ready(cur) else "'monthly'")
             cur.execute("""
+                WITH prices(plan, monthly, yearly) AS (VALUES """ + price_rows + """)
                 SELECT
                     TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
-                    COALESCE(SUM(CASE
-                        WHEN u.plan = 'plus' THEN 20
-                        WHEN u.plan = 'pro' THEN 50
-                        WHEN u.plan = 'ultra' THEN 100
-                        ELSE 0
-                    END), 0) AS mrr,
+                    COALESCE(SUM(CASE WHEN """ + period_col + """ = 'yearly'
+                                      THEN p.yearly ELSE p.monthly END), 0) AS mrr,
                     COUNT(u.id) AS subscribers
                 FROM generate_series(NOW() - INTERVAL '30 days', NOW(), '1 day') AS d
                 LEFT JOIN users u ON u.is_subscribed = 1
                     AND u.subscription_expiry > d::date
                     AND u.created_at <= d::date + INTERVAL '1 day'
                     AND """ + _scope('u') + """
+                LEFT JOIN prices p ON p.plan = """ + plan_col + """
                 GROUP BY d
                 ORDER BY d
             """)
@@ -543,23 +674,56 @@ def chart_mrr():
 @admin_bp.route('/revenue', methods=['GET'])
 @admin_required
 def revenue_analytics():
-    plan_prices = {'plus': 20, 'pro': 50, 'ultra': 100}
     conn = get_db()
     try:
         with conn.cursor() as cur:
             scope = _scope('')  # real post-relaunch customers only
+            ready = _billing_ready(cur)
+
+            # Everyone the app treats as subscribed, INCLUDING trials — this
+            # is the population breakdown, not the revenue.
             cur.execute(f"SELECT plan, COUNT(*) AS count FROM users WHERE is_subscribed = 1 AND {scope} GROUP BY plan")
             plan_counts = {r['plan']: r['count'] for r in cur.fetchall()}
-            mrr = sum(plan_prices.get(p, 0) * c for p, c in plan_counts.items())
-            arr = mrr * 12
+
+            # ── The revenue ────────────────────────────────────────────────
+            # `plan_prices` used to be {'plus': 20, 'pro': 50, 'ultra': 100} —
+            # three plans nobody can buy and nobody live is on — so MRR was
+            # structurally 0, and it counted every trialling account as though
+            # it were paying. Both halves are fixed: real prices from
+            # billing.PLAN_PRICES_USD, and only genuinely-active subscriptions.
+            mrr = _live_mrr(cur, scope)
+            arr = round(mrr * 12, 2)
 
             cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope}")
             total_verified = cur.fetchone()['total']
             arpu = round(mrr / max(1, total_verified), 2)
 
-            total_paying = sum(plan_counts.get(p, 0) for p in ['plus', 'pro', 'ultra'])
+            # The paying head-count has to be the SAME population the MRR came
+            # from, or ARPPU is one plan's revenue divided by another plan's
+            # customers.
+            if ready:
+                cur.execute(f"""SELECT COUNT(*) AS n FROM users u
+                                 WHERE {_paying_predicate('u')} AND {scope}""")
+                total_paying = cur.fetchone()['n']
+            else:
+                total_paying = sum(plan_counts.values())
             arppu = round(mrr / max(1, total_paying), 2)
             ltv = round(arppu * 6, 2)
+
+            # Trials and declines, counted separately and never as revenue.
+            trialing = past_due = 0
+            if ready:
+                cur.execute(f"""
+                    SELECT COALESCE(billing_status, 'unknown') AS s,
+                           COUNT(*) AS n
+                      FROM users u
+                     WHERE u.is_subscribed = 1 AND {scope}
+                     GROUP BY 1""")
+                by_status = {r['s']: r['n'] for r in cur.fetchall()}
+                trialing = by_status.get('trialing', 0)
+                past_due = by_status.get('past_due', 0) + by_status.get('paused', 0)
+            collected = _collected(cur)
+            collected_30d = _collected(cur, since_days=30)
 
             cur.execute(f"SELECT COUNT(DISTINCT ip) AS total FROM page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
             unique_visitors_30d = cur.fetchone()['total']
@@ -570,13 +734,35 @@ def revenue_analytics():
             cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND {scope} AND created_at >= NOW() - INTERVAL '30 days'")
             subscribed_30d = cur.fetchone()['total']
 
+            # Per plan: how many hold it, how many of those are actually
+            # PAYING, and what that is worth. The `count`/`paying` split is the
+            # thing the old panel could not show — a plan with four holders and
+            # zero payers looked identical to one with four payers.
             revenue_by_plan = {}
+            if ready:
+                cur.execute(f"""
+                    SELECT COALESCE(billing_plan, plan) AS plan,
+                           COALESCE(billing_period, 'monthly') AS period,
+                           COUNT(*) AS n
+                      FROM users u
+                     WHERE {_paying_predicate('u')} AND {scope}
+                     GROUP BY 1, 2""")
+                paying_rows = cur.fetchall()
+            else:
+                paying_rows = [{'plan': p, 'period': 'monthly', 'n': c}
+                               for p, c in plan_counts.items()]
+            paying_by_plan = {}
+            for r in paying_rows:
+                b = paying_by_plan.setdefault(r['plan'], {'paying': 0, 'revenue': 0.0})
+                b['paying'] += r['n']
+                b['revenue'] += billing.monthly_value(r['plan'], r['period']) * r['n']
             for plan, count in plan_counts.items():
-                price = plan_prices.get(plan, 0)
+                b = paying_by_plan.get(plan, {'paying': 0, 'revenue': 0.0})
                 revenue_by_plan[plan] = {
                     'count': count,
-                    'revenue': price * count,
-                    'price': price,
+                    'paying': b['paying'],
+                    'revenue': round(b['revenue'], 2),
+                    'price': billing.monthly_value(plan),
                 }
 
         return jsonify({
@@ -588,6 +774,14 @@ def revenue_analytics():
             'total_paying': total_paying,
             'total_verified': total_verified,
             'revenue_by_plan': revenue_by_plan,
+            # Subscribed but NOT revenue. Broken out so "6 subscribers, $0
+            # collected" reads as the sentence it is instead of a contradiction.
+            'trialing': trialing,
+            'past_due': past_due,
+            # What actually landed in the account, from the payments ledger.
+            'collected': collected,
+            'collected_30d': collected_30d,
+            'billing_ready': ready,
             'funnel': {
                 'visitors_30d': unique_visitors_30d,
                 'registered_30d': registered_30d,
@@ -596,6 +790,122 @@ def revenue_analytics():
                 'register_to_subscribe': round((subscribed_30d / max(1, registered_30d)) * 100, 1),
             }
         }), 200
+    finally:
+        conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  BILLING — what Paddle says, what we say, and where they disagree
+#
+#  Built because on Jul 29 2026 the two disagreed on three separate things at
+#  once and there was no screen anywhere that would have shown it. The point of
+#  this endpoint is that the disagreement is the FIRST thing on it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route('/billing', methods=['GET'])
+@admin_required
+def billing_overview():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            ready = _billing_ready(cur)
+            out = {'billing_ready': ready,
+                   'grace_days': billing.PAID_GRACE_DAYS,
+                   'max_dunning_emails': billing.MAX_DUNNING_EMAILS}
+            if not ready:
+                out['note'] = ('migrations/012_billing_truth.sql has not been '
+                               'applied — run it in the Render shell')
+                return jsonify(out), 200
+
+            # Declines, most recent first. `dunning_email_count` is how many
+            # times we have asked them to fix it.
+            cur.execute("""
+                SELECT id, email, plan, billing_plan, billing_status,
+                       payment_failed_at, payment_failed_reason,
+                       payment_failed_count, dunning_emailed_at,
+                       dunning_email_count, subscription_id,
+                       credits_balance, trial_status
+                  FROM users
+                 WHERE billing_status IN ('past_due', 'paused')
+                 ORDER BY payment_failed_at DESC NULLS LAST
+                 LIMIT 100""")
+            out['declines'] = [dict(r) for r in cur.fetchall()]
+
+            # ── THE CONTRADICTION LIST ────────────────────────────────────
+            # Every row here is a place our DB and Paddle cannot both be
+            # right. Empty is the goal; anything in it is a bug or an unrun
+            # reconcile, and either way it is the thing to look at first.
+            cur.execute("""
+                SELECT id, email, plan, is_subscribed, billing_status,
+                       trial_status, credits_monthly, credits_balance,
+                       subscription_id, billing_synced_at,
+                       CASE
+                         WHEN billing_status = 'canceled' AND is_subscribed = 1
+                           THEN 'Paddle says canceled but the account is still subscribed'
+                         WHEN billing_status IN ('past_due','paused') AND credits_monthly > 0
+                           THEN 'payment refused but the monthly pool is still funded'
+                         WHEN trial_status = 'converted'
+                              AND NOT EXISTS (SELECT 1 FROM payments p
+                                               WHERE p.user_id = users.id
+                                                 AND p.status = 'completed'
+                                                 AND p.amount_cents > 0)
+                           THEN 'marked converted with no payment on record'
+                         WHEN billing_status = 'not_in_paddle'
+                           THEN 'Paddle does not recognise this subscription id'
+                         WHEN is_subscribed = 1 AND subscription_id IS NULL
+                           THEN 'subscribed with no Paddle subscription id'
+                       END AS problem
+                  FROM users
+                 WHERE (billing_status = 'canceled' AND is_subscribed = 1)
+                    OR (billing_status IN ('past_due','paused') AND credits_monthly > 0)
+                    OR (billing_status = 'not_in_paddle')
+                    OR (trial_status = 'converted'
+                        AND NOT EXISTS (SELECT 1 FROM payments p
+                                         WHERE p.user_id = users.id
+                                           AND p.status = 'completed'
+                                           AND p.amount_cents > 0))
+                    OR (is_subscribed = 1 AND subscription_id IS NULL)
+                 ORDER BY id""")
+            out['contradictions'] = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT p.id, p.user_id, u.email, p.transaction_id,
+                       p.subscription_id, p.plan, p.status, p.amount_cents,
+                       p.currency, p.origin, p.error_code, p.occurred_at
+                  FROM payments p LEFT JOIN users u ON u.id = p.user_id
+                 ORDER BY COALESCE(p.occurred_at, p.created_at) DESC
+                 LIMIT 100""")
+            out['payments'] = [dict(r) for r in cur.fetchall()]
+
+            out['collected'] = _collected(cur)
+            out['collected_30d'] = _collected(cur, since_days=30)
+            cur.execute("""SELECT MAX(billing_synced_at) AS t FROM users
+                            WHERE billing_synced_at IS NOT NULL""")
+            out['last_synced_at'] = cur.fetchone()['t']
+        return jsonify(out), 200
+    finally:
+        conn.close()
+
+
+@admin_bp.route('/billing/sync', methods=['POST'])
+@admin_required
+def billing_sync_now():
+    """Reconcile every subscription against Paddle, right now.
+
+    The same code the hourly tick runs, so what it fixes on demand is exactly
+    what it would have fixed on its own — there is no second implementation to
+    drift. `full=1` also re-pulls every transaction, which is what you want
+    once, to backfill the payments ledger from before it existed.
+    """
+    import billing_sync
+    full = request.args.get('full') in ('1', 'true', 'yes')
+    conn = get_db()
+    try:
+        if not billing.columns_ready(conn):
+            return jsonify({'error': 'migrations/012_billing_truth.sql has '
+                                     'not been applied'}), 409
+        result = billing_sync.reconcile_all(conn, full=full)
+        return jsonify(result), 200
     finally:
         conn.close()
 

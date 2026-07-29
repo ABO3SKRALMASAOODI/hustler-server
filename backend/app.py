@@ -93,6 +93,18 @@ def create_app():
     except Exception as e:
         app.logger.error("could not start newsletter scheduler: %s", e)
 
+    # ── Billing reconciliation (round 59) ─────────────────────────────
+    # Hourly: make every subscription's DB state match Paddle's, and nudge
+    # anyone whose card was refused. Webhooks are the fast path and not a
+    # record — when one is dropped nothing else was ever going to notice, which
+    # is how the admin came to show a "converted" customer whose payment Paddle
+    # had refused. Same advisory-lock pattern as the newsletter tick.
+    try:
+        from billing_sync import start_billing_scheduler
+        start_billing_scheduler(app)
+    except Exception as e:
+        app.logger.error("could not start billing sync scheduler: %s", e)
+
     return app
 
 

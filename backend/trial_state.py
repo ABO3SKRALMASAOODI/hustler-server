@@ -233,13 +233,26 @@ def _record_cancel(conn, user_id, subscription_id):
 
 
 def _record_converted(conn, user_id, subscription_id):
-    """The trial ran its course and Paddle charged: status is now 'active'."""
+    """The trial ended AND the money arrived.
+
+    ROUND 59 — 'converted' now requires a payment, and that is a correction.
+    This used to be written on `status == 'active'` alone, and Paddle sets a
+    subscription to `active` when the TRIAL ENDS — *before* it tries the card.
+    On Jul 29 2026 a customer's $30.00 charge was refused for
+    `not_enough_balance` seconds after that event, and the admin went on
+    showing him as a converted paying customer indefinitely, next to a revenue
+    figure of zero. Both were reporting the same subscription.
+
+    The caller now supplies the proof (billing.subscription_has_paid). Trials
+    that have genuinely converted still land here within seconds, via the
+    transaction.completed that carries the amount.
+    """
     cur = conn.cursor()
     cur.execute("""
         UPDATE users
            SET trial_status = 'converted'
          WHERE id = %s
-           AND trial_status = 'trialing'
+           AND trial_status IN ('trialing', 'payment_failed')
            AND trial_subscription_id = %s
         RETURNING id
     """, (user_id, subscription_id))
@@ -247,6 +260,30 @@ def _record_converted(conn, user_id, subscription_id):
     conn.commit()
     cur.close()
     return converted
+
+
+def _record_payment_failed(conn, user_id, subscription_id):
+    """The conversion charge was refused.
+
+    Guarded on the trial states so an ordinary renewal failure months into a
+    paid subscription is never relabelled as a failed trial — the same
+    discipline _record_cancel follows, and for the same reason: this column
+    feeds the one number that says whether the product lands.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE users
+           SET trial_status = 'payment_failed'
+         WHERE id = %s
+           AND trial_status IN ('trialing', 'converted')
+           AND (trial_subscription_id IS NULL
+                OR trial_subscription_id = %s)
+        RETURNING id
+    """, (user_id, subscription_id))
+    failed = cur.fetchone() is not None
+    conn.commit()
+    cur.close()
+    return failed
 
 
 # ── The alert ────────────────────────────────────────────────────────────────
@@ -368,13 +405,63 @@ def sync_from_subscription(conn, user_id, plan, subscription_id, data):
                       flush=True)
 
         elif status == 'active':
-            if _record_converted(conn, user_id, subscription_id):
+            # 'active' is Paddle saying the subscription is RUNNING, which on
+            # the last day of a trial it says before it has tried the card. So
+            # it is not enough on its own — the ledger has to show money. If
+            # the charge is still in flight, the transaction.completed that
+            # follows a second later calls record_paid_conversion and this
+            # lands then; if it is refused, _handle_failure marks it instead.
+            import billing
+            if not billing.subscription_has_paid(conn, subscription_id,
+                                                 user_id):
+                print(f"⏸ User {user_id} subscription is active but no "
+                      f"payment is recorded yet — not marking converted",
+                      flush=True)
+            elif _record_converted(conn, user_id, subscription_id):
                 print(f"💚 User {user_id} converted from trial to paid",
                       flush=True)
     except Exception as e:
         _safe_rollback(conn)
         print(f"⚠️ [trial] bookkeeping failed for user {user_id}: {e}",
               flush=True)
+
+
+def record_paid_conversion(conn, user_id, subscription_id):
+    """Money landed on this subscription — promote the trial to converted.
+
+    Called from the transaction.completed branch of the webhook, which is the
+    only place on this system that sees an amount. Also recovers a trial we had
+    already marked `payment_failed`: a Paddle dunning retry that succeeds is a
+    conversion, just a late one, and the badge has to be able to move back.
+    """
+    try:
+        if not columns_ready(conn) or not subscription_id:
+            return False
+        if _record_converted(conn, user_id, subscription_id):
+            print(f"💚 User {user_id} converted from trial to paid",
+                  flush=True)
+            return True
+    except Exception as e:                                  # pragma: no cover
+        _safe_rollback(conn)
+        print(f"⚠️ [trial] paid-conversion bookkeeping failed for "
+              f"{user_id}: {e}", flush=True)
+    return False
+
+
+def record_payment_failure(conn, user_id, subscription_id):
+    """The charge that would have converted this trial was refused."""
+    try:
+        if not columns_ready(conn):
+            return False
+        if _record_payment_failed(conn, user_id, subscription_id):
+            print(f"💳 User {user_id} trial conversion payment was refused",
+                  flush=True)
+            return True
+    except Exception as e:                                  # pragma: no cover
+        _safe_rollback(conn)
+        print(f"⚠️ [trial] payment-failure bookkeeping failed for "
+              f"{user_id}: {e}", flush=True)
+    return False
 
 
 def record_cancel(conn, user_id, subscription_id):

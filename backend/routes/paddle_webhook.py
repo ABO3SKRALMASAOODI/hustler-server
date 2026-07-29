@@ -8,6 +8,7 @@ from flask import Blueprint, request
 from models import get_db, update_user_subscription_status
 from datetime import datetime
 
+import billing
 import credits as credits_mod
 import offers
 import trial_state
@@ -272,43 +273,88 @@ def handle_webhook():
     # Paddle BILLING event names (not the Classic *_refunded/_failed alerts,
     # which never fire on this integration). Grants activate the plan; refunds
     # arrive as adjustment.* with action='refund'; cancellations arrive as
-    # subscription.canceled at period end; failed charges (past_due) are grace
-    # (Paddle retries) and downgrade only when the sub is ultimately canceled.
+    # subscription.canceled at period end.
+    #
+    # ROUND 59 — A FAILED CHARGE IS NO LONGER JUST A PRINTED LINE. These used
+    # to fall through to an `else` that logged "no change (grace)" and did
+    # nothing at all, so a trial whose card was refused KEPT the full plan
+    # Paddle's preceding `active` event had just granted it. They now go to
+    # billing.record_failure, which lifts the pool for an account that has
+    # never paid a cent and grants real, bounded grace to one that has.
     GRANT_EVENTS = ('transaction.completed', 'transaction.paid',
                     'subscription.created', 'subscription.updated',
                     'subscription.activated')
     REFUND_EVENTS = ('adjustment.created', 'adjustment.updated')
-    if event_type not in GRANT_EVENTS + REFUND_EVENTS + (
-            'subscription.canceled', 'subscription.past_due',
-            'transaction.payment_failed'):
+    DUNNING_EVENTS = ('subscription.past_due', 'subscription.paused',
+                      'transaction.payment_failed', 'transaction.past_due')
+    if event_type not in GRANT_EVENTS + REFUND_EVENTS + DUNNING_EVENTS + (
+            'subscription.canceled',):
         return 'OK', 200
 
     custom_data = data.get('custom_data') or {}
     subscription_id = data.get('subscription_id') or data.get('id')
 
+    # ── Identity, resolved ONCE for every branch ────────────────────────────
+    # custom_data arrives from Paddle.js (the browser creates the transaction
+    # so it can render inline), so user_id is no longer server-set and must not
+    # be trusted on its own. The BUYER'S EMAIL is the authoritative identity:
+    # resolve the account from Paddle's customer record and prefer it whenever
+    # the two disagree. Without this, editing customData in devtools would
+    # activate a plan on someone else's account.
+    #
+    # It is resolved here rather than inside each branch because it costs a
+    # Paddle API round trip, and round 59 added branches that all need it.
+    user_id = _user_id_by_customer_email(data.get('customer_id'))
+    claimed = custom_data.get('user_id')
+    if user_id and claimed and str(claimed) != str(user_id):
+        print(f"⛔ custom_data claimed user {claimed} but the paying "
+              f"customer is user {user_id} — using the payer")
+    if not user_id:
+        # Unknown email (first purchase) -> the claim; then the subscription we
+        # stored at activation, which is the only handle a refund/adjustment
+        # event carries.
+        user_id = claimed or _user_id_by_subscription(
+            data.get('subscription_id') or subscription_id)
+
+    # Every transaction Paddle mentions goes in the ledger, successful or not,
+    # BEFORE any branch decides what it means. `payments.amount_cents` is the
+    # only thing on this system that is revenue: a trial opens with a genuine,
+    # signed, `completed` transaction whose grand_total is $0.00, so counting
+    # completed transactions has never once been counting money.
+    if event_type.startswith('transaction.'):
+        billing.record_transaction(get_db(), user_id, data)
+
+    if not user_id:
+        return 'OK', 200
+
+    # The subscription's OWN status, which only subscription.* events carry —
+    # transaction.completed's data.status is the TRANSACTION's ('completed').
+    sub_status = ((data.get('status') or '').lower()
+                  if event_type.startswith('subscription.') else '')
+
+    # ── THE GUARD THAT WAS MISSING ─────────────────────────────────────────
+    # Paddle keeps sending subscription.updated while a subscription sits in
+    # dunning, and every one of those events carries the paid price id. They
+    # are in GRANT_EVENTS, so without this they walk straight into the grant
+    # below and hand the full monthly pool to an account whose card was just
+    # refused — re-granting it after every lift, forever.
+    if sub_status in billing.FAILING_STATUSES:
+        _handle_failure(user_id, subscription_id, data, event_type, sub_status)
+        return 'OK', 200
+
+    if event_type in DUNNING_EVENTS:
+        _handle_failure(user_id, subscription_id, data, event_type)
+        return 'OK', 200
+
     if event_type in GRANT_EVENTS:
-        # custom_data now arrives from Paddle.js (the browser creates the
-        # transaction so it can render inline), so user_id is no longer
-        # server-set and must not be trusted on its own. The BUYER'S EMAIL is
-        # the authoritative identity: resolve the account from Paddle's
-        # customer record and prefer it whenever the two disagree. Without
-        # this, editing customData in devtools would activate a plan on
-        # someone else's account.
-        user_id = _user_id_by_customer_email(data.get('customer_id'))
-        claimed = custom_data.get('user_id')
-        if user_id and claimed and str(claimed) != str(user_id):
-            print(f"⛔ custom_data claimed user {claimed} but the paying "
-                  f"customer is user {user_id} — granting to the payer")
-        if not user_id:
-            user_id = claimed          # unknown email (first purchase) -> fall back
-        if not user_id:
-            return 'OK', 200
         # Plan/credits come from the PAID price, never from custom_data.plan.
         plan = _plan_from_data(data)
         if not plan:
             print("⛔ Grant event with no known price id — granting 0 credits")
             plan = 'free'
-        billing = custom_data.get('billing', 'monthly')
+        # NB: a local named `billing` lived here (the monthly/yearly label) and
+        # would now shadow the billing module imported at the top of the file.
+        period = custom_data.get('billing', 'monthly')
         expiry_date_str = data.get('next_billed_at')
         expiry_date = None
         if expiry_date_str:
@@ -322,8 +368,23 @@ def handle_webhook():
         update_user_subscription_status(
             user_id, True, expiry_date, subscription_id, plan, grant,
             daily_credits=daily, preserve_credits=preserve)
-        print(f"✅ User {user_id} on plan {plan} ({billing}) activated "
+        print(f"✅ User {user_id} on plan {plan} ({period}) activated "
               f"(from price). Credits: {grant} ({why})")
+
+        # ── MONEY ────────────────────────────────────────────────────────
+        # A transaction that carries a real amount is the ONLY thing that
+        # proves the card worked. It is what promotes a trial to 'converted',
+        # and what clears a decline when a Paddle retry finally lands.
+        if event_type in ('transaction.completed', 'transaction.paid'):
+            cents, _cur = billing.transaction_amount(data)
+            if cents > 0:
+                billing.record_recovery(get_db(), user_id, plan)
+                trial_state.record_paid_conversion(
+                    get_db(), user_id, data.get('subscription_id'))
+                print(f"💰 User {user_id} paid {cents / 100:.2f} on {plan}")
+        elif sub_status:
+            billing.set_status(get_db(), user_id, sub_status, plan)
+
         # Trial bookkeeping + the founder alert. Only subscription.* events
         # carry the subscription's own status; transaction.completed's
         # data.status is the TRANSACTION's ('completed'), which would read as
@@ -342,18 +403,12 @@ def handle_webhook():
     elif event_type in REFUND_EVENTS:
         if (data.get('action') or '').lower() != 'refund':
             return 'OK', 200            # credit/chargeback adjustments ignored
-        user_id = _user_id_by_subscription(subscription_id)
-        if not user_id:
-            return 'OK', 200
         update_user_subscription_status(user_id, False, None, None, 'free', 0)
         _clawback_monthly_credits(user_id)
+        billing.clear_billing(get_db(), user_id)
         print(f"⚠️ User {user_id} refunded — reverted to free + credits clawed back")
 
     elif event_type == 'subscription.canceled':
-        user_id = custom_data.get('user_id') or \
-            _user_id_by_subscription(subscription_id)
-        if not user_id:
-            return 'OK', 200
         # Only downgrade if this cancellation is for the user's CURRENT
         # subscription — a stale canceled event for an old, already-replaced
         # subscription must not wipe the pool they just paid for on a new one.
@@ -367,11 +422,48 @@ def handle_webhook():
         trial_state.record_cancel(get_db(), user_id, subscription_id)
         update_user_subscription_status(user_id, False, None, None, 'free', 0)
         _clawback_monthly_credits(user_id)
+        billing.clear_billing(get_db(), user_id)
         print(f"⚠️ User {user_id} canceled — reverted to free + credits clawed back")
 
-    else:
-        # subscription.past_due / transaction.payment_failed: dunning grace,
-        # Paddle retries the charge; no downgrade until it truly cancels.
-        print(f"ℹ️ Dunning event {event_type} for sub {subscription_id} — no change (grace)")
-
     return 'OK', 200
+
+
+def _handle_failure(user_id, subscription_id, data, event_type,
+                    sub_status=None):
+    """A charge was refused. Record it, and take back what was not paid for.
+
+    THIS IS THE BRANCH THAT USED TO PRINT "no change (grace)" AND RETURN.
+    A trial ending in a refused card left an account marked converted, holding
+    the full monthly pool, on a plan nobody had paid for — permanently, because
+    nothing downstream ever revisited it.
+
+    What "grace" means now depends on a fact we can finally check: whether this
+    account has ever collected a payment. See billing.record_failure. Both
+    outcomes mark the account past_due, which is what lights the studio banner,
+    the admin badge and the daily nudge.
+    """
+    # A transaction event with no subscription is a one-off, not a renewal.
+    # `subscription_id` falls back to data['id'] at the top of the handler, so
+    # without this a failed standalone charge would be looked up in `payments`
+    # under its own transaction id, find nothing, and lift a subscriber's pool
+    # over a payment that had nothing to do with their subscription.
+    if (event_type.startswith('transaction.')
+            and not data.get('subscription_id')):
+        print(f"ℹ️ {event_type} with no subscription for user {user_id} "
+              f"— recorded, no entitlement change")
+        return
+
+    reason = billing.payment_error_code(data)
+    plan = _plan_from_data(data)
+    # A subscription.paused at the end of Paddle's retry window is a harder
+    # state than past_due — it means recovery has stopped being attempted.
+    status = sub_status or ('paused' if event_type == 'subscription.paused'
+                            else 'past_due')
+    outcome = billing.record_failure(get_db(), user_id, subscription_id, plan,
+                                     reason, status=status)
+    # A trial whose conversion charge was refused is NOT a conversion. This is
+    # the exact row the admin was reading as 'converted' next to a Paddle
+    # dashboard that said the payment failed.
+    trial_state.record_payment_failure(get_db(), user_id, subscription_id)
+    print(f"💳 {event_type} for user {user_id} / sub {subscription_id}: "
+          f"{reason or 'declined'} — {outcome.get('action')}")

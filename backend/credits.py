@@ -320,7 +320,14 @@ def get_balance(conn, user_id: int) -> dict:
         plan_limit = FREE_GRANT_CREDITS
 
     empty = float(balance or 0) < 1
+    # A refused card, if there is one. Attached HERE rather than at each call
+    # site so every surface that already asks for a balance — the studio meter,
+    # the account page, both 402 paths in routes/video.py — learns about the
+    # decline without a second request. Spreads {} when nothing is wrong, so no
+    # existing client changes shape.
+    import billing
     return {
+        **billing.payment_state(conn, user_id),
         "balance": balance,
         "is_subscribed": is_subscribed,
         "plan": plan,

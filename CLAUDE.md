@@ -296,6 +296,74 @@ Decided in `paddle_webhook._trial_aware_grant`, and three things there are load-
 
 **THE CARD IS A MESSAGE IN THE CHAT, not a modal.** `PlanCTACard` was a full-screen dialog that took the studio away and had to be dismissed; it now renders inline in the conversation, under the bot avatar, where the reply would have gone — because running out of credits *is* the reply to what the user just asked for. Three sources reach it and all three set the same `chat_messages.meta` flags, so there is one wall with one design: the 402 in `post_message`, the worker's budget stop (`agent_loop`), and the concierge's blank-canvas refusal. Variant is read off the flags — `trial_cap_reached` → `trial_spent`, `free_trial_exhausted === false` → `plan_spent` (a subscriber's pool *does* come back — say when), else `free_spent`. The message's own text becomes the card's `note`, so "the edits I finished are saved and previewed below" survives instead of being replaced by marketing. The grant is quoted from the server (`free_credits` on the 402, `plan_limit` from `/credits`) — **never a literal in the frontend**. The round-49 `video_ready` card that popped the moment indexing finished is **gone**: with 50 spendable credits, a freshly indexed video is something the visitor can now go and edit.
 
+### "ACTIVE" IS NOT "PAID" — the refused card (round 59, `backend/billing.py`)
+
+A trial user showed **converted** in the admin while Paddle showed his **$30.00
+charge refused** (`not_enough_balance`), and the revenue panel showed **$0**.
+Three screens, three different wrong answers, one cause: **Paddle flips a
+subscription to `active` when the TRIAL ENDS, and only then tries the card.**
+We read `active` as conversion, released the full 2,000-credit pool, and the
+`subscription.past_due` a second later hit an `else` branch that printed
+*"no change (grace)"* and **did nothing** — so the account sat there
+permanently claiming to be a paying customer who had paid nothing.
+
+- **Money is a row in `payments`, and nothing else is revenue.** A trial opens
+  with a genuine, signed, `completed` transaction whose `grand_total` is
+  **$0.00** — so "count the completed transactions" was never counting money
+  either. Only `amount_cents > 0` is. `grand_total` is **minor units**: `"3000"`
+  is $30.00.
+- **Revenue was structurally zero for a SECOND reason.** `admin.py` carried its
+  own `{'plus': 20, 'pro': 50, 'ultra': 100}` in three places — three **retired**
+  plans. Every live customer is on ai/ai_pro/ai_max, so MRR summed to $0 no
+  matter who paid, and the two wrongs agreeing is why nobody caught either.
+  Prices now live once, in `billing.PLAN_PRICES_USD`; yearly is amortised (a
+  $300/yr Creator is **$25** of MRR, not $300 and not $30); MRR counts
+  **paying** subscriptions only, so a trial is never booked as revenue.
+- **THE GUARD THAT WAS MISSING:** `subscription.updated` keeps arriving while a
+  subscription is in dunning and **carries the paid price id**, so it is in
+  `GRANT_EVENTS`. Without a `FAILING_STATUSES` check before the grant, every
+  such event re-funds the pool after every lift, forever.
+- **Grace is graded by payment history, not granted blanket.** Never collected
+  a cent (a refused trial conversion) → **the pool is lifted immediately**.
+  Has paid before (a renewal declined) → everything stays for
+  `PAID_GRACE_DAYS` (3) while Paddle retries. Blanket grace is what let the
+  refused trial keep 2,000 credits; no grace would cut off a real customer over
+  a bank blip. `lift_paid_credits` deliberately does **not** call
+  `update_user_subscription_status(..., False, ...)` — that NULLs
+  `subscription_id`, which is how every later event, including the retry that
+  succeeds, finds the user. Strip the entitlement, keep the identity. The 50
+  free bonus credits are never taken.
+- **PADDLE HAS NO API TO FORCE A RETRY.** Its dunning engine retries 7 times
+  over 30 days on its own. The only lever we hold is
+  `GET /subscriptions/{id}/update-payment-method-transaction` → an inline
+  checkout that captures a new card. So "try again daily" is: reconcile daily +
+  **one capped email a day** carrying that link (`billing_sync.run_dunning`,
+  `GET /paddle/update-payment-method`), never a claim that we re-charged.
+- **`billing_sync.py` reconciles against Paddle hourly** and on demand
+  (`POST /admin/billing/sync`, `?full=1` backfills the ledger). Webhooks are a
+  fast path, not a record — when one is dropped nothing ever revisits the
+  account, which is how a subscription **canceled 12 hours earlier** was still
+  marked subscribed. **It never downgrades on silence**: a timeout or missing
+  key changes nothing. A definite **404 is an answer**, but still not acted on
+  — it sets `billing_status='not_in_paddle'` and lands in the admin's
+  **contradiction list** for a human. Three legacy `plus` accounts are in that
+  state (sandbox-era ids against the live key).
+- **The trial cap leaked 10x.** Two live trials held **3,924.80** and
+  **2,000.00** credits against allowances of 400 and 200. The grant is a SET
+  (what makes Paddle's repeats idempotent) and a repeat trial event passes
+  `preserve_credits=True`, which updates `credits_monthly_limit` and
+  deliberately leaves `credits_monthly` alone — so once any single event grants
+  the full pool, the limit is corrected afterwards and **the pool never is**.
+  The webhook comment calls that race self-healing; it heals the limit, not the
+  balance. `_clamp_trial_credits` takes the **overage** off the balance rather
+  than recomputing it, so credits already spent are not handed back.
+- The refused card is a **fourth wall** in the studio with code `payment_failed`
+  — "start a trial" and "you're out of credits" are both false to someone whose
+  payment failed. `credits.get_balance` carries it, so every surface gets it
+  without a second request.
+- Schema: `migrations/012_billing_truth.sql` (**applied to prod Jul 29 2026**).
+  Everything is behind `billing.columns_ready()`, so it deploys before the psql.
+
 ### The 50%-off offer (round 49)
 
 `backend/offers.py` owns it end to end. **TWO moments, and neither is signup:**
