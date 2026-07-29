@@ -410,6 +410,104 @@ def video_overview():
     })
 
 
+# ── HOW LONG DID THIS PERSON WAIT? ──────────────────────────────────────────
+#
+# The three waits a customer actually experiences, per project, so they can be
+# read against the one number that should predict them: how long their video
+# is. Every churn investigation this codebase has run started with someone
+# saying "it took forever" and ended in a hand-written SQL query.
+#
+#   upload_s  their bytes leaving their machine — from the moment the browser
+#             says it started (client_events.upload_started, round 57) to the
+#             asset row existing. Falls back to the project's own creation
+#             time for everything uploaded before that event existed.
+#   index_s   the first successful analysis. A CACHE HIT is flagged, because
+#             re-uploading a file we have already indexed is 10 seconds and
+#             tells you nothing about the pipeline's real speed.
+#   edit_s    the MEDIAN preview render — what the user waits, every time, to
+#             see a change they just made. The median and not the mean: one
+#             cold 4K encode should not describe a session of small cuts.
+#
+# The LATERALs pick a specific row (ORDER BY ... LIMIT 1) rather than
+# aggregating: MIN(created_at) with MIN(updated_at) can silently pair the start
+# of one job with the end of another and produce a duration that never happened.
+_PROJECT_TIMINGS = """
+    LEFT JOIN LATERAL (
+        SELECT a.id, a.duration_s, a.bytes, a.width, a.height, a.created_at
+        FROM assets a
+        WHERE a.project_id = p.id AND a.kind = 'original'
+        ORDER BY a.id ASC LIMIT 1) o ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT ce.created_at
+        FROM client_events ce
+        WHERE ce.project_id = p.id AND ce.kind = 'upload_started'
+          AND ce.created_at <= o.created_at
+        ORDER BY (ce.detail->>'bytes' ~ '^[0-9]+$'
+                  AND (ce.detail->>'bytes')::bigint = o.bytes) DESC NULLS LAST,
+                 ce.id DESC
+        LIMIT 1) ue ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT vj.created_at AS t0, vj.updated_at AS t1,
+               (vj.result->>'cached') AS cached
+        FROM video_jobs vj
+        WHERE vj.project_id = p.id AND vj.type = 'index' AND vj.state = 'done'
+        ORDER BY vj.id ASC LIMIT 1) ij ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY EXTRACT(EPOCH FROM (vj.updated_at - vj.created_at))
+               ) AS med,
+               COUNT(*) AS n
+        FROM video_jobs vj
+        WHERE vj.project_id = p.id AND vj.type = 'preview'
+          AND vj.state = 'done' AND vj.updated_at > vj.created_at) pv ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY EXTRACT(EPOCH FROM (vj.updated_at - vj.created_at))
+               ) AS med,
+               COUNT(*) AS n
+        FROM video_jobs vj
+        WHERE vj.project_id = p.id AND vj.type = 'agent_turn'
+          AND vj.state = 'done' AND vj.updated_at > vj.created_at) ag ON TRUE
+"""
+
+_TIMING_COLS = """
+    o.duration_s AS duration_s, o.bytes AS source_bytes,
+    o.width AS width, o.height AS height,
+    EXTRACT(EPOCH FROM (o.created_at
+                        - COALESCE(ue.created_at, p.created_at))) AS upload_s,
+    (ue.created_at IS NOT NULL) AS upload_measured,
+    EXTRACT(EPOCH FROM (ij.t1 - ij.t0)) AS index_s,
+    (ij.cached = 'true') AS index_cached,
+    pv.med AS edit_s, pv.n AS previews,
+    ag.med AS turn_s, ag.n AS turns
+"""
+
+
+def _timing_out(r):
+    """Round the seconds and drop the negatives. A clock that runs backwards
+    (an asset row written before its own upload_started event was flushed) is
+    not a measurement — reporting it as one puts a nonsense point on the chart."""
+    def secs(v):
+        if v is None:
+            return None
+        v = float(v)
+        return round(v, 1) if v >= 0 else None
+    return {
+        "duration_s": round(float(r["duration_s"]), 1) if r["duration_s"] else None,
+        "source_bytes": r["source_bytes"],
+        "width": r["width"], "height": r["height"],
+        "upload_s": secs(r["upload_s"]),
+        # False = derived from the project's creation time, because this upload
+        # predates client_events (round 57). It includes however long the user
+        # spent choosing a file, so it is an upper bound, not a measurement.
+        "upload_measured": bool(r["upload_measured"]),
+        "index_s": secs(r["index_s"]),
+        "index_cached": bool(r["index_cached"]),
+        "edit_s": secs(r["edit_s"]), "previews": r["previews"] or 0,
+        "turn_s": secs(r["turn_s"]), "turns": r["turns"] or 0,
+    }
+
+
 @admin_video_bp.route("/admin/video/projects", methods=["GET"])
 @admin_required
 def video_projects():
@@ -432,16 +530,53 @@ def video_projects():
                       AND vf.state='done') AS exports,
                    (SELECT MAX(vf.updated_at) FROM video_jobs vf
                     WHERE vf.project_id = p.id AND vf.type='final'
-                      AND vf.state='done') AS last_export
+                      AND vf.state='done') AS last_export,
+                   """ + _TIMING_COLS + """
             FROM projects p JOIN users u ON u.id = p.user_id
+            """ + _PROJECT_TIMINGS + """
             WHERE u.email ILIKE %s OR p.title ILIKE %s
             ORDER BY p.id DESC LIMIT 100
         """, (f"%{search}%", f"%{search}%"))
         rows = cur.fetchall()
     return jsonify({"projects": [
-        {**r, "created_at": r["created_at"].isoformat(),
+        {"id": r["id"], "title": r["title"], "email": r["email"],
+         "messages": r["messages"], "versions": r["versions"],
+         "exports": r["exports"],
+         "created_at": r["created_at"].isoformat(),
          "last_job": r["last_job"].isoformat() if r["last_job"] else None,
-         "last_export": r["last_export"].isoformat() if r["last_export"] else None}
+         "last_export": (r["last_export"].isoformat()
+                         if r["last_export"] else None),
+         **_timing_out(r)}
+        for r in rows]})
+
+
+@admin_video_bp.route("/admin/video/timings", methods=["GET"])
+@admin_required
+def video_timings():
+    """Every project that has a video, as points for the wait-vs-length chart.
+
+    Deliberately a WIDER set than the project list (which is capped at 100 and
+    filtered by a search box): the shape only shows up across the whole corpus,
+    and the single most useful thing it shows is where the line STOPS being a
+    line — the length past which a wait becomes a churn."""
+    try:
+        days = max(1, min(int(request.args.get("days") or 90), 3650))
+    except (TypeError, ValueError):
+        days = 90
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT p.id, p.created_at, u.email, """ + _TIMING_COLS + """
+            FROM projects p JOIN users u ON u.id = p.user_id
+            """ + _PROJECT_TIMINGS + """
+            WHERE p.created_at > NOW() - (%s || ' days')::interval
+              AND o.duration_s IS NOT NULL
+            ORDER BY p.id DESC LIMIT 1000
+        """, (str(days),))
+        rows = cur.fetchall()
+    return jsonify({"days": days, "points": [
+        {"id": r["id"], "email": r["email"],
+         "created_at": r["created_at"].isoformat(), **_timing_out(r)}
         for r in rows]})
 
 

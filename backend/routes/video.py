@@ -544,6 +544,95 @@ def _latest_edl(cur, project_id):
     return cur.fetchone()
 
 
+def _edl_at(cur, project_id, version):
+    cur.execute("""SELECT version, json, created_by, created_at FROM edls
+                   WHERE project_id = %s AND version = %s""",
+                (project_id, version))
+    return cur.fetchone()
+
+
+# ── TWO EDL VERSIONS CAN BE THE SAME VIDEO ───────────────────────────────────
+#
+# Splitting a clip is a keep-list rewrite that changes NOTHING you can see:
+# [[0, 354.61]] split at 18.54 becomes [[0, 18.54], [18.54, 354.61]], which the
+# renderer concatenates straight back into the same programme. But a version is
+# a version, so it got its own full re-encode — 36 seconds of it on project 246,
+# three times in four minutes, for frames that were already on the user's
+# screen. Every manual cut in the studio is split-then-delete, so HALF of all
+# preview work was rendering a picture identical to the one it replaced.
+#
+# Worse than the waste: the split's render and the delete's render finish
+# seconds apart, and whichever asset id lands higher is the one that attaches.
+# When the no-op won, the user's cut visibly did not happen.
+#
+# So a version's render is keyed on what the renderer will actually PRODUCE.
+# Two versions with the same program signature share one encode.
+#
+# Contiguous keep spans merge — except when a transition is configured, because
+# `timeline.transition_junctions` counts a junction per keep boundary and a
+# split genuinely adds one (an `every_cut` whip pan would appear at the split).
+# Everything else in the EDL is anchored in program or source time, never in
+# segment indices, so merging cannot move it.
+def _program_signature(edl):
+    """Canonical form of what this EDL renders, ignoring differences that the
+    renderer cannot express (currently: where the keep list is subdivided)."""
+    try:
+        e = json.loads(json.dumps(edl))
+    except (TypeError, ValueError):
+        return None
+    effects = e.get("effects") or {}
+    if not (effects.get("transition") or {}):
+        merged = []
+        for span in (e.get("keep") or []):
+            try:
+                s, t = round(float(span[0]), 3), round(float(span[1]), 3)
+            except (TypeError, ValueError, IndexError):
+                return None            # malformed: never claim equivalence
+            if merged and abs(merged[-1][1] - s) < 1e-3:
+                merged[-1][1] = t
+            else:
+                merged.append([s, t])
+        e["keep"] = merged
+    try:
+        return wschemas.edl_signature(e)
+    except Exception:
+        return None
+
+
+def _preview_twin(cur, project_id, edl, exclude_version=None):
+    """The id of an existing preview render that already shows this exact
+    programme, or None. Lets a split, an undo/redo, or a re-applied edit attach
+    an encode that already exists instead of paying for it again."""
+    sig = _program_signature(edl)
+    if not sig:
+        return None
+    cur.execute("""SELECT id, meta FROM assets
+                   WHERE project_id = %s AND kind = 'render'
+                   ORDER BY id DESC LIMIT 200""", (project_id,))
+    renders = cur.fetchall()
+    best = {}
+    for r in renders:
+        m = r.get("meta") or {}
+        if m.get("variant") != "preview":
+            continue
+        try:
+            v = int(m.get("edl_version"))
+        except (TypeError, ValueError):
+            continue
+        if v == exclude_version:
+            continue
+        best.setdefault(v, r["id"])       # rows come newest-first
+    if not best:
+        return None
+    cur.execute("""SELECT version, json FROM edls
+                   WHERE project_id = %s AND version = ANY(%s)""",
+                (project_id, list(best.keys())))
+    for row in cur.fetchall():
+        if _program_signature(row["json"]) == sig:
+            return best[row["version"]]
+    return None
+
+
 def _asset_out(a):
     return {
         "id": a["id"], "kind": a["kind"], "storage_key": a["storage_key"],
@@ -1538,12 +1627,30 @@ def project_state(user_id, project_id):
         # opening version — 56 of them at the time of writing, none of which
         # anyone had asked to see. The bug was in the user-edit path, where
         # this write is the only thing that ever enqueues.
+        # A version can also be covered WITHOUT a job: an edit that renders the
+        # same programme as an earlier version adopts its encode outright
+        # (_preview_twin). Without this clause the heal fires on every one of
+        # those and re-queues exactly the render the adoption exists to avoid —
+        # it did, on the first run of the studio test.
         if edl and indexed and edl["created_by"] == "user":
             cur.execute("""SELECT 1 FROM video_jobs
                            WHERE project_id = %s AND type = 'preview'
                              AND (payload->>'edl_version')::int = %s
-                           LIMIT 1""", (project_id, edl["version"]))
-            if not cur.fetchone():
+                           LIMIT 1
+                           """, (project_id, edl["version"]))
+            covered = cur.fetchone() is not None
+            if not covered:
+                # The cast is guarded: meta is worker-written JSON, and ONE row
+                # with a non-numeric edl_version would raise here and take the
+                # whole state poll — the studio's heartbeat — down with it.
+                cur.execute("""SELECT 1 FROM assets
+                               WHERE project_id = %s AND kind = 'render'
+                                 AND meta->>'variant' = 'preview'
+                                 AND meta->>'edl_version' ~ '^[0-9]+$'
+                                 AND (meta->>'edl_version')::int = %s
+                               LIMIT 1""", (project_id, edl["version"]))
+                covered = cur.fetchone() is not None
+            if not covered:
                 print(f"[state] project {project_id}: EDL v{edl['version']} "
                       f"had no preview job — enqueuing one", flush=True)
                 _enqueue(cur, project_id, user_id, "preview",
@@ -1665,7 +1772,14 @@ def project_state(user_id, project_id):
         if variant == "final" and not _gate(a["id"], m, v):
             continue          # stale card, transitions or watermark: re-export
         if variant not in bv:
-            bv[variant] = {"id": a["id"], "created_at": a["created_at"]}
+            # object_id names the bytes, not the row. Two versions that render
+            # the same programme share one encode (see _preview_twin), and the
+            # studio must not tear the video down and reload it to show a
+            # picture that is already on screen — pressing Split would restart
+            # playback from zero.
+            bv[variant] = {"id": a["id"], "created_at": a["created_at"],
+                           "object_id": m.get("reused_from_asset_id")
+                           or a["id"]}
     # The preview the player should show is the render of the NEWEST edl version
     # — NOT merely the newest render asset id. A late re-render of an OLDER
     # version (a version-picker tap, a retried/redelivered job) inserts a higher
@@ -1678,6 +1792,7 @@ def project_state(user_id, project_id):
         vmax = max(preview_versions)
         pv = by_version[vmax]["preview"]
         latest_preview = {"asset_id": pv["id"], "edl_version": vmax,
+                          "object_id": pv.get("object_id") or pv["id"],
                           "created_at": pv["created_at"].isoformat()}
     music = [a for a in extra if a["kind"] == "music"]
     proxies = [a for a in extra if a["kind"] == "proxy"]
@@ -2518,6 +2633,24 @@ def user_edl_write(user_id, project_id):
     data = request.get_json() or {}
     op = str(data.get("op") or "")
     args = data.get("args") or {}
+    # WHICH VERSION IS THE USER LOOKING AT?
+    #
+    # This used to be "the newest one, always". The studio lets you step back
+    # through the edit history, and the timeline you can see and click is the
+    # one you stepped back to — so a cut made there was applied to a completely
+    # different keep list, and the studio then refused to display the result
+    # (it only follows the newest version when nothing is pinned). The user
+    # clicked Split and nothing happened; clicked again and got "that point is
+    # already a clip edge". Both are the same bug wearing different clothes.
+    #
+    # An index or a program time is only meaningful against the EDL it was read
+    # off. So the studio now names its base, and editing from an older state
+    # branches by APPEND — the result becomes the new newest version, which is
+    # what "go back and cut from here" means in every NLE.
+    try:
+        base_version = int(data["base_version"])
+    except (KeyError, TypeError, ValueError):
+        base_version = None
     with vdb() as conn:
         cur = conn.cursor()
         p = _project_for_user(cur, project_id, user_id)
@@ -2533,14 +2666,24 @@ def user_edl_write(user_id, project_id):
         if cur.fetchone():
             return jsonify({"error": "The editor is working on a request — "
                                      "try again when it finishes."}), 409
-        edl_row = _latest_edl(cur, project_id)
-        if not edl_row:
+        latest_row = _latest_edl(cur, project_id)
+        if not latest_row:
             cur.execute("""INSERT INTO edls (project_id, version, json,
                                              created_by)
                            VALUES (%s, 1, %s, 'user')""",
                         (project_id,
                          Json(wschemas.default_edl(original["duration_s"]))))
-            edl_row = _latest_edl(cur, project_id)
+            latest_row = _latest_edl(cur, project_id)
+        edl_row = latest_row
+        if base_version is not None and base_version != latest_row["version"]:
+            picked = _edl_at(cur, project_id, base_version)
+            if not picked:
+                return jsonify({"error": "That edit version no longer "
+                                         "exists."}), 404
+            edl_row = picked
+        branched_from = (edl_row["version"]
+                         if edl_row["version"] != latest_row["version"]
+                         else None)
 
         cur.execute("""SELECT id, kind, storage_key, duration_s, meta
                        FROM assets WHERE project_id = %s""", (project_id,))
@@ -2640,9 +2783,39 @@ def user_edl_write(user_id, project_id):
         #
         # source='user_edit' lets the worker post a chat note if THIS preview
         # fails (agent-enqueued previews react inline instead).
-        preview_job = _enqueue(cur, project_id, user_id, "preview",
-                               {"edl_version": version,
-                                "source": "user_edit"})
+        #
+        # Unless an encode of this exact programme already exists (a split, an
+        # undo/redo, a re-applied edit) — then it is adopted for the new version
+        # and no render is asked for at all. The row is a pointer at the same
+        # storage key, not a copy: no bytes move.
+        twin = _preview_twin(cur, project_id, normalized,
+                             exclude_version=version)
+        preview_job, reused = None, None
+        if twin is not None:
+            cur.execute("""SELECT storage_key, bytes, duration_s, width,
+                                  height, fps, meta
+                           FROM assets WHERE id = %s""", (twin,))
+            src = cur.fetchone()
+            meta = dict(src["meta"] or {})
+            # Canonical, never a chain: an alias of an alias still names the
+            # asset that owns the bytes, so the studio can tell in one
+            # comparison that the object on screen has not changed.
+            meta.update({"edl_version": version, "variant": "preview",
+                         "reused_from_asset_id":
+                             meta.get("reused_from_asset_id") or twin})
+            cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
+                                               bytes, duration_s, width,
+                                               height, fps, meta)
+                           VALUES (%s,'render',%s,%s,%s,%s,%s,%s,%s)
+                           RETURNING id""",
+                        (project_id, src["storage_key"], src["bytes"],
+                         src["duration_s"], src["width"], src["height"],
+                         src["fps"], Json(meta)))
+            reused = cur.fetchone()["id"]
+        else:
+            preview_job = _enqueue(cur, project_id, user_id, "preview",
+                                   {"edl_version": version,
+                                    "source": "user_edit"})
         cur.execute("""INSERT INTO chat_messages (session_id, role, content,
                                                   meta)
                        VALUES (%s, 'activity', %s, %s)""",
@@ -2651,6 +2824,8 @@ def user_edl_write(user_id, project_id):
                      Json({"tool": "user_edit", "op": op})))
 
     return jsonify({"version": version, "preview_job_id": preview_job,
+                    "reused_preview_asset_id": reused,
+                    "branched_from": branched_from,
                     "desc": desc, "edl": normalized})
 
 
@@ -2985,14 +3160,20 @@ def list_edls(user_id, project_id):
             continue          # stale card, transitions or watermark: re-export
         # Keep the NEWEST asset id per (version, variant): a version can be
         # re-rendered, and the version list must point at the latest encode.
-        if r["id"] > bv.get(variant, 0):
-            bv[variant] = r["id"]
+        if r["id"] > (bv.get(variant) or {}).get("id", 0):
+            bv[variant] = {"id": r["id"],
+                           "object_id": m.get("reused_from_asset_id")
+                           or r["id"]}
+
+    def _pick(v, variant, field="id"):
+        return (by_version.get(v, {}).get(variant) or {}).get(field)
 
     return jsonify({"edls": [
         {"version": v["version"], "created_by": v["created_by"],
          "created_at": v["created_at"].isoformat(),
-         "preview_asset_id": by_version.get(v["version"], {}).get("preview"),
-         "final_asset_id": by_version.get(v["version"], {}).get("final")}
+         "preview_asset_id": _pick(v["version"], "preview"),
+         "preview_object_id": _pick(v["version"], "preview", "object_id"),
+         "final_asset_id": _pick(v["version"], "final")}
         for v in versions
     ]})
 
@@ -3083,10 +3264,41 @@ def render_preview_endpoint(user_id, project_id):
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, user_id):
             return jsonify({"error": "Project not found"}), 404
-        cur.execute("SELECT version FROM edls WHERE project_id = %s AND version = %s",
+        cur.execute("""SELECT version, json FROM edls
+                       WHERE project_id = %s AND version = %s""",
                     (project_id, version))
-        if not cur.fetchone():
+        want = cur.fetchone()
+        if not want:
             return jsonify({"error": "That EDL version does not exist"}), 400
+        # STEPPING BACK THROUGH THE HISTORY MUST NOT COST AN ENCODE.
+        #
+        # The studio renders on demand when a version has no preview of its
+        # own, which is every version created by a split — and a split renders
+        # the same picture as its parent. force=true is exempt: its entire
+        # purpose is fresh bytes for a render this browser will not play.
+        if not force:
+            twin = _preview_twin(cur, project_id, want["json"],
+                                 exclude_version=version)
+            if twin is not None:
+                cur.execute("""SELECT storage_key, bytes, duration_s, width,
+                                      height, fps, meta
+                               FROM assets WHERE id = %s""", (twin,))
+                src = cur.fetchone()
+                meta = dict(src["meta"] or {})
+                meta.update({"edl_version": version, "variant": "preview",
+                             "reused_from_asset_id":
+                                 meta.get("reused_from_asset_id") or twin})
+                cur.execute("""INSERT INTO assets (project_id, kind,
+                                   storage_key, bytes, duration_s, width,
+                                   height, fps, meta)
+                               VALUES (%s,'render',%s,%s,%s,%s,%s,%s,%s)
+                               RETURNING id""",
+                            (project_id, src["storage_key"], src["bytes"],
+                             src["duration_s"], src["width"], src["height"],
+                             src["fps"], Json(meta)))
+                return jsonify({"job_id": None,
+                                "reused_preview_asset_id":
+                                    cur.fetchone()["id"]})
         # Don't stack a second preview for a version already rendering — EXCEPT
         # for a forced re-render: an in-flight normal job for this version will
         # serve the very asset the user is telling us they cannot play, so
