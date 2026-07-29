@@ -260,6 +260,24 @@ def get_range(key, nbytes=64):
         return None
 
 
+def get_range_at(key, offset, length):
+    """`length` bytes from `offset`. None on failure.
+
+    Used to read an MP4's header boxes without downloading the file — the moov
+    atom of a 14 GB original is a few hundred bytes, and walking to it costs a
+    handful of 16-byte reads.
+    """
+    if length <= 0:
+        return b""
+    try:
+        obj = client().get_object(
+            Bucket=bucket(), Key=key,
+            Range=f"bytes={int(offset)}-{int(offset) + int(length) - 1}")
+        return obj["Body"].read()
+    except Exception:
+        return None
+
+
 def content_matches_kind(head, kind):
     """Best-effort magic-byte check on the first bytes of an upload. Returns
     True when the bytes match the declared kind, False on a CLEAR mismatch

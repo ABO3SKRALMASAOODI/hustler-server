@@ -26,6 +26,7 @@ from flask import Blueprint, request, jsonify, current_app
 from routes.auth import token_required
 from credits import check_and_reserve, get_balance
 import plan_gate
+import mp4probe
 import storage
 
 # The EDL schema's single source of truth is worker/schemas.py (pure
@@ -848,6 +849,14 @@ def create_upload(user_id, project_id):
     return jsonify(out)
 
 
+# How far the original's real duration may sit from what the browser reported
+# before the index is rebuilt from the file itself. Mirrors the worker's
+# client_proxy_gap_tolerance ceiling: a gate has to mean the same thing on a
+# 30-second clip and a 3-hour one, and 2% of three hours is 3.6 minutes of
+# footage the edit would be measured against wrongly.
+_ORIGINAL_DRIFT_TOLERANCE_S = 5.0
+
+
 def _clean_dim(v, lo, hi):
     try:
         v = int(v)
@@ -1235,16 +1244,53 @@ def original_upload_ready(user_id, project_id):
     if storage.content_matches_kind(head, "original") is False:
         return jsonify({"error": "That file's contents don't match a video"}), 400
 
+    # ── Check the claim against the file ─────────────────────────────────
+    # The edit was built against a duration the BROWSER reported, because for
+    # the whole time the project has been editable this object did not exist.
+    # Now it does, so verify it — reading the moov atom over a few ranged
+    # requests, never downloading the file. A mismatch means every timestamp in
+    # the EDL is measured against the wrong length, and the first thing that
+    # would notice is the export.
+    #
+    # Fails OPEN: an unparseable container is not evidence the browser lied,
+    # and refusing an upload over an unreadable header would break exactly the
+    # long-tail formats this check cannot help with anyway.
+    claimed = a.get("duration_s")
+    drift = None
+    if claimed and (a.get("meta") or {}).get("client_proxy_key"):
+        actual = mp4probe.duration_of_key(storage, key, nbytes)
+        if actual and abs(actual - float(claimed)) > _ORIGINAL_DRIFT_TOLERANCE_S:
+            drift = {"claimed_s": round(float(claimed), 2),
+                     "actual_s": round(actual, 2)}
+
     with vdb() as conn:
         cur = conn.cursor()
+        patch = {"upload_state": "ready", "upload_progress": 1.0}
+        if drift:
+            patch["duration_drift"] = drift
         cur.execute("""UPDATE assets SET bytes = %s, meta = meta || %s
-                       WHERE id = %s""",
-                    (nbytes, Json({"upload_state": "ready",
-                                   "upload_progress": 1.0}), asset_id))
+                       WHERE id = %s""", (nbytes, Json(patch), asset_id))
+        if drift:
+            # Re-index from the ORIGINAL. No client_proxy_key on the payload,
+            # so the indexer takes the ordinary trusted path — which is the
+            # same self-healing rule the worker already applies whenever the
+            # original turns out to exist.
+            cur.execute("""SELECT user_id FROM projects WHERE id = %s""",
+                        (project_id,))
+            owner = cur.fetchone()
+            _enqueue(cur, project_id, owner["user_id"], "index",
+                     {"asset_id": asset_id, "reindex": True})
+            print(f"[uploads] project {project_id}: original is "
+                  f"{drift['actual_s']}s but the browser claimed "
+                  f"{drift['claimed_s']}s — re-indexing from the original",
+                  flush=True)
+
     record_client_event(user_id, project_id, "upload_original_ready", detail={
-        "bytes": nbytes}, origin="server")
+        "bytes": nbytes, **({"duration_drift": drift} if drift else {})},
+        origin="server")
     return jsonify({"asset_id": asset_id, "upload_state": "ready",
-                    "bytes": nbytes}), 200
+                    "bytes": nbytes,
+                    **({"reindexing": True} if drift else {})}), 200
 
 
 # ------------------------------------------------------------------ #
