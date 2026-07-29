@@ -2435,6 +2435,18 @@ def run_render_job(worker_db, job):
             proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
             if proxy:
                 src_asset = proxy
+        elif (original.get("meta") or {}).get("upload_state") == "pending":
+            # Proxy-first upload: the original is registered but its bytes are
+            # still in flight. /render/final refuses this with a percentage, so
+            # reaching here means a non-studio caller (the MCP surface) asked
+            # for an export — give it the same answer rather than a download
+            # failure from inside ffmpeg.
+            pct = int(round(float((original.get("meta") or {})
+                                  .get("upload_progress") or 0) * 100))
+            raise RuntimeError(
+                "Exports render from the full-resolution original, which is "
+                f"still uploading ({pct}% done). The edit is saved — export "
+                "again once it lands.")
         clean_key = clean_source_key(edl_row["json"], variant, src_sha)
         if clean_key:
             if not storage.exists(clean_key):

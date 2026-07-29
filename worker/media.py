@@ -294,6 +294,27 @@ def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
 PROXY_SHORT_FRAC = 0.02
 PROXY_SHORT_MIN_S = 0.4
 
+# How far a BROWSER-BUILT proxy may sit from the duration the browser reported
+# for the original before we refuse to index it.
+#
+# Deliberately not PROXY_SHORT_FRAC. That fraction is a warning threshold on an
+# encode we performed ourselves and can vouch for; this is a refusal gate on a
+# file produced by someone else's machine, and 2% of the 3-hour maximum is 3.6
+# MINUTES of footage that would silently not be in the edit. The floor stays
+# generous because container duration legitimately disagrees with frame
+# duration by a frame or two of audio tail; the ceiling is what makes the gate
+# mean the same thing for a 30-second clip and a 3-hour one.
+CLIENT_PROXY_GAP_FRAC = 0.02
+CLIENT_PROXY_GAP_MIN_S = 1.0
+CLIENT_PROXY_GAP_MAX_S = 5.0
+
+
+def client_proxy_gap_tolerance(declared_duration):
+    """Seconds of disagreement allowed between a browser proxy and its source."""
+    return max(CLIENT_PROXY_GAP_MIN_S,
+               min(CLIENT_PROXY_GAP_FRAC * float(declared_duration or 0),
+                   CLIENT_PROXY_GAP_MAX_S))
+
 
 def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None):
     """Downscaled H.264 proxy, +faststart. VFR sources are normalized to CFR
@@ -329,6 +350,51 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None):
           f"last frame to fill it", flush=True)
     _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=gap,
                   progress_cb=progress_cb, expected_out_s=duration)
+
+
+def adopt_client_proxy(src, dst, warnings=None):
+    """Turn a browser-built proxy into one of OURS, as cheaply as it allows.
+
+    The browser produced this with WebCodecs so the customer did not have to
+    upload 4 GiB before editing, but it is not automatically the same artifact
+    `make_proxy` produces, and two things downstream care:
+
+      * MOOV POSITION. The browser writes with fastStart 'off' — every write is
+        an append, so the sink never has to hold a whole hour-long file in
+        order to patch a header. Ours is +faststart because the studio streams
+        and seeks it constantly. A remux fixes that as a STREAM COPY: seconds
+        even for an hour, no pixels touched.
+      * CFR. Every downstream timestamp — shot boundaries, thumbnails, the
+        preview render's own concat — assumes a constant rate, which is why
+        make_proxy normalizes VFR sources. A VFR proxy is the one case worth
+        paying for a re-encode, and it is cheap here precisely because the
+        input is already 540p: the expensive half of a proxy encode is
+        decoding the 4K source, and that has already happened on the client.
+
+    Returns the probe of the adopted file.
+    """
+    info = probe(src)
+    if not info["vfr"]:
+        try:
+            run(["ffmpeg", "-y", "-i", src, "-c", "copy",
+                 "-movflags", "+faststart", dst])
+            return probe(dst)
+        except MediaError as e:
+            # A remux should not fail on a file we can probe, but if it does,
+            # re-encoding is always available and is still far cheaper than
+            # having demanded the original.
+            print(f"[media] client proxy remux failed ({e}) — re-encoding",
+                  flush=True)
+            if warnings is not None:
+                warnings.append("the prepared video had to be re-encoded on "
+                                "the server (its container could not be "
+                                "remuxed)")
+    else:
+        print("[media] client proxy is variable-rate — normalizing to CFR",
+              flush=True)
+    _encode_proxy(src, dst, info["fps"], True, info["has_audio"],
+                  expected_out_s=info["duration"])
+    return probe(dst)
 
 
 def extract_wav(src, dst):

@@ -3040,6 +3040,19 @@ def _original_local(ctx):
     row = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
     if not row:
         raise RuntimeError("this project has no original video")
+    # A proxy-first upload registers the original BEFORE its bytes arrive, so
+    # the project is editable while a multi-GB file streams up behind it.
+    # Repainting pixels is one of the few things that genuinely needs the
+    # full-resolution file, so say which one it is and what happens next —
+    # "download failed" would be true and useless.
+    if (row.get("meta") or {}).get("upload_state") == "pending":
+        pct = int(round(float((row.get("meta") or {})
+                              .get("upload_progress") or 0) * 100))
+        raise RuntimeError(
+            "erasing pixels needs the full-resolution original, and it is "
+            f"still uploading in the background ({pct}% done). Everything "
+            "else — cuts, captions, music, zooms — works right now; ask me "
+            "again for this one once the upload finishes.")
     local = os.path.join(ctx.workdir,
                          "orig" + os.path.splitext(row["storage_key"])[1])
     storage.download_to(row["storage_key"], local)

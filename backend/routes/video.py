@@ -807,9 +807,9 @@ def create_upload(user_id, project_id):
     filename = data.get("filename") or ""
     nbytes = data.get("bytes")
     kind = data.get("kind") or "original"
-    if kind not in ("original", "music", "image", "clip"):
-        return jsonify({"error": "kind must be original, music, image "
-                                 "or clip"}), 400
+    if kind not in ("original", "music", "image", "clip", "proxy"):
+        return jsonify({"error": "kind must be original, music, image, "
+                                 "clip or proxy"}), 400
 
     try:
         ext, content_type = storage.validate_upload(filename, nbytes, kind)
@@ -848,6 +848,73 @@ def create_upload(user_id, project_id):
     return jsonify(out)
 
 
+def _clean_dim(v, lo, hi):
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return None
+    return v if lo <= v <= hi else None
+
+
+def _register_deferred_original(user_id, project_id, key, filename, declared,
+                                client_proxy_key, proxy_bytes, data):
+    """Create the original asset for a proxy-first upload and start indexing.
+
+    The asset's `storage_key` points at an object that DOES NOT EXIST YET. That
+    is the whole trick, and it is why `meta.upload_state` is load-bearing:
+    every reader that needs the real bytes (export, above all) has to check it
+    rather than assume a row implies an object. Duration and geometry come from
+    the browser's own read of the file, so the studio can describe the video
+    correctly while only the proxy has arrived.
+    """
+    duration_s = data.get("duration_s")
+    try:
+        duration_s = min(max(float(duration_s), 0.1), 4 * 3600) \
+            if duration_s else None
+    except (TypeError, ValueError):
+        duration_s = None
+    width = _clean_dim(data.get("width"), 16, 16384)
+    height = _clean_dim(data.get("height"), 16, 16384)
+
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                    (project_id,))
+        cur.execute("""SELECT id, kind FROM assets
+                       WHERE project_id = %s AND storage_key = %s
+                       ORDER BY id DESC LIMIT 1""", (project_id, key))
+        dup = cur.fetchone()
+        if dup:
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                             AND (payload->>'asset_id')::int = %s
+                           ORDER BY id DESC LIMIT 1""", (project_id, dup["id"]))
+            ij = cur.fetchone()
+            return {"asset_id": dup["id"],
+                    "index_job_id": ij["id"] if ij else None,
+                    "kind": dup["kind"], "duplicate": True}, 200
+        cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
+                                           bytes, duration_s, width, height,
+                                           meta)
+                       VALUES (%s, 'original', %s, %s, %s, %s, %s, %s)
+                       RETURNING id""",
+                    (project_id, key, declared, duration_s, width, height,
+                     Json({"filename": filename,
+                           "upload_state": "pending",
+                           "client_proxy_key": client_proxy_key,
+                           "client_proxy_bytes": proxy_bytes,
+                           "declared_bytes": declared})))
+        asset_id = cur.fetchone()["id"]
+        job_id = _enqueue(cur, project_id, user_id, "index",
+                          {"asset_id": asset_id,
+                           "client_proxy_key": client_proxy_key})
+    record_client_event(user_id, project_id, "upload_proxy_first", detail={
+        "filename": filename, "bytes": declared, "proxy_bytes": proxy_bytes,
+        "duration_s": duration_s}, origin="server")
+    return {"asset_id": asset_id, "index_job_id": job_id, "kind": "original",
+            "original_pending": True}, 200
+
+
 def complete_upload_core(user_id, project_id, data):
     """Turn a finished direct-to-storage upload into an asset (+ an index job
     for a main video). Returns (payload_dict, http_status).
@@ -866,11 +933,38 @@ def complete_upload_core(user_id, project_id, data):
     filename = data.get("filename") or ""
     upload_id = data.get("upload_id")
     parts = data.get("parts") or []
-    duration_s = data.get("duration_s")   # client-probed, music only
+    duration_s = data.get("duration_s")   # client-probed, music/clip/original
 
     prefix = storage.KEY_PREFIX.get(kind, "originals")
     if not key.startswith(f"{prefix}/{project_id}/"):
         return {"error": "storage_key does not belong to this project"}, 400
+
+    # A browser-built proxy is BYTES, not an asset. It is finalized here so a
+    # multipart upload_id gets consumed exactly once, then handed to the
+    # original's own complete as `client_proxy_key` — the worker is what
+    # decides whether those bytes are a usable proxy, and only it writes the
+    # proxy asset row. Creating one here would publish a proxy to the player
+    # before anything had probed it.
+    if kind == "proxy":
+        with vdb() as conn:
+            if not _project_for_user(conn.cursor(), project_id, user_id):
+                return {"error": "Project not found"}, 404
+        if upload_id:
+            try:
+                storage.complete_multipart(key, upload_id, parts)
+            except Exception as e:
+                if storage.head_bytes(key) is None:
+                    storage.abort_multipart(key, upload_id)
+                    record_client_event(user_id, project_id, "upload_failed",
+                                        detail={"reason": str(e)[:300],
+                                                "kind": "proxy",
+                                                "stage": "complete_multipart"},
+                                        origin="server")
+                    return {"error": f"Upload could not be finalized: {e}"}, 400
+        nbytes = storage.head_bytes(key)
+        if nbytes is None:
+            return {"error": "Prepared video not found in storage"}, 400
+        return {"storage_key": key, "bytes": nbytes, "kind": "proxy"}, 200
 
     with vdb() as conn:
         cur = conn.cursor()
@@ -902,6 +996,45 @@ def complete_upload_core(user_id, project_id, data):
                 _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
             return {"error": "Too many jobs running. "
                              "Wait for one to finish."}, 429
+
+    # ── The deferred original ────────────────────────────────────────────
+    # The browser already built and uploaded a 540p proxy; the original is
+    # still streaming up in the background and will be finished by
+    # /uploads/original-ready. We register the asset NOW so indexing can start
+    # against the proxy — the original is not needed until export, and making
+    # the user watch 4 GiB move before they can do anything is the entire
+    # problem this path exists to remove.
+    client_proxy_key = (data.get("client_proxy_key") or "").strip()
+    pending_original = bool(data.get("original_pending")) and kind == "original"
+    if pending_original:
+        if not client_proxy_key:
+            return {"error": "A deferred original needs a client_proxy_key"}, 400
+        if not client_proxy_key.startswith(
+                f"{storage.KEY_PREFIX['proxy']}/{project_id}/"):
+            return {"error": "client_proxy_key does not belong to this "
+                             "project"}, 400
+        proxy_bytes = storage.head_bytes(client_proxy_key)
+        if proxy_bytes is None:
+            return {"error": "The prepared video is missing — upload it "
+                             "again"}, 400
+        head = storage.get_range(client_proxy_key, 64)
+        if storage.content_matches_kind(head, "original") is False:
+            return {"error": "The prepared video is not a video file"}, 400
+        declared = data.get("bytes")
+        try:
+            declared = int(declared) if declared else None
+        except (TypeError, ValueError):
+            declared = None
+        if declared and declared > storage.max_upload_bytes():
+            record_client_event(user_id, project_id, "upload_rejected", detail={
+                "reason": "over size cap at deferred registration",
+                "filename": filename, "bytes": declared,
+                "cap_bytes": storage.max_upload_bytes(), "kind": kind,
+                "stage": "defer"}, origin="server")
+            return {"error": "File exceeds the upload size limit"}, 400
+        return _register_deferred_original(
+            user_id, project_id, key, filename, declared, client_proxy_key,
+            proxy_bytes, data)
 
     if upload_id:
         try:
@@ -1002,6 +1135,116 @@ def complete_upload(user_id, project_id):
     payload, status = complete_upload_core(user_id, project_id,
                                            request.get_json() or {})
     return jsonify(payload), status
+
+
+def _pending_original(cur, project_id, asset_id):
+    cur.execute("""SELECT * FROM assets
+                   WHERE id = %s AND project_id = %s AND kind = 'original'""",
+                (asset_id, project_id))
+    a = cur.fetchone()
+    if not a:
+        return None, ({"error": "Video not found"}, 404)
+    if (a.get("meta") or {}).get("upload_state") != "pending":
+        # Already finished. Idempotent by design: the studio retries this POST
+        # after a network blip, and a finished background upload must not be
+        # reported as an error to a client that simply lost the response.
+        return a, ({"asset_id": a["id"], "upload_state": "ready",
+                    "duplicate": True}, 200)
+    return a, None
+
+
+@video_bp.route("/projects/<int:project_id>/uploads/original-progress",
+                methods=["POST"])
+@token_required
+def original_upload_progress(user_id, project_id):
+    """Stamp how far the background original upload has got.
+
+    Purely so the product can be HONEST later: an export attempted before the
+    original lands says "your video is 62% uploaded" instead of a bare refusal,
+    and an abandoned upload is visible in admin rather than looking like a
+    project that simply never exported.
+    """
+    data = request.get_json() or {}
+    try:
+        frac = max(0.0, min(1.0, float(data.get("progress") or 0)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "progress must be a number"}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+        a, early = _pending_original(cur, project_id, data.get("asset_id"))
+        if early:
+            return jsonify(early[0]), early[1]
+        cur.execute("""UPDATE assets
+                       SET meta = meta || %s WHERE id = %s""",
+                    (Json({"upload_progress": round(frac, 4)}), a["id"]))
+    return jsonify({"ok": True}), 200
+
+
+@video_bp.route("/projects/<int:project_id>/uploads/original-ready",
+                methods=["POST"])
+@token_required
+def original_upload_ready(user_id, project_id):
+    """The background upload of the real original finished — verify and adopt it.
+
+    This is the moment the deferred half of a proxy-first upload becomes real,
+    so it repeats the checks the normal path does at completion: finalize the
+    multipart, confirm the object exists, and sniff its magic bytes. An
+    original that fails them leaves `upload_state` pending rather than being
+    adopted, because a project whose export would die is better described as
+    still missing its video than as ready.
+    """
+    data = request.get_json() or {}
+    asset_id = data.get("asset_id")
+    upload_id = data.get("upload_id")
+    parts = data.get("parts") or []
+
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+        a, early = _pending_original(cur, project_id, asset_id)
+        if early:
+            return jsonify(early[0]), early[1]
+        key = a["storage_key"]
+
+    if upload_id:
+        try:
+            storage.complete_multipart(key, upload_id, parts)
+        except Exception as e:
+            if storage.head_bytes(key) is None:
+                storage.abort_multipart(key, upload_id)
+                record_client_event(user_id, project_id, "upload_failed",
+                                    detail={"reason": str(e)[:300],
+                                            "kind": "original",
+                                            "stage": "original_ready"},
+                                    origin="server")
+                return jsonify({"error": f"Upload could not be finalized: {e}"
+                                }), 400
+
+    nbytes = storage.head_bytes(key)
+    if nbytes is None:
+        record_client_event(user_id, project_id, "upload_failed", detail={
+            "reason": "original missing in storage after background upload",
+            "kind": "original", "stage": "original_ready"}, origin="server")
+        return jsonify({"error": "Uploaded file not found in storage"}), 400
+    if nbytes > storage.max_upload_bytes():
+        return jsonify({"error": "File exceeds the upload size limit"}), 400
+    head = storage.get_range(key, 64)
+    if storage.content_matches_kind(head, "original") is False:
+        return jsonify({"error": "That file's contents don't match a video"}), 400
+
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""UPDATE assets SET bytes = %s, meta = meta || %s
+                       WHERE id = %s""",
+                    (nbytes, Json({"upload_state": "ready",
+                                   "upload_progress": 1.0}), asset_id))
+    record_client_event(user_id, project_id, "upload_original_ready", detail={
+        "bytes": nbytes}, origin="server")
+    return jsonify({"asset_id": asset_id, "upload_state": "ready",
+                    "bytes": nbytes}), 200
 
 
 # ------------------------------------------------------------------ #
@@ -2737,6 +2980,24 @@ def render_final(user_id, project_id):
                     (project_id, version))
         if not cur.fetchone():
             return jsonify({"error": "That EDL version does not exist"}), 400
+        # THE EXPORT IS THE ONE THING THAT GENUINELY NEEDS THE ORIGINAL.
+        # Everything before it runs on the proxy, which is why a proxy-first
+        # upload can start editing within seconds. Finals render from the
+        # source file at full resolution, so if the background upload has not
+        # landed yet, say exactly that and how far along it is — a bare "not
+        # ready" on a video the user can see and has already edited reads as a
+        # bug rather than as a transfer still in flight.
+        original = _active_original(cur, project_id)
+        meta = (original or {}).get("meta") or {}
+        if meta.get("upload_state") == "pending":
+            pct = int(round(float(meta.get("upload_progress") or 0) * 100))
+            return jsonify({
+                "error": "Your original video is still uploading in the "
+                         f"background ({pct}% done). Exports render from the "
+                         "full-resolution file, so this needs to finish "
+                         "first — your edit is saved and nothing is lost.",
+                "code": "original_uploading",
+                "upload_progress": pct}), 409
         cur.execute("""SELECT id FROM video_jobs
                        WHERE project_id = %s AND type = 'final'
                          AND state IN ('queued','running')""", (project_id,))
@@ -2850,7 +3111,14 @@ def render_preview_endpoint(user_id, project_id):
 #               65 of 214 accounts sit in that bucket.
 CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       "player_recovered", "attach_failed",
-                      "upload_started", "upload_rejected", "upload_failed"}
+                      "upload_started", "upload_rejected", "upload_failed",
+                      # Proxy-first upload: the browser built a 540p proxy and
+                      # sent that first. Recorded as its own kind so the split
+                      # between the fast path and the legacy whole-file path is
+                      # countable — without it, "did the browser transcode
+                      # actually work for real users" has no answer.
+                      "upload_proxy_first", "upload_proxy_failed",
+                      "upload_original_ready"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these

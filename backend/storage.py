@@ -59,6 +59,12 @@ MUSIC_MAX_BYTES = 50 * 1024 * 1024
 IMAGE_MAX_BYTES = 10 * 1024 * 1024
 CLIP_MAX_BYTES = 500 * 1024 * 1024   # clips spliced into the edit
 
+# A browser-built 540p proxy. Our own proxies average 0.70 Mbps across 202
+# production files, so the 3-hour maximum lands near 950 MB even at the
+# browser encoder's less efficient fixed bitrate. 2 GB is the abuse guard, not
+# a working limit — a proxy anywhere near it is not a proxy.
+PROXY_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
 
 def is_configured():
     return all(os.getenv(k) for k in (
@@ -139,6 +145,11 @@ def upload_limits():
         "clip_max_bytes": CLIP_MAX_BYTES,
         "music_max_bytes": MUSIC_MAX_BYTES,
         "image_max_bytes": IMAGE_MAX_BYTES,
+        "proxy_max_bytes": PROXY_MAX_BYTES,
+        # Advertises that this server understands a browser-built proxy and a
+        # deferred original. The studio checks it before spending the user's
+        # CPU on a transcode this API would then have no way to accept.
+        "proxy_first": True,
         "video_ext": sorted(ALLOWED_VIDEO_EXT),
         "music_ext": sorted(ALLOWED_MUSIC_EXT),
         "image_ext": sorted(ALLOWED_IMAGE_EXT),
@@ -152,6 +163,7 @@ def validate_upload(filename, nbytes, kind):
         "music": (ALLOWED_MUSIC_EXT, MUSIC_MAX_BYTES),
         "image": (ALLOWED_IMAGE_EXT, IMAGE_MAX_BYTES),
         "clip": (ALLOWED_VIDEO_EXT, CLIP_MAX_BYTES),
+        "proxy": (ALLOWED_VIDEO_EXT, PROXY_MAX_BYTES),
     }.get(kind, (ALLOWED_VIDEO_EXT, max_upload_bytes()))
     if ext not in allowed:
         raise ValueError(f"File type {ext or '(none)'} not supported. "
@@ -165,7 +177,7 @@ def validate_upload(filename, nbytes, kind):
 
 
 KEY_PREFIX = {"original": "originals", "music": "music", "image": "images",
-              "clip": "clips"}
+              "clip": "clips", "proxy": "clientproxies"}
 
 
 def new_original_key(project_id, ext, kind="original"):

@@ -69,18 +69,79 @@ def run_index_job(worker_db, job):
         timings[stage] = round(time.monotonic() - _t, 2)
         _t = time.monotonic()
 
-    try:
-        # 1. Pull original + hash it
-        src = os.path.join(workdir,
-                           "src" + os.path.splitext(asset["storage_key"])[1])
-        storage.download_to(asset["storage_key"], src)
-        worker_db.run(dbx.set_progress, job_id, 8)
-        _mark("download_s")
-        sha = media.sha256_file(src)
-        _mark("sha256_s")
+    # PROXY-FIRST UPLOADS. When the browser could transcode, it sent a 540p
+    # proxy in seconds and the multi-GB original is still streaming up in the
+    # background — it is not needed until export. Indexing that proxy is what
+    # takes "editable" from 24 minutes to under a minute on a 4K recording.
+    #
+    # The original ALWAYS wins when it is actually there. That single rule is
+    # what makes every retry self-healing: a re-index that runs after the
+    # background upload lands takes the full, trusted path with no special
+    # case, and a client proxy is only ever used while there is no alternative.
+    client_proxy_key = (job["payload"].get("client_proxy_key") or "").strip()
+    from_client_proxy = bool(client_proxy_key) and \
+        not storage.exists(asset["storage_key"])
+    if client_proxy_key and not from_client_proxy:
+        print(f"[index {job_id}] original has landed — indexing from it "
+              f"rather than the browser proxy", flush=True)
 
-        # 2. Probe (also enforces the duration quota)
-        info = media.probe(src)
+    try:
+        warnings_pre = []
+        if from_client_proxy:
+            # 1'. Pull the browser's proxy and adopt it as ours.
+            raw = os.path.join(workdir, "client_proxy_raw.mp4")
+            storage.download_to(client_proxy_key, raw)
+            worker_db.run(dbx.set_progress, job_id, 8)
+            _mark("download_s")
+            adopted = os.path.join(workdir, "proxy.mp4")
+            proxy_info = media.adopt_client_proxy(raw, adopted, warnings_pre)
+            try:
+                os.remove(raw)
+            except OSError:
+                pass
+            src = adopted
+            sha = media.sha256_file(adopted)
+            _mark("sha256_s")
+
+            # The asset row carries what the BROWSER measured of the original:
+            # its real duration and its DISPLAY geometry. Keep those — the
+            # proxy is 540p by construction, and describing a 4K recording as
+            # 960x540 would be wrong everywhere it is shown.
+            declared_dur = asset.get("duration_s") or 0
+            dur = proxy_info["duration"]
+            if declared_dur and abs(declared_dur - dur) > \
+                    media.client_proxy_gap_tolerance(declared_dur):
+                # The prepared video does not cover the recording it claims to.
+                # Refuse rather than build an edit against footage that is not
+                # all there — the original is on its way, and the studio's
+                # own self-heal re-runs this job, which will then take the
+                # branch above and index the real file.
+                raise RuntimeError(
+                    f"The prepared video is {dur:.1f}s but the recording is "
+                    f"{declared_dur:.1f}s. Re-analysing from the original as "
+                    "soon as it finishes uploading.")
+            info = {
+                "duration": dur,
+                "video_duration": proxy_info.get("video_duration"),
+                "width": asset.get("width") or proxy_info["width"],
+                "height": asset.get("height") or proxy_info["height"],
+                "fps": proxy_info["fps"],
+                "has_audio": proxy_info["has_audio"],
+                "vfr": False,          # adopt_client_proxy guarantees CFR
+            }
+        else:
+            # 1. Pull original + hash it
+            src = os.path.join(workdir,
+                               "src" + os.path.splitext(asset["storage_key"])[1])
+            storage.download_to(asset["storage_key"], src)
+            worker_db.run(dbx.set_progress, job_id, 8)
+            _mark("download_s")
+            sha = media.sha256_file(src)
+            _mark("sha256_s")
+
+            # 2. Probe (also enforces the duration quota)
+            info = media.probe(src)
+
         if info["duration"] > config.MAX_DURATION_S:
             raise RuntimeError(
                 f"Video is {info['duration']/3600:.1f}h — the limit is "
@@ -98,12 +159,14 @@ def run_index_job(worker_db, job):
         if cached and cached.get("pipeline_version", 1) == \
                 config.PIPELINE_VERSION:
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
-                          workdir)
+                          workdir,
+                          ready_proxy=src if from_client_proxy else None)
             _finish_setup(worker_db, project_id, session_id, info,
                           cached["json"], job["user_id"],
                           reindex=bool(job["payload"].get("reindex")))
             _mark("cache_hit_s")
             return {"sha256": sha, "cached": True,
+                    "from_client_proxy": from_client_proxy,
                     "shots": len(cached["json"].get("shots", [])),
                     "words": len(cached["json"].get("words", [])),
                     "timings": timings}
@@ -116,16 +179,23 @@ def run_index_job(worker_db, job):
         # Non-fatal degradations recorded here and stored on the index so a
         # partially-degraded analysis is visible in admin instead of silently
         # worse.
-        warnings = []
+        warnings = list(warnings_pre)
 
         # 3. Proxy (VFR -> CFR here) + 16k mono wav
-        proxy_local = os.path.join(workdir, "proxy.mp4")
-        media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
-                         info["has_audio"], duration=info["duration"],
-                         progress_cb=_stage_progress(worker_db, job_id, 12, 30))
-        # Probed here, not at upload time: step 6 needs the proxy's REAL
-        # duration to keep thumbnail seeks inside it.
-        proxy_info = media.probe(proxy_local)
+        if from_client_proxy:
+            # Already have it: the browser encoded it and adopt_client_proxy
+            # normalized it. This is the 386.8s that a 4K index used to spend
+            # here — 78% of the whole job — and it is now zero.
+            proxy_local = src
+        else:
+            proxy_local = os.path.join(workdir, "proxy.mp4")
+            media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
+                             info["has_audio"], duration=info["duration"],
+                             progress_cb=_stage_progress(worker_db, job_id,
+                                                         12, 30))
+            # Probed here, not at upload time: step 6 needs the proxy's REAL
+            # duration to keep thumbnail seeks inside it.
+            proxy_info = media.probe(proxy_local)
         # The index is about to describe this video to the agent, the player
         # and every cut. If the proxy still doesn't cover the recording, say so
         # rather than shipping a description of footage that isn't there.
@@ -464,6 +534,7 @@ def run_index_job(worker_db, job):
                       reindex=bool(job["payload"].get("reindex")))
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
+                "from_client_proxy": from_client_proxy,
                 "words": len(words), "silences": len(silences),
                 "language": language, "warnings": warnings,
                 "timings": timings}
@@ -472,9 +543,14 @@ def run_index_job(worker_db, job):
 
 
 def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
-                  workdir):
+                  workdir, ready_proxy=None):
     """Cache hits still need a proxy asset for THIS project (the player and
-    preview renders read it). Reuse the stored object when possible."""
+    preview renders read it). Reuse the stored object when possible.
+
+    `ready_proxy` is a local file that IS already the proxy — the browser built
+    it and `adopt_client_proxy` normalized it. Encoding one from it would be a
+    540p re-encode of a 540p file for no gain.
+    """
     existing = worker_db.run(
         lambda conn: dbx.asset_by_key(conn, project_id, proxy_key))
     if existing:
@@ -487,9 +563,10 @@ def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
                       width=donor["width"], height=donor["height"],
                       fps=donor["fps"], sha256=sha)
         return
-    proxy_local = os.path.join(workdir, "proxy.mp4")
-    media.make_proxy(src_local, proxy_local, info["fps"], info["vfr"],
-                     info["has_audio"], duration=info["duration"])
+    proxy_local = ready_proxy or os.path.join(workdir, "proxy.mp4")
+    if not ready_proxy:
+        media.make_proxy(src_local, proxy_local, info["fps"], info["vfr"],
+                         info["has_audio"], duration=info["duration"])
     storage.upload_file(proxy_local, proxy_key, "video/mp4")
     p = media.probe(proxy_local)
     worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,
