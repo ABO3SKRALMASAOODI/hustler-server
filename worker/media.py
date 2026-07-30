@@ -533,7 +533,7 @@ def detect_silences(wav_path, duration):
     return silences
 
 
-def frame_at(src, t, dst, width=None, quality=4):
+def frame_at(src, t, dst, width=None, quality=4, timeout=120):
     """Write ONE frame from `src` at ~t seconds to `dst`.
 
     ffmpeg's exit code is NOT a trustworthy success signal here. Seeking at or
@@ -559,19 +559,26 @@ def frame_at(src, t, dst, width=None, quality=4):
     """
     vf = ["-vf", rf"scale={width}:-2"] if width else []
     ts = f"{max(0.0, t):.3f}"
+    # -threads 1 for ONE frame. Frame threading allocates a full decode picture
+    # buffer per thread, so a 4K source costs 618 MB resident to hand back a
+    # single still — measured, and it is what OOM-killed the dispatcher when the
+    # timeline started sampling users' own uploads (worker/filmstrip.py). One
+    # frame has nothing to parallelise: single-threaded is 240 MB and, on the
+    # input-seek path, actually FASTER (0.51s of CPU against 1.12s).
+    th = ["-threads", "1"]
     attempts = (
-        ["ffmpeg", "-y", "-ss", ts, "-i", src,
+        ["ffmpeg", "-y", *th, "-ss", ts, "-i", src,
          "-frames:v", "1", *vf, "-q:v", str(quality), dst],
-        ["ffmpeg", "-y", "-i", src, "-ss", ts,
+        ["ffmpeg", "-y", *th, "-i", src, "-ss", ts,
          "-frames:v", "1", *vf, "-q:v", str(quality), dst],
-        ["ffmpeg", "-y", "-i", src, "-ss", ts, "-map", "0:v:0",
+        ["ffmpeg", "-y", *th, "-i", src, "-ss", ts, "-map", "0:v:0",
          "-an", "-sn", "-dn", "-frames:v", "1", *vf, "-q:v", str(quality),
          "-f", "image2", "-update", "1", dst],
     )
     last_err = None
     for cmd in attempts:
         try:
-            run(cmd, timeout=120)
+            run(cmd, timeout=timeout)
         except MediaError as e:
             last_err = str(e)
             continue

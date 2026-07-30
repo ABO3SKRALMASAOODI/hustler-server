@@ -164,3 +164,133 @@ def test_no_inserts_still_behaves_exactly_as_before():
                    "remove_keep_segment", {"index": 0})
     assert out["keep"] == [[20.0, 30.0]]
     assert out["inserts"] == []
+
+
+# ── round 61: the clip dropped at the end ───────────────────────────────────
+#
+# Same session, later the same night. He dropped a 23.86s clip onto the end of
+# the timeline and got a 10.0s block that showed no frames, then spent six
+# drags across two positions getting its length back, then asked the agent to
+# split it because the scissors refused.
+
+CLIP = "clips/246/3a38d20ff110.mov"
+CLIP_LEN = 23.86
+
+
+def dropped_edl(dur=CLIP_LEN, at=18.23, src0=None):
+    e = wschemas.default_edl(SRC_DUR)
+    e["keep"] = [list(k) for k in PROD_KEEP]
+    ins = {"id": "ins1", "asset_key": CLIP, "kind": "video",
+           "at_output_s": at, "duration_s": dur}
+    if src0:
+        ins["source_start_s"] = src0
+    e["inserts"] = [ins]
+    return wschemas.validate_edl(e, SRC_DUR).model_dump()
+
+
+def test_a_dropped_clip_arrives_at_its_own_length_not_ten_seconds():
+    """The 10s cap belonged to the AGENT's insert_media, which picks its own
+    b-roll lengths. This op is only reached by a human dragging a file onto
+    their own timeline; they chose the file."""
+    edl = wschemas.validate_edl(
+        {**wschemas.default_edl(SRC_DUR), "keep": [list(k) for k in PROD_KEEP]},
+        SRC_DUR).model_dump()
+    assets = {7: {"id": 7, "kind": "video_clip", "storage_key": CLIP,
+                  "duration_s": CLIP_LEN}}
+    out, desc = apply(edl, "insert_media", {"asset_id": 7, "at_output_s": 33.5},
+                      assets)
+    assert out["inserts"][0]["duration_s"] == CLIP_LEN, desc
+    # ...and it landed at the END boundary, which is where he dropped it.
+    assert out["inserts"][0]["at_output_s"] == 33.57
+
+
+def test_a_long_recording_is_still_bounded_by_one_shared_ceiling():
+    """Not by a second, different number: the drop and the resize handle have
+    to agree, or a clip arrives at a length the chip then refuses to restore."""
+    edl = wschemas.validate_edl(
+        {**wschemas.default_edl(SRC_DUR), "keep": [list(k) for k in PROD_KEEP]},
+        SRC_DUR).model_dump()
+    assets = {7: {"id": 7, "kind": "video_clip", "storage_key": CLIP,
+                  "duration_s": 5000.0}}
+    out, _ = apply(edl, "insert_media", {"asset_id": 7, "at_output_s": 0.0},
+                   assets)
+    assert out["inserts"][0]["duration_s"] == video._INSERT_MAX_S
+    capped, _ = apply(out, "set_insert_duration",
+                      {"id": "ins1", "duration_s": 9999.0})
+    assert capped["inserts"][0]["duration_s"] == video._INSERT_MAX_S
+
+
+def test_the_scissors_split_an_inserted_clip():
+    """out_to_src maps a program time inside a splice to None, and the answer
+    used to be "move the playhead onto the footage" — a refusal to cut a block
+    sitting right there on the timeline."""
+    edl = dropped_edl()                       # plays 18.23 -> 42.09
+    out, desc = apply(edl, "split_keep", {"at_program_s": 30.0})
+    ins = out["inserts"]
+    assert len(ins) == 2, desc
+    head, tail = ins
+    assert head["at_output_s"] == tail["at_output_s"] == 18.23
+    assert head["duration_s"] == pytest.approx(11.77, abs=0.01)
+    assert tail["duration_s"] == pytest.approx(12.09, abs=0.01)
+    # The tail SEEKS — without this the second half replays the beginning and
+    # "split" is indistinguishable from "duplicate".
+    assert head.get("source_start_s") in (None, 0.0)
+    assert tail["source_start_s"] == pytest.approx(11.77, abs=0.01)
+    # The keep list is untouched and the program is exactly as long as before.
+    assert out["keep"] == PROD_KEEP
+    assert wschemas.program_duration(out) == wschemas.program_duration(edl)
+
+
+def test_the_two_halves_play_head_first_even_when_the_head_is_longer():
+    """The ordering that made this representable at all. Program order at a
+    shared boundary is LIST order (timeline._ins_sort_key); sorting the
+    (at, duration) tuple, as it used to, played the SHORTER half first — so
+    splitting late in a clip put its tail before its head."""
+    edl = dropped_edl()
+    out, _ = apply(edl, "split_keep", {"at_program_s": 40.0})
+    head, tail = out["inserts"]
+    assert head["duration_s"] > tail["duration_s"]      # 21.77 vs 2.09
+    tl = video.wtimeline.Timeline(out["keep"], out["inserts"], out.get("speed"))
+    wins = video.wtimeline.insert_windows(out["inserts"], tl)
+    assert wins[head["id"]][0] < wins[tail["id"]][0]
+    assert wins[head["id"]][1] == pytest.approx(wins[tail["id"]][0], abs=0.01)
+
+
+def test_a_split_half_can_be_deleted_and_the_other_survives():
+    edl = dropped_edl()
+    out, _ = apply(edl, "split_keep", {"at_program_s": 30.0})
+    tail_id = out["inserts"][1]["id"]
+    out, _ = apply(out, "remove_insert", {"id": tail_id})
+    assert [i["id"] for i in out["inserts"]] == ["ins1"]
+    assert out["inserts"][0]["duration_s"] == pytest.approx(11.77, abs=0.01)
+
+
+def test_a_still_image_is_refused_in_words_rather_than_duplicated():
+    e = wschemas.default_edl(SRC_DUR)
+    e["keep"] = [list(k) for k in PROD_KEEP]
+    e["inserts"] = [{"id": "ins1", "asset_key": "images/1/a.png",
+                     "kind": "image", "at_output_s": 18.23, "duration_s": 6.0}]
+    edl = wschemas.validate_edl(e, SRC_DUR).model_dump()
+    with pytest.raises(ValueError) as ex:
+        apply(edl, "split_keep", {"at_program_s": 21.0})
+    assert "still image" in str(ex.value)
+
+
+def test_splitting_at_a_splice_edge_is_still_nothing_to_split():
+    edl = dropped_edl()
+    for at in (18.24, 42.08):
+        with pytest.raises(ValueError) as ex:
+            apply(edl, "split_keep", {"at_program_s": at})
+        assert "already a clip edge" in str(ex.value)
+
+
+def test_splitting_footage_is_completely_unchanged_by_any_of_this():
+    edl = dropped_edl()
+    out, desc = apply(edl, "split_keep", {"at_program_s": 10.0})
+    assert out["keep"] == [[111.85, 121.85], [121.85, 130.08],
+                           [339.27, 354.61]]
+    assert len(out["inserts"]) == 1
+    # ...and the clip is still in front of the same footage (source anchor
+    # 339.27 — round 60's rule). Splitting take one adds a boundary BEFORE it,
+    # so its output value is unchanged even though its junction index moved.
+    assert out["inserts"][0]["at_output_s"] == 18.23

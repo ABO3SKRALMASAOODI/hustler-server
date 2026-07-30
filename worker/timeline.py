@@ -30,6 +30,26 @@ def _ins_tuple(i):
     return (float(i.at_output_s), float(i.duration_s))
 
 
+def _ins_sort_key(i):
+    """Program order of the inserts, and ONLY at_output_s decides it.
+
+    Round 61. Two inserts can legitimately share a boundary — that is the only
+    way the timeline can express "this clip, then that clip, both spliced at
+    the same cut", and it is exactly what splitting one inserted clip in two
+    produces (both halves stay at the boundary; source_start_s says which half
+    is which). The order used to fall out of sorting the (at, duration) TUPLE,
+    which made the SHORTER half play first: split a 24s clip at 15s and the
+    tail played before the head. Duration is not an intention. List order is —
+    it is the order the halves were written, the order the agent appended its
+    b-roll, the order the user sees in the EDL — so ties keep it, which
+    Python's stable sort gives for free.
+
+    Nothing else in this module cares: every offset here sums the durations at
+    or before a boundary, and a sum does not have an order.
+    """
+    return _ins_tuple(i)[0]
+
+
 def _ins_id(i):
     return i.get("id") if isinstance(i, dict) else getattr(i, "id", None)
 
@@ -46,14 +66,14 @@ def insert_windows(inserts, tl):
     """{insert id: (program_start, program_end)} for a Timeline built from
     the SAME insert list.
 
-    Timeline sorts its inserts by (at_output_s, duration_s) and
+    Timeline sorts its inserts by at_output_s (see _ins_sort_key) and
     insert_positions() returns windows in that order, so re-sorting the
     items by the same key pairs each id with its own window. Python's sort
     is stable, so two inserts sharing a position stay in list order on both
     sides and still get the right window each — the ambiguity that made
     callers guess a "last matching index" before.
     """
-    ordered = sorted((inserts or []), key=_ins_tuple)
+    ordered = sorted((inserts or []), key=_ins_sort_key)
     out = {}
     for item, (start, dur) in zip(ordered, tl.insert_positions()):
         iid = _ins_id(item)
@@ -81,7 +101,10 @@ class Timeline:
         None for the classic 1:1 timeline."""
         self.segs = [(float(s), float(e)) for s, e in keep]
         self.speed = list(speed or [])
-        self.ins = sorted(_ins_tuple(i) for i in (inserts or []))
+        # Stable, keyed on at_output_s alone — insert_windows pairs ids to
+        # windows by sorting the SAME way, so the two must agree exactly.
+        self.ins = [_ins_tuple(i)
+                    for i in sorted((inserts or []), key=_ins_sort_key)]
         # Constant-rate pieces per segment: [(src_s, src_e, factor)].
         self.pieces = [speed_pieces(s, e, self.speed) for s, e in self.segs]
         self.seg_out_len = [
@@ -843,7 +866,11 @@ def transition_junctions(edl, index, n_blocks=None):
         seg_out_len = Timeline(keep, inserts, edl.get("speed")).seg_out_len
     except Exception:
         seg_out_len = [max(0.0, e - s) for s, e in keep]
-    at_list = sorted(_ins_tuple(i)[0] for i in inserts)
+    # ONE ordering, shared with ins_durs below and with Timeline.ins — the
+    # block list indexes into both, so a different tie-break in either would
+    # pair a junction with another insert's length.
+    ins_order = [_ins_tuple(i) for i in sorted(inserts, key=_ins_sort_key)]
+    at_list = [at for at, _d in ins_order]
     blocks, ins_j, pre = [], 0, 0.0
     for i, (s, e) in enumerate(keep):
         while ins_j < len(at_list) and at_list[ins_j] <= pre + 1e-6:
@@ -876,7 +903,7 @@ def transition_junctions(edl, index, n_blocks=None):
             ends.add(round(float(ov["start"]) + float(ov["duration_s"]), 2))
     protected = set()
     if ends:
-        ins_durs = [d for _at, d in sorted(_ins_tuple(i) for i in inserts)]
+        ins_durs = [d for _at, d in ins_order]
         acc, starts = 0.0, []
         for kind, i in blocks:
             starts.append(round(acc, 2))

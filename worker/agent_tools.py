@@ -3932,6 +3932,95 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     return result
 
 
+def set_insert_window(ctx, id, duration_s=None, clip_start_s=None):
+    """Change WHICH PART of an already-spliced clip plays, in place.
+
+    Round 61. Nothing could edit an insert once it existed — there was
+    insert_media and remove_insert and nothing between them — so "trim the clip
+    you put in" and "split it" both came out as remove-then-re-add. A real user
+    watched that happen twice in one session and asked why the editor kept
+    taking his clip out and putting it back: two EDL versions per adjustment,
+    two full preview encodes, and the block visibly vanishing from his timeline
+    in between. The clip was never in doubt; only its window was.
+
+    It stays at the same boundary, so the program's other content does not move
+    for a shortening except by the length that came off the end — the same
+    re-anchoring remove_insert already does, through the same shared remap.
+
+    TO SPLIT a spliced clip: shorten it here, then insert_media the same
+    asset_key at the same at_output_s with clip_start_s = the head's end. Both
+    halves sit at one boundary and play in LIST order (timeline._ins_sort_key),
+    so the head — shortened first, therefore still first in the list — plays
+    first.
+    """
+    edl = dict(ctx.latest_edl()["json"])
+    before = [dict(i) for i in (edl.get("inserts") or [])]
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    hit = next((i for i in inserts if i.get("id") == id), None)
+    if not hit:
+        have = ", ".join(i.get("id", "?") for i in inserts) or "none"
+        return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
+                f"{have}. Call get_edl to see them.")
+    if duration_s is None and clip_start_s is None:
+        return ("REJECTED: give duration_s, clip_start_s, or both — otherwise "
+                "there is nothing to change.")
+    if hit.get("kind") == "image" and clip_start_s is not None:
+        return ("REJECTED: clip_start_s is for video inserts — a still has no "
+                "timeline to seek into. Use duration_s to change how long it "
+                "shows.")
+    # The clip's real length bounds the window. Without it a duration longer
+    # than the file renders as a block the footage cannot fill.
+    src_len = None
+    if hit.get("kind") == "video":
+        asset, _err = _resolve_media_asset(ctx, hit["asset_key"],
+                                           ("video_clip",))
+        if asset:
+            try:
+                src_len = float(_asset_media_duration(ctx, asset) or 0.0) or None
+            except Exception:
+                src_len = None
+    off = float(hit.get("source_start_s") or 0.0)
+    if clip_start_s is not None:
+        try:
+            off = max(0.0, round(float(clip_start_s), 2))
+        except (TypeError, ValueError):
+            return "REJECTED: clip_start_s must be a number of seconds."
+    dur = float(hit["duration_s"])
+    if duration_s is not None:
+        try:
+            dur = round(float(duration_s), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: duration_s must be a number of seconds."
+        if dur < 0.2:
+            return ("REJECTED: an insert shorter than 0.2s is a single frame "
+                    "nobody sees. Remove it instead if you want it gone.")
+    if hit.get("kind") == "video" and src_len:
+        if off >= src_len - 0.05:
+            return (f"REJECTED: clip_start_s {off}s is at or past the end of "
+                    f"that clip ({round(src_len, 2)}s long).")
+        room = round(src_len - off, 2)
+        if dur > room:
+            dur = room
+    prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0))
+    hit["duration_s"] = dur
+    hit["source_start_s"] = round(off, 2) or None
+    if hit["source_start_s"] is None:
+        hit.pop("source_start_s", None)
+    if (dur, off) == prev:
+        return f"insert {id} already plays {off}-{round(off + dur, 2)}s"
+    edl["inserts"] = inserts
+    speed = edl.get("speed") or []
+    old_tl = Timeline(edl.get("keep") or [], before, speed)
+    new_tl = Timeline(edl.get("keep") or [], inserts, speed)
+    notes = _remap_program_items(edl, old_tl, new_tl)
+    res = ctx.write_edl(
+        edl, f"insert {id} now plays {off}-{round(off + dur, 2)}s of "
+             f"'{os.path.basename(hit['asset_key'])}' ({dur}s on the timeline)")
+    if notes and res.startswith("EDL v"):
+        res += "\n" + "\n".join(notes)
+    return res
+
+
 def remove_insert(ctx, id):
     edl = dict(ctx.latest_edl()["json"])
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
@@ -8858,6 +8947,22 @@ TOOLS = {
                       "motion": {"type": "string",
                                  "enum": ["zoom_in", "zoom_out",
                                           "pan_left", "pan_right"]}}),
+    "set_insert_window": (set_insert_window, "Change which part of an "
+                          "already-spliced clip plays, IN PLACE — duration_s "
+                          "for how long it runs, clip_start_s for where in the "
+                          "clip it starts. USE THIS instead of remove_insert + "
+                          "insert_media to trim or re-window a clip that is "
+                          "already on the timeline: removing and re-adding "
+                          "costs two edit versions and two renders, and the "
+                          "user watches their clip disappear and come back. "
+                          "TO SPLIT a spliced clip in two: shorten it here to "
+                          "the first part, then insert_media the same "
+                          "asset_key at the SAME at_output_s with clip_start_s "
+                          "set to where the first part ended — the two halves "
+                          "play in the order you created them.",
+                          {"id": {"type": "string"},
+                           "duration_s": {"type": "number"},
+                           "clip_start_s": {"type": "number"}}),
     "remove_insert": (remove_insert, "Remove one spliced insert by its id "
                       "(see get_edl) — the surrounding timing is restored "
                       "exactly. If an insert landed wrong, remove it BEFORE "
@@ -9841,6 +9946,7 @@ REQUIRED_ARGS = {
     "search_stock": ["query"],
     "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
+    "set_insert_window": ["id"],
     "remove_insert": ["id"],
     "set_color_grade": ["preset"],
     "add_zoom": ["start", "end"],
@@ -9897,7 +10003,8 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
                "record_website", "record_website_demo", "showcase_demo",
                "add_stock_media",
-               "insert_media", "remove_insert", "add_voiceover",
+               "insert_media", "set_insert_window", "remove_insert",
+               "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "add_zoom_path", "remove_zoom_path",
                "enhance_cursor", "remove_cursor_enhance",

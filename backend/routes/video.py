@@ -2279,6 +2279,12 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
 #  User-authored EDL writes (frame selector, timeline inserts, voiceover)
 # ------------------------------------------------------------------ #
 
+# Longest an inserted clip may be. One number, shared by the drop
+# (insert_media) and the resize handle (set_insert_duration), so a clip cannot
+# arrive at a length the chip then refuses to restore.
+_INSERT_MAX_S = 600.0
+
+
 def _pick_audio_error(asset, what):
     """Why an asset can't be used as sound HERE, and where it can be.
 
@@ -2291,6 +2297,64 @@ def _pick_audio_error(asset, what):
                 "from this clip\") and the editor will take the audio out of "
                 "it for you — its picture stays out of the edit.")
     return f"Pick an uploaded audio file for {what}."
+
+
+def _split_insert(edl, tl, at):
+    """Split the inserted clip under program time `at` into two inserts.
+
+    Returns (new_edl, desc) or raises ValueError with a user-facing reason —
+    the same contract as every branch of _apply_edl_op.
+
+    An IMAGE cannot be split in any meaningful sense: both halves would be the
+    same still, and "the second half of a photograph" is not a thing a user
+    means. It is refused in those words rather than silently producing two
+    identical blocks.
+    """
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    if not inserts:
+        raise ValueError("Move the playhead onto the footage to split.")
+    wins = wtimeline.insert_windows(inserts, tl)
+    # By POSITION, not by value: two b-roll blocks of the same clip and length
+    # are equal dicts, and list.index() would then hand back the first one.
+    at_i = next((k for k, i in enumerate(inserts)
+                 if i.get("id") in wins
+                 and wins[i["id"]][0] - 1e-6 <= at <= wins[i["id"]][1] + 1e-6),
+                None)
+    if at_i is None:
+        raise ValueError("Move the playhead onto the footage to split.")
+    hit = inserts[at_i]
+    start, end = wins[hit["id"]]
+    if hit.get("kind") == "image":
+        raise ValueError("That block is a still image — splitting it would "
+                         "just give you the same picture twice. Drag its edge "
+                         "to change how long it shows instead.")
+    # Same guard the footage branch uses: a cut 0.05s from an edge is not a
+    # cut, it is a second block nobody can see or grab.
+    head = round(at - start, 3)
+    tail = round(end - at, 3)
+    if head < 0.05 or tail < 0.05:
+        raise ValueError("That point is already a clip edge — nothing to "
+                         "split.")
+    src0 = round(max(0.0, float(hit.get("source_start_s") or 0.0)), 3)
+    taken = {i.get("id") for i in inserts}
+    n = 1
+    while f"ins{n}" in taken:
+        n += 1
+    second = dict(hit)
+    second["id"] = f"ins{n}"
+    second["duration_s"] = tail
+    # Where the tail starts IN THE CLIP — the head's own offset plus the head's
+    # length. Without this the second half replays the beginning of the clip,
+    # which is the bug that makes "split" look like "duplicate".
+    second["source_start_s"] = round(src0 + head, 3)
+    hit["duration_s"] = head
+    # Directly AFTER its own head in the list: list order is what decides
+    # program order at a shared boundary, so appending it would play the tail
+    # before the head whenever another insert sits at the same cut.
+    inserts.insert(at_i + 1, second)
+    edl["inserts"] = inserts
+    return edl, (f"split the inserted clip at {round(at, 2)}s "
+                 f"({head}s + {tail}s)")
 
 
 def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
@@ -2335,8 +2399,21 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
                                 edl.get("speed") or [])
         src = tl.out_to_src(at)
         if src is None:
-            raise ValueError("Move the playhead onto the footage to split — "
-                             "it is over an inserted clip.")
+            # THE SCISSORS WORK ON AN INSERTED CLIP TOO (round 61).
+            #
+            # out_to_src maps a program time inside a splice to None, and the
+            # answer used to be "move the playhead onto the footage" — which is
+            # a refusal to cut a block that is sitting right there on the
+            # timeline looking exactly like every other block. A spliced clip is
+            # a clip; the reason the tool could not touch one was a
+            # representation gap, not an editorial rule.
+            #
+            # Both halves stay at the SAME keep boundary (there is no other
+            # legal position for an insert) and source_start_s says which half
+            # each one is. That only reads back in the right order because
+            # timeline._ins_sort_key breaks a shared boundary by LIST order:
+            # sorting by duration, as it used to, played the tail first.
+            return _split_insert(edl, tl, at)
         keep = [list(x) for x in edl["keep"]]
         for i, (s, e) in enumerate(keep):
             if s + 0.05 < src < e - 0.05:
@@ -2540,11 +2617,22 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
                                  "give it a second and try again.")
             dur = round(min(float(base),
                             float(asset.get("duration_s") or base)), 2)
-            # A drop with no explicit duration starts as a 10s insert at
-            # most — dumping a 10-minute recording whole into a short edit
-            # is never intended; the duration chip can extend it.
-            if not args.get("duration_s"):
-                dur = min(dur, 10.0)
+            # A DROPPED CLIP IS AS LONG AS THE CLIP (round 61).
+            #
+            # This used to clamp a duration-less drop to 10 seconds, on the
+            # reasoning that dumping a 10-minute recording whole into a short
+            # edit is never intended. That reasoning belongs to the AGENT's
+            # insert_media (worker/agent_tools.py), which picks its own b-roll
+            # lengths and has its own default — this op is only ever reached by
+            # a human dragging a file onto their own timeline, and they chose
+            # that file. On 2026-07-30 a 23.86s clip arrived as a 10.0s insert,
+            # and getting the other 13.86s back took SIX separate drags of the
+            # resize handle across two positions on the timeline.
+            #
+            # The ceiling that remains is set_insert_duration's, so the tool
+            # and the chip agree on what an insert can be.
+            if dur > _INSERT_MAX_S:
+                dur = _INSERT_MAX_S
         at = float(args.get("at_output_s") or 0.0)
         inserts = list(edl.get("inserts") or [])
         # Speed-aware boundaries: a sped keep segment occupies its remapped
@@ -2574,7 +2662,7 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
             if i.get("id") == args.get("id"):
                 i["duration_s"] = round(
                     min(max(float(args.get("duration_s") or 3.0), 0.2),
-                        600.0), 2)
+                        _INSERT_MAX_S), 2)
                 # Program-item re-anchoring happens in user_edl_write's
                 # shared remap (same code the worker tools run).
                 return edl, f"insert {i['id']} duration {i['duration_s']}s"
@@ -3650,7 +3738,7 @@ def client_event_no_project(user_id):
 # That is the round-53 lesson applied before it could bite again — a version
 # gate that hides finished work until some other service catches up is how
 # Download became a platform-wide no-op.
-TIMELINE_MEDIA_VERSION = 1
+TIMELINE_MEDIA_VERSION = 2
 
 # Builds this route will ever run for ONE asset set. Any gate that asks for a
 # rebuild must be able to give up: if a worker somehow never writes the stamp,
@@ -3658,6 +3746,16 @@ TIMELINE_MEDIA_VERSION = 1
 # SIG rather than per project is what keeps that safety valve from also
 # blocking the legitimate case — a user who adds a tenth clip has a genuinely
 # new asset set and gets a genuinely new build, however many came before.
+#
+# ROUND 61 — and the budget is per (asset set, BUILDER VERSION).
+#
+# It used to be per asset set alone, which quietly made a builder bug
+# permanent. Project 246's asset set spent both of its builds on a worker that
+# OOM-killed itself decoding a 4K clip; after the fix shipped, the two corpses
+# would still have said "already tried twice" and that timeline would have
+# stayed grey forever. Two failures are evidence about the CODE that failed,
+# not about the footage — so a new TIMELINE_MEDIA_VERSION is a new budget, and
+# bumping it is how a fix to this job reaches the projects it was written for.
 MAX_FILMSTRIP_BUILDS_PER_SIG = 2
 
 # Asset kinds that can appear as a block on the timeline.
@@ -3773,14 +3871,19 @@ def filmstrip(user_id, project_id):
                 if fresh:
                     return jsonify(payload)
 
+        # same_sig counts only this BUILDER's attempts at this asset set. A job
+        # from before the current TIMELINE_MEDIA_VERSION carries a different
+        # stamp (or none at all) and does not spend the budget — see the comment
+        # on MAX_FILMSTRIP_BUILDS_PER_SIG.
         cur.execute("""SELECT COUNT(*) FILTER (
                                   WHERE state IN ('queued','running')) AS live,
                               COUNT(*) FILTER (
                                   WHERE payload ->> 'sig'
-                                        IS NOT DISTINCT FROM %s) AS same_sig
+                                        IS NOT DISTINCT FROM %s
+                                    AND payload ->> 'tm_v' = %s) AS same_sig
                        FROM video_jobs
                        WHERE project_id = %s AND type = 'filmstrip'""",
-                    (want_sig, project_id))
+                    (want_sig, str(TIMELINE_MEDIA_VERSION), project_id))
         counts = cur.fetchone() or {"live": 0, "same_sig": 0}
         if counts["live"]:
             return jsonify(dict(payload, rebuilding=True) if payload
@@ -3801,7 +3904,9 @@ def filmstrip(user_id, project_id):
                              (project_id, user_id, type, state, payload)
                            VALUES (%s, %s, 'filmstrip', 'queued', %s)
                            RETURNING id""",
-                        (project_id, int(user_id), Json({"sig": want_sig})))
+                        (project_id, int(user_id),
+                         Json({"sig": want_sig,
+                               "tm_v": str(TIMELINE_MEDIA_VERSION)})))
             cur.fetchone()
             conn.commit()
         except Exception as e:

@@ -75,6 +75,9 @@ check("the envelope is normalised to the file's own peak, so a quiet "
       "voiceover is not drawn as a flat line beside a mastered song",
       "255.0 / peak_all" in _src)
 
+_media = open(os.path.join(os.path.dirname(__file__), "..",
+                           "media.py")).read()
+
 
 print("\n— the rebuild gate —")
 
@@ -104,7 +107,14 @@ check("the budget is counted per ASSET SET, so a user who keeps adding "
       "payload ->> 'sig'" in _route)
 check("the fingerprint the worker echoes is the one the backend supplied",
       'payload.get("sig")' in _src
-      and 'Json({"sig": want_sig})' in _route)
+      and '"sig": want_sig' in _route)
+# ROUND 61. Project 246 spent both of its builds on a worker that OOM-killed
+# itself decoding a 4K insert; without this the fix could never reach the
+# timeline it was written for, because two corpses still said "tried twice".
+check("the budget is per BUILDER VERSION too, so a fix to this job can "
+      "reach the projects whose two builds died under the bug",
+      "payload ->> 'tm_v'" in _route
+      and '"tm_v": str(TIMELINE_MEDIA_VERSION)' in _route)
 check("bundled library music is in the fingerprint — it is not an asset, "
       "so nothing else would ever notice it arriving",
       "'music'" in _bev[_bev.index("def _timeline_media_sig"):
@@ -119,6 +129,38 @@ check("a dropped asset is reported, not silently swallowed",
       "past the" in _src and "cap got no artwork" in _src)
 check("a feature-length 'insert' gets one poster frame, not a linear decode",
       filmstrip.ASSET_STRIP_MAX_S <= 300 and "ASSET_STRIP_MAX_S" in _src)
+
+# ── round 61: the asset strip must not decode the user's own 4K file ────────
+# A 260 MB 23.86s 3840x2160 HEVC clip dropped on the timeline cost 94.4s of CPU
+# and 620 MB of RSS to produce sixteen 160x90 thumbnails — on the DISPATCHER,
+# which also runs agent turns. It OOM-killed the process three times, and took
+# a user's agent turn down with it ("lost connection"). Seeks + one thread:
+# 10.2s CPU, 230 MB.
+check("an ASSET is sampled by seek, never by a linear decode — there is no "
+      "proxy for a clip the user dropped, so the file is theirs at their own "
+      "resolution",
+      "build_by_seek(local, sheet" in _src
+      and "m = build(local, sheet" not in _src)
+check("each seek decodes with ONE thread — frame threading allocates a 4K "
+      "picture buffer per thread, which is where the 620 MB went",
+      '"-threads", "1"' in _src)
+check("input seek (-ss BEFORE -i), so each tile reads its own GOP and not "
+      "the whole file",
+      _src.index('"-ss"') < _src.index('"-i", src, "-frames:v", "1"'))
+check("one asset's ffmpeg is bounded — the media lane it shares with previews "
+      "must not be held by a pathological file",
+      filmstrip.ASSET_FFMPEG_TIMEOUT_S <= 180
+      and "timeout=ASSET_FFMPEG_TIMEOUT_S" in _src)
+check("a short read is a real answer: the tiles that decoded are kept and "
+      "the grid is re-planned to match, so the client's tile arithmetic "
+      "cannot disagree with the image",
+      "n = len(frames)" in _src and "if not frames:" in _src)
+check("the per-tile temporaries are always cleaned up, even on a raise",
+      "finally:" in _src[_src.index("def build_by_seek"):
+                         _src.index("def _local_for_ref")])
+check("media.frame_at takes the timeout the caller needs (it was pinned at "
+      "120s, sized for a proxy, not for a 4K original)",
+      "timeout=120" in _media and "run(cmd, timeout=timeout)" in _media)
 check("one unreadable clip cannot fail the job",
       "asset {ref} skipped" in _src)
 check("a bundled track is opened where it lives, never downloaded",

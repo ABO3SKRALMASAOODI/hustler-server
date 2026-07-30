@@ -82,6 +82,12 @@ MAX_ASSETS = 14
 # background: those get a single poster frame from one seek instead.
 ASSET_STRIP_MAX_S = 180.0
 ASSET_MAX_TILES = 16
+# Wall-clock ceiling on ONE ffmpeg call against ONE asset. media.run's default
+# is sized for an encode; this is a thumbnail, and the whole feature is
+# decoration on a panel that has drawn fine since round 5. A pathological file
+# must cost this and then be skipped, not hold the media lane the previews
+# people are waiting on share with it.
+ASSET_FFMPEG_TIMEOUT_S = 90
 
 # Waveform resolution. The envelope is drawn into a lane 16-26px tall and at
 # most ~1400px wide at 8x zoom, so more points than this cannot be seen; fewer
@@ -226,6 +232,84 @@ def build(src, out_path, duration_s, tile_h=None, max_tiles=MAX_TILES):
             "duration_s": round(float(duration_s), 3)}
 
 
+def build_by_seek(src, out_path, duration_s, n_tiles, timeout=None):
+    """A sheet sampled with N SEEKS instead of one linear decode.
+
+    The module docstring argues the other way round, and for the MAIN strip it
+    is still right: 200 tiles off a 540p proxy is one cheap read of a small
+    file, and 200 seeks would be 200 keyframe searches for no gain.
+
+    An ASSET is a different file. There is no proxy for a clip the user dropped
+    onto the timeline — the only copy is what came off their phone — and on
+    2026-07-30 that was 260 MB of 3840x2160 HEVC at 60fps for 23.86 seconds.
+    Sampling it linearly decodes all 1,431 frames at full resolution to keep
+    sixteen 160x90 thumbnails. Measured on a file built to match that one:
+
+        linear (what shipped)   17.9s wall / 94.4s CPU / 620 MB peak RSS
+        16 seeks, -threads 1     ~8s CPU  /  0.5s each / 240 MB peak RSS
+
+    620 MB resident is what killed it. The filmstrip runs LOCALLY on the
+    dispatcher (main.py keeps it off the executor deliberately — it is one
+    ffmpeg on a proxy), and that box is the smallest in the fleet, already
+    running an agent turn and a preview beside this. The job died three times
+    and the row said "Worker died and retries are exhausted", which is round
+    57's least-actionable message for the OOM it actually was.
+
+    Each seek is its own process, so peak memory is ONE decoder's, not the
+    whole pass's — and `-ss` before `-i` means each one reads the GOP around
+    its target rather than the file. `-threads 1` is 2.6x of the saving on its
+    own: frame threading allocates a 4K DPB per thread, and there is nothing to
+    parallelise in decoding one frame.
+    """
+    n = max(1, int(n_tiles))
+    dur = max(0.1, float(duration_s))
+    cols = min(COLS, n)
+    rows = int(math.ceil(n / float(cols)))
+    info = media.probe(src)
+    sw, sh = int(info["width"] or 16), int(info["height"] or 9)
+    th = max(2, int(round(TILE_W * sh / max(1, sw) / 2)) * 2)
+    interval = dur / n
+    stem = os.path.splitext(out_path)[0]
+    frames = []
+    try:
+        for i in range(n):
+            # Mid-tile rather than tile-start: the first frame of a clip is
+            # often a black or half-exposed frame, and the last seek must stay
+            # inside the file or it returns nothing at all.
+            at = min(max(0.0, (i + 0.5) * interval), max(0.0, dur - 0.05))
+            f = f"{stem}_t{i:03d}.jpg"
+            media.run(["ffmpeg", "-y", "-v", "error", "-threads", "1",
+                       "-ss", f"{at:.3f}", "-i", src, "-frames:v", "1",
+                       "-vf", (f"scale={TILE_W}:{th}:"
+                               f"force_original_aspect_ratio=increase,"
+                               f"crop={TILE_W}:{th}"),
+                       "-q:v", "4", f], timeout=timeout)
+            if not os.path.exists(f):
+                break
+            frames.append(f)
+        if not frames:
+            raise media.MediaError("no frames could be sampled")
+        # A short read is a real answer, not a failure: a clip whose tail is
+        # unreadable still gets a strip of the part that decoded, and the grid
+        # is re-planned so the client's tile arithmetic matches the image.
+        n = len(frames)
+        cols = min(COLS, n)
+        rows = int(math.ceil(n / float(cols)))
+        interval = dur / n
+        media.run(["ffmpeg", "-y", "-v", "error",
+                   "-i", f"{stem}_t%03d.jpg", "-vf", f"tile={cols}x{rows}",
+                   "-frames:v", "1", "-q:v", "4", out_path], timeout=timeout)
+    finally:
+        for f in frames:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    return {"tiles": n, "interval_s": round(interval, 4), "cols": cols,
+            "rows": rows, "tile_w": TILE_W, "tile_h": th,
+            "duration_s": round(dur, 3)}
+
+
 def _local_for_ref(ref, workdir, tag):
     """A readable local path for one timeline reference, or None.
 
@@ -316,14 +400,21 @@ def _asset_artifacts(project_id, ref, kind, duration_s, workdir, tag):
                     # flat orange rectangle. Only a clip has a 10% to seek to.
                     at = 0.0 if kind == "image" else \
                         min(max(0.0, dur * 0.1), max(0.0, dur - 0.05))
-                    media.frame_at(local, at, sheet, width=TILE_W)
+                    media.frame_at(local, at, sheet, width=TILE_W,
+                                   timeout=ASSET_FFMPEG_TIMEOUT_S)
                     # tile_w/tile_h deliberately absent: the client measures
                     # them off the loaded image (sheet size / cols x rows),
                     # so a still needs no probe at all.
                     m = {"tiles": 1, "interval_s": max(0.05, dur or 1.0),
                          "cols": 1, "rows": 1}
                 else:
-                    m = build(local, sheet, dur, max_tiles=n_want)
+                    # SEEKS, not a linear decode — see build_by_seek. An asset
+                    # is the user's own file at its own resolution; the main
+                    # strip's linear pass is only affordable because it reads a
+                    # 540p proxy, and no such proxy exists for a clip someone
+                    # dropped onto the timeline.
+                    m = build_by_seek(local, sheet, dur, n_want,
+                                      timeout=ASSET_FFMPEG_TIMEOUT_S)
             except Exception:
                 m = None
             if m:
@@ -364,12 +455,18 @@ def _asset_artifacts(project_id, ref, kind, duration_s, workdir, tag):
     return out if (out.get("key") or out.get("wave")) else None
 
 
-# Bumped whenever this job's RESULT gains a field the studio draws from. The
-# backend uses it to ask for one rebuild of a strip built by an older worker —
-# and, per the round-53 download bug, it asks WITHOUT withholding what it
-# already has: a pre-round-54 result still serves its frames while the
-# waveforms are being built.
-TIMELINE_MEDIA_VERSION = 1
+# Bumped whenever this job's RESULT gains a field the studio draws from, OR
+# whenever a fix in here needs to reach projects whose build budget is already
+# spent (see MAX_FILMSTRIP_BUILDS_PER_SIG in backend/routes/video.py — the
+# budget is per asset set AND per this number). The backend uses it to ask for
+# one rebuild of a strip built by an older worker — and, per the round-53
+# download bug, it asks WITHOUT withholding what it already has: a
+# pre-round-54 result still serves its frames while the waveforms are built.
+#
+# 2 (round 61): asset sheets are sampled by seek at mid-tile rather than by a
+# linear decode at tile-start, and the projects that most need the new sampler
+# are exactly the ones whose two builds died under the old one.
+TIMELINE_MEDIA_VERSION = 2
 
 _KIND_MAP = {"video_clip": "video", "image_ref": "image",
              "music": "audio", "audio": "audio"}
