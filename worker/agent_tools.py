@@ -3,6 +3,7 @@ short instructive string the model can act on, every output fits the token
 budget. Write tools create new EDL versions and return one-line diffs."""
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import db as dbx
 import eleven
 import inpaint
 import llm
+import matte
 import media
 import model_prices
 import music_library
@@ -857,22 +859,22 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=False,
     edl = dict(prev["json"])
     edl["keep"] = new_keep
     speed = edl.get("speed") or []
-    # Inserts sit at keep boundaries; when the keep list changes, re-snap
-    # each to the nearest boundary of the NEW keep so the edit stays valid.
-    # Boundaries are speed-aware — a sped segment occupies its remapped length.
+    # Inserts sit at keep boundaries; when the keep list changes they have to
+    # move to the boundary of the NEW keep that is in front of the SAME
+    # footage, or the edit no longer validates. Shared with the backend UI ops
+    # (timeline.resnap_inserts) so a cut made in the studio and a cut made in
+    # chat move a spliced clip the same way.
+    ins_notes = []
     if edl.get("inserts"):
-        bounds = keep_boundaries(new_keep, speed)
-        edl["inserts"] = [
-            {**ins, "at_output_s": min(bounds,
-                                       key=lambda b: abs(b - ins["at_output_s"]))}
-            for ins in edl["inserts"]]
+        edl["inserts"], ins_notes = timeline_mod.resnap_inserts(
+            edl["inserts"], prev_keep, new_keep, speed, speed)
     # Program-time items re-anchor through the shared remap; both Timelines
     # carry the (unchanged-by-this-write) speed list so their clocks agree
     # with what actually renders.
     old_tl = Timeline(prev_keep, prev["json"].get("inserts") or [],
                       prev["json"].get("speed") or [])
     new_tl = Timeline(new_keep, edl.get("inserts") or [], speed)
-    region_notes = _remap_program_items(edl, old_tl, new_tl)
+    region_notes = ins_notes + _remap_program_items(edl, old_tl, new_tl)
 
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
@@ -4040,23 +4042,12 @@ def _write_speed(ctx, prev, edl, desc, warn_slow=False):
         # A speed change moves every downstream boundary, so re-snapping by
         # nearest VALUE can silently hop an insert to a DIFFERENT junction
         # (4x the intro and boundary 10.0 lands nearer the NEXT take's start
-        # than its own remapped 2.5). The keep list is unchanged here, so
-        # old and new boundary lists pair 1:1 — re-snap by junction INDEX,
-        # which preserves exactly which cut the insert sits at.
-        old_bounds = keep_boundaries(keep, prev["json"].get("speed") or [])
-        bounds = keep_boundaries(keep, speed)
-        resnapped = []
-        for ins in edl["inserts"]:
-            oi = min(range(len(old_bounds)),
-                     key=lambda k: abs(old_bounds[k] - ins["at_output_s"]))
-            new_at = bounds[oi]
-            if abs(new_at - float(ins["at_output_s"])) > 0.01:
-                ins_notes.append(
-                    f"note: insert {ins.get('id')} now splices at "
-                    f"{round(new_at, 2)}s — the same junction, on the "
-                    "speed-remapped clock.")
-            resnapped.append({**ins, "at_output_s": new_at})
-        edl["inserts"] = resnapped
+        # than its own remapped 2.5). The keep list is unchanged here, so the
+        # shared resnap matches every insert's own source anchor exactly and
+        # preserves which cut it sits at, on the new clock.
+        edl["inserts"], ins_notes = timeline_mod.resnap_inserts(
+            edl["inserts"], keep, keep,
+            prev["json"].get("speed") or [], speed)
     old_tl = Timeline(prev["json"]["keep"], prev["json"].get("inserts") or [],
                       prev["json"].get("speed") or [])
     new_tl = Timeline(keep, edl.get("inserts") or [], speed)
@@ -4338,6 +4329,80 @@ def _out_frac_from_source(ctx, edl, sx, sy):
     return min(max(ox, 0.0), 1.0), min(max(oy, 0.0), 1.0)
 
 
+_SCREEN_VISION_PROMPT = (
+    "This frame is from a video. Somewhere in it there is a DEVICE SCREEN "
+    "being filmed — a laptop, a monitor, a phone, a tablet, a TV. I need its "
+    "four corners so I can pin a video onto the glass.\n"
+    "Give me the corners of the SCREEN ITSELF — the lit display area, inside "
+    "the bezel — not the whole laptop, not the whole phone body.\n"
+    "Reply with ONLY a JSON array of 8 numbers, fractions of the frame from "
+    "the TOP-LEFT corner (0-1), in this exact order:\n"
+    "[top_left_x, top_left_y, top_right_x, top_right_y, "
+    "bottom_left_x, bottom_left_y, bottom_right_x, bottom_right_y]\n"
+    "The screen is usually seen at an angle, so the four corners rarely form "
+    "a rectangle — give me where each corner ACTUALLY is. If there is no "
+    "device screen in this frame, reply exactly: none")
+
+
+def _vision_screen_corners(ctx, frame_path):
+    """Read a screen's four corners off ONE frame with the vision model.
+
+    The fallback for when the geometric detector declines (screendet refuses
+    rather than guessing, which is right — a corner 2% out slides visibly once
+    the push magnifies it). What it declines on is real footage: a screen with
+    dark content on it, a bezel that blends into a dark desk, a hand across a
+    corner.
+
+    Before this, that refusal ended the tool call and told the AGENT to go and
+    do exactly this — call look_at, read the corners, pass them back. That is
+    two more round trips at ~13 seconds each, in the middle of a request the
+    user described in one sentence, and the model frequently gave up and
+    offered a plain cut instead. Doing the same work in the same call is
+    strictly better, as long as the reply never CLAIMS a measurement: the
+    caller reports "read" instead of "measured", and every sanity check the
+    measured path runs still runs here.
+
+    Returns (corners_in_source_fractions, note) or (None, reason).
+    """
+    if not llm.vision_available():
+        return None, ("visual inspection is unavailable in this deployment, "
+                      "so there is no second way to find it")
+    answer = llm.ask_vision(_SCREEN_VISION_PROMPT, [frame_path],
+                            purpose="vision_screen",
+                            image_names=["screen corner read"])
+    if not answer:
+        return None, "the vision model did not answer"
+    txt = str(answer).strip()
+    if txt.lower().startswith("none"):
+        return None, "the vision model says there is no device screen in it"
+    m = re.search(r"\[[^\]]*\]", txt, re.S)
+    if not m:
+        return None, "the vision model's answer was not a list of corners"
+    try:
+        nums = [float(x) for x in json.loads(m.group(0))]
+    except (ValueError, TypeError):
+        return None, "the vision model's corners did not parse as numbers"
+    if len(nums) != 8:
+        return None, (f"the vision model returned {len(nums)} numbers, not the "
+                      "8 a quadrilateral needs")
+    if any(not (-0.05 <= v <= 1.05) for v in nums):
+        return None, "the vision model's corners fall outside the frame"
+    q = [min(max(v, 0.0), 1.0) for v in nums]
+    # ORDER, which is the one mistake a language model makes here that geometry
+    # cannot catch. The storage order is TL, TR, BL, BR; a model that answers
+    # clockwise (TL, TR, BR, BL) or bottom-row-first hands back a quad that is
+    # still convex and still consistently wound, so quad_is_sane passes it and
+    # the content is pinned mirrored or upside down onto the glass. Rows and
+    # columns are un-swapped by their own coordinates, which is unambiguous for
+    # any screen a person could film.
+    tl, tr, bl, br = q[0:2], q[2:4], q[4:6], q[6:8]
+    if (tl[1] + tr[1]) > (bl[1] + br[1]) + 0.04:
+        tl, tr, bl, br = bl, br, tl, tr           # bottom row given first
+    if (tl[0] + bl[0]) > (tr[0] + br[0]) + 0.04:
+        tl, tr, bl, br = tr, tl, br, bl           # right column given first
+    return [*tl, *tr, *bl, *br], None
+
+
 def _detect_screen(ctx, edl, src_t):
     """Measure the device screen around SOURCE second src_t. Returns
     (corners_in_output_fractions, info_dict) or (None, reason)."""
@@ -4366,11 +4431,25 @@ def _detect_screen(ctx, edl, src_t):
     if not frames:
         return None, "could not extract frames from the footage at that moment"
     res = screendet.find_screen(frames)
+    why = None
     if res.get("error"):
-        return None, res["error"]
-    if res["confidence"] < screendet.MIN_CONFIDENCE:
-        return None, (f"the best screen-shaped region scored only "
-                      f"{res['confidence']:.2f} confidence")
+        why = res["error"]
+    elif res["confidence"] < screendet.MIN_CONFIDENCE:
+        why = (f"the best screen-shaped region scored only "
+               f"{res['confidence']:.2f} confidence")
+    if why:
+        # The pixels declined. Ask the vision model to read the corners off the
+        # middle frame rather than ending the call and asking the AGENT to do
+        # the same thing over two more 13-second round trips.
+        quad, vwhy = _vision_screen_corners(ctx, frames[len(frames) // 2])
+        if quad is None:
+            return None, f"{why}, and {vwhy}"
+        ok, sane = quad_is_sane(quad)
+        if not ok:
+            return None, (f"{why}, and the corners the vision model read are "
+                          f"not a usable quadrilateral ({sane})")
+        res = {"corners": quad, "confidence": None, "method": "vision",
+               "agreement": 1, "n_frames": 1, "read_not_measured": why}
     out = []
     for i in range(4):
         pt = _out_frac_from_source(ctx, edl, res["corners"][2 * i],
@@ -4451,14 +4530,17 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
     else:
         quad, why = _detect_screen(ctx, edl, src_t)
         if quad is None:
-            return (f"REJECTED: I could not measure a screen in the frame at "
-                    f"{round(probe_out, 2)}s — {why}. I will not guess a "
-                    "rectangle: the corners are the whole effect, and one that "
-                    "is 2% out slides visibly once the push magnifies it. "
-                    "Either call look_at on that moment to read the screen's "
-                    "four corners and pass them as `corners` (8 numbers, "
-                    "fractions of the frame: top-left, top-right, BOTTOM-LEFT, "
-                    "bottom-right), or ask the user where the screen is.")
+            return (f"REJECTED: I could not find a screen in the frame at "
+                    f"{round(probe_out, 2)}s — {why}. BOTH ways were tried: "
+                    "measuring it from the pixels and reading it with the "
+                    "vision model. I will not guess a rectangle — the corners "
+                    "are the whole effect, and one that is 2% out slides "
+                    "visibly once the push magnifies it. So: check the moment "
+                    "is right (look_at that timestamp — is the device actually "
+                    "on screen there, and big enough?), or ask the user where "
+                    "the screen's four corners are and pass them as `corners` "
+                    "(8 numbers, fractions of the frame: top-left, top-right, "
+                    "BOTTOM-LEFT, bottom-right).")
         detected = why
 
     ok, why = quad_is_sane(quad)
@@ -4576,7 +4658,20 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
 
     _cx, _cy, z_end = renderer.screen_lock_geometry(item["screen"])
     bits = [written]
-    if detected:
+    if detected and detected.get("read_not_measured"):
+        # Honest about which of the two ways this happened. A vision read is an
+        # estimate, and the whole effect lives or dies on the corners, so the
+        # user is told to look at the join — never told it was measured.
+        bits.append(
+            f"NOTE: the corners here were READ off the frame by the vision "
+            f"model, not measured from the pixels "
+            f"({detected['read_not_measured']}). They occupy "
+            f"{qw:.2f}x{qh:.2f} of the frame and form a sane quadrilateral, "
+            f"but a corner a couple of percent out slides visibly once the "
+            f"push magnifies it. Tell the user to watch the moment the picture "
+            f"lands, and if the content sits off the glass, ask them where the "
+            f"screen's corners are and pass them as `corners`.")
+    elif detected:
         bits.append(
             f"The screen was MEASURED, not estimated: corners agreed across "
             f"{detected['agreement']} of {detected['n_frames']} sampled "
@@ -4809,6 +4904,226 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
     return ctx.write_edl(
         edl, f"{tpl} text \"{t[:40]}\" at {s}-{e}s (program time) "
              f"[{item['id']}]")
+
+
+TEXT_BEHIND_DEFAULT_S = 3.0
+
+
+def _behind_text_box(item):
+    """Roughly where on the frame this text will land, as (x, y, w, h)
+    fractions — used ONLY to report how much of the words the subject actually
+    crosses. It is a report, never a decision, so a template whose exact metrics
+    differ by a few percent does not matter; what matters is telling the user
+    "the subject never walks in front of these words" when that is true."""
+    cx = 0.5 if item.get("x") is None else float(item["x"])
+    cy = 0.5 if item.get("y") is None else float(item["y"])
+    scale = float(item.get("size_scale") or 1.0)
+    w = min(0.92, 0.62 * scale)
+    h = min(0.5, 0.17 * scale)
+    return (max(0.0, cx - w / 2), max(0.0, cy - h / 2), w, h)
+
+
+def _matte_geometry(ctx, edl):
+    """(fit_filter, width, height) for a mask that composites onto the render.
+
+    The mask is measured on the PROXY (fast, and this runs on the same box as
+    the agent turn) but has to be cropped EXACTLY as the picture is, so it goes
+    through renderer.frame_fit_filter — the same function _normalize_video uses.
+    Its target dims are the output frame scaled down to proxy height: identical
+    aspect means identical crop geometry, and the renderer scales the mask up to
+    WxH. Never larger than the proxy itself, so nothing is upscaled twice.
+    """
+    fr = edl.get("frame") or {}
+    info = ctx.index.get("video") or {}
+    sw = float(info.get("width") or 0) or 1920.0
+    sh = float(info.get("height") or 0) or 1080.0
+    W, H = renderer.frame_dims(sw, sh, fr.get("ratio"))
+    mode = (fr.get("mode") or "crop") if fr.get("ratio") not in (None,
+                                                                "source") \
+        else "crop"
+    focus = None
+    if fr.get("focus_x") is not None or fr.get("focus_y") is not None:
+        focus = (fr.get("focus_x"), fr.get("focus_y"))
+    target_h = min(int(H), int(config.PROXY_HEIGHT))
+    k = target_h / float(H)
+    w = max(16, int(round(W * k / 2)) * 2)
+    h = max(16, int(round(H * k / 2)) * 2)
+    # pad modes must pad with BLACK here, not transparent: this is a mask, and
+    # black means "not the subject" — which is exactly right for the letterbox
+    # bars, where there is no picture at all.
+    return renderer.frame_fit_filter(mode, w, h, focus, pad_color="black"), w, h
+
+
+def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
+                    x=None, y=None, size_scale=None, color=None,
+                    accent_color=None, font=None, entrance=None, exit=None,
+                    uppercase=None, box=None):
+    """Put words BEHIND the moving subject — the person walks in front of the
+    letters. Measures the subject out of the shot and stores a mask the renderer
+    composites back over the text."""
+    t = (text or "").strip()
+    if not t:
+        return "REJECTED: text is empty."
+    tpl = (template or "title").strip().lower()
+    if tpl not in TEXT_TEMPLATES:
+        return (f"REJECTED: template must be one of "
+                f"{', '.join(TEXT_TEMPLATES)}.")
+    if not ctx.has_main_video:
+        return ("REJECTED: this puts words behind the SUBJECT of a shot, and "
+                "there is no main video to find a subject in. On a clip/image "
+                "canvas program, add_text is the ordinary title.")
+    if entrance is not None and entrance not in TEXT_ANIMS:
+        return f"REJECTED: entrance must be one of {', '.join(TEXT_ANIMS)}."
+    if exit is not None and (exit not in TEXT_ANIMS or exit == "typewriter"):
+        return ("REJECTED: exit must be one of "
+                + ", ".join(a for a in TEXT_ANIMS if a != "typewriter")
+                + " (typewriter is entrance-only).")
+    if font is not None and font not in TEXT_FONTS:
+        return (f"REJECTED: font must be one of the bundled families: "
+                f"{', '.join(TEXT_FONTS)}.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    if prog <= 0.4:
+        return ("REJECTED: there is no program yet to put text on — place "
+                "footage first.")
+    try:
+        s = round(min(max(float(at_output_s), 0.0), max(0.0, prog - 0.4)), 2)
+        dur = round(float(duration_s if duration_s is not None
+                          else TEXT_BEHIND_DEFAULT_S), 2)
+    except (TypeError, ValueError):
+        return ("REJECTED: at_output_s and duration_s must be numbers — where "
+                "in the EDITED video the words appear, and for how long.")
+    e = round(min(s + max(dur, 0.4), prog), 2)
+    if e - s < 0.4:
+        return ("REJECTED: the window is under 0.4s — too short to read a "
+                "title, let alone walk in front of one.")
+
+    # ── the window has to be ONE continuous piece of ONE shot ──────────────
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    a_src = tl.out_to_src(s)
+    b_src = tl.out_to_src(max(s, e - 0.02))
+    if a_src is None or b_src is None:
+        return (f"REJECTED: {s}-{e}s of the program is inside a spliced-in "
+                "clip, not the main footage — there is no shot there to cut a "
+                "subject out of. Point it at a moment where your own video is "
+                "playing, or use add_text for a title over the clip.")
+    ra, rb = tl.seg_program_range(a_src), tl.seg_program_range(b_src)
+    if ra is None or rb is None or abs(ra[0] - rb[0]) > 0.001:
+        return (f"REJECTED: there is a CUT inside {s}-{e}s. The background has "
+                "to hold still for the whole window — I photograph it from the "
+                "shot itself — so put the words entirely inside one take, or "
+                "shorten duration_s.")
+    for sp in (edl.get("speed") or []):
+        if float(sp["end"]) > a_src and float(sp["start"]) < b_src:
+            return (f"REJECTED: a speed ramp ({sp.get('id')}) covers that "
+                    "footage, and the mask I measure is frame-for-frame with "
+                    "the source — sped or slowed, it would drift off the "
+                    "subject. Put the words behind footage that plays at "
+                    "normal speed, or remove the ramp there first.")
+    src_start, src_end = round(min(a_src, b_src), 2), round(max(a_src, b_src), 2)
+    if src_end - src_start < 0.2:
+        return ("REJECTED: under 0.2s of source footage is in that window.")
+
+    # ── measure the subject (or refuse, with the number that says why) ──────
+    texts = [dict(tx) for tx in (edl.get("texts") or [])]
+    item = {"id": _next_item_id(texts, "tx"), "text": t[:200], "start": s,
+            "end": e, "template": tpl,
+            "x": float(x) if x is not None else None,
+            "y": float(y) if y is not None else None,
+            "size_scale": float(size_scale) if size_scale is not None else None,
+            "color": color, "accent_color": accent_color, "font": font,
+            "entrance": entrance, "exit": exit,
+            "uppercase": bool(uppercase) if uppercase is not None else None,
+            "box": bool(box) if box is not None else None}
+    try:
+        fit, mw, mh = _matte_geometry(ctx, edl)
+    except Exception as err:
+        return f"REJECTED: could not work out the output geometry ({err})."
+    fp = hashlib.sha256(json.dumps([
+        getattr(ctx, "_orig_sha", ""), src_start, src_end, fit, mw, mh,
+        matte.DIFF_THRESHOLD, matte.PLATE_SAMPLES, matte.VERSION],
+        sort_keys=True).encode()).hexdigest()
+    key = f"matte/{ctx.project_id}/{fp[:16]}.mp4"
+    stats = None
+    if storage.exists(key):
+        # Cached: the same window measured before (an undo/redo, a re-worded
+        # title over the same moment). The numbers come from whichever text
+        # already carries this fingerprint, so the reply never invents them.
+        prior = next((tx.get("behind") for tx in texts
+                      if (tx.get("behind") or {}).get("fp") == fp), None)
+        stats = {"ok": True, "coverage": (prior or {}).get("coverage"),
+                 "fps": (prior or {}).get("fps"), "cached": True}
+    else:
+        try:
+            src = ctx.proxy_path()
+        except Exception:
+            try:
+                src = _original_local(ctx)
+            except Exception as err:
+                return (f"REJECTED: could not open the footage to measure the "
+                        f"subject ({str(err)[:140]}).")
+        out = os.path.join(ctx.workdir, f"matte_{fp[:8]}.mp4")
+        try:
+            stats = matte.measure_and_build(
+                src, out, src_start, src_end - src_start,
+                box=_behind_text_box(item), extra_vf=fit,
+                width=mw, height=mh)
+        except Exception as err:
+            return (f"The subject measurement failed ({str(err)[:180]}). "
+                    "Nothing was changed — do NOT claim the text was added.")
+        if not stats.get("ok"):
+            return (f"REJECTED: {stats.get('why') or 'the subject could not be measured'}. "
+                    "Nothing was changed. add_text puts the same words on TOP "
+                    "of the picture, which always works — offer that and say "
+                    "plainly why the behind version will not.")
+        storage.upload_file(out, key, "video/mp4")
+
+    item["behind"] = {"asset_key": key, "src_start": src_start,
+                      "src_end": src_end, "fp": fp,
+                      "coverage": stats.get("coverage"),
+                      "fps": stats.get("fps")}
+    texts.append(item)
+    edl["texts"] = texts
+    written = ctx.write_edl(
+        edl, f"{tpl} text \"{t[:40]}\" BEHIND the subject at {s}-{e}s "
+             f"[{item['id']}]")
+    if not written.startswith("EDL v"):
+        return written
+    bits = [written]
+    if stats.get("cached"):
+        bits.append("The subject mask for that exact moment was already "
+                    "measured, so this cost nothing to add.")
+    else:
+        cov = stats.get("coverage")
+        bits.append(
+            f"MEASURED on the footage: the subject covers {cov * 100:.1f}% of "
+            f"the frame on average across the window (peaking at "
+            f"{stats.get('coverage_max', 0) * 100:.1f}%), from a background "
+            f"photographed out of the shot itself. The words are drawn on the "
+            f"picture and the subject is laid back over them, so they pass "
+            f"BEHIND — this is not a fade or a transparency.")
+        tc = stats.get("text_covered")
+        if tc is not None and tc < 0.02:
+            bits.append(
+                f"WARNING: the subject crosses only {tc * 100:.1f}% of where "
+                "the words sit, so on screen this will look like an ordinary "
+                "title. Tell the user, and offer to move the text (x/y) to "
+                "where they actually walk, or to shift the window to when they "
+                "cross the frame.")
+        elif tc is not None:
+            bits.append(f"The subject crosses {tc * 100:.0f}% of the text's "
+                        "area at its most, so the effect is visible.")
+        if stats.get("no_cv2"):
+            bits.append("NOTE: OpenCV was unavailable, so the mask edge is "
+                        "unsmoothed — it may look slightly cut out.")
+    bits.append(
+        "It is bound to that FOOTAGE, not to a program time: a later cut moves "
+        "it with the shot, and if that footage is cut away entirely the words "
+        "stay as an ordinary title. The camera must hold still for the window "
+        "— that is what makes the background photographable — so do not add a "
+        "zoom, a stabilize pass or a speed ramp over it. NEXT: render_preview, "
+        "and look at whether the subject's edge reads cleanly.")
+    return "\n".join(bits)
 
 
 def remove_text(ctx, id):
@@ -9151,8 +9466,50 @@ TOOLS = {
                                     if a != "typewriter"]},
                   "uppercase": {"type": "boolean"},
                   "box": {"type": "boolean"}}),
+    "add_text_behind": (add_text_behind, "Put words BEHIND the moving subject "
+                        "— the person walks IN FRONT of the letters, the way a "
+                        "title painted on the street or the wall behind them "
+                        "would. This is the 'text behind me walking' / 'name "
+                        "behind the subject' move, and it is a REAL depth "
+                        "composite, not a fade: I photograph the background out "
+                        "of the shot itself, measure which pixels are the "
+                        "subject in every frame, and lay them back over the "
+                        "words. Same styling arguments as add_text "
+                        "(template/x/y/size_scale/color/font/entrance/exit); "
+                        "at_output_s + duration_s are where in the EDITED video "
+                        "the words appear. REQUIREMENTS I check and refuse on, "
+                        "so read the reply: the camera must HOLD STILL through "
+                        "the window (a moving camera has no still background to "
+                        "photograph — I say so and you offer add_text instead), "
+                        "something must actually MOVE in front of the words, "
+                        "the window must be inside ONE take with no cut in it, "
+                        "and no speed ramp over that footage. I also report how "
+                        "much of the text the subject actually crosses — if "
+                        "that is near zero the user will see a plain title, so "
+                        "move the text or the window. Do NOT put a zoom or a "
+                        "stabilize pass over the window. Remove it with "
+                        "remove_text like any other text.",
+                        {"text": {"type": "string"},
+                         "at_output_s": {"type": "number"},
+                         "duration_s": {"type": "number"},
+                         "template": {"type": "string",
+                                      "enum": list(TEXT_TEMPLATES)},
+                         "x": {"type": "number"},
+                         "y": {"type": "number"},
+                         "size_scale": {"type": "number"},
+                         "color": {"type": "string"},
+                         "accent_color": {"type": "string"},
+                         "font": {"type": "string", "enum": list(TEXT_FONTS)},
+                         "entrance": {"type": "string",
+                                      "enum": list(TEXT_ANIMS)},
+                         "exit": {"type": "string",
+                                  "enum": [a for a in TEXT_ANIMS
+                                           if a != "typewriter"]},
+                         "uppercase": {"type": "boolean"},
+                         "box": {"type": "boolean"}}),
     "remove_text": (remove_text, "Remove one text element by its id (see "
-                    "get_edl).", {"id": {"type": "string"}}),
+                    "get_edl) — including one placed behind the subject.",
+                    {"id": {"type": "string"}}),
     "add_title_card": (add_title_card, "Cut to a STANDALONE full-frame card "
                        "showing only this text, then return to the footage — "
                        "the 'show the term on a blank screen' move. One call "
@@ -9501,6 +9858,7 @@ REQUIRED_ARGS = {
     "add_screen_takeover": ["asset_key", "at_output_s"],
     "remove_screen_takeover": ["id"],
     "add_text": ["text", "start", "end"],
+    "add_text_behind": ["text", "at_output_s"],
     "remove_text": ["id"],
     "add_title_card": ["text", "at_output_s"],
     "add_color_screen": ["at_output_s"],
@@ -9552,7 +9910,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
                "set_speed", "remove_speed",
                "add_overlay", "move_overlay", "remove_overlay",
                "add_screen_takeover", "remove_screen_takeover",
-               "add_text", "remove_text",
+               "add_text", "add_text_behind", "remove_text",
                "add_title_card", "add_color_screen", "add_corrupt_screen",
                "set_caption_mutes",
                "add_stylize", "add_freeze_frame", "enhance_video",

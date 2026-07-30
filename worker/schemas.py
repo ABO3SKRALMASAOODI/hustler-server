@@ -986,6 +986,31 @@ class TextItem(BaseModel):
     # frame the agent could see but not explain. timeline.remap_program_items
     # re-derives an anchored text from its card's new window instead.
     anchor_insert: Optional[str] = None
+    # Round 60 — the words go BEHIND the moving subject.
+    #
+    # Set by add_text_behind, which measures the subject out of the shot and
+    # stores a grayscale mask clip. The renderer draws this text on a copy of
+    # its own picture and then lays the masked subject back over the words; the
+    # subject's pixels are the render's own, so a mask measured on the 540p
+    # proxy composites correctly into a 4K export.
+    #
+    # SOURCE seconds, not program seconds, and that is the whole point: the
+    # mask is pixels of particular footage, so the text that owns it is
+    # CONTENT-anchored (timeline.remap_program_items moves it through the source
+    # like a zoom, and drops it when that footage is cut). A program-anchored
+    # window would slide off its own matte the first time anything upstream was
+    # trimmed, and the subject would be cut out of the wrong second of video.
+    behind: Optional["SubjectMatte"] = None
+
+
+class SubjectMatte(BaseModel):
+    """Where the subject-mask clip is, and which footage it was measured from."""
+    asset_key: str
+    src_start: float
+    src_end: float
+    fp: str                                 # derivation fingerprint (cache key)
+    coverage: Optional[float] = None        # mean share of frame that moved
+    fps: Optional[float] = None
 
 
 # ── Speed spans (round 35): time remapping ───────────────────────────────
@@ -1693,6 +1718,30 @@ def validate_edl(data, duration=None):
                     raise EDLValidationError(
                         f"texts[{i}].{cname} '{cv}' must be #RRGGBB hex.")
                 setattr(tx, cname, cv.upper())
+        if tx.behind is not None:
+            b = tx.behind
+            if not b.asset_key:
+                raise EDLValidationError(
+                    f"texts[{i}].behind.asset_key is empty — a text can only "
+                    "sit behind the subject when a measured mask exists for "
+                    "it (add_text_behind writes one).")
+            if not b.fp:
+                raise EDLValidationError(f"texts[{i}].behind.fp is empty.")
+            b.src_start, b.src_end = _r(b.src_start), _r(b.src_end)
+            # SOURCE span, so it is bounded by the video and NOT by prog_dur.
+            _check_span(f"texts[{i}].behind", b.src_start, b.src_end,
+                        duration, min_len=0.2)
+            if b.fps is not None:
+                b.fps = round(min(max(float(b.fps), 1.0), 120.0), 3)
+            if b.coverage is not None:
+                b.coverage = round(min(max(float(b.coverage), 0.0), 1.0), 4)
+            if canvas_prog:
+                # No main video means no shot to measure a subject out of, and
+                # nothing the mask's source seconds could refer to.
+                raise EDLValidationError(
+                    f"texts[{i}].behind needs a main video — a clip/image "
+                    "canvas program has no source footage to cut a subject "
+                    "out of.")
     edl.texts.sort(key=lambda t: (t.start, t.id))
 
     # Caption mutes: PROGRAM-time windows, same clock as texts/stylize. Sorted

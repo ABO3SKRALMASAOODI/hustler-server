@@ -496,3 +496,163 @@ def test_detector_declines_on_footage_with_no_screen(workdir):
         paths.append(p)
     res = screendet.find_screen(paths)
     assert res.get("error") or res["confidence"] < screendet.MIN_CONFIDENCE
+
+
+# ------------------------------------------------------------------ #
+#  5. Round 60: when the pixels decline, the corners are READ         #
+# ------------------------------------------------------------------ #
+#
+# screendet declines on real footage — dark content on the screen, a bezel that
+# blends into a dark desk, a hand across a corner. That used to end the tool
+# call with a REJECTED telling the AGENT to go and call look_at, read the
+# corners and pass them back: two more round trips at ~13s each, mid-request,
+# which the model frequently abandoned in favour of a plain cut. The same work
+# now happens inside the same call — but a read is an ESTIMATE, and the reply
+# has to say so.
+
+import agent_tools                                             # noqa: E402
+import llm                                                     # noqa: E402
+
+
+class _VisionStub:
+    def __init__(self, answer, available=True):
+        self.answer = answer
+        self.available = available
+        self.calls = 0
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(llm, "vision_available", lambda *a, **k: self.available)
+
+        def _ask(prompt, paths, **kw):
+            self.calls += 1
+            self.prompt = prompt
+            return self.answer
+        monkeypatch.setattr(llm, "ask_vision", _ask)
+        return self
+
+
+@pytest.mark.parametrize("answer, ok", [
+    ("[0.25, 0.20, 0.72, 0.20, 0.25, 0.68, 0.72, 0.68]", True),
+    ("Here you go:\n[0.1,0.1, 0.9,0.12, 0.12,0.8, 0.88,0.82]\nHope that helps",
+     True),
+    ("none", False),                       # no device in the frame
+    ("I'm not able to determine that", False),
+    ("[0.1, 0.2, 0.3]", False),            # not 8 numbers
+    ("[0.1,0.1, 2.4,0.1, 0.1,0.9, 0.9,0.9]", False),   # off the frame
+    ("[a,b,c,d,e,f,g,h]", False),          # not numbers
+])
+def test_vision_corner_read_accepts_only_a_real_quad(monkeypatch, answer, ok):
+    stub = _VisionStub(answer).install(monkeypatch)
+    quad, why = agent_tools._vision_screen_corners(None, "frame.jpg")
+    assert stub.calls == 1
+    if ok:
+        assert quad is not None and len(quad) == 8 and why is None
+        assert all(0.0 <= v <= 1.0 for v in quad)
+    else:
+        assert quad is None and why
+
+
+def test_no_vision_provider_is_an_honest_no_not_a_crash(monkeypatch):
+    stub = _VisionStub("[0,0,1,0,0,1,1,1]", available=False).install(monkeypatch)
+    quad, why = agent_tools._vision_screen_corners(None, "frame.jpg")
+    assert quad is None
+    assert "unavailable" in why
+    assert stub.calls == 0          # never asked a provider that cannot answer
+
+
+class _Ctx:
+    """The three things _detect_screen touches."""
+
+    def __init__(self, workdir):
+        self.workdir = workdir
+        self.duration = 10.0
+        self.index = {"video": {"width": W, "height": H}}
+
+    def proxy_path(self):
+        return os.path.join(self.workdir, "proxy.mp4")
+
+
+def _stub_frames(monkeypatch, workdir):
+    import media
+    monkeypatch.setattr(media, "frame_at",
+                        lambda path, t, fp, **k: open(fp, "wb").write(b"x"))
+
+
+def test_a_declining_detector_falls_through_to_the_read(monkeypatch, workdir):
+    """The wiring. Without this the fallback exists and is never reached."""
+    _stub_frames(monkeypatch, workdir)
+    monkeypatch.setattr(screendet, "find_screen",
+                        lambda frames: {"confidence": 0.1, "corners": QUAD})
+    stub = _VisionStub(
+        "[0.25, 0.20, 0.72, 0.20, 0.25, 0.68, 0.72, 0.68]").install(monkeypatch)
+    quad, info = agent_tools._detect_screen(_Ctx(workdir), {}, 3.0)
+    assert stub.calls == 1
+    assert quad is not None
+    assert info["method"] == "vision"
+    # ...and it remembers WHY it had to, so the reply can say so
+    assert "confidence" in info["read_not_measured"]
+
+
+def test_a_measured_screen_never_calls_vision(monkeypatch, workdir):
+    """Cost and honesty both: the measurement is better AND cheaper, so the
+    model is only asked when the pixels have already declined."""
+    _stub_frames(monkeypatch, workdir)
+    monkeypatch.setattr(screendet, "find_screen",
+                        lambda frames: {"confidence": 0.9, "corners": QUAD,
+                                        "method": "quad", "agreement": 3,
+                                        "n_frames": 3})
+    stub = _VisionStub("[0,0,1,0,0,1,1,1]").install(monkeypatch)
+    quad, info = agent_tools._detect_screen(_Ctx(workdir), {}, 3.0)
+    assert stub.calls == 0
+    assert quad is not None and not info.get("read_not_measured")
+
+
+def test_a_read_quad_that_is_not_sane_is_still_refused(monkeypatch, workdir):
+    """quad_is_sane runs on the read exactly as on the measurement — the
+    fallback lowers the number of round trips, never the bar. A bow-tie (one
+    corner folded past another) renders as a torn smear rather than failing, so
+    it has to die here."""
+    _stub_frames(monkeypatch, workdir)
+    monkeypatch.setattr(screendet, "find_screen",
+                        lambda frames: {"error": "no candidates"})
+    _VisionStub("[0.2,0.2, 0.8,0.2, 0.8,0.8, 0.2,0.8]").install(monkeypatch)
+    quad, why = agent_tools._detect_screen(_Ctx(workdir), {}, 3.0)
+    assert quad is None
+    assert "not a usable quadrilateral" in why
+
+
+@pytest.mark.parametrize("answer, label", [
+    ("[0.2,0.8, 0.8,0.8, 0.2,0.2, 0.8,0.2]", "bottom row first"),
+    ("[0.8,0.2, 0.2,0.2, 0.8,0.8, 0.2,0.8]", "right column first"),
+    ("[0.8,0.8, 0.2,0.8, 0.8,0.2, 0.2,0.2]", "both"),
+])
+def test_a_read_in_the_wrong_ORDER_is_corrected_not_pinned_mirrored(
+        monkeypatch, answer, label):
+    """The mistake geometry cannot catch. A model that answers bottom-row-first
+    hands back a quad that is convex and consistently wound — quad_is_sane
+    passes it — and the content lands upside down on the glass. Rows and columns
+    are un-swapped by their own coordinates."""
+    _VisionStub(answer).install(monkeypatch)
+    quad, why = agent_tools._vision_screen_corners(None, "f.jpg")
+    assert why is None, label
+    assert quad == [0.2, 0.2, 0.8, 0.2, 0.2, 0.8, 0.8, 0.8], label
+
+
+def test_a_correctly_ordered_read_is_left_alone(monkeypatch):
+    """Including an ANGLED screen, where the corners are deliberately not a
+    rectangle — the un-swap must not "tidy" a real perspective."""
+    _VisionStub("[0.10,0.14, 0.86,0.05, 0.12,0.79, 0.88,0.93]").install(monkeypatch)
+    quad, why = agent_tools._vision_screen_corners(None, "f.jpg")
+    assert why is None
+    assert quad == [0.10, 0.14, 0.86, 0.05, 0.12, 0.79, 0.88, 0.93]
+
+
+def test_the_read_prompt_asks_for_the_glass_not_the_laptop():
+    """The single most common way this goes wrong: corners around the whole
+    device body rather than the lit display, which pins the content over the
+    keyboard and the bezel."""
+    p = agent_tools._SCREEN_VISION_PROMPT
+    assert "inside the bezel" in p
+    assert "not the whole laptop" in p
+    # and the corner ORDER, which is the other way it silently goes wrong
+    assert "bottom_left_x" in p and p.index("top_right_x") < p.index("bottom_left_x")

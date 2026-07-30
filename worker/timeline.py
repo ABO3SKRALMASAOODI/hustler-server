@@ -18,10 +18,10 @@ pre-speed behavior (piece factor 1.0, one piece per segment).
 """
 
 try:
-    from schemas import speed_pieces, clip_anim
+    from schemas import speed_pieces, clip_anim, keep_boundaries
 except ImportError:      # loaded standalone by the backend (importlib):
     # routes/video.py registers the schemas module as 'worker_schemas'
-    from worker_schemas import speed_pieces, clip_anim
+    from worker_schemas import speed_pieces, clip_anim, keep_boundaries
 
 
 def _ins_tuple(i):
@@ -218,6 +218,95 @@ class Timeline:
                 t1o = min(max(t1o, lo), hi)
             out.append({"w": token, "t0": t0o, "t1": t1o})
         return out
+
+
+def keep_anchor_times(keep):
+    """The SOURCE time that identifies each keep boundary.
+
+    keep_boundaries() gives the OUTPUT position of every splice point; those
+    positions move whenever ANY earlier segment is trimmed or deleted, so they
+    cannot say WHICH junction an insert was sitting at. The source time can:
+    boundary i is the seam immediately BEFORE keep[i], so it is identified by
+    that segment's start (an insert at a boundary plays before the segment that
+    starts there — see Timeline), and the final boundary is the end of the last
+    segment.
+
+    Returns len(keep) + 1 anchors, index-aligned with keep_boundaries().
+    """
+    keep = [(float(s), float(e)) for s, e in (keep or [])]
+    if not keep:
+        return [0.0]
+    return [s for s, _e in keep] + [keep[-1][1]]
+
+
+def resnap_inserts(inserts, old_keep, new_keep, old_speed=None,
+                   new_speed=None):
+    """Follow every insert to the same JUNCTION after the keep list changed.
+
+    Returns (new_inserts, notes).
+
+    An insert's at_output_s must land exactly on a keep boundary or
+    validate_edl rejects the whole EDL — so every write that changes the keep
+    list has to move the inserts with it. Doing that by nearest OUTPUT VALUE is
+    what shipped before, and it is wrong in both directions:
+
+      * It can miss entirely. A real session (project 246) held one clip at the
+        LAST boundary, 33.57s, of keep [[111.85, 130.08], [339.27, 354.61]].
+        Deleting either take removes that boundary, the nearest surviving one is
+        18.23s — 15s away — and the backend UI ops never re-snapped at all, so
+        the user clicked delete and got
+        "at_output_s 33.57 is not on a keep-segment boundary" with nothing
+        deleted. There was no way out of that state from the timeline.
+      * When it does snap, it can snap to the WRONG cut, because every boundary
+        after an edit has a different output value than it had before. Trimming
+        4s off take one moves take two's junction 4s earlier, and an insert
+        that was at take three can land at take two.
+
+    So the junction is followed through the SOURCE, exactly like the
+    content-anchored effects in remap_program_items: the anchor is the footage
+    the insert sat in front of, which does not move when something upstream is
+    cut. Ties resolve to the LATER anchor — when the take an insert sat in
+    front of is deleted outright, its seam collapses onto the footage that now
+    follows, which is where the clip visibly was.
+
+    With the keep list unchanged (a speed write) the anchors are identical, so
+    every insert matches its own anchor exactly and this reduces to
+    "same junction index, new speed-remapped clock" — the behaviour
+    _write_speed had to special-case before.
+    """
+    inserts = list(inserts or [])
+    if not inserts:
+        return inserts, []
+    old_bounds = keep_boundaries(old_keep, old_speed)
+    new_bounds = keep_boundaries(new_keep, new_speed)
+    old_anchors = keep_anchor_times(old_keep)
+    new_anchors = keep_anchor_times(new_keep)
+    if len(old_bounds) != len(old_anchors) or \
+            len(new_bounds) != len(new_anchors) or not new_bounds:
+        return inserts, []          # cannot reason; leave it to validation
+    out, notes = [], []
+    for ins in inserts:
+        at = float(ins["at_output_s"] if isinstance(ins, dict)
+                   else ins.at_output_s)
+        oi = min(range(len(old_bounds)),
+                 key=lambda k: (abs(old_bounds[k] - at), -k))
+        anchor = old_anchors[oi]
+        nj = min(range(len(new_anchors)),
+                 key=lambda k: (abs(new_anchors[k] - anchor), -new_anchors[k]))
+        new_at = new_bounds[nj]
+        if abs(new_at - at) > 0.01:
+            iid = _ins_id(ins) or "?"
+            where = ("the start of the edit" if nj == 0
+                     else "the end of the edit" if nj == len(new_bounds) - 1
+                     else f"the cut at {new_at}s")
+            notes.append(f"note: insert {iid} now splices at {new_at}s — "
+                         f"{where}, still in front of the same footage.")
+        if isinstance(ins, dict):
+            out.append({**ins, "at_output_s": new_at})
+        else:
+            ins.at_output_s = new_at
+            out.append(ins)
+    return out, notes
 
 
 def remap_program_span(old_tl, new_tl, s, e):
@@ -583,6 +672,40 @@ def remap_program_items(edl, old_tl, new_tl):
         kept_tx = []
         for tx in edl["texts"]:
             tx = dict(tx)
+            behind = tx.get("behind")
+            if behind:
+                # CONTENT-anchored, and it has to be: the mask is pixels of
+                # PARTICULAR footage (behind.src_start/src_end are source
+                # seconds). Clamped in program time like an ordinary text, the
+                # words would slide off their own matte the first time anything
+                # upstream was trimmed — and the subject would then be cut out
+                # of a different second of video, which reads as the person
+                # being erased in the wrong place.
+                moved = remap_program_span(old_tl, new_tl, float(tx["start"]),
+                                           float(tx["end"]))
+                if moved is None:
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\", behind the "
+                        "subject) was removed — the footage it was on is no "
+                        "longer in the edit.")
+                    continue
+                ns, ne = moved
+                if ne - ns < 0.4:
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\", behind the "
+                        "subject) was removed — too little of the footage it "
+                        "was measured on survives the cut.")
+                    continue
+                if (ns, ne) != (tx.get("start"), tx.get("end")):
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\") moved to "
+                        f"{ns}-{ne}s, staying behind the same subject.")
+                    tx["start"], tx["end"] = ns, ne
+                kept_tx.append(tx)
+                continue
             anchor = tx.get("anchor_insert")
             if anchor:
                 win = windows.get(anchor)

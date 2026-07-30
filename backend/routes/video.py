@@ -633,6 +633,58 @@ def _preview_twin(cur, project_id, edl, exclude_version=None):
     return None
 
 
+# ------------------------------------------------------------------ #
+#  Who pays for the encode, and when (round 60)                        #
+# ------------------------------------------------------------------ #
+#
+# A preview is a full re-encode of the whole programme — 33 to 65 seconds each
+# on project 246. That session was scissors, delete, scissors, delete, and it
+# bought SIXTEEN of them (~11 minutes of ffmpeg) to arrive at one video; every
+# render but the last showed a timeline the user had already changed. Since
+# round 58 the studio plays a timing edit itself, off the proxy, in the time it
+# takes to click — so the encode does not have to happen per click. It has to
+# happen ONCE, on the state the user stops at.
+#
+# The two rules below are the whole mechanism, and they are deliberately
+# separate: one decides what a write does, the other decides what the poll's
+# safety net does, and it was the safety net that would have quietly undone the
+# saving (exactly as it once re-queued the render an adopted twin had avoided).
+
+def _preview_plan(twin, defer):
+    """'adopt' | 'enqueue' | 'defer' for one user EDL write.
+
+    An existing encode of the same programme is ALWAYS adopted, deferral or
+    not: it costs nothing, no bytes move, and it is the exact picture rather
+    than a draft. Only a write that would otherwise start a fresh encode can be
+    deferred, and only because the client said it can show the edit meanwhile.
+    """
+    if twin is not None:
+        return "adopt"
+    return "defer" if defer else "enqueue"
+
+
+def _should_heal_preview(edl, indexed, drafting):
+    """Should this poll enqueue a preview for the newest EDL?
+
+    The heal exists because the current edit must always have a render on the
+    way — any path that fails to enqueue leaves the studio waiting on something
+    nobody will ever request, with no error to see and no button to press.
+
+    `drafting` is the version the polling client says it is showing as a draft
+    and will ask a render for itself. Suppressing exactly that version is what
+    makes deferral possible at all: the heal runs every 2 seconds, so without
+    this it would re-queue the encode the deferral exists to coalesce, one poll
+    later. Scoped to ONE version and to a client that keeps saying so — the
+    moment a tab closes, navigates, or edits again it stops sending it and the
+    net is back.
+    """
+    if not edl or not indexed:
+        return False
+    if edl["created_by"] != "user":
+        return False
+    return drafting != edl["version"]
+
+
 def _asset_out(a):
     return {
         "id": a["id"], "kind": a["kind"], "storage_key": a["storage_key"],
@@ -1632,7 +1684,10 @@ def project_state(user_id, project_id):
         # (_preview_twin). Without this clause the heal fires on every one of
         # those and re-queues exactly the render the adoption exists to avoid —
         # it did, on the first run of the studio test.
-        if edl and indexed and edl["created_by"] == "user":
+        # ...and EXCEPT while a client is drafting this exact version and will
+        # ask for the render itself — see _should_heal_preview.
+        drafting = request.args.get("drafting", type=int)
+        if _should_heal_preview(edl, indexed, drafting):
             cur.execute("""SELECT 1 FROM video_jobs
                            WHERE project_id = %s AND type = 'preview'
                              AND (payload->>'edl_version')::int = %s
@@ -2297,7 +2352,17 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         keep = [list(x) for x in edl.get("keep") or []]
         if not (0 <= idx < len(keep)):
             return edl, "clip already gone"
-        if len(keep) == 1 and not (edl.get("inserts") or []):
+        if len(keep) == 1:
+            # Also refused when there ARE inserts. Popping the last keep
+            # segment leaves keep empty with no canvas, which validate_edl
+            # rejects in language about canvas programs that means nothing to
+            # someone who just pressed delete — and the honest answer is the
+            # same either way: something has to be left to cut.
+            if edl.get("inserts"):
+                raise ValueError(
+                    "Can't delete the last piece of your own footage — the "
+                    "spliced-in clips would be all that's left. Delete those "
+                    "clips first, or trim this one instead.")
             raise ValueError("Can't delete the only clip — the video would "
                              "be empty. Trim it instead.")
         s, e = keep.pop(idx)
@@ -2424,6 +2489,20 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         prog = wschemas.program_duration(edl)
         for tx in (edl.get("texts") or []):
             if tx.get("id") == args.get("id"):
+                if tx.get("behind"):
+                    # Words behind the subject own a MEASURED mask of specific
+                    # frames. Dragging the block in program time slides them off
+                    # it, and the render would then cut the subject out of a
+                    # different second of video — visible as the person being
+                    # erased in the wrong place. Same policy as a screen
+                    # takeover's pinned block (retime_overlay above): one rule,
+                    # both surfaces.
+                    raise ValueError(
+                        "These words sit BEHIND the subject, measured from "
+                        "these exact frames — so they can't be dragged to a "
+                        "different moment. Ask me to move them and I'll "
+                        "re-measure at the new spot, or delete them and add "
+                        "them where you want.")
                 length = float(tx["end"]) - float(tx["start"])
                 if args.get("start") is not None:
                     tx["start"] = round(min(max(float(args["start"]), 0.0),
@@ -2643,6 +2722,54 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
     raise ValueError(f"Unknown operation '{op}'.")
 
 
+def _reanchor_after_op(old_j, new_edl, desc):
+    """Everything that has to follow the program when a UI op changes its
+    shape. Returns (new_edl, desc + disclosure).
+
+    TWO passes, in this order, and the order matters — the second one builds a
+    Timeline from the inserts the first one moved:
+
+    1. SPLICED INSERTS follow their junction (timeline.resnap_inserts), the
+       same call the worker's keep writes make. This route used to skip it
+       entirely, on a comment saying "keep/speed are agent-only" that stopped
+       being true the day the timeline learned to split, trim and delete. A
+       project with one clip pinned at the LAST boundary (project 246 v19:
+       ins1 at 33.57s of keep [[111.85, 130.08], [339.27, 354.61]]) could not
+       have EITHER take deleted: the boundary the clip sat on stopped
+       existing, validate_edl correctly refused the EDL, and the user got
+       "at_output_s 33.57 is not on a keep-segment boundary" with nothing
+       deleted and no click in the timeline that could get out of it.
+    2. PROGRAM-TIME ITEMS re-anchor through the shared remap the worker tools
+       run: content-anchored zooms/sfx/stylize follow their footage,
+       program-anchored music/vo/overlays/texts clamp — otherwise removing an
+       insert 400s over a stale zoom, or every sound after it drifts by the
+       insert's length.
+    """
+    def _said(notes):
+        return "; ".join(n[6:] if n.startswith("note: ") else n
+                         for n in notes)
+
+    if new_edl.get("keep") != old_j.get("keep") and new_edl.get("inserts"):
+        new_edl["inserts"], notes = wtimeline.resnap_inserts(
+            new_edl["inserts"], old_j.get("keep") or [],
+            new_edl.get("keep") or [],
+            old_j.get("speed") or [], new_edl.get("speed") or [])
+        if notes:
+            desc += " — " + _said(notes)
+    if (new_edl.get("keep"), new_edl.get("inserts"), new_edl.get("speed")) != \
+            (old_j.get("keep"), old_j.get("inserts"), old_j.get("speed")):
+        old_tl = wtimeline.Timeline(old_j.get("keep") or [],
+                                    old_j.get("inserts") or [],
+                                    old_j.get("speed") or [])
+        new_tl = wtimeline.Timeline(new_edl.get("keep") or [],
+                                    new_edl.get("inserts") or [],
+                                    new_edl.get("speed") or [])
+        notes = wtimeline.remap_program_items(new_edl, old_tl, new_tl)
+        if notes:
+            desc += " — " + _said(notes)
+    return new_edl, desc
+
+
 @video_bp.route("/projects/<int:project_id>/edl", methods=["POST"])
 @token_required
 def user_edl_write(user_id, project_id):
@@ -2728,30 +2855,7 @@ def user_edl_write(user_id, project_id):
                                           src_dur=float(
                                               original["duration_s"]),
                                           speech_spans=speech_spans)
-            # Any op that changed the program's geometry (inserts here;
-            # keep/speed are agent-only) re-anchors every program-time item
-            # through the SAME remap the worker tools run: content-anchored
-            # zooms/sfx/stylize follow their footage, program-anchored
-            # music/vo/overlays/texts clamp — otherwise removing an insert
-            # 400s over a stale zoom, or every sound after it drifts by the
-            # insert's length.
-            old_j = edl_row["json"]
-            if (new_edl.get("keep"), new_edl.get("inserts"),
-                    new_edl.get("speed")) != \
-                    (old_j.get("keep"), old_j.get("inserts"),
-                     old_j.get("speed")):
-                old_tl = wtimeline.Timeline(old_j.get("keep") or [],
-                                            old_j.get("inserts") or [],
-                                            old_j.get("speed") or [])
-                new_tl = wtimeline.Timeline(new_edl.get("keep") or [],
-                                            new_edl.get("inserts") or [],
-                                            new_edl.get("speed") or [])
-                notes = wtimeline.remap_program_items(new_edl, old_tl,
-                                                      new_tl)
-                if notes:
-                    desc += " — " + "; ".join(
-                        n[6:] if n.startswith("note: ") else n
-                        for n in notes)
+            new_edl, desc = _reanchor_after_op(edl_row["json"], new_edl, desc)
             normalized = wschemas.validate_edl(
                 new_edl, float(original["duration_s"])).model_dump()
         except (ValueError, wschemas.EDLValidationError) as e:
@@ -2807,10 +2911,20 @@ def user_edl_write(user_id, project_id):
         # undo/redo, a re-applied edit) — then it is adopted for the new version
         # and no render is asked for at all. The row is a pointer at the same
         # storage key, not a copy: no bytes move.
+        # ...or DEFERRED, when the client says it can already show this edit
+        # itself and will ask for the encode once the clicking stops — see
+        # _preview_plan and _should_heal_preview for why and for what stops that
+        # becoming "no render at all". The CLIENT decides, because the client is
+        # what knows whether its draft engine can represent this EDL
+        # (livePreview.unsupportedParts) and whether it still holds the proxy.
+        # An older studio sends nothing and renders immediately, as before.
         twin = _preview_twin(cur, project_id, normalized,
                              exclude_version=version)
+        plan = _preview_plan(twin, bool(data.get("defer_preview")))
         preview_job, reused = None, None
-        if twin is not None:
+        if plan == "defer":
+            pass
+        elif plan == "adopt":
             cur.execute("""SELECT storage_key, bytes, duration_s, width,
                                   height, fps, meta
                            FROM assets WHERE id = %s""", (twin,))
@@ -2844,6 +2958,8 @@ def user_edl_write(user_id, project_id):
 
     return jsonify({"version": version, "preview_job_id": preview_job,
                     "reused_preview_asset_id": reused,
+                    "preview_deferred": bool(preview_job is None
+                                             and reused is None),
                     "branched_from": branched_from,
                     "desc": desc, "edl": normalized})
 

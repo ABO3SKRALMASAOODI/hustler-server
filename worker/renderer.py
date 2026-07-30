@@ -309,8 +309,7 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
     tail = f"fps={fps:.3f},{bound}setsar=1,format=yuv420p"
     if mode == "pad":
         parts.append(
-            f"[{in_label}]scale={W}:{H}:force_original_aspect_ratio=decrease,"
-            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,{tail}[{out_label}]")
+            f"[{in_label}]{frame_fit_filter(mode, W, H)},{tail}[{out_label}]")
     elif mode == "pad_blur":
         parts.append(f"[{in_label}]split[pbA{uid}][pbB{uid}]")
         parts.append(f"[pbA{uid}]scale={W}:{H}:"
@@ -321,26 +320,43 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
         parts.append(f"[pbBG{uid}][pbFG{uid}]overlay=(W-w)/2:(H-h)/2,"
                      f"{tail}[{out_label}]")
     else:                              # crop
-        fx = focus[0] if focus else None
-        fy = focus[1] if focus else None
-        if (fx is not None and abs(float(fx) - 0.5) > 1e-6) or \
-                (fy is not None and abs(float(fy) - 0.5) > 1e-6):
-            # Fractions survive the uniform scale, so the focus point maps
-            # straight onto the SCALED frame; clip() keeps the window inside
-            # the picture when the subject sits near an edge.
-            xe = (f"x='clip(iw*{float(fx if fx is not None else 0.5):.4f}"
-                  f"-ow/2,0,iw-ow)'")
-            ye = (f"y='clip(ih*{float(fy if fy is not None else 0.5):.4f}"
-                  f"-oh/2,0,ih-oh)'")
-            parts.append(
-                f"[{in_label}]scale={W}:{H}:"
-                f"force_original_aspect_ratio=increase,"
-                f"crop={W}:{H}:{xe}:{ye},{tail}[{out_label}]")
-        else:
-            parts.append(
-                f"[{in_label}]scale={W}:{H}:"
-                f"force_original_aspect_ratio=increase,"
-                f"crop={W}:{H},{tail}[{out_label}]")
+        parts.append(f"[{in_label}]{frame_fit_filter(mode, W, H, focus)},"
+                     f"{tail}[{out_label}]")
+
+
+def frame_fit_filter(mode, W, H, focus=None, pad_color="black"):
+    """The scale (+crop or +pad) that maps a SOURCE frame onto the output frame.
+
+    Extracted from _normalize_video so that anything which has to land in
+    EXACTLY the same geometry as the picture can ask for it instead of
+    re-deriving it — worker/matte.py measures a subject mask that is composited
+    over the render, and a mask cropped differently from the frame is a subject
+    cut out of the wrong part of the picture.
+
+    Byte-identical to what _normalize_video emitted before the extraction
+    (several tests compare whole filtergraphs against stored legacy strings).
+    'pad_blur' shares pad's geometry: the picture content lands in the same
+    fitted rectangle, and the blurred backdrop behind it is the base picture's
+    business, not a mask's.
+    """
+    if mode in ("pad", "pad_blur"):
+        return (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color}")
+    fx = focus[0] if focus else None
+    fy = focus[1] if focus else None
+    if (fx is not None and abs(float(fx) - 0.5) > 1e-6) or \
+            (fy is not None and abs(float(fy) - 0.5) > 1e-6):
+        # Fractions survive the uniform scale, so the focus point maps
+        # straight onto the SCALED frame; clip() keeps the window inside
+        # the picture when the subject sits near an edge.
+        xe = (f"x='clip(iw*{float(fx if fx is not None else 0.5):.4f}"
+              f"-ow/2,0,iw-ow)'")
+        ye = (f"y='clip(ih*{float(fy if fy is not None else 0.5):.4f}"
+              f"-oh/2,0,ih-oh)'")
+        return (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                f"crop={W}:{H}:{xe}:{ye}")
+    return (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+            f"crop={W}:{H}")
 
 
 def _region_parts(parts, in_label, out_label, regions, sw, sh,
@@ -733,7 +749,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       src_sar=1.0, src_fps=None,
                       overlay_inputs=None, gfx_ass_path=None,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
-                      plate_idx=None, plate_box=None):
+                      plate_idx=None, plate_box=None, behind_inputs=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -807,10 +823,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # An aspect shift pushes the picture in via the same zoompan the zooms use,
     # and the floating frame scales the finished picture to an exact WxH box —
     # both need the CFR WxH guarantee every other geometry effect needs.
+    # A behind-subject composite is per-pixel geometry against a mask measured
+    # at exact WxH, so it needs the same CFR WxH guarantee everything else here
+    # needs. Without this a plain single-source cut would take the cheap graph
+    # and alphamerge a WxH mask onto frames of some other size.
     do_norm = (bool(insert_inputs) or frame_mode is not None or bool(zooms)
                or bool(speed) or bool(overlay_inputs) or bool(takeovers)
                or tstyle in ("whip_left", "whip_right", "zoom_punch")
                or bool(shifts) or screen_frame is not None
+               or bool(behind_inputs)
                or any(s.get("kind") == "shake" for s in stylize))
     mode = frame_mode or "crop"
 
@@ -1321,6 +1342,57 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         else:
             continue
         vlabel = out_lab
+
+    # ---- words BEHIND the subject (round 60) -----------------------------
+    # The one composite that has to happen BEFORE the zoom stage.
+    #
+    # Everything else about text is drawn late, on top of everything, because
+    # words win. These words lose on purpose: they are in the SCENE, painted on
+    # the wall the subject walks past. Three consequences, all deliberate:
+    #
+    #   * It is emitted here, after the grade and before the zoom, because the
+    #     mask was measured on source frames in output geometry — the same
+    #     geometry the picture has at this point in the graph, and NOT the
+    #     geometry it has after zoompan. A mask composited after a punch zoom is
+    #     a subject cut out of the wrong part of the frame.
+    #   * The text therefore rides the zoom with the picture, which is what it
+    #     should do: a push into a wall pushes into the writing on it too.
+    #   * The subject's pixels come from the render's OWN picture (split, then
+    #     alphamerge the mask onto the copy), never from the mask clip. That is
+    #     what lets the mask be measured on the 540p proxy and still composite
+    #     into a 4K export: scaling a MASK softens an edge, where scaling a
+    #     cut-out subject would drop a blurry patch into a sharp frame.
+    for j, (idx, item, win) in enumerate(behind_inputs or []):
+        b_start, b_end = win
+        b_dur = max(0.05, b_end - b_start)
+        tail_pad = max(0.0, tl.out_duration - b_end)
+        # tpad black-fills the mask to the WHOLE programme so alphamerge — a
+        # framesync filter — has a frame to pair with every frame of the
+        # picture, from t=0. Black in a gray mask is alpha 0: outside the
+        # window the "subject" layer is fully transparent, so the composite is
+        # the picture, exactly. Padding in the graph rather than encoding
+        # thousands of black frames into the artifact.
+        chain = [f"trim=start=0:end={b_dur:.3f}", "setpts=PTS-STARTPTS",
+                 f"scale={W}:{H}", "format=gray",
+                 f"fps={fps:.3f}"]
+        if b_start > 0.001:
+            chain.append(f"tpad=start_duration={b_start:.3f}"
+                         f":start_mode=add:color=black")
+        if tail_pad > 0.001:
+            chain.append(f"tpad=stop_duration={tail_pad + 1.0:.3f}"
+                         f":stop_mode=add:color=black")
+        parts.append(f"[{idx}:v]{','.join(chain)}[bhm{j}]")
+        parts.append(f"[{vlabel}]split[bhb{j}][bhf{j}]")
+        # The words, burned on a copy of the picture...
+        parts.append(f"[bhb{j}]subtitles=filename='{item['ass']}'"
+                     f":fontsdir='{caplib.FONTS_DIR}'[bht{j}]")
+        # ...and the subject, lifted off the OTHER copy by the mask and laid
+        # back over them.
+        parts.append(f"[bhf{j}][bhm{j}]alphamerge[bhfa{j}]")
+        parts.append(f"[bht{j}][bhfa{j}]overlay=0:0:format=auto"
+                     f":eof_action=pass[vbh{j}]")
+        vlabel = f"vbh{j}"
+
     zoom_terms = []
     # A takeover always aims (at the screen), so it forces the targeted branch
     # for the whole zoompan. It must be decided BEFORE the zoom loop: that loop
@@ -2015,7 +2087,17 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     ass_path = caplib.build_ass(edl, index, tl,
                                 os.path.join(workdir, "captions.ass"),
                                 play_res=(W, H))
-    gfx_path = graphics.build_gfx_ass(edl, tl.out_duration,
+    # TWO text layers, not one. A behind-subject text is burned early (under the
+    # subject); everything else is burned last (over everything). Splitting the
+    # LIST rather than teaching graphics.py about depth keeps the ASS builder
+    # exactly as it was — including its concurrent-text stacking, which is now
+    # per-layer: a behind text and a front text that overlap in time no longer
+    # de-stack against each other, which is the right trade (they are at
+    # different depths, so they read as different planes anyway).
+    behind_texts = [t for t in (edl.get("texts") or []) if t.get("behind")]
+    front_texts = [t for t in (edl.get("texts") or []) if not t.get("behind")]
+    gfx_path = graphics.build_gfx_ass(dict(edl, texts=front_texts),
+                                      tl.out_duration,
                                       os.path.join(workdir, "graphics.ass"),
                                       play_res=(W, H))
 
@@ -2148,6 +2230,50 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     if plate_idx is not None:
         next_idx += 1
 
+    # ---- behind-subject text: one mask input + one ASS per item -------------
+    # The window comes from the mask's SOURCE span, not from the text's program
+    # window, because the mask is pixels of particular footage and has to land
+    # wherever that footage now plays. tl.span_to_out is the same map captions
+    # and duck windows use, so a cut made after the mask was measured moves the
+    # composite with the shot instead of leaving it behind.
+    #
+    # Every failure here DEGRADES to an ordinary title rather than failing the
+    # render: footage cut away, a mask object that will not download, an ASS
+    # with nothing to burn. A user who loses the depth still gets their words.
+    behind_inputs = []
+    for bi, item in enumerate(behind_texts):
+        b = item["behind"]
+        pieces = tl.span_to_out(float(b["src_start"]), float(b["src_end"]))
+        ass = None
+        if pieces:
+            ass = graphics.build_gfx_ass(
+                dict(edl, texts=[item]), tl.out_duration,
+                os.path.join(workdir, f"behind_{bi}.ass"), play_res=(W, H))
+        if not pieces or not ass:
+            print(f"[render] behind-text {item.get('id')}: "
+                  f"{'its footage is no longer in the edit' if not pieces else 'nothing to burn'}"
+                  f" — burning it as a plain title", flush=True)
+            front_texts.append(item)
+            continue
+        try:
+            local = _fetch(b["asset_key"], "matte", next_idx)
+        except Exception as e:
+            print(f"[render] behind-text {item.get('id')}: mask unavailable "
+                  f"({str(e)[:120]}) — burning it as a plain title", flush=True)
+            front_texts.append(item)
+            continue
+        extra_inputs += ["-i", local]
+        behind_inputs.append((next_idx, {"ass": ass}, (round(pieces[0][0], 3),
+                                                      round(pieces[-1][1], 3))))
+        next_idx += 1
+    if behind_texts:
+        # Rebuild the front layer — anything that degraded above belongs in it.
+        gfx_path = graphics.build_gfx_ass(dict(edl, texts=front_texts),
+                                          tl.out_duration,
+                                          os.path.join(workdir,
+                                                       "graphics.ass"),
+                                          play_res=(W, H))
+
     graph = build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                               music_inputs, index, preview,
                               W=W, H=H, fps=fps, frame_mode=frame_mode,
@@ -2162,7 +2288,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               gfx_ass_path=gfx_path,
                               frame_focus=frame_focus, robot_idx=robot_idx,
                               wm_ass_path=wm_ass_path,
-                              plate_idx=plate_idx, plate_box=plate_box)
+                              plate_idx=plate_idx, plate_box=plate_box,
+                              behind_inputs=behind_inputs)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).
