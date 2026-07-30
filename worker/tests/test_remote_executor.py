@@ -45,6 +45,8 @@ def _start_server():
 def _setup(monkeyrunners, secret="test-secret"):
     """Point the client at a fresh stub server and stub the DB."""
     srv, port = _start_server()
+    orig_cfg = (config.REMOTE_EXECUTOR_URL, config.REMOTE_EXECUTOR_SECRET,
+                config.REMOTE_EXECUTOR_TIMEOUT_S)
     config.REMOTE_EXECUTOR_URL = f"http://127.0.0.1:{port}"
     config.REMOTE_EXECUTOR_SECRET = secret
     config.REMOTE_EXECUTOR_TIMEOUT_S = 10
@@ -53,14 +55,20 @@ def _setup(monkeyrunners, secret="test-secret"):
     http_server.RUNNERS.clear()
     http_server.RUNNERS.update(monkeyrunners)
     dbx.Db = _StubDb
-    return srv, (orig_runners, orig_db)
+    return srv, (orig_runners, orig_db, orig_cfg)
 
 
 def _teardown(srv, saved):
-    orig_runners, orig_db = saved
+    # Restore config too: the URL leaking out of this module made every LATER
+    # test believe an executor was configured — invisible for two rounds, then
+    # the first tool that goes remote-first (round 64's matte) failed a test
+    # that never mentions executors.
+    orig_runners, orig_db, orig_cfg = saved
     http_server.RUNNERS.clear()
     http_server.RUNNERS.update(orig_runners)
     dbx.Db = orig_db
+    (config.REMOTE_EXECUTOR_URL, config.REMOTE_EXECUTOR_SECRET,
+     config.REMOTE_EXECUTOR_TIMEOUT_S) = orig_cfg
     srv.shutdown()
 
 

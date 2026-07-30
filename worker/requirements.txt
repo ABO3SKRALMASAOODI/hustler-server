@@ -6,6 +6,10 @@ faster-whisper==1.1.1
 scenedetect==0.6.4
 opencv-python-headless==4.10.0.84
 numpy<2
+# Person segmentation for the text-behind matte (worker/personseg.py, round
+# 64). CPU provider only — the executor is the box that runs the forward
+# passes. The model file itself is baked by the Dockerfile, not pip.
+onnxruntime==1.19.2
 pillow==10.4.0
 requests==2.32.3
 # Media extraction from page links (YouTube, TikTok, Vimeo, SoundCloud) for

@@ -18,6 +18,7 @@ import eleven
 import inpaint
 import llm
 import matte
+import personseg
 import media
 import model_prices
 import music_library
@@ -5394,15 +5395,17 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
             f"({detected['method']} detector). It occupies "
             f"{qw:.2f}x{qh:.2f} of the frame.")
     bits.append(
-        f"From {start}s the clip FADES onto the screen inside the shot (no "
-        f"pop — the glass 'comes alive'), the camera pushes {z_end:.1f}x "
-        f"into it over {dur}s, and the picture arrives full frame at "
-        f"exactly {hand}s — where '{name}' cuts in and keeps playing from "
-        f"the same instant ({round(off + dur, 2)}s into the clip). The last "
-        "frame of the push and the first frame of the clip are the SAME "
-        "frame, and the momentum carries through the cut (a brief punch "
-        "past full frame that settles), so the join sits inside one "
-        "continuous motion.")
+        f"From {start}s the camera pushes {z_end:.1f}x into the screen over "
+        f"{dur}s. The glass shows what you actually filmed until the push is "
+        f"nearly half done — only once the screen dominates the frame does "
+        f"the clip DISSOLVE onto it (fully there before the picture lands, "
+        f"so the swap happens where the room is already gone from view) — "
+        f"and the picture arrives full frame at exactly {hand}s, where "
+        f"'{name}' cuts in and keeps playing from the same instant "
+        f"({round(off + dur, 2)}s into the clip). The last frame of the "
+        "push and the first frame of the clip are the SAME frame, and the "
+        "momentum carries through the cut (a brief punch past full frame "
+        "that settles), so the join sits inside one continuous motion.")
     bits.append(
         "The push and the pin are one item — remove it with "
         f"remove_screen_takeover('{item['id']}'), which also takes the "
@@ -5766,9 +5769,14 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
         fit, mw, mh = _matte_geometry(ctx, edl)
     except Exception as err:
         return f"REJECTED: could not work out the output geometry ({err})."
+    # The planned METHOD rides the fingerprint (round 64): a mask built by
+    # the photometric fallback (executor down for an afternoon) must not
+    # permanently occupy the cache slot the person model would fill better.
+    seg_planned = remote.matte_available() or personseg.available()
     fp = hashlib.sha256(json.dumps([
         getattr(ctx, "_orig_sha", ""), src_start, src_end, fit, mw, mh,
-        matte.DIFF_THRESHOLD, matte.PLATE_SAMPLES, matte.VERSION],
+        matte.DIFF_THRESHOLD, matte.PLATE_SAMPLES, matte.VERSION,
+        "person" if seg_planned else "plate"],
         sort_keys=True).encode()).hexdigest()
     key = f"matte/{ctx.project_id}/{fp[:16]}.mp4"
     stats = None
@@ -5785,7 +5793,10 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
         prior = next((tx.get("behind") for tx in texts
                       if (tx.get("behind") or {}).get("fp") == fp), None)
         stats = {"ok": True, "coverage": (prior or {}).get("coverage"),
-                 "fps": (prior or {}).get("fps"), "cached": True}
+                 "fps": (prior or {}).get("fps"),
+                 "method": (prior or {}).get("method")
+                 or ("person" if seg_planned else "plate"),
+                 "cached": True}
         try:
             mlocal = os.path.join(ctx.workdir, f"matte_c_{fp[:8]}.mp4")
             storage.download_to(key, mlocal)
@@ -5795,34 +5806,63 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
         except Exception:
             pass
     else:
-        try:
-            src = ctx.proxy_path()
-        except Exception:
+        # The person model's forward passes run on the EXECUTOR (round 64) —
+        # model compute on the dispatcher is the round-60 objection that was
+        # right all along. Remote failure falls back to the photometric build
+        # WITHOUT the model (that is today's dispatcher-safe work, never the
+        # heavy path — the round-61b rule), and says so in the reply.
+        stats = None
+        fell_back = None
+        if remote.matte_available() and getattr(ctx, "db", None):
+            proxy_row = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
+            if proxy_row:
+                try:
+                    stats = remote.run_matte_remote(
+                        ctx.project_id,
+                        {"storage_key": proxy_row["storage_key"],
+                         "start": src_start, "dur": src_end - src_start,
+                         "box": list(_behind_text_box(item)),
+                         "extra_vf": fit, "width": mw, "height": mh,
+                         "out_key": key},
+                        user_id=ctx.job.get("user_id"))
+                except Exception as err:
+                    fell_back = str(err)[:160]
+                    stats = None
+        if stats is None:
             try:
-                src = _original_local(ctx)
+                src = ctx.proxy_path()
+            except Exception:
+                try:
+                    src = _original_local(ctx)
+                except Exception as err:
+                    return (f"REJECTED: could not open the footage to "
+                            f"measure the subject ({str(err)[:140]}).")
+            out = os.path.join(ctx.workdir, f"matte_{fp[:8]}.mp4")
+            try:
+                stats = matte.measure_and_build(
+                    src, out, src_start, src_end - src_start,
+                    box=_behind_text_box(item), extra_vf=fit,
+                    width=mw, height=mh,
+                    allow_model=not remote.matte_available())
             except Exception as err:
-                return (f"REJECTED: could not open the footage to measure the "
-                        f"subject ({str(err)[:140]}).")
-        out = os.path.join(ctx.workdir, f"matte_{fp[:8]}.mp4")
-        try:
-            stats = matte.measure_and_build(
-                src, out, src_start, src_end - src_start,
-                box=_behind_text_box(item), extra_vf=fit,
-                width=mw, height=mh)
-        except Exception as err:
-            return (f"The subject measurement failed ({str(err)[:180]}). "
-                    "Nothing was changed — do NOT claim the text was added.")
+                return (f"The subject measurement failed ({str(err)[:180]}). "
+                        "Nothing was changed — do NOT claim the text was "
+                        "added.")
+            if stats.get("ok"):
+                storage.upload_file(out, key, "video/mp4")
         if not stats.get("ok"):
             return (f"REJECTED: {stats.get('why') or 'the subject could not be measured'}. "
                     "Nothing was changed. add_text puts the same words on TOP "
                     "of the picture, which always works — offer that and say "
                     "plainly why the behind version will not.")
-        storage.upload_file(out, key, "video/mp4")
+        if fell_back:
+            stats["fell_back"] = fell_back
 
     item["behind"] = {"asset_key": key, "src_start": src_start,
                       "src_end": src_end, "fp": fp,
                       "coverage": stats.get("coverage"),
-                      "fps": stats.get("fps")}
+                      "fps": stats.get("fps"),
+                      "method": stats.get("method")}
     texts.append(item)
     edl["texts"] = texts
     written = ctx.write_edl(
@@ -5836,13 +5876,23 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
                     "measured, so this cost nothing to add.")
     else:
         cov = stats.get("coverage")
+        how = ("found frame by frame by the person-segmentation model"
+               if stats.get("method") == "person" else
+               "from a background photographed out of the shot itself")
         bits.append(
             f"MEASURED on the footage: the subject covers {cov * 100:.1f}% of "
             f"the frame on average across the window (peaking at "
-            f"{stats.get('coverage_max', 0) * 100:.1f}%), from a background "
-            f"photographed out of the shot itself. The words are drawn on the "
-            f"picture and the subject is laid back over them, so they pass "
-            f"BEHIND — this is not a fade or a transparency.")
+            f"{stats.get('coverage_max', 0) * 100:.1f}%), {how}. The words "
+            f"are drawn on the picture and the subject is laid back over "
+            f"them, so they pass BEHIND — this is not a fade or a "
+            f"transparency.")
+        if stats.get("fell_back"):
+            bits.append(
+                "NOTE: the person model was unreachable, so this mask came "
+                "from the photometric fallback — it needs a still camera and "
+                "can miss a dark subject on a dark background. If the render "
+                "shows words printed over the subject, remove and re-add the "
+                "text once the model is back.")
         if stats.get("no_cv2"):
             bits.append("NOTE: OpenCV was unavailable, so the mask edge is "
                         "unsmoothed — it may look slightly cut out.")
@@ -5878,13 +5928,18 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
             f"The subject crosses {(tw or 0) * 100:.0f}% of the line's width "
             f"at its most ({tc * 100:.0f}% of the text's area), so the "
             "effect is visible and the title stays readable.")
+    steady = ("Handheld or moving camera is fine — the subject is found in "
+              "each frame on its own —"
+              if stats.get("method") == "person" else
+              "The camera must hold still for the window — that is what "
+              "makes the background photographable —")
     bits.append(
         "It is bound to that FOOTAGE, not to a program time: a later cut moves "
         "it with the shot, and if that footage is cut away entirely the words "
-        "stay as an ordinary title. The camera must hold still for the window "
-        "— that is what makes the background photographable — so do not add a "
-        "zoom, a stabilize pass or a speed ramp over it. NEXT: render_preview, "
-        "and look at whether the subject's edge reads cleanly.")
+        f"stay as an ordinary title. {steady} but do not add a zoom or a "
+        "speed ramp over it (the mask is frame-for-frame with the source). "
+        "NEXT: render_preview, and look at whether the subject's edge reads "
+        "cleanly.")
     return "\n".join(bits)
 
 
@@ -10283,11 +10338,15 @@ TOOLS = {
         "device and the push rides that clip's tail, arriving exactly where "
         "it ends (I snap there and say so). "
         "duration_s 0.4-5, default 1.2 — 1.0-1.5 is the move people "
-        "mean. The content FADES onto the glass at the window's start and "
-        "the momentum carries through the cut (a brief settle past full "
-        "frame), so the join reads as one continuous move; for a user who "
-        "wants it even more seamless/aggressive, ease='accelerate' dives "
-        "into the screen with speed peaking at the cut. "
+        "mean. The glass shows what was FILMED for the first part of the "
+        "push; the content dissolves onto it only once the push is ~half "
+        "done and the screen dominates the frame (a scene switch visible in "
+        "a wide shot of the room is the #1 thing users call 'not smooth'), "
+        "is fully there before the picture lands, and the momentum carries "
+        "through the cut (a brief settle past full frame), so the join reads "
+        "as one continuous move; for a user who wants it even more "
+        "seamless/aggressive, ease='accelerate' dives into the screen with "
+        "speed peaking at the cut. "
         "I MEASURE the screen's four corners from the frames myself; "
         "pass `corners` only to override that (8 numbers x0,y0,x1,y1,x2,y2,"
         "x3,y3 as FRACTIONS of the frame in the order top-left, top-right, "
@@ -10352,17 +10411,19 @@ TOOLS = {
                         "title painted on the street or the wall behind them "
                         "would. This is the 'text behind me walking' / 'name "
                         "behind the subject' move, and it is a REAL depth "
-                        "composite, not a fade: I photograph the background out "
-                        "of the shot itself, measure which pixels are the "
-                        "subject in every frame, and lay them back over the "
-                        "words. Same styling arguments as add_text "
+                        "composite, not a fade: a person-segmentation model "
+                        "finds the subject's pixels in every frame — dark "
+                        "clothes on a dark wall, handheld wobble and a moving "
+                        "camera are all fine — and the renderer lays them "
+                        "back over the words. Same styling arguments as "
+                        "add_text "
                         "(template/x/y/size_scale/color/font/entrance/exit); "
                         "at_output_s + duration_s are where in the EDITED video "
                         "the words appear. REQUIREMENTS I check and refuse on, "
-                        "so read the reply: the camera must HOLD STILL through "
-                        "the window (a moving camera has no still background to "
-                        "photograph — I say so and you offer add_text instead), "
-                        "something must actually MOVE in front of the words, "
+                        "so read the reply: a PERSON must be visible in the "
+                        "window (nothing to go behind otherwise — I say so and "
+                        "you offer add_text instead), they must not fill most "
+                        "of the frame (the words would never be visible), "
                         "the window must be inside ONE take with no cut in it, "
                         "and no speed ramp over that footage. I also report how "
                         "much of the text the subject actually crosses — if "

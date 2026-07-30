@@ -560,6 +560,12 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # a per-frame LK pass — seconds of compute, minutes of download on a big
     # original. Synchronously inside an agent turn, same ceiling logic.
     "track": int(os.getenv("REMOTE_TIMEOUT_TRACK_S", "240")),
+    # The text-behind matte (round 64): stages the 540p PROXY (small), decodes
+    # one <=15s window and runs the person model on a bounded number of frames
+    # (matte.SEG_BUDGET). Synchronously inside an agent turn — same ceiling
+    # logic as capture/frames/track, sized for the worst budgeted window plus
+    # a cold start.
+    "matte": int(os.getenv("REMOTE_TIMEOUT_MATTE_S", "300")),
 }
 
 
@@ -738,6 +744,19 @@ CLEAN_X264_LOOKAHEAD = int(os.getenv("CLEAN_X264_LOOKAHEAD", "10"))
 # input-seeks, so each sample is a seek, not a decode; 28 covers a caption that
 # is only on screen for part of the video without making the scan noticeable.
 CLEAN_DETECT_SAMPLES = int(os.getenv("CLEAN_DETECT_SAMPLES", "28"))
+
+# Person-segmentation model for the text-behind matte (round 64). The ONNX
+# file is baked into the image by the Dockerfile (same policy as the whisper
+# model: never a runtime download). Missing file or missing onnxruntime =
+# personseg.available() False = the matte builds the photometric way — the
+# honest-off contract, nothing errors. On the dispatcher the model is present
+# (one image, two roles) but deliberately NOT run: a forward pass per frame on
+# the box that also runs agent turns is the round-60 objection, still valid —
+# the matte job goes to the executor whenever one is configured.
+MATTE_SEG_MODEL = os.getenv(
+    "MATTE_SEG_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "models", "u2net_human_seg.onnx"))
 
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /

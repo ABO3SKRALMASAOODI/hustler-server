@@ -32,6 +32,7 @@ import config
 import db as dbx
 import frameserve
 import indexer
+import matte
 import renderer
 import tracker
 import version
@@ -59,6 +60,10 @@ RUNNERS = {
     # window. Decodes the whole window of a user ORIGINAL — the exact job
     # class that OOM-killed the dispatcher four separate times.
     "track": tracker.run_track_job,
+    # Round 64: the text-behind matte. Reads only the 540p proxy, but runs a
+    # person-segmentation forward pass per budgeted frame — model compute,
+    # which belongs on this box, never beside agent turns.
+    "matte": matte.run_matte_job,
 }
 
 

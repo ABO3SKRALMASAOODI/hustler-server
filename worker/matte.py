@@ -36,18 +36,60 @@ Everything here is bounded by design: one window of a few seconds, decoded once.
 """
 
 import os
+import shutil
 import subprocess
+import uuid
 
 import numpy as np
 
 import config
 import media
+import personseg
 
 # Bumped when anything below would produce a DIFFERENT mask from the same
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 5
+VERSION = 6
+
+# ── v6: the subject is FOUND, not inferred (round 64) ───────────────────────
+# Versions 2-5 are four consecutive rounds of cleverer photometrics failing on
+# the same real footage: a dark walker in a dark lamp-lit room, whose body
+# differs from the plate by less than the noise the thresholds must clear. The
+# shipped mask measured the subject at 2.7% of the frame against a visible
+# ~15%, and the title printed straight across him — "why are the captions on
+# top of the thing they were supposed to be behind". That is physics, not
+# tuning: absolute differences cannot see dark-on-dark. So when the person
+# model is available (personseg — executor-side in production), the mask comes
+# from a per-frame segmentation instead, and the photometric pipeline below
+# survives only as the fallback for deployments without the model.
+#   * The model is run on a BUDGET of frames (SEG_BUDGET, evenly spaced) and
+#     the soft masks between samples are linearly blended — full mask rate on
+#     any normal window, graceful degradation on a pathological 15s one.
+#   * STATIC things the model likes (an armchair reads as vaguely person-
+#     shaped to u2net_human_seg — watched on the round-64 validation frame)
+#     are dropped by a motion gate: a union-blob whose pixels are masked in
+#     nearly every sampled frame never moved, and a thing that never moved is
+#     furniture — UNLESS nothing moved at all, because a subject standing
+#     still through the window is still the subject.
+#   * A moving camera is fine here — each frame is segmented on its own — so
+#     the v6 path drops the photometric path's stillness requirement.
+SEG_THRESHOLD = 0.5          # calibrated sigmoid output; verified on real
+#                              frames (empty room peaks at 0.001)
+SEG_BUDGET = 240             # max model passes per window
+SEG_STATIC_KEEP = 0.85       # union-blob presence above this = furniture...
+SEG_MIN_MOVING = 0.002       # ...provided something else genuinely moves
+#                              (fraction of the frame that is non-static mask)
+SEG_MOVING_SHARE = 0.25      # ...and that moving mass is a real share of the
+#                              union, not codec flicker: on a static shot the
+#                              encoder's borderline pixels blink in and out as
+#                              a few hundred px of 'motion', and a gate that
+#                              believed them dropped the standing person and
+#                              kept the speckle (caught by the round-64 E2E
+#                              run against the real dark-room frame)
+SEG_MIN_BLOB_PX = 82         # union-blobs under this (model res) are speckle:
+#                              they neither count as moving mass nor as a
+#                              subject
 
 # Sampling for the background plate. 24 samples spread over the window is
 # enough for a median to see past a subject that lingers, and few enough to hold
@@ -585,8 +627,94 @@ def _box_frame_stats(on, box_px):
     return area, width
 
 
+def _seg_sample_masks(frames, est_frames, cv2):
+    """(sample_indices, sample_masks_320, n_frames): the model run on a
+    budgeted, evenly-strided subset of the window's frames. Masks are kept at
+    model resolution as uint8 — a whole window of them is a few MB."""
+    stride = max(1, int(np.ceil(max(1.0, est_frames) / SEG_BUDGET)))
+    idxs, masks = [], []
+    n = 0
+    for f in frames:
+        if n % stride == 0:
+            soft = personseg.segment(f, cv2)
+            idxs.append(n)
+            masks.append((soft * 255.0).astype(np.uint8))
+        n += 1
+    return idxs, masks, n
+
+
+def _seg_keep_region(masks):
+    """The motion gate, decided ONCE for the whole window so nothing flickers
+    in and out: a float32 (320, 320) multiplier that zeroes union-blobs which
+    sat still through every sampled frame. u2net_human_seg occasionally
+    claims a large piece of furniture (an armchair, on the round-64
+    validation frame); a blob masked in ~every sample never moved, and it is
+    dropped — unless NOTHING moved, because a person standing still for the
+    window is still the person."""
+    try:
+        import cv2
+    except Exception:
+        return None
+    binm = [(m > int(SEG_THRESHOLD * 255)) for m in masks]
+    if not binm:
+        return None
+    presence = np.mean(np.stack(binm), axis=0).astype(np.float32)
+    union = np.any(np.stack(binm), axis=0).astype(np.uint8) * 255
+    nlab, lab, stats, _ = cv2.connectedComponentsWithStats(union, 8)
+    if nlab <= 1:
+        return None
+    static = []
+    static_px = 0
+    moving_px = 0
+    for b in range(1, nlab):
+        area = int(stats[b, cv2.CC_STAT_AREA])
+        if area < SEG_MIN_BLOB_PX:
+            continue        # speckle: votes for nobody
+        sel = lab == b
+        if float(presence[sel].mean()) > SEG_STATIC_KEEP:
+            static.append(b)
+            static_px += area
+        else:
+            moving_px += area
+    if not static:
+        return None
+    # Drop the static furniture only when something person-sized genuinely
+    # moves: an absolute floor (codec flicker is a few hundred px of 'motion'
+    # on a perfectly still shot) AND a share of what would be dropped — a
+    # standing subject must never lose to their own edge shimmer.
+    if moving_px < max(SEG_MIN_MOVING * union.size,
+                       SEG_MOVING_SHARE * static_px):
+        return None      # nothing meaningful moves: the standing subject stays
+    keep = np.ones(union.shape, np.float32)
+    keep[np.isin(lab, static)] = 0.0
+    return keep
+
+
+def _seg_mask_frames(idxs, masks, n_frames, w, h, cv2):
+    """One soft mask per OUTPUT frame at (w, h): linear blend between the
+    bracketing sampled masks (identity when every frame was sampled), gated
+    by the window-wide keep region, upscaled last. Yields uint8 (h, w)."""
+    keep = _seg_keep_region(masks)
+    j = 0
+    for i in range(n_frames):
+        while j + 1 < len(idxs) and idxs[j + 1] <= i:
+            j += 1
+        if j + 1 < len(idxs) and idxs[j] < i:
+            t = (i - idxs[j]) / float(idxs[j + 1] - idxs[j])
+            soft = ((1.0 - t) * masks[j].astype(np.float32)
+                    + t * masks[j + 1].astype(np.float32))
+        else:
+            soft = masks[j].astype(np.float32)
+        if keep is not None:
+            soft = soft * keep
+        m = cv2.resize(soft.astype(np.uint8), (w, h),
+                       interpolation=cv2.INTER_LINEAR)
+        yield m
+
+
 def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
-                      extra_vf=None, width=None, height=None, feather=3):
+                      extra_vf=None, width=None, height=None, feather=3,
+                      allow_model=True):
     """Build the subject mask for [start, start+dur] of `src`.
 
     src should be the PROXY — see the module docstring: the mask is resolution
@@ -617,13 +745,24 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
                         f"frame by frame — over {MAX_WINDOW_S:.0f}s that does "
                         "not finish inside one edit turn. Use a shorter "
                         "window for the words behind you")}
-    plate, noise, ref_sg = _plate(src, start, dur, w, h, extra_vf, cv2)
-    if plate is None:
-        return {"ok": False,
-                "why": ("I could not read enough frames from that moment to "
-                        "photograph the background behind you")}
-
-    frames = _decode(src, start, dur, w, h, extra_vf, fps=out_fps)
+    use_model = bool(allow_model) and cv2 is not None and personseg.available()
+    if use_model:
+        idxs, s_masks, n_frames = _seg_sample_masks(
+            _decode(src, start, dur, w, h, extra_vf, fps=out_fps),
+            dur * out_fps, cv2)
+        if n_frames == 0 or not s_masks:
+            return {"ok": False,
+                    "why": ("I could not read enough frames from that "
+                            "moment to find the subject")}
+        mask_iter = _seg_mask_frames(idxs, s_masks, n_frames, w, h, cv2)
+    else:
+        plate, noise, ref_sg = _plate(src, start, dur, w, h, extra_vf, cv2)
+        if plate is None:
+            return {"ok": False,
+                    "why": ("I could not read enough frames from that moment "
+                            "to photograph the background behind you")}
+        frames = _decode(src, start, dur, w, h, extra_vf, fps=out_fps)
+        mask_iter = _vote3(_mask_frames(frames, plate, noise, cv2, ref_sg))
     total = w * h
     n = 0
     cov_sum = 0.0
@@ -644,7 +783,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE)
     try:
-        for m in _vote3(_mask_frames(frames, plate, noise, cv2, ref_sg)):
+        for m in mask_iter:
             if cv2 is not None and feather > 0:
                 # A hard 1-pixel edge is what makes a composite look pasted.
                 # After the vote, so the majority is taken on crisp binaries.
@@ -681,12 +820,16 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
            "moving_frames": hits,
            "text_covered": round(box_cov, 3) if box_px else None,
            "text_width_covered": round(box_width_cov, 3) if box_px else None,
+           "method": "person" if use_model else "plate",
            "no_cv2": cv2 is None}
-    # THE MEASUREMENT IS THE FEATURE. Both of these are real footage, not edge
-    # cases: people hand-hold their cameras, and people ask for this on a static
-    # tripod shot of an empty room.
+    # THE MEASUREMENT IS THE FEATURE. Both refusal bounds are real footage,
+    # not edge cases — but what they MEAN depends on how the mask was made.
     if mean_cov > MAX_COVERAGE:
         res.update(ok=False, why=(
+            f"the subject fills {mean_cov * 100:.0f}% of the frame through "
+            "that window, so words behind them would barely ever be visible. "
+            "Offer a normal title instead, and say why")
+            if use_model else (
             f"{mean_cov * 100:.0f}% of the frame changes through that window, "
             "so there is no still background to put words on — the camera is "
             "moving (or the shot cuts inside the window). This effect needs a "
@@ -694,6 +837,11 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
             "normal title instead, and say why"))
     elif mean_cov < MIN_COVERAGE:
         res.update(ok=False, why=(
+            "I cannot find a person in that window "
+            f"({mean_cov * 100:.2f}% of the frame reads as subject), so "
+            "there is nothing for the words to go behind. Point it at a "
+            "moment where someone is actually in front of the camera")
+            if use_model else (
             "nothing moves in front of the camera through that window "
             f"({mean_cov * 100:.2f}% of the frame changes), so there is "
             "nothing for the words to go behind. Point it at a moment where "
@@ -745,3 +893,41 @@ def box_stats(mask_path, box):
             "coverage_max": round(cov_max, 4),
             "text_covered": round(box_cov, 3) if box_px else None,
             "text_width_covered": round(box_width, 3) if box_px else None}
+
+
+def run_matte_job(worker_db, job):
+    """Executor-side runner (capture/frames/track-shaped: synchronous, no
+    row). The model's forward passes are why this is here — the round-60
+    objection to running them on the box that also runs agent turns is still
+    valid, so in production the dispatcher never touches personseg.
+
+    payload: {storage_key, start, dur, box, extra_vf, width, height, out_key}
+    -> measure_and_build's stats dict. On ok=True the finished mask has
+    already been uploaded to out_key; nothing heavy rides the response.
+    `worker_db` is unused — this writes no rows.
+    """
+    import storage
+    payload = job.get("payload") or {}
+    key = payload.get("storage_key")
+    out_key = payload.get("out_key")
+    start = float(payload.get("start") or 0.0)
+    dur = float(payload.get("dur") or 0.0)
+    if not key or not out_key or dur <= 0.05:
+        raise ValueError("matte job needs storage_key, out_key, start, dur")
+    box = payload.get("box")
+    workdir = os.path.join(config.TMP_DIR, f"mat_{uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        local = os.path.join(workdir, "src" + os.path.splitext(key)[1])
+        storage.download_to(key, local)
+        out = os.path.join(workdir, "mask.mp4")
+        stats = measure_and_build(
+            local, out, start, dur,
+            box=tuple(box) if box else None,
+            extra_vf=payload.get("extra_vf"),
+            width=payload.get("width"), height=payload.get("height"))
+        if stats.get("ok"):
+            storage.upload_file(out, out_key, "video/mp4")
+        return stats
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)

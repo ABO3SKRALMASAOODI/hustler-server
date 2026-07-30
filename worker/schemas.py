@@ -1021,6 +1021,10 @@ class SubjectMatte(BaseModel):
     fp: str                                 # derivation fingerprint (cache key)
     coverage: Optional[float] = None        # mean share of frame that moved
     fps: Optional[float] = None
+    # How the mask was made (round 64): "person" = segmentation model on the
+    # executor, "plate" = the photometric fallback. Ride-along metadata so a
+    # cache hit can speak honestly about what it is serving.
+    method: Optional[str] = None
 
 
 # ── Speed spans (round 35): time remapping ───────────────────────────────

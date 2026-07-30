@@ -213,6 +213,26 @@ def run_track_remote(project_id, payload, user_id=None):
                         "attempts": 0, "payload": payload})
 
 
+def matte_available():
+    """Is there an executor to build the text-behind matte on? (round 64)
+
+    Same contract as frames_available. The matte reads only the 540p proxy,
+    but the person model's forward passes are CPU compute the dispatcher
+    cannot afford beside agent turns — with no executor the caller builds the
+    photometric mask locally, which is exactly what shipped before."""
+    return bool(config.REMOTE_EXECUTOR_URL)
+
+
+def run_matte_remote(project_id, payload, user_id=None):
+    """Build the text-behind mask on the executor. Returns
+    matte.measure_and_build's stats dict; on ok=True the mask is already at
+    payload['out_key'] in storage. Synchronous, no job row — the round-61
+    capture shape."""
+    return _run_remote({"id": None, "type": "matte",
+                        "project_id": project_id, "user_id": user_id,
+                        "attempts": 0, "payload": payload})
+
+
 def run_render_remote(worker_db, job):      # signature matches run_render_job
     return _run_remote(job)
 

@@ -357,14 +357,16 @@ def rendered(workdir, room, clip):
 @needs_ffmpeg
 def test_content_is_glued_inside_the_screen_once_faded_in(rendered):
     """The claim an ordinary overlay cannot make: the content is IN the shot,
-    filling the glass and nothing outside it. Sampled just PAST the fade-in:
-    round 62b fades the content onto the glass (its first frame is never
-    pixel-identical to what the filmed screen displays, and snapping it on
-    read as a pop), so the window's opening frames deliberately show the
-    filmed screen. The glued check therefore compares against the resolver's
-    own corners for the sampled frame, not the static quad."""
+    filling the glass and nothing outside it. Sampled just PAST the dissolve:
+    round 64 places the content's appearance on the push's PROGRESS (the
+    window's opening stretch deliberately shows the filmed screen — a scene
+    switch visible in a wide shot is what users call 'it switches too
+    early'), so the sample time comes from the same helper the renderer
+    emits, and the glued check compares against the resolver's own corners
+    for that frame, not the static quad."""
     lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth"}
-    dt = 0.40                       # past SCREEN_FADE_IN_S
+    _f0, f1 = renderer.screen_appear_window(lock, TAKE_S, float(FPS))
+    dt = f1 + 0.05                  # first fully opaque moment
     f = _frame_at(rendered, 3.0 - TAKE_S + dt)
     m = _content_mask(f)
     ys, xs = np.where(m)
@@ -389,16 +391,61 @@ def test_the_window_opens_on_the_filmed_screen_not_a_pop(rendered):
 
 
 @needs_ffmpeg
-def test_content_rides_the_push_instead_of_floating_over_it(rendered):
-    """Mid-move the content is still on the glass — same centre, grown by the
-    camera. An overlay drawn above the zoom would hold its size here."""
+def test_no_scene_switch_while_the_shot_is_still_wide(rendered):
+    """Round 64, from a real render: the recording was opaque on the laptop
+    while the camera had covered ~10% of its travel, so the viewer watched
+    the next scene playing on a screen across the room. Right up to the
+    dissolve's start the glass must show only what was filmed."""
     lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth"}
-    t_mid = 3.0 - TAKE_S / 2.0
-    f = _frame_at(rendered, t_mid)
+    f0, _f1 = renderer.screen_appear_window(lock, TAKE_S, float(FPS))
+    assert f0 > 0.25 * TAKE_S, "the dissolve starts with the shot still wide"
+    f = _frame_at(rendered, 3.0 - TAKE_S + f0 - 0.05)
+    assert _content_mask(f).sum() < 200
+
+
+def test_appear_window_completes_before_the_arrival():
+    """The dissolve must be done — content fully opaque — strictly before the
+    push lands, for every ease, or the handoff's frame-identical invariant
+    dissolves with it. And it must start late: at least a third of the zoom
+    travel has to happen with the filmed screen still showing."""
+    for kind in ("smooth", "accelerate", "linear"):
+        lock = {"corners": list(QUAD), "push": 1.0, "ease": kind}
+        for dur in (0.8, 1.2, 1.5, 3.0):
+            f0, f1 = renderer.screen_appear_window(lock, dur, 30.0)
+            hold = renderer.screen_lock_hold(dur)
+            span = max(dur - hold - 1.0 / 30.0, (dur - hold) * 0.5)
+            assert f1 <= span + 1e-6, (kind, dur, f1, span)
+            assert f1 - f0 >= 0.05, (kind, dur)
+            # e at the dissolve's start is at least SCREEN_APPEAR_E0 minus
+            # the minimum-duration slide
+            p0 = f0 / span
+            e0 = eval(renderer._ease_expr(kind, str(p0)),
+                      {"__builtins__": {}})
+            assert e0 >= 0.30 or f0 == 0.0, (kind, dur, e0)
+
+
+def test_ease_inverse_round_trips():
+    for kind in ("smooth", "accelerate", "linear"):
+        for e in (0.0, 0.2, 0.45, 0.85, 1.0):
+            p = renderer._ease_inv(kind, e)
+            got = eval(renderer._ease_expr(kind, str(p)),
+                       {"__builtins__": {}})
+            assert abs(got - e) < 1e-6, (kind, e, p, got)
+
+
+@needs_ffmpeg
+def test_content_rides_the_push_instead_of_floating_over_it(rendered):
+    """Mid-dissolve the content is already on the glass — same centre, grown
+    by the camera — and it keeps growing to the fully-opaque frame. An
+    overlay drawn above the zoom would hold its size here."""
+    lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth"}
+    f0, f1 = renderer.screen_appear_window(lock, TAKE_S, float(FPS))
+    dt_mid = f0 + 0.5 * (f1 - f0)   # half-faded: visible, still mid-move
+    f = _frame_at(rendered, 3.0 - TAKE_S + dt_mid)
     m = _content_mask(f)
     ys, xs = np.where(m)
     assert m.sum() > 500
-    on = int(round((TAKE_S / 2.0) * FPS))
+    on = int(round(dt_mid * FPS))
     want = _content_corners(lock, on)
     wx = [p[0] for p in want]
     wy = [p[1] for p in want]
@@ -406,10 +453,9 @@ def test_content_rides_the_push_instead_of_floating_over_it(rendered):
     # renderer's output is.
     assert abs(xs.min() - max(0, min(wx))) < 12, (xs.min(), min(wx))
     assert abs(ys.min() - max(0, min(wy))) < 12, (ys.min(), min(wy))
-    # and it really did grow (baseline just past the fade-in, where the
-    # content is first fully opaque)
-    start = _content_mask(_frame_at(rendered, 3.0 - TAKE_S + 0.40)).sum()
-    assert m.sum() > start * 1.1
+    # and it really did grow between mid-dissolve and fully opaque
+    later = _content_mask(_frame_at(rendered, 3.0 - TAKE_S + f1 + 0.05)).sum()
+    assert later > m.sum() * 1.1
 
 
 @needs_ffmpeg
@@ -794,7 +840,8 @@ def test_corner_path_renders_and_content_follows(workdir, room, clip):
     _render(room, clip, edl, out)
     lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth",
             "corner_path": _wobble_path(dur)}
-    dt = 0.40
+    _f0, f1 = renderer.screen_appear_window(lock, dur, float(FPS))
+    dt = f1 + 0.05                  # first fully opaque moment (round 64)
     f = _frame_at(out, 3.0 - dur + dt)
     m = _content_mask(f)
     ys, xs = np.where(m)

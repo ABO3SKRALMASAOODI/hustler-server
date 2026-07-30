@@ -46,6 +46,19 @@ ARG WHISPER_MODEL=medium
 RUN python -c "from faster_whisper import download_model; \
     download_model('${WHISPER_MODEL}')"
 
+# Person-segmentation model for the text-behind matte (round 64) — baked, same
+# policy as the whisper model above: never a runtime download. If this layer is
+# dropped, personseg.available() turns the model path off honestly and the
+# matte falls back to the photometric build — nothing else breaks. Keep the
+# path in sync with worker/config.py MATTE_SEG_MODEL.
+# (python -c, not curl and not a heredoc — slim images do not ship curl, and
+# RUN heredocs need BuildKit, which Cloud Build's classic builder lacks)
+RUN mkdir -p /app/models && python -c "import urllib.request, os; \
+    urllib.request.urlretrieve('https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_human_seg.onnx', '/app/models/u2net_human_seg.onnx'); \
+    s = os.path.getsize('/app/models/u2net_human_seg.onnx'); \
+    assert s > 100_000_000, f'model download truncated: {s} bytes'; \
+    print('u2net_human_seg.onnx', s, 'bytes')"
+
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \

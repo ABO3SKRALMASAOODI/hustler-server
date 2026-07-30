@@ -16,6 +16,7 @@ Every render also emits a 3x3 contact sheet for the agent's self-check.
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import time
@@ -82,6 +83,26 @@ SCREEN_PAD_PX = 2
 SCREEN_FADE_IN_S = 0.35
 SCREEN_LAND_ZOOM = 0.08
 SCREEN_LAND_S = 0.55
+# Round 64, from the user watching the round-63b render: "the next scene is
+# appearing before even the laptop screen becomes full frame". He is right
+# again, and the cause was WHEN the content faded on, not how: the fade ran
+# from the WINDOW'S START (st=0), so with an accelerating 1.5s push the
+# recording was fully opaque on the glass while the camera had covered ~10% of
+# its travel — the viewer sat in a wide shot of the room watching the laptop
+# play the next scene for a full second. The scene switch must happen where
+# the eye cannot compare the two pictures: LATE in the dive, when the glass
+# already dominates the frame. So the content's appearance is now a function
+# of the PUSH'S PROGRESS, not of wall clock — alpha ramps from
+# SCREEN_APPEAR_E0 to SCREEN_APPEAR_E1 of the eased zoom travel (the same e
+# that drives z), which on an accelerating ease lands the dissolve in the
+# fastest, most magnified part of the move. Until then the glass shows what
+# the camera actually filmed — the professional grammar: push into the REAL
+# screen, and the content materializes as it swells to meet the frame.
+SCREEN_APPEAR_E0 = 0.45
+SCREEN_APPEAR_E1 = 0.85
+# A dissolve shorter than this reads as the pop the round-62b fade was added
+# to kill, so the start slides earlier to protect it.
+SCREEN_APPEAR_MIN_S = 0.12
 # Round 63b, from the user watching the round-63 render: "it doesn't make
 # sense to switch scenes unless the first one is zoomed close to full frame".
 # He is right, and the geometry was hiding it: the push reached full frame
@@ -118,6 +139,22 @@ def _ease_expr(kind, p):
     return f"({p})*({p})*(3-2*({p}))"
 
 
+def _ease_inv(kind, e):
+    """The time fraction p at which _ease_expr reaches progress e — the ease
+    functions are monotonic on [0,1], so each has a closed-form inverse.
+    Used to place the content's appearance at a chosen point of the ZOOM
+    TRAVEL (round 64): 'appear at 45% of the push' is a statement about e,
+    and this converts it into the branch-local second `fade` needs."""
+    e = min(max(float(e), 0.0), 1.0)
+    if kind == "linear":
+        return e
+    if kind == "accelerate":
+        return math.sqrt(e)
+    # smoothstep: e = p*p*(3-2p). The real root on [0,1], via the
+    # trigonometric solution of the depressed cubic.
+    return 0.5 - math.sin(math.asin(1.0 - 2.0 * e) / 3.0)
+
+
 def _screen_lock_ease(lock, tvar, t0, dur, fps):
     """The eased 0-1 progress of a takeover, as an expression over `tvar`.
 
@@ -132,6 +169,31 @@ def _screen_lock_ease(lock, tvar, t0, dur, fps):
     p = f"clip(({tvar}-{t0:.3f})/{span:.5f},0,1)" if t0 else \
         f"clip(({tvar})/{span:.5f},0,1)"
     return _ease_expr(lock.get("ease") or "smooth", p)
+
+
+def screen_appear_window(lock, dur, fps):
+    """(fade_start, fade_end) of the content's dissolve, in branch-local
+    seconds. ONE function — the overlay chain emits it and the tests assert
+    against it, so 'when does the content appear' has a single answer.
+
+    The window is placed on the push's PROGRESS (e in [SCREEN_APPEAR_E0,
+    SCREEN_APPEAR_E1]), converted to seconds through the ease's inverse: on
+    an accelerating dive that lands the dissolve late and fast, which is the
+    point — the room must already be gone from view when the scene changes.
+    """
+    hold = screen_lock_hold(dur)
+    dur_push = dur - hold
+    span = max(dur_push - 1.0 / max(fps, 1e-6), dur_push * 0.5, 1e-3)
+    kind = lock.get("ease") or "smooth"
+    f0 = span * _ease_inv(kind, SCREEN_APPEAR_E0)
+    f1 = span * _ease_inv(kind, SCREEN_APPEAR_E1)
+    if f1 - f0 < SCREEN_APPEAR_MIN_S:
+        f0 = max(0.0, f1 - SCREEN_APPEAR_MIN_S)
+    if f1 <= SCREEN_APPEAR_MIN_S:
+        # A window too short to stage the late appearance at all: the old
+        # start-of-window fade is the honest fallback.
+        return 0.0, min(SCREEN_FADE_IN_S, dur * 0.5)
+    return f0, f1
 
 
 def screen_lock_geometry(lock):
@@ -1662,15 +1724,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         chain.append(f"scale={iw_}:{ih_}:force_original_aspect_ratio=increase")
         chain.append(f"crop={iw_}:{ih_}")
         chain.append("format=rgba")
-        # The content FADES onto the glass (round 62b). Its first frame is
-        # never pixel-identical to what the filmed screen actually displays,
-        # so snapping it on at full opacity read as a pop at the exact moment
-        # the move begins. A third of a second of alpha, in branch-local time
-        # (pts start at 0 here), lets the screen "come alive" under the push;
-        # bounded by half the window so a short push still arrives opaque.
-        fin = min(SCREEN_FADE_IN_S, o_dur * 0.5)
-        if fin >= 0.05:
-            chain.append(f"fade=t=in:st=0:d={fin:.2f}:alpha=1")
+        # The content FADES onto the glass (round 62b) — but LATE in the dive
+        # (round 64). At the window's start the push has not moved and the
+        # viewer is looking at a wide shot of the room: content appearing
+        # there is the next scene playing on a laptop across the room, which
+        # a real user called out as exactly wrong. The dissolve is placed on
+        # the PUSH'S PROGRESS instead — from SCREEN_APPEAR_E0 to
+        # SCREEN_APPEAR_E1 of the eased zoom travel, converted to
+        # branch-local seconds through the ease's inverse — so the glass
+        # shows what was filmed until it dominates the frame, and the content
+        # is fully opaque with the last stretch of the push still to run
+        # (plus the whole full-frame hold) before the cut.
+        f0, f1 = screen_appear_window(lock, o_dur, fps)
+        if f1 - f0 >= 0.05:
+            chain.append(
+                f"fade=t=in:st={f0:.3f}:d={f1 - f0:.3f}:alpha=1")
         chain.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
         # vf_perspective has no `t` — only `on` — so the frames reaching it
         # have to be at the render rate or every corner expression is off by
