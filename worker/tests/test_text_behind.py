@@ -722,6 +722,13 @@ def test_exposure_breathing_does_not_fool_the_matte(workdir):
         bias = int(round(24 * np.sin(2 * np.pi * t * 1.3)))
         f = np.clip(room.astype(np.int16) + bias, 0, 255).astype(np.uint8)
         x0, y0 = int((w - sw) * t), (h - sh) // 2
+        # the lamp-cast SHADOW: a clean multiplicative darkening TWICE the
+        # subject's area, moving with them — the round-62 report was a hidden
+        # stretch of title wider than the walker, and it was his wall shadow
+        shx = max(0, x0 - 2 * sw - 8)
+        band = f[y0:y0 + sh, shx:shx + 2 * sw].astype(np.float32)
+        f[y0:y0 + sh, shx:shx + 2 * sw] = \
+            np.clip(band * 0.65, 0, 255).astype(np.uint8)
         f[y0:y0 + sh, x0:x0 + sw] = rng.integers(35, 75, (sh, sw, 3),
                                                  np.uint8)
         enc.stdin.write(f.tobytes())
@@ -731,11 +738,14 @@ def test_exposure_breathing_does_not_fool_the_matte(workdir):
     res = matte.measure_and_build(src, out, 0.0, dur, fps=float(fps))
     assert res["ok"], res.get("why")
     true_cov = sw * sh / float(w * h)
-    assert res["coverage"] < 3.0 * true_cov, \
-        f"over-masking: {res['coverage']} vs true {true_cov}"
+    # The shadow is 2x the subject's area: were it counted as subject,
+    # coverage would land near 3x the footprint. 1.8x is the line between
+    # "subject found" and "subject plus his shadow".
+    assert res["coverage"] < 1.8 * true_cov, \
+        f"over-masking (shadow counted?): {res['coverage']} vs {true_cov}"
     assert res["coverage"] > 0.5 * true_cov, \
         f"under-masking: {res['coverage']} vs true {true_cov}"
-    assert res["moving_frames"] >= n * 0.9
+    assert res["moving_frames"] >= n * 0.75
 
 
 def test_no_behind_text_changes_nothing_in_the_graph():

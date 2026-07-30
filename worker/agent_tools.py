@@ -4517,7 +4517,102 @@ def _out_frac_from_insert(ctx, edl, asset_aspect, x, y):
     return min(max(ox, 0.0), 1.0), min(max(oy, 0.0), 1.0)
 
 
-def _detect_screen_on_insert(ctx, edl, host, clip_t):
+def _quad_plausible_for(quad, frame_aspect, content_aspect):
+    """Could this rectangle be a SCREEN showing that content?
+
+    The wrong-pin bug this guards (round 62, project 246): the bright
+    detector latched a tall shelf beside the laptop — 0.34x0.66 of the
+    frame, PORTRAIT — in a shot whose takeover content was a LANDSCAPE Mac
+    recording, scored 0.66 confidence, and the push flattened the recording
+    onto the furniture while the actual laptop screen sat untouched. The
+    contradiction was checkable and never checked: perspective
+    foreshortening SHRINKS one axis (an angled landscape screen reads
+    narrower, never taller than wide), so a measured region whose aspect is
+    below ~0.65x the content's — or wildly above it — is not the screen the
+    content belongs on. Returns (ok, why_not). quad is fractions of a frame
+    whose width:height is frame_aspect.
+    """
+    if not content_aspect:
+        return True, ""
+    qx, qy, qw, qh = quad_bbox(quad)
+    if qh <= 1e-6:
+        return False, "the region has no height"
+    qa = (qw / qh) * float(frame_aspect)
+    if qa < 0.65 * content_aspect:
+        return False, (f"the region is {qa:.2f}:1 — taller and narrower "
+                       f"than the {content_aspect:.2f}:1 content could ever "
+                       "look on a screen (an angle narrows a screen; it "
+                       "does not turn it portrait)")
+    if qa > 2.0 * content_aspect:
+        return False, (f"the region is {qa:.2f}:1 — far wider than the "
+                       f"{content_aspect:.2f}:1 content")
+    return True, ""
+
+
+def _asset_aspect(ctx, asset):
+    """width/height of an asset when the probe has recorded them, else None.
+    Never downloads — this feeds a sanity check, not a measurement."""
+    try:
+        aw = float(asset.get("width") or 0)
+        ah = float(asset.get("height") or 0)
+        return (aw / ah) if aw > 0 and ah > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _ensure_asset_dims(ctx, asset):
+    """The asset's frame aspect, measured once and persisted.
+
+    Browser uploads record duration only — in prod every clip row had NULL
+    width/height — so the aspect that feeds _quad_plausible_for has to come
+    from a probe. Done on the EXECUTOR when one is configured (a one-frame
+    frames job whose probe dims ride back), because the only copy of a clip
+    is the user's original. Returns the aspect or None; None just disables
+    the plausibility check, it never blocks the takeover.
+    """
+    a = _asset_aspect(ctx, asset)
+    if a:
+        return a
+    if asset.get("kind") != "video_clip":
+        return None
+    got = None
+    if remote.frames_available():
+        try:
+            got = remote.run_frames_remote(
+                ctx.project_id,
+                {"storage_key": asset["storage_key"], "times": [0.1],
+                 "width": 64},
+                user_id=ctx.job.get("user_id")) or {}
+        except Exception:
+            return None
+        try:
+            storage.delete_keys([k for k in (got.get("keys") or []) if k])
+        except Exception:
+            pass
+    else:
+        try:
+            info = media.probe(_asset_local_path(ctx, asset))
+        except Exception:
+            return None
+        got = {"duration_s": info.get("duration"),
+               "width": info.get("width"), "height": info.get("height"),
+               "fps": info.get("fps")}
+    try:
+        w_ = float(got.get("width") or 0)
+        h_ = float(got.get("height") or 0)
+        if w_ > 0 and h_ > 0:
+            ctx.db.run(dbx.update_asset_probe, asset["id"],
+                       got.get("duration_s") or asset.get("duration_s"),
+                       int(w_), int(h_), got.get("fps"),
+                       asset.get("sha256"))
+            asset["width"], asset["height"] = w_, h_
+            return w_ / h_
+    except Exception:
+        pass
+    return None
+
+
+def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None):
     """_detect_screen's counterpart for a screen inside a SPLICED clip.
 
     The frames come from the insert's own asset — via the executor when one
@@ -4537,26 +4632,8 @@ def _detect_screen_on_insert(ctx, edl, host, clip_t):
     if not frames:
         return None, (f"could not extract frames from the spliced clip "
                       f"({(ferr or 'unknown error')[:120]})")
-    res = screendet.find_screen(frames)
-    why = None
-    if res.get("error"):
-        why = res["error"]
-    elif res["confidence"] < screendet.MIN_CONFIDENCE:
-        why = (f"the best screen-shaped region scored only "
-               f"{res['confidence']:.2f} confidence")
-    if why:
-        quad, vwhy = _vision_screen_corners(ctx, frames[len(frames) // 2])
-        if quad is None:
-            return None, f"{why}, and {vwhy}"
-        ok, sane = quad_is_sane(quad)
-        if not ok:
-            return None, (f"{why}, and the corners the vision model read are "
-                          f"not a usable quadrilateral ({sane})")
-        res = {"corners": quad, "confidence": None, "method": "vision",
-               "agreement": 1, "n_frames": 1, "read_not_measured": why}
-    # The measured fractions are of the ASSET's frame; the pin consumes
-    # OUTPUT fractions. Aspect from the asset row when probed, else from the
-    # extracted jpeg itself (frame_at preserves aspect).
+    # The host clip's own frame shape — needed both to sanity-check the
+    # measurement below and to map the corners into output fractions after.
     aw = float(asset.get("width") or 0)
     ah = float(asset.get("height") or 0)
     if not (aw > 0 and ah > 0):
@@ -4567,6 +4644,34 @@ def _detect_screen_on_insert(ctx, edl, host, clip_t):
         except Exception:
             return None, ("could not determine the spliced clip's frame "
                           "shape to place the corners")
+    res = screendet.find_screen(frames)
+    why = None
+    if res.get("error"):
+        why = res["error"]
+    elif res["confidence"] < screendet.MIN_CONFIDENCE:
+        why = (f"the best screen-shaped region scored only "
+               f"{res['confidence']:.2f} confidence")
+    if not why:
+        ok_p, pwhy = _quad_plausible_for(res["corners"], aw / ah,
+                                         content_aspect)
+        if not ok_p:
+            why = f"the measured rectangle cannot be the screen: {pwhy}"
+    if why:
+        quad, vwhy = _vision_screen_corners(ctx, frames[len(frames) // 2])
+        if quad is None:
+            return None, f"{why}, and {vwhy}"
+        ok, sane = quad_is_sane(quad)
+        if not ok:
+            return None, (f"{why}, and the corners the vision model read are "
+                          f"not a usable quadrilateral ({sane})")
+        ok_p, pwhy = _quad_plausible_for(quad, aw / ah, content_aspect)
+        if not ok_p:
+            return None, (f"{why}, and the corners the vision model read "
+                          f"cannot be the screen either — {pwhy}")
+        res = {"corners": quad, "confidence": None, "method": "vision",
+               "agreement": 1, "n_frames": 1, "read_not_measured": why}
+    # The measured fractions are of the ASSET's frame; the pin consumes
+    # OUTPUT fractions.
     out = []
     for i in range(4):
         pt = _out_frac_from_insert(ctx, edl, aw / ah,
@@ -4654,7 +4759,7 @@ def _vision_screen_corners(ctx, frame_path):
     return [*tl, *tr, *bl, *br], None
 
 
-def _detect_screen(ctx, edl, src_t):
+def _detect_screen(ctx, edl, src_t, content_aspect=None):
     """Measure the device screen around SOURCE second src_t. Returns
     (corners_in_output_fractions, info_dict) or (None, reason)."""
     try:
@@ -4681,6 +4786,9 @@ def _detect_screen(ctx, edl, src_t):
         frames.append(fp)
     if not frames:
         return None, "could not extract frames from the footage at that moment"
+    info = ctx.index.get("video") or {}
+    src_aspect = ((float(info.get("width") or 0) or 1920.0)
+                  / (float(info.get("height") or 0) or 1080.0))
     res = screendet.find_screen(frames)
     why = None
     if res.get("error"):
@@ -4688,6 +4796,15 @@ def _detect_screen(ctx, edl, src_t):
     elif res["confidence"] < screendet.MIN_CONFIDENCE:
         why = (f"the best screen-shaped region scored only "
                f"{res['confidence']:.2f} confidence")
+    if not why:
+        # A confident measurement can still be the WRONG rectangle — a bright
+        # doorway, a poster, a window. The content about to be pinned says
+        # what shape the screen has to be; a region that contradicts it is
+        # treated exactly like a low-confidence one and handed to the read.
+        ok_p, pwhy = _quad_plausible_for(res["corners"], src_aspect,
+                                         content_aspect)
+        if not ok_p:
+            why = f"the measured rectangle cannot be the screen: {pwhy}"
     if why:
         # The pixels declined. Ask the vision model to read the corners off the
         # middle frame rather than ending the call and asking the AGENT to do
@@ -4699,6 +4816,10 @@ def _detect_screen(ctx, edl, src_t):
         if not ok:
             return None, (f"{why}, and the corners the vision model read are "
                           f"not a usable quadrilateral ({sane})")
+        ok_p, pwhy = _quad_plausible_for(quad, src_aspect, content_aspect)
+        if not ok_p:
+            return None, (f"{why}, and the corners the vision model read "
+                          f"cannot be the screen either — {pwhy}")
         res = {"corners": quad, "confidence": None, "method": "vision",
                "agreement": 1, "n_frames": 1, "read_not_measured": why}
     out = []
@@ -4819,7 +4940,9 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
     elif host is not None:
         h_ins, w0, w1 = host
         clip_t = float(h_ins.get("source_start_s") or 0.0) + (probe_out - w0)
-        quad, why = _detect_screen_on_insert(ctx, edl, h_ins, clip_t)
+        quad, why = _detect_screen_on_insert(ctx, edl, h_ins, clip_t,
+                                             content_aspect=_ensure_asset_dims(
+                                                 ctx, asset))
         if quad is None:
             return (f"REJECTED: I could not find a screen in the spliced clip "
                     f"at {round(probe_out, 2)}s — {why}. BOTH ways were "
@@ -4833,7 +4956,9 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
                     "BOTTOM-LEFT, bottom-right).")
         detected = why
     else:
-        quad, why = _detect_screen(ctx, edl, src_t)
+        quad, why = _detect_screen(ctx, edl, src_t,
+                                   content_aspect=_ensure_asset_dims(ctx,
+                                                                     asset))
         if quad is None:
             return (f"REJECTED: I could not find a screen in the frame at "
                     f"{round(probe_out, 2)}s — {why}. BOTH ways were tried: "

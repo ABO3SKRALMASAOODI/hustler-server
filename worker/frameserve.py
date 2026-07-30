@@ -79,11 +79,18 @@ def run_frames_job(worker_db, job):
                  f"{uuid.uuid4().hex[:10]}_{i}.jpg")
             storage.upload_file(fp, k, "image/jpeg")
             out_keys.append(k)
-        dur = None
+        dur = w_ = h_ = fps_ = None
         try:
-            dur = float(media.probe(local)["duration"])
+            pi = media.probe(local)
+            dur = float(pi["duration"])
+            w_, h_, fps_ = pi.get("width"), pi.get("height"), pi.get("fps")
         except Exception:
             pass
-        return {"keys": out_keys, "errors": errors, "duration_s": dur}
+        # Dims ride along because the caller usually has none: browser
+        # uploads record duration only, and the aspect feeds the screen
+        # detector's plausibility check (probe applies the display matrix, so
+        # a rotated phone clip reports its true shape).
+        return {"keys": out_keys, "errors": errors, "duration_s": dur,
+                "width": w_, "height": h_, "fps": fps_}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

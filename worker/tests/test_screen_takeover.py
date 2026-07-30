@@ -647,6 +647,24 @@ def test_a_correctly_ordered_read_is_left_alone(monkeypatch):
     assert quad == [0.10, 0.14, 0.86, 0.05, 0.12, 0.79, 0.88, 0.93]
 
 
+def test_a_portrait_region_cannot_host_a_landscape_recording():
+    """Round 62, project 246: the bright detector latched a tall shelf —
+    0.34x0.66 of a 16:9 frame — at 0.66 confidence, and a LANDSCAPE Mac
+    recording was flattened onto the furniture beside the laptop. The
+    contradiction was checkable: foreshortening narrows a screen, it does
+    not turn it portrait."""
+    shelf = [0.60, 0.15, 0.94, 0.15, 0.60, 0.81, 0.94, 0.81]  # 0.34 x 0.66
+    ok, why = agent_tools._quad_plausible_for(shelf, 16 / 9, 2880 / 1800)
+    assert not ok and "taller" in why
+    # the real laptop screen in the same shot: landscape, modestly angled
+    laptop = [0.30, 0.55, 0.62, 0.52, 0.31, 0.75, 0.63, 0.74]
+    ok, _ = agent_tools._quad_plausible_for(laptop, 16 / 9, 2880 / 1800)
+    assert ok
+    # no known content shape -> the check stands aside rather than guessing
+    ok, _ = agent_tools._quad_plausible_for(shelf, 16 / 9, None)
+    assert ok
+
+
 def test_the_read_prompt_asks_for_the_glass_not_the_laptop():
     """The single most common way this goes wrong: corners around the whole
     device body rather than the lit display, which pins the content over the

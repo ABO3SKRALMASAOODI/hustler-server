@@ -47,7 +47,7 @@ import media
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 2
+VERSION = 3
 
 # Sampling for the background plate. 24 samples spread over the window is
 # enough for a median to see past a subject that lingers, and few enough to hold
@@ -216,8 +216,25 @@ def _mask_frames(frames, plate, noise, cv2):
         # differs hugely in one channel and barely in the others, and averaging
         # that dilutes a real difference into noise.
         d = np.max(np.abs(diff - bias.astype(np.float32)), axis=2)
-        m = ((d > thr) if thr is not None
-             else (d > DIFF_THRESHOLD)).astype(np.uint8) * 255
+        on = (d > thr) if thr is not None else (d > DIFF_THRESHOLD)
+        # A MOVING SHADOW differs from the plate exactly as much as the
+        # person casting it, and it is not the person (round 62: a lamp-lit
+        # walk hid a stretch of title wider than the walker — his wall shadow
+        # was in the matte). A shadow is the same surface under less light: a
+        # near-uniform multiplicative darkening that preserves hue, where a
+        # body IN FRONT of the wall replaces the surface entirely. Pixels
+        # whose change is a clean darkening — every channel scaled by the
+        # same factor, moderately — are shadow, not subject. The bounds are
+        # deliberately tight: dark clothing over a bright wall scales its
+        # channels UNEVENLY (spread) or too far down (mean), and anything
+        # this test wrongly eats inside the body is refilled by the
+        # hole-filling pass.
+        ratio = (f.astype(np.float32) + 4.0) / \
+            (plate.astype(np.float32) + 4.0)
+        rmean = ratio.mean(axis=2)
+        rspread = ratio.max(axis=2) - ratio.min(axis=2)
+        shadow = (rmean > 0.5) & (rmean < 0.92) & (rspread < 0.05)
+        m = (on & ~shadow).astype(np.uint8) * 255
         if cv2 is not None:
             # Close first, then open: closing fills the holes a plain-coloured
             # torso leaves where it happens to match the wall behind it (which
