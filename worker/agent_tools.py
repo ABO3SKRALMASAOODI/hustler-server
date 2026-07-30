@@ -6947,6 +6947,52 @@ def _capture_precheck(ctx, url, orientation):
     return url, orientation, None
 
 
+# Pages that answer a datacenter IP with a wall instead of themselves. The
+# capture SUCCEEDS — 8 seconds of video, correct resolution, no error anywhere —
+# and what is in it is a CAPTCHA. Verified on 2026-07-30: recording
+# google.com/search?q=plumber+near+me from the executor landed on
+# google.com/sorry/index, which is exactly what the customer who asked for
+# "a Google search for 'plumber near me'" would have got spliced into their
+# video, described to them as b-roll of search results.
+#
+# Same family as the YouTube bot wall (round 40): it is IP-based, so there is
+# nothing to fix in the browser. What there IS to fix is the claim — the agent
+# must be told it filmed a wall so it can say so and offer the alternative,
+# rather than reporting a clean capture.
+_INTERSTITIAL_MARKS = (
+    "/sorry/", "captcha", "consent.", "/consent", "unusual traffic",
+    "are you a robot", "access denied", "just a moment",
+    "attention required", "verify you are human", "enable javascript",
+    "log in", "sign in to continue",
+)
+
+
+def _interstitial_problem(url, got):
+    """A sentence for `problems` when the capture landed on a wall, else None."""
+    final = (got.get("final_url") or "").lower()
+    title = (got.get("page_title") or "").lower()
+    hit = next((m for m in _INTERSTITIAL_MARKS
+                if m in final or m in title), None)
+    if not hit:
+        return None
+    where = got.get("final_url") or url
+    return (f"THIS CAPTURE IS NOT THE PAGE — it landed on a bot check / "
+            f"consent / login wall ({where[:120]}). Recording from a server "
+            f"gets that instead of the real page for Google and many big "
+            f"sites, and it is IP-based, so retrying will not help. Tell the "
+            f"user plainly what is in this clip, do NOT put it in the video "
+            f"as if it were the page, and offer the alternative: they screen-"
+            f"record the page themselves and upload it")
+
+
+def _note_interstitial(url, got):
+    """Put the wall at the FRONT of problems — it is the thing that matters
+    most about this clip, and problems are truncated to six."""
+    p = _interstitial_problem(url, got)
+    if p:
+        got["problems"] = [p] + list(got.get("problems") or [])
+
+
 def _run_capture(ctx, mode, url, **kw):
     """Record a web page, on the executor when there is one.
 
@@ -6974,6 +7020,7 @@ def _run_capture(ctx, mode, url, **kw):
             return None, str(e)[:200]
         if not isinstance(got, dict) or not got.get("storage_key"):
             return None, "the capture service returned nothing usable"
+        _note_interstitial(url, got)
         return got, None
 
     workdir = os.path.join(ctx.workdir, f"webcap_{uuid.uuid4().hex[:8]}")
@@ -6995,6 +7042,7 @@ def _run_capture(ctx, mode, url, **kw):
         key = url_media.storage_key(ctx.project_id, url_media.KIND_VIDEO, path)
         storage.upload_file(path, key, url_media.content_type(path))
         got["storage_key"] = key
+        _note_interstitial(url, got)
         return got, None
     except webrecord.WebRecordError as e:
         return None, str(e)
@@ -7064,13 +7112,21 @@ def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
     key, name, fail = _store_capture(ctx, url, got, "capture")
     if fail:
         return fail
+    # This branch never reported `problems` at all — only the demo did — so a
+    # capture that filmed a bot wall came back reading exactly like a clean one.
+    trouble = ""
+    problems = got.get("problems") or []
+    if problems:
+        trouble = ("\nWHAT DID NOT WORK (tell the user, do not hide it): "
+                   + "; ".join(problems[:6]) + ".")
     return (f"Recorded \"{name}\" — "
             f"{got['duration_s']:.1f}s at {got['width']}x{got['height']} "
             f"(the page loads, holds, then smooth-scrolls to the bottom): "
             f"storage_key={key}. It is saved to the project but NOT in the "
             "video yet — splice it with insert_media, or lay it over the "
             "footage with add_overlay (fit='cover' for a full-frame "
-            "cutaway while the speech continues). The capture is SILENT.")
+            "cutaway while the speech continues). The capture is SILENT."
+            + trouble)
 
 
 def record_website_demo(ctx, url, steps, orientation=None):
