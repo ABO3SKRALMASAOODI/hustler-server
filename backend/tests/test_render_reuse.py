@@ -163,5 +163,84 @@ def test_undo_back_to_a_rendered_version_reuses_it():
                                exclude_version=3) == 50
 
 
+# ── split INSERTS render the same programme too (round 62) ─────────────────
+#
+# The studio scissors split a spliced clip into co-located head + tail whose
+# source windows run continuously (timeline._split_insert). The renderer
+# concatenates them straight back into the clip they were, so the signature
+# must merge them or every scissors click on a dropped-in clip re-encodes a
+# byte-identical programme.
+
+def ins(id_, at, dur, src=0.0, key="clips/1/a.mov", kind="video", **rest):
+    d = {"id": id_, "asset_key": key, "kind": kind, "at_output_s": at,
+         "duration_s": dur, "source_start_s": src}
+    d.update(rest)
+    return d
+
+
+def test_a_split_insert_is_the_same_programme():
+    whole = edl([[0.0, 100.0]], inserts=[ins("ins1", 33.57, 23.86)])
+    halves = edl([[0.0, 100.0]],
+                 inserts=[ins("ins1", 33.57, 15.0),
+                          ins("ins2", 33.57, 8.86, src=15.0)])
+    assert video._program_signature(whole) == \
+           video._program_signature(halves)
+
+
+def test_a_trimmed_half_is_a_different_programme():
+    """Head shortened after the split — the tail no longer continues where
+    the head stops, so real footage is missing and no encode can be shared."""
+    whole = edl([[0.0, 100.0]], inserts=[ins("ins1", 33.57, 23.86)])
+    trimmed = edl([[0.0, 100.0]],
+                  inserts=[ins("ins1", 33.57, 10.0),
+                           ins("ins2", 33.57, 8.86, src=15.0)])
+    assert video._program_signature(whole) != \
+           video._program_signature(trimmed)
+
+
+def test_different_clips_at_one_boundary_never_merge():
+    a = edl([[0.0, 100.0]],
+            inserts=[ins("ins1", 33.57, 5.0),
+                     ins("ins2", 33.57, 5.0, src=5.0, key="clips/1/b.mov")])
+    b = edl([[0.0, 100.0]], inserts=[ins("ins1", 33.57, 10.0)])
+    assert video._program_signature(a) != video._program_signature(b)
+
+
+def test_a_motion_half_never_merges():
+    """A Ken Burns move eases per BLOCK — two halves genuinely render
+    differently from one whole."""
+    a = edl([[0.0, 100.0]],
+            inserts=[ins("i1", 10.0, 3.0, kind="image", motion="zoom_in"),
+                     ins("i2", 10.0, 3.0, kind="image", motion="zoom_in")])
+    b = edl([[0.0, 100.0]],
+            inserts=[ins("i1", 10.0, 6.0, kind="image", motion="zoom_in")])
+    assert video._program_signature(a) != video._program_signature(b)
+
+
+def test_a_transition_keeps_split_inserts_distinct():
+    """The head/tail join is a junction the transition resolver can see, so
+    with a transition configured the merged and unmerged programmes are
+    genuinely different videos."""
+    fx = {"transition": {"style": "dip_black", "duration_s": 0.4}}
+    whole = edl([[0.0, 100.0]], effects=fx,
+                inserts=[ins("ins1", 33.57, 23.86)])
+    halves = edl([[0.0, 100.0]], effects=fx,
+                 inserts=[ins("ins1", 33.57, 15.0),
+                          ins("ins2", 33.57, 8.86, src=15.0)])
+    assert video._program_signature(whole) != \
+           video._program_signature(halves)
+
+
+def test_split_insert_twin_is_adopted():
+    """The end-to-end payoff: the scissors click on a spliced clip attaches
+    the encode that already exists instead of enqueueing a fresh one."""
+    whole = edl([[0.0, 100.0]], inserts=[ins("ins1", 33.57, 23.86)])
+    halves = edl([[0.0, 100.0]],
+                 inserts=[ins("ins1", 33.57, 15.0),
+                          ins("ins2", 33.57, 8.86, src=15.0)])
+    cur = _Cur(renders=[(50, 1, "preview")], edls={1: whole})
+    assert video._preview_twin(cur, 1, halves, exclude_version=2) == 50
+
+
 if __name__ == "__main__":                                # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))

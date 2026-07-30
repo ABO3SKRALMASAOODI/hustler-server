@@ -173,6 +173,27 @@ def run_capture_remote(project_id, payload, user_id=None):
                         "attempts": 0, "payload": payload})
 
 
+def frames_available():
+    """Is there an executor to decode a stored original on? (round 62)
+
+    Same contract as capture_available: purely "is the executor configured".
+    With no executor there is only one box, and the local decode is what
+    shipped before — correct for that deployment, fatal only beside a
+    dispatcher whose job is to stay light.
+    """
+    return bool(config.REMOTE_EXECUTOR_URL)
+
+
+def run_frames_remote(project_id, payload, user_id=None):
+    """Extract stills from a stored object on the executor. Returns
+    frameserve.run_frames_job's dict: per-time storage keys (None where a
+    seek failed), errors, and the probed duration. Synchronous, no job row —
+    the round-61 capture shape."""
+    return _run_remote({"id": None, "type": "frames",
+                        "project_id": project_id, "user_id": user_id,
+                        "attempts": 0, "payload": payload})
+
+
 def run_render_remote(worker_db, job):      # signature matches run_render_job
     return _run_remote(job)
 

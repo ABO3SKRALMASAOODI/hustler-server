@@ -47,7 +47,7 @@ import media
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 1
+VERSION = 2
 
 # Sampling for the background plate. 24 samples spread over the window is
 # enough for a median to see past a subject that lingers, and few enough to hold
@@ -56,7 +56,37 @@ PLATE_SAMPLES = 24
 # A pixel counts as subject when it differs from the plate by more than this,
 # in 0-255 luma-ish distance. 18 is above codec noise and camera grain at
 # proxy bitrates and below any real change of content.
+#
+# ...on footage whose exposure holds still. VERSION 2 exists because a real
+# title-behind-a-walk shipped ~30% right on a dark handheld iPhone shot
+# (project 246, 2026-07-30): the phone's auto-exposure breathed as the subject
+# crossed the lamp, which moved EVERY pixel a couple of dozen luma values and
+# lit the mask up in a band across the middle of the frame — words vanished
+# behind nobody — while the dark-jacket-on-dark-room subject himself sat UNDER
+# the threshold and got overprinted. One fixed global number cannot serve both,
+# so v2 measures per frame and per pixel:
+#   * a per-frame, per-channel BIAS (the median of frame-minus-plate) is
+#     subtracted before thresholding — auto-exposure and white-balance drift
+#     move the whole frame together, and the median is immune to the subject
+#     (who is bounded by MAX_COVERAGE);
+#   * the threshold is lifted per PIXEL by that pixel's own temporal noise,
+#     measured from the same samples the plate came from — a flickering TV,
+#     shimmering foliage or a noisy shadow buys itself headroom instead of
+#     buying a hole in the title;
+#   * what survives is cleaned structurally (dropping specks no person could
+#     be, filling holes a plain torso leaves) and steadied by a 3-frame
+#     majority vote, so one frame's flicker cannot strobe the composite.
 DIFF_THRESHOLD = 18.0
+# Per-pixel threshold lift: threshold = max(DIFF_THRESHOLD, NOISE_K x that
+# pixel's mean absolute deviation across the plate samples), capped at
+# THRESHOLD_CEIL so a wildly noisy region can still yield a subject rather
+# than going permanently blind.
+NOISE_K = 4.0
+THRESHOLD_CEIL = 64.0
+# A connected blob smaller than this fraction of the frame is speckle, not a
+# person (a subject worth hiding words behind is bounded below by
+# MIN_COVERAGE, which is 5x this).
+MIN_BLOB_FRAC = 0.0008
 # Bounds on the answer, and both are refusals rather than degradations.
 #   above MAX: the frame is changing everywhere — a moving camera, a whip pan,
 #              a cut inside the window, a light being switched on. There is no
@@ -125,7 +155,7 @@ def _plate(path, start, dur, w, h, extra_vf=None):
             stack.append(f)
             break
     if len(stack) < 6:
-        return None
+        return None, None
     # THE COMMENT ON PLATE_SAMPLES WAS RIGHT; THE CODE WAS NOT (round 61).
     #
     # "24 x 960x540x3 is ~37 MB" is the uint8 figure. Every sample was being
@@ -139,17 +169,46 @@ def _plate(path, start, dur, w, h, extra_vf=None):
     # Kept in uint8 the whole way, the same three allocations come to ~110 MB
     # and the arithmetic is identical — median is order statistics, so the
     # dtype it partitions in cannot change which value wins.
-    return np.median(np.stack(stack), axis=0)
+    med = np.median(np.stack(stack), axis=0)
+    # The same samples the plate came from also say how much each pixel moves
+    # WITHOUT a subject in front of it — codec noise, a flickering screen,
+    # leaves in a window. Mean absolute deviation from the median, max across
+    # channels, accumulated one float32 frame at a time (~6 MB per step, never
+    # the stack widened at once).
+    acc = np.zeros((h, w, 3), np.float32)
+    for f in stack:
+        acc += np.abs(f.astype(np.float32) - med)
+    noise = (acc / float(len(stack))).max(axis=2)
+    return med, noise
 
 
-def _mask_frames(frames, plate, cv2, feather):
-    """Per-frame subject mask, 0-255, from the distance to the plate."""
+def _mask_frames(frames, plate, noise, cv2):
+    """Per-frame subject mask, 0-255 BINARY, from the distance to the plate.
+
+    Feathering happens after the temporal vote in the caller — blurring here
+    would turn the vote's crisp majority into mush.
+    """
+    thr = None
+    if noise is not None:
+        thr = np.clip(np.maximum(DIFF_THRESHOLD, NOISE_K * noise),
+                      DIFF_THRESHOLD, THRESHOLD_CEIL)
+        if cv2 is not None:
+            # Smoothed so the threshold map has no 1-pixel cliffs of its own.
+            thr = cv2.GaussianBlur(thr, (0, 0), 3)
     for f in frames:
+        diff = f.astype(np.float32) - plate
+        # Auto-exposure/white-balance drift moves the WHOLE frame together;
+        # the per-channel median of the difference is that drift (the subject
+        # cannot dominate a median — it is bounded by MAX_COVERAGE), and
+        # subtracting it is what lets a phone breathe its exposure without the
+        # mask claiming the whole room moved.
+        bias = np.median(diff[::4, ::4, :].reshape(-1, 3), axis=0)
         # Max across channels, not the mean: a red jumper against a grey wall
         # differs hugely in one channel and barely in the others, and averaging
         # that dilutes a real difference into noise.
-        d = np.max(np.abs(f.astype(np.float32) - plate), axis=2)
-        m = (d > DIFF_THRESHOLD).astype(np.uint8) * 255
+        d = np.max(np.abs(diff - bias.astype(np.float32)), axis=2)
+        m = ((d > thr) if thr is not None
+             else (d > DIFF_THRESHOLD)).astype(np.uint8) * 255
         if cv2 is not None:
             # Close first, then open: closing fills the holes a plain-coloured
             # torso leaves where it happens to match the wall behind it (which
@@ -159,10 +218,59 @@ def _mask_frames(frames, plate, cv2, feather):
             m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
             k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k2)
-            if feather > 0:
-                # A hard 1-pixel edge is what makes a composite look pasted.
-                m = cv2.GaussianBlur(m, (feather * 2 + 1, feather * 2 + 1), 0)
+            # Structure, not just texture: drop blobs no person could be, then
+            # fill the holes a person always has (a matte with a window through
+            # the torso prints the title THROUGH the subject, which is the
+            # single most visible way this effect fails).
+            nlab, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+            if nlab > 1:
+                h_, w_ = m.shape
+                min_px = max(64, int(MIN_BLOB_FRAC * w_ * h_))
+                keep = np.zeros(nlab, bool)
+                keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_px
+                m = np.where(keep[lab], 255, 0).astype(np.uint8)
+            m = _fill_holes(m, cv2)
         yield m
+
+
+def _fill_holes(m, cv2):
+    """Fill regions of background fully enclosed by subject. Flood-fills the
+    background from a border pixel that IS background; a mask touching every
+    border pixel has no reachable outside and is returned unchanged."""
+    h, w = m.shape
+    border = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
+    border += [(x, 0) for x in range(0, w, max(1, w // 16))]
+    border += [(x, h - 1) for x in range(0, w, max(1, w // 16))]
+    border += [(0, y) for y in range(0, h, max(1, h // 16))]
+    border += [(w - 1, y) for y in range(0, h, max(1, h // 16))]
+    seed = next(((x, y) for x, y in border if m[y, x] == 0), None)
+    if seed is None:
+        return m
+    ff = m.copy()
+    scratch = np.zeros((h + 2, w + 2), np.uint8)
+    cv2.floodFill(ff, scratch, seed, 255)
+    # ff is now white everywhere EXCEPT enclosed background — the holes.
+    return cv2.bitwise_or(m, cv2.bitwise_not(ff))
+
+
+def _vote3(masks):
+    """3-frame majority vote, frame-aligned: output i is the majority of
+    frames i-1, i, i+1 (edges vote with themselves doubled). One frame's
+    flicker — a threshold grazed by noise for a single frame — cannot strobe
+    the composite, while anything real survives two of three frames."""
+    def vote(a, b, c):
+        s = (a > 127).astype(np.uint8) + (b > 127) + (c > 127)
+        return np.where(s >= 2, 255, 0).astype(np.uint8)
+
+    p2 = p1 = None
+    for m in masks:
+        if p1 is None:
+            p1 = m
+            continue
+        yield vote(p1 if p2 is None else p2, p1, m)
+        p2, p1 = p1, m
+    if p1 is not None:
+        yield p1 if p2 is None else vote(p2, p1, p1)
 
 
 def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
@@ -197,7 +305,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
                         f"frame by frame — over {MAX_WINDOW_S:.0f}s that does "
                         "not finish inside one edit turn. Use a shorter "
                         "window for the words behind you")}
-    plate = _plate(src, start, dur, w, h, extra_vf)
+    plate, noise = _plate(src, start, dur, w, h, extra_vf)
     if plate is None:
         return {"ok": False,
                 "why": ("I could not read enough frames from that moment to "
@@ -230,7 +338,11 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE)
     try:
-        for m in _mask_frames(frames, plate, cv2, feather):
+        for m in _vote3(_mask_frames(frames, plate, noise, cv2)):
+            if cv2 is not None and feather > 0:
+                # A hard 1-pixel edge is what makes a composite look pasted.
+                # After the vote, so the majority is taken on crisp binaries.
+                m = cv2.GaussianBlur(m, (feather * 2 + 1, feather * 2 + 1), 0)
             on = m > 127
             c = float(on.sum()) / float(total)
             cov_sum += c

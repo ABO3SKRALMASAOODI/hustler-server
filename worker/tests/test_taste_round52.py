@@ -208,6 +208,31 @@ check("median of measured points",
 check("spread measures travel",
       subject.spread([(0.2, 0.4), (0.9, 0.45)]) == 0.7)
 
+print("== one type system per video (round 62) ==")
+
+
+def _tx(i, tpl, ent):
+    return {"id": f"tx{i}", "text": f"line {i}", "start": 2.0 + i * 6.0,
+            "end": 6.0 + i * 6.0, "template": tpl, "entrance": ent}
+
+
+# The real 26s architecture reel: title + callout + callout + subtitle,
+# entrances mixed fade/pop. Four sentences, three templates, two entrances.
+deck = dict(base, texts=[_tx(0, "title", "fade"), _tx(1, "callout", "pop"),
+                         _tx(2, "callout", "pop"), _tx(3, "subtitle", "fade")])
+check("a template-per-sentence text stack is flagged as a slide deck",
+      fired(_crit(deck), "slide deck"))
+one_sys = dict(base, texts=[_tx(0, "callout", "fade"), _tx(1, "callout", "fade"),
+                            _tx(2, "callout", "fade"), _tx(3, "callout", "fade")])
+check("one template + one entrance raises nothing",
+      not fired(_crit(one_sys), "slide deck"))
+two_cards = dict(base, texts=[_tx(0, "title", "fade"), _tx(1, "subtitle", "pop")])
+check("two cards are too few to call a pattern",
+      not fired(_crit(two_cards), "slide deck"))
+check("asking for the mix suppresses it",
+      not fired(_crit(deck, ask="use a different template for each line"),
+                "slide deck"))
+
 print("== library tempo lookup ==")
 t = music_library.measured_tempo("library:hiphop-abducted")
 check("a shipped track has an offline tempo measurement", t is not None)

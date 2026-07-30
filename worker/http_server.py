@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
 import db as dbx
+import frameserve
 import indexer
 import renderer
 import version
@@ -49,6 +50,10 @@ RUNNERS = {
     "preview": renderer.run_render_job,
     "final": renderer.run_render_job,
     "capture": webrecord.run_capture_job,
+    # Same shape as capture (round 62): one tool call inside an agent turn,
+    # moved here because decoding a user's 4K original for six jpegs is
+    # compute, and doing it on the dispatcher killed job 1452's turn.
+    "frames": frameserve.run_frames_job,
 }
 
 

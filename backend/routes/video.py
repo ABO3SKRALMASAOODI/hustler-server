@@ -593,6 +593,51 @@ def _program_signature(edl):
             else:
                 merged.append([s, t])
         e["keep"] = merged
+        # A split INSERT is the same no-op a split keep span is (round 61b):
+        # _split_insert leaves head + tail co-located at one boundary, with the
+        # tail's source_start_s continuing exactly where the head stops, and
+        # list order playing head-then-tail — the renderer concatenates them
+        # straight back into the clip they were. So merge content-continuous
+        # neighbours before hashing, or every scissors click on a dropped-in
+        # clip pays a full re-encode for a byte-identical programme. Only
+        # ADJACENT-in-list pieces merge (list order is program order at a
+        # shared boundary), only when every other field agrees, and never when
+        # either half carries a motion — a Ken Burns move eases per BLOCK, so
+        # two halves genuinely render differently from one whole. Skipped when
+        # a transition is configured, same as the keep merge above: the
+        # head/tail join is a junction the transition resolver can see.
+        ins_in = e.get("inserts") or []
+        if len(ins_in) >= 2:
+            ins_out = [dict(ins_in[0])]
+            for nxt in ins_in[1:]:
+                prev = ins_out[-1]
+                joins = False
+                try:
+                    if (abs(float(nxt.get("at_output_s"))
+                            - float(prev.get("at_output_s"))) < 1e-3
+                            and not prev.get("motion")
+                            and not nxt.get("motion")
+                            and all(prev.get(k) == nxt.get(k)
+                                    for k in (set(prev) | set(nxt))
+                                    if k not in ("id", "duration_s",
+                                                 "source_start_s"))):
+                        if nxt.get("kind") == "image":
+                            joins = True
+                        else:
+                            s0 = float(prev.get("source_start_s") or 0.0)
+                            s1 = float(nxt.get("source_start_s") or 0.0)
+                            joins = abs(
+                                s1 - (s0 + float(prev.get("duration_s") or 0.0))
+                            ) < 0.005
+                except (TypeError, ValueError):
+                    joins = False
+                if joins:
+                    prev["duration_s"] = round(
+                        float(prev.get("duration_s") or 0.0)
+                        + float(nxt.get("duration_s") or 0.0), 3)
+                else:
+                    ins_out.append(dict(nxt))
+            e["inserts"] = ins_out
     try:
         return wschemas.edl_signature(e)
     except Exception:

@@ -390,6 +390,23 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             "remove_text the rest, or space them out. (A title card's own "
             "title + subtitle pair is fine; a third line on top of it is "
             "not.)")
+    # ── one type system per video (round 62) ────────────────────────────
+    # A real 26s architecture reel shipped with a title in one template, two
+    # callouts and a subtitle, entrances mixed fade/pop — four text styles in
+    # four sentences reads as a slide deck, not an edit. Templates and
+    # entrances are a TYPE SYSTEM: pick one and reuse it. Standalone cards
+    # only — a title card's own title+subtitle pair is one designed graphic,
+    # same exemption as the overlap check above.
+    loose = [t for t in texts if not t.get("anchor_insert")]
+    if len(loose) >= 3 and "template" not in ask:
+        tpls = {str(t.get("template") or "title") for t in loose}
+        ents = {str(t.get("entrance") or "none") for t in loose}
+        if len(tpls) >= 3 or (len(tpls) >= 2 and len(ents) >= 3):
+            add(f"{len(loose)} text cards use {len(tpls)} different templates "
+                f"and {len(ents)} different entrances — four styles in four "
+                "sentences is a slide deck, not a type system. Re-set them "
+                "with ONE template and ONE entrance (vary only size or "
+                "accent), unless the user asked for the mix.")
     if caps_on and texts:
         clashes = []
         for t in texts:

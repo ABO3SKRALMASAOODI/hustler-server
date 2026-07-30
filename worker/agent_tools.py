@@ -761,6 +761,64 @@ def _asset_local_path(ctx, asset):
     return local
 
 
+def _asset_frames(ctx, asset, times, width=640, tag="alook"):
+    """Local jpeg paths for `times` of an UPLOADED asset — [(i, path)], err.
+
+    Decoded on the EXECUTOR when one is configured (round 62). An uploaded
+    asset has no proxy — the only copy is the user's original, routinely 4K
+    HEVC off a phone — and one decoded 4K frame costs ~240 MB resident even
+    single-threaded. This runs inside an agent turn, on the dispatcher, and
+    on 2026-07-30 (job 1452) it OOM-killed that process one hour after round
+    61b shipped for the same class of death; the customer read "I lost my
+    connection". A remote FAILURE does not fall back to a local decode —
+    that reproduces the crash on the box we know is too small (round 61b).
+    The local loop below exists only for the single-box deployment with no
+    executor at all, where it is what always shipped.
+    """
+    times = [round(float(t), 3) for t in times]
+    if remote.frames_available():
+        try:
+            got = remote.run_frames_remote(
+                ctx.project_id,
+                {"storage_key": asset["storage_key"], "times": times,
+                 "width": width},
+                user_id=ctx.job.get("user_id")) or {}
+        except Exception as ex:
+            return [], f"frame extraction failed on the render service ({ex})"
+        keys = got.get("keys") or []
+        pairs, errs = [], [str(e) for e in (got.get("errors") or [])]
+        for i, k in enumerate(keys):
+            if not k:
+                continue
+            fp = os.path.join(ctx.workdir, f"{tag}_{asset['id']}_{i}.jpg")
+            try:
+                storage.download_to(k, fp)
+            except Exception as ex:
+                errs.append(str(ex))
+                continue
+            pairs.append((i, fp))
+        try:
+            storage.delete_keys([k for k in keys if k])
+        except Exception:
+            pass                     # scratch objects; never worth a failure
+        return pairs, (None if pairs else
+                       ("; ".join(errs)[:220] or "no frames came back"))
+    # No executor configured: one box is all there is, decode here.
+    try:
+        local = _asset_local_path(ctx, asset)
+    except Exception as ex:
+        return [], f"cannot fetch that asset right now ({ex})"
+    pairs, last_err = [], None
+    for i, t in enumerate(times):
+        fp = os.path.join(ctx.workdir, f"{tag}_{asset['id']}_{i}.jpg")
+        try:
+            media.frame_at(local, t, fp, width=width)
+            pairs.append((i, fp))
+        except media.MediaError as ex:
+            last_err = str(ex)
+    return pairs, (None if pairs else (last_err or "unknown error"))
+
+
 def look_at_asset(ctx, asset_key, question, start=0, end=None):
     """Frames from an UPLOADED clip or image (not the main video) — THE way
     to pick which moment of a long clip to splice in with insert_media."""
@@ -773,11 +831,11 @@ def look_at_asset(ctx, asset_key, question, start=0, end=None):
         return err
     name = (asset.get("meta") or {}).get("filename") or \
         os.path.basename(asset_key)
-    try:
-        local = _asset_local_path(ctx, asset)
-    except Exception as e:
-        return f"Cannot fetch that asset right now ({e})."
     if asset["kind"] == "image_ref":
+        try:
+            local = _asset_local_path(ctx, asset)
+        except Exception as e:
+            return f"Cannot fetch that asset right now ({e})."
         answer = llm.ask_vision(
             f"This is the uploaded image '{name}'. Question from the "
             f"editor: {question}\nAnswer concisely and concretely.",
@@ -792,24 +850,19 @@ def look_at_asset(ctx, asset_key, question, start=0, end=None):
     if e <= s:
         e = min(dur, s + 1.0)
     n = 6 if e - s > 20 else 4
-    frames, frame_names, last_err = [], [], None
-    for i in range(n):
-        t = s + (e - s) * (i + 0.5) / n
-        fp = os.path.join(ctx.workdir,
-                          f"alook_{asset['id']}_{i}_{int(t * 10)}.jpg")
-        try:
-            media.frame_at(local, t, fp, width=640)
-            frames.append(fp)
-            frame_names.append(f"clip '{name}' frame @{t:.2f}s")
-        except media.MediaError as ex:
-            last_err = str(ex)
+    times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
+    # The decode happens on the executor when one is configured — an uploaded
+    # clip has no proxy, and 4K seeks on the dispatcher are what killed job
+    # 1452's whole turn (see _asset_frames).
+    pairs, err = _asset_frames(ctx, asset, times, width=640, tag="alook")
+    frames = [fp for _, fp in pairs]
+    frame_names = [f"clip '{name}' frame @{times[i]:.2f}s" for i, _ in pairs]
     if not frames:
         return ("Could not extract frames from that clip "
-                f"({(last_err or 'unknown error')[:220]}). The clip can still "
+                f"({(err or 'unknown error')[:220]}). The clip can still "
                 "be inserted — you just cannot see inside it; ask the user "
                 "which part to use instead of guessing.")
-    labels = ", ".join(f"{s + (e - s) * (i + 0.5) / n:.1f}s"
-                       for i in range(len(frames)))
+    labels = ", ".join(f"{times[i]:.1f}s" for i, _ in pairs)
     answer = llm.ask_vision(
         f"These are {len(frames)} frames sampled from the uploaded clip "
         f"'{name}' ({dur:.0f}s long), at {labels}. Question from the "
@@ -4419,6 +4472,114 @@ def _out_frac_from_source(ctx, edl, sx, sy):
     return min(max(ox, 0.0), 1.0), min(max(oy, 0.0), 1.0)
 
 
+def _out_frac_from_insert(ctx, edl, asset_aspect, x, y):
+    """Map a fraction of an INSERTED clip's own frame to an OUTPUT-frame
+    fraction (round 62).
+
+    A spliced clip is normalized to the output frame by the renderer —
+    cover-cropped when the project's frame mode is crop, letterboxed when it
+    is pad — so a screen measured in the ASSET's pixels sits somewhere else
+    in the program's pixels, exactly as a reframed source does. Same contract
+    as _out_frac_from_source: None when the point is cropped away.
+    """
+    fr = edl.get("frame") or {}
+    ratio = fr.get("ratio") or "source"
+    info = ctx.index.get("video") or {}
+    sw = float(info.get("width") or 0) or 1920.0
+    sh = float(info.get("height") or 0) or 1080.0
+    if ratio == "source":
+        out_aspect = sw / sh
+    else:
+        W, H = renderer.frame_dims(sw, sh, ratio)
+        out_aspect = W / float(H)
+    a, o = float(asset_aspect), float(out_aspect)
+    mode = fr.get("mode") or "crop"
+    if mode == "crop":                          # cover: center-crop overflow
+        if a > o:                               # sides cropped
+            vis = o / a
+            ox = (x - (1.0 - vis) / 2.0) / vis
+            oy = y
+        else:                                   # top/bottom cropped
+            vis = a / o
+            ox = x
+            oy = (y - (1.0 - vis) / 2.0) / vis
+    else:                                       # pad / pad_blur: fit + bars
+        if a > o:                               # bars above/below
+            vis = o / a
+            ox = x
+            oy = y * vis + (1.0 - vis) / 2.0
+        else:                                   # bars left/right
+            vis = a / o
+            ox = x * vis + (1.0 - vis) / 2.0
+            oy = y
+    if not (-0.02 <= ox <= 1.02 and -0.02 <= oy <= 1.02):
+        return None
+    return min(max(ox, 0.0), 1.0), min(max(oy, 0.0), 1.0)
+
+
+def _detect_screen_on_insert(ctx, edl, host, clip_t):
+    """_detect_screen's counterpart for a screen inside a SPLICED clip.
+
+    The frames come from the insert's own asset — via the executor when one
+    is configured (_asset_frames), because the only copy of a dropped-in clip
+    is the user's original. Same voting, same vision fallback, same honest
+    (corners, info) | (None, reason) contract; corners come back in OUTPUT
+    fractions via the insert normalization mapping above.
+    """
+    asset, err = _resolve_media_asset(ctx, host["asset_key"], ("video_clip",))
+    if err:
+        return None, f"could not open the spliced clip ({err[:120]})"
+    dur = _asset_media_duration(ctx, asset)
+    times = [min(max(clip_t + off, 0.0), max(0.0, dur - 0.05))
+             for off in (-0.4, 0.0, 0.4)]
+    pairs, ferr = _asset_frames(ctx, asset, times, width=960, tag="sdet")
+    frames = [fp for _, fp in pairs]
+    if not frames:
+        return None, (f"could not extract frames from the spliced clip "
+                      f"({(ferr or 'unknown error')[:120]})")
+    res = screendet.find_screen(frames)
+    why = None
+    if res.get("error"):
+        why = res["error"]
+    elif res["confidence"] < screendet.MIN_CONFIDENCE:
+        why = (f"the best screen-shaped region scored only "
+               f"{res['confidence']:.2f} confidence")
+    if why:
+        quad, vwhy = _vision_screen_corners(ctx, frames[len(frames) // 2])
+        if quad is None:
+            return None, f"{why}, and {vwhy}"
+        ok, sane = quad_is_sane(quad)
+        if not ok:
+            return None, (f"{why}, and the corners the vision model read are "
+                          f"not a usable quadrilateral ({sane})")
+        res = {"corners": quad, "confidence": None, "method": "vision",
+               "agreement": 1, "n_frames": 1, "read_not_measured": why}
+    # The measured fractions are of the ASSET's frame; the pin consumes
+    # OUTPUT fractions. Aspect from the asset row when probed, else from the
+    # extracted jpeg itself (frame_at preserves aspect).
+    aw = float(asset.get("width") or 0)
+    ah = float(asset.get("height") or 0)
+    if not (aw > 0 and ah > 0):
+        try:
+            import cv2
+            ih_, iw_ = cv2.imread(frames[0]).shape[:2]
+            aw, ah = float(iw_), float(ih_)
+        except Exception:
+            return None, ("could not determine the spliced clip's frame "
+                          "shape to place the corners")
+    out = []
+    for i in range(4):
+        pt = _out_frac_from_insert(ctx, edl, aw / ah,
+                                   res["corners"][2 * i],
+                                   res["corners"][2 * i + 1])
+        if pt is None:
+            return None, ("the screen in the spliced clip falls outside the "
+                          "output frame — this project's reframe crops it "
+                          "away")
+        out.extend([round(pt[0], 4), round(pt[1], 4)])
+    return out, res
+
+
 _SCREEN_VISION_PROMPT = (
     "This frame is from a video. Somewhere in it there is a DEVICE SCREEN "
     "being filmed — a laptop, a monitor, a phone, a tablet, a TV. I need its "
@@ -4606,17 +4767,71 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
     # measure, and the end is where the content has already covered it.
     probe_out = max(0.0, at - dur * 0.5)
     src_t = tl.out_to_src(probe_out)
+    host = None          # (insert, win_start, win_end) when the push rides one
+    host_notes = []
     if src_t is None:
-        return (f"REJECTED: {round(probe_out, 2)}s of the program is inside a "
-                "spliced-in clip, not the main footage — there is no shot of "
-                "a device there to push into. Point at_output_s at a moment "
-                "where the main video is playing.")
+        # THE DEVICE SHOT CAN ITSELF BE A SPLICED-IN CLIP (round 62). A real
+        # user's timeline was walk / laptop-shot clip / screen recording —
+        # "transition into the laptop" — and this branch used to refuse
+        # because the laptop lived in an insert. The renderer never cared:
+        # the push is a program-time zoom term over whatever picture is there
+        # and the pin overlays the composited stream. Only detection (frames
+        # must come from the insert's own asset) and placement (the handoff
+        # lands at the insert's boundary, after it in list order) are
+        # insert-aware, and both are handled here.
+        wins0 = insert_windows(edl.get("inserts") or [], tl)
+        for cand in (edl.get("inserts") or []):
+            wsp = wins0.get(cand.get("id"))
+            if wsp and wsp[0] - 1e-6 <= probe_out <= wsp[1] + 1e-6:
+                host = (cand, wsp[0], wsp[1])
+                break
+        if host is None or host[0].get("kind") != "video":
+            return (f"REJECTED: {round(probe_out, 2)}s of the program is "
+                    "inside a spliced-in still image — there is no moving "
+                    "shot of a device there to push into. Point at_output_s "
+                    "at footage or at a spliced video clip that shows the "
+                    "device.")
+        h_ins, w0, w1 = host
+        if w1 - w0 < SCREEN_TAKEOVER_MIN_S + 0.1:
+            return (f"REJECTED: the spliced clip under {round(probe_out, 2)}s "
+                    f"is only {round(w1 - w0, 2)}s long — too short to push "
+                    "through. Lengthen it (set_insert_window) or push into "
+                    "the main footage instead.")
+        # The handoff must land where the host clip ends — that is the only
+        # boundary the content can take over at without cutting the host
+        # short — and the push rides the host's own tail to get there.
+        if dur > w1 - w0 - 0.05:
+            dur = round(max(SCREEN_TAKEOVER_MIN_S, w1 - w0 - 0.05), 2)
+            host_notes.append(f"shortened the push to {dur}s so it fits "
+                              "inside the spliced clip")
+        if abs(at - w1) > 0.01:
+            host_notes.append(f"moved the arrival from {at}s to {round(w1, 2)}s "
+                              "— the end of the spliced device shot, which is "
+                              "where the content can take over")
+            at = round(w1, 2)
+        probe_out = max(0.0, at - dur * 0.5)
 
     detected = None
     if corners is not None:
         quad, cerr = _parse_screen_corners(corners)
         if cerr:
             return cerr
+    elif host is not None:
+        h_ins, w0, w1 = host
+        clip_t = float(h_ins.get("source_start_s") or 0.0) + (probe_out - w0)
+        quad, why = _detect_screen_on_insert(ctx, edl, h_ins, clip_t)
+        if quad is None:
+            return (f"REJECTED: I could not find a screen in the spliced clip "
+                    f"at {round(probe_out, 2)}s — {why}. BOTH ways were "
+                    "tried: measuring it from the pixels and reading it with "
+                    "the vision model. I will not guess a rectangle — the "
+                    "corners are the whole effect. Check the moment "
+                    "(look_at_asset on that clip — is the device actually "
+                    "visible and big enough there?), or ask the user for the "
+                    "screen's four corners and pass them as `corners` "
+                    "(8 numbers, fractions of the frame: top-left, top-right, "
+                    "BOTTOM-LEFT, bottom-right).")
+        detected = why
     else:
         quad, why = _detect_screen(ctx, edl, src_t)
         if quad is None:
@@ -4669,63 +4884,143 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
     except (TypeError, ValueError):
         return "REJECTED: hold_s must be a number of seconds."
 
-    # ── 1. the handoff, placed FIRST ────────────────────────────────────────
-    # insert_media snaps to segment boundaries and to word edges, so where the
-    # clip actually lands is not necessarily where it was asked to land. The
-    # takeover is then built backwards from the position the insert REALLY
-    # took — the pin's last frame and the clip's first frame have to be the
-    # same frame, and a quarter-second snap nobody read back would break
-    # exactly that.
-    ins_dur = hold
-    if ins_dur is None:
-        ins_dur = (round(min(clip_dur - off - dur, MAX_INSERT_DURATION_S), 2)
-                   if kind == "video" else 4.0)
-    before_ids = {i.get("id") for i in (edl.get("inserts") or [])}
-    before_keep = [list(k) for k in edl["keep"]]
-    res = insert_media(ctx, asset_key, at, duration_s=ins_dur,
-                       clip_start_s=(round(off + dur, 2)
-                                     if kind == "video" else None))
-    if not res.startswith("EDL v"):
-        return (f"REJECTED: could not place the clip the takeover hands off "
-                f"to — {res}")
-    edl = dict(ctx.latest_edl()["json"])
+    # ── 0. a clip ALREADY placed at the arrival point IS the handoff ────────
+    # (round 62) On the timeline this was built for — walk / device-shot clip /
+    # screen recording — the content that takes over is usually already
+    # sitting right after the device shot, placed by the user or an earlier
+    # edit. Splicing a fresh copy would land AFTER it in list order and the
+    # push would arrive on the wrong clip. So when an insert already starts at
+    # the arrival frame, the takeover adopts it: the pin plays the footage of
+    # that same asset that ENDS exactly on the frame the placed clip opens
+    # with, and nothing is duplicated.
+    adopt = None
+    if host is not None:
+        h_ins, w0, w1 = host
+        wins_now = insert_windows(edl.get("inserts") or [], tl)
+        for cand in (edl.get("inserts") or []):
+            if cand.get("id") == h_ins.get("id"):
+                continue
+            wsp = wins_now.get(cand.get("id"))
+            if wsp and abs(wsp[0] - w1) < 1e-6:
+                adopt = cand
+                break
+        if adopt is not None and (adopt.get("asset_key") != asset_key
+                                  or adopt.get("kind") != "video"
+                                  or kind != "video"):
+            return (f"REJECTED: a different clip already plays at "
+                    f"{round(w1, 2)}s, right where this takeover would arrive "
+                    f"[{adopt.get('id')}]. The push must land on the clip "
+                    "that actually plays there — call again with THAT "
+                    f"asset_key, or remove_insert('{adopt.get('id')}') "
+                    "first.")
 
-    def _undo(reason):
-        """Put the edit back the way it was before the clip was spliced.
+    adopt_notes = []
+    if adopt is not None:
+        inserts2 = [dict(i) for i in (edl.get("inserts") or [])]
+        tgt = next(i for i in inserts2 if i.get("id") == adopt.get("id"))
+        s2 = float(tgt.get("source_start_s") or 0.0)
+        if clip_start_s is not None and abs((off + dur) - s2) > 0.05:
+            adopt_notes.append(
+                "ignored clip_start_s — the pin has to end on the exact "
+                "frame the already-placed clip starts on")
+        if hold_s is not None:
+            adopt_notes.append("ignored hold_s — the placed clip keeps its "
+                               "own length")
+        if s2 >= dur - 0.01:
+            # Enough of the asset exists before the placed clip's own start:
+            # the pin plays the run-up and the placed clip is untouched.
+            off = round(max(0.0, s2 - dur), 2)
+        elif s2 >= SCREEN_TAKEOVER_MIN_S:
+            adopt_notes.append(
+                f"shortened the push to {round(s2, 2)}s — that is all the "
+                "footage the clip has before the frame it already starts on")
+            dur = round(s2, 2)
+            off = 0.0
+        else:
+            # The placed clip starts at (nearly) the top of its source: the
+            # pin has to consume the clip's own opening, playing it ON the
+            # glass, and the full-screen part picks up where the pin ends.
+            take = round(dur - s2, 2)
+            newlen = round(float(tgt["duration_s"]) - take, 2)
+            if newlen < 0.5:
+                return (f"REJECTED: the placed clip [{tgt['id']}] is only "
+                        f"{tgt['duration_s']}s long — a {dur}s push would "
+                        "consume nearly all of it. Use a shorter duration_s.")
+            off = 0.0
+            tgt["source_start_s"] = round(dur, 3)
+            tgt["duration_s"] = newlen
+            adopt_notes.append(
+                f"the clip's first {round(dur, 2)}s now plays ON the glass "
+                f"during the push; its full-screen part follows for {newlen}s")
+        edl["inserts"] = inserts2
+        ins = tgt
+        hand = round(w1, 2)
+        start = round(hand - dur, 2)
 
-        insert_media has already written a version by this point, so a bare
-        REJECTED here would leave the user with a clip cutting in cold and no
-        push into it — a change they did not ask for, from a call that said it
-        failed. The keep list goes back too, because insert_media may have
-        SPLIT a take to land the clip mid-sentence.
-        """
-        back = dict(ctx.latest_edl()["json"])
-        back["inserts"] = [i for i in (back.get("inserts") or [])
-                           if i.get("id") in before_ids]
-        back["keep"] = before_keep
-        ctx.write_edl(back, "undid the handoff clip — the takeover could not "
-                            "be built")
-        return f"REJECTED: {reason} Nothing was changed."
+        def _undo(reason):
+            # Nothing has been written in adopt mode — a plain refusal IS the
+            # rollback.
+            return f"REJECTED: {reason} Nothing was changed."
+    else:
+        # ── 1. the handoff, placed FIRST ────────────────────────────────────
+        # insert_media snaps to segment boundaries and to word edges, so where
+        # the clip actually lands is not necessarily where it was asked to
+        # land. The takeover is then built backwards from the position the
+        # insert REALLY took — the pin's last frame and the clip's first frame
+        # have to be the same frame, and a quarter-second snap nobody read
+        # back would break exactly that.
+        ins_dur = hold
+        if ins_dur is None:
+            ins_dur = (round(min(clip_dur - off - dur,
+                                 MAX_INSERT_DURATION_S), 2)
+                       if kind == "video" else 4.0)
+        before_ids = {i.get("id") for i in (edl.get("inserts") or [])}
+        before_keep = [list(k) for k in edl["keep"]]
+        res = insert_media(ctx, asset_key, at, duration_s=ins_dur,
+                           clip_start_s=(round(off + dur, 2)
+                                         if kind == "video" else None))
+        if not res.startswith("EDL v"):
+            return (f"REJECTED: could not place the clip the takeover hands "
+                    f"off to — {res}")
+        edl = dict(ctx.latest_edl()["json"])
 
-    new_ids = {i.get("id") for i in (edl.get("inserts") or [])} - before_ids
-    if not new_ids:
-        return _undo("the handoff clip did not survive the write.")
-    # Diff the id sets rather than matching on asset_key: the same clip may
-    # already be spliced in elsewhere, and picking "the last one with this
-    # asset" would build the takeover around somebody else's insert.
-    ins = next(i for i in edl["inserts"] if i.get("id") in new_ids)
-    tl2 = Timeline(edl["keep"], edl.get("inserts") or [],
-                   edl.get("speed") or [])
-    windows = insert_windows(edl.get("inserts") or [], tl2)
-    if ins["id"] not in windows:
-        return _undo("I could not locate the clip on the timeline after "
-                     "placing it.")
-    hand = windows[ins["id"]][0]
-    start = round(hand - dur, 2)
-    if start < 0.0:
-        return _undo(f"the clip snapped to the nearest cut at {hand}s, and a "
-                     f"{dur}s push does not fit before it — move at_output_s "
-                     "later or shorten duration_s.")
+        def _undo(reason):
+            """Put the edit back the way it was before the clip was spliced.
+
+            insert_media has already written a version by this point, so a
+            bare REJECTED here would leave the user with a clip cutting in
+            cold and no push into it — a change they did not ask for, from a
+            call that said it failed. The keep list goes back too, because
+            insert_media may have SPLIT a take to land the clip mid-sentence.
+            """
+            back = dict(ctx.latest_edl()["json"])
+            back["inserts"] = [i for i in (back.get("inserts") or [])
+                               if i.get("id") in before_ids]
+            back["keep"] = before_keep
+            ctx.write_edl(back, "undid the handoff clip — the takeover could "
+                                "not be built")
+            return f"REJECTED: {reason} Nothing was changed."
+
+        new_ids = {i.get("id") for i in (edl.get("inserts") or [])} \
+            - before_ids
+        if not new_ids:
+            return _undo("the handoff clip did not survive the write.")
+        # Diff the id sets rather than matching on asset_key: the same clip
+        # may already be spliced in elsewhere, and picking "the last one with
+        # this asset" would build the takeover around somebody else's insert.
+        ins = next(i for i in edl["inserts"] if i.get("id") in new_ids)
+        tl2 = Timeline(edl["keep"], edl.get("inserts") or [],
+                       edl.get("speed") or [])
+        windows = insert_windows(edl.get("inserts") or [], tl2)
+        if ins["id"] not in windows:
+            return _undo("I could not locate the clip on the timeline after "
+                         "placing it.")
+        hand = windows[ins["id"]][0]
+        start = round(hand - dur, 2)
+        if start < 0.0:
+            return _undo(f"the clip snapped to the nearest cut at {hand}s, "
+                         f"and a {dur}s push does not fit before it — move "
+                         "at_output_s later or shorten duration_s.")
 
     # ── 2. the pin, built backwards from where the clip really landed ───────
     overlays = [dict(o) for o in (edl.get("overlays") or [])]
@@ -4748,6 +5043,13 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
 
     _cx, _cy, z_end = renderer.screen_lock_geometry(item["screen"])
     bits = [written]
+    if host_notes:
+        bits.append("Riding the spliced clip: " + "; ".join(host_notes) + ".")
+    if adopt is not None:
+        bits.append("Adopted the clip already placed at the arrival point "
+                    f"[{ins['id']}] as the handoff — nothing was duplicated"
+                    + ("; " + "; ".join(adopt_notes) if adopt_notes else "")
+                    + ".")
     if detected and detected.get("read_not_measured"):
         # Honest about which of the two ways this happened. A vision read is an
         # estimate, and the whole effect lives or dies on the corners, so the
@@ -9606,7 +9908,11 @@ TOOLS = {
         "cut lands as a jump. "
         "at_output_s is where in the FINAL video the takeover FINISHES and "
         "the asset is full screen (the push happens in the duration_s before "
-        "it). duration_s 0.4-5, default 1.2 — 1.0-1.5 is the move people "
+        "it). The device shot may be the MAIN footage or a SPLICED-IN video "
+        "clip: point at_output_s inside an inserted clip that shows the "
+        "device and the push rides that clip's tail, arriving exactly where "
+        "it ends (I snap there and say so). "
+        "duration_s 0.4-5, default 1.2 — 1.0-1.5 is the move people "
         "mean. I MEASURE the screen's four corners from the frames myself; "
         "pass `corners` only to override that (8 numbers x0,y0,x1,y1,x2,y2,"
         "x3,y3 as FRACTIONS of the frame in the order top-left, top-right, "

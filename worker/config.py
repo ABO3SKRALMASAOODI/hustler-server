@@ -541,6 +541,13 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # agent turn, so it must stay far below AGENT_TURN_TIMEOUT_S rather than
     # near the executor's own ceiling.
     "capture": int(os.getenv("REMOTE_TIMEOUT_CAPTURE_S", "180")),
+    # Frame extraction from a stored original (round 62): dominated by the
+    # executor pulling the source object from storage — a few hundred MB on
+    # Cloud Run's own pipe — plus a handful of single-frame seeks. Like
+    # capture, a user is synchronously inside an agent turn waiting on it, so
+    # it sits far below AGENT_TURN_TIMEOUT_S (720), never near the executor's
+    # ceiling.
+    "frames": int(os.getenv("REMOTE_TIMEOUT_FRAMES_S", "240")),
 }
 
 
