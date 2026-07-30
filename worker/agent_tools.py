@@ -36,6 +36,7 @@ import cursor as cursorlib
 import screendet
 import screenframe
 import timeline as timeline_mod
+import tracker
 import travel
 import url_media
 import remote
@@ -4517,6 +4518,189 @@ def _out_frac_from_insert(ctx, edl, asset_aspect, x, y):
     return min(max(ox, 0.0), 1.0), min(max(oy, 0.0), 1.0)
 
 
+def _src_frac_from_out(ctx, edl, ox, oy):
+    """Inverse of _out_frac_from_source: an OUTPUT fraction back into the
+    SOURCE frame's fractions. The tracker measures on the source/proxy pixels,
+    but the pin's quad lives in output fractions — corners have to make the
+    round trip through the same reframe arithmetic in both directions."""
+    fr = edl.get("frame") or {}
+    ratio = fr.get("ratio") or "source"
+    if ratio == "source":
+        return ox, oy
+    info = ctx.index.get("video") or {}
+    sw = float(info.get("width") or 0) or 1920.0
+    sh = float(info.get("height") or 0) or 1080.0
+    W, H = renderer.frame_dims(sw, sh, ratio)
+    mode = fr.get("mode") or "crop"
+    if mode == "crop":
+        s = max(W / sw, H / sh)
+        scaled_w, scaled_h = sw * s, sh * s
+        fx = fr.get("focus_x")
+        fy = fr.get("focus_y")
+        fx = 0.5 if fx is None else float(fx)
+        fy = 0.5 if fy is None else float(fy)
+        x0 = min(max(scaled_w * fx - W / 2.0, 0.0), scaled_w - W)
+        y0 = min(max(scaled_h * fy - H / 2.0, 0.0), scaled_h - H)
+        return (ox * W + x0) / scaled_w, (oy * H + y0) / scaled_h
+    s = min(W / sw, H / sh)
+    scaled_w, scaled_h = sw * s, sh * s
+    return ((ox * W - (W - scaled_w) / 2.0) / scaled_w,
+            (oy * H - (H - scaled_h) / 2.0) / scaled_h)
+
+
+def _asset_frac_from_out(ctx, edl, asset_aspect, ox, oy):
+    """Inverse of _out_frac_from_insert: an OUTPUT fraction back into an
+    inserted clip's own frame fractions."""
+    fr = edl.get("frame") or {}
+    ratio = fr.get("ratio") or "source"
+    info = ctx.index.get("video") or {}
+    sw = float(info.get("width") or 0) or 1920.0
+    sh = float(info.get("height") or 0) or 1080.0
+    if ratio == "source":
+        out_aspect = sw / sh
+    else:
+        W, H = renderer.frame_dims(sw, sh, ratio)
+        out_aspect = W / float(H)
+    a, o = float(asset_aspect), float(out_aspect)
+    mode = fr.get("mode") or "crop"
+    if mode == "crop":
+        if a > o:
+            vis = o / a
+            return ox * vis + (1.0 - vis) / 2.0, oy
+        vis = a / o
+        return ox, oy * vis + (1.0 - vis) / 2.0
+    if a > o:
+        vis = o / a
+        return ox, (oy - (1.0 - vis) / 2.0) / vis
+    vis = a / o
+    return (ox - (1.0 - vis) / 2.0) / vis, oy
+
+
+def _track_screen_path(ctx, edl, quad_out, start, dur, host):
+    """Follow the screen through the push window so the pin can ride it.
+
+    Returns (corner_path, arrival_quad, note):
+      corner_path — [[t_rel, x0..y3], ...] in OUTPUT fractions, or None when
+                    the static pin stands (tripod shot, track failed, no
+                    executor for an original, a cut/ramp inside the window);
+      arrival_quad — the tracked quad at the window's END (what the camera
+                    geometry should aim at), or None with corner_path;
+      note — one sentence for the tool reply saying what happened.
+
+    The track runs where the pixels are cheap to decode: the executor for an
+    inserted clip (its only copy is the user's original — the OOM class), the
+    proxy for main footage (proxy-class work, allowed locally only as the
+    no-executor fallback).
+    """
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    hand = start + dur
+    if host is not None:
+        h_ins, w0, _w1 = host
+        asset, err = _resolve_media_asset(ctx, h_ins["asset_key"],
+                                          ("video_clip",))
+        if err:
+            return None, None, "kept a static pin (could not open the clip)"
+        if not remote.track_available():
+            return (None, None,
+                    "kept a static pin — tracking the screen means decoding "
+                    "the clip's original, which needs the executor")
+        aw = float(asset.get("width") or 0)
+        ah = float(asset.get("height") or 0)
+        if not (aw > 0 and ah > 0):
+            dims = _ensure_asset_dims(ctx, asset)
+            if dims:
+                aw, ah = dims * 1000.0, 1000.0
+        if not (aw > 0 and ah > 0):
+            return None, None, ("kept a static pin (the clip's frame shape "
+                                "is unknown)")
+        a0 = float(h_ins.get("source_start_s") or 0.0) + (start - w0)
+        to_track = lambda x, y: _asset_frac_from_out(ctx, edl, aw / ah, x, y)
+        to_out = lambda x, y: _out_frac_from_insert(ctx, edl, aw / ah, x, y)
+        key = asset["storage_key"]
+        local = None
+    else:
+        a_src = tl.out_to_src(start)
+        b_src = tl.out_to_src(max(start, hand - 0.02))
+        if a_src is None or b_src is None:
+            return None, None, "kept a static pin (window off the footage)"
+        ra, rb = tl.seg_program_range(a_src), tl.seg_program_range(b_src)
+        if ra is None or rb is None or abs(ra[0] - rb[0]) > 0.001:
+            return None, None, ("kept a static pin — there is a cut inside "
+                                "the push window, so the screen is not one "
+                                "continuous shot there")
+        for sp in (edl.get("speed") or []):
+            if float(sp["end"]) > a_src and float(sp["start"]) < b_src:
+                return None, None, ("kept a static pin — a speed ramp covers "
+                                    "the window and the track is "
+                                    "frame-for-frame with the source")
+        a0 = a_src
+        to_track = lambda x, y: _src_frac_from_out(ctx, edl, x, y)
+        to_out = lambda x, y: _out_frac_from_source(ctx, edl, x, y)
+        proxy = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
+        key = proxy["storage_key"] if proxy else None
+        local = None
+        if not remote.track_available():
+            try:
+                local = ctx.proxy_path()
+            except Exception:
+                return None, None, "kept a static pin (no proxy to track on)"
+
+    tq = []
+    for i in range(4):
+        pt = to_track(quad_out[2 * i], quad_out[2 * i + 1])
+        tq.extend([float(pt[0]), float(pt[1])])
+    try:
+        if local is not None:
+            quads, quality = tracker.track_quad(local, a0, dur, tq)
+        else:
+            if not key:
+                return None, None, "kept a static pin (no source object)"
+            res = remote.run_track_remote(
+                ctx.project_id, {"storage_key": key, "start": round(a0, 3),
+                                 "dur": round(dur, 3), "corners": tq})
+            quads, quality = (res or {}).get("quads"), \
+                (res or {}).get("quality") or {}
+    except Exception as e:
+        return None, None, (f"kept a static pin (tracking failed: "
+                            f"{str(e)[:120]})")
+    if not quads:
+        why = (quality or {}).get("why") or "the track was not usable"
+        return None, None, f"kept a static pin — {why}"
+
+    path = []
+    for entry in quads:
+        t_rel = float(entry[0])
+        q = []
+        for i in range(4):
+            pt = to_out(entry[1 + 2 * i], entry[2 + 2 * i])
+            if pt is None:
+                return None, None, ("kept a static pin — the tracked screen "
+                                    "drifts outside the output frame during "
+                                    "the window")
+            q.extend([round(pt[0], 5), round(pt[1], 5)])
+        ok, _why = quad_is_sane(q)
+        if not ok:
+            return None, None, "kept a static pin — the tracked quad folded"
+        path.append([round(t_rel, 3)] + q)
+    if path[-1][0] < dur - 0.34:
+        # the track must reach (nearly) the arrival frame, or the pin would
+        # lerp-hold a stale quad through the handoff
+        return None, None, ("kept a static pin — the track ends "
+                            f"{dur - path[-1][0]:.2f}s short of the arrival")
+    arrival = path[-1][1:]
+    _ax, _ay, aw_, ah_ = quad_bbox(arrival)
+    if aw_ < SCREEN_QUAD_MIN_FRAC or ah_ < SCREEN_QUAD_MIN_FRAC:
+        return None, None, ("kept a static pin — the screen shrinks below "
+                            "usable size by the arrival frame")
+    note = (f"the pin TRACKS the screen through the window "
+            f"({quality.get('samples')} samples, "
+            f"{quality.get('alive', 0) * 100:.0f}% of features held, "
+            f"max drift {quality.get('max_excursion_frac', 0) * 100:.1f}% "
+            "of the frame) — the content stays glued to the glass even as "
+            "the shot wobbles")
+    return path, arrival, note
+
+
 def _quad_plausible_for(quad, frame_aspect, content_aspect):
     """Could this rectangle be a SCREEN showing that content?
 
@@ -5148,13 +5332,25 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
                          "at_output_s later or shorten duration_s.")
 
     # ── 2. the pin, built backwards from where the clip really landed ───────
+    # Round 63: before the pin is written, follow the screen THROUGH the
+    # window. The shot is almost always handheld, and a pin rigid at one
+    # measured quad slides against the wobbling glass — the loudest "this is
+    # an effect" tell the move has. Tracking failing for any reason keeps the
+    # static pin, which is exactly what shipped before.
+    corner_path, arrival, track_note = _track_screen_path(
+        ctx, edl, quad, start, dur, host)
+    if arrival:
+        quad = [round(v, 4) for v in arrival]
+    screen_spec = {"corners": quad, "push": pu, "ease": es}
+    if corner_path:
+        screen_spec["corner_path"] = corner_path
     overlays = [dict(o) for o in (edl.get("overlays") or [])]
     item = {"id": _next_item_id(overlays, "tk"), "asset_key": asset_key,
             "kind": kind, "start": start, "duration_s": dur,
             "x": 0.5, "y": 0.5, "scale": 1.0, "fit": None, "opacity": None,
             "entrance": None, "exit": None,
             "source_start_s": off if kind == "video" else None,
-            "screen": {"corners": quad, "push": pu, "ease": es}}
+            "screen": screen_spec}
     overlays.append(item)
     edl["overlays"] = overlays
     written = ctx.write_edl(
@@ -5168,6 +5364,8 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
 
     _cx, _cy, z_end = renderer.screen_lock_geometry(item["screen"])
     bits = [written]
+    if track_note:
+        bits.append(("TRACKED: " if corner_path else "") + track_note + ".")
     if host_notes:
         bits.append("Riding the spliced clip: " + "; ".join(host_notes) + ".")
     if adopt is not None:
@@ -5566,12 +5764,26 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
     stats = None
     if storage.exists(key):
         # Cached: the same window measured before (an undo/redo, a re-worded
-        # title over the same moment). The numbers come from whichever text
-        # already carries this fingerprint, so the reply never invents them.
+        # title over the same moment). The MASK is reusable — it depends only
+        # on the footage — but the text-box numbers are NOT: round 63 caught
+        # this path parroting "the subject crosses 11% of the text" measured
+        # for a size-2.0 title onto a re-added size-1.2 one, whose smaller box
+        # was in truth mostly behind the walker. So the box numbers are
+        # re-measured against the cached mask itself (a 540p gray decode,
+        # proxy-class work). If the mask cannot be read back, the reply says
+        # nothing about the box rather than the wrong thing.
         prior = next((tx.get("behind") for tx in texts
                       if (tx.get("behind") or {}).get("fp") == fp), None)
         stats = {"ok": True, "coverage": (prior or {}).get("coverage"),
                  "fps": (prior or {}).get("fps"), "cached": True}
+        try:
+            mlocal = os.path.join(ctx.workdir, f"matte_c_{fp[:8]}.mp4")
+            storage.download_to(key, mlocal)
+            fresh = matte.box_stats(mlocal, _behind_text_box(item))
+            if fresh:
+                stats.update(fresh)
+        except Exception:
+            pass
     else:
         try:
             src = ctx.proxy_path()
@@ -5621,20 +5833,38 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
             f"photographed out of the shot itself. The words are drawn on the "
             f"picture and the subject is laid back over them, so they pass "
             f"BEHIND — this is not a fade or a transparency.")
-        tc = stats.get("text_covered")
-        if tc is not None and tc < 0.02:
-            bits.append(
-                f"WARNING: the subject crosses only {tc * 100:.1f}% of where "
-                "the words sit, so on screen this will look like an ordinary "
-                "title. Tell the user, and offer to move the text (x/y) to "
-                "where they actually walk, or to shift the window to when they "
-                "cross the frame.")
-        elif tc is not None:
-            bits.append(f"The subject crosses {tc * 100:.0f}% of the text's "
-                        "area at its most, so the effect is visible.")
         if stats.get("no_cv2"):
             bits.append("NOTE: OpenCV was unavailable, so the mask edge is "
                         "unsmoothed — it may look slightly cut out.")
+    # The box numbers are quoted for CACHED masks too — they were re-measured
+    # against this text's own box above, because the previous text that built
+    # the mask may have been a different size at a different spot.
+    tc = stats.get("text_covered")
+    tw = stats.get("text_width_covered")
+    if tc is not None and tc < 0.02:
+        bits.append(
+            f"WARNING: the subject crosses only {tc * 100:.1f}% of where "
+            "the words sit, so on screen this will look like an ordinary "
+            "title. Tell the user, and offer to move the text (x/y) to "
+            "where they actually walk, or to shift the window to when they "
+            "cross the frame.")
+    elif tw is not None and tw >= 0.45:
+        # AREA under-sells what eyes see: 11% of the box's area can be two
+        # whole letters gone, and a word missing two letters is a broken
+        # word. Width interrupted maps to letters interrupted.
+        bits.append(
+            f"LEGIBILITY: at its peak the subject interrupts "
+            f"{tw * 100:.0f}% of the line's WIDTH ({(tc or 0) * 100:.0f}% of "
+            "the box's area). That much of the title is unreadable at that "
+            "moment — right if the subject SWEEPS PAST (the words re-emerge), "
+            "wrong if they stand there through the window. If they linger, "
+            "make the text larger (size_scale) or move it (x/y) so it reads "
+            "around them, and say which you did.")
+    elif tc is not None:
+        bits.append(
+            f"The subject crosses {(tw or 0) * 100:.0f}% of the line's width "
+            f"at its most ({tc * 100:.0f}% of the text's area), so the "
+            "effect is visible and the title stays readable.")
     bits.append(
         "It is bound to that FOOTAGE, not to a program time: a later cut moves "
         "it with the shot, and if that footage is cut away entirely the words "

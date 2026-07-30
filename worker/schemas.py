@@ -900,6 +900,16 @@ class ScreenLock(BaseModel):
     corners: List[float]
     push: float = 1.0
     ease: Literal["smooth", "accelerate", "linear"] = "smooth"
+    # Round 63: the filmed screen WOBBLES — the shot is handheld — and a pin
+    # rigid at one measured quad slides visibly against the glass it claims to
+    # hold. corner_path is the screen's measured motion through the window:
+    # entries of [t_rel, x0,y0,x1,y1,x2,y2,x3,y3] (window-relative seconds,
+    # ascending, same corner order as `corners`), tracked by optical flow on
+    # the executor. The renderer lerps corners between entries; `corners`
+    # itself stays the ARRIVAL-frame quad, which is what the camera geometry
+    # is computed from. Absent (every EDL before round 63) = static pin,
+    # byte-identical behaviour to round 55.
+    corner_path: Optional[List[List[float]]] = None
 
 
 class OverlayItem(BaseModel):
@@ -1336,6 +1346,44 @@ def _check_screen_lock(lock, name, window_s):
             "more than 12x to reach it, which is mush. Start the takeover "
             "from a closer shot of the screen.")
     lock.push = round(min(max(float(lock.push), 0.0), 1.0), 3)
+    if lock.corner_path is not None:
+        if not isinstance(lock.corner_path, list) or len(lock.corner_path) < 2:
+            raise EDLValidationError(
+                f"{name}.corner_path needs at least 2 entries of "
+                "[t, x0..y3] — or omit it for a static pin.")
+        prev_t = -1e9
+        cleaned = []
+        for i, entry in enumerate(lock.corner_path):
+            if not isinstance(entry, (list, tuple)) or len(entry) != 9:
+                raise EDLValidationError(
+                    f"{name}.corner_path[{i}] must be [t, x0,y0,...y3] "
+                    "(9 numbers).")
+            try:
+                tt = float(entry[0])
+                q = [float(v) for v in entry[1:]]
+            except (TypeError, ValueError):
+                raise EDLValidationError(
+                    f"{name}.corner_path[{i}] must all be numbers.")
+            if tt < -0.001 or tt > window_s + 0.05:
+                raise EDLValidationError(
+                    f"{name}.corner_path[{i}] t={tt} is outside the takeover "
+                    f"window (0-{window_s}s, window-relative).")
+            if tt <= prev_t:
+                raise EDLValidationError(
+                    f"{name}.corner_path times must strictly ascend.")
+            prev_t = tt
+            for v in q:
+                if v != v or v in (float("inf"), float("-inf")) \
+                        or not (-0.5 <= v <= 1.5):
+                    raise EDLValidationError(
+                        f"{name}.corner_path[{i}] corners must be finite "
+                        "fractions of the frame.")
+            ok, why = quad_is_sane(q)
+            if not ok:
+                raise EDLValidationError(
+                    f"{name}.corner_path[{i}] is not a usable quad: {why}.")
+            cleaned.append([round(tt, 3)] + [round(v, 5) for v in q])
+        lock.corner_path = cleaned
     if not (SCREEN_TAKEOVER_MIN_S - 0.01 <= window_s
             <= SCREEN_TAKEOVER_MAX_S + 0.01):
         raise EDLValidationError(

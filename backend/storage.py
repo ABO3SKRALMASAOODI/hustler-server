@@ -79,8 +79,15 @@ PROXY_MAX_BYTES = 2 * 1024 * 1024 * 1024
 # is redeployed — `/health` reports the fingerprint that proves which code it
 # is running. The failure mode of "off" is "the old speed"; the failure mode of
 # shipping it on against a stale executor is "no big video can be uploaded at
-# all", so this defaults to the one that cannot hurt.
-PROXY_FIRST_UPLOADS = os.getenv("PROXY_FIRST_UPLOADS", "0").strip().lower() \
+# all", so it shipped defaulting to the one that cannot hurt.
+#
+# Round 63: the default flips to ON. The executor has carried the
+# client_proxy_key code since the round-58 redeploy (verified against
+# /health's fingerprint), every piece is pinned by tests on both services,
+# and the measured stake is a real customer waiting 24m30s before their
+# first edit on a 6-minute 4K clip. The env var still works both ways —
+# set PROXY_FIRST_UPLOADS=0 on Render to fall back to plain uploads.
+PROXY_FIRST_UPLOADS = os.getenv("PROXY_FIRST_UPLOADS", "1").strip().lower() \
     in ("1", "true", "yes", "on")
 
 

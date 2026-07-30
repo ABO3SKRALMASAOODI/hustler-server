@@ -213,6 +213,8 @@ def _ev(expr, on):
     return eval(expr.replace("on", str(float(on))),
                 {"clip": lambda v, a, b: max(a, min(b, v)),
                  "between": lambda t, a, b: 1.0 if a <= t <= b else 0.0,
+                 "lt": lambda a, b: 1.0 if a < b else 0.0,
+                 "gte": lambda a, b: 1.0 if a >= b else 0.0,
                  "__builtins__": {}})
 
 
@@ -694,3 +696,88 @@ def test_the_read_prompt_asks_for_the_glass_not_the_laptop():
     assert "not the whole laptop" in p
     # and the corner ORDER, which is the other way it silently goes wrong
     assert "bottom_left_x" in p and p.index("top_right_x") < p.index("bottom_left_x")
+
+
+# ------------------------------------------------------------------ #
+#  5. Round 63 — the pin RIDES a tracked screen                       #
+# ------------------------------------------------------------------ #
+
+def _wobble_path(dur=TAKE_S, amp=0.02, knots=7):
+    """A corner_path that drifts the whole quad sideways like hand shake and
+    returns to the measured quad at the arrival frame (the tool's contract:
+    `corners` is the arrival quad, the path's last entry equals it)."""
+    path = []
+    for i in range(knots):
+        t = dur * i / (knots - 1)
+        dx = amp * np.sin(2 * np.pi * i / (knots - 1))
+        q = list(QUAD)
+        for j in range(0, 8, 2):
+            q[j] = round(q[j] + float(dx), 5)
+        path.append([round(t, 3)] + [round(v, 5) for v in q])
+    # last knot back on the measured quad exactly
+    path[-1] = [round(dur, 3)] + [round(v, 5) for v in QUAD]
+    return path
+
+
+def test_piecewise_linear_expr_lerps_and_holds():
+    e = renderer._piecewise_linear_expr("on", [(0.0, 0.2), (1.0, 0.4),
+                                              (2.0, 0.1)])
+    assert abs(_ev(e, -0.5) - 0.2) < 1e-6          # held before first knot
+    assert abs(_ev(e, 0.0) - 0.2) < 1e-6
+    assert abs(_ev(e, 0.5) - 0.3) < 1e-6           # mid-lerp
+    assert abs(_ev(e, 1.5) - 0.25) < 1e-6
+    assert abs(_ev(e, 2.5) - 0.1) < 1e-6           # held after last knot
+
+
+def test_corner_path_pin_follows_the_path_and_still_lands_identity():
+    """With a corner_path, the pin's start sits on the path's FIRST quad, the
+    middle follows the lerped quad, and the arrival frame is still the exact
+    full-frame identity — the round-55 handoff invariant survives tracking."""
+    dur = TAKE_S
+    path = _wobble_path(dur)
+    lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth",
+            "corner_path": path}
+    static = {"corners": list(QUAD), "push": 1.0, "ease": "smooth"}
+    # start: first path quad == QUAD here (sin(0)=0), so it matches static
+    got0 = _content_corners(lock, 0, dur)
+    want0 = _content_corners(static, 0, dur)
+    for (gx, gy), (wx, wy) in zip(got0, want0):
+        assert abs(gx - wx) < 0.75 and abs(gy - wy) < 0.75
+    # mid-window: the pin has moved with the path (knot 1.5/6 of the wobble
+    # is off-quad), so it must NOT match the static pin
+    on_mid = int(round(dur * FPS * 0.25))
+    got_mid = _content_corners(lock, on_mid, dur)
+    want_static = _content_corners(static, on_mid, dur)
+    assert any(abs(g[0] - s[0]) > 1.5 for g, s in zip(got_mid, want_static)), \
+        "corner_path had no effect on the mid-window pin"
+    # arrival frame: identity, exactly as without a path
+    on_end = int(round(dur * FPS)) - 1
+    got_end = _content_corners(lock, on_end, dur)
+    frame_corners = [(0.0, 0.0), (W, 0.0), (0.0, H), (W, H)]
+    for (gx, gy), (fx, fy) in zip(got_end, frame_corners):
+        assert abs(gx - fx) < 1.0 and abs(gy - fy) < 1.0, \
+            f"tracked pin does not land identity: {(gx, gy)} vs {(fx, fy)}"
+
+
+@needs_ffmpeg
+def test_corner_path_renders_and_content_follows(workdir, room, clip):
+    """Pixel claim: rendered with a wobbling corner_path, the content's left
+    edge mid-window sits where the PATH says, not where the static quad says."""
+    dur = TAKE_S
+    edl = _takeover_edl("clip.mp4")
+    edl["overlays"][0]["screen"]["corner_path"] = _wobble_path(dur)
+    out = os.path.join(workdir, "takeover_tracked.mp4")
+    _render(room, clip, edl, out)
+    lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth",
+            "corner_path": _wobble_path(dur)}
+    dt = 0.40
+    f = _frame_at(out, 3.0 - dur + dt)
+    m = _content_mask(f)
+    ys, xs = np.where(m)
+    assert m.sum() > 200
+    on = int(round(dt * FPS))
+    want = _content_corners(lock, on, dur)
+    wx = [p[0] for p in want]
+    wy = [p[1] for p in want]
+    assert abs(xs.min() - max(0, min(wx))) < 12, (xs.min(), min(wx))
+    assert abs(ys.min() - max(0, min(wy))) < 12, (ys.min(), min(wy))

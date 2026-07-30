@@ -190,10 +190,17 @@ FRONTIER_PLANS = {"ai_max"}
 # paid for. Iterations 2+ are mostly "which tool, which arguments", which xAI's
 # own guidance puts under "low".
 #
-# So this applies from the SECOND iteration on, never the first. Empty (the
-# default) sends no field at all, so a provider that would 400 on an unknown
-# parameter — DeepSeek does — is unaffected until someone opts in.
-AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "").strip()
+# So this applies from the SECOND iteration on, never the first.
+#
+# Round 63: defaults to "low". An agent turn is round-trips x 13 seconds
+# (measured flat across 385 turns), and 402 of the average call's 646 output
+# tokens are REASONING — mostly spent on iterations that are pure tool
+# dispatch. Round 58 made the field safe to send blind: a provider that
+# rejects it retries once without it and latches per model, matched narrowly
+# on the field name plus an unknown-parameter phrase, so DeepSeek either
+# honours it or costs one failed call per process, ever. Set
+# AGENT_REASONING_EFFORT="" on Render to send nothing again.
+AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "low").strip()
 # Vision (look_at) is the slowest thing the agent does, so it gets a MORE
 # generous per-call timeout than the text agent (grok multimodal latency is
 # spiky) — retries stay at the client default. The agent isn't capped on how
@@ -548,6 +555,11 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # it sits far below AGENT_TURN_TIMEOUT_S (720), never near the executor's
     # ceiling.
     "frames": int(os.getenv("REMOTE_TIMEOUT_FRAMES_S", "240")),
+    # Quad tracking through a takeover window (round 63): the same staging
+    # cost as frames plus one linear decode of a <=5s window at 960 wide and
+    # a per-frame LK pass — seconds of compute, minutes of download on a big
+    # original. Synchronously inside an agent turn, same ceiling logic.
+    "track": int(os.getenv("REMOTE_TIMEOUT_TRACK_S", "240")),
 }
 
 
@@ -803,7 +815,7 @@ GFX_SHAPING_VERSION = 1
 # on EDL VERSION rather than content, so without this stamp she would keep
 # being served the broken file forever. Bump if junction selection changes
 # again.
-TRANSITION_VERSION = 1
+TRANSITION_VERSION = 2
 
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera

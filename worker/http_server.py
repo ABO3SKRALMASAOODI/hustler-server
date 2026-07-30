@@ -33,6 +33,7 @@ import db as dbx
 import frameserve
 import indexer
 import renderer
+import tracker
 import version
 import webrecord
 
@@ -54,6 +55,10 @@ RUNNERS = {
     # moved here because decoding a user's 4K original for six jpegs is
     # compute, and doing it on the dispatcher killed job 1452's turn.
     "frames": frameserve.run_frames_job,
+    # Round 63: optical-flow tracking of a screen quad through the takeover
+    # window. Decodes the whole window of a user ORIGINAL — the exact job
+    # class that OOM-killed the dispatcher four separate times.
+    "track": tracker.run_track_job,
 }
 
 

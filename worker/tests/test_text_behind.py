@@ -758,3 +758,103 @@ def test_no_behind_text_changes_nothing_in_the_graph():
                                       behind_inputs=[])
     assert plain == same
     assert "alphamerge" not in plain
+
+
+def test_handheld_lamp_walk_masks_the_walker_not_the_room(workdir):
+    """Round 63, the same project 246 one round later: with v3 live, the title
+    STILL lost a band wider than the walker. This is that footage's profile,
+    synthesized: a TEXTURED wall (structure, not iid noise), a hard 0.35x
+    lamp shadow (v3's 0.5 floor never forgave it), a bright halo patch that
+    DIMS as the subject passes the lamp (light occlusion), and 2-4px handheld
+    drift (which used to wear a masked stripe on every high-contrast edge).
+    The subject is dark-on-dark — the case every version has to keep finding.
+    """
+    w, h, fps, dur = 480, 270, 24, 4.0
+    sw, sh = 50, 120
+    rng = np.random.default_rng(11)
+    # A wall with real spatial structure: smooth blotches + a dark TV bezel
+    # rectangle (the high-contrast edge that jitter used to light up).
+    base = rng.integers(28, 44, (h // 8 + 2, w // 8 + 2, 3), np.uint8)
+    room = np.kron(base, np.ones((8, 8, 1), np.uint8))[:h, :w].astype(np.uint8)
+    room[40:130, 60:220] = 12                      # the TV
+    room[38:40, 58:222] = 70                       # its bright bezel edge
+    room[130:132, 58:222] = 70
+    yy, xx = np.mgrid[0:h, 0:w]
+    halo = np.exp(-(((xx - 380) / 60.0) ** 2 + ((yy - 100) / 70.0) ** 2))
+    src = os.path.join(workdir, "lamp_walk.mp4")
+    n = int(dur * fps)
+    enc = subprocess.Popen(
+        ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt",
+         "bgr24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "pipe:0",
+         "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", src],
+        stdin=subprocess.PIPE)
+    for i in range(n):
+        t = i / float(n - 1)
+        # lamp halo, dimming to 45% as the subject passes it mid-window
+        occl = 1.0 - 0.55 * np.exp(-((t - 0.5) / 0.18) ** 2)
+        f = np.clip(room + (110.0 * occl) * halo[..., None],
+                    0, 255).astype(np.uint8)
+        # handheld drift, +-3px, slow (not noise the temporal map absorbs)
+        dx = int(round(3 * np.sin(2 * np.pi * t * 0.9)))
+        dy = int(round(2 * np.sin(2 * np.pi * t * 0.6 + 1.0)))
+        f = np.roll(np.roll(f, dy, axis=0), dx, axis=1)
+        x0, y0 = int((w - sw) * t), (h - sh) // 2
+        # hard lamp shadow, 0.35x, twice the subject's area, leading him
+        shx = max(0, x0 - 2 * sw - 8)
+        band = f[y0:y0 + sh, shx:shx + 2 * sw].astype(np.float32)
+        f[y0:y0 + sh, shx:shx + 2 * sw] = \
+            np.clip(band * 0.35, 0, 255).astype(np.uint8)
+        # the walker: dark jacket catching the lamp at the folds — visibly
+        # darker AND lighter than the wall in patches, the way a real person
+        # reads against a lit room (a subject with less contrast than the
+        # codec floor is a different test — the breathing test owns that)
+        subj = rng.integers(45, 100, (sh, sw, 3), np.uint8)
+        subj[::9, :, :] = 130                      # fold highlights
+        subj[:, ::11, :] = 14                      # deep shadow folds
+        f[y0:y0 + sh, x0:x0 + sw] = subj
+        enc.stdin.write(f.tobytes())
+    enc.stdin.close()
+    assert enc.wait() == 0
+    out = os.path.join(workdir, "lamp_walk_mask.mp4")
+    res = matte.measure_and_build(src, out, 0.0, dur, fps=float(fps),
+                                  box=(0.1, 0.4, 0.8, 0.25))
+    assert res["ok"], res.get("why")
+    true_cov = sw * sh / float(w * h)
+    # Shadow (2x the subject) + halo dimming (another ~2.5x) both move with
+    # him: counted as subject they put coverage near 5x the footprint. The
+    # bound is the one the user's eyes set: the hole must be the walker.
+    assert res["coverage"] < 2.0 * true_cov, \
+        f"over-masking (shadow/halo counted?): {res['coverage']} vs {true_cov}"
+    assert res["coverage"] > 0.45 * true_cov, \
+        f"under-masking (walker lost): {res['coverage']} vs {true_cov}"
+    assert res["moving_frames"] >= n * 0.7
+    # the legibility number rides out (round 63): the reply quotes how much
+    # of the LINE the subject interrupts, not just box area
+    assert res.get("text_width_covered") is not None
+
+
+def test_alignment_sign_convention_via_np_roll(workdir):
+    """Pins cv2.phaseCorrelate's direction against np.roll: _align_shift must
+    return the shift that maps the FRAME back into the reference's space. The
+    docs are ambiguous, and the wrong sign makes alignment double the error
+    instead of removing it."""
+    cv2 = pytest.importorskip("cv2")
+    rng = np.random.default_rng(3)
+    base = np.kron(rng.integers(0, 255, (34, 60, 3), np.uint8),
+                   np.ones((8, 8, 1), np.uint8))[:270, :480].astype(np.uint8)
+    ref_sg = matte._small_gray(base, cv2)
+    rolled = np.roll(np.roll(base, 5, axis=1), -4, axis=0)   # +5 x, -4 y
+    dx, dy = matte._align_shift(ref_sg, rolled, cv2)
+    # the corrective shift undoes the roll: content moved +5/-4, so the fix
+    # is -5/+4 (one pixel of estimator slack at the downscale is fine)
+    assert abs(dx + 5) <= 1 and abs(dy - 4) <= 1, \
+        f"alignment sign/magnitude wrong (got dx={dx}, dy={dy}, want ~(-5,4))"
+    fixed = matte._shift(rolled, dx, dy, cv2)
+    a = fixed[20:-20, 20:-20].astype(np.int16)
+    b = base[20:-20, 20:-20].astype(np.int16)
+    un = np.abs(rolled[20:-20, 20:-20].astype(np.int16) - b).mean()
+    # the estimator is deliberately +-1px (integer shifts at half-res); on an
+    # 8px-block texture that residual pixel still costs ~1/8 of the pixels,
+    # so "substantially undone" is a halving, not perfection
+    assert np.abs(a - b).mean() < un * 0.5, \
+        "alignment did not substantially undo a known roll"

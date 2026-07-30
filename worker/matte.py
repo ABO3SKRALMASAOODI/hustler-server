@@ -47,7 +47,7 @@ import media
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 3
+VERSION = 4
 
 # Sampling for the background plate. 24 samples spread over the window is
 # enough for a median to see past a subject that lingers, and few enough to hold
@@ -98,6 +98,58 @@ MIN_COVERAGE = 0.004
 # How long a window this is allowed to chew, on the box that is also running the
 # agent turn. A title behind someone is a 2-6 second beat; 15 is generous.
 MAX_WINDOW_S = 15.0
+# The mask is measured at most at this rate. The composite chains its own
+# fps=<render rate> on the mask input, so a 30 Hz mask under 60 fps footage is
+# frame-doubled there — the subject's edge lags at most 1/60 s, invisible under
+# the feather, and the measurement costs half as much on the box that is also
+# running the agent turn.
+MASK_MAX_FPS = 30.0
+
+# ── v4: the camera never actually holds still ───────────────────────────────
+# Round 63, from the same project 246 footage one round later: with v3 live,
+# the title STILL lost a band of letters wider than the walker. Two mechanisms,
+# both measured off the screenshots and the stored mask:
+#   * HANDHELD JITTER: a phone drifts a few pixels even "held still". At a
+#     hard bright/dark boundary (a TV bezel, a lamp halo's rim) a 2px shift is
+#     a 100+ luma difference — far past any threshold — so every high-contrast
+#     edge in the frame wore a masked stripe. The noise map lifts thresholds
+#     where jitter flickers, but a slow drift reads as signal, not noise.
+#     Fix: ALIGN each frame to the plate (phase correlation at half res, a
+#     global translation) before differencing, and un-shift the finished mask
+#     back into the frame's own geometry. The plate itself is built from
+#     samples aligned to the first sample for the same reason.
+#   * LIGHT OCCLUSION: a body passing a lamp dims the wall around it (and
+#     brightens it again as it leaves). v3's shadow test only forgave darkening
+#     down to 0.5x with near-zero channel spread — a lamp shadow is 3-5x dark,
+#     and on near-black pixels the ratio's spread is pure noise, so the whole
+#     halo band was kept as "subject" and ate the title around the walker.
+#     Fix: classify per BLOB, not per pixel. An illumination change is the same
+#     surface under different light — channel-uniform scaling, and NO NEW
+#     EDGES: the wall's own texture stays where it was. A person REPLACES the
+#     surface and always brings a silhouette of edges the plate does not have.
+#     Pooled over a blob, those two cues separate a shadow from a torso even in
+#     the dark, where any single pixel is uninformative.
+ALIGN_DOWNSCALE = 2          # phase correlation at 1/2 proxy resolution
+MAX_ALIGN_PX = 14.0          # beyond this the camera is genuinely moving
+ALIGN_DEADBAND_PX = 2        # under this per axis = estimator noise, not drift
+ALIGN_MIN_RESPONSE = 0.03    # phaseCorrelate confidence floor; below = don't
+RATIO_LO, RATIO_HI = 0.28, 2.4   # how far light may scale and still be light
+SPREAD_BASE = 0.055          # allowed channel spread of the ratio...
+SPREAD_DARK = 4.0            # ...plus this over (plate luma + 10). Small on
+#                              purpose: round 63's first draft gave dark
+#                              pixels generous slack and a noisy dark SUBJECT
+#                              started classifying as illumination — the v2
+#                              overprint bug reborn. Where the ratio is too
+#                              noisy to decide, the BLOB correlation below
+#                              decides instead.
+EDGE_NEW = 26.0              # sobel-magnitude increase that counts as an edge
+#                              the plate does not have
+BLOB_ILLUM_FRAC = 0.75       # blob is illumination when this much of it fits
+BLOB_NOVELTY_MAX = 0.06      # ...and it brought this few new-edge pixels
+BLOB_CORR_SHADOW = 0.5       # gradient-structure correlation with the plate
+#                              above which a blob is the SAME SURFACE re-lit
+ILLUM_CARVE = 0.85           # inside a kept blob, carve pixels this deep in a
+#                              coherent illumination field (smoothed fraction)
 
 
 def _decode(path, start, dur, w, h, extra_vf=None, fps=None):
@@ -134,7 +186,98 @@ def _decode(path, start, dur, w, h, extra_vf=None, fps=None):
             proc.kill()
 
 
-def _plate(path, start, dur, w, h, extra_vf=None):
+def _small_gray(f, cv2):
+    """Half-res float32 gray for phase correlation. Small because the estimate
+    is a GLOBAL translation — sub-pixel accuracy at half res is a pixel at
+    full, which is inside the feather."""
+    g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+    if ALIGN_DOWNSCALE > 1:
+        g = cv2.resize(g, (g.shape[1] // ALIGN_DOWNSCALE,
+                           g.shape[0] // ALIGN_DOWNSCALE),
+                       interpolation=cv2.INTER_AREA)
+    return g.astype(np.float32)
+
+
+def _align_shift(ref_sg, f, cv2, win=None):
+    """WHOLE-PIXEL (dx, dy) that maps frame -> reference space, or (0, 0) when
+    the correlation is not confident, the move is too big to be hand shake, or
+    the move is under a pixel.
+
+    Integer pixels on purpose: a sub-pixel warp interpolates, and bilinear
+    interpolation LOW-PASSES the frame while the plate stays sharp — the
+    asymmetric smoothing pulled a noisy subject's difference under its own
+    threshold (measured on the breathing test: the walker vanished from the
+    mask for the last second of the window). np.roll-exact translation keeps
+    every pixel value; the sub-pixel residual is what v3 always lived with
+    and the noise map already prices in.
+
+    cv2.phaseCorrelate(src1, src2) returns the displacement OF src2 RELATIVE
+    TO src1 — the CORRECTIVE shift is its negation (pinned by
+    test_alignment_sign_convention_via_np_roll, because the docs are ambiguous
+    and the wrong sign makes alignment double the error it exists to remove,
+    which is precisely what the first draft shipped)."""
+    sg = _small_gray(f, cv2)
+    (dx, dy), resp = cv2.phaseCorrelate(ref_sg, sg, win)
+    dx = round(-dx * ALIGN_DOWNSCALE)
+    dy = round(-dy * ALIGN_DOWNSCALE)
+    if resp < ALIGN_MIN_RESPONSE or abs(dx) > MAX_ALIGN_PX \
+            or abs(dy) > MAX_ALIGN_PX:
+        return 0, 0
+    # Per-axis deadband: a 1px "shift" is inside the estimator's own noise on
+    # a static scene (measured: a truly still synthetic reported (0, 1) from
+    # the moving subject perturbing the peak), and a 1px residual is exactly
+    # what the noise map has always priced in. Correct only real drift.
+    if abs(dx) < ALIGN_DEADBAND_PX:
+        dx = 0
+    if abs(dy) < ALIGN_DEADBAND_PX:
+        dy = 0
+    return int(dx), int(dy)
+
+
+def _proven_shift(f, target, dx, dy, cv2):
+    """The candidate shift, or (0, 0) if it does not clearly IMPROVE the match.
+
+    The estimator's sub-pixel noise doubles through ALIGN_DOWNSCALE and can
+    round to a 'shift' on a scene that never moved — and one wrong 2px roll on
+    a static shot decorrelates every textured pixel from the plate (measured:
+    a single spurious shift took one frame's mask from 4% to 100% coverage).
+    So alignment has to earn its keep per frame: apply the shift only when the
+    subsampled residual against the target drops by a clear margin. Median,
+    not mean — the subject is IN the frame and must not vote."""
+    if not dx and not dy:
+        return 0, 0
+    grid = (slice(None, None, 4), slice(None, None, 4))
+    a = f[grid].astype(np.float32)
+    t = target[grid].astype(np.float32)
+    r0 = float(np.median(np.abs(a - t)))
+    fs = _shift(f, dx, dy, cv2)
+    r1 = float(np.median(np.abs(fs[grid].astype(np.float32) - t)))
+    if r1 < r0 * 0.85:
+        return dx, dy
+    return 0, 0
+
+
+def _shift(img, dx, dy, cv2):
+    """Translate by INTEGER (dx, dy) with edge replication (a border that goes
+    black would difference against the plate as a fake subject). Pure memory
+    move — no interpolation, no value changes."""
+    dx, dy = int(dx), int(dy)
+    if dx == 0 and dy == 0:
+        return img
+    m = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(img, m, (img.shape[1], img.shape[0]),
+                          flags=cv2.INTER_NEAREST,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+
+def _sobel_mag(gray_u8, cv2):
+    g = cv2.GaussianBlur(gray_u8, (0, 0), 1.2)
+    sx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    sy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    return cv2.magnitude(sx, sy)
+
+
+def _plate(path, start, dur, w, h, extra_vf=None, cv2=None):
     """The background, photographed from the window itself.
 
     The MEDIAN and not the mean: a mean is dragged toward whatever the subject
@@ -143,19 +286,34 @@ def _plate(path, start, dur, w, h, extra_vf=None):
     is the pixel's majority value, which is the background unless the subject
     covered that pixel in most of the window — and where it did, that pixel is
     lost to the matte, honestly and locally, rather than smearing.
+
+    Returns (plate, noise, ref_sg): ref_sg is the half-res gray of the FIRST
+    sample — the space every sample was aligned into, and the space every
+    output frame is aligned into later, so plate and frame always meet in the
+    same geometry.
     """
     step = dur / float(PLATE_SAMPLES)
     stack = []
+    ref_sg = None
+    ref_frame = None
     for i in range(PLATE_SAMPLES):
         t = start + step * (i + 0.5)
         for f in _decode(path, t, 0.06, w, h, extra_vf):
             # uint8, NOT float32 — see below. np.median partitions in the
             # input dtype and returns float64 for the (h, w, 3) result, which
             # is one frame's worth, not the stack's.
+            if cv2 is not None:
+                if ref_sg is None:
+                    ref_sg = _small_gray(f, cv2)
+                    ref_frame = f
+                else:
+                    dx, dy = _align_shift(ref_sg, f, cv2)
+                    dx, dy = _proven_shift(f, ref_frame, dx, dy, cv2)
+                    f = _shift(f, dx, dy, cv2)
             stack.append(f)
             break
     if len(stack) < 6:
-        return None, None
+        return None, None, None
     # THE COMMENT ON PLATE_SAMPLES WAS RIGHT; THE CODE WAS NOT (round 61).
     #
     # "24 x 960x540x3 is ~37 MB" is the uint8 figure. Every sample was being
@@ -188,10 +346,10 @@ def _plate(path, start, dur, w, h, extra_vf=None):
         bias = np.median(d[::4, ::4, :].reshape(-1, 3), axis=0)
         acc += np.abs(d - bias.astype(np.float32))
     noise = (acc / float(len(stack))).max(axis=2)
-    return med, noise
+    return med, noise, ref_sg
 
 
-def _mask_frames(frames, plate, noise, cv2):
+def _mask_frames(frames, plate, noise, cv2, ref_sg=None):
     """Per-frame subject mask, 0-255 BINARY, from the distance to the plate.
 
     Feathering happens after the temporal vote in the caller — blurring here
@@ -204,8 +362,29 @@ def _mask_frames(frames, plate, noise, cv2):
         if cv2 is not None:
             # Smoothed so the threshold map has no 1-pixel cliffs of its own.
             thr = cv2.GaussianBlur(thr, (0, 0), 3)
+    plate_f = plate.astype(np.float32)
+    plate_gray_sobel = None
+    plate_luma = None
+    hann = None
+    if cv2 is not None:
+        pg = np.clip(plate, 0, 255).astype(np.uint8)
+        plate_gray_sobel = _sobel_mag(cv2.cvtColor(pg, cv2.COLOR_BGR2GRAY),
+                                      cv2)
+        plate_luma = plate_f.mean(axis=2)
+        if ref_sg is not None:
+            hann = cv2.createHanningWindow(
+                (ref_sg.shape[1], ref_sg.shape[0]), cv2.CV_32F)
     for f in frames:
-        diff = f.astype(np.float32) - plate
+        dx = dy = 0
+        if cv2 is not None and ref_sg is not None:
+            # ONE global translation per frame. This is hand shake, not a
+            # stabiliser: a real pan blows past MAX_ALIGN_PX, alignment turns
+            # itself off, the whole frame differs from the plate and the
+            # coverage refusal below tells the user the camera moved.
+            dx, dy = _align_shift(ref_sg, f, cv2, hann)
+            dx, dy = _proven_shift(f, plate_f, dx, dy, cv2)
+            f = _shift(f, dx, dy, cv2)
+        diff = f.astype(np.float32) - plate_f
         # Auto-exposure/white-balance drift moves the WHOLE frame together;
         # the per-channel median of the difference is that drift (the subject
         # cannot dominate a median — it is bounded by MAX_COVERAGE), and
@@ -217,25 +396,39 @@ def _mask_frames(frames, plate, noise, cv2):
         # that dilutes a real difference into noise.
         d = np.max(np.abs(diff - bias.astype(np.float32)), axis=2)
         on = (d > thr) if thr is not None else (d > DIFF_THRESHOLD)
-        # A MOVING SHADOW differs from the plate exactly as much as the
-        # person casting it, and it is not the person (round 62: a lamp-lit
-        # walk hid a stretch of title wider than the walker — his wall shadow
-        # was in the matte). A shadow is the same surface under less light: a
-        # near-uniform multiplicative darkening that preserves hue, where a
-        # body IN FRONT of the wall replaces the surface entirely. Pixels
-        # whose change is a clean darkening — every channel scaled by the
-        # same factor, moderately — are shadow, not subject. The bounds are
-        # deliberately tight: dark clothing over a bright wall scales its
-        # channels UNEVENLY (spread) or too far down (mean), and anything
-        # this test wrongly eats inside the body is refilled by the
-        # hole-filling pass.
-        ratio = (f.astype(np.float32) + 4.0) / \
-            (plate.astype(np.float32) + 4.0)
-        rmean = ratio.mean(axis=2)
-        rspread = ratio.max(axis=2) - ratio.min(axis=2)
-        shadow = (rmean > 0.5) & (rmean < 0.92) & (rspread < 0.05)
-        m = (on & ~shadow).astype(np.uint8) * 255
+        m = on.astype(np.uint8) * 255
         if cv2 is not None:
+            # ── what changed vs what is merely LIT differently ────────────
+            # Per-pixel evidence, pooled per blob below. ratio = how each
+            # channel scaled; an illumination change scales them together
+            # (hue preserved), a body replaces the surface. Dark pixels get
+            # spread slack — their ratio is noise — which is exactly why the
+            # per-pixel answer alone cannot be trusted and the blob pools it.
+            # The GLOBAL bias comes off first, same as the diff above: auto-
+            # exposure breathing is additive in our model, and an offset
+            # smeared into a ratio reads as channel spread — at the breathing
+            # peaks a clean 0.65x wall shadow failed the uniformity test and
+            # was kept as subject.
+            ratio = (f.astype(np.float32) - bias.astype(np.float32) + 4.0) \
+                / (plate_f + 4.0)
+            rmean = ratio.mean(axis=2)
+            rspread = ratio.max(axis=2) - ratio.min(axis=2)
+            spread_allow = SPREAD_BASE + SPREAD_DARK / (plate_luma + 10.0)
+            # NEW EDGES: texture the plate does not have. A shadow falls ON
+            # the wall's texture (its own edges stay put; only the penumbra
+            # rim is new); a person brings a silhouette and folds. This is
+            # the cue that still works where the ratio is noise.
+            fg = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+            frame_sobel = _sobel_mag(fg, cv2)
+            novel = (frame_sobel - 1.15 * plate_gray_sobel) > EDGE_NEW
+            illum = ((rmean > RATIO_LO) & (rmean < RATIO_HI)
+                     & (rspread < spread_allow) & ~novel)
+            # Confident illumination comes off BEFORE morphology, exactly
+            # where v3 subtracted its shadow test: leaving it in lets the
+            # close bridge a shadow band, the subject and stray speckle into
+            # one mega-blob no later stage can classify (measured: mean
+            # coverage rode to 10x the subject's footprint).
+            m = (on & ~illum).astype(np.uint8) * 255
             # Close first, then open: closing fills the holes a plain-coloured
             # torso leaves where it happens to match the wall behind it (which
             # is where a title lives), and opening then drops the speckle that
@@ -244,18 +437,79 @@ def _mask_frames(frames, plate, noise, cv2):
             m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
             k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k2)
-            # Structure, not just texture: drop blobs no person could be, then
-            # fill the holes a person always has (a matte with a window through
-            # the torso prints the title THROUGH the subject, which is the
-            # single most visible way this effect fails).
+            # ── per-BLOB: same surface re-lit, or a new thing in the shot? ──
+            # (round 63). The per-pixel test above is deliberately timid — at
+            # dark pixels a ratio says nothing (v3 kept a 3-5x lamp shadow as
+            # "subject" for exactly that reason, and a first draft that gave
+            # dark pixels slack started eating dark SUBJECTS instead). What a
+            # single pixel cannot answer, a blob of thousands can, and the
+            # question with actual discriminating power in the dark is about
+            # STRUCTURE, not colour: a shadow falls ON the wall — the wall's
+            # own gradient field survives, merely dimmed, so the blob's sobel
+            # correlates with the plate's — where a person REPLACES the wall
+            # and their texture has no relationship to what was behind them.
+            h_, w_ = m.shape
+            min_px = max(64, int(MIN_BLOB_FRAC * w_ * h_))
             nlab, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
             if nlab > 1:
-                h_, w_ = m.shape
-                min_px = max(64, int(MIN_BLOB_FRAC * w_ * h_))
+                illum_f = illum.astype(np.float32)
+                novel_f = novel.astype(np.float32)
                 keep = np.zeros(nlab, bool)
-                keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_px
+                carve_blobs = []
+                for b in range(1, nlab):
+                    area = stats[b, cv2.CC_STAT_AREA]
+                    if area < min_px:
+                        continue
+                    x0 = stats[b, cv2.CC_STAT_LEFT]
+                    y0 = stats[b, cv2.CC_STAT_TOP]
+                    bw = stats[b, cv2.CC_STAT_WIDTH]
+                    bh = stats[b, cv2.CC_STAT_HEIGHT]
+                    sel = lab[y0:y0 + bh, x0:x0 + bw] == b
+                    fi = float(illum_f[y0:y0 + bh, x0:x0 + bw][sel].mean())
+                    fn = float(novel_f[y0:y0 + bh, x0:x0 + bw][sel].mean())
+                    sf = frame_sobel[y0:y0 + bh, x0:x0 + bw][sel]
+                    sp = plate_gray_sobel[y0:y0 + bh, x0:x0 + bw][sel]
+                    sf = sf - sf.mean()
+                    sp = sp - sp.mean()
+                    denom = float(np.sqrt((sf * sf).sum() * (sp * sp).sum()))
+                    corr = float((sf * sp).sum()) / denom if denom > 1e-6 \
+                        else 1.0
+                    # denom ~ 0 is a structureless void (a black region with
+                    # no gradients anywhere) — nothing to hide words behind;
+                    # treated as re-lit surface, not subject.
+                    if corr > BLOB_CORR_SHADOW or (fi > BLOB_ILLUM_FRAC
+                                                   and fn < BLOB_NOVELTY_MAX):
+                        continue        # a shadow / a moving pool of light
+                    keep[b] = True
+                    if fi > 0.25:
+                        # Person + their attached shadow can arrive as ONE
+                        # blob (morphology bridges them at the feet). Carve
+                        # only where the illumination field is COHERENT —
+                        # deep inside a smoothed run of illumination pixels —
+                        # never on the person's own noisy interior.
+                        carve_blobs.append(b)
                 m = np.where(keep[lab], 255, 0).astype(np.uint8)
+                if carve_blobs:
+                    coh = cv2.blur(illum_f, (15, 15))
+                    carve = (coh > ILLUM_CARVE) & ~novel & \
+                        np.isin(lab, carve_blobs)
+                    m[carve] = 0
+                    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k2)
+                    # re-drop anything the carve shaved below personhood
+                    nl2, lb2, st2, _ = cv2.connectedComponentsWithStats(m, 8)
+                    if nl2 > 1:
+                        keep2 = np.zeros(nl2, bool)
+                        keep2[1:] = st2[1:, cv2.CC_STAT_AREA] >= min_px
+                        m = np.where(keep2[lb2], 255, 0).astype(np.uint8)
+            # Structure, not just texture: fill the holes a person always has
+            # (a matte with a window through the torso prints the title
+            # THROUGH the subject, the single most visible way this fails).
             m = _fill_holes(m, cv2)
+            if dx or dy:
+                # The mask was measured in PLATE space; the composite needs it
+                # in the frame's own geometry, or the cut-out subject sits a
+                # jitter off the real one.
+                m = _shift(m, -dx, -dy, cv2)
         yield m
 
 
@@ -299,6 +553,36 @@ def _vote3(masks):
         yield p1 if p2 is None else vote(p2, p1, p1)
 
 
+def _box_px(box, w, h):
+    if not box:
+        return None
+    bx = int(max(0.0, min(1.0, box[0])) * w)
+    by = int(max(0.0, min(1.0, box[1])) * h)
+    bw = max(1, int(max(0.01, min(1.0, box[2])) * w))
+    bh = max(1, int(max(0.01, min(1.0, box[3])) * h))
+    return (bx, by, min(w, bx + bw), min(h, by + bh))
+
+
+def _box_frame_stats(on, box_px):
+    """(area_frac, width_frac) of the text box the mask claims this frame.
+
+    width_frac is the LEGIBILITY number (round 63): the fraction of the line's
+    WIDTH where a column of the box is at least a quarter covered. 11% of the
+    box's AREA sounds like nothing and can still be two whole letters gone —
+    a word with two letters missing is a broken word, and the agent told a
+    user "only 11%" about a title that read as gibberish. Width interrupted
+    maps to letters interrupted, which is what eyes actually measure.
+    """
+    x0, y0, x1, y1 = box_px
+    sub = on[y0:y1, x0:x1]
+    if not sub.size:
+        return 0.0, 0.0
+    area = float(sub.sum()) / float(sub.size)
+    colcov = sub.mean(axis=0)
+    width = float((colcov >= 0.25).mean())
+    return area, width
+
+
 def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
                       extra_vf=None, width=None, height=None, feather=3):
     """Build the subject mask for [start, start+dur] of `src`.
@@ -321,7 +605,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
     info = media.probe(src)
     sw, sh = int(info["width"]), int(info["height"])
     src_fps = max(1.0, min(float(info["fps"]) or 30.0, 120.0))
-    out_fps = float(fps or src_fps)
+    out_fps = min(float(fps or src_fps), MASK_MAX_FPS)
     w = int(width or sw)
     h = int(height or sh)
     w, h = max(2, w - w % 2), max(2, h - h % 2)
@@ -331,7 +615,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
                         f"frame by frame — over {MAX_WINDOW_S:.0f}s that does "
                         "not finish inside one edit turn. Use a shorter "
                         "window for the words behind you")}
-    plate, noise = _plate(src, start, dur, w, h, extra_vf)
+    plate, noise, ref_sg = _plate(src, start, dur, w, h, extra_vf, cv2)
     if plate is None:
         return {"ok": False,
                 "why": ("I could not read enough frames from that moment to "
@@ -343,16 +627,10 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
     cov_sum = 0.0
     cov_max = 0.0
     hits = 0
-    box_px = None
-    if box:
-        bx = int(max(0.0, min(1.0, box[0])) * w)
-        by = int(max(0.0, min(1.0, box[1])) * h)
-        bw = max(1, int(max(0.01, min(1.0, box[2])) * w))
-        bh = max(1, int(max(0.01, min(1.0, box[3])) * h))
-        box_px = (bx, by, min(w, bx + bw), min(h, by + bh))
+    box_px = _box_px(box, w, h)
     box_cov = 0.0
+    box_width_cov = 0.0
 
-    frame_bytes = w * h
     enc = subprocess.Popen(
         ["ffmpeg", "-y", "-v", "error",
          "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{w}x{h}",
@@ -364,7 +642,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE)
     try:
-        for m in _vote3(_mask_frames(frames, plate, noise, cv2)):
+        for m in _vote3(_mask_frames(frames, plate, noise, cv2, ref_sg)):
             if cv2 is not None and feather > 0:
                 # A hard 1-pixel edge is what makes a composite look pasted.
                 # After the vote, so the majority is taken on crisp binaries.
@@ -376,10 +654,9 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
             if c >= MIN_COVERAGE:
                 hits += 1
             if box_px:
-                x0, y0, x1, y1 = box_px
-                sub = on[y0:y1, x0:x1]
-                if sub.size:
-                    box_cov = max(box_cov, float(sub.sum()) / float(sub.size))
+                a, wd = _box_frame_stats(on, box_px)
+                box_cov = max(box_cov, a)
+                box_width_cov = max(box_width_cov, wd)
             enc.stdin.write(m.tobytes() if m.flags["C_CONTIGUOUS"]
                             else np.ascontiguousarray(m).tobytes())
             n += 1
@@ -401,6 +678,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
            "coverage_max": round(cov_max, 4),
            "moving_frames": hits,
            "text_covered": round(box_cov, 3) if box_px else None,
+           "text_width_covered": round(box_width_cov, 3) if box_px else None,
            "no_cv2": cv2 is None}
     # THE MEASUREMENT IS THE FEATURE. Both of these are real footage, not edge
     # cases: people hand-hold their cameras, and people ask for this on a static
@@ -424,3 +702,44 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
         except OSError:
             pass
     return res
+
+
+def box_stats(mask_path, box):
+    """Re-measure an EXISTING mask against a NEW text box.
+
+    Round 63: a cache hit used to parrot the numbers measured for whichever
+    text FIRST built the mask — a user shrank their title, the tool quoted
+    "11% of the text" from the old, larger box, and the smaller title on
+    screen was gibberish. The mask never changes with the box; the numbers
+    must. Decoding a 540p gray mp4 is proxy-class work, fine on the small box.
+
+    Returns {"coverage", "coverage_max", "text_covered", "text_width_covered"}
+    or None when the mask cannot be read (caller falls back to honesty about
+    not knowing, never to the wrong number).
+    """
+    try:
+        info = media.probe(mask_path)
+        w, h = int(info["width"]), int(info["height"])
+    except Exception:
+        return None
+    box_px = _box_px(box, w, h)
+    cov_sum = cov_max = box_cov = box_width = 0.0
+    n = 0
+    total = float(w * h)
+    for m in _decode(mask_path, 0.0, float(info.get("duration") or
+                                           MAX_WINDOW_S) + 1.0, w, h):
+        on = m[:, :, 0] > 127
+        c = float(on.sum()) / total
+        cov_sum += c
+        cov_max = max(cov_max, c)
+        if box_px:
+            a, wd = _box_frame_stats(on, box_px)
+            box_cov = max(box_cov, a)
+            box_width = max(box_width, wd)
+        n += 1
+    if n == 0:
+        return None
+    return {"coverage": round(cov_sum / n, 4),
+            "coverage_max": round(cov_max, 4),
+            "text_covered": round(box_cov, 3) if box_px else None,
+            "text_width_covered": round(box_width, 3) if box_px else None}

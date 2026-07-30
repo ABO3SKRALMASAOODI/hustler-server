@@ -194,6 +194,25 @@ def run_frames_remote(project_id, payload, user_id=None):
                         "attempts": 0, "payload": payload})
 
 
+def track_available():
+    """Is there an executor to run quad tracking on? (round 63)
+
+    Same contract as frames_available. Tracking decodes the WHOLE takeover
+    window of what is usually a user's 4K original — the job class that has
+    OOM-killed the dispatcher four times — so with no executor the caller
+    keeps the static pin rather than attempting it locally."""
+    return bool(config.REMOTE_EXECUTOR_URL)
+
+
+def run_track_remote(project_id, payload, user_id=None):
+    """Track a screen quad through a window of a stored object on the
+    executor. Returns tracker.run_track_job's dict: {"quads", "quality"}.
+    Synchronous, no job row — the round-61 capture shape."""
+    return _run_remote({"id": None, "type": "track",
+                        "project_id": project_id, "user_id": user_id,
+                        "attempts": 0, "payload": payload})
+
+
 def run_render_remote(worker_db, job):      # signature matches run_render_job
     return _run_remote(job)
 

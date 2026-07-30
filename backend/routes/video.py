@@ -3233,7 +3233,7 @@ def _final_is_current(meta):
 
 
 # Mirrors worker/config.TRANSITION_VERSION — a worker test asserts they match.
-TRANSITION_VERSION = 1
+TRANSITION_VERSION = 2
 
 
 def _transitions_are_current(meta, edl_has_transition=True):

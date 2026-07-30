@@ -287,10 +287,29 @@ def test_the_paid_model_is_priced():
     assert "grok-4.5" in model_prices.MODEL_PRICES
 
 
-def test_reasoning_effort_is_off_by_default():
-    """DeepSeek 400s on an unknown parameter, so the field must not be sent
-    until someone opts in."""
-    assert config.AGENT_REASONING_EFFORT == ""
+def test_reasoning_effort_defaults_low_and_rejection_is_survivable():
+    """Round 63: the default flips to "low" — an agent turn is round-trips x
+    13s and most output tokens were reasoning spent on tool dispatch. The flip
+    is only safe because a provider that rejects the field costs ONE call per
+    process (retry without, latch per model) — so this test pins the default
+    AND the machinery that makes it survivable, together."""
+    assert config.AGENT_REASONING_EFFORT == "low"
+    import llm
+
+    class FakeErr(Exception):
+        pass
+
+    e = FakeErr("Unknown parameter: 'reasoning_effort'")
+    assert llm.looks_like_bad_parameter(e, "reasoning_effort")
+    # an unrelated 400 must NOT latch the field off
+    e2 = FakeErr("invalid value for max_tokens")
+    assert not llm.looks_like_bad_parameter(e2, "reasoning_effort")
+    assert not llm.reasoning_effort_rejected("some-model-xyz")
+    llm.mark_reasoning_effort_rejected("some-model-xyz")
+    try:
+        assert llm.reasoning_effort_rejected("some-model-xyz")
+    finally:
+        llm._no_reasoning_effort.discard("some-model-xyz")
 
 
 def test_reasoning_effort_never_applies_to_the_first_iteration():

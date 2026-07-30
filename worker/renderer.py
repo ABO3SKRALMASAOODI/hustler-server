@@ -182,7 +182,8 @@ def screen_lock_corner_paths(lock, W, H, fps, dur):
     """
     cx, cy, z_end = screen_lock_geometry(lock)
     corners = [float(v) for v in lock["corners"]]
-    e = _screen_lock_ease(lock, f"on/{fps:.3f}", 0.0, dur, fps)
+    tvar = f"on/{fps:.3f}"
+    e = _screen_lock_ease(lock, tvar, 0.0, dur, fps)
     z = f"(1+{z_end - 1.0:.5f}*({e}))"
     g = f"(({e})*({e}))"
     # The destination is grown by the transparent border's share so the CONTENT
@@ -190,23 +191,67 @@ def screen_lock_corner_paths(lock, W, H, fps, dur):
     # this the takeover hands off two pixels small and the cut shows.
     kx = W / max(1.0, W - 2.0 * SCREEN_PAD_PX)
     ky = H / max(1.0, H - 2.0 * SCREEN_PAD_PX)
+    # Round 63: a TRACKED screen. corner_path carries the quad's measured
+    # motion through the window (the shot is handheld — the glass wobbles),
+    # so each corner coordinate becomes a piecewise-linear function of time
+    # instead of a constant. `corners` stays the ARRIVAL quad: it is what the
+    # camera geometry above was computed from, and the end-state correction
+    # below must aim at where the screen IS when the move lands, or the
+    # un-skew would chase a moving target and overshoot.
+    path = lock.get("corner_path")
     out = []
     # Storage order is the filter's order (TL, TR, BL, BR); the frame corner
     # each one has to arrive at follows the same order.
     frame_corners = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
     for i, (fx, fy) in enumerate(frame_corners):
-        qx, qy = corners[2 * i], corners[2 * i + 1]
-        # where this corner sits on screen under the push, and where it ends up
-        lock_x = f"(({qx:.5f}-(1-1/{z})*{cx:.5f})*{z})"
-        lock_y = f"(({qy:.5f}-(1-1/{z})*{cy:.5f})*{z})"
-        end_x = (qx - (1.0 - 1.0 / z_end) * cx) * z_end
-        end_y = (qy - (1.0 - 1.0 / z_end) * cy) * z_end
+        if path:
+            # The tracked coordinate is blended toward the ARRIVAL corner by
+            # g — the same weight that closes the skew. Two reasons, one
+            # mechanism: the ease reaches 1 on the LAST EMITTED frame
+            # (dur - 1/fps, the round-55 minus-one-frame rule) while the
+            # path's final knot sits at dur, so an unblended lerp lands the
+            # handoff a few pixels out of identity; and near the landing the
+            # screen fills most of the frame, where chasing hand wobble
+            # would shake the whole picture — the blend retires the wobble
+            # exactly as fast as the un-skew takes over.
+            px = _piecewise_linear_expr(tvar,
+                                        [(p[0], p[1 + 2 * i]) for p in path])
+            py = _piecewise_linear_expr(tvar,
+                                        [(p[0], p[2 + 2 * i]) for p in path])
+            ax, ay = corners[2 * i], corners[2 * i + 1]
+            qx = f"({px}*(1-{g})+{ax:.5f}*{g})"
+            qy = f"({py}*(1-{g})+{ay:.5f}*{g})"
+            lock_x = f"(({qx}-(1-1/{z})*{cx:.5f})*{z})"
+            lock_y = f"(({qy}-(1-1/{z})*{cy:.5f})*{z})"
+        else:
+            qx, qy = corners[2 * i], corners[2 * i + 1]
+            lock_x = f"(({qx:.5f}-(1-1/{z})*{cx:.5f})*{z})"
+            lock_y = f"(({qy:.5f}-(1-1/{z})*{cy:.5f})*{z})"
+        # the end state comes from the ARRIVAL quad in both branches
+        eqx, eqy = corners[2 * i], corners[2 * i + 1]
+        end_x = (eqx - (1.0 - 1.0 / z_end) * cx) * z_end
+        end_y = (eqy - (1.0 - 1.0 / z_end) * cy) * z_end
         ex = f"({lock_x}+{g}*{fx - end_x:.5f})"
         ey = f"({lock_y}+{g}*{fy - end_y:.5f})"
         # fractions -> pixels, expanded about the frame centre by the border
         out.append(f"{W}*(0.5+({ex}-0.5)*{kx:.6f})")
         out.append(f"{H}*(0.5+({ey}-0.5)*{ky:.6f})")
     return out
+
+
+def _piecewise_linear_expr(tvar, kfs):
+    """Piecewise-linear value over `tvar` from [(t, v), ...] (ascending t).
+    Held flat before the first knot and after the last. Segments are
+    half-open [t_i, t_{i+1}) so shared knots are counted exactly once."""
+    if len(kfs) == 1:
+        return f"{kfs[0][1]:.5f}"
+    terms = [f"{kfs[0][1]:.5f}*lt({tvar},{kfs[0][0]:.3f})"]
+    for (t0, v0), (t1, v1) in zip(kfs, kfs[1:]):
+        span = max(t1 - t0, 1e-4)
+        seg = f"({v0:.5f}+{v1 - v0:.5f}*({tvar}-{t0:.3f})/{span:.4f})"
+        terms.append(f"{seg}*gte({tvar},{t0:.3f})*lt({tvar},{t1:.3f})")
+    terms.append(f"{kfs[-1][1]:.5f}*gte({tvar},{kfs[-1][0]:.3f})")
+    return "(" + "+".join(terms) + ")"
 
 
 def _even(x):
@@ -1208,25 +1253,52 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                              f"enable='{en}'[vwhip]")
                 vlabel = "vwhip"
         else:                          # zoom_punch
-            # Accelerating push INTO the cut; the next block lands from a
-            # slight over-zoom. zoompan needs CFR (do_norm forced), so
+            # Accelerating push INTO the cut; the next block lands from an
+            # over-zoom and settles. zoompan needs CFR (do_norm forced), so
             # on/fps is program time.
+            #
+            # Round 63 — what makes this read as ONE camera move instead of
+            # two zooms with a cut between them ("smooth transition... without
+            # the user even noticing", from a real user's brief):
+            #   * VELOCITY CONTINUITY. The incoming over-zoom is scaled so its
+            #     initial rate matches the outgoing side's final rate
+            #     (B = A*td_i/td_o): the apparent camera decelerates through
+            #     the cut instead of changing speed exactly where the eye
+            #     must not be given a reason to look.
+            #   * MOTION BLUR at the peak, from tmix frame-blending — the same
+            #     real blur the motion_blur stylize uses. Around the junction
+            #     the frames are moving fastest, so averaging them yields a
+            #     radial smear that peaks exactly ON the cut — and because
+            #     tmix's window spans the junction, the last outgoing and
+            #     first incoming frames blend INTO EACH OTHER: the content
+            #     switch happens inside the smear, which is the entire trick
+            #     of the professional zoom-through.
             T = f"on/{fps:.3f}"
+            A = 0.55
             zterms = []
+            blur_spans = []
             for c, td_o, td_i in juncs:
                 if td_o:
                     zterms.append(
-                        f"0.45*pow(max(0,({T}-{c - td_o:.3f})"
+                        f"{A}*pow(max(0,({T}-{c - td_o:.3f})"
                         f"/{td_o:.3f}),2)*{_win(T, c - td_o, c)}")
+                    blur_spans.append((c - min(td_o * 0.6, 0.25), c))
                 if td_i:
+                    B = min(A * (td_i / td_o) if td_o else 0.35, 0.6)
                     zterms.append(
-                        f"0.30*pow(max(0,1-({T}-{c:.3f})"
+                        f"{B:.3f}*pow(max(0,1-({T}-{c:.3f})"
                         f"/{td_i:.3f}),2)*{_win(T, c, c + td_i)}")
+                    blur_spans.append((c, c + min(td_i * 0.5, 0.2)))
             if zterms:
                 parts.append(f"[{vlabel}]zoompan=z='1+{'+'.join(zterms)}'"
                              f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                              f":d=1:s={W}x{H}:fps={fps:.3f}[vpunch]")
                 vlabel = "vpunch"
+                en = "+".join(f"between(t,{a:.3f},{b:.3f})"
+                              for a, b in merge_spans(blur_spans, gap=0.0))
+                parts.append(f"[{vlabel}]tmix=frames=5:enable='{en}'"
+                             f"[vpunchb]")
+                vlabel = "vpunchb"
     # effects: grade -> custom grade -> stylize -> zooms -> overlays ->
     # (captions burn) -> (graphics burn) -> fades. Zooms use one zoompan
     # whose z steps up inside each window; do_norm guarantees the frames
