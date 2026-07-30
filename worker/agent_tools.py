@@ -5196,13 +5196,15 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
             f"({detected['method']} detector). It occupies "
             f"{qw:.2f}x{qh:.2f} of the frame.")
     bits.append(
-        f"From {start}s the clip plays ON the screen inside the shot, the "
-        f"camera pushes {z_end:.1f}x into it over {dur}s, and the picture "
-        f"arrives full frame at exactly {hand}s — where '{name}' cuts in and "
-        f"keeps playing from the same instant ({round(off + dur, 2)}s into "
-        "the clip). The last frame of the push and the first frame of the "
-        "clip are the SAME frame, which is what makes the join invisible; "
-        "the clip's own sound starts there too.")
+        f"From {start}s the clip FADES onto the screen inside the shot (no "
+        f"pop — the glass 'comes alive'), the camera pushes {z_end:.1f}x "
+        f"into it over {dur}s, and the picture arrives full frame at "
+        f"exactly {hand}s — where '{name}' cuts in and keeps playing from "
+        f"the same instant ({round(off + dur, 2)}s into the clip). The last "
+        "frame of the push and the first frame of the clip are the SAME "
+        "frame, and the momentum carries through the cut (a brief punch "
+        "past full frame that settles), so the join sits inside one "
+        "continuous motion.")
     bits.append(
         "The push and the pin are one item — remove it with "
         f"remove_screen_takeover('{item['id']}'), which also takes the "
@@ -10038,7 +10040,12 @@ TOOLS = {
         "device and the push rides that clip's tail, arriving exactly where "
         "it ends (I snap there and say so). "
         "duration_s 0.4-5, default 1.2 — 1.0-1.5 is the move people "
-        "mean. I MEASURE the screen's four corners from the frames myself; "
+        "mean. The content FADES onto the glass at the window's start and "
+        "the momentum carries through the cut (a brief settle past full "
+        "frame), so the join reads as one continuous move; for a user who "
+        "wants it even more seamless/aggressive, ease='accelerate' dives "
+        "into the screen with speed peaking at the cut. "
+        "I MEASURE the screen's four corners from the frames myself; "
         "pass `corners` only to override that (8 numbers x0,y0,x1,y1,x2,y2,"
         "x3,y3 as FRACTIONS of the frame in the order top-left, top-right, "
         "BOTTOM-LEFT, bottom-right — or a {x,y,w,h} rectangle). clip_start_s "

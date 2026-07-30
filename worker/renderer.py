@@ -66,6 +66,22 @@ def _enable_expr(spans):
 # Two is enough to give the interpolator something transparent to reach for,
 # and small enough that the compensation below is sub-pixel honest.
 SCREEN_PAD_PX = 2
+# What makes the takeover read as ONE camera move instead of an effect
+# followed by a cut (round 62b, from a real user's "it should be so smooth
+# you can't even tell where it switches"):
+#   * the content FADES onto the glass over the window's first beat — its
+#     first frame is never pixel-identical to what the filmed screen really
+#     displays, and snapping it on read as a pop exactly where the move
+#     begins;
+#   * the momentum CARRIES THROUGH the cut — the push used to stop dead on
+#     the arrival frame, and a dead stop is where the eye finds the seam. A
+#     short landing keeps moving: the picture punches past full frame and
+#     settles, the classic through-the-glass overshoot. It starts at exactly
+#     zero extra zoom on the arrival frame itself, so the frame-identical
+#     handoff (the round-55 invariant) is untouched.
+SCREEN_FADE_IN_S = 0.35
+SCREEN_LAND_ZOOM = 0.08
+SCREEN_LAND_S = 0.55
 
 
 def _ease_expr(kind, p):
@@ -1475,6 +1491,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             cx_terms.append(cxt)
         if cyt:
             cy_terms.append(cyt)
+        # The landing (round 62b): momentum through the cut. sin(PI*p) is 0
+        # on the arrival frame itself — the handoff stays frame-identical —
+        # rises to SCREEN_LAND_ZOOM past full frame and settles to rest, so
+        # the join sits inside one continuous motion instead of ending it.
+        tvar = f"on/{fps:.3f}"
+        le = min(tl.out_duration, b + SCREEN_LAND_S)
+        if le - b > 0.1:
+            p = f"clip(({tvar}-{b:.3f})/{le - b:.5f},0,1)"
+            zoom_terms.append(f"{SCREEN_LAND_ZOOM:.3f}*sin(PI*{p})"
+                              f"*gt({tvar},{b:.3f})*lt({tvar},{le:.3f})")
     shift_w, shift_h, shift_z = ([], [], [])
     if shifts:
         shift_w, shift_h, shift_z = screenframe.shift_tracks(
@@ -1521,6 +1547,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         chain.append(f"scale={iw_}:{ih_}:force_original_aspect_ratio=increase")
         chain.append(f"crop={iw_}:{ih_}")
         chain.append("format=rgba")
+        # The content FADES onto the glass (round 62b). Its first frame is
+        # never pixel-identical to what the filmed screen actually displays,
+        # so snapping it on at full opacity read as a pop at the exact moment
+        # the move begins. A third of a second of alpha, in branch-local time
+        # (pts start at 0 here), lets the screen "come alive" under the push;
+        # bounded by half the window so a short push still arrives opaque.
+        fin = min(SCREEN_FADE_IN_S, o_dur * 0.5)
+        if fin >= 0.05:
+            chain.append(f"fade=t=in:st=0:d={fin:.2f}:alpha=1")
         chain.append(f"pad={W}:{H}:{pad}:{pad}:color=black@0")
         # vf_perspective has no `t` — only `on` — so the frames reaching it
         # have to be at the render rate or every corner expression is off by

@@ -331,18 +331,37 @@ def rendered(workdir, room, clip):
 
 
 @needs_ffmpeg
-def test_content_is_glued_inside_the_screen_at_the_start(rendered):
+def test_content_is_glued_inside_the_screen_once_faded_in(rendered):
     """The claim an ordinary overlay cannot make: the content is IN the shot,
-    filling the glass and nothing outside it."""
-    f = _frame_at(rendered, 3.0 - TAKE_S + 0.02)
+    filling the glass and nothing outside it. Sampled just PAST the fade-in:
+    round 62b fades the content onto the glass (its first frame is never
+    pixel-identical to what the filmed screen displays, and snapping it on
+    read as a pop), so the window's opening frames deliberately show the
+    filmed screen. The glued check therefore compares against the resolver's
+    own corners for the sampled frame, not the static quad."""
+    lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth"}
+    dt = 0.40                       # past SCREEN_FADE_IN_S
+    f = _frame_at(rendered, 3.0 - TAKE_S + dt)
     m = _content_mask(f)
     ys, xs = np.where(m)
     assert m.sum() > 200, "no content visible on the screen at all"
-    qx, qy, qw, qh = quad_bbox(QUAD)
-    assert abs(xs.min() / W - qx) < 0.03, xs.min() / W
-    assert abs(xs.max() / W - (qx + qw)) < 0.03, xs.max() / W
-    assert abs(ys.min() / H - qy) < 0.03, ys.min() / H
-    assert abs(ys.max() / H - (qy + qh)) < 0.03, ys.max() / H
+    on = int(round(dt * FPS))
+    want = _content_corners(lock, on)
+    wx = [p[0] for p in want]
+    wy = [p[1] for p in want]
+    assert abs(xs.min() - max(0, min(wx))) < 12, (xs.min(), min(wx))
+    assert abs(xs.max() - min(W - 1, max(wx))) < 12, (xs.max(), max(wx))
+    assert abs(ys.min() - max(0, min(wy))) < 12, (ys.min(), min(wy))
+    assert abs(ys.max() - min(H - 1, max(wy))) < 12, (ys.max(), max(wy))
+
+
+@needs_ffmpeg
+def test_the_window_opens_on_the_filmed_screen_not_a_pop(rendered):
+    """Round 62b: the window's first frame shows essentially the base footage
+    — the content FADES onto the glass instead of snapping on at an opacity
+    the filmed screen never had."""
+    f = _frame_at(rendered, 3.0 - TAKE_S + 0.02)
+    assert _content_mask(f).sum() < 200
 
 
 @needs_ffmpeg
@@ -363,9 +382,10 @@ def test_content_rides_the_push_instead_of_floating_over_it(rendered):
     # renderer's output is.
     assert abs(xs.min() - max(0, min(wx))) < 12, (xs.min(), min(wx))
     assert abs(ys.min() - max(0, min(wy))) < 12, (ys.min(), min(wy))
-    # and it really did grow
-    start = _content_mask(_frame_at(rendered, 3.0 - TAKE_S + 0.02)).sum()
-    assert m.sum() > start * 1.6
+    # and it really did grow (baseline just past the fade-in, where the
+    # content is first fully opaque)
+    start = _content_mask(_frame_at(rendered, 3.0 - TAKE_S + 0.40)).sum()
+    assert m.sum() > start * 1.1
 
 
 @needs_ffmpeg
