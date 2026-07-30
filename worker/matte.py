@@ -47,7 +47,7 @@ import media
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 4
+VERSION = 5
 
 # Sampling for the background plate. 24 samples spread over the window is
 # enough for a median to see past a subject that lingers, and few enough to hold
@@ -98,12 +98,14 @@ MIN_COVERAGE = 0.004
 # How long a window this is allowed to chew, on the box that is also running the
 # agent turn. A title behind someone is a 2-6 second beat; 15 is generous.
 MAX_WINDOW_S = 15.0
-# The mask is measured at most at this rate. The composite chains its own
-# fps=<render rate> on the mask input, so a 30 Hz mask under 60 fps footage is
-# frame-doubled there — the subject's edge lags at most 1/60 s, invisible under
-# the feather, and the measurement costs half as much on the box that is also
-# running the agent turn.
-MASK_MAX_FPS = 30.0
+# The mask is measured at most at this rate. It was capped at 30 for one
+# round on the theory that a frame-doubled mask under 60 fps footage lags "at
+# most 1/60 s, invisible under the feather" — which is true for a walking
+# TORSO and false for a swinging ARM: a hand crosses letters at hundreds of
+# px/s, the half-rate mask trails it by a visible sliver, and the letters
+# flicker against the limb (watched on the round-63 render). The mask now
+# follows the render rate up to 60; the cost returns only on 60 fps sources.
+MASK_MAX_FPS = 60.0
 
 # ── v4: the camera never actually holds still ───────────────────────────────
 # Round 63, from the same project 246 footage one round later: with v3 live,

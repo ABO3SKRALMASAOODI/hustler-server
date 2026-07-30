@@ -82,6 +82,27 @@ SCREEN_PAD_PX = 2
 SCREEN_FADE_IN_S = 0.35
 SCREEN_LAND_ZOOM = 0.08
 SCREEN_LAND_S = 0.55
+# Round 63b, from the user watching the round-63 render: "it doesn't make
+# sense to switch scenes unless the first one is zoomed close to full frame".
+# He is right, and the geometry was hiding it: the push reached full frame
+# EXACTLY at the cut, so with an accelerating ease the room was still visible
+# around the glass until the final ~0.2s and the entire scene switch lived in
+# a blink at the end of the dive. The arrival now happens EARLY: the push
+# completes SCREEN_HOLD_S before the handoff, the content rides full-frame
+# for that beat, and the landing punch starts AT THE ARRIVAL and carries
+# THROUGH the cut with one continuous sin profile — the overlay grows past
+# identity pre-cut and the program zoom continues the same curve post-cut, so
+# the cut sits strictly inside a moving, already-full-frame picture. Both
+# sides of the cut show the same content at the same magnification.
+SCREEN_HOLD_S = 0.30
+
+
+def screen_lock_hold(dur):
+    """How long the content rides full frame before the handoff. ONE
+    function: the overlay's corner paths, the camera push and the landing
+    term all read it, so the three cannot disagree about when the push
+    actually lands."""
+    return min(SCREEN_HOLD_S, max(0.0, float(dur)) * 0.25)
 
 
 def _ease_expr(kind, p):
@@ -142,7 +163,11 @@ def _screen_lock_terms(lock, t, a, b, fps):
     the frame's crop is decided.
     """
     cx, cy, z_end = screen_lock_geometry(lock)
-    e = _screen_lock_ease(lock, t, a, b - a, fps)
+    # The ease spans the window MINUS the hold (round 63b): the camera lands
+    # early and z rides at z_end through the hold — the clip() inside the
+    # ease pins it at 1 for the remainder of the window.
+    e = _screen_lock_ease(lock, t, a,
+                          (b - a) - screen_lock_hold(b - a), fps)
     win = f"between({t},{a:.3f},{b:.3f})"
     strength = f"{z_end - 1.0:.5f}*({e})*{win}"
     cxt = (f"{cx - 0.5:.5f}*{win}" if abs(cx - 0.5) > 1e-6 else None)
@@ -183,9 +208,20 @@ def screen_lock_corner_paths(lock, W, H, fps, dur):
     cx, cy, z_end = screen_lock_geometry(lock)
     corners = [float(v) for v in lock["corners"]]
     tvar = f"on/{fps:.3f}"
-    e = _screen_lock_ease(lock, tvar, 0.0, dur, fps)
+    hold = screen_lock_hold(dur)
+    dur_push = dur - hold
+    e = _screen_lock_ease(lock, tvar, 0.0, dur_push, fps)
     z = f"(1+{z_end - 1.0:.5f}*({e}))"
     g = f"(({e})*({e}))"
+    # The through-cut punch (round 63b): from the moment the push lands
+    # (dur_push), the content keeps moving — it grows past identity on the
+    # same sin curve the program-side landing continues after the handoff,
+    # so the cut sits inside one uninterrupted zoom instead of at the exact
+    # first full-frame instant. Zero during the push itself.
+    l_tot = max(hold + SCREEN_LAND_S, 1e-3)
+    grow = (f"(1+{SCREEN_LAND_ZOOM:.3f}"
+            f"*sin(PI*clip(({tvar}-{dur_push:.3f})/{l_tot:.4f},0,1))"
+            f"*gt({tvar},{dur_push:.3f}))") if hold > 0.02 else "1"
     # The destination is grown by the transparent border's share so the CONTENT
     # (which sits inset by SCREEN_PAD_PX) lands where the quad says. Without
     # this the takeover hands off two pixels small and the cut shows.
@@ -234,8 +270,9 @@ def screen_lock_corner_paths(lock, W, H, fps, dur):
         ex = f"({lock_x}+{g}*{fx - end_x:.5f})"
         ey = f"({lock_y}+{g}*{fy - end_y:.5f})"
         # fractions -> pixels, expanded about the frame centre by the border
-        out.append(f"{W}*(0.5+({ex}-0.5)*{kx:.6f})")
-        out.append(f"{H}*(0.5+({ey}-0.5)*{ky:.6f})")
+        # share and by the through-cut punch (identity during the push).
+        out.append(f"{W}*(0.5+({ex}-0.5)*{kx:.6f}*{grow})")
+        out.append(f"{H}*(0.5+({ey}-0.5)*{ky:.6f}*{grow})")
     return out
 
 
@@ -1563,14 +1600,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             cx_terms.append(cxt)
         if cyt:
             cy_terms.append(cyt)
-        # The landing (round 62b): momentum through the cut. sin(PI*p) is 0
-        # on the arrival frame itself — the handoff stays frame-identical —
-        # rises to SCREEN_LAND_ZOOM past full frame and settles to rest, so
-        # the join sits inside one continuous motion instead of ending it.
+        # The landing (round 62b, reshaped in 63b): momentum through the cut.
+        # ONE sin profile starts at the ARRIVAL (b minus the hold — where the
+        # push actually lands now), rises past full frame and settles. Its
+        # pre-cut half is applied by the OVERLAY's own corner growth (the
+        # program picture is covered there); this term is the post-cut half,
+        # picking up the SAME curve at the SAME value on the frame after the
+        # handoff — both sides of the cut show the same content at the same
+        # magnification, so the join sits inside one uninterrupted zoom.
         tvar = f"on/{fps:.3f}"
-        le = min(tl.out_duration, b + SCREEN_LAND_S)
-        if le - b > 0.1:
-            p = f"clip(({tvar}-{b:.3f})/{le - b:.5f},0,1)"
+        hold = screen_lock_hold(b - a)
+        bp = b - hold
+        le = min(tl.out_duration, bp + hold + SCREEN_LAND_S)
+        if le - b > 0.05:
+            p = f"clip(({tvar}-{bp:.3f})/{le - bp:.5f},0,1)"
             zoom_terms.append(f"{SCREEN_LAND_ZOOM:.3f}*sin(PI*{p})"
                               f"*gt({tvar},{b:.3f})*lt({tvar},{le:.3f})")
     shift_w, shift_h, shift_z = ([], [], [])

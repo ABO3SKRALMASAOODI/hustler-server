@@ -210,11 +210,14 @@ def _content_mask(frame):
 # ------------------------------------------------------------------ #
 
 def _ev(expr, on):
+    import math
     return eval(expr.replace("on", str(float(on))),
                 {"clip": lambda v, a, b: max(a, min(b, v)),
                  "between": lambda t, a, b: 1.0 if a <= t <= b else 0.0,
                  "lt": lambda a, b: 1.0 if a < b else 0.0,
+                 "gt": lambda a, b: 1.0 if a > b else 0.0,
                  "gte": lambda a, b: 1.0 if a >= b else 0.0,
+                 "sin": math.sin, "PI": math.pi,
                  "__builtins__": {}})
 
 
@@ -241,17 +244,34 @@ def test_pin_starts_exactly_on_the_quad():
         assert abs(gx - wx) < 0.05 and abs(gy - wy) < 0.05
 
 
-def test_pin_ends_exactly_on_the_frame():
-    """The handoff is only invisible if the arrival is exact. The last frame
-    a filter emits inside the window is at dur - 1/fps, which is why the
-    progress denominator is the window minus one frame — with the naive
-    denominator this lands over a pixel short."""
+def test_pin_lands_identity_at_the_arrival_then_punches_through():
+    """Round 63b: the push completes screen_lock_hold BEFORE the handoff.
+    At the ARRIVAL instant the pin is the exact full-frame identity (the
+    round-55 invariant, relocated); through the hold the content keeps
+    moving — grown past the frame on the same sin curve the program-side
+    landing continues after the cut — so the cut never sits at a first-
+    full-frame instant or a dead stop."""
+    import math
     lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth"}
-    last = int(round((TAKE_S - 1.0 / FPS) * FPS))
-    got = _content_corners(lock, last)
+    hold = renderer.screen_lock_hold(TAKE_S)
+    assert hold > 0.02
+    arrive = int(round((TAKE_S - hold - 1.0 / FPS) * FPS))
+    got = _content_corners(lock, arrive)
     want = [(0, 0), (W, 0), (0, H), (W, H)]
     for (gx, gy), (wx, wy) in zip(got, want):
-        assert abs(gx - wx) < 0.02 and abs(gy - wy) < 0.02
+        assert abs(gx - wx) < 0.05 and abs(gy - wy) < 0.05
+    # last emitted frame: identity grown by the through-cut punch, exactly
+    # on the shared curve — the frame stays covered and still moving
+    last = int(round((TAKE_S - 1.0 / FPS) * FPS))
+    t = last / FPS
+    g = 1.0 + renderer.SCREEN_LAND_ZOOM * math.sin(
+        math.pi * (t - (TAKE_S - hold)) / (hold + renderer.SCREEN_LAND_S))
+    got_last = _content_corners(lock, last)
+    want_last = [(W * 0.5 + (wx - W * 0.5) * g, H * 0.5 + (wy - H * 0.5) * g)
+                 for wx, wy in want]
+    for (gx, gy), (wx, wy) in zip(got_last, want_last):
+        assert abs(gx - wx) < 0.5 and abs(gy - wy) < 0.5
+    assert g > 1.001, "the hold is a dead stop"
 
 
 def test_camera_and_pin_come_from_one_resolver():
@@ -268,14 +288,16 @@ def test_camera_and_pin_come_from_one_resolver():
 
 
 def test_push_dial_shortens_the_camera_move_only():
-    """push=0 leaves the shot alone; the content still has to arrive."""
+    """push=0 leaves the shot alone; the content still has to arrive (at the
+    arrival instant — the hold rides full frame after it)."""
     lock = {"corners": list(QUAD), "push": 0.0, "ease": "smooth"}
     _cx, _cy, z_end = renderer.screen_lock_geometry(lock)
     assert abs(z_end - 1.0) < 1e-9
-    last = int(round((TAKE_S - 1.0 / FPS) * FPS))
-    got = _content_corners(lock, last)
+    hold = renderer.screen_lock_hold(TAKE_S)
+    arrive = int(round((TAKE_S - hold - 1.0 / FPS) * FPS))
+    got = _content_corners(lock, arrive)
     for (gx, gy), (wx, wy) in zip(got, [(0, 0), (W, 0), (0, H), (W, H)]):
-        assert abs(gx - wx) < 0.02 and abs(gy - wy) < 0.02
+        assert abs(gx - wx) < 0.05 and abs(gy - wy) < 0.05
 
 
 def test_quad_order_is_checked():
@@ -750,8 +772,10 @@ def test_corner_path_pin_follows_the_path_and_still_lands_identity():
     want_static = _content_corners(static, on_mid, dur)
     assert any(abs(g[0] - s[0]) > 1.5 for g, s in zip(got_mid, want_static)), \
         "corner_path had no effect on the mid-window pin"
-    # arrival frame: identity, exactly as without a path
-    on_end = int(round(dur * FPS)) - 1
+    # the ARRIVAL instant (round 63b: the window end minus the hold) is the
+    # exact identity, exactly as without a path
+    hold = renderer.screen_lock_hold(dur)
+    on_end = int(round((dur - hold) * FPS)) - 1
     got_end = _content_corners(lock, on_end, dur)
     frame_corners = [(0.0, 0.0), (W, 0.0), (0.0, H), (W, H)]
     for (gx, gy), (fx, fy) in zip(got_end, frame_corners):
@@ -781,3 +805,17 @@ def test_corner_path_renders_and_content_follows(workdir, room, clip):
     wy = [p[1] for p in want]
     assert abs(xs.min() - max(0, min(wx))) < 12, (xs.min(), min(wx))
     assert abs(ys.min() - max(0, min(wy))) < 12, (ys.min(), min(wy))
+
+
+@needs_ffmpeg
+def test_frame_is_all_content_well_before_the_cut(rendered):
+    """Round 63b, the user's own words: 'it doesn't make sense to switch
+    scenes unless the first one is zoomed close to full frame'. The room must
+    be fully covered from the ARRIVAL on — the whole hold rides full-frame
+    content, so the scene switch happens inside an already-complete picture,
+    never in the final blink of the dive."""
+    hold = renderer.screen_lock_hold(TAKE_S)
+    f = _frame_at(rendered, 3.0 - hold + 2.0 / FPS)
+    m = _content_mask(f)
+    assert m.mean() > 0.985, \
+        f"room still visible at the arrival: {m.mean():.3f} content"

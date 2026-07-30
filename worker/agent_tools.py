@@ -5742,12 +5742,22 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
         return ("REJECTED: under 0.2s of source footage is in that window.")
 
     # ── measure the subject (or refuse, with the number that says why) ──────
+    # BIG TYPE IS THE LOOK (round 63b). Behind-subject text reads as depth
+    # only when the subject crosses the MIDDLE of tall glyphs — their tops
+    # and bottoms stay visible and the eye completes the letters. A small
+    # line sits entirely inside the torso band, whole words vanish as the
+    # person crosses, and the user reads "broken text", not depth (watched
+    # happen on a real render: the agent even SHRANK the title to help, which
+    # made every crossing hide more of it). So an unspecified size defaults
+    # LARGE for a behind title; the caller can still pass any size_scale.
+    behind_default_scale = 2.4 if tpl == "title" else None
     texts = [dict(tx) for tx in (edl.get("texts") or [])]
     item = {"id": _next_item_id(texts, "tx"), "text": t[:200], "start": s,
             "end": e, "template": tpl,
             "x": float(x) if x is not None else None,
             "y": float(y) if y is not None else None,
-            "size_scale": float(size_scale) if size_scale is not None else None,
+            "size_scale": (float(size_scale) if size_scale is not None
+                           else behind_default_scale),
             "color": color, "accent_color": accent_color, "font": font,
             "entrance": entrance, "exit": exit,
             "uppercase": bool(uppercase) if uppercase is not None else None,
@@ -5857,9 +5867,12 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
             f"{tw * 100:.0f}% of the line's WIDTH ({(tc or 0) * 100:.0f}% of "
             "the box's area). That much of the title is unreadable at that "
             "moment — right if the subject SWEEPS PAST (the words re-emerge), "
-            "wrong if they stand there through the window. If they linger, "
-            "make the text larger (size_scale) or move it (x/y) so it reads "
-            "around them, and say which you did.")
+            "wrong if they stand there through the window. The craft fix is "
+            "BIGGER type, never smaller: with tall glyphs the subject crosses "
+            "the middle of the letters while their tops and bottoms stay "
+            "readable — shrinking the line puts ALL of it inside the body "
+            "and whole words vanish. Raise size_scale or shorten the text, "
+            "and say which you did.")
     elif tc is not None:
         bits.append(
             f"The subject crosses {(tw or 0) * 100:.0f}% of the line's width "
@@ -10354,7 +10367,14 @@ TOOLS = {
                         "and no speed ramp over that footage. I also report how "
                         "much of the text the subject actually crosses — if "
                         "that is near zero the user will see a plain title, so "
-                        "move the text or the window. Do NOT put a zoom or a "
+                        "move the text or the window. BIG TYPE IS THE LOOK: "
+                        "the subject should cross the MIDDLE of tall glyphs "
+                        "with their tops and bottoms staying readable — that "
+                        "is what reads as depth. A small line sits entirely "
+                        "inside the body and whole words vanish, so titles "
+                        "default to size_scale 2.4 here; NEVER shrink the "
+                        "text to 'fix' hidden letters — enlarge it or shorten "
+                        "the phrase. Do NOT put a zoom or a "
                         "stabilize pass over the window. Remove it with "
                         "remove_text like any other text.",
                         {"text": {"type": "string"},
