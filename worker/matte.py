@@ -175,9 +175,18 @@ def _plate(path, start, dur, w, h, extra_vf=None):
     # leaves in a window. Mean absolute deviation from the median, max across
     # channels, accumulated one float32 frame at a time (~6 MB per step, never
     # the stack widened at once).
+    #
+    # Each sample's GLOBAL bias is removed first, exactly as the mask pass
+    # removes it per frame. Without this, auto-exposure breathing counts as
+    # per-pixel noise, the threshold map rides to its ceiling everywhere, and
+    # a dark subject in a dark room drops below it — measured on a synthetic
+    # reproduction: coverage fell to 12% of the subject's true footprint.
+    # Drift is the BIAS'S job; this map is for what flickers locally.
     acc = np.zeros((h, w, 3), np.float32)
     for f in stack:
-        acc += np.abs(f.astype(np.float32) - med)
+        d = f.astype(np.float32) - med
+        bias = np.median(d[::4, ::4, :].reshape(-1, 3), axis=0)
+        acc += np.abs(d - bias.astype(np.float32))
     noise = (acc / float(len(stack))).max(axis=2)
     return med, noise
 

@@ -695,6 +695,49 @@ def test_render_edl_degrades_to_a_plain_title_when_the_mask_is_missing(
     assert os.path.getsize(out) > 1000
 
 
+@needs_ffmpeg
+def test_exposure_breathing_does_not_fool_the_matte(workdir):
+    """Round 62, project 246: a dark handheld iPhone shot whose auto-exposure
+    breathes as the subject crosses a lamp. v1's fixed global threshold read
+    the breathing as subject (a band across the frame — the title vanished
+    behind nobody) while the dark-jacket subject sat UNDER the threshold and
+    was overprinted. Both failure modes are pinned here at once: coverage must
+    stay near the subject's true footprint (no over-mask) AND actually find
+    the subject (no under-mask). The under-mask half also guards the noise
+    map's own bias correction — global drift measured as per-pixel noise rode
+    the threshold to its ceiling and cost 88% of the subject."""
+    w, h, fps, dur = 480, 270, 24, 4.0
+    sw, sh = 50, 120
+    rng = np.random.default_rng(7)
+    room = rng.integers(20, 60, (h, w, 3), np.uint8)
+    src = os.path.join(workdir, "drift.mp4")
+    n = int(dur * fps)
+    enc = subprocess.Popen(
+        ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt",
+         "bgr24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "pipe:0",
+         "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", src],
+        stdin=subprocess.PIPE)
+    for i in range(n):
+        t = i / float(n - 1)
+        bias = int(round(24 * np.sin(2 * np.pi * t * 1.3)))
+        f = np.clip(room.astype(np.int16) + bias, 0, 255).astype(np.uint8)
+        x0, y0 = int((w - sw) * t), (h - sh) // 2
+        f[y0:y0 + sh, x0:x0 + sw] = rng.integers(35, 75, (sh, sw, 3),
+                                                 np.uint8)
+        enc.stdin.write(f.tobytes())
+    enc.stdin.close()
+    assert enc.wait() == 0
+    out = os.path.join(workdir, "drift_mask.mp4")
+    res = matte.measure_and_build(src, out, 0.0, dur, fps=float(fps))
+    assert res["ok"], res.get("why")
+    true_cov = sw * sh / float(w * h)
+    assert res["coverage"] < 3.0 * true_cov, \
+        f"over-masking: {res['coverage']} vs true {true_cov}"
+    assert res["coverage"] > 0.5 * true_cov, \
+        f"under-masking: {res['coverage']} vs true {true_cov}"
+    assert res["moving_frames"] >= n * 0.9
+
+
 def test_no_behind_text_changes_nothing_in_the_graph():
     edl = validate_edl({"keep": [[0.0, SHOT_S]]}, SHOT_S).model_dump()
     tl = Timeline(edl["keep"], [], [])
