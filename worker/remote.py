@@ -148,6 +148,31 @@ def _run_remote(job):
     return data.get("result")
 
 
+def capture_available():
+    """Is there an executor to run web captures on? (round 61)
+
+    Chromium is baked into the same image the executor runs, so this is purely
+    "is the executor configured". When it is not, the caller falls back to
+    recording locally — which is what shipped before and is correct on a
+    single-box deployment; it is only the LARGE dispatcher-plus-executor
+    deployment where the browser has to move.
+    """
+    return bool(config.REMOTE_EXECUTOR_URL)
+
+
+def run_capture_remote(project_id, payload, user_id=None):
+    """Record a web page on the executor and return record()'s dict, with
+    `storage_key` in place of `path` (the bytes never come back here).
+
+    Not a queued job: this is called synchronously from inside an agent turn,
+    so there is no row to claim and no id. _run_remote only reads the fields
+    below, and the executor's runner only reads project_id and payload.
+    """
+    return _run_remote({"id": None, "type": "capture",
+                        "project_id": project_id, "user_id": user_id,
+                        "attempts": 0, "payload": payload})
+
+
 def run_render_remote(worker_db, job):      # signature matches run_render_job
     return _run_remote(job)
 

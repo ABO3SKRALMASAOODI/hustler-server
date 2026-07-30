@@ -38,6 +38,7 @@ import screenframe
 import timeline as timeline_mod
 import travel
 import url_media
+import remote
 import webrecord
 from captions import KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
@@ -6946,6 +6947,63 @@ def _capture_precheck(ctx, url, orientation):
     return url, orientation, None
 
 
+def _run_capture(ctx, mode, url, **kw):
+    """Record a web page, on the executor when there is one.
+
+    Returns (got, None) or (None, failure_text). ROUND 61 — the browser must
+    not run on the dispatcher: a headless Chromium at 1080x1920 inside an agent
+    turn OOM-killed a real customer's turn on the first production use of
+    record_website, and an OOM is a disappearance, so none of the honest
+    "could not record that page" handling below could fire.
+
+    The remote path is preferred but never required: with no executor
+    configured this records locally exactly as it always did, which is right
+    for a single-box deployment. A remote failure does NOT fall back to local —
+    that would reproduce the crash it exists to avoid, on a box we already know
+    is too small.
+    """
+    if remote.capture_available():
+        payload = dict(kw, mode=mode, url=url)
+        try:
+            got = remote.run_capture_remote(ctx.project_id, payload,
+                                            user_id=getattr(ctx, "user_id",
+                                                            None))
+        except remote.RemoteExecutorError as e:
+            return None, str(e)
+        except Exception as e:
+            return None, str(e)[:200]
+        if not isinstance(got, dict) or not got.get("storage_key"):
+            return None, "the capture service returned nothing usable"
+        return got, None
+
+    workdir = os.path.join(ctx.workdir, f"webcap_{uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        if mode == "demo":
+            got = webrecord.record_demo(url, workdir, kw.get("steps") or [],
+                                        orientation=kw.get("orientation"))
+        else:
+            got = webrecord.record(url, workdir,
+                                   duration_s=kw.get("duration_s"),
+                                   orientation=kw.get("orientation"),
+                                   scroll=bool(kw.get("scroll", True)))
+        # Upload HERE, while the file still exists, so both branches hand back
+        # the same shape and the workdir's lifetime lives in one place. The
+        # caller is then only ever registering an object that is already in
+        # storage.
+        path = got.pop("path")
+        key = url_media.storage_key(ctx.project_id, url_media.KIND_VIDEO, path)
+        storage.upload_file(path, key, url_media.content_type(path))
+        got["storage_key"] = key
+        return got, None
+    except webrecord.WebRecordError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, str(e)[:200]
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def _store_capture(ctx, url, got, kind_word):
     """Upload a finished capture, register the asset, remember the event
     track ON THE ASSET. Returns (storage_key, name, None) or (None, None,
@@ -6956,14 +7014,18 @@ def _store_capture(ctx, url, got, kind_word):
     put the demo at the start"), and a track that only lived in turn memory
     would be gone exactly when showcase_demo needed it.
     """
-    path = got["path"]
-    key = url_media.storage_key(ctx.project_id, url_media.KIND_VIDEO, path)
-    try:
-        storage.upload_file(path, key, url_media.content_type(path))
-    except Exception as e:
-        return None, None, (
-            f"Recorded the page but could not save the capture "
-            f"({str(e)[:160]}). Do NOT claim it was added; try again.")
+    # A capture run on the executor (round 61) has already uploaded itself and
+    # returns the key instead of a local path — the mp4 never crosses the wire.
+    key = got.get("storage_key")
+    if not key:
+        path = got["path"]
+        key = url_media.storage_key(ctx.project_id, url_media.KIND_VIDEO, path)
+        try:
+            storage.upload_file(path, key, url_media.content_type(path))
+        except Exception as e:
+            return None, None, (
+                f"Recorded the page but could not save the capture "
+                f"({str(e)[:160]}). Do NOT claim it was added; try again.")
 
     from urllib.parse import urlparse as _up
     domain = (_up(got.get("final_url") or url).hostname or "site")
@@ -6992,26 +7054,14 @@ def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
     except (TypeError, ValueError):
         return "REJECTED: duration_s must be a number of seconds (4-30)."
 
-    workdir = os.path.join(ctx.workdir, f"webrec_{uuid.uuid4().hex[:8]}")
-    os.makedirs(workdir, exist_ok=True)
-    try:
-        got = webrecord.record(url, workdir, duration_s=dur,
-                               orientation=orientation,
-                               scroll=bool(scroll))
-    except webrecord.WebRecordError as e:
-        shutil.rmtree(workdir, ignore_errors=True)
-        return (f"Could not record that page — {e}. Tell the user plainly "
+    got, err = _run_capture(ctx, "record", url, duration_s=dur,
+                            orientation=orientation, scroll=bool(scroll))
+    if err:
+        return (f"Could not record that page — {err}. Tell the user plainly "
                 "and offer the alternative (they screen-record it and "
                 "upload). Do NOT claim anything was recorded or added.")
-    except Exception as e:
-        shutil.rmtree(workdir, ignore_errors=True)
-        return (f"Could not record that page ({str(e)[:200]}). Tell the "
-                "user it did not work. Do NOT claim anything was added.")
 
-    try:
-        key, name, fail = _store_capture(ctx, url, got, "capture")
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    key, name, fail = _store_capture(ctx, url, got, "capture")
     if fail:
         return fail
     return (f"Recorded \"{name}\" — "
@@ -7030,25 +7080,14 @@ def record_website_demo(ctx, url, steps, orientation=None):
     if rej:
         return rej
 
-    workdir = os.path.join(ctx.workdir, f"webdemo_{uuid.uuid4().hex[:8]}")
-    os.makedirs(workdir, exist_ok=True)
-    try:
-        got = webrecord.record_demo(url, workdir, steps,
-                                    orientation=orientation)
-    except webrecord.WebRecordError as e:
-        shutil.rmtree(workdir, ignore_errors=True)
-        return (f"Could not record that walkthrough — {e}. Tell the user "
+    got, err = _run_capture(ctx, "demo", url, steps=steps,
+                            orientation=orientation)
+    if err:
+        return (f"Could not record that walkthrough — {err}. Tell the user "
                 "plainly what went wrong. Do NOT claim anything was recorded "
                 "or added.")
-    except Exception as e:
-        shutil.rmtree(workdir, ignore_errors=True)
-        return (f"Could not record that walkthrough ({str(e)[:200]}). Tell "
-                "the user it did not work. Do NOT claim anything was added.")
 
-    try:
-        key, name, fail = _store_capture(ctx, url, got, "demo")
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    key, name, fail = _store_capture(ctx, url, got, "demo")
     if fail:
         return fail
 

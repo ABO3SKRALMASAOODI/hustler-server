@@ -1642,10 +1642,24 @@ def validate_edl(data, duration=None):
     for i, v in enumerate(edl.volume):
         v.start, v.end = _r(v.start), _r(v.end)
         _check_span(f"volume[{i}]", v.start, v.end, duration)
-        if not (GAIN_MIN_DB <= v.gain_db <= GAIN_MAX_DB):
+        # BELOW THE FLOOR MEANS SILENCE, NOT AN ERROR (round 61).
+        #
+        # "remove the sound of the video" is close to the simplest request this
+        # product gets, and the obvious way to express it is a very negative
+        # gain. A real turn on 2026-07-30 asked for -100 dB and got
+        # "volume[0].gain_db -100.0 outside [-60.0, 12.0]" — a rejection, for
+        # asking for MORE of exactly the thing the parameter does.
+        #
+        # GAIN_MIN_DB is already inaudible (-60 dB is 0.1% amplitude), so there
+        # is no difference to hear between it and -100: clamping delivers what
+        # was asked for. Going OVER the top is still refused, because too loud
+        # is a real defect and silently capping it would hide a clipped mix.
+        if v.gain_db < GAIN_MIN_DB:
+            v.gain_db = GAIN_MIN_DB
+        elif v.gain_db > GAIN_MAX_DB:
             raise EDLValidationError(
-                f"volume[{i}].gain_db {v.gain_db} outside "
-                f"[{GAIN_MIN_DB}, {GAIN_MAX_DB}].")
+                f"volume[{i}].gain_db {v.gain_db} is above the "
+                f"{GAIN_MAX_DB} dB ceiling.")
 
     # Overlays: program-time windows, keyframeable position, clamped scale.
     seen_ov = set()

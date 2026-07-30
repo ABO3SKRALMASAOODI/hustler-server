@@ -87,11 +87,27 @@ class WebRecordError(Exception):
 
 
 def available():
-    """Recording exists only where the playwright package AND its baked
-    Chromium are installed (the worker Docker image; not a dev Mac unless
-    set up). Import is the honest probe — config can force it off."""
+    """Recording exists where the playwright package AND its baked Chromium
+    are installed (the worker Docker image; not a dev Mac unless set up), OR
+    where an executor is configured to run it for us.
+
+    Import is the honest probe for the local case — config can force it off.
+    The remote clause matters because round 61 moved the browser OFF this
+    process: on a dispatcher that somehow lacks Chromium the capability is
+    still real, because the box that actually runs it has one. Both roles ship
+    the same image today, so in practice both clauses agree; the point is that
+    the answer follows where the work happens, not where the question is asked.
+    """
     if not config.WEB_RECORD_ENABLED:
         return False
+    return local_available() or bool(config.REMOTE_EXECUTOR_URL)
+
+
+def local_available():
+    """Can THIS process drive a browser? The executor's runner asks this one:
+    `available()` would answer for the fleet, and an executor that also had
+    REMOTE_EXECUTOR_URL set would then claim a capability it does not have and
+    crash on the import instead of refusing in words."""
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
         return True
@@ -1051,3 +1067,80 @@ def summarize_events(events):
 
 def events_json(events):
     return json.dumps(events, separators=(",", ":"))
+
+
+# ── Running the browser somewhere it fits (round 61) ─────────────────────────
+#
+# On 2026-07-30 a customer asked for website b-roll and the FIRST real
+# record_website call this product has ever served killed the worker:
+#
+#   13:15:28  "record a website (like a Google search for 'plumber near me'
+#              or a business listing) For b-rolls"
+#   13:15:57  the model asks for get_kept_transcript + three record_website
+#   13:16:15  last heartbeat, then nothing
+#   13:18:27  the reaper: "Worker died and retries are exhausted"
+#
+# A tool call runs inside the agent turn, and agent turns run LOCALLY on the
+# dispatcher — deliberately, because they are network-bound waiting on an LLM
+# (worker/main._build_runners). That is exactly the wrong box for a full
+# headless Chromium at 1080x1920 rendering Google Search while a CDP screencast
+# drains frames: the same small instance whose memory ceiling had already been
+# killing filmstrip jobs that morning.
+#
+# The careful error handling in agent_tools.record_website — "Could not record
+# that page, offer the alternative" — could not fire, because an OOM kill is a
+# disappearance, not an exception (round 57). MAX_ATTEMPTS_AGENT is 1, so there
+# was no retry either. The customer's turn simply ended.
+#
+# The executor already has Chromium (one image, two roles — the Dockerfile
+# bakes `playwright install --with-deps chromium` for both), 8 vCPU and 32Gi.
+# So the capture runs THERE and only its result comes back. The recorded file
+# never crosses the wire: the executor uploads it to storage and returns the
+# key, which is the same key _store_capture would have written.
+
+def run_capture_job(worker_db, job):
+    """Executor-side runner for a web capture. Returns the `got` dict that
+    record()/record_demo() produce, with `path` replaced by `storage_key`.
+
+    `worker_db` is unused — a capture writes no rows. The asset is registered
+    by the DISPATCHER, which owns the ToolContext and the project's DB writes;
+    this side only produces bytes. Keeping it that way means a capture that
+    succeeds but whose caller has gone away leaves an orphaned object, not a
+    half-registered asset pointing at nothing.
+    """
+    import shutil as _shutil
+    import uuid as _uuid
+
+    import storage as _storage
+    import url_media as _url_media
+
+    payload = job.get("payload") or {}
+    project_id = job.get("project_id")
+    mode = payload.get("mode") or "record"
+    url = payload.get("url")
+    if not url:
+        raise WebRecordError("no url given")
+    if not config.WEB_RECORD_ENABLED or not local_available():
+        # local_available, not available(): see its docstring. An executor
+        # without a browser is a deployment fault, and the agent must hear it
+        # as "cannot", never as a crash.
+        raise WebRecordError("web capture is not available on this worker")
+
+    workdir = os.path.join(config.TMP_DIR, f"cap_{_uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        if mode == "demo":
+            got = record_demo(url, workdir, payload.get("steps") or [],
+                              orientation=payload.get("orientation"))
+        else:
+            got = record(url, workdir,
+                         duration_s=payload.get("duration_s"),
+                         orientation=payload.get("orientation"),
+                         scroll=bool(payload.get("scroll", True)))
+        path = got.pop("path")
+        key = _url_media.storage_key(project_id, _url_media.KIND_VIDEO, path)
+        _storage.upload_file(path, key, _url_media.content_type(path))
+        got["storage_key"] = key
+        return got
+    finally:
+        _shutil.rmtree(workdir, ignore_errors=True)

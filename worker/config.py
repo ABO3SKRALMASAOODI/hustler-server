@@ -534,6 +534,13 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     "final": int(os.getenv("REMOTE_TIMEOUT_FINAL_S", "3400")),
     # An index is once per video and everything else waits on it.
     "index": int(os.getenv("REMOTE_TIMEOUT_INDEX_S", "3400")),
+    # A web capture is bounded on the FAR side by WEB_RECORD_WALL_S (90s),
+    # which covers page load, the scripted steps and the screencast. This is
+    # that plus room for a Cloud Run cold start and the upload of the finished
+    # mp4 — and it is the one kind a user is synchronously waiting on inside an
+    # agent turn, so it must stay far below AGENT_TURN_TIMEOUT_S rather than
+    # near the executor's own ceiling.
+    "capture": int(os.getenv("REMOTE_TIMEOUT_CAPTURE_S", "180")),
 }
 
 

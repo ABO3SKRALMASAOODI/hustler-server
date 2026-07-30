@@ -33,13 +33,22 @@ import db as dbx
 import indexer
 import renderer
 import version
+import webrecord
 
 # Only the compute runners are exposed remotely. agent_turn stays on the
 # dispatcher (network-bound), so it is intentionally NOT in this map.
+#
+# `capture` is the exception that proves the rule (round 61): it is not a
+# queued job at all, it is one TOOL CALL inside an agent turn — but the thing
+# it does is launch a full Chromium at 1080x1920, which is compute, and doing
+# that on the dispatcher OOM-killed a real customer's turn on the first
+# production use of the feature. The turn still runs there and blocks on this
+# call; only the browser moved. See webrecord.run_capture_job.
 RUNNERS = {
     "index": indexer.run_index_job,
     "preview": renderer.run_render_job,
     "final": renderer.run_render_job,
+    "capture": webrecord.run_capture_job,
 }
 
 

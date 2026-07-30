@@ -985,6 +985,12 @@ def create_upload(user_id, project_id):
         current_app.logger.exception("presign failed")
         return jsonify({"error": f"Could not prepare upload: {e}"}), 502
     out["kind"] = kind
+    # How big a file we could take through our own servers if this browser
+    # turns out not to be able to reach storage directly. Carried on the
+    # presign so the client always knows without a second request — and so it
+    # can say "too big to route through us, try a different network" up front
+    # instead of after a 4 GB upload earns a 413.
+    out["relay_max_bytes"] = storage.RELAY_MAX_BYTES
     # The one beacon that is NOT a failure. Without a start there is no
     # denominator: an upload that dies mid-transfer looks identical to one that
     # was never attempted, and "how many big uploads never finish" is the
@@ -993,6 +999,75 @@ def create_upload(user_id, project_id):
         "filename": filename, "bytes": nbytes, "kind": kind,
         "mode": out.get("mode")}, origin="server")
     return jsonify(out)
+
+
+@video_bp.route("/projects/<int:project_id>/uploads/relay", methods=["POST"])
+@token_required
+def relay_upload(user_id, project_id):
+    """Take the bytes ourselves when the browser cannot reach storage.
+
+    The fallback of last resort — see storage.RELAY_MAX_BYTES for the customer
+    this exists for. The client calls it only after the direct presigned PUT
+    has failed at the NETWORK layer (no HTTP status), never for a 4xx: a
+    refused or expired presign is a bug to fix, not traffic to re-route.
+
+    The key is not trusted. It has to be one this project's own create_upload
+    could have issued — same prefix check complete_upload_core makes — so a
+    valid token for project A can never write into project B, and no caller can
+    choose a path outside the upload prefixes.
+    """
+    if not storage.is_configured():
+        return jsonify({"error": "Video storage is not configured yet"}), 503
+    key = request.args.get("key") or ""
+    kind = request.args.get("kind") or "original"
+    if kind not in ("original", "music", "image", "clip", "proxy"):
+        return jsonify({"error": "unsupported kind"}), 400
+    prefix = storage.KEY_PREFIX.get(kind, "originals")
+    if not key.startswith(f"{prefix}/{project_id}/") or ".." in key:
+        return jsonify({"error": "storage_key does not belong to this "
+                                 "project"}), 400
+    with vdb() as conn:
+        if not _project_for_user(conn.cursor(), project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+
+    declared = request.content_length
+    try:
+        storage.relay_upload(key, request.stream,
+                             request.headers.get("Content-Type"),
+                             declared_bytes=declared)
+    except storage.RelayTooLarge as e:
+        record_client_event(user_id, project_id, "upload_rejected", detail={
+            "reason": str(e), "bytes": declared, "kind": kind,
+            "stage": "relay"}, origin="server")
+        return jsonify({"error": str(e)}), 413
+    except Exception as e:
+        current_app.logger.exception("relay upload failed")
+        record_client_event(user_id, project_id, "upload_failed", detail={
+            "reason": str(e)[:300], "bytes": declared, "kind": kind,
+            "stage": "relay"}, origin="server")
+        return jsonify({"error": f"Could not save the upload: {e}"}), 502
+
+    nbytes = storage.head_bytes(key)
+    if nbytes is None:
+        return jsonify({"error": "Upload did not land in storage"}), 502
+    # The presigned multipart upload the browser could not use is now garbage
+    # staged in the bucket that nothing will ever complete. Aborting it is
+    # separate from the object we just wrote (an MPU is its own staging area),
+    # and best-effort: a failure here costs storage, not correctness.
+    abandoned = request.args.get("abandon_upload_id")
+    if abandoned:
+        try:
+            storage.abort_multipart(key, abandoned)
+        except Exception:
+            current_app.logger.warning(
+                "could not abort abandoned multipart %s for %s",
+                abandoned, key)
+    # Countable on purpose. This route is a symptom, not a feature: if it
+    # starts carrying real traffic, something about the direct path is broken
+    # for a whole population and the number is how we find out.
+    record_client_event(user_id, project_id, "upload_relayed", detail={
+        "bytes": nbytes, "kind": kind}, origin="server")
+    return jsonify({"ok": True, "storage_key": key, "bytes": nbytes})
 
 
 # How far the original's real duration may sit from what the browser reported
@@ -1088,6 +1163,14 @@ def complete_upload_core(user_id, project_id, data):
     filename = data.get("filename") or ""
     upload_id = data.get("upload_id")
     parts = data.get("parts") or []
+    # COMPLETING A MULTIPART UPLOAD WITH NO PARTS IS A DELETE (round 61).
+    # The relay path writes the object whole and then has no parts to report;
+    # a caller that still sent its upload_id would ask S3 to assemble the key
+    # out of nothing, replacing bytes that are already correctly in place. The
+    # client clears the id, and this makes it impossible to get wrong from any
+    # client, including an old bundle in an open tab.
+    if upload_id and not parts:
+        upload_id = None
     duration_s = data.get("duration_s")   # client-probed, music/clip/original
 
     prefix = storage.KEY_PREFIX.get(kind, "originals")
@@ -1355,6 +1438,14 @@ def original_upload_ready(user_id, project_id):
     asset_id = data.get("asset_id")
     upload_id = data.get("upload_id")
     parts = data.get("parts") or []
+    # COMPLETING A MULTIPART UPLOAD WITH NO PARTS IS A DELETE (round 61).
+    # The relay path writes the object whole and then has no parts to report;
+    # a caller that still sent its upload_id would ask S3 to assemble the key
+    # out of nothing, replacing bytes that are already correctly in place. The
+    # client clears the id, and this makes it impossible to get wrong from any
+    # client, including an old bundle in an open tab.
+    if upload_id and not parts:
+        upload_id = None
 
     with vdb() as conn:
         cur = conn.cursor()
@@ -3605,7 +3696,13 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       # countable — without it, "did the browser transcode
                       # actually work for real users" has no answer.
                       "upload_proxy_first", "upload_proxy_failed",
-                      "upload_original_ready"}
+                      "upload_original_ready",
+                      # The direct PUT to storage died in the browser and the
+                      # bytes came through our own servers instead (round 61).
+                      # A symptom, not a feature: if this starts carrying real
+                      # traffic the direct path is broken for a population, and
+                      # this count is how that becomes visible.
+                      "upload_relayed"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these

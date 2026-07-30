@@ -119,10 +119,26 @@ def _plate(path, start, dur, w, h, extra_vf=None):
     for i in range(PLATE_SAMPLES):
         t = start + step * (i + 0.5)
         for f in _decode(path, t, 0.06, w, h, extra_vf):
-            stack.append(f.astype(np.float32))
+            # uint8, NOT float32 — see below. np.median partitions in the
+            # input dtype and returns float64 for the (h, w, 3) result, which
+            # is one frame's worth, not the stack's.
+            stack.append(f)
             break
     if len(stack) < 6:
         return None
+    # THE COMMENT ON PLATE_SAMPLES WAS RIGHT; THE CODE WAS NOT (round 61).
+    #
+    # "24 x 960x540x3 is ~37 MB" is the uint8 figure. Every sample was being
+    # widened to float32 on the way in — 4x — and then np.stack COPIED the lot
+    # and np.median partitioned another copy, so a 6-second title cost roughly
+    # 450 MB of peak RSS. This runs inside the agent turn, which runs on the
+    # dispatcher, and on 2026-07-30 it killed that process one second after
+    # add_text_behind was called: the user asked for a title behind themselves
+    # walking and got "I lost my connection while working on that request".
+    #
+    # Kept in uint8 the whole way, the same three allocations come to ~110 MB
+    # and the arithmetic is identical — median is order statistics, so the
+    # dtype it partitions in cannot change which value wins.
     return np.median(np.stack(stack), axis=0)
 
 

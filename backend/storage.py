@@ -203,6 +203,96 @@ def new_original_key(project_id, ext, kind="original"):
     return f"{prefix}/{project_id}/{uuid.uuid4().hex[:12]}{ext}"
 
 
+# ── The way in when the browser cannot reach storage (round 61) ─────────────
+#
+# Every upload goes browser -> object storage directly, on a presigned URL.
+# That is right: the bytes never touch our web service, so a 4 GiB original
+# costs us nothing but a signature. It has one failure mode, and on
+# 2026-07-30 a real customer hit it for an hour:
+#
+#   registered 07:09:37, then EIGHT upload attempts across FOUR projects over
+#   56 minutes, two different files (1.96 MB, then 564 KB — they tried
+#   shrinking it), and NOT ONE BYTE LANDED. Zero assets, zero jobs. Then they
+#   left.
+#
+# The server issued all eight presigns fine. Every PUT died in the browser at
+# xhr.onerror with `status: null, offline: false` — the browser killing a
+# cross-origin request, not a slow line. Their app, their API calls and their
+# eight presigns all worked. Every other account in the system has at least one
+# successful upload; this one had zero, forever, with no way out and no other
+# route to try.
+#
+# So there is a second route. It costs us bandwidth and ties up a web worker
+# for the duration, which is exactly why it is a FALLBACK and not the path —
+# and why it is capped well below the direct limit. A cap means some users
+# still cannot get in, but "your 4 GB file cannot be routed through us, try a
+# different network" is a sentence someone can act on. Eight silent failures
+# are not.
+# The cap is 64 MB and it is MEASURED, not chosen. Posting identical bodies to
+# the same backend route on 2026-07-30:
+#
+#   via the Vercel rewrite   20 MB ok, 40 MB ok, 50 MB -> 502
+#                            (x-vercel-error: ROUTER_EXTERNAL_TARGET_
+#                             CONNECTION_ERROR_CD8)
+#   straight at Render       the SAME 50 MB body arrived fine
+#
+# So the client posts relays DIRECTLY at this service, past the rewrite. Above
+# 50 MB the numbers stop being trustworthy — the probe route 404s without
+# draining the request body, which can reset a connection on its own — so the
+# ceiling beyond that is unmeasured and this stays below it rather than
+# guessing. 64 MB is also exactly SINGLE_PUT_LIMIT: at or under it the direct
+# upload would have been one PUT anyway, so the relay covers precisely the
+# range where routing bytes through a web service is a reasonable thing to do.
+# Bigger files get an honest refusal naming the real cause, which is still
+# infinitely better than the eight silent failures that prompted this.
+RELAY_MAX_BYTES = int(os.getenv("RELAY_MAX_UPLOAD_MB", "64")) * 1024 * 1024
+
+
+class RelayTooLarge(ValueError):
+    pass
+
+
+def _capped_reader(stream, limit):
+    """Wrap a request stream so it cannot deliver more than `limit` bytes.
+
+    Content-Length is a claim by the client, so it is checked BEFORE we read
+    and enforced again WHILE we read: a lying header must not be able to
+    stream an unbounded body through a service sized for small ones.
+    """
+    class _Capped:
+        def __init__(self):
+            self.seen = 0
+
+        def read(self, n=-1):
+            chunk = stream.read(n) if n is not None and n >= 0 \
+                else stream.read()
+            if not chunk:
+                return chunk
+            self.seen += len(chunk)
+            if self.seen > limit:
+                raise RelayTooLarge(
+                    f"upload body exceeded {_size_label(limit)}")
+            return chunk
+
+    return _Capped()
+
+
+def relay_upload(key, stream, content_type, declared_bytes=None):
+    """Stream a request body straight into object storage.
+
+    upload_fileobj chunks internally (and does its own multipart against R2),
+    so memory here is one part, not one file — the constraint this route lives
+    under is TIME on a web worker, not RAM.
+    """
+    if declared_bytes is not None and declared_bytes > RELAY_MAX_BYTES:
+        raise RelayTooLarge(
+            f"file is larger than the {_size_label(RELAY_MAX_BYTES)} limit "
+            f"for uploads routed through our servers")
+    client().upload_fileobj(
+        _capped_reader(stream, RELAY_MAX_BYTES), bucket(), key,
+        ExtraArgs={"ContentType": content_type or "application/octet-stream"})
+
+
 def presign_upload(key, nbytes, content_type):
     """Single presigned PUT for small files, presigned multipart for large.
 
