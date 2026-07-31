@@ -36,6 +36,7 @@ import videogen
 import cursor as cursorlib
 import screendet
 import screenframe
+import screenmatch
 import timeline as timeline_mod
 import tracker
 import travel
@@ -4797,7 +4798,68 @@ def _ensure_asset_dims(ctx, asset):
     return None
 
 
-def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None):
+def _takeover_content_frames(ctx, asset, off, dur):
+    """Frames of the CONTENT about to be pinned, for the round-65 match tier.
+
+    Three spread samples of the handoff clip (any moment works — the match
+    anchors on the UI chrome that never moves), or the image itself for a
+    still. Best effort: [] just skips the match tier and detection proceeds
+    exactly as before.
+    """
+    try:
+        off = float(off or 0.0)
+        dur = float(dur or 1.2)
+        if asset.get("kind") == "image_ref":
+            return [_asset_local_path(ctx, asset)]
+        clip_dur = _asset_media_duration(ctx, asset)
+        hi = max(0.05, clip_dur - 0.1)
+        times = sorted({min(max(t, 0.0), hi) for t in
+                        (off, off + dur, off + dur + 3.0)})
+        pairs, _err = _asset_frames(ctx, asset, times, width=960,
+                                    tag="smtch")
+        return [fp for _, fp in pairs]
+    except Exception:
+        return []
+
+
+def _try_content_match(filmed_frames, content_frames, frame_aspect):
+    """The round-65 first tier: the content's own pixels found ON the glass.
+
+    Returns a detection `res` dict (same shape screendet/vision produce) or
+    None to fall through. Runs the same geometric gates the other tiers face
+    — a match that projects to a bow-tie or a sliver is discarded, never
+    trusted for being clever.
+    """
+    if not content_frames or not filmed_frames:
+        return None
+    try:
+        got = screenmatch.match_screen(filmed_frames, content_frames)
+    except Exception:
+        return None
+    if not got:
+        return None
+    quad = got["corners"]
+    ok, _why = quad_is_sane(quad)
+    if not ok:
+        return None
+    _qx, _qy, qw, qh = quad_bbox(quad)
+    if qw < SCREEN_QUAD_MIN_FRAC or qh < SCREEN_QUAD_MIN_FRAC:
+        return None
+    # A quad covering most of the frame is not a filmed screen — it is the
+    # match locking onto SHARED SCENERY instead of the glass (verified on
+    # real footage: a screen recording of this very editor contains a video
+    # panel showing the filmed room itself, and the room-to-room homography
+    # produced a near-full-frame quad with 77 confident inliers). A screen
+    # worth pushing into sits well inside the shot.
+    if qw > 0.92 or qh > 0.92:
+        return None
+    return {"corners": quad, "confidence": None, "method": "content_match",
+            "inliers": got["inliers"], "agreement": got["agreement"],
+            "n_frames": got["n_pairs"]}
+
+
+def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None,
+                             content_frames=None):
     """_detect_screen's counterpart for a screen inside a SPLICED clip.
 
     The frames come from the insert's own asset — via the executor when one
@@ -4829,14 +4891,20 @@ def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None):
         except Exception:
             return None, ("could not determine the spliced clip's frame "
                           "shape to place the corners")
-    res = screendet.find_screen(frames)
+    # Round 65, tier one: the content's own pixels found on the glass. Exact
+    # rotation and keystone; no plausibility check needed because the quad IS
+    # a projection of the content being pinned.
+    res = _try_content_match(frames, content_frames, aw / ah)
+    if res is None:
+        res = screendet.find_screen(frames)
+    matched = res.get("method") == "content_match"
     why = None
     if res.get("error"):
         why = res["error"]
-    elif res["confidence"] < screendet.MIN_CONFIDENCE:
+    elif not matched and res["confidence"] < screendet.MIN_CONFIDENCE:
         why = (f"the best screen-shaped region scored only "
                f"{res['confidence']:.2f} confidence")
-    if not why:
+    if not why and not matched:
         ok_p, pwhy = _quad_plausible_for(res["corners"], aw / ah,
                                          content_aspect)
         if not ok_p:
@@ -4944,7 +5012,7 @@ def _vision_screen_corners(ctx, frame_path):
     return [*tl, *tr, *bl, *br], None
 
 
-def _detect_screen(ctx, edl, src_t, content_aspect=None):
+def _detect_screen(ctx, edl, src_t, content_aspect=None, content_frames=None):
     """Measure the device screen around SOURCE second src_t. Returns
     (corners_in_output_fractions, info_dict) or (None, reason)."""
     try:
@@ -4974,14 +5042,20 @@ def _detect_screen(ctx, edl, src_t, content_aspect=None):
     info = ctx.index.get("video") or {}
     src_aspect = ((float(info.get("width") or 0) or 1920.0)
                   / (float(info.get("height") or 0) or 1080.0))
-    res = screendet.find_screen(frames)
+    # Round 65, tier one: the content's own pixels found on the glass —
+    # exact rotation and keystone, sub-pixel corners. Only when the glass
+    # never showed the content does this fall through to the detector.
+    res = _try_content_match(frames, content_frames, src_aspect)
+    if res is None:
+        res = screendet.find_screen(frames)
+    matched = res.get("method") == "content_match"
     why = None
     if res.get("error"):
         why = res["error"]
-    elif res["confidence"] < screendet.MIN_CONFIDENCE:
+    elif not matched and res["confidence"] < screendet.MIN_CONFIDENCE:
         why = (f"the best screen-shaped region scored only "
                f"{res['confidence']:.2f} confidence")
-    if not why:
+    if not why and not matched:
         # A confident measurement can still be the WRONG rectangle — a bright
         # doorway, a poster, a window. The content about to be pinned says
         # what shape the screen has to be; a region that contradicts it is
@@ -5127,7 +5201,11 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
         clip_t = float(h_ins.get("source_start_s") or 0.0) + (probe_out - w0)
         quad, why = _detect_screen_on_insert(ctx, edl, h_ins, clip_t,
                                              content_aspect=_ensure_asset_dims(
-                                                 ctx, asset))
+                                                 ctx, asset),
+                                             content_frames=
+                                             _takeover_content_frames(
+                                                 ctx, asset, clip_start_s,
+                                                 dur))
         if quad is None:
             return (f"REJECTED: I could not find a screen in the spliced clip "
                     f"at {round(probe_out, 2)}s — {why}. BOTH ways were "
@@ -5143,7 +5221,9 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
     else:
         quad, why = _detect_screen(ctx, edl, src_t,
                                    content_aspect=_ensure_asset_dims(ctx,
-                                                                     asset))
+                                                                     asset),
+                                   content_frames=_takeover_content_frames(
+                                       ctx, asset, clip_start_s, dur))
         if quad is None:
             return (f"REJECTED: I could not find a screen in the frame at "
                     f"{round(probe_out, 2)}s — {why}. BOTH ways were tried: "
@@ -5342,7 +5422,20 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
         ctx, edl, quad, start, dur, host)
     if arrival:
         quad = [round(v, 4) for v in arrival]
-    screen_spec = {"corners": quad, "push": pu, "ease": es}
+    # Where the corners came from decides WHEN the content may appear on the
+    # glass (renderer.screen_appear_window): matched corners mean the glass
+    # is already showing this very content, so the pin can live on it from
+    # the window's start; measured/read corners keep the late dissolve.
+    if corners is not None:
+        c_src = "user"
+    elif detected and detected.get("method") == "content_match":
+        c_src = "matched"
+    elif detected and detected.get("read_not_measured"):
+        c_src = "read"
+    else:
+        c_src = "measured"
+    screen_spec = {"corners": quad, "push": pu, "ease": es,
+                   "corners_source": c_src}
     if corner_path:
         screen_spec["corner_path"] = corner_path
     overlays = [dict(o) for o in (edl.get("overlays") or [])]
@@ -5374,7 +5467,18 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
                     f"[{ins['id']}] as the handoff — nothing was duplicated"
                     + ("; " + "; ".join(adopt_notes) if adopt_notes else "")
                     + ".")
-    if detected and detected.get("read_not_measured"):
+    if detected and detected.get("method") == "content_match":
+        bits.append(
+            f"LOCKED TO THE CONTENT: the screen's corners come from finding "
+            f"the recording's OWN pixels on the filmed glass "
+            f"({detected['inliers']} feature matches agreeing, "
+            f"{detected['agreement']} of {detected['n_frames']} frame pairs "
+            f"concurring) — rotation and perspective are exact, and the "
+            f"pinned clip grows out of the very pixels it was filmed "
+            f"playing on. Because the glass already shows this content, the "
+            f"clip lives on the screen from the window's start instead of "
+            f"dissolving in late.")
+    elif detected and detected.get("read_not_measured"):
         # Honest about which of the two ways this happened. A vision read is an
         # estimate, and the whole effect lives or dies on the corners, so the
         # user is told to look at the join — never told it was measured.
@@ -5394,12 +5498,20 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
             f"frames at {detected['confidence']:.2f} confidence "
             f"({detected['method']} detector). It occupies "
             f"{qw:.2f}x{qh:.2f} of the frame.")
+    if c_src == "matched":
+        appear = ("The recording is already playing ON the glass — pinned to "
+                  "its own filmed pixels — for the whole window, so nothing "
+                  "'appears' at all; the camera simply travels into a screen "
+                  "that was always showing it")
+    else:
+        appear = ("The glass shows what you actually filmed until the push "
+                  "is nearly half done — only once the screen dominates the "
+                  "frame does the clip DISSOLVE onto it (fully there before "
+                  "the picture lands, so the swap happens where the room is "
+                  "already gone from view)")
     bits.append(
         f"From {start}s the camera pushes {z_end:.1f}x into the screen over "
-        f"{dur}s. The glass shows what you actually filmed until the push is "
-        f"nearly half done — only once the screen dominates the frame does "
-        f"the clip DISSOLVE onto it (fully there before the picture lands, "
-        f"so the swap happens where the room is already gone from view) — "
+        f"{dur}s. {appear} — "
         f"and the picture arrives full frame at exactly {hand}s, where "
         f"'{name}' cuts in and keeps playing from the same instant "
         f"({round(off + dur, 2)}s into the clip). The last frame of the "
@@ -10338,23 +10450,30 @@ TOOLS = {
         "device and the push rides that clip's tail, arriving exactly where "
         "it ends (I snap there and say so). "
         "duration_s 0.4-5, default 1.2 — 1.0-1.5 is the move people "
-        "mean. The glass shows what was FILMED for the first part of the "
-        "push; the content dissolves onto it only once the push is ~half "
-        "done and the screen dominates the frame (a scene switch visible in "
-        "a wide shot of the room is the #1 thing users call 'not smooth'), "
-        "is fully there before the picture lands, and the momentum carries "
-        "through the cut (a brief settle past full frame), so the join reads "
-        "as one continuous move; for a user who wants it even more "
-        "seamless/aggressive, ease='accelerate' dives into the screen with "
-        "speed peaking at the cut. "
-        "I MEASURE the screen's four corners from the frames myself; "
-        "pass `corners` only to override that (8 numbers x0,y0,x1,y1,x2,y2,"
-        "x3,y3 as FRACTIONS of the frame in the order top-left, top-right, "
-        "BOTTOM-LEFT, bottom-right — or a {x,y,w,h} rectangle). clip_start_s "
-        "picks where in the asset the takeover starts playing; hold_s is how "
-        "long the asset stays full screen afterwards (default: the rest of "
-        "it). push 0-1 is how far the camera travels (1 = all the way, the "
-        "default). ease: 'smooth' (default), 'accelerate', 'linear'. "
+        "mean. I find the corners THREE ways, in order of trust: first I "
+        "MATCH the content's own pixels against the filmed glass (the "
+        "laptop was almost always filmed displaying that very recording — "
+        "a feature homography gives exact corners INCLUDING rotation and "
+        "keystone, and the pinned clip then grows out of the very pixels it "
+        "was filmed playing on, living on the glass from the window's "
+        "start); else I MEASURE a screen-shaped region from the pixels; "
+        "else I READ the corners with the vision model. When the corners "
+        "are matched the content is on the glass the whole window; when "
+        "they are only measured or read, the glass shows what was FILMED "
+        "until the push is ~half done and the content dissolves on late "
+        "(a scene switch visible in a wide shot of the room is the #1 "
+        "thing users call 'not smooth'), fully there before the picture "
+        "lands. Momentum carries through the cut either way (a brief "
+        "settle past full frame); ease='accelerate' dives with speed "
+        "peaking at the cut. "
+        "Pass `corners` only to override all of that (8 numbers x0,y0,x1,y1,"
+        "x2,y2,x3,y3 as FRACTIONS of the frame in the order top-left, "
+        "top-right, BOTTOM-LEFT, bottom-right — or a {x,y,w,h} rectangle). "
+        "clip_start_s picks where in the asset the takeover starts playing; "
+        "hold_s is how long the asset stays full screen afterwards (default: "
+        "the rest of it). push 0-1 is how far the camera travels (1 = all "
+        "the way, the default). ease: 'smooth' (default), 'accelerate', "
+        "'linear'. "
         "It REFUSES rather than guessing when it cannot measure the screen, "
         "and refuses when the screen is under 8% of the frame (the push "
         "would be a >12x blowup). Undo with remove_screen_takeover.",

@@ -424,6 +424,34 @@ def test_appear_window_completes_before_the_arrival():
             assert e0 >= 0.30 or f0 == 0.0, (kind, dur, e0)
 
 
+def test_matched_corners_appear_from_the_window_start():
+    """Round 65: corners that came from finding the CONTENT'S OWN PIXELS on
+    the glass mean the screen is already displaying this very content — so
+    the pin lives on it from the start, and the late dissolve (which exists
+    to hide a scene switch a wide shot would betray) would only hide the
+    continuity the match proved. Anything less trustworthy keeps it late."""
+    matched = {"corners": list(QUAD), "push": 1.0, "ease": "smooth",
+               "corners_source": "matched"}
+    f0, f1 = renderer.screen_appear_window(matched, TAKE_S, 30.0)
+    assert f0 == 0.0
+    assert f1 <= renderer.SCREEN_FADE_IN_S + 1e-6
+    for src in ("measured", "read", "user", None):
+        lock = {"corners": list(QUAD), "push": 1.0, "ease": "smooth",
+                "corners_source": src}
+        l0, _l1 = renderer.screen_appear_window(lock, TAKE_S, 30.0)
+        assert l0 > 0.25 * TAKE_S, (src, l0)
+
+
+def test_corners_source_survives_validation():
+    """corners_source must be a schema field or validate_edl silently drops
+    it (pydantic ignores unknown fields — the round-60 lesson) and every
+    takeover renders as untrusted."""
+    edl = _takeover_edl("clip.mp4")
+    edl["overlays"][0]["screen"]["corners_source"] = "matched"
+    out = validate_edl(dict(edl), ROOM_S).model_dump()
+    assert out["overlays"][0]["screen"]["corners_source"] == "matched"
+
+
 def test_ease_inverse_round_trips():
     for kind in ("smooth", "accelerate", "linear"):
         for e in (0.0, 0.2, 0.45, 0.85, 1.0):

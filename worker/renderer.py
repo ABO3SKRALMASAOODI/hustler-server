@@ -180,7 +180,16 @@ def screen_appear_window(lock, dur, fps):
     SCREEN_APPEAR_E1]), converted to seconds through the ease's inverse: on
     an accelerating dive that lands the dissolve late and fast, which is the
     point — the room must already be gone from view when the scene changes.
+
+    EXCEPT when the corners are MATCHED (round 65): then the quad came from
+    finding the content's own pixels on the filmed glass, which means the
+    screen is already displaying this very content — so the pin can live on
+    the glass from the window's start (a short fade only smooths the residual
+    exposure difference between the filmed emitter and the clean clip), and
+    delaying it would HIDE the continuity the match just proved.
     """
+    if lock.get("corners_source") == "matched":
+        return 0.0, min(SCREEN_FADE_IN_S, dur * 0.5)
     hold = screen_lock_hold(dur)
     dur_push = dur - hold
     span = max(dur_push - 1.0 / max(fps, 1e-6), dur_push * 0.5, 1e-3)

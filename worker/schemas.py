@@ -910,6 +910,15 @@ class ScreenLock(BaseModel):
     # is computed from. Absent (every EDL before round 63) = static pin,
     # byte-identical behaviour to round 55.
     corner_path: Optional[List[List[float]]] = None
+    # Round 65: where the corners CAME FROM — "matched" (the content's own
+    # pixels found on the glass by feature homography: exact rotation and
+    # keystone), "measured" (screendet), "read" (vision estimate), "user".
+    # The renderer keys the content's appearance on this: matched corners
+    # mean the glass is already showing this very content, so the pin lives
+    # on it from the window's start; anything less trustworthy keeps the
+    # round-64 late dissolve. Must be a schema field or validate_edl silently
+    # drops it (the round-60 lesson) and every takeover reads as untrusted.
+    corners_source: Optional[str] = None
 
 
 class OverlayItem(BaseModel):
