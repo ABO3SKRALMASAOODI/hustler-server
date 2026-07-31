@@ -50,7 +50,7 @@ import personseg
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 10
+VERSION = 11
 
 # ── v10: temporal coherence comes from the MODEL, not from gates (round 69) ──
 # The user filmed v9 failing five ways on project 300 in one afternoon, and
@@ -79,6 +79,54 @@ VERSION = 10
 # absent -> u2net -> photometric); the refusal bounds and their meanings are
 # unchanged.
 RVM_MIN_FPS = 12.0           # fps halving floor under a strangled budget
+
+# ── v11: uncertainty attached to the body is BODY (round 69b) ────────────────
+# The first v10 render was watched by the user the hour it shipped: far better,
+# but "my body is being eaten by a word". Measured on his window: at t=3.0 the
+# model held his raised arm and shoulder at alpha ~0.5 — 5,937 half-transparent
+# pixels INSIDE the silhouette — so the letters composited THROUGH his limbs at
+# half strength. Not flicker: honest model uncertainty about dark limbs on a
+# dark room, expressed as translucency, which reads on screen as the word
+# biting into the person. Two-step firming, applied to the RVM alpha only:
+#   * a pointwise S-curve (RVM_EDGE_LO..RVM_SOLID_HI): confident-ish values
+#     become solid, near-zero stays zero, and the silhouette's edge ramp stays
+#     a ramp — just steeper. Monotone and continuous, so it cannot introduce
+#     frame-to-frame toggles the raw alpha did not have.
+#   * CONNECTIVITY: mid-alpha regions (>= RVM_SUPPORT) that touch an emphatic
+#     core (>= RVM_CORE) are the subject's own doubted limbs and go fully
+#     solid (edge re-feathered with a small blur). Isolated mid blobs — a
+#     reflection, a shadow — stay at their curve value, and true gaps (the
+#     wedge under an arm, raw ~0) stay open because they never reach
+#     RVM_SUPPORT. Verified on the failing window: interior half-transparency
+#     at the filmed moments 5937 -> 1880 px (the remainder is compressed edge
+#     band, not letter bleed), the arm-torso gap keeps mean alpha 0.004, and
+#     >=12-toggle strobe pixels DROP 377 -> 259. ~13 ms/frame.
+# Deliberately NOT shipped: filling enclosed near-zero holes. At the moment an
+# arm closes against the body a real see-through gap becomes "enclosed", and
+# filling it would hide letters that should show — the round-68 lesson that a
+# guard which erases truth is worse than the blemish it guards against.
+RVM_EDGE_LO = 0.15           # curve floor: below this is background
+RVM_SOLID_HI = 0.55          # curve ceiling: above this is solid subject
+RVM_SUPPORT = 0.20           # a region must reach this to count as attached
+RVM_CORE = 0.80              # ...to a component holding pixels this certain
+
+
+def _firm_alpha(a, cv2):
+    """v11 firming for one RVM alpha frame (float32 0..1, full mask res)."""
+    t = np.clip((a - RVM_EDGE_LO) / (RVM_SOLID_HI - RVM_EDGE_LO), 0.0, 1.0)
+    out = t * t * (3.0 - 2.0 * t)
+    if cv2 is None:
+        return out
+    support = (a >= RVM_SUPPORT).astype(np.uint8)
+    n, lab = cv2.connectedComponents(support, 8)
+    if n > 1:
+        ids = np.unique(lab[a >= RVM_CORE])
+        ids = ids[ids != 0]
+        if ids.size:
+            attached = np.isin(lab, ids).astype(np.float32)
+            attached = cv2.GaussianBlur(attached, (5, 5), 1.2)
+            out = np.maximum(out, attached)
+    return out
 
 # ── v6: the subject is FOUND, not inferred (round 64) ───────────────────────
 # Versions 2-5 are four consecutive rounds of cleverer photometrics failing on
@@ -863,7 +911,8 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
 
         def _rvm_masks():
             for f in _decode(src, start, dur, w, h, extra_vf, fps=out_fps):
-                yield (stream.step(f, cv2) * 255.0).astype(np.uint8)
+                a = _firm_alpha(stream.step(f, cv2), cv2)
+                yield (a * 255.0).astype(np.uint8)
         mask_iter = _rvm_masks()
     elif use_model:
         idxs, s_masks, n_frames = _seg_sample_masks(

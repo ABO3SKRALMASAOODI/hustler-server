@@ -156,10 +156,12 @@ def test_rvm_is_the_primary_and_the_chair_is_never_claimed(walk, workdir,
 
 
 @needs_ffmpeg
-def test_the_soft_alpha_ships_untouched(walk, workdir, monkeypatch):
-    """No threshold, no vote, no morphology, no feather: a region the model
-    holds at 0.35 must land in the encoded mask AT 0.35-of-255 — not 0, not
-    255, not fattened. This is what makes the composite a real matte."""
+def test_isolated_soft_alpha_stays_graded_never_binary(walk, workdir,
+                                                       monkeypatch):
+    """The v11 firming is not a threshold: an ISOLATED region the model holds
+    at 0.35 lands at its curve value (~127) — not 0, not 255, not fattened.
+    Sub-core uncertainty away from the subject stays visibly translucent,
+    which is what keeps the mask a matte rather than a stencil."""
     strip = (slice(20, 60), slice(20, 120))
 
     class _Soft(_FakeRVM):
@@ -176,7 +178,49 @@ def test_the_soft_alpha_ships_untouched(walk, workdir, monkeypatch):
     assert res["ok"], res
     mid = _decode_mask(out)[N // 2]
     v = float(mid[30:50, 40:100].mean())
-    assert 60 < v < 115, f"soft alpha was mangled: {v} (expected ~89)"
+    assert 100 < v < 160, f"isolated soft alpha not graded: {v} (expect ~127)"
+
+
+@needs_ffmpeg
+def test_uncertain_limbs_attached_to_the_body_go_solid(walk, workdir,
+                                                       monkeypatch):
+    """Round 69b, filmed by the user an hour after v10 shipped: the model
+    held his raised arm at ~0.5 and the letters composited THROUGH it — "my
+    body is being eaten by a word". A mid-alpha region CONNECTED to the
+    emphatic body is the subject's own doubted limb and must ship solid; the
+    same value floating alone (a reflection) must not. The walker's own gap
+    to the background (raw ~0) stays open."""
+    # an "arm": a 0.4 band glued to the walker's right edge, same rows
+    class _DoubtedArm(_FakeRVM):
+        def step(self, frame_bgr, cv2):
+            self.steps += 1
+            f = frame_bgr.astype(np.int16)
+            a = self.alpha(f)
+            walker = np.all(np.abs(f - np.array(WALKER, np.int16)) < 6,
+                            axis=2)
+            cols = np.where(walker.any(axis=0))[0]
+            if cols.size:
+                x1 = int(cols.max())
+                arm = (slice(BAR_Y[0] + 20, BAR_Y[0] + 60),
+                       slice(x1 + 1, min(W, x1 + 40)))
+                a[arm] = 0.4
+            a[300:330, 30:90] = 0.4          # isolated blob, same value
+            return a
+
+    monkeypatch.setattr(personseg, "rvm_available", lambda: True)
+    monkeypatch.setattr(personseg, "rvm_stream", lambda w, h: _DoubtedArm())
+    out = os.path.join(workdir, "rvm_arm.mp4")
+    res = matte.measure_and_build(walk, out, 0.0, DUR, width=W, height=H)
+    assert res["ok"], res
+    mid = _decode_mask(out)[N // 2]
+    walker_x1 = int((0.5) * (W - BAR_W)) + BAR_W   # mid-window bar right edge
+    arm_v = float(mid[BAR_Y[0] + 28:BAR_Y[0] + 52,
+                      walker_x1 + 6:walker_x1 + 30].mean())
+    assert arm_v > 235, f"attached doubted limb not solid: {arm_v}"
+    iso_v = float(mid[306:324, 40:80].mean())
+    assert 140 < iso_v < 210, f"isolated blob wrongly firmed: {iso_v}"
+    bg_v = float(mid[10:16, 200:400].mean())
+    assert bg_v < 15, f"background crept up: {bg_v}"
 
 
 @needs_ffmpeg
