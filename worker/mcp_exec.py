@@ -244,7 +244,8 @@ def run_mcp_job(worker_db, job):
             after = ctx.latest_edl()["version"]
 
             agent_loop._activity(worker_db, project["chat_session_id"],
-                                 tool, args, text, source="mcp")
+                                 tool, args, text, source="mcp",
+                                 edl_version=after)
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
             if ctx.last_preview:

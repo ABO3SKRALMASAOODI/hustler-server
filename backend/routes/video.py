@@ -2078,6 +2078,13 @@ def project_state(user_id, project_id):
              "created_at": v["created_at"].isoformat(),
              "preview_asset_id":
                  (by_version.get(v["version"], {}).get("preview") or {}).get("id"),
+             # object_id names the BYTES (see by_version above). The studio
+             # compares it on version picks so an adopted twin never tears
+             # down and reloads the identical picture — it was only ever sent
+             # by /edls, so every pick fed from this poll reloaded.
+             "preview_object_id":
+                 (by_version.get(v["version"], {}).get("preview")
+                  or {}).get("object_id"),
              "final_asset_id":
                  (by_version.get(v["version"], {}).get("final") or {}).get("id")}
             for v in versions],
