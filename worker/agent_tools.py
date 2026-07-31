@@ -4995,7 +4995,22 @@ def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None,
         if not ok_p:
             return None, (f"{why}, and the corners the vision model read "
                           f"cannot be the screen either — {pwhy}")
-        res = (_refine_read_with_content(frames, content_frames, quad)
+        # Round 65c: the guided lock needs SIGNAL, and the 960px detection
+        # frames carry ~350px of dark, compressed glass — measured to be
+        # below what SIFT can grip. The host clip's original is right there
+        # on the executor, so the refinement gets two frames at 2048 wide
+        # (glass ~760px of real detail). Best effort: any failure leaves
+        # `frames` and the read stands.
+        ref_frames = frames
+        try:
+            hp, _herr = _asset_frames(
+                ctx, asset, [max(0.0, clip_t - 0.2), clip_t],
+                width=2048, tag="smref")
+            if hp:
+                ref_frames = [p for _, p in hp]
+        except Exception:
+            pass
+        res = (_refine_read_with_content(ref_frames, content_frames, quad)
                or {"corners": quad, "confidence": None, "method": "vision",
                    "agreement": 1, "n_frames": 1, "read_not_measured": why})
     # The measured fractions are of the ASSET's frame; the pin consumes
