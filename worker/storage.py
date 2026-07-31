@@ -163,9 +163,13 @@ def presign_get(key, expires=3600):
 
 
 def copy_object(src_key, dst_key):
-    client().copy_object(Bucket=config.S3_BUCKET,
-                         CopySource={"Bucket": config.S3_BUCKET, "Key": src_key},
-                         Key=dst_key)
+    """Server-side copy, any size. boto3's managed copy stays a single
+    CopyObject for small objects and switches itself to multipart
+    (UploadPartCopy) past its threshold — a plain CopyObject caps at 5 GB,
+    and the dedup path (round 67d) copies originals up to the 16 GB upload
+    limit without the bytes ever leaving the bucket."""
+    client().copy({"Bucket": config.S3_BUCKET, "Key": src_key},
+                  config.S3_BUCKET, dst_key)
 
 
 def exists(key):

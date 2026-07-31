@@ -67,6 +67,10 @@ import storage
 TILE_W = 160
 COLS = 10
 MAX_TILES = 200
+# The main-strip fallback when the only source is a user ORIGINAL (index
+# terminally failed): sampled by seek, and capped well under the proxy plan —
+# each seek decodes a full-resolution GOP in its own single-threaded process.
+ORIGINAL_SEEK_TILES = 60
 # Never denser than this. A tile every 0.25s of a 20-minute video is 4800
 # thumbnails; the cap is what bounds both the ffmpeg pass and the sheet size,
 # and the interval is reported so the client can address tiles by time.
@@ -487,6 +491,20 @@ def run_filmstrip_job(worker_db, job):
     if not row:
         return {"available": False,
                 "reason": "this project has no video to sample yet"}
+    main_is_original = row.get("kind") != "proxy"
+    if main_is_original and worker_db.run(dbx.has_active_job, project_id,
+                                          "index"):
+        # The proxy is minutes away. The old behaviour — fall through to the
+        # ORIGINAL and linear-decode it — is the round-61 OOM class from the
+        # main strip's side: on 2026-07-31 a 4.35 GB 4K HEVC original killed
+        # the dispatcher three times in a row here (job 1619), and one of
+        # those deaths took the project's index attempt down with it. The
+        # studio re-requests artwork the moment the asset set changes, which
+        # is exactly when the index publishes the proxy — so the honest
+        # answer now is "not yet", at the cost of one cheap job.
+        return {"available": False,
+                "reason": "the video is still being analyzed — the timeline "
+                          "artwork builds from the proxy that produces"}
     src_row = worker_db.run(dbx.latest_asset, project_id, "original") or row
     dur = float(row.get("duration_s") or src_row.get("duration_s") or 0.0)
     if dur <= 0.2:
@@ -531,7 +549,17 @@ def run_filmstrip_job(worker_db, job):
                         **meta, "assets": {}}
             raise
         if not cached:
-            built = build(local, out, dur)
+            if main_is_original:
+                # No proxy will ever come (the index failed for good, or was
+                # never run) — the timeline still deserves a scrub bar, but a
+                # LINEAR decode of a user original on the dispatcher is the
+                # round-61 OOM. Bounded seeks, one frame per process, exactly
+                # like the asset sheets — capped tighter than the proxy plan
+                # because every seek decodes a full-res GOP.
+                built = build_by_seek(local, out, dur,
+                                      min(n, ORIGINAL_SEEK_TILES))
+            else:
+                built = build(local, out, dur)
             storage.upload_file(out, key, "image/jpeg")
             meta.update({k: built[k] for k in
                          ("tiles", "interval_s", "cols", "rows", "tile_h")})

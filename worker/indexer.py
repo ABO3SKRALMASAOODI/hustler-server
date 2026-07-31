@@ -69,6 +69,24 @@ def run_index_job(worker_db, job):
         timings[stage] = round(time.monotonic() - _t, 2)
         _t = time.monotonic()
 
+    # DEDUP UPLOADS (round 67d). The browser recognized bytes this user
+    # already uploaded (backend /uploads/dedup) and never transferred them:
+    # this asset points at an object that exists only once WE copy it,
+    # server-side, from the earlier upload. Before anything reads the key,
+    # and idempotent — a reaped retry that finds the object copied skips
+    # straight through. A missing source is an honest failure the studio
+    # surfaces, and the user can simply upload normally.
+    dedup_src = (job["payload"].get("dedup_src") or "").strip()
+    if dedup_src:
+        if not storage.exists(asset["storage_key"]):
+            if not storage.exists(dedup_src):
+                raise RuntimeError(
+                    "The earlier upload this project reuses is gone from "
+                    "storage — please upload the file again")
+            worker_db.run(dbx.set_progress, job_id, 3)
+            storage.copy_object(dedup_src, asset["storage_key"])
+        worker_db.run(dbx.asset_upload_ready, asset["id"])
+
     # PROXY-FIRST UPLOADS. When the browser could transcode, it sent a 540p
     # proxy in seconds and the multi-GB original is still streaming up in the
     # background — it is not needed until export. Indexing that proxy is what
@@ -163,7 +181,8 @@ def run_index_job(worker_db, job):
                           ready_proxy=src if from_client_proxy else None)
             _finish_setup(worker_db, project_id, session_id, info,
                           cached["json"], job["user_id"],
-                          reindex=bool(job["payload"].get("reindex")))
+                          reindex=bool(job["payload"].get("reindex")),
+                          asset_id=asset["id"])
             _mark("cache_hit_s")
             return {"sha256": sha, "cached": True,
                     "from_client_proxy": from_client_proxy,
@@ -531,7 +550,8 @@ def run_index_job(worker_db, job):
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         _finish_setup(worker_db, project_id, session_id, info, index,
                       job["user_id"],
-                      reindex=bool(job["payload"].get("reindex")))
+                      reindex=bool(job["payload"].get("reindex")),
+                      asset_id=asset["id"])
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,
@@ -641,7 +661,7 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
 
 
 def _finish_setup(worker_db, project_id, session_id, info, index,
-                  user_id=None, reindex=False):
+                  user_id=None, reindex=False, asset_id=None):
     """Seed EDL v1 (keep everything) if none exists, greet in chat, and
     auto-start the agent on any request the user sent while indexing was
     still running (instead of asking them to resend it — nobody does).
@@ -650,8 +670,23 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     project (the /state self-heal sets it on the job payload) — those stay
     QUIET: a real customer got a second "Your video is ready to edit ... I
     haven't made any edits" over a session where the agent had already cut
-    her video. A replacement upload or a heal of a never-successful index is
-    NOT a reindex and greets normally."""
+    her video.
+
+    The flag alone is not enough (round 67): an index job reaped after a
+    worker death and re-claimed re-runs this whole function with NO reindex
+    flag, and project 300 was greeted twice from one job row, 3.5 minutes
+    apart. So the greet is idempotent against the CHAT, keyed on the ASSET —
+    any re-run for the same asset (retry, self-heal, original-lands
+    re-index, pipeline bump) stays quiet, while a genuine replacement upload
+    is a new asset row and greets normally."""
+    already_greeted = False
+    if session_id and asset_id is not None:
+        try:
+            already_greeted = worker_db.run(dbx.has_index_greet, session_id,
+                                            asset_id)
+        except Exception as e:
+            print(f"[index] greet dedup check failed: {e}", flush=True)
+    quiet = bool(reindex or already_greeted)
     edl_was_reset = False
     _latest = worker_db.run(dbx.latest_edl, project_id)
     if not _latest:
@@ -732,7 +767,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         summary += ("Tell me what you'd like changed — for example: \"cut "
                     "the dead air, caption every word, and tighten the "
                     "intro.\"")
-    if reindex:
+    if quiet:
         # Quiet refresh: only speak when there is something the user needs —
         # a saved request auto-starting, or the reason it CAN'T start.
         # Staying silent on the out-of-credits case would break the
@@ -764,9 +799,27 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                         "full new upload — the earlier cuts don't apply to "
                         "this footage.")
         if session_id:
-            worker_db.run(dbx.add_message, session_id, "assistant", summary,
-                          {"kind": "index_ready", "auto_resume": bool(pending),
-                           "llm_authored": bool(drafted)})
+            meta = {"kind": "index_ready", "auto_resume": bool(pending),
+                    "llm_authored": bool(drafted)}
+            if asset_id is not None:
+                try:
+                    # ON CONFLICT against the partial unique index — two live
+                    # workers greeting the same asset (a deploy window runs
+                    # both) resolve to one message.
+                    worker_db.run(dbx.add_index_greet, session_id, summary,
+                                  meta, asset_id)
+                except Exception as e:
+                    # A deployment whose DB predates the unique index still
+                    # greets — the check-first above already dedupes every
+                    # non-racing path.
+                    print(f"[index] greet conflict-insert unavailable "
+                          f"({str(e)[:120]}) — plain insert", flush=True)
+                    meta["index_greet"] = str(asset_id)
+                    worker_db.run(dbx.add_message, session_id, "assistant",
+                                  summary, meta)
+            else:
+                worker_db.run(dbx.add_message, session_id, "assistant",
+                              summary, meta)
     if pending:
         try:
             worker_db.run(dbx.enqueue_job, project_id, user_id, "agent_turn",

@@ -9,6 +9,7 @@ chat_sessions / chat_messages tables (one session per project, plus an
 'activity' role for agent tool calls).
 """
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -1139,6 +1140,133 @@ def create_upload(user_id, project_id):
         "filename": filename, "bytes": nbytes, "kind": kind,
         "mode": out.get("mode")}, origin="server")
     return jsonify(out)
+
+
+# Recognizing a re-upload (round 67d). The two halves must compute the SAME
+# bytes: first CHUNK, plus the last CHUNK when the file is bigger than one —
+# hashed together. The studio hashes its local File in ~a second; we verify
+# against the candidate object with two ranged GETs and cache the answer on
+# the asset so the next check is one SELECT.
+_DEDUP_CHUNK = 8 * 1024 * 1024
+
+
+def _dedup_quickhash_of_key(key, size):
+    first = storage.get_range_at(key, 0, min(int(size), _DEDUP_CHUNK))
+    if first is None:
+        return None
+    last = b""
+    if size > _DEDUP_CHUNK:
+        off = max(_DEDUP_CHUNK, int(size) - _DEDUP_CHUNK)
+        last = storage.get_range_at(key, off, int(size) - off)
+        if last is None:
+            return None
+    return hashlib.sha256(first + last).hexdigest()
+
+
+@video_bp.route("/projects/<int:project_id>/uploads/dedup", methods=["POST"])
+@token_required
+def dedup_upload(user_id, project_id):
+    """Skip the transfer when this user has already uploaded these bytes.
+
+    The user who tests with the same clip re-uploaded 4.35 GB twice in one
+    afternoon (projects 298 and 300, 2026-07-31) and waited ~12 minutes each
+    time for bytes the bucket already held — and round 47's music customer
+    re-uploaded the same file four times. The index has been content-addressed
+    since round 58 (same sha -> cache hit), so the transfer was the only part
+    still being paid for twice.
+
+    The client asks BEFORE building a proxy or uploading anything, sending
+    (bytes, quickhash). A hit creates the asset row pointing at a key that
+    does not exist yet — exactly the round-58 deferred-original shape, same
+    load-bearing `upload_state` — and the INDEX JOB copies the object
+    server-side (worker/indexer.py), so no bytes cross the user's link at
+    all. Any mismatch or internal failure answers {dedup: false}: this path
+    may only ever make an upload faster, never block one.
+    """
+    if not storage.is_configured():
+        return jsonify({"dedup": False})
+    data = request.get_json() or {}
+    filename = (data.get("filename") or "").strip()
+    try:
+        nbytes = int(data.get("bytes") or 0)
+    except (TypeError, ValueError):
+        nbytes = 0
+    quickhash = (data.get("quickhash") or "").strip().lower()
+    if nbytes <= 0 or len(quickhash) != 64:
+        return jsonify({"dedup": False})
+    try:
+        storage.validate_upload(filename or "video.mp4", nbytes, "original")
+    except ValueError as e:
+        # Same refusal create_upload would give — better now than after the
+        # client skipped its own pre-flight because dedup said nothing.
+        return jsonify({"dedup": False, "error": str(e)}), 400
+
+    try:
+        with vdb() as conn:
+            cur = conn.cursor()
+            if not _project_for_user(cur, project_id, user_id):
+                return jsonify({"error": "Project not found"}), 404
+            cur.execute("""SELECT a.id, a.storage_key, a.bytes, a.duration_s,
+                                  a.width, a.height, a.fps, a.meta
+                           FROM assets a JOIN projects p ON p.id = a.project_id
+                           WHERE p.user_id = %s AND a.kind = 'original'
+                             AND a.bytes = %s AND a.sha256 IS NOT NULL
+                           ORDER BY a.id DESC LIMIT 4""",
+                        (int(user_id), nbytes))
+            candidates = cur.fetchall() or []
+        match = None
+        for cand in candidates:
+            meta = cand.get("meta") or {}
+            # A proxy-first original carries the PROXY's sha while its own
+            # bytes are still in the browser — sha256 alone does not prove
+            # the object is there.
+            if meta.get("upload_state") == "pending":
+                continue
+            if storage.head_bytes(cand["storage_key"]) != nbytes:
+                continue
+            known = (meta.get("quickhash") or "").lower()
+            if not known:
+                known = _dedup_quickhash_of_key(cand["storage_key"], nbytes)
+                if known:
+                    with vdb() as conn:
+                        conn.cursor().execute(
+                            """UPDATE assets SET meta = meta || %s
+                               WHERE id = %s""",
+                            (Json({"quickhash": known}), cand["id"]))
+            if known and known == quickhash:
+                match = cand
+                break
+        if not match:
+            return jsonify({"dedup": False})
+
+        ext = os.path.splitext(match["storage_key"])[1].lstrip(".") or "mp4"
+        new_key = storage.new_original_key(project_id, ext, "original")
+        with vdb() as conn:
+            cur = conn.cursor()
+            cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
+                                               bytes, duration_s, width,
+                                               height, fps, meta)
+                           VALUES (%s, 'original', %s, %s, %s, %s, %s, %s, %s)
+                           RETURNING id""",
+                        (project_id, new_key, nbytes, match["duration_s"],
+                         match["width"], match["height"], match["fps"],
+                         Json({"filename": filename,
+                               "upload_state": "pending",
+                               "quickhash": quickhash,
+                               "dedup_src": match["storage_key"],
+                               "declared_bytes": nbytes})))
+            asset_id = cur.fetchone()["id"]
+            job_id = _enqueue(cur, project_id, user_id, "index",
+                              {"asset_id": asset_id,
+                               "dedup_src": match["storage_key"]})
+        record_client_event(user_id, project_id, "upload_deduped", detail={
+            "filename": filename, "bytes": nbytes,
+            "src_asset_id": match["id"]}, origin="server")
+        return jsonify({"dedup": True, "asset_id": asset_id,
+                        "index_job_id": job_id, "kind": "original"})
+    except Exception:
+        current_app.logger.exception("dedup check failed")
+        return jsonify({"dedup": False})
 
 
 @video_bp.route("/projects/<int:project_id>/uploads/relay", methods=["POST"])

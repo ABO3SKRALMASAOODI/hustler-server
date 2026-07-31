@@ -283,3 +283,61 @@ def test_multiword_presets_default_to_the_bottom():
             assert p["position"] == "bottom", (
                 f"preset '{name}' anchors multi-word text mid-frame — "
                 "across the speaker's face")
+
+
+# ── round 67d: Luna takes tools only with reasoning_effort='none' ──────────
+
+_LUNA_CONFLICT = ("Error code: 400 - {'error': {'message': \"Function tools "
+                  "with reasoning_effort are not supported for gpt-5.6-luna "
+                  "in /v1/chat/completions. To use function tools, use "
+                  "/v1/responses or set reasoning_effort to 'none'.\", "
+                  "'type': 'invalid_request_error', "
+                  "'param': 'reasoning_effort', 'code': None}}")
+
+
+def test_tools_reasoning_conflict_is_detected_and_not_overmatched():
+    """The EXACT error the first Luna agent turn died on in production (job
+    1626, 2026-07-31). It fired with reasoning_effort ABSENT from the request
+    — the model's default reasoning is what conflicts — so the strip-the-
+    field latch could never fix it, and the singular-only 'is not supported'
+    marker meant no adaptation ran at all: the turn failed in 4 seconds."""
+    e = RuntimeError(_LUNA_CONFLICT)
+    assert llm.looks_like_tools_reasoning_conflict(e)
+    assert llm.looks_like_bad_parameter(e, "reasoning_effort")
+    # an outage or unrelated 400 must not latch anything
+    for msg in ("Rate limit exceeded", "invalid JSON in messages",
+                "Unsupported parameter: 'max_tokens' is not supported "
+                "with this model."):
+        assert not llm.looks_like_tools_reasoning_conflict(RuntimeError(msg))
+
+
+def test_create_with_dialect_latches_effort_none_for_tools(monkeypatch):
+    monkeypatch.setattr(llm, "_tools_effort_none", set())
+    calls = []
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    calls.append(kw)
+                    if kw.get("tools") and \
+                            kw.get("reasoning_effort") != "none":
+                        raise RuntimeError(_LUNA_CONFLICT)
+                    return types.SimpleNamespace(choices=[])
+
+    tools = [{"type": "function", "function": {"name": "x"}}]
+    llm.create_with_dialect(_Client, "gpt-5.6-luna", [], max_tokens=10,
+                            tools=tools)
+    assert len(calls) == 2, "one conflict, one corrected retry"
+    assert calls[1]["reasoning_effort"] == "none"
+    assert llm.tools_need_effort_none("gpt-5.6-luna")
+    # latched: the next call is right the FIRST time
+    calls.clear()
+    llm.create_with_dialect(_Client, "gpt-5.6-luna", [], max_tokens=10,
+                            tools=tools)
+    assert len(calls) == 1 and calls[0]["reasoning_effort"] == "none"
+    # and a tool-less call never carries the field
+    calls.clear()
+    llm.create_with_dialect(_Client, "gpt-5.6-luna", [], max_tokens=10)
+    assert "reasoning_effort" not in calls[0]

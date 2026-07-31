@@ -542,6 +542,40 @@ def add_message(conn, session_id, role, content, meta=None):
         return cur.fetchone()["id"]
 
 
+def has_index_greet(conn, session_id, greet_key):
+    """Has this chat already been greeted for this asset? The greet must be
+    idempotent against the CHAT, not against job flags: an index job that is
+    reaped mid-run and re-claimed re-runs _finish_setup with no reindex flag,
+    and on 2026-07-31 a real project got 'Your video is ready to edit' twice,
+    3.5 minutes apart, from one job row (job 1618)."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM chat_messages
+                       WHERE session_id = %s
+                         AND meta->>'index_greet' = %s LIMIT 1""",
+                    (session_id, str(greet_key)))
+        return cur.fetchone() is not None
+
+
+def add_index_greet(conn, session_id, content, meta, greet_key):
+    """Insert the index greeting, racing safely: the partial unique index
+    (session_id, meta->>'index_greet') makes two live workers greeting the
+    same asset resolve to ONE message. Returns the message id, or None when
+    the other side won."""
+    meta = dict(meta or {})
+    meta["index_greet"] = str(greet_key)
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO chat_messages (session_id, role, content,
+                                                  meta)
+                       VALUES (%s, 'assistant', %s, %s)
+                       ON CONFLICT (session_id, (meta->>'index_greet'))
+                         WHERE meta->>'index_greet' IS NOT NULL
+                       DO NOTHING
+                       RETURNING id""",
+                    (session_id, content, Json(meta)))
+        row = cur.fetchone()
+        return row["id"] if row else None
+
+
 def recent_chat(conn, session_id, limit=24):
     """Recent user/assistant turns (activity rows excluded), oldest first."""
     with conn.cursor() as cur:
@@ -575,6 +609,25 @@ def has_active_agent_turn(conn, project_id):
                        WHERE project_id = %s AND type = 'agent_turn'
                          AND state IN ('queued','running') LIMIT 1""",
                     (project_id,))
+        return cur.fetchone() is not None
+
+
+def asset_upload_ready(conn, asset_id):
+    """Flip a deferred/dedup original to ready once its bytes exist. The
+    same stamp /uploads/original-ready writes — upload_state is load-bearing
+    for export (round 58)."""
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE assets SET meta = meta ||
+                         '{"upload_state": "ready", "upload_progress": 1.0}'
+                       WHERE id = %s""", (asset_id,))
+
+
+def has_active_job(conn, project_id, jtype):
+    with conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE project_id = %s AND type = %s
+                         AND state IN ('queued','running') LIMIT 1""",
+                    (project_id, jtype))
         return cur.fetchone() is not None
 
 

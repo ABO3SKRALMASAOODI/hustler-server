@@ -244,10 +244,14 @@ _BLIND_MARKERS = ("unknown variant `image_url`", "unknown variant 'image_url'",
 # An OpenAI-compatible provider that does not know a request field says so in
 # one of a few shapes. Matched on the error body for the same reason as the
 # blind markers above: the API is the only honest source for what it accepts.
+# "not supported", not "is not supported": OpenAI writes "Function tools with
+# reasoning_effort ARE not supported", and the singular-only marker is why the
+# first Luna agent turn in production died as a hard failure instead of
+# adapting (job 1626, 2026-07-31).
 _BAD_PARAM_MARKERS = ("unrecognized request argument", "unknown parameter",
                       "unknown field", "unexpected keyword argument",
                       "extra inputs are not permitted", "unknown argument",
-                      "is not supported", "invalid_request_error")
+                      "not supported", "invalid_request_error")
 
 # Models whose provider has told us it does not accept reasoning_effort. Latched
 # per process so one rejection is one wasted call, not one per iteration.
@@ -297,6 +301,37 @@ def reasoning_effort_rejected(model):
 
 def mark_reasoning_effort_rejected(model):
     _no_reasoning_effort.add(model)
+
+
+# Models that accept function tools on /v1/chat/completions ONLY with an
+# explicit reasoning_effort of 'none' (round 67b, from the first Luna agent
+# turn in production): gpt-5.6-luna 400s on tools + ANY reasoning — including
+# the default that applies when the field is ABSENT — with "Function tools
+# with reasoning_effort are not supported ... use /v1/responses or set
+# reasoning_effort to 'none'". So the existing latch (strip the field) can
+# never fix it: the request that omits the field is the request that fails.
+# The dialect is the opposite — always SEND the field, as 'none', on every
+# tools call. Latched per model from the provider's own words, same policy as
+# every other dialect here.
+_tools_effort_none = set()
+
+
+def tools_need_effort_none(model):
+    return model in _tools_effort_none
+
+
+def mark_tools_need_effort_none(model):
+    _tools_effort_none.add(model)
+
+
+def looks_like_tools_reasoning_conflict(exc):
+    """Is `exc` the provider saying tools and reasoning cannot ride the same
+    chat/completions call? Distinct from looks_like_bad_parameter because the
+    failing request usually does NOT carry reasoning_effort at all — the
+    default effort is what conflicts — so there is no field to strip."""
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    return ("reasoning_effort" in msg and "not supported" in msg
+            and ("function tools" in msg or "tool" in msg))
 
 
 # ── Completion-parameter dialects (round 67) ─────────────────────────────
@@ -353,6 +388,8 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     agent loop integrates the same helpers into its richer retry chain."""
     kw = completion_kwargs(model, max_tokens, temperature)
     kw.update(extra)
+    if "tools" in kw and tools_need_effort_none(model):
+        kw["reasoning_effort"] = "none"
     attempts = 0
     while True:
         try:
@@ -360,8 +397,18 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
                 model=model, messages=messages, **kw)
         except Exception as e:
             attempts += 1
-            adapted = adapt_completion_kwargs(e, model, kw) \
-                if attempts <= 2 else None
+            if attempts > 3:
+                raise
+            if "tools" in kw and not tools_need_effort_none(model) \
+                    and looks_like_tools_reasoning_conflict(e):
+                # The honesty regen passes the tool schemas for context
+                # (tool_choice='none'), which is still a tools call to the
+                # provider — Luna refuses it with default reasoning exactly
+                # as it refuses the agent loop's.
+                mark_tools_need_effort_none(model)
+                kw["reasoning_effort"] = "none"
+                continue
+            adapted = adapt_completion_kwargs(e, model, kw)
             if adapted is None:
                 raise
             kw = adapted

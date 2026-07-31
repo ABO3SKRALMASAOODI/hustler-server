@@ -50,7 +50,7 @@ import personseg
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 8
+VERSION = 9
 
 # ── v6: the subject is FOUND, not inferred (round 64) ───────────────────────
 # Versions 2-5 are four consecutive rounds of cleverer photometrics failing on
@@ -68,60 +68,55 @@ VERSION = 8
 #     any normal window, graceful degradation on a pathological 15s one.
 #   * STATIC things the model likes (an armchair reads as vaguely person-
 #     shaped to u2net_human_seg — watched on the round-64 validation frame)
-#     are dropped by a motion gate: a union-blob whose pixels are masked in
-#     nearly every sampled frame never moved, and a thing that never moved is
-#     furniture — UNLESS nothing moved at all, because a subject standing
-#     still through the window is still the subject.
+#     are separated from the subject by CONFIDENCE, not motion — see the v9
+#     block below for why the motion gates of v6-v8 could not hold.
 #   * A moving camera is fine here — each frame is segmented on its own — so
 #     the v6 path drops the photometric path's stillness requirement.
 SEG_THRESHOLD = 0.5          # calibrated sigmoid output; verified on real
 #                              frames (empty room peaks at 0.001)
 SEG_BUDGET = 240             # max model passes per window
-SEG_STATIC_KEEP = 0.85       # union-blob presence above this = furniture...
-SEG_MIN_MOVING = 0.002       # ...provided something else genuinely moves
-#                              (fraction of the frame that is non-static mask)
-SEG_MOVING_SHARE = 0.25      # ...and that moving mass is a real share of the
-#                              union, not codec flicker: on a static shot the
-#                              encoder's borderline pixels blink in and out as
-#                              a few hundred px of 'motion', and a gate that
-#                              believed them dropped the standing person and
-#                              kept the speckle (caught by the round-64 E2E
-#                              run against the real dark-room frame)
-SEG_MIN_BLOB_PX = 82         # union-blobs under this (model res) are speckle:
-#                              they neither count as moving mass nor as a
-#                              subject
-# ── v7: the mask must not STROBE (round 66) ─────────────────────────────────
-# The first real render off v6 flickered — the user's words: "like a corrupt
-# screen that goes off and on in some places... every time i walk". Two
-# mechanisms, both about time, which v6 never looked along:
-#   * NO TEMPORAL SMOOTHING. The photometric path earned its 3-frame vote in
-#     round 62 ("one frame's flicker cannot strobe the composite"); the v6
-#     seg path had none, so every frame's model output stood alone and every
-#     borderline detection strobed at the render rate.
-#   * INTERMITTENT FURNITURE. The static gate only drops blobs present in
-#     ~every sampled frame (presence > 0.85). A chair the model detects in
-#     HALF the frames reads as 'moving' and eats the title on and off. Those
-#     detections hover near the decision threshold — that is WHY they
-#     flicker — so the second gate drops static-ish blobs whose mean model
-#     confidence is weak. A pacing person is safe on both counts: their
-#     swept band unions into one blob with LOW mean presence, and the model
-#     is emphatic about people (confidence ~1.0 on the round-64 validation
-#     frames).
+SEG_MIN_BLOB_PX = 82         # components under this (model res) are speckle
 SEG_VOTE = 5                 # majority vote window, in sampled frames
-SEG_FLICKER_PRESENCE = 0.45  # static-ish: present in this share of frames...
-SEG_FLICKER_CONF = 0.75      # ...with mean confidence under this = furniture
-#                              flicker, dropped (when real motion exists)
-# The per-pixel TOGGLE budget (round 66b, from inspecting the v137 render
-# frame by frame: the title's "?" went on-off-on within 0.3s while the
-# walker was nowhere near it). Burst detections of 100-300ms defeat the vote
-# (too long) AND the presence gate (too short), but they cannot defeat
-# arithmetic: a passing subject turns a pixel on and off ONCE (~2
-# transitions, a few more at grazed silhouette edges), while a strobing
-# region transitions constantly. Pixels over budget are removed for the
-# whole window. The budget scales with sample count so long windows do not
-# strangle a subject who genuinely crosses several times.
-SEG_MAX_TOGGLE_FRAC = 0.06   # transitions allowed, as a share of samples...
-SEG_MIN_TOGGLES = 6          # ...with this floor
+# ── v9: the person is EMPHATIC; furniture is REPEATED-BUT-WEAK (round 67) ───
+# v6-v8 were three rounds of blob-level gates (static presence, flicker
+# confidence, per-pixel toggle budget) trying to keep u2net's furniture
+# detections out of the mask, and the round-67 screenshots show both ways
+# that architecture loses on the same armchair:
+#   * The gates keyed on PER-FRAME context. The armchair's blob merged with
+#     the walker whenever he passed it, inheriting his presence/confidence
+#     immunity — so the chair occluded the title exactly while he was near
+#     and released it when he left. A static object whose mask state follows
+#     the PERSON's position is the strobe the user filmed ("the o and w
+#     started appearing on the couch ... just as i go in").
+#   * The toggle budget punished the PIXELS that strobe — for the WHOLE
+#     window. The person then walked through the punished region and was
+#     unmasked there: "the w is even sitting on top of me". A guard that can
+#     erase the subject is worse than the flicker it guards against.
+# The v9 rule set is per-PIXEL and window-stable, from two measured facts
+# (round 64 validation, incl. the real dark-room frame): the model is
+# emphatic about people (~1.0 even on a dark walker) and merely tempted by
+# furniture (hovers near threshold). So:
+#   * A component is the SUBJECT only if it contains an emphatic core
+#     (>= SEG_SEED_PX pixels at >= SEG_STRONG). The armchair alone never
+#     qualifies; a standing-still person always does — the v6 motion gate
+#     and its standing-person exception both retire.
+#   * A FURNITURE ZONE is computed once for the window: pixels the model
+#     claims repeatedly (presence >= SEG_STATIC_PRESENCE) but never
+#     emphatically (mean confidence < SEG_STRONG). Inside a kept component,
+#     zone pixels survive only when they are emphatic IN THIS FRAME — so a
+#     merged person+armchair blob keeps the person and sheds the chair, in
+#     every frame, whether or not they touch. Constant by construction:
+#     nothing about the decision reads the person's current position.
+SEG_STRONG = 0.75            # emphatic per-pixel confidence (the round-66
+#                              measured boundary: furniture flicker sits
+#                              under it, people at ~1.0)
+SEG_SEED_PX = 12             # emphatic pixels a component needs to be the
+#                              subject (model res; a person 3% of frame width
+#                              still clears it several times over)
+SEG_STATIC_PRESENCE = 0.35   # claimed in this share of samples = repeated
+#                              (low on purpose: a chair claimed only while
+#                              the person stands beside it still accumulates
+#                              this much presence across a window)
 
 # Sampling for the background plate. 24 samples spread over the window is
 # enough for a median to see past a subject that lingers, and few enough to hold
@@ -675,64 +670,70 @@ def _seg_sample_masks(frames, est_frames, cv2):
     return idxs, masks, n
 
 
-def _seg_keep_region(masks):
-    """The motion gate, decided ONCE for the whole window so nothing flickers
-    in and out: a float32 (320, 320) multiplier that zeroes union-blobs which
-    sat still through every sampled frame. u2net_human_seg occasionally
-    claims a large piece of furniture (an armchair, on the round-64
-    validation frame); a blob masked in ~every sample never moved, and it is
-    dropped — unless NOTHING moved, because a person standing still for the
-    window is still the person."""
-    try:
-        import cv2
-    except Exception:
-        return None
-    binm = [(m > int(SEG_THRESHOLD * 255)) for m in masks]
-    if not binm:
-        return None
-    stack = np.stack(binm)
-    presence = np.mean(stack, axis=0).astype(np.float32)
-    # Mean model confidence where the pixel was claimed at all — near-
-    # threshold flicker (furniture) scores low, a person scores ~1.0.
-    softs = np.stack([m.astype(np.float32) / 255.0 for m in masks])
-    on_count = np.maximum(stack.sum(axis=0), 1)
-    conf = (softs * stack).sum(axis=0) / on_count
-    union = np.any(stack, axis=0).astype(np.uint8) * 255
-    nlab, lab, stats, _ = cv2.connectedComponentsWithStats(union, 8)
-    if nlab <= 1:
-        return None
-    drop = []
-    drop_px = 0
-    moving_px = 0
-    for b in range(1, nlab):
-        area = int(stats[b, cv2.CC_STAT_AREA])
-        if area < SEG_MIN_BLOB_PX:
-            continue        # speckle: votes for nobody
-        sel = lab == b
-        pres = float(presence[sel].mean())
-        bconf = float(conf[sel].mean())
-        if pres > SEG_STATIC_KEEP or \
-                (pres > SEG_FLICKER_PRESENCE and bconf < SEG_FLICKER_CONF):
-            drop.append(b)
-            drop_px += area
-        else:
-            moving_px += area
-    if not drop:
-        return None
-    # Drop the static/flickering furniture only when something person-sized
-    # genuinely moves: an absolute floor (codec flicker is a few hundred px
-    # of 'motion' on a perfectly still shot) AND a share of what would be
-    # dropped — a standing subject must never lose to their own edge shimmer.
-    if moving_px < max(SEG_MIN_MOVING * union.size,
-                       SEG_MOVING_SHARE * drop_px):
-        return None      # nothing meaningful moves: the standing subject stays
-    keep = np.ones(union.shape, np.float32)
-    keep[np.isin(lab, drop)] = 0.0
-    return keep
+def _seg_maps(masks):
+    """(presence, conf) per pixel across the window's samples: the share of
+    samples where the model claims the pixel at all, and the mean confidence
+    where claimed. These two numbers are what separate a person from a chair:
+    a chair is claimed often and never emphatically; a person is emphatic
+    wherever they are, and wherever they linger their presence rides high WITH
+    that confidence."""
+    stack = np.stack([m.astype(np.float32) / 255.0 for m in masks])
+    binm = stack >= SEG_THRESHOLD
+    presence = binm.mean(axis=0).astype(np.float32)
+    on_count = np.maximum(binm.sum(axis=0), 1)
+    conf = ((stack * binm).sum(axis=0) / on_count).astype(np.float32)
+    return presence, conf
+
+
+def _seg_furniture_zone(presence, conf):
+    """Pixels the model claims repeatedly but never emphatically, decided ONCE
+    for the whole window. Boolean (320, 320) or None when nothing qualifies.
+    This is a region, not a verdict: inside it, per-frame emphatic evidence
+    still wins (the person standing in front of the armchair is masked; the
+    armchair alone never is)."""
+    zone = (presence >= SEG_STATIC_PRESENCE) & (conf < SEG_STRONG)
+    return zone if bool(zone.any()) else None
+
+
+def _seg_person_frames(masks, zone, cv2):
+    """Per-sample BINARY person mask (uint8 0/255, model res).
+
+    Two per-pixel rules, no frame-level context — which is what makes the
+    result temporally stable by construction:
+      * a connected component is kept only when it carries an emphatic core
+        (>= SEG_SEED_PX pixels at >= SEG_STRONG) and is at least
+        SEG_MIN_BLOB_PX — the armchair-alone and codec speckle both die here;
+      * within a kept component, furniture-zone pixels survive only where
+        THIS frame is emphatic — a merged person+chair blob sheds the chair
+        without the person losing so much as his silhouette.
+    """
+    out = []
+    bin_thr = int(SEG_THRESHOLD * 255)
+    strong_thr = int(SEG_STRONG * 255)
+    for m in masks:
+        binm = (m > bin_thr).astype(np.uint8)
+        strong = m > strong_thr
+        nlab, lab, stats, _ = cv2.connectedComponentsWithStats(binm * 255, 8)
+        keep = np.zeros(nlab, bool)
+        for b in range(1, nlab):
+            if stats[b, cv2.CC_STAT_AREA] < SEG_MIN_BLOB_PX:
+                continue
+            x0 = stats[b, cv2.CC_STAT_LEFT]
+            y0 = stats[b, cv2.CC_STAT_TOP]
+            bw = stats[b, cv2.CC_STAT_WIDTH]
+            bh = stats[b, cv2.CC_STAT_HEIGHT]
+            sel = lab[y0:y0 + bh, x0:x0 + bw] == b
+            if int(strong[y0:y0 + bh, x0:x0 + bw][sel].sum()) >= SEG_SEED_PX:
+                keep[b] = True
+        pm = keep[lab]
+        if zone is not None:
+            pm = pm & (~zone | strong)
+        out.append(pm.astype(np.uint8) * 255)
+    return out
 
 
 def _seg_stabilize(masks, cv2, sample_dt):
-    """Temporal majority vote over the BINARIZED sampled masks, then hole
+    """Temporal majority vote over the per-sample person masks, then hole
     filling. This is _vote3's job done for the model path: a detection that
     lives for one or two samples is flicker and dies here; the subject
     survives every vote.
@@ -763,25 +764,10 @@ def _seg_stabilize(masks, cv2, sample_dt):
     return out
 
 
-def _seg_toggle_filter(masks):
-    """Per-pixel flicker kill (round 66b): pixels whose on/off transition
-    count across the (voted) samples exceeds the budget are zeroed for the
-    whole window. A passing subject costs a pixel ~2 transitions; a strobing
-    detection costs dozens. Returns a float32 multiplier or None."""
-    if len(masks) < 8:
-        return None
-    stack = np.stack([m > 127 for m in masks])
-    toggles = np.sum(stack[1:] != stack[:-1], axis=0)
-    budget = max(SEG_MIN_TOGGLES, int(SEG_MAX_TOGGLE_FRAC * len(masks)))
-    if int((toggles > budget).sum()) == 0:
-        return None
-    return (toggles <= budget).astype(np.float32)
-
-
-def _seg_mask_frames(idxs, masks, n_frames, w, h, cv2, keep=None):
+def _seg_mask_frames(idxs, masks, n_frames, w, h, cv2):
     """One soft mask per OUTPUT frame at (w, h): linear blend between the
-    bracketing sampled masks (identity when every frame was sampled), gated
-    by the window-wide keep region, upscaled last. Yields uint8 (h, w)."""
+    bracketing sampled masks (identity when every frame was sampled),
+    upscaled last. Yields uint8 (h, w)."""
     j = 0
     for i in range(n_frames):
         while j + 1 < len(idxs) and idxs[j + 1] <= i:
@@ -792,8 +778,6 @@ def _seg_mask_frames(idxs, masks, n_frames, w, h, cv2, keep=None):
                     + t * masks[j + 1].astype(np.float32))
         else:
             soft = masks[j].astype(np.float32)
-        if keep is not None:
-            soft = soft * keep
         m = cv2.resize(soft.astype(np.uint8), (w, h),
                        interpolation=cv2.INTER_LINEAR)
         yield m
@@ -841,19 +825,17 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
             return {"ok": False,
                     "why": ("I could not read enough frames from that "
                             "moment to find the subject")}
-        # The gate reads the SOFT masks (confidence is one of its cues); the
-        # vote then stabilizes the binarized stream (round 66).
-        keep = _seg_keep_region(s_masks)
+        # v9: the furniture zone is measured once from the whole window's
+        # soft masks; each sample then reduces to its emphatic-cored person
+        # components; the vote smooths what remains. Nothing per-frame reads
+        # the person's position, so nothing can toggle with it.
+        presence, conf = _seg_maps(s_masks)
+        zone = _seg_furniture_zone(presence, conf)
+        person = _seg_person_frames(s_masks, zone, cv2)
         sample_dt = ((idxs[1] - idxs[0]) / out_fps if len(idxs) > 1
                      else 1.0 / out_fps)
-        proc = _seg_stabilize(s_masks, cv2, sample_dt)
-        # The toggle budget (round 66b) reads the VOTED stream: flicker that
-        # survived the vote is exactly what it exists to remove.
-        flick = _seg_toggle_filter(proc)
-        if flick is not None:
-            keep = flick if keep is None else keep * flick
-        mask_iter = _seg_mask_frames(idxs, proc, n_frames, w, h, cv2,
-                                     keep=keep)
+        proc = _seg_stabilize(person, cv2, sample_dt)
+        mask_iter = _seg_mask_frames(idxs, proc, n_frames, w, h, cv2)
     else:
         plate, noise, ref_sg = _plate(src, start, dur, w, h, extra_vf, cv2)
         if plate is None:

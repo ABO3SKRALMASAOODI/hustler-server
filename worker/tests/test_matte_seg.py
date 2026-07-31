@@ -11,9 +11,11 @@ pipeline to the fallback for deployments without the model.
 
 The model itself was validated against real pixels during round 64; what these
 tests pin is everything AROUND it, with personseg monkeypatched to a
-deterministic stand-in: the motion gate that drops furniture the model likes,
-the standing-subject exception, the sampling budget's interpolation, the
-refusal bounds' new meanings, and the executor job plumbing.
+deterministic stand-in that reproduces the model's MEASURED habits (emphatic
+~1.0 on people, tempted-but-weak on furniture): the v9 confidence rules that
+keep furniture out of the mask without ever keying on the person's position,
+the sampling budget's interpolation, the refusal bounds' meanings, and the
+executor job plumbing.
 
 Run:  python -m pytest tests/test_matte_seg.py -q        (from worker/)
 """
@@ -54,7 +56,7 @@ BAR_W, BAR_Y = 80, (H // 4, 3 * H // 4)
 CHAIR_BOX = (int(W * 0.70), int(H * 0.82), int(W * 0.95), int(H * 0.97))
 
 
-def _frame(i, n, walker=True, chair=True, pan=0):
+def _frame(i, n, walker=True, chair=True, pan=0, chair_box=CHAIR_BOX):
     img = np.zeros((H, W, 3), np.uint8)
     img[:] = BG
     if pan:
@@ -62,7 +64,7 @@ def _frame(i, n, walker=True, chair=True, pan=0):
         img[:, :, 0] = np.roll(img[:, :, 0], i * pan, axis=1)
         img[10:20, (i * pan) % W:(i * pan) % W + 30] = (200, 200, 200)
     if chair:
-        x0, y0, x1, y1 = CHAIR_BOX
+        x0, y0, x1, y1 = chair_box
         img[y0:y1, x0:x1] = CHAIR
     if walker:
         x = int((i / max(1, n - 1)) * (W - BAR_W))
@@ -86,14 +88,16 @@ def _encode(path, frames):
 
 
 def _fake_segment(frame_bgr, cv2):
-    """The stand-in model: 'person probability' 1.0 wherever the frame shows
-    the walker's or the chair's exact colour (the codec smears edges, so match
-    with tolerance), 0 elsewhere — deterministic, colour-keyed, and blind to
-    motion, exactly like the real model."""
+    """The stand-in model, faithful to the real one's measured habits
+    (round 64 validation + round 66 flicker analysis): EMPHATIC about the
+    person (1.0, even a dark walker) and merely TEMPTED by furniture — the
+    armchair hovers above threshold but well under emphasis. Colour-keyed
+    (the codec smears edges, so match with tolerance), deterministic, and
+    blind to motion, exactly like the real model."""
     f = frame_bgr.astype(np.int16)
     m = np.zeros(f.shape[:2], np.float32)
-    for c in (WALKER, CHAIR):
-        m[np.all(np.abs(f - np.array(c, np.int16)) < 5, axis=2)] = 1.0
+    m[np.all(np.abs(f - np.array(CHAIR, np.int16)) < 5, axis=2)] = 0.62
+    m[np.all(np.abs(f - np.array(WALKER, np.int16)) < 5, axis=2)] = 1.0
     return cv2.resize(m, (personseg.INPUT_SIZE, personseg.INPUT_SIZE),
                       interpolation=cv2.INTER_AREA)
 
@@ -114,9 +118,10 @@ def walk(workdir):
 
 @pytest.fixture(scope="module")
 def standing(workdir):
-    """Only the static 'chair' — which here plays a person standing still."""
+    """A person standing perfectly still for the whole window (the walker
+    frozen at his opening position), plus the armchair."""
     path = os.path.join(workdir, "stand.mp4")
-    _encode(path, [_frame(i, N, walker=False) for i in range(N)])
+    _encode(path, [_frame(0, N) for _ in range(N)])
     return path
 
 
@@ -141,9 +146,10 @@ def _decode_mask(path):
 
 @needs_ffmpeg
 def test_the_walker_is_masked_and_the_furniture_is_not(walk, workdir):
-    """The motion gate: the model claims walker AND chair; the chair sat in
-    the same pixels through every sampled frame, so it is furniture and comes
-    out — decided once for the whole window, so nothing flickers."""
+    """The v9 confidence rules: the model claims walker AND chair, but only
+    the walker is emphatic. The chair's component never carries an emphatic
+    core, so it is out of the mask in EVERY frame — no per-frame context, so
+    nothing can flicker."""
     out = os.path.join(workdir, "seg_walk.mp4")
     res = matte.measure_and_build(walk, out, 0.0, DUR, width=W, height=H,
                                   box=(0.1, 0.35, 0.8, 0.3))
@@ -167,16 +173,22 @@ def test_the_walker_is_masked_and_the_furniture_is_not(walk, workdir):
 
 @needs_ffmpeg
 def test_a_standing_subject_is_kept(standing, workdir):
-    """The exception that makes the gate safe: when NOTHING moves, the static
-    blob is not furniture — it is a person standing still, and dropping them
-    would refuse the one thing in the shot."""
+    """A person standing still through the whole window is claimed with the
+    same emphasis as a walker — high presence WITH high confidence is not
+    furniture, so no motion exception is needed to keep them. The armchair in
+    the same static shot still comes out."""
     out = os.path.join(workdir, "seg_stand.mp4")
     res = matte.measure_and_build(standing, out, 0.0, DUR, width=W, height=H)
     assert res["ok"], res
     masks = _decode_mask(out)
-    x0, y0, x1, y1 = CHAIR_BOX
-    on = float((masks[0][y0 + 12:y1 - 12, x0 + 12:x1 - 12] > 127).mean())
+    # the frozen walker occupies his i=0 position: x 0..BAR_W, the band rows
+    on = float((masks[len(masks) // 2][BAR_Y[0] + 12:BAR_Y[1] - 12,
+                                       12:BAR_W - 12] > 127).mean())
     assert on > 0.9, f"the standing subject was gated away: {on}"
+    x0, y0, x1, y1 = CHAIR_BOX
+    chair_on = max(float((m[y0 + 12:y1 - 12, x0 + 12:x1 - 12] > 127).mean())
+                   for m in masks)
+    assert chair_on < 0.05, f"furniture crept in on a static shot: {chair_on}"
 
 
 @needs_ffmpeg
@@ -217,11 +229,10 @@ def test_the_budget_still_yields_every_frame(walk, workdir, monkeypatch):
 def test_flickering_weak_furniture_is_dropped(walk, workdir, monkeypatch):
     """Round 66, from the first real render off v6: 'like a corrupt screen
     that goes off and on in some places'. A chair the model detects in HALF
-    the frames has presence ~0.5 — under the 0.85 static rule, so v6 kept it
-    as 'motion' and it strobed over the title. Those detections hover near
-    the decision threshold (that is WHY they flicker), so the flicker gate
-    drops static-ish blobs with weak mean confidence — for the WHOLE window,
-    no strobing possible."""
+    the frames strobed over the title under v6's presence-only rule. Under
+    v9 it is doubly out: its detections carry no emphatic core (dropped per
+    frame), and its repeated-but-weak pixels sit in the furniture zone —
+    both rules are position-blind, so no strobing is possible."""
     def flickery(frame_bgr, cv2):
         m = _fake_segment(frame_bgr, cv2)
         f = cv2.resize(frame_bgr, (personseg.INPUT_SIZE, personseg.INPUT_SIZE),
@@ -275,34 +286,51 @@ def test_single_sample_flicker_dies_in_the_vote(walk, workdir, monkeypatch):
 
 
 @needs_ffmpeg
-def test_burst_flicker_is_killed_by_the_toggle_budget(walk, workdir,
-                                                      monkeypatch):
-    """Round 66b, seen frame by frame in a real render: a region strobed
-    on-off-on within 0.3s far from the walker. Bursts of ~5 samples defeat
-    the vote (too long) and the presence gate (too short) and can be fully
-    confident — but a passing subject toggles a pixel ~twice, a strobe
-    toggles constantly, and the budget kills it for the whole window."""
-    n_call = {"i": 0}
-
-    def bursty(frame_bgr, cv2):
-        m = _fake_segment(frame_bgr, cv2)
-        n_call["i"] += 1
-        if (n_call["i"] // 5) % 2 == 0:       # 5 on, 5 off, all window long
-            m[255:310, 220:300] = 1.0         # strong burst, fixed spot
-            #        ^ fully BELOW the walker's band, so no legit
-            #          subject pixels share the region
-        return m
-    monkeypatch.setattr(personseg, "segment", bursty)
-    out = os.path.join(workdir, "seg_burst.mp4")
-    res = matte.measure_and_build(walk, out, 0.0, DUR, width=W, height=H)
+def test_walker_crossing_furniture_neither_strobes_nor_vanishes(workdir):
+    """Round 67, filmed by the user on project 300's render. The armchair sat
+    in the walker's path; under v6-v8 the chair's blob merged with his and
+    inherited his immunity, so its occlusion of the title FOLLOWED HIM — on
+    while he was near, off when he left ("the o and w started appearing on
+    the couch ... just as i go in") — and the toggle budget then zeroed the
+    strobing pixels for the whole window, unmasking HIM whenever he walked
+    through them ("the w is even sitting on top of me"). The v9 rules are
+    per-pixel and window-stable, so both defects die together:
+      * the chair's own pixels are NEVER in the mask, in any frame, however
+        close the walker stands;
+      * the walker's pixels ARE in the mask even while he is in front of the
+        chair — emphatic evidence beats the furniture zone."""
+    chair_box = (int(W * 0.70), int(H * 0.30), int(W * 0.95), int(H * 0.60))
+    path = os.path.join(workdir, "cross.mp4")
+    _encode(path, [_frame(i, N, chair_box=chair_box) for i in range(N)])
+    out = os.path.join(workdir, "seg_cross.mp4")
+    res = matte.measure_and_build(path, out, 0.0, DUR, width=W, height=H)
     assert res["ok"], res
-    fy0, fy1 = int(255 / 320 * H), int(310 / 320 * H)
-    fx0, fx1 = int(220 / 320 * W), int(300 / 320 * W)
-    worst = max(float((m[fy0 + 6:fy1 - 6, fx0 + 6:fx1 - 6] > 127).mean())
-                for m in _decode_mask(out))
-    assert worst < 0.05, f"burst flicker survived: {worst}"
-    # ...and the walker himself is still there
-    assert res["coverage"] > 0.02, res
+    masks = _decode_mask(out)
+    cx0, cy0, cx1, cy1 = chair_box
+    n = len(masks)
+    for i, m in enumerate(masks):
+        # where the walker's bar sits in this frame (source timing; give the
+        # temporal vote a generous +/- margin by shrinking every window)
+        bx = int((min(i, N - 1) / max(1, N - 1)) * (W - BAR_W))
+        # chair pixels clearly OUTSIDE the bar must be unmasked — this is the
+        # no-strobe half: it must hold in EVERY frame, walker near or far
+        left_hi = min(cx1 - 8, bx - 24)
+        if left_hi - (cx0 + 8) > 20:
+            frac = float((m[cy0 + 12:cy1 - 12, cx0 + 8:left_hi] > 127).mean())
+            assert frac < 0.05, f"chair masked at frame {i}: {frac}"
+        right_lo = max(cx0 + 8, bx + BAR_W + 24)
+        if (cx1 - 8) - right_lo > 20:
+            frac = float((m[cy0 + 12:cy1 - 12,
+                            right_lo:cx1 - 8] > 127).mean())
+            assert frac < 0.05, f"chair masked ahead of the walker " \
+                                f"at frame {i}: {frac}"
+        # once the bar is well inside the chair box, the walker must still be
+        # masked there — the anti-"w sitting on top of me" half
+        in_lo, in_hi = max(bx + 16, cx0 + 8), min(bx + BAR_W - 16, cx1 - 8)
+        if 6 <= i < n - 6 and in_hi - in_lo > 20:
+            frac = float((m[cy0 + 16:cy1 - 16, in_lo:in_hi] > 127).mean())
+            assert frac > 0.85, \
+                f"walker unmasked over the chair at frame {i}: {frac}"
 
 
 @needs_ffmpeg

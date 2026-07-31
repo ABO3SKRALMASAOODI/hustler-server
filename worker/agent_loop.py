@@ -1352,6 +1352,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         if config.AGENT_REASONING_EFFORT and iteration > 0 \
                 and not llm.reasoning_effort_rejected(model):
             extra["reasoning_effort"] = config.AGENT_REASONING_EFFORT
+        if llm.tools_need_effort_none(model):
+            # This model refuses tools + reasoning on chat/completions
+            # outright (Luna); the only accepted spelling is an explicit
+            # 'none' on EVERY tools call — including iteration 0, where the
+            # field is otherwise never sent.
+            extra["reasoning_effort"] = "none"
         try:
             # THE KNOBS HAVE TO BE SAFE TO TURN ON. reasoning_effort is an
             # env var someone sets against a provider we cannot test from
@@ -1377,7 +1383,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     _adapt_tries += 1
                     if _adapt_tries > 3:
                         raise
+                    # Checked BEFORE the strip-the-field branch: this
+                    # rejection fires when the field is ABSENT (the model's
+                    # default reasoning is what conflicts with tools), so
+                    # stripping fixes nothing — the dialect is to SEND
+                    # reasoning_effort='none' explicitly, always.
+                    if not llm.tools_need_effort_none(model) and \
+                            llm.looks_like_tools_reasoning_conflict(e):
+                        llm.mark_tools_need_effort_none(model)
+                        print(f"[agent {job['id']}] {model} takes function "
+                              "tools only with reasoning_effort='none' on "
+                              "chat/completions — latched, retrying",
+                              flush=True)
+                        kw["reasoning_effort"] = "none"
+                        extra = {"reasoning_effort": "none"}
+                        continue
                     if "reasoning_effort" in kw and \
+                            not llm.tools_need_effort_none(model) and \
                             llm.looks_like_bad_parameter(e,
                                                          "reasoning_effort"):
                         llm.mark_reasoning_effort_rejected(model)
