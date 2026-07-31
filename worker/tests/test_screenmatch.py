@@ -128,6 +128,43 @@ def test_a_glassless_room_is_an_honest_no(paths, workdir):
     assert screenmatch.match_screen([rp], [cp]) is None
 
 
+def test_shared_scenery_does_not_steal_the_match(workdir):
+    """The adversarial case caught on real footage: a screen recording OF
+    THIS VERY EDITOR contains a video panel showing the filmed room itself,
+    so the strongest single consensus is room-to-room — which projects a
+    near-full-frame quad (rejected as scenery) and, before sequential
+    RANSAC, took the whole tier down with it. The chrome-to-glass match is
+    still in the set underneath and must win round two."""
+    rng = np.random.default_rng(21)
+    # A texture-RICH room (the real one is), so room-to-room has plenty of
+    # features to win the first consensus with.
+    room_tex = rng.integers(0, 255, (FH // 4, FW // 4, 3)).astype(np.uint8)
+    room_tex = cv2.resize(room_tex, (FW, FH), interpolation=cv2.INTER_CUBIC)
+    content = _content()
+    # ...and the content's video panel SHOWS that room (scaled down).
+    ph, pw = CH - 170, CW - 160
+    content[60:60 + ph, 80:80 + pw] = cv2.resize(room_tex, (pw, ph))
+    src = np.float32([[0, 0], [CW, 0], [0, CH], [CW, CH]])
+    H = cv2.getPerspectiveTransform(src, np.float32(QUAD_PX))
+    warped = cv2.warpPerspective((content * 0.85).astype(np.uint8), H,
+                                 (FW, FH))
+    mask = cv2.warpPerspective(np.full((CH, CW), 255, np.uint8), H,
+                               (FW, FH))
+    filmed = room_tex.copy()
+    filmed[mask > 0] = warped[mask > 0]
+    cp = os.path.join(workdir, "content_rec.png")
+    fp = os.path.join(workdir, "filmed_rec.png")
+    cv2.imwrite(cp, content)
+    cv2.imwrite(fp, filmed)
+    got = screenmatch.match_screen([fp], [cp])
+    assert got is not None, "sequential RANSAC failed to find the glass"
+    for i, (wx, wy) in enumerate(QUAD_PX):
+        gx = got["corners"][2 * i] * FW
+        gy = got["corners"][2 * i + 1] * FH
+        assert abs(gx - wx) < 8 and abs(gy - wy) < 8, \
+            f"corner {i}: got ({gx:.1f},{gy:.1f}) want ({wx:.1f},{wy:.1f})"
+
+
 def test_agreement_counts_concurring_pairs(paths, workdir):
     cp, fp = paths
     # a second filmed frame of the same scene (fresh noise) must concur

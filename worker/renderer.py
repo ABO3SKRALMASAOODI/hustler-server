@@ -116,6 +116,9 @@ SCREEN_APPEAR_MIN_S = 0.12
 # the cut sits strictly inside a moving, already-full-frame picture. Both
 # sides of the cut show the same content at the same magnification.
 SCREEN_HOLD_S = 0.30
+# Where along the push the shape/skew correction is allowed to begin, as a
+# fraction of the eased travel (see the g weight in screen_lock_corner_paths).
+SCREEN_CORR_E0 = 0.6
 
 
 def screen_lock_hold(dur):
@@ -283,7 +286,22 @@ def screen_lock_corner_paths(lock, W, H, fps, dur):
     dur_push = dur - hold
     e = _screen_lock_ease(lock, tvar, 0.0, dur_push, fps)
     z = f"(1+{z_end - 1.0:.5f}*({e}))"
-    g = f"(({e})*({e}))"
+    # The correction weight (round 65 reshape). g closes the quad's SKEW and
+    # its SHAPE GAP: a 16:10 laptop filmed at an angle is ~1.5:1 on screen
+    # while the output is 16:9, so the content must stretch ~15% of the frame
+    # to become frame-shaped, and WHEN that happens is visible. e*e ran it
+    # through the whole second half of the push — at 85% travel the content
+    # already overhung the glass by a sixth of the frame width with the room
+    # still visible around it, which a real user read (correctly) as a flat
+    # rectangle floating over the room, "not tuned to the rotation of the
+    # laptop". The correction now starts at SCREEN_CORR_E0 of the travel and
+    # runs quadratically to the arrival: the content stays GLUED to the true
+    # quad until the glass dominates the frame, and the un-shape happens
+    # inside the fastest, most magnified stretch of the dive, where the room
+    # is already at the edges. Still exactly 1 at the arrival, so the
+    # frame-identical handoff is untouched.
+    gl = f"clip(({e}-{SCREEN_CORR_E0})/{1.0 - SCREEN_CORR_E0:.3f},0,1)"
+    g = f"(({gl})*({gl}))"
     # The through-cut punch (round 63b): from the moment the push lands
     # (dur_push), the content keeps moving — it grows past identity on the
     # same sin curve the program-side landing continues after the handoff,

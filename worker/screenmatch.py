@@ -46,6 +46,10 @@ MIN_INLIER_RATIO = 0.30
 # in one panel projected a quad twice the screen's height).
 MIN_SPREAD = 0.18
 SIFT_FEATURES = 3000
+# The filmed side gets more budget: the glass is a small, dim, slightly
+# defocused region of the frame, and its weak features are exactly the ones
+# a tight cap discards first — while the room's strong corners survive.
+SIFT_FEATURES_FILMED = 6000
 ORB_FEATURES = 5000
 RANSAC_PX = 4.0
 
@@ -61,7 +65,7 @@ def _load_gray(path, cv2):
     return clahe.apply(img)
 
 
-def _features(img, cv2):
+def _features(img, cv2, nfeat=SIFT_FEATURES):
     """(keypoints, descriptors, norm). SIFT first — a FILMED screen is
     slightly defocused, glared and exposure-shifted, and SIFT's gradient
     descriptors survive that where ORB's binary tests flip; UI content is
@@ -69,7 +73,7 @@ def _features(img, cv2):
     with descriptors that separate well. ORB is the fallback for a cv2
     build without SIFT."""
     try:
-        det = cv2.SIFT_create(nfeatures=SIFT_FEATURES)
+        det = cv2.SIFT_create(nfeatures=nfeat)
         kp, des = det.detectAndCompute(img, None)
         if des is not None and len(kp) >= MIN_MATCHES:
             return kp, des, cv2.NORM_L2
@@ -80,6 +84,39 @@ def _features(img, cv2):
     return kp, des, cv2.NORM_HAMMING
 
 
+# A projected quad covering more than this of the filmed frame in either
+# dimension is not a filmed screen: it is the match locking onto SHARED
+# SCENERY (a recording of this very editor contains a video panel showing
+# the filmed room itself — room-to-room matched with 77 confident inliers on
+# real footage). Rejected candidates have their inliers STRIPPED and RANSAC
+# re-fit on the remainder (sequential multi-homography), because the correct
+# chrome-to-glass consensus is usually still in the match set underneath.
+MAX_QUAD_FRAC = 0.92
+QUAD_BOUNDS = (-0.25, 1.25)
+SEQ_ROUNDS = 3
+
+
+def _quad_from_h(H, cw, ch, fw, fh, cv2):
+    # Corner order is the perspective filter's: TL, TR, BL, BR.
+    rect = np.float32([[0, 0], [cw, 0], [0, ch], [cw, ch]]).reshape(-1, 1, 2)
+    proj = cv2.perspectiveTransform(rect, H).reshape(4, 2)
+    quad = []
+    for x, y in proj:
+        quad.extend([float(x) / fw, float(y) / fh])
+    return quad
+
+
+def _quad_candidate_ok(quad):
+    xs, ys = quad[0::2], quad[1::2]
+    if min(xs) < QUAD_BOUNDS[0] or max(xs) > QUAD_BOUNDS[1] or \
+            min(ys) < QUAD_BOUNDS[0] or max(ys) > QUAD_BOUNDS[1]:
+        return False
+    if (max(xs) - min(xs)) > MAX_QUAD_FRAC or \
+            (max(ys) - min(ys)) > MAX_QUAD_FRAC:
+        return False
+    return True
+
+
 def _match_pair(content_path, filmed_path, cv2):
     """One (content frame, filmed frame) attempt. Returns (quad_fracs,
     inliers) in the FILMED frame's fractions, or (None, 0)."""
@@ -88,7 +125,7 @@ def _match_pair(content_path, filmed_path, cv2):
     if content is None or filmed is None:
         return None, 0
     kc, dc, norm_c = _features(content, cv2)
-    kf, df, norm_f = _features(filmed, cv2)
+    kf, df, norm_f = _features(filmed, cv2, nfeat=SIFT_FEATURES_FILMED)
     if dc is None or df is None or norm_c != norm_f or \
             len(kc) < MIN_MATCHES or len(kf) < MIN_MATCHES:
         return None, 0
@@ -96,30 +133,31 @@ def _match_pair(content_path, filmed_path, cv2):
     knn = matcher.knnMatch(dc, df, k=2)
     good = [m for m, n in (p for p in knn if len(p) == 2)
             if m.distance < RATIO * n.distance]
-    if len(good) < MIN_MATCHES:
-        return None, 0
-    src = np.float32([kc[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-    dst = np.float32([kf[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-    H, mask = cv2.findHomography(src, dst, cv2.RANSAC, RANSAC_PX)
-    if H is None or mask is None:
-        return None, 0
-    inliers = int(mask.sum())
-    if inliers < MIN_INLIERS or inliers < MIN_INLIER_RATIO * len(good):
-        return None, 0
     ch, cw = content.shape[:2]
     fh, fw = filmed.shape[:2]
-    inl = src[mask.ravel() == 1].reshape(-1, 2)
-    span = ((inl[:, 0].max() - inl[:, 0].min()) / cw
-            * (inl[:, 1].max() - inl[:, 1].min()) / ch)
-    if span < MIN_SPREAD:
-        return None, 0
-    # Corner order is the perspective filter's: TL, TR, BL, BR.
-    rect = np.float32([[0, 0], [cw, 0], [0, ch], [cw, ch]]).reshape(-1, 1, 2)
-    proj = cv2.perspectiveTransform(rect, H).reshape(4, 2)
-    quad = []
-    for x, y in proj:
-        quad.extend([float(x) / fw, float(y) / fh])
-    return quad, inliers
+    for _ in range(SEQ_ROUNDS):
+        if len(good) < MIN_MATCHES:
+            return None, 0
+        src = np.float32([kc[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst = np.float32([kf[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+        H, mask = cv2.findHomography(src, dst, cv2.RANSAC, RANSAC_PX)
+        if H is None or mask is None:
+            return None, 0
+        keep = mask.ravel() == 1
+        inliers = int(keep.sum())
+        if inliers < MIN_INLIERS:
+            return None, 0
+        quad = _quad_from_h(H, cw, ch, fw, fh, cv2)
+        inl = src[keep].reshape(-1, 2)
+        span = ((inl[:, 0].max() - inl[:, 0].min()) / cw
+                * (inl[:, 1].max() - inl[:, 1].min()) / ch)
+        if _quad_candidate_ok(quad) and span >= MIN_SPREAD and \
+                inliers >= MIN_INLIER_RATIO * len(good):
+            return quad, inliers
+        # This consensus is scenery or a degenerate cluster — strip its
+        # inliers and let the next-strongest structure have its RANSAC.
+        good = [m for m, k in zip(good, keep) if not k]
+    return None, 0
 
 
 def match_screen(filmed_paths, content_paths):

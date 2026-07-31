@@ -371,14 +371,22 @@ def test_content_is_glued_inside_the_screen_once_faded_in(rendered):
     m = _content_mask(f)
     ys, xs = np.where(m)
     assert m.sum() > 200, "no content visible on the screen at all"
+    # The corners move ~10px/frame here (the round-65 shape correction is
+    # deliberately concentrated late in the dive), so the prediction is an
+    # ENVELOPE over the sampled frame and its neighbours — a one-frame seek
+    # offset must not read as a detached pin.
     on = int(round(dt * FPS))
-    want = _content_corners(lock, on)
-    wx = [p[0] for p in want]
-    wy = [p[1] for p in want]
-    assert abs(xs.min() - max(0, min(wx))) < 12, (xs.min(), min(wx))
-    assert abs(xs.max() - min(W - 1, max(wx))) < 12, (xs.max(), max(wx))
-    assert abs(ys.min() - max(0, min(wy))) < 12, (ys.min(), min(wy))
-    assert abs(ys.max() - min(H - 1, max(wy))) < 12, (ys.max(), max(wy))
+    cands = [_content_corners(lock, o) for o in (on - 1, on, on + 1)]
+
+    def _near(measured, picks):
+        return any(abs(measured - p) < 12 for p in picks)
+
+    assert _near(xs.min(), [max(0, min(px for px, _ in c)) for c in cands])
+    assert _near(xs.max(), [min(W - 1, max(px for px, _ in c))
+                            for c in cands])
+    assert _near(ys.min(), [max(0, min(py for _, py in c)) for c in cands])
+    assert _near(ys.max(), [min(H - 1, max(py for _, py in c))
+                            for c in cands])
 
 
 @needs_ffmpeg
