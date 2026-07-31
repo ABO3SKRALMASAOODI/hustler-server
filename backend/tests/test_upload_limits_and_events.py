@@ -182,3 +182,47 @@ def test_only_the_two_failure_kinds_count_as_failures():
     from routes import video
     assert set(video.UPLOAD_FAILURE_KINDS) == {"upload_rejected",
                                                "upload_failed"}
+
+
+# ── round 68: the dedup quickhash is a two-party contract ────────────────────
+
+def test_dedup_quickhash_matches_the_client_construction():
+    """The server verifies a candidate by hashing the same bytes the browser
+    hashed: first chunk, plus the last chunk when the file is bigger than one,
+    concatenated. If either side changes its recipe the other stops
+    recognizing every re-upload — silently, as {dedup:false} — so the exact
+    construction is pinned here against a fake object store, including the
+    small-file (single-slice) and the between-one-and-two-chunks shapes the
+    slicing arithmetic can get wrong."""
+    import hashlib
+
+    from routes import video
+
+    CH = video._DEDUP_CHUNK
+
+    def fake_blob(n):
+        # deterministic, position-dependent bytes so a wrong offset changes
+        # the hash
+        return bytes((i * 31 + 7) % 256 for i in range(n))
+
+    for size in (100, CH - 1, CH, CH + 1, CH + CH // 2, 2 * CH, 3 * CH + 5):
+        blob = fake_blob(size)
+
+        def fake_range(key, offset, length, _blob=blob):
+            return _blob[int(offset):int(offset) + int(length)]
+
+        orig = video.storage.get_range_at
+        video.storage.get_range_at = fake_range
+        try:
+            server = video._dedup_quickhash_of_key("k", size)
+        finally:
+            video.storage.get_range_at = orig
+
+        # the client's construction (src/lib/upload.js quickhashFile)
+        first = blob[0:min(size, CH)]
+        last = b""
+        if size > CH:
+            off = max(CH, size - CH)
+            last = blob[off:size]
+        client = hashlib.sha256(first + last).hexdigest()
+        assert server == client, f"quickhash drift at size {size}"
