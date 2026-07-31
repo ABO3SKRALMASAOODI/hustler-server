@@ -165,6 +165,42 @@ def test_shared_scenery_does_not_steal_the_match(workdir):
             f"corner {i}: got ({gx:.1f},{gy:.1f}) want ({wx:.1f},{wy:.1f})"
 
 
+def test_a_sloppy_read_is_refined_to_exact_corners(paths, workdir):
+    """Round 65b, the case the live run exposed: on real footage the glass is
+    a small, dim tenth of the frame and the FULL-FRAME match fails — its weak
+    features lose the budget to the room. The vision read locates the screen
+    approximately; the guided crop-and-match must then recover the EXACT quad
+    from inside that neighbourhood."""
+    import agent_tools
+    cp, fp = paths
+    # a read that is the right screen but sloppy: axis-aligned bbox of the
+    # true quad, wrong by design about the rotation
+    xs = [p[0] / FW for p in QUAD_PX]
+    ys = [p[1] / FH for p in QUAD_PX]
+    read = [min(xs), min(ys), max(xs), min(ys),
+            min(xs), max(ys), max(xs), max(ys)]
+    got = agent_tools._refine_read_with_content([fp], [cp], read)
+    assert got is not None, "the guided match did not lock"
+    assert got["method"] == "content_match" and got["refined_from_read"]
+    for i, (wx, wy) in enumerate(QUAD_PX):
+        gx = got["corners"][2 * i] * FW
+        gy = got["corners"][2 * i + 1] * FH
+        assert abs(gx - wx) < 8 and abs(gy - wy) < 8, \
+            f"corner {i}: got ({gx:.1f},{gy:.1f}) want ({wx:.1f},{wy:.1f})"
+
+
+def test_a_refinement_landing_elsewhere_is_distrusted(paths, workdir):
+    """A guided match must stay NEAR the read: one that lands somewhere else
+    is the shared-scenery steal wearing a crop, and the read did at least
+    look at the actual screen."""
+    import agent_tools
+    cp, fp = paths
+    # a read pointing at empty room, far from the true quad
+    read = [0.72, 0.05, 0.98, 0.05, 0.72, 0.35, 0.98, 0.35]
+    got = agent_tools._refine_read_with_content([fp], [cp], read)
+    assert got is None
+
+
 def test_agreement_counts_concurring_pairs(paths, workdir):
     cp, fp = paths
     # a second filmed frame of the same scene (fresh noise) must concur

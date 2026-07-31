@@ -4858,6 +4858,80 @@ def _try_content_match(filmed_frames, content_frames, frame_aspect):
             "n_frames": got["n_pairs"]}
 
 
+def _refine_read_with_content(frames, content_frames, quad):
+    """Round 65b: a vision read LOCATES the glass; the content's pixels then
+    NAIL it. The full-frame match fails on real footage where the glass is a
+    small, dim, defocused tenth of the frame — its weak features lose the
+    feature budget to the room. But once the read says roughly where the
+    screen is, cropping to that neighbourhood and upscaling flips the odds:
+    the glass becomes most of the image and the content-to-glass scale gap
+    nearly closes. A successful guided match returns matched-grade corners
+    (exact rotation and keystone); any failure returns None and the read
+    stands exactly as before.
+
+    The refined quad must stay NEAR the read — a guided match that lands
+    somewhere else entirely is the shared-scenery steal wearing a crop, and
+    the read, for all its sloppiness, did look at the actual screen.
+    """
+    if not content_frames or not frames:
+        return None
+    try:
+        import cv2
+    except Exception:
+        return None
+    xs, ys = quad[0::2], quad[1::2]
+    rw, rh = max(xs) - min(xs), max(ys) - min(ys)
+    if rw <= 0.01 or rh <= 0.01:
+        return None
+    best = None
+    for i, fp in enumerate(frames):
+        img = cv2.imread(fp)
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        x0 = max(0, int((min(xs) - 0.35 * rw) * w))
+        x1 = min(w, int((max(xs) + 0.35 * rw) * w))
+        y0 = max(0, int((min(ys) - 0.35 * rh) * h))
+        y1 = min(h, int((max(ys) + 0.35 * rh) * h))
+        if x1 - x0 < 60 or y1 - y0 < 60:
+            continue
+        crop = img[y0:y1, x0:x1]
+        crop = cv2.resize(crop, ((x1 - x0) * 2, (y1 - y0) * 2),
+                          interpolation=cv2.INTER_CUBIC)
+        cp = fp + f".smref{i}.jpg"
+        if not cv2.imwrite(cp, crop):
+            continue
+        try:
+            got = screenmatch.match_screen([cp], content_frames)
+        except Exception:
+            got = None
+        if not got:
+            continue
+        q = got["corners"]
+        mapped = []
+        for j in range(4):
+            mapped.extend([(x0 + q[2 * j] * (x1 - x0)) / w,
+                           (y0 + q[2 * j + 1] * (y1 - y0)) / h])
+        ok, _why = quad_is_sane(mapped)
+        if not ok:
+            continue
+        bx, by, bw, bh = quad_bbox(mapped)
+        if not (0.45 * rw <= bw <= 1.7 * rw and 0.45 * rh <= bh <= 1.7 * rh):
+            continue
+        cxm, cym = bx + bw / 2.0, by + bh / 2.0
+        if not (min(xs) - 0.15 <= cxm <= max(xs) + 0.15
+                and min(ys) - 0.15 <= cym <= max(ys) + 0.15):
+            continue
+        if best is None or got["inliers"] > best["inliers"]:
+            best = {"corners": [round(v, 4) for v in mapped],
+                    "confidence": None, "method": "content_match",
+                    "inliers": got["inliers"],
+                    "agreement": got["agreement"],
+                    "n_frames": got["n_pairs"],
+                    "refined_from_read": True}
+    return best
+
+
 def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None,
                              content_frames=None):
     """_detect_screen's counterpart for a screen inside a SPLICED clip.
@@ -4921,8 +4995,9 @@ def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None,
         if not ok_p:
             return None, (f"{why}, and the corners the vision model read "
                           f"cannot be the screen either — {pwhy}")
-        res = {"corners": quad, "confidence": None, "method": "vision",
-               "agreement": 1, "n_frames": 1, "read_not_measured": why}
+        res = (_refine_read_with_content(frames, content_frames, quad)
+               or {"corners": quad, "confidence": None, "method": "vision",
+                   "agreement": 1, "n_frames": 1, "read_not_measured": why})
     # The measured fractions are of the ASSET's frame; the pin consumes
     # OUTPUT fractions.
     out = []
@@ -5079,8 +5154,9 @@ def _detect_screen(ctx, edl, src_t, content_aspect=None, content_frames=None):
         if not ok_p:
             return None, (f"{why}, and the corners the vision model read "
                           f"cannot be the screen either — {pwhy}")
-        res = {"corners": quad, "confidence": None, "method": "vision",
-               "agreement": 1, "n_frames": 1, "read_not_measured": why}
+        res = (_refine_read_with_content(frames, content_frames, quad)
+               or {"corners": quad, "confidence": None, "method": "vision",
+                   "agreement": 1, "n_frames": 1, "read_not_measured": why})
     out = []
     for i in range(4):
         pt = _out_frac_from_source(ctx, edl, res["corners"][2 * i],
@@ -5477,7 +5553,10 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
             f"pinned clip grows out of the very pixels it was filmed "
             f"playing on. Because the glass already shows this content, the "
             f"clip lives on the screen from the window's start instead of "
-            f"dissolving in late.")
+            f"dissolving in late."
+            + (" (A vision read located the glass first; the content lock "
+               "then nailed the corners inside it.)"
+               if detected.get("refined_from_read") else ""))
     elif detected and detected.get("read_not_measured"):
         # Honest about which of the two ways this happened. A vision read is an
         # estimate, and the whole effect lives or dies on the corners, so the
