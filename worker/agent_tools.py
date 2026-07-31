@@ -828,8 +828,13 @@ def look_at_asset(ctx, asset_key, question, start=0, end=None):
     if not llm.vision_available():
         return ("Visual inspection unavailable (no vision model configured). "
                 "Ask the user which part of the clip to use.")
+    # Renders are inspectable too (round 66): "check it yourself" is a real
+    # user sentence, and the render self-check is a 3x3 sheet of the whole
+    # programme — too coarse to catch a strobing mask or a one-frame flash.
+    # Pointing this at a finished render with a narrow start/end samples
+    # frame-accurately around the moment in question.
     asset, err = _resolve_media_asset(ctx, asset_key,
-                                      ("video_clip", "image_ref"))
+                                      ("video_clip", "image_ref", "render"))
     if err:
         return err
     name = (asset.get("meta") or {}).get("filename") or \
@@ -9601,12 +9606,18 @@ TOOLS = {
                  "end": {"type": "number"},
                  "question": {"type": "string"}}),
     "look_at_asset": (look_at_asset, "Ask the vision model about frames from "
-                      "an UPLOADED clip or image (storage_key from "
-                      "list_assets). THE way to choose which moment of a "
-                      "long clip to splice in: ask e.g. 'at which timestamps "
-                      "is the tool's page actually visible?' over the whole "
-                      "clip, then call again on a narrower start/end, then "
-                      "insert_media with clip_start_s at the chosen moment.",
+                      "an UPLOADED clip or image, or a finished RENDER "
+                      "(storage_key from list_assets; kind='render' lists "
+                      "past previews/finals). THE way to choose which moment "
+                      "of a long clip to splice in: ask e.g. 'at which "
+                      "timestamps is the tool's page actually visible?' over "
+                      "the whole clip, then call again on a narrower "
+                      "start/end, then insert_media with clip_start_s at the "
+                      "chosen moment. On a RENDER it is how you CHECK YOUR "
+                      "OWN WORK at exact moments — a narrow start/end "
+                      "samples frame-accurately, so use it to verify a "
+                      "transition junction or an effect the user questions "
+                      "before claiming it is fine.",
                       {"asset_key": {"type": "string"},
                        "question": {"type": "string"},
                        "start": {"type": "number"},
