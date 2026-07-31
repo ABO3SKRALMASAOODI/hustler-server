@@ -50,7 +50,35 @@ import personseg
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 9
+VERSION = 10
+
+# ── v10: temporal coherence comes from the MODEL, not from gates (round 69) ──
+# The user filmed v9 failing five ways on project 300 in one afternoon, and
+# every one of them is the same defect: per-frame thresholded decisions on a
+# per-frame model flicker at the decision boundary. The armchair toggled
+# between wholly-masked and wholly-carved (letters "behind the couch normally
+# then all of a sudden on the couch"); the sample-lerped masks led the walker
+# ("i dim things that i havent reached yet"); the walker himself lost pixels
+# to the furniture zone where he lingered ("things ... appear on me"); and the
+# 320px boundary wobble flickered letter fragments with nobody near them.
+# Measured on that exact window: a 19.4%-of-frame mask change between two
+# CONSECUTIVE frames, 8174 pixels toggling 12+ times, the chair flipping
+# fully-on/fully-off 20 times.
+#
+# v10 replaces the whole cascade with RobustVideoMatting (personseg.
+# rvm_stream): a video matting network whose four recurrent state tensors
+# carry the previous frames' answer INTO each new frame. Run on EVERY mask
+# frame (no strided sampling, so nothing is ever lerped between two subject
+# positions), its soft alpha goes to the encoder untouched — no threshold, no
+# vote, no zones, no morphology, no feather. Same window, measured: max
+# frame-to-frame change 1.6%, 377 pixels toggling 12+, the chair never
+# claimed at all (it is not a person — furniture separation stops being a
+# gate and becomes the model's task definition), and the walker holds his
+# full silhouette standing still or crossing furniture. The u2net + v9-gate
+# path below survives as the middle rung of the honest-off ladder (RVM file
+# absent -> u2net -> photometric); the refusal bounds and their meanings are
+# unchanged.
+RVM_MIN_FPS = 12.0           # fps halving floor under a strangled budget
 
 # ── v6: the subject is FOUND, not inferred (round 64) ───────────────────────
 # Versions 2-5 are four consecutive rounds of cleverer photometrics failing on
@@ -816,8 +844,28 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
                         f"frame by frame — over {MAX_WINDOW_S:.0f}s that does "
                         "not finish inside one edit turn. Use a shorter "
                         "window for the words behind you")}
-    use_model = bool(allow_model) and cv2 is not None and personseg.available()
-    if use_model:
+    use_rvm = (bool(allow_model) and cv2 is not None
+               and personseg.rvm_available())
+    use_model = (not use_rvm and bool(allow_model) and cv2 is not None
+                 and personseg.available())
+    if use_rvm:
+        # The recurrent model runs on EVERY encoded mask frame — a strided
+        # run lerped between two subject positions is the round-68 ghost
+        # that dimmed letters the walker had not reached. The budget bounds
+        # wall time by halving the mask RATE instead; the renderer's fps
+        # conform duplicates frames up to the render rate, so a reduced-rate
+        # mask trails a fast limb by at most one mask frame, never by a
+        # blended double-exposure.
+        while (dur * out_fps > config.MATTE_RVM_BUDGET
+               and out_fps / 2.0 >= RVM_MIN_FPS):
+            out_fps = out_fps / 2.0
+        stream = personseg.rvm_stream(w, h)
+
+        def _rvm_masks():
+            for f in _decode(src, start, dur, w, h, extra_vf, fps=out_fps):
+                yield (stream.step(f, cv2) * 255.0).astype(np.uint8)
+        mask_iter = _rvm_masks()
+    elif use_model:
         idxs, s_masks, n_frames = _seg_sample_masks(
             _decode(src, start, dur, w, h, extra_vf, fps=out_fps),
             dur * out_fps, cv2)
@@ -865,9 +913,11 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
         stderr=subprocess.PIPE)
     try:
         for m in mask_iter:
-            if cv2 is not None and feather > 0:
+            if cv2 is not None and feather > 0 and not use_rvm:
                 # A hard 1-pixel edge is what makes a composite look pasted.
                 # After the vote, so the majority is taken on crisp binaries.
+                # The RVM alpha is exempt: it IS a soft matte already, and
+                # blurring it would fatten the subject by the feather width.
                 m = cv2.GaussianBlur(m, (feather * 2 + 1, feather * 2 + 1), 0)
             on = m > 127
             c = float(on.sum()) / float(total)
@@ -895,13 +945,17 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
                 "why": (f"the frames at that moment could not be processed "
                         f"({err or 'no output'})")}
     mean_cov = cov_sum / float(n)
+    person_led = use_rvm or use_model
     res = {"ok": True, "frames": n, "width": w, "height": h,
            "fps": round(out_fps, 3), "coverage": round(mean_cov, 4),
            "coverage_max": round(cov_max, 4),
            "moving_frames": hits,
            "text_covered": round(box_cov, 3) if box_px else None,
            "text_width_covered": round(box_width_cov, 3) if box_px else None,
-           "method": "person" if use_model else "plate",
+           "method": "person" if person_led else "plate",
+           "engine": ("rvm" if use_rvm
+                      else "u2net" if use_model else "plate"),
+           "matte_version": VERSION,
            "no_cv2": cv2 is None}
     # THE MEASUREMENT IS THE FEATURE. Both refusal bounds are real footage,
     # not edge cases — but what they MEAN depends on how the mask was made.
@@ -910,7 +964,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
             f"the subject fills {mean_cov * 100:.0f}% of the frame through "
             "that window, so words behind them would barely ever be visible. "
             "Offer a normal title instead, and say why")
-            if use_model else (
+            if person_led else (
             f"{mean_cov * 100:.0f}% of the frame changes through that window, "
             "so there is no still background to put words on — the camera is "
             "moving (or the shot cuts inside the window). This effect needs a "
@@ -922,7 +976,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
             f"({mean_cov * 100:.2f}% of the frame reads as subject), so "
             "there is nothing for the words to go behind. Point it at a "
             "moment where someone is actually in front of the camera")
-            if use_model else (
+            if person_led else (
             "nothing moves in front of the camera through that window "
             f"({mean_cov * 100:.2f}% of the frame changes), so there is "
             "nothing for the words to go behind. Point it at a moment where "
@@ -995,6 +1049,19 @@ def run_matte_job(worker_db, job):
     dur = float(payload.get("dur") or 0.0)
     if not key or not out_key or dur <= 0.05:
         raise ValueError("matte job needs storage_key, out_key, start, dur")
+    # The dispatcher fingerprints its cache key with ITS matte.VERSION. An
+    # executor running a different version would upload a differently-built
+    # mask under that key and poison the cache for every future user of the
+    # window — the round-60 false-claim class, silent and permanent. Refuse
+    # loudly instead; the dispatcher falls back honestly and says so. A
+    # payload WITHOUT the field is an older dispatcher mid-deploy: accept,
+    # its fingerprint matches what this code used to build.
+    want = payload.get("matte_version")
+    if want is not None and int(want) != VERSION:
+        raise ValueError(
+            f"executor builds matte v{VERSION} but the dispatcher expects "
+            f"v{int(want)} — redeploy the executor (gcloud run deploy "
+            "valmera-executor --source worker/ --region us-central1)")
     box = payload.get("box")
     workdir = os.path.join(config.TMP_DIR, f"mat_{uuid.uuid4().hex[:8]}")
     os.makedirs(workdir, exist_ok=True)

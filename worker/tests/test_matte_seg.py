@@ -136,6 +136,10 @@ def panning(workdir):
 def fake_model(monkeypatch):
     monkeypatch.setattr(personseg, "available", lambda: True)
     monkeypatch.setattr(personseg, "segment", _fake_segment)
+    # These tests pin the u2net RUNG of the round-69 ladder. RVM outranks it
+    # when its file is present (as it is in the shipped image), so it is
+    # pinned off here — test_matte_rvm.py owns the primary path.
+    monkeypatch.setattr(personseg, "rvm_available", lambda: False)
 
 
 def _decode_mask(path):

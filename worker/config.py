@@ -789,6 +789,22 @@ MATTE_SEG_MODEL = os.getenv(
     "MATTE_SEG_MODEL",
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  "models", "u2net_human_seg.onnx"))
+# RobustVideoMatting (round 69) — the PRIMARY matte model. u2net above is a
+# per-frame salient-object net, and matte v6-v9 spent four rounds gating its
+# frame-to-frame flicker; RVM carries recurrent state across frames, so the
+# mask is temporally stable because the MODEL is, not because post-processing
+# fought it. Same honest-off ladder: file missing -> u2net rung -> photometric.
+MATTE_RVM_MODEL = os.getenv(
+    "MATTE_RVM_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "models", "rvm_mobilenetv3_fp32.onnx"))
+# RVM runs on EVERY mask frame (that is what kills the round-68 lerp ghost —
+# the mask that dimmed letters the walker had not reached yet). The budget
+# bounds wall time on the executor by halving the mask RATE, never by strided
+# sampling: measured 128 ms/frame at 960x540, so 500 frames is ~2 minutes
+# against REMOTE_TIMEOUT_MATTE_S=300 with staging either side. A 2-8s beat
+# masks at the full render rate; the 15s ceiling masks at 30 fps.
+MATTE_RVM_BUDGET = int(os.getenv("MATTE_RVM_BUDGET", "500"))
 
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /

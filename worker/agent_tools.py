@@ -6064,7 +6064,8 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
     # The planned METHOD rides the fingerprint (round 64): a mask built by
     # the photometric fallback (executor down for an afternoon) must not
     # permanently occupy the cache slot the person model would fill better.
-    seg_planned = remote.matte_available() or personseg.available()
+    seg_planned = (remote.matte_available() or personseg.rvm_available()
+                   or personseg.available())
     fp = hashlib.sha256(json.dumps([
         getattr(ctx, "_orig_sha", ""), src_start, src_end, fit, mw, mh,
         matte.DIFF_THRESHOLD, matte.PLATE_SAMPLES, matte.VERSION,
@@ -6115,10 +6116,27 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
                          "start": src_start, "dur": src_end - src_start,
                          "box": list(_behind_text_box(item)),
                          "extra_vf": fit, "width": mw, "height": mh,
-                         "out_key": key},
+                         "out_key": key,
+                         "matte_version": matte.VERSION},
                         user_id=ctx.job.get("user_id"))
                 except Exception as err:
                     fell_back = str(err)[:160]
+                    stats = None
+                if (stats is not None and stats.get("ok")
+                        and stats.get("matte_version") != matte.VERSION):
+                    # A stale executor predating the version handshake built
+                    # a DIFFERENT mask and uploaded it under this version's
+                    # cache key. Served, it would pin the old defects under
+                    # the new fingerprint forever (the round-60 false-claim
+                    # class). Delete it and fall back honestly.
+                    try:
+                        storage.delete_keys([key])
+                    except Exception:
+                        pass
+                    fell_back = (f"executor built matte "
+                                 f"v{stats.get('matte_version')} but this "
+                                 f"code is v{matte.VERSION} — redeploy the "
+                                 "executor")
                     stats = None
         if stats is None:
             try:
@@ -6168,7 +6186,12 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
                     "measured, so this cost nothing to add.")
     else:
         cov = stats.get("coverage")
-        how = ("found frame by frame by the person-segmentation model"
+        eng = stats.get("engine")
+        how = (("matted frame by frame by the person-matting model, which "
+                "carries temporal state between frames so the mask holds "
+                "steady instead of strobing")
+               if eng == "rvm" else
+               "found frame by frame by the person-segmentation model"
                if stats.get("method") == "person" else
                "from a background photographed out of the shot itself")
         bits.append(
@@ -6178,6 +6201,14 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
             f"are drawn on the picture and the subject is laid back over "
             f"them, so they pass BEHIND — this is not a fade or a "
             f"transparency.")
+        if eng == "rvm":
+            bits.append(
+                "CONTRACT worth telling the user if furniture overlaps the "
+                "words: the words go behind PEOPLE (including what they "
+                "carry). Static objects — furniture, walls, parked cars — "
+                "do not hide the letters; over those the words read as an "
+                "ordinary title. That is deliberate: it is what keeps the "
+                "occlusion rock-steady frame to frame.")
         if stats.get("fell_back"):
             bits.append(
                 "NOTE: the person model was unreachable, so this mask came "
@@ -10746,11 +10777,17 @@ TOOLS = {
                         "title painted on the street or the wall behind them "
                         "would. This is the 'text behind me walking' / 'name "
                         "behind the subject' move, and it is a REAL depth "
-                        "composite, not a fade: a person-segmentation model "
-                        "finds the subject's pixels in every frame — dark "
-                        "clothes on a dark wall, handheld wobble and a moving "
-                        "camera are all fine — and the renderer lays them "
-                        "back over the words. Same styling arguments as "
+                        "composite, not a fade: a person-matting model that "
+                        "carries temporal state between frames cuts the "
+                        "subject out of every frame — dark clothes on a dark "
+                        "wall, handheld wobble and a moving camera are all "
+                        "fine, and the mask holds steady instead of "
+                        "flickering — and the renderer lays them back over "
+                        "the words. PEOPLE occlude the words (with whatever "
+                        "they carry); static objects — furniture, walls — do "
+                        "NOT: over those the words read as an ordinary "
+                        "title, which is what keeps the occlusion steady. "
+                        "Say so if the user asks about an object. Same styling arguments as "
                         "add_text "
                         "(template/x/y/size_scale/color/font/entrance/exit); "
                         "at_output_s + duration_s are where in the EDITED video "

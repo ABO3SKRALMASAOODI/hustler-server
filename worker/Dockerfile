@@ -59,6 +59,17 @@ RUN mkdir -p /app/models && python -c "import urllib.request, os; \
     assert s > 100_000_000, f'model download truncated: {s} bytes'; \
     print('u2net_human_seg.onnx', s, 'bytes')"
 
+# RobustVideoMatting (round 69) — the PRIMARY matte model; u2net above is now
+# the fallback rung. RVM carries recurrent state across frames, which is what
+# made the text-behind mask stop strobing (see worker/matte.py v10). Path in
+# sync with worker/config.py MATTE_RVM_MODEL. Weights are GPL-3.0
+# (PeterL1n/RobustVideoMatting) — run server-side only, never distributed.
+RUN python -c "import urllib.request, os; \
+    urllib.request.urlretrieve('https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx', '/app/models/rvm_mobilenetv3_fp32.onnx'); \
+    s = os.path.getsize('/app/models/rvm_mobilenetv3_fp32.onnx'); \
+    assert s > 10_000_000, f'model download truncated: {s} bytes'; \
+    print('rvm_mobilenetv3_fp32.onnx', s, 'bytes')"
+
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \

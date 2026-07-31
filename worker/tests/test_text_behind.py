@@ -609,6 +609,41 @@ def test_the_tool_refuses_without_a_main_video(workdir):
 
 
 @needs_ffmpeg
+def test_a_stale_executors_mask_is_deleted_not_cached(shot, workdir,
+                                                      monkeypatch, uploads):
+    """Round 69: the executor echoes its matte.VERSION in the stats. A stale
+    executor that predates the handshake builds and uploads an OLD-pipeline
+    mask under the NEW version's cache key — served, it would pin the v9
+    strobe under the v10 fingerprint forever (the round-60 false-claim
+    class). The dispatcher must delete that object, fall back honestly, and
+    say so in the reply."""
+    deleted = []
+    monkeypatch.setattr(agent_tools.storage, "delete_keys",
+                        lambda keys: deleted.extend(keys))
+    monkeypatch.setattr(agent_tools.remote, "matte_available", lambda: True)
+    monkeypatch.setattr(
+        agent_tools.remote, "run_matte_remote",
+        lambda pid, payload, user_id=None: {
+            "ok": True, "coverage": 0.1, "coverage_max": 0.2, "fps": 30.0,
+            "method": "person", "engine": "u2net",
+            "matte_version": matte.VERSION - 1})
+    monkeypatch.setattr(agent_tools.dbx, "latest_asset",
+                        lambda con, pid, kind: {"storage_key": "prox.mp4"})
+    ctx = _Ctx(shot, workdir)
+    ctx.db = type("Db", (), {"run": lambda self, fn, *a, **k:
+                             fn(None, *a, **k)})()
+    ctx.job = {"user_id": 1}
+    res = agent_tools.add_text_behind(ctx, "STALE", 1.0, duration_s=2.5)
+    assert res.startswith("EDL v"), res
+    assert deleted and deleted[0].startswith("matte/1/")
+    # the local rebuild ran WITHOUT the model (executor configured), so the
+    # reply carries the honest fallback note
+    assert "unreachable" in res
+    tx = ctx._edl["texts"][0]
+    assert tx["behind"]["method"] == "plate"
+
+
+@needs_ffmpeg
 def test_render_edl_end_to_end_puts_the_mask_on_the_right_input(shot, workdir,
                                                                 monkeypatch):
     """The wiring the graph test cannot reach: render_edl builds the ffmpeg
