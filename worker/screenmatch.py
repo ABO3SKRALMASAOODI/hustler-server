@@ -160,6 +160,131 @@ def _match_pair(content_path, filmed_path, cv2):
     return None, 0
 
 
+def refine_with_read(filmed_paths, content_paths, quad):
+    """The guided lock (round 65c/d): a vision read LOCATES the glass, the
+    content's pixels then NAIL it. Crops each filmed frame to the read's
+    neighbourhood, upscales 2x, matches the content against the crop, and
+    maps a lock back into frame fractions. The refined quad must stay NEAR
+    the read — sized 0.45-1.7x and centred inside it — or it is the
+    shared-scenery steal wearing a crop. Returns the same dict shape as
+    match_screen plus refined_from_read, or None (the read stands).
+    """
+    try:
+        import cv2
+    except Exception:
+        return None
+    if not filmed_paths or not content_paths:
+        return None
+    xs, ys = quad[0::2], quad[1::2]
+    rw, rh = max(xs) - min(xs), max(ys) - min(ys)
+    if rw <= 0.01 or rh <= 0.01:
+        return None
+    best = None
+    for i, fp in enumerate(filmed_paths):
+        img = cv2.imread(fp)
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        x0 = max(0, int((min(xs) - 0.35 * rw) * w))
+        x1 = min(w, int((max(xs) + 0.35 * rw) * w))
+        y0 = max(0, int((min(ys) - 0.35 * rh) * h))
+        y1 = min(h, int((max(ys) + 0.35 * rh) * h))
+        if x1 - x0 < 60 or y1 - y0 < 60:
+            continue
+        crop = img[y0:y1, x0:x1]
+        crop = cv2.resize(crop, ((x1 - x0) * 2, (y1 - y0) * 2),
+                          interpolation=cv2.INTER_CUBIC)
+        cp = fp + f".smref{i}.jpg"
+        if not cv2.imwrite(cp, crop):
+            continue
+        got = match_screen([cp], content_paths)
+        if not got:
+            continue
+        q = got["corners"]
+        mapped = []
+        for j in range(4):
+            mapped.extend([(x0 + q[2 * j] * (x1 - x0)) / w,
+                           (y0 + q[2 * j + 1] * (y1 - y0)) / h])
+        try:
+            from schemas import quad_is_sane, quad_bbox
+            ok, _why = quad_is_sane(mapped)
+            if not ok:
+                continue
+            bx, by, bw, bh = quad_bbox(mapped)
+        except Exception:
+            continue
+        if not (0.45 * rw <= bw <= 1.7 * rw and 0.45 * rh <= bh <= 1.7 * rh):
+            continue
+        cxm, cym = bx + bw / 2.0, by + bh / 2.0
+        if not (min(xs) - 0.15 <= cxm <= max(xs) + 0.15
+                and min(ys) - 0.15 <= cym <= max(ys) + 0.15):
+            continue
+        if best is None or got["inliers"] > best["inliers"]:
+            best = {"corners": [round(v, 4) for v in mapped],
+                    "inliers": got["inliers"],
+                    "agreement": got["agreement"],
+                    "n_pairs": got["n_pairs"],
+                    "refined_from_read": True}
+    return best
+
+
+def run_smatch_job(worker_db, job):
+    """Executor-side runner (capture/frames/track-shaped: synchronous, no
+    row). SIFT on high-resolution frames is exactly the compute class that
+    OOM-killed the dispatcher when round 65d tried it there (job 1513,
+    'Worker died and retries are exhausted' 79s into a takeover call) — the
+    round-61 rule, learned again: heavy per-frame compute runs HERE.
+
+    payload: {filmed_key, filmed_times[], content_key, content_times[],
+              content_kind ('video'|'image'), read_quad[8], width?}
+    -> {"match": refine dict | None}. `worker_db` is unused.
+    """
+    import os as _os
+    import shutil as _shutil
+    import uuid as _uuid
+    import config as _config
+    import media as _media
+    import storage as _storage
+    payload = job.get("payload") or {}
+    fk = payload.get("filmed_key")
+    ck = payload.get("content_key")
+    quad = payload.get("read_quad")
+    if not fk or not ck or not quad or len(quad) != 8:
+        raise ValueError("smatch needs filmed_key, content_key, read_quad[8]")
+    width = int(payload.get("width") or 2048)
+    workdir = _os.path.join(_config.TMP_DIR, f"smx_{_uuid.uuid4().hex[:8]}")
+    _os.makedirs(workdir, exist_ok=True)
+    try:
+        flocal = _os.path.join(workdir, "filmed" + _os.path.splitext(fk)[1])
+        _storage.download_to(fk, flocal)
+        filmed = []
+        for i, t in enumerate(payload.get("filmed_times") or [0.0]):
+            fp = _os.path.join(workdir, f"f_{i}.jpg")
+            try:
+                _media.frame_at(flocal, float(t), fp, width=width)
+                filmed.append(fp)
+            except Exception:
+                continue
+        clocal = _os.path.join(workdir, "content" + _os.path.splitext(ck)[1])
+        _storage.download_to(ck, clocal)
+        content = []
+        if payload.get("content_kind") == "image":
+            content = [clocal]
+        else:
+            for i, t in enumerate(payload.get("content_times") or [0.0]):
+                cp = _os.path.join(workdir, f"c_{i}.jpg")
+                try:
+                    _media.frame_at(clocal, float(t), cp, width=1280)
+                    content.append(cp)
+                except Exception:
+                    continue
+        got = refine_with_read(filmed, content,
+                               [float(v) for v in quad])
+        return {"match": got}
+    finally:
+        _shutil.rmtree(workdir, ignore_errors=True)
+
+
 def match_screen(filmed_paths, content_paths):
     """Best content->filmed corner match across all frame pairs.
 

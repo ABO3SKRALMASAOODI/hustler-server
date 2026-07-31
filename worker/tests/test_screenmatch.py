@@ -171,7 +171,6 @@ def test_a_sloppy_read_is_refined_to_exact_corners(paths, workdir):
     features lose the budget to the room. The vision read locates the screen
     approximately; the guided crop-and-match must then recover the EXACT quad
     from inside that neighbourhood."""
-    import agent_tools
     cp, fp = paths
     # a read that is the right screen but sloppy: axis-aligned bbox of the
     # true quad, wrong by design about the rotation
@@ -179,9 +178,9 @@ def test_a_sloppy_read_is_refined_to_exact_corners(paths, workdir):
     ys = [p[1] / FH for p in QUAD_PX]
     read = [min(xs), min(ys), max(xs), min(ys),
             min(xs), max(ys), max(xs), max(ys)]
-    got = agent_tools._refine_read_with_content([fp], [cp], read)
+    got = screenmatch.refine_with_read([fp], [cp], read)
     assert got is not None, "the guided match did not lock"
-    assert got["method"] == "content_match" and got["refined_from_read"]
+    assert got["refined_from_read"]
     for i, (wx, wy) in enumerate(QUAD_PX):
         gx = got["corners"][2 * i] * FW
         gy = got["corners"][2 * i + 1] * FH
@@ -193,11 +192,10 @@ def test_a_refinement_landing_elsewhere_is_distrusted(paths, workdir):
     """A guided match must stay NEAR the read: one that lands somewhere else
     is the shared-scenery steal wearing a crop, and the read did at least
     look at the actual screen."""
-    import agent_tools
     cp, fp = paths
     # a read pointing at empty room, far from the true quad
     read = [0.72, 0.05, 0.98, 0.05, 0.72, 0.35, 0.98, 0.35]
-    got = agent_tools._refine_read_with_content([fp], [cp], read)
+    got = screenmatch.refine_with_read([fp], [cp], read)
     assert got is None
 
 

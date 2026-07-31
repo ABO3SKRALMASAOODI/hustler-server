@@ -566,6 +566,11 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # logic as capture/frames/track, sized for the worst budgeted window plus
     # a cold start.
     "matte": int(os.getenv("REMOTE_TIMEOUT_MATTE_S", "300")),
+    # The takeover's guided content-lock (round 65d): stages the host clip's
+    # original plus the handoff recording, extracts a handful of frames and
+    # runs one SIFT match. Synchronously inside an agent turn — same ceiling
+    # logic as frames/track.
+    "smatch": int(os.getenv("REMOTE_TIMEOUT_SMATCH_S", "240")),
 }
 
 

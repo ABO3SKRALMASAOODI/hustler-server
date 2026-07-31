@@ -233,6 +233,23 @@ def run_matte_remote(project_id, payload, user_id=None):
                         "attempts": 0, "payload": payload})
 
 
+def smatch_available():
+    """Is there an executor to run the takeover's guided content-lock on?
+    (round 65d) Same contract as track_available — SIFT on 2048px frames of
+    a user original OOM-killed the dispatcher the one time it ran there, so
+    with no executor the caller refines on its small local frames only."""
+    return bool(config.REMOTE_EXECUTOR_URL)
+
+
+def run_smatch_remote(project_id, payload, user_id=None):
+    """Match the takeover content against the filmed glass on the executor,
+    guided by a vision read. Returns screenmatch.run_smatch_job's dict:
+    {"match": {...} | None}. Synchronous, no job row."""
+    return _run_remote({"id": None, "type": "smatch",
+                        "project_id": project_id, "user_id": user_id,
+                        "attempts": 0, "payload": payload})
+
+
 def run_render_remote(worker_db, job):      # signature matches run_render_job
     return _run_remote(job)
 

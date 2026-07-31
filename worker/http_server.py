@@ -34,6 +34,7 @@ import frameserve
 import indexer
 import matte
 import renderer
+import screenmatch
 import tracker
 import version
 import webrecord
@@ -64,6 +65,10 @@ RUNNERS = {
     # person-segmentation forward pass per budgeted frame — model compute,
     # which belongs on this box, never beside agent turns.
     "matte": matte.run_matte_job,
+    # Round 65d: the takeover's guided content-lock. SIFT on 2048px frames
+    # of a user original — tried on the dispatcher for exactly one live run,
+    # which it OOM-killed (job 1513).
+    "smatch": screenmatch.run_smatch_job,
 }
 
 

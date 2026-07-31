@@ -4798,142 +4798,79 @@ def _ensure_asset_dims(ctx, asset):
     return None
 
 
-def _takeover_content_frames(ctx, asset, off, dur):
-    """Frames of the CONTENT about to be pinned, for the round-65 match tier.
-
-    Three spread samples of the handoff clip (any moment works — the match
-    anchors on the UI chrome that never moves), or the image itself for a
-    still. Best effort: [] just skips the match tier and detection proceeds
-    exactly as before.
+def _takeover_content(ctx, asset, off, dur, want_frames):
+    """What the pinned CONTENT is, for the round-65 guided lock: the asset's
+    key/kind plus three spread sample times (any moment works — the match
+    anchors on UI chrome that never moves). Local frame paths are fetched
+    only when want_frames (no executor to run the match on, or the main-
+    footage path that refines locally). Best effort: a dict with empty
+    frames just narrows what the refinement can try.
     """
+    out = {"key": asset.get("storage_key"), "kind":
+           ("image" if asset.get("kind") == "image_ref" else "video"),
+           "times": [0.0], "frames": []}
     try:
         off = float(off or 0.0)
         dur = float(dur or 1.2)
-        if asset.get("kind") == "image_ref":
-            return [_asset_local_path(ctx, asset)]
+        if out["kind"] == "image":
+            if want_frames:
+                out["frames"] = [_asset_local_path(ctx, asset)]
+            return out
         clip_dur = _asset_media_duration(ctx, asset)
         hi = max(0.05, clip_dur - 0.1)
-        times = sorted({min(max(t, 0.0), hi) for t in
-                        (off, off + dur, off + dur + 3.0)})
-        pairs, _err = _asset_frames(ctx, asset, times, width=960,
-                                    tag="smtch")
-        return [fp for _, fp in pairs]
+        out["times"] = sorted({round(min(max(t, 0.0), hi), 2) for t in
+                               (off, off + dur, off + dur + 3.0)})
+        if want_frames:
+            pairs, _err = _asset_frames(ctx, asset, out["times"], width=960,
+                                        tag="smtch")
+            out["frames"] = [fp for _, fp in pairs]
     except Exception:
-        return []
+        pass
+    return out
 
 
-def _try_content_match(filmed_frames, content_frames, frame_aspect):
-    """The round-65 first tier: the content's own pixels found ON the glass.
-
-    Returns a detection `res` dict (same shape screendet/vision produce) or
-    None to fall through. Runs the same geometric gates the other tiers face
-    — a match that projects to a bow-tie or a sliver is discarded, never
-    trusted for being clever.
+def _refine_read_with_content(ctx, frames, content, quad,
+                              remote_spec=None):
+    """Round 65c/d: a vision read LOCATES the glass; the content's pixels
+    then NAIL it (screenmatch.refine_with_read). WHERE it runs is the
+    round-61 rule: with remote_spec and an executor, the match runs there on
+    2048px frames of the originals — SIFT at that size OOM-killed the
+    dispatcher the one time it ran locally (job 1513) — and a remote failure
+    NEVER falls back to heavy local work. Without an executor, the local
+    small-frame refine is the safe best effort. None = the read stands.
     """
-    if not content_frames or not filmed_frames:
-        return None
+    if remote_spec is not None and remote.smatch_available():
+        try:
+            got = remote.run_smatch_remote(
+                ctx.project_id,
+                dict(remote_spec,
+                     read_quad=[round(float(v), 4) for v in quad]),
+                user_id=ctx.job.get("user_id"))
+        except Exception:
+            return None
+        m = (got or {}).get("match")
+        if not m:
+            return None
+        return {"corners": m["corners"], "confidence": None,
+                "method": "content_match", "inliers": m["inliers"],
+                "agreement": m["agreement"], "n_frames": m["n_pairs"],
+                "refined_from_read": True}
+    got = None
     try:
-        got = screenmatch.match_screen(filmed_frames, content_frames)
+        got = screenmatch.refine_with_read(
+            frames, (content or {}).get("frames") or [], quad)
     except Exception:
-        return None
+        got = None
     if not got:
         return None
-    quad = got["corners"]
-    ok, _why = quad_is_sane(quad)
-    if not ok:
-        return None
-    _qx, _qy, qw, qh = quad_bbox(quad)
-    if qw < SCREEN_QUAD_MIN_FRAC or qh < SCREEN_QUAD_MIN_FRAC:
-        return None
-    # A quad covering most of the frame is not a filmed screen — it is the
-    # match locking onto SHARED SCENERY instead of the glass (verified on
-    # real footage: a screen recording of this very editor contains a video
-    # panel showing the filmed room itself, and the room-to-room homography
-    # produced a near-full-frame quad with 77 confident inliers). A screen
-    # worth pushing into sits well inside the shot.
-    if qw > 0.92 or qh > 0.92:
-        return None
-    return {"corners": quad, "confidence": None, "method": "content_match",
-            "inliers": got["inliers"], "agreement": got["agreement"],
-            "n_frames": got["n_pairs"]}
-
-
-def _refine_read_with_content(frames, content_frames, quad):
-    """Round 65b: a vision read LOCATES the glass; the content's pixels then
-    NAIL it. The full-frame match fails on real footage where the glass is a
-    small, dim, defocused tenth of the frame — its weak features lose the
-    feature budget to the room. But once the read says roughly where the
-    screen is, cropping to that neighbourhood and upscaling flips the odds:
-    the glass becomes most of the image and the content-to-glass scale gap
-    nearly closes. A successful guided match returns matched-grade corners
-    (exact rotation and keystone); any failure returns None and the read
-    stands exactly as before.
-
-    The refined quad must stay NEAR the read — a guided match that lands
-    somewhere else entirely is the shared-scenery steal wearing a crop, and
-    the read, for all its sloppiness, did look at the actual screen.
-    """
-    if not content_frames or not frames:
-        return None
-    try:
-        import cv2
-    except Exception:
-        return None
-    xs, ys = quad[0::2], quad[1::2]
-    rw, rh = max(xs) - min(xs), max(ys) - min(ys)
-    if rw <= 0.01 or rh <= 0.01:
-        return None
-    best = None
-    for i, fp in enumerate(frames):
-        img = cv2.imread(fp)
-        if img is None:
-            continue
-        h, w = img.shape[:2]
-        x0 = max(0, int((min(xs) - 0.35 * rw) * w))
-        x1 = min(w, int((max(xs) + 0.35 * rw) * w))
-        y0 = max(0, int((min(ys) - 0.35 * rh) * h))
-        y1 = min(h, int((max(ys) + 0.35 * rh) * h))
-        if x1 - x0 < 60 or y1 - y0 < 60:
-            continue
-        crop = img[y0:y1, x0:x1]
-        crop = cv2.resize(crop, ((x1 - x0) * 2, (y1 - y0) * 2),
-                          interpolation=cv2.INTER_CUBIC)
-        cp = fp + f".smref{i}.jpg"
-        if not cv2.imwrite(cp, crop):
-            continue
-        try:
-            got = screenmatch.match_screen([cp], content_frames)
-        except Exception:
-            got = None
-        if not got:
-            continue
-        q = got["corners"]
-        mapped = []
-        for j in range(4):
-            mapped.extend([(x0 + q[2 * j] * (x1 - x0)) / w,
-                           (y0 + q[2 * j + 1] * (y1 - y0)) / h])
-        ok, _why = quad_is_sane(mapped)
-        if not ok:
-            continue
-        bx, by, bw, bh = quad_bbox(mapped)
-        if not (0.45 * rw <= bw <= 1.7 * rw and 0.45 * rh <= bh <= 1.7 * rh):
-            continue
-        cxm, cym = bx + bw / 2.0, by + bh / 2.0
-        if not (min(xs) - 0.15 <= cxm <= max(xs) + 0.15
-                and min(ys) - 0.15 <= cym <= max(ys) + 0.15):
-            continue
-        if best is None or got["inliers"] > best["inliers"]:
-            best = {"corners": [round(v, 4) for v in mapped],
-                    "confidence": None, "method": "content_match",
-                    "inliers": got["inliers"],
-                    "agreement": got["agreement"],
-                    "n_frames": got["n_pairs"],
-                    "refined_from_read": True}
-    return best
+    return {"corners": got["corners"], "confidence": None,
+            "method": "content_match", "inliers": got["inliers"],
+            "agreement": got["agreement"], "n_frames": got["n_pairs"],
+            "refined_from_read": True}
 
 
 def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None,
-                             content_frames=None):
+                             content=None):
     """_detect_screen's counterpart for a screen inside a SPLICED clip.
 
     The frames come from the insert's own asset — via the executor when one
@@ -4965,20 +4902,14 @@ def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None,
         except Exception:
             return None, ("could not determine the spliced clip's frame "
                           "shape to place the corners")
-    # Round 65, tier one: the content's own pixels found on the glass. Exact
-    # rotation and keystone; no plausibility check needed because the quad IS
-    # a projection of the content being pinned.
-    res = _try_content_match(frames, content_frames, aw / ah)
-    if res is None:
-        res = screendet.find_screen(frames)
-    matched = res.get("method") == "content_match"
+    res = screendet.find_screen(frames)
     why = None
     if res.get("error"):
         why = res["error"]
-    elif not matched and res["confidence"] < screendet.MIN_CONFIDENCE:
+    elif res["confidence"] < screendet.MIN_CONFIDENCE:
         why = (f"the best screen-shaped region scored only "
                f"{res['confidence']:.2f} confidence")
-    if not why and not matched:
+    if not why:
         ok_p, pwhy = _quad_plausible_for(res["corners"], aw / ah,
                                          content_aspect)
         if not ok_p:
@@ -4995,22 +4926,22 @@ def _detect_screen_on_insert(ctx, edl, host, clip_t, content_aspect=None,
         if not ok_p:
             return None, (f"{why}, and the corners the vision model read "
                           f"cannot be the screen either — {pwhy}")
-        # Round 65c: the guided lock needs SIGNAL, and the 960px detection
-        # frames carry ~350px of dark, compressed glass — measured to be
-        # below what SIFT can grip. The host clip's original is right there
-        # on the executor, so the refinement gets two frames at 2048 wide
-        # (glass ~760px of real detail). Best effort: any failure leaves
-        # `frames` and the read stands.
-        ref_frames = frames
-        try:
-            hp, _herr = _asset_frames(
-                ctx, asset, [max(0.0, clip_t - 0.2), clip_t],
-                width=2048, tag="smref")
-            if hp:
-                ref_frames = [p for _, p in hp]
-        except Exception:
-            pass
-        res = (_refine_read_with_content(ref_frames, content_frames, quad)
+        # Round 65d: the guided lock needs SIGNAL — the 960px detection
+        # frames carry ~350px of dark, compressed glass, below what SIFT can
+        # grip — and it needs a BIG BOX: SIFT at 2048px OOM-killed the
+        # dispatcher when it ran here. Both answered by the executor smatch
+        # job, which stages the host clip's original and the recording and
+        # matches hi-res frames there.
+        rs = None
+        if content and content.get("key"):
+            rs = {"filmed_key": asset["storage_key"],
+                  "filmed_times": [round(max(0.0, clip_t - 0.2), 2),
+                                   round(clip_t, 2)],
+                  "content_key": content["key"],
+                  "content_times": content.get("times") or [0.0],
+                  "content_kind": content.get("kind") or "video"}
+        res = (_refine_read_with_content(ctx, frames, content, quad,
+                                         remote_spec=rs)
                or {"corners": quad, "confidence": None, "method": "vision",
                    "agreement": 1, "n_frames": 1, "read_not_measured": why})
     # The measured fractions are of the ASSET's frame; the pin consumes
@@ -5102,7 +5033,7 @@ def _vision_screen_corners(ctx, frame_path):
     return [*tl, *tr, *bl, *br], None
 
 
-def _detect_screen(ctx, edl, src_t, content_aspect=None, content_frames=None):
+def _detect_screen(ctx, edl, src_t, content_aspect=None, content=None):
     """Measure the device screen around SOURCE second src_t. Returns
     (corners_in_output_fractions, info_dict) or (None, reason)."""
     try:
@@ -5132,20 +5063,14 @@ def _detect_screen(ctx, edl, src_t, content_aspect=None, content_frames=None):
     info = ctx.index.get("video") or {}
     src_aspect = ((float(info.get("width") or 0) or 1920.0)
                   / (float(info.get("height") or 0) or 1080.0))
-    # Round 65, tier one: the content's own pixels found on the glass —
-    # exact rotation and keystone, sub-pixel corners. Only when the glass
-    # never showed the content does this fall through to the detector.
-    res = _try_content_match(frames, content_frames, src_aspect)
-    if res is None:
-        res = screendet.find_screen(frames)
-    matched = res.get("method") == "content_match"
+    res = screendet.find_screen(frames)
     why = None
     if res.get("error"):
         why = res["error"]
-    elif not matched and res["confidence"] < screendet.MIN_CONFIDENCE:
+    elif res["confidence"] < screendet.MIN_CONFIDENCE:
         why = (f"the best screen-shaped region scored only "
                f"{res['confidence']:.2f} confidence")
-    if not why and not matched:
+    if not why:
         # A confident measurement can still be the WRONG rectangle — a bright
         # doorway, a poster, a window. The content about to be pinned says
         # what shape the screen has to be; a region that contradicts it is
@@ -5169,7 +5094,10 @@ def _detect_screen(ctx, edl, src_t, content_aspect=None, content_frames=None):
         if not ok_p:
             return None, (f"{why}, and the corners the vision model read "
                           f"cannot be the screen either — {pwhy}")
-        res = (_refine_read_with_content(frames, content_frames, quad)
+        # Main-footage path: the filmed source is the user's ORIGINAL —
+        # gigabytes — so no executor staging; the local small-frame refine
+        # (proxy-grade, dispatcher-safe) is the honest best effort.
+        res = (_refine_read_with_content(ctx, frames, content, quad)
                or {"corners": quad, "confidence": None, "method": "vision",
                    "agreement": 1, "n_frames": 1, "read_not_measured": why})
     out = []
@@ -5290,13 +5218,12 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
     elif host is not None:
         h_ins, w0, w1 = host
         clip_t = float(h_ins.get("source_start_s") or 0.0) + (probe_out - w0)
-        quad, why = _detect_screen_on_insert(ctx, edl, h_ins, clip_t,
-                                             content_aspect=_ensure_asset_dims(
-                                                 ctx, asset),
-                                             content_frames=
-                                             _takeover_content_frames(
-                                                 ctx, asset, clip_start_s,
-                                                 dur))
+        quad, why = _detect_screen_on_insert(
+            ctx, edl, h_ins, clip_t,
+            content_aspect=_ensure_asset_dims(ctx, asset),
+            content=_takeover_content(
+                ctx, asset, clip_start_s, dur,
+                want_frames=not remote.smatch_available()))
         if quad is None:
             return (f"REJECTED: I could not find a screen in the spliced clip "
                     f"at {round(probe_out, 2)}s — {why}. BOTH ways were "
@@ -5313,8 +5240,9 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
         quad, why = _detect_screen(ctx, edl, src_t,
                                    content_aspect=_ensure_asset_dims(ctx,
                                                                      asset),
-                                   content_frames=_takeover_content_frames(
-                                       ctx, asset, clip_start_s, dur))
+                                   content=_takeover_content(
+                                       ctx, asset, clip_start_s, dur,
+                                       want_frames=True))
         if quad is None:
             return (f"REJECTED: I could not find a screen in the frame at "
                     f"{round(probe_out, 2)}s — {why}. BOTH ways were tried: "
