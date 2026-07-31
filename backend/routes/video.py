@@ -1138,7 +1138,13 @@ def create_upload(user_id, project_id):
     # question this whole surface exists to answer.
     record_client_event(user_id, project_id, "upload_started", detail={
         "filename": filename, "bytes": nbytes, "kind": kind,
-        "mode": out.get("mode")}, origin="server")
+        "mode": out.get("mode"),
+        # The transfer's shape, so "why was this one slow" is answerable from
+        # this row alone — the 2026-07-31 investigation had to infer "single
+        # PUT, one TCP stream" from the absence of these fields.
+        **({"part_size": out.get("part_size"),
+            "n_parts": len(out.get("part_urls") or [])}
+           if out.get("mode") == "multipart" else {})}, origin="server")
     return jsonify(out)
 
 
@@ -4028,7 +4034,19 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       # A symptom, not a feature: if this starts carrying real
                       # traffic the direct path is broken for a population, and
                       # this count is how that becomes visible.
-                      "upload_relayed"}
+                      "upload_relayed",
+                      # Mid-transfer, the measured link was so slow the studio
+                      # switched to building + sending a 540p proxy instead of
+                      # making the user wait out the original (round 70 — a
+                      # 45 MB upload at 48 KB/s took 15.5 minutes and the user
+                      # left without typing a word). Carries the measured
+                      # bytes/s and the projection that triggered the switch.
+                      "upload_slow_rescue",
+                      # One row per finished main-video transfer: elapsed, bps,
+                      # mode, retry count. The denominator's other half —
+                      # upload_started says what was attempted, this says what
+                      # the link actually delivered.
+                      "upload_transfer"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these

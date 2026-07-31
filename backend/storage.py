@@ -21,15 +21,55 @@ import uuid
 import boto3
 from botocore.config import Config
 
-PRESIGN_EXPIRY = 900          # 15 min for UPLOAD presigns
+PRESIGN_EXPIRY = 900          # short-lived links (admin GETs lean on this)
+# UPLOAD presigns must OUTLIVE THE SLOWEST PLAUSIBLE UPLOAD, because a presign
+# is validated when a request STARTS: at the old 15 minutes, any multipart
+# whose later parts first went up after minute 15 — or any retry of a slow
+# single PUT — earned a 403 the client correctly treats as non-retryable, and
+# the whole transfer died. The measured 4 GB uploads were finishing in ~13
+# minutes; they were one congestion event away from total loss. A real user on
+# 2026-07-31 PUT 45 MB for 15m30s — had that one PUT blipped near the end, the
+# retry would have found its URL expired. 12h covers the 14 GB cap at 4 Mbps
+# with room; the URL is still minted per-key behind the owner's auth, and
+# leaking one only lets someone overwrite the single key it names.
+PRESIGN_UPLOAD_EXPIRY = int(os.getenv("PRESIGN_UPLOAD_EXPIRY", "43200"))
 # Playback GETs live much longer: the studio fetches ONE url per asset and the
 # user watches/chats across a long session — at 15 min the player's src went
 # dead mid-session and every later play/seek was a silent black frame. The
 # url is still minted per-request behind the user's own auth; 6h only bounds
 # how long a leaked link would work, not who can mint one.
 PRESIGN_GET_EXPIRY = int(os.getenv("PRESIGN_GET_EXPIRY", "21600"))
-PART_SIZE = 64 * 1024 * 1024  # 64 MB multipart parts (min 5 MB on S3/R2)
-SINGLE_PUT_LIMIT = 64 * 1024 * 1024
+
+# ── Transfer geometry ────────────────────────────────────────────────────────
+# A single PUT is ONE TCP stream, and one stream is exactly what a slow or
+# lossy link cannot fill: the user this section is written for uploaded 45 MB
+# in 15.5 minutes (48 KB/s effective) as a single PUT while other users pushed
+# multipart files at 5-9 MB/s over six sockets. A single PUT also retries from
+# byte zero — one blip at 90% resends everything. So the single-PUT range is
+# only where the multipart handshake overhead would be a real fraction of the
+# transfer: 16 MB, the same threshold S3's own transfer managers converged on.
+SINGLE_PUT_LIMIT = 16 * 1024 * 1024
+
+# Parts are sized so PARALLELISM ARRIVES WHERE THE FILES ARE, not only on
+# multi-GB uploads. The old fixed 64 MB meant a 100 MB file was "multipart" in
+# name and two sockets in practice — six sockets only lit up past ~384 MB.
+# Small parts also make retries cheap (a blip resends 8 MB, not 64) at the
+# price of more presigned URLs, so the size scales with the file: aim for
+# TARGET_PARTS so every upload big enough to split keeps the pool busy, floor
+# at 8 MB (comfortably above R2/S3's 5 MB minimum), cap at 64 MB so a 14 GB
+# file still mints ~224 URLs rather than thousands. All parts but the last are
+# equal-sized, which R2 requires.
+MIN_PART_SIZE = 8 * 1024 * 1024
+MAX_PART_SIZE = 64 * 1024 * 1024
+TARGET_PARTS = 32
+
+
+def part_size_for(nbytes):
+    """Multipart part size for a file of `nbytes`, in whole MiB."""
+    raw = (int(nbytes) + TARGET_PARTS - 1) // TARGET_PARTS
+    mib = 1024 * 1024
+    rounded = ((raw + mib - 1) // mib) * mib
+    return max(MIN_PART_SIZE, min(MAX_PART_SIZE, rounded))
 
 # Only these get presigned for upload. Everything else is rejected before a
 # URL is ever minted.
@@ -247,11 +287,11 @@ def new_original_key(project_id, ext, kind="original"):
 # 50 MB the numbers stop being trustworthy — the probe route 404s without
 # draining the request body, which can reset a connection on its own — so the
 # ceiling beyond that is unmeasured and this stays below it rather than
-# guessing. 64 MB is also exactly SINGLE_PUT_LIMIT: at or under it the direct
-# upload would have been one PUT anyway, so the relay covers precisely the
-# range where routing bytes through a web service is a reasonable thing to do.
-# Bigger files get an honest refusal naming the real cause, which is still
-# infinitely better than the eight silent failures that prompted this.
+# guessing. (It used to also equal SINGLE_PUT_LIMIT; that limit has since
+# dropped to 16 MB for parallelism, while this cap stays at its measured
+# ceiling — a blocked browser with a 40 MB multipart file still deserves the
+# relay.) Bigger files get an honest refusal naming the real cause, which is
+# still infinitely better than the eight silent failures that prompted this.
 RELAY_MAX_BYTES = int(os.getenv("RELAY_MAX_UPLOAD_MB", "64")) * 1024 * 1024
 
 
@@ -310,7 +350,7 @@ def presign_upload(key, nbytes, content_type):
         url = c.generate_presigned_url(
             "put_object",
             Params={"Bucket": bucket(), "Key": key, "ContentType": content_type},
-            ExpiresIn=PRESIGN_EXPIRY,
+            ExpiresIn=PRESIGN_UPLOAD_EXPIRY,
         )
         return {"mode": "single", "storage_key": key, "url": url,
                 "content_type": content_type}
@@ -318,7 +358,8 @@ def presign_upload(key, nbytes, content_type):
     mpu = c.create_multipart_upload(
         Bucket=bucket(), Key=key, ContentType=content_type)
     upload_id = mpu["UploadId"]
-    n_parts = (nbytes + PART_SIZE - 1) // PART_SIZE
+    part_size = part_size_for(nbytes)
+    n_parts = (nbytes + part_size - 1) // part_size
     urls = [
         {
             "part_number": i,
@@ -326,13 +367,13 @@ def presign_upload(key, nbytes, content_type):
                 "upload_part",
                 Params={"Bucket": bucket(), "Key": key,
                         "UploadId": upload_id, "PartNumber": i},
-                ExpiresIn=PRESIGN_EXPIRY,
+                ExpiresIn=PRESIGN_UPLOAD_EXPIRY,
             ),
         }
         for i in range(1, n_parts + 1)
     ]
     return {"mode": "multipart", "storage_key": key, "upload_id": upload_id,
-            "part_size": PART_SIZE, "part_urls": urls,
+            "part_size": part_size, "part_urls": urls,
             "content_type": content_type}
 
 

@@ -226,3 +226,67 @@ def test_dedup_quickhash_matches_the_client_construction():
             last = blob[off:size]
         client = hashlib.sha256(first + last).hexdigest()
         assert server == client, f"quickhash drift at size {size}"
+
+
+# ── round 70: the transfer's geometry is why one user waited 15 minutes ─────
+#
+# A 45 MB file went up as ONE presigned PUT — one TCP stream — and the user's
+# link delivered 48 KB/s, so they stared at a bar for 15.5 minutes and left
+# without ever sending a message. Meanwhile 4 GB multipart uploads on the same
+# day ran at 5-9 MB/s over six sockets. Parallelism has to arrive where the
+# files actually are (tens of MB), not only past a third of a gigabyte.
+
+def test_single_put_range_is_small():
+    """Above 16 MB a file gets parts and sockets. 16 MB is where every
+    S3-compatible transfer manager draws the line, and it is small enough
+    that the 45 MB upload this round is about would have had six streams."""
+    assert storage.SINGLE_PUT_LIMIT == 16 * 1024 * 1024
+
+
+def test_part_size_gives_real_parallelism_to_mid_sized_files():
+    """The old fixed 64 MB part meant a 100 MB 'multipart' upload was two
+    sockets in practice. Six-way parallelism (the client's pool width) must
+    light up right at the multipart threshold."""
+    for nbytes in (17 * 1024 * 1024, 45 * 1024 * 1024, 100 * 1024 * 1024,
+                   500 * 1024 * 1024):
+        ps = storage.part_size_for(nbytes)
+        n_parts = (nbytes + ps - 1) // ps
+        assert n_parts >= min(6, (nbytes + storage.MIN_PART_SIZE - 1)
+                              // storage.MIN_PART_SIZE), (
+            f"{nbytes} bytes -> {n_parts} parts of {ps}: the pool starves")
+
+
+def test_part_size_respects_the_protocol_and_the_url_budget():
+    """Every part but the last must be >= 5 MB (R2/S3 refuse smaller), equal
+    sized (R2 requires it — part_size_for returns ONE size per file), and a
+    14 GB file must not mint thousands of presigned URLs."""
+    for nbytes in (storage.SINGLE_PUT_LIMIT + 1, 64 * 1024 * 1024,
+                   1024 ** 3, 4 * 1024 ** 3, 14 * 1024 ** 3):
+        ps = storage.part_size_for(nbytes)
+        assert ps >= 5 * 1024 * 1024
+        assert ps % (1024 * 1024) == 0, "whole MiB keeps ranges page-aligned"
+        n_parts = (nbytes + ps - 1) // ps
+        assert n_parts <= 10_000, "S3's hard cap on parts"
+        assert n_parts <= 300, f"{n_parts} URLs for {nbytes} bytes is a bloated presign response"
+        assert n_parts * ps >= nbytes, "parts must cover the file"
+
+
+def test_upload_presigns_outlive_a_slow_upload():
+    """A presign is validated when a request STARTS. At the old 15 minutes,
+    any part first attempted after minute 15 — or any retry of a slow single
+    PUT — got a non-retryable 403 and killed the whole transfer. The window
+    must cover the biggest allowed file on a modest 4 Mbps uplink."""
+    slowest_plausible_s = storage.max_upload_bytes() * 8 / 4e6
+    assert storage.PRESIGN_UPLOAD_EXPIRY >= slowest_plausible_s, (
+        f"{storage.PRESIGN_UPLOAD_EXPIRY}s cannot cover a "
+        f"{storage.MAX_UPLOAD_GB} GB upload at 4 Mbps "
+        f"({slowest_plausible_s:.0f}s)")
+
+
+def test_the_slow_rescue_and_transfer_beacons_are_accepted():
+    """The studio reports the mid-upload switch to a proxy and the finished
+    transfer's measured speed; a kind missing from the allowlist is silently
+    dropped and the next investigation is blind again."""
+    from routes import video
+    assert "upload_slow_rescue" in video.CLIENT_EVENT_KINDS
+    assert "upload_transfer" in video.CLIENT_EVENT_KINDS

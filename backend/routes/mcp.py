@@ -525,7 +525,7 @@ def _t_upload_start(tok, args):
             f"kind=\"{kind}\").\n\n"
             f"curl -sS -f -X PUT -H 'Content-Type: {content_type}' "
             f"--upload-file '<LOCAL PATH>' '{out['url']}'\n\n"
-            "The URL is valid for 15 minutes and carries the whole upload — "
+            "The URL is valid for 12 hours and carries the whole upload — "
             "it is long, do not edit or wrap it.\n\n"
             + json.dumps({"mode": "single", "storage_key": key,
                           "content_type": content_type, "url": out["url"]}))
