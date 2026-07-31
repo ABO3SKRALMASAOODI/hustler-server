@@ -432,6 +432,11 @@ def run_agent_job(worker_db, job):
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"] if index_row else None,
                                   workdir)
+    # Round 67: only THIS loop can deliver captured frames into the model's
+    # context (an MCP tool call has no loop — its result is text, and a
+    # "the picture follows" claim there would be a lie). ToolContext ships
+    # with direct sight off; the loop that can honour it turns it on.
+    ctx.direct_sight = True
     ctx.user_message = (user_message.get("content") or "")[:4000]
     # A turn spends what the user can PAY FOR — balance + a small grace — and
     # nothing else bounds it.

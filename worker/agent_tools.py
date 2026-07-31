@@ -115,9 +115,12 @@ class ToolContext:
         # Frames a look tool captured for the AGENT'S OWN EYES this step
         # (round 67): [(label, jpeg_path)]. The loop injects them as image
         # parts in a user message right after the tool results, then clears
-        # the list. Only populated when llm.agent_sees(model) — a blind agent
-        # model gets the old second-hand vision description instead.
+        # the list. Only populated when llm.agent_sees(model) AND
+        # direct_sight is on — the agent loop sets it, because only a loop
+        # that appends messages can actually deliver a picture; an MCP tool
+        # call's result is text and must get the vision-provider answer.
         self.pending_images = []
+        self.direct_sight = False
         self.last_selfcheck = None    # vision one-liner from the last preview
         # Craft findings from the most recent REAL preview render, and the EDL
         # version they were measured on. The loop reads these to stop a turn
@@ -694,7 +697,7 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
     the footage with its own eyes instead of reading a second-hand
     description. A blind agent model (or a queueing failure) falls back to
     the separate vision provider exactly as before round 67."""
-    if llm.agent_sees(ctx.agent_model):
+    if getattr(ctx, "direct_sight", False) and llm.agent_sees(ctx.agent_model):
         try:
             if len(frames) == 1:
                 sheet = frames[0]
