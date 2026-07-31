@@ -28,6 +28,7 @@ import perception
 # will use — importing the resolver is the only way those two cannot drift.
 import renderer
 import sfx_library
+import sheets
 import stock
 import storage
 import subject
@@ -111,6 +112,12 @@ class ToolContext:
         self._perception = None       # main video's audio analysis, cached
         self._asset_perception = {}   # asset/library key -> audio analysis
         self.last_preview = None      # set by render_preview
+        # Frames a look tool captured for the AGENT'S OWN EYES this step
+        # (round 67): [(label, jpeg_path)]. The loop injects them as image
+        # parts in a user message right after the tool results, then clears
+        # the list. Only populated when llm.agent_sees(model) — a blind agent
+        # model gets the old second-hand vision description instead.
+        self.pending_images = []
         self.last_selfcheck = None    # vision one-liner from the last preview
         # Craft findings from the most recent REAL preview render, and the EDL
         # version they were measured on. The loop reads these to stop a turn
@@ -677,16 +684,74 @@ def list_assets(ctx, kind=None):
     return _cap(out)
 
 
-def look_at(ctx, start, end, question):
+def _deliver_frames(ctx, frames, labels, question, subject_line):
+    """The round-67 direct-sight tail shared by look_at / look_at_asset.
+
+    When the agent model itself reads images (llm.agent_sees), the captured
+    frames are assembled into ONE timestamp-labeled picture (or passed as the
+    single frame) and queued on ctx.pending_images — the loop injects it into
+    the AGENT'S OWN context right after this tool result, so the editor sees
+    the footage with its own eyes instead of reading a second-hand
+    description. A blind agent model (or a queueing failure) falls back to
+    the separate vision provider exactly as before round 67."""
+    if llm.agent_sees(ctx.agent_model):
+        try:
+            if len(frames) == 1:
+                sheet = frames[0]
+            else:
+                sheet = os.path.join(
+                    ctx.workdir, f"look_sheet_{uuid.uuid4().hex[:8]}.jpg")
+                sheets.build_timestamp_sheet(list(zip(labels, frames)), sheet)
+            ctx.pending_images.append(
+                (f"{subject_line} — {', '.join(labels)}", sheet))
+            return (f"Captured {len(frames)} frame(s): {', '.join(labels)}. "
+                    "The picture follows this message — LOOK AT IT YOURSELF "
+                    "and answer from what you see"
+                    + (f" (your question: {question})" if question else "")
+                    + ". Timestamps are printed under each tile.")
+        except Exception as ex:
+            print(f"[look] direct-sight assembly failed ({ex}); "
+                  "falling back to the vision provider", flush=True)
     if not llm.vision_available():
         return ("Visual inspection unavailable (no vision model configured). "
                 "Decide from the transcript, silences, and shot captions.")
-    try:
-        s, e = ctx.clamp(start), ctx.clamp(end)
-    except ValueError as err:
-        return f"REJECTED: {err}"
-    if e <= s:
-        e = min(ctx.duration, s + 1.0)
+    answer = llm.ask_vision(
+        f"{subject_line}. Frames: {', '.join(labels)}. Question from the "
+        f"editor: {question or 'describe what is on screen, concretely'}\n"
+        "Answer concisely and concretely.",
+        frames, purpose="vision_look", image_names=labels)
+    return _cap(answer or "The vision model did not return an answer; "
+                          "proceed using the transcript and shot captions.")
+
+
+def look_at(ctx, times=None, question="", start=None, end=None):
+    """Round 67: the agent's own eyes. Pass `times` (1-8 source seconds) and
+    the exact frames at those moments come back as ONE labeled picture in the
+    agent's own context. start/end still work as a range and sample evenly."""
+    if times is not None:
+        if not isinstance(times, (list, tuple)) or not times:
+            return ("REJECTED: times must be a non-empty array of source "
+                    "seconds, e.g. times=[3.2, 17.8].")
+        try:
+            times = [ctx.clamp(t) for t in times][:8]
+        except (ValueError, TypeError) as err:
+            return f"REJECTED: {err}"
+        s, e = min(times), max(times)
+    elif start is not None and end is not None:
+        try:
+            s, e = ctx.clamp(start), ctx.clamp(end)
+        except ValueError as err:
+            return f"REJECTED: {err}"
+        if e <= s:
+            e = min(ctx.duration, s + 1.0)
+        # 6 frames over a >30s range (was 4 max): 4 samples across half a
+        # minute skip whole shots; the marginal cost is small next to a wrong
+        # cut.
+        n = 6 if e - s > 30 else (4 if e - s > 1.5 else 2)
+        times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
+    else:
+        return ("REJECTED: pass times=[...] (exact source seconds to look "
+                "at) or a start/end range.")
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
@@ -694,10 +759,6 @@ def look_at(ctx, start, end, question):
         proxy_err = str(err)
     else:
         proxy_err = None
-    # 6 frames over a >30s range (was 4 max): 4 samples across half a minute
-    # skip whole shots; the marginal vision cost is small next to a wrong cut.
-    n = 6 if e - s > 30 else (4 if e - s > 1.5 else 2)
-    times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
 
     def _sample(path, label, tag):
         """Pull `times` out of one file. Returns (frames, names, last_error)."""
@@ -710,7 +771,7 @@ def look_at(ctx, start, end, question):
                 err = str(ex)
                 continue
             got.append(fp)
-            names.append(f"{label} @{t:.2f}s")
+            names.append(f"@{t:.2f}s")
         return got, names, err
 
     frames, frame_names, last_err = ([], [], proxy_err)
@@ -742,16 +803,12 @@ def look_at(ctx, start, end, question):
                          .get("ratio"))
     except Exception:
         has_frame = False
-    src_note = ("These frames are from the SOURCE footage — the output "
-                "frame (crop/letterbox) is applied later at render, so do "
-                "not judge aspect ratio here. " if has_frame else "")
-    prompt = (f"{src_note}These are {len(frames)} frames sampled evenly from "
-              f"{s:.2f}s to {e:.2f}s of a video. Question from the editor: "
-              f"{question}\nAnswer concisely and concretely.")
-    answer = llm.ask_vision(prompt, frames, purpose="vision_look",
-                            image_names=frame_names)
-    return _cap(answer or "The vision model did not return an answer; "
-                          "proceed using the transcript and shot captions.")
+    src_note = (" (SOURCE footage — the output frame crop/letterbox is "
+                "applied later at render, so do not judge aspect ratio here)"
+                if has_frame else "")
+    return _deliver_frames(
+        ctx, frames, frame_names, question,
+        f"Frames from the MAIN video, {s:.2f}s-{e:.2f}s{src_note}")
 
 
 def _asset_local_path(ctx, asset):
@@ -822,12 +879,11 @@ def _asset_frames(ctx, asset, times, width=640, tag="alook"):
     return pairs, (None if pairs else (last_err or "unknown error"))
 
 
-def look_at_asset(ctx, asset_key, question, start=0, end=None):
+def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
     """Frames from an UPLOADED clip or image (not the main video) — THE way
-    to pick which moment of a long clip to splice in with insert_media."""
-    if not llm.vision_available():
-        return ("Visual inspection unavailable (no vision model configured). "
-                "Ask the user which part of the clip to use.")
+    to pick which moment of a long clip to splice in with insert_media.
+    Round 67: the frames land in the agent's own context (see
+    _deliver_frames); pass times=[...] for exact moments."""
     # Renders are inspectable too (round 66): "check it yourself" is a real
     # user sentence, and the render self-check is a 3x3 sheet of the whole
     # programme — too coarse to catch a strobing mask or a one-frame flash.
@@ -844,41 +900,45 @@ def look_at_asset(ctx, asset_key, question, start=0, end=None):
             local = _asset_local_path(ctx, asset)
         except Exception as e:
             return f"Cannot fetch that asset right now ({e})."
-        answer = llm.ask_vision(
-            f"This is the uploaded image '{name}'. Question from the "
-            f"editor: {question}\nAnswer concisely and concretely.",
-            [local], purpose="vision_look", image_names=[asset_key])
-        return _cap(answer or "The vision model did not return an answer.")
+        return _deliver_frames(ctx, [local], [name[:60] or "image"], question,
+                               f"The uploaded image '{name}'")
     dur = _asset_media_duration(ctx, asset)
-    try:
-        s = round(min(max(float(start or 0), 0.0), dur), 2)
-        e = round(min(max(float(end), s), dur), 2) if end is not None else dur
-    except (TypeError, ValueError):
-        return "REJECTED: start/end must be numbers of seconds."
-    if e <= s:
-        e = min(dur, s + 1.0)
-    n = 6 if e - s > 20 else 4
-    times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
+    if times is not None:
+        if not isinstance(times, (list, tuple)) or not times:
+            return ("REJECTED: times must be a non-empty array of seconds "
+                    "into the clip, e.g. times=[3.2, 17.8].")
+        try:
+            times = sorted(round(min(max(float(t), 0.0), dur), 3)
+                           for t in times)[:8]
+        except (TypeError, ValueError):
+            return "REJECTED: times must be numbers of seconds."
+    else:
+        try:
+            s = round(min(max(float(start or 0), 0.0), dur), 2)
+            e = round(min(max(float(end), s), dur), 2) \
+                if end is not None else dur
+        except (TypeError, ValueError):
+            return "REJECTED: start/end must be numbers of seconds."
+        if e <= s:
+            e = min(dur, s + 1.0)
+        n = 6 if e - s > 20 else 4
+        times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
     # The decode happens on the executor when one is configured — an uploaded
     # clip has no proxy, and 4K seeks on the dispatcher are what killed job
     # 1452's whole turn (see _asset_frames).
     pairs, err = _asset_frames(ctx, asset, times, width=640, tag="alook")
     frames = [fp for _, fp in pairs]
-    frame_names = [f"clip '{name}' frame @{times[i]:.2f}s" for i, _ in pairs]
+    frame_names = [f"@{times[i]:.2f}s" for i, _ in pairs]
     if not frames:
         return ("Could not extract frames from that clip "
                 f"({(err or 'unknown error')[:220]}). The clip can still "
                 "be inserted — you just cannot see inside it; ask the user "
                 "which part to use instead of guessing.")
-    labels = ", ".join(f"{times[i]:.1f}s" for i, _ in pairs)
-    answer = llm.ask_vision(
-        f"These are {len(frames)} frames sampled from the uploaded clip "
-        f"'{name}' ({dur:.0f}s long), at {labels}. Question from the "
-        f"editor: {question}\nRefer to moments by those timestamps; answer "
-        "concisely.", frames, purpose="vision_look", image_names=frame_names)
-    return _cap((answer or "The vision model did not return an answer.")
-                + f"\n(clip is {dur:.1f}s long; call again with a narrower "
-                  "start/end to zoom into a region)")
+    out = _deliver_frames(
+        ctx, frames, frame_names, question,
+        f"Frames from '{name}' ({asset['kind']}, {dur:.0f}s long)")
+    return _cap(out + f"\n(clip is {dur:.1f}s long; call again with times "
+                      "or a narrower start/end to zoom into a region)")
 
 
 # ------------------------------------------------------------------ #
@@ -2660,14 +2720,16 @@ def _parse_zoom_path(path):
     return out, None
 
 
-def add_zoom(ctx, start, end, strength=0.25, mode=None, cx=None, cy=None,
+def add_zoom(ctx, start, end, strength=0.15, mode=None, cx=None, cy=None,
              path=None):
+    # Round 67 default: 15% (was 25%) — a gentle push the viewer feels
+    # rather than sees. Big snaps are opt-in, not the default grammar.
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     try:
         s = round(min(max(float(start), 0.0), max(0.0, prog - 0.2)), 2)
         e = round(min(max(float(end), s), prog), 2)
-        st = round(min(max(float(strength if strength is not None else 0.25),
+        st = round(min(max(float(strength if strength is not None else 0.15),
                            ZOOM_STRENGTH_MIN), ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
         return ("REJECTED: start/end/strength must be numbers. start/end are "
@@ -3101,6 +3163,20 @@ def _original_local(ctx):
     """
     if getattr(ctx, "_orig_local", None):
         return ctx._orig_local
+    row = _original_row(ctx)
+    local = os.path.join(ctx.workdir,
+                         "orig" + os.path.splitext(row["storage_key"])[1])
+    storage.download_to(row["storage_key"], local)
+    ctx._orig_local = local
+    ctx._orig_sha = row.get("sha256") or ""
+    return local
+
+
+def _original_row(ctx):
+    """The original's asset row — storage key + sha, WITHOUT downloading the
+    bytes. Round 67: the remote clean path stages the original on the
+    executor, so the dispatcher must be able to fingerprint the derivation
+    from the row alone."""
     row = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
     if not row:
         raise RuntimeError("this project has no original video")
@@ -3117,12 +3193,7 @@ def _original_local(ctx):
             f"still uploading in the background ({pct}% done). Everything "
             "else — cuts, captions, music, zooms — works right now; ask me "
             "again for this one once the upload finishes.")
-    local = os.path.join(ctx.workdir,
-                         "orig" + os.path.splitext(row["storage_key"])[1])
-    storage.download_to(row["storage_key"], local)
-    ctx._orig_local = local
-    ctx._orig_sha = row.get("sha256") or ""
-    return local
+    return row
 
 
 def _clean_fp(sha, regions, cursor=None):
@@ -3143,7 +3214,8 @@ def _run_clean(ctx, regions, cursor=None):
     pointer was, and because a caption erased from under a redrawn cursor
     would have the cursor repainted away with it.
     """
-    src = _original_local(ctx)
+    row = _original_row(ctx)
+    ctx._orig_sha = row.get("sha256") or getattr(ctx, "_orig_sha", "")
     fp = _clean_fp(getattr(ctx, "_orig_sha", ""), regions, cursor)
     key = f"cleaned/{ctx.project_id}/{fp[:16]}.mp4"
     pkey = f"cleaned/{ctx.project_id}/{fp[:16]}_proxy.mp4"
@@ -3160,6 +3232,68 @@ def _run_clean(ctx, regions, cursor=None):
            "action (add_zoom_path), or the floating frame "
            "(set_screen_frame).")
     what = "repainting" if regions else "redrawing the cursor"
+    # ROUND 67 — THE REPAINT RUNS ON THE EXECUTOR. It decodes and re-encodes
+    # every frame of the user's ORIGINAL inside an agent turn: the heaviest
+    # member of the job class that has OOM-killed the dispatcher repeatedly
+    # (and the prime suspect in job 1557's death, minutes after a customer's
+    # erase ran there). With an executor configured the dispatcher never
+    # touches the original — bounds are checked from the INDEX, the executor
+    # stages/repaints/uploads/measures, and a remote failure is an honest
+    # refusal, never a local retry on the box we know is too small.
+    if remote.clean_available():
+        v = (ctx.index or {}).get("video") or {}
+        r_dur = float(v.get("duration") or 0.0)
+        r_w, r_h = int(v.get("width") or 0), int(v.get("height") or 0)
+        if r_dur > config.CLEAN_MAX_SOURCE_S:
+            raise ValueError(
+                f"this video is {r_dur / 60:.1f} min long and {what} works "
+                f"frame by frame — above {config.CLEAN_MAX_SOURCE_S / 60:.0f} "
+                f"min it does not finish inside one edit turn. {alt}")
+        if r_w and r_h and (r_w * r_h / 1e6) * r_dur > \
+                config.CLEAN_MAX_MPX_SECONDS:
+            raise ValueError(
+                f"this video is {r_w}x{r_h} for {r_dur / 60:.1f} min, which "
+                "is more pixels than a frame-by-frame pass can finish inside "
+                f"one edit turn. {alt}")
+        try:
+            stats = remote.run_clean_remote(
+                ctx.project_id,
+                {"src_key": row["storage_key"], "out_key": key,
+                 "proxy_key": pkey, "regions": regions, "cursor": cursor,
+                 "measure": regions},
+                user_id=ctx.job.get("user_id"))
+        except Exception as ex:
+            raise ValueError(
+                f"the repaint could not run on the render service "
+                f"({str(ex)[:200]}). Nothing was changed — try again in a "
+                f"moment. {alt}")
+        ctx._clean_stats = stats
+        if cursor:
+            ctx._cursor_stats = stats
+        ctx._clean_measure = (stats.get("before"), stats.get("after"))
+        try:
+            ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_source", key,
+                       bytes_=stats.get("out_bytes"),
+                       duration_s=stats.get("duration_s"),
+                       width=stats.get("width"), height=stats.get("height"),
+                       fps=stats.get("fps"),
+                       meta={"filename": "cleaned-source.mp4", "clean_fp": fp,
+                             "generated": True,
+                             "model": ("remote:cursor" if cursor
+                                       else "remote:inpaint"),
+                             "regions": len(regions)})
+            ctx.db.run(dbx.insert_asset, ctx.project_id, "clean_proxy", pkey,
+                       bytes_=stats.get("proxy_bytes"),
+                       duration_s=stats.get("duration_s"),
+                       meta={"filename": "cleaned-proxy.mp4", "clean_fp": fp,
+                             "generated": True, "model": "remote:inpaint"})
+        except Exception as e:
+            print(f"[erase] cleaned-source asset rows not recorded for "
+                  f"project {ctx.project_id} ({str(e)[:160]}) — the repaint "
+                  "itself is in storage and the EDL points at it; run "
+                  "migration 007", flush=True)
+        return key, pkey, fp
+    src = _original_local(ctx)
     info = media.probe(src)
     if float(info["duration"]) > config.CLEAN_MAX_SOURCE_S:
         raise ValueError(
@@ -3275,9 +3409,16 @@ def _apply_clean(ctx, regions, what, cursor=_KEEP_CURSOR):
     if not regions and not cursor:
         edl["source_clean"] = None
         return ctx.write_edl(edl, f"restored the original pixels ({what})")
-    src = _original_local(ctx)
-    before = [inpaint.text_energy(src, (r["x"], r["y"], r["w"], r["h"]),
-                                  samples=5) for r in regions]
+    # Round 67: on the remote path the executor measures before/after itself
+    # (see inpaint.run_clean_job) — the dispatcher must not decode the
+    # original at all, that being the whole point of the move.
+    ctx._clean_measure = None
+    remote_clean = remote.clean_available()
+    before = None
+    if not remote_clean:
+        src = _original_local(ctx)
+        before = [inpaint.text_energy(src, (r["x"], r["y"], r["w"], r["h"]),
+                                      samples=5) for r in regions]
     key, pkey, fp = _run_clean(ctx, regions, cursor)
     edl["source_clean"] = {"asset_key": key, "proxy_key": pkey, "fp": fp,
                            "regions": regions}
@@ -3290,13 +3431,22 @@ def _apply_clean(ctx, regions, what, cursor=_KEEP_CURSOR):
     # actually be rendered. A claim that the text is gone is only made when
     # the pixels say so — and when they do not, the agent is told which
     # rectangle survived and what to try, instead of reporting success.
-    local = os.path.join(ctx.workdir, "clean_check.mp4")
-    try:
-        storage.download_to(key, local)
-        after = [inpaint.text_energy(local, (r["x"], r["y"], r["w"], r["h"]),
-                                     samples=5) for r in regions]
-    except Exception:
+    # Remote path: the executor already measured both sides on its own copy
+    # (a cached fingerprint hit carries no fresh numbers — that derivation
+    # measured clean when it was first created, which is why it is cached).
+    if getattr(ctx, "_clean_measure", None) and ctx._clean_measure[1]:
+        before, after = ctx._clean_measure
+    elif remote_clean:
         after = None
+    else:
+        local = os.path.join(ctx.workdir, "clean_check.mp4")
+        try:
+            storage.download_to(key, local)
+            after = [inpaint.text_energy(local,
+                                         (r["x"], r["y"], r["w"], r["h"]),
+                                         samples=5) for r in regions]
+        except Exception:
+            after = None
     if after:
         lines = []
         for r, b, a in zip(regions, before, after):
@@ -8812,10 +8962,16 @@ def get_audio_analysis(ctx, asset_key=None):
                 + "\n- ".join(lines))
 
 
-def punch_in_on_emphasis(ctx, count=4, strength=0.35):
+def punch_in_on_emphasis(ctx, count=3, strength=0.14):
     """Punch zooms on the most vocally stressed KEPT words, in ONE version.
     Every timestamp is a real word time mapped through the current cut —
-    nothing is estimated."""
+    nothing is estimated.
+
+    Round 67 defaults: 3 zooms at 14% (was 4 at 35%). A 35% snap on a
+    talking head is the 'abrupt noob zoom' the owner traced through real
+    edits — modern emphasis is 105-115%, felt more than seen. Pass a bigger
+    strength only when the user asks for hard punches or the format is
+    hype/montage."""
     if not ctx.has_main_video:
         return ("REJECTED: needs the main video — an image/clip-only "
                 "program has no speech to find emphasis in.")
@@ -9531,7 +9687,7 @@ def _seg_schema():
 # agent would then be told a field does not exist on the very tool it uses to
 # restyle EXISTING captions. Keep in step with captions.STYLE_KEYS,
 # schemas.CaptionStyle and _parse_partial_style's allowlist.
-CAPTION_PRESETS = ["podcast", "beast", "karaoke", "elegant",
+CAPTION_PRESETS = ["podcast", "beast", "karaoke", "elegant", "spotlight",
                    "stacked", "iridescent", "chrome", "editorial",
                    "fashion", "luxe", "impact", "classic"]
 CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
@@ -9598,27 +9754,39 @@ TOOLS = {
                     "'image' reference images (use with insert_media); "
                     "'render' past renders; 'all' everything.",
                     {"kind": {"type": "string"}}),
-    "look_at": (look_at, "Ask the vision model about up to 4 frames from a "
-                "range of the MAIN video. Use for taste/visual questions. The "
-                "transcript is accurate, so read speech from get_words / the "
-                "transcript — don't use look_at to lip-read or guess a word.",
-                {"start": {"type": "number"},
-                 "end": {"type": "number"},
-                 "question": {"type": "string"}}),
-    "look_at_asset": (look_at_asset, "Ask the vision model about frames from "
-                      "an UPLOADED clip or image, or a finished RENDER "
-                      "(storage_key from list_assets; kind='render' lists "
-                      "past previews/finals). THE way to choose which moment "
-                      "of a long clip to splice in: ask e.g. 'at which "
-                      "timestamps is the tool's page actually visible?' over "
-                      "the whole clip, then call again on a narrower "
-                      "start/end, then insert_media with clip_start_s at the "
-                      "chosen moment. On a RENDER it is how you CHECK YOUR "
-                      "OWN WORK at exact moments — a narrow start/end "
-                      "samples frame-accurately, so use it to verify a "
-                      "transition junction or an effect the user questions "
-                      "before claiming it is fine.",
+    "look_at": (look_at, "YOUR OWN EYES on the MAIN video. Pass times=[...] "
+                "(1-8 exact source seconds) and the frames at those moments "
+                "come back as ONE timestamp-labeled picture in your own "
+                "context — you see the footage yourself and judge it "
+                "directly (composition, where the subject is, clear space "
+                "for text, what a moment looks like). start/end still work "
+                "as a range sampled evenly. USE IT WHEN THE DECISION "
+                "GENUINELY NEEDS THE PIXELS (aiming a zoom or crop, placing "
+                "text in clear space, verifying a visual complaint) — and "
+                "batch the moments you need into ONE call with several "
+                "times, never a string of separate calls. The transcript is "
+                "accurate, so read speech from get_words / the transcript — "
+                "never look to lip-read or guess a word.",
+                {"times": {"type": "array", "items": {"type": "number"}},
+                 "question": {"type": "string"},
+                 "start": {"type": "number"},
+                 "end": {"type": "number"}}),
+    "look_at_asset": (look_at_asset, "YOUR OWN EYES on an UPLOADED clip or "
+                      "image, or a finished RENDER (storage_key from "
+                      "list_assets; kind='render' lists past previews/"
+                      "finals). Same contract as look_at: pass times=[...] "
+                      "(seconds into the clip) and the frames arrive as one "
+                      "labeled picture you read yourself. THE way to choose "
+                      "which moment of a long clip to splice in — one call "
+                      "over the whole clip, then insert_media with "
+                      "clip_start_s at the moment you saw. On a RENDER it is "
+                      "how you CHECK YOUR OWN WORK at exact moments — "
+                      "narrow times sample frame-accurately, so use it to "
+                      "verify a transition junction or an effect the user "
+                      "questions before claiming it is fine.",
                       {"asset_key": {"type": "string"},
+                       "times": {"type": "array",
+                                 "items": {"type": "number"}},
                        "question": {"type": "string"},
                        "start": {"type": "number"},
                        "end": {"type": "number"}}),
@@ -9675,9 +9843,15 @@ TOOLS = {
                      "premium/viral/TikTok captions), 'beast' (loud "
                      "MrBeast-style: ALL-CAPS impact font, centered, the "
                      "spoken word pops in the accent color), 'karaoke' (an "
-                     "accent box follows each spoken word), 'elegant' "
-                     "(calm lower-third, serif-italic accents — "
+                     "accent box follows each spoken word), 'spotlight' "
+                     "(ONE glowing word at a time, centred, uppercase — the "
+                     "modern single-word look for hype/motivation/fast "
+                     "talking; the ONLY preset that belongs mid-frame), "
+                     "'elegant' (calm lower-third, serif-italic accents — "
                      "interviews/luxury), 'classic' (plain legacy look). "
+                     "PLACEMENT: multi-word presets default to the BOTTOM, "
+                     "clear of the face — do not move them to 'middle'; "
+                     "only a single-word-at-a-time look may sit centred. "
                      "With a preset, ALSO pass emphasis_words: 10-25 "
                      "impact words picked from the REAL transcript (money "
                      "words: numbers, outcomes, emotional peaks, names — "
@@ -9768,6 +9942,11 @@ TOOLS = {
                                       "enum": list(sfx_library.CATEGORIES)}}),
     "add_sfx": (add_sfx, "Punctuate a MOMENT with a one-shot sound effect — a "
                 "whoosh on a cut, a click on a beat, an impact on a reveal. "
+                "SOUND EFFECTS ARE STRICTLY OPT-IN: call this ONLY when the "
+                "user's own message asks for sound effects (by name or "
+                "clearly: 'add a whoosh', 'sound effects please'). 'Make it "
+                "viral/punchy/engaging' is NOT a request for sfx — offer "
+                "them in your reply instead. "
                 "storage_key is either an 'sfx:<slug>' from "
                 "list_sfx_library() or an exact key from "
                 "list_assets(kind='music') — never invent one. `at` is an "
@@ -9826,7 +10005,8 @@ TOOLS = {
                           "only the fields to change: 'make the captions "
                           "premium/viral' -> {\"style\":{\"preset\":"
                           "\"podcast\"}} (see add_captions for the preset "
-                          "menu: podcast/beast/karaoke/elegant/classic), "
+                          "menu: podcast/beast/karaoke/spotlight/elegant/"
+                          "stacked/.../classic), "
                           "'make it red' -> {\"style\":{\"color\":"
                           "\"#FF0000\"}}, 'center the captions' -> "
                           '{"style":{"position":"middle"}}, '
@@ -10826,14 +11006,20 @@ TOOLS = {
                              "current cut (stress measured from the audio, "
                              "times from the real word timestamps — never "
                              "guessed), spaced >=4s apart, in one EDL "
-                             "version. count 1-8 (default 4); strength "
-                             "0.05-1.5 (default 0.35). The result lists "
+                             "version. count 1-8 (default 3); strength "
+                             "0.05-1.5 (default 0.14 — a gentle push the "
+                             "viewer feels rather than sees; only go past "
+                             "~0.3 when the user asks for hard punches or "
+                             "the format is hype). The result lists "
                              "each word + program time — report those to "
                              "the user. THE tool for 'add zooms on the "
                              "important moments'.",
                              {"count": {"type": "integer"},
                               "strength": {"type": "number"}}),
-    "sound_design_pass": (sound_design_pass, "ONE-CALL sound design from "
+    "sound_design_pass": (sound_design_pass, "ONLY when the user explicitly "
+                          "asked for sound effects / sound design — never as "
+                          "part of a generic 'make it engaging' pass. "
+                          "ONE-CALL sound design from "
                           "the built-in pack, in one version: a whoosh on "
                           "cut junctions (spaced >=5s), one impact on the "
                           "strongest stressed word, one riser resolving "
@@ -10906,8 +11092,9 @@ TOOLS = {
 
 REQUIRED_ARGS = {
     "search_transcript": ["query"],
-    "look_at": ["start", "end", "question"],
-    "look_at_asset": ["asset_key", "question"],
+    # times OR start/end — validated in the tool, so neither is "required".
+    "look_at": [],
+    "look_at_asset": ["asset_key"],
     "keep_segments": ["segments"],
     "cut_range": ["start", "end"],
     "restore_range": ["start", "end"],

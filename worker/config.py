@@ -13,25 +13,31 @@ S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "")
 S3_BUCKET = os.getenv("S3_BUCKET", "")
 S3_REGION = os.getenv("S3_REGION", "auto")
 
-# LLM — OpenAI-compatible only. Default: DeepSeek V4 Pro (api.deepseek.com).
-# The whole stack (agent tool-calling, vision, concierge) is OpenAI-compatible,
-# so pointing OPENAI_BASE_URL + OPENAI_API_KEY at any compatible provider is all
-# that's needed. To run DeepSeek you ONLY set OPENAI_API_KEY (a DeepSeek key);
-# the defaults below already select v4-pro. (For xAI Grok: OPENAI_BASE_URL=
-# https://api.x.ai/v1, AGENT_MODEL=VISION_MODEL=grok-4.5, prices 2.0/6.0.)
+# LLM — OpenAI-compatible only. Default: OpenAI GPT-5.6 Luna
+# (api.openai.com), the owner's chosen agent model since Jul 31 2026 (round
+# 67). The whole stack (agent tool-calling, vision, concierge) is
+# OpenAI-compatible, so pointing OPENAI_BASE_URL + OPENAI_API_KEY at any
+# compatible provider is all that's needed. To run Luna you ONLY set
+# OPENAI_API_KEY (an OpenAI key); the defaults below already select it.
+# (For the previous stack: OPENAI_BASE_URL=https://api.deepseek.com +
+# AGENT_MODEL=deepseek-v4-pro, or https://api.x.ai/v1 + grok-4.5.)
 #
-# NO V4 TIER TAKES IMAGES. This was believed of v4-pro and it is false: the
-# DeepSeek chat API rejects an `image_url` content part at the JSON layer —
-# HTTP 400 "Failed to deserialize the JSON body: unknown variant `image_url`,
-# expected `text`" — so pro is as blind as flash. It cost a real outage: from
-# 13:06 UTC on Jul 26 2026 (the switch) every look_at, look_at_asset and
-# preview self-check 400'd, 59 calls in a row, and the agent asked users to
-# describe their own footage to it. Vision therefore has its OWN provider
-# below, exactly as image generation does. Do not point VISION_BASE_URL at
-# DeepSeek "because the agent runs there".
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+# LUNA TAKES IMAGES ("text, image" input modalities per OpenAI's model page,
+# checked Jul 31 2026) — which is what makes the round-67 direct-sight
+# look_at possible: frames go straight into the AGENT's own context instead
+# of through a separate vision model. AGENT_MULTIMODAL below gates that path;
+# a deployment pointed back at DeepSeek must set it to 0 (or eat one latched
+# 400 — the runtime downgrade catches it either way, see llm.mark_agent_blind).
+# Model id: use the exact "gpt-5.6-luna" — the bare "gpt-5.6" alias routes to
+# Sol, a different (pricier) model.
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-AGENT_MODEL = os.getenv("AGENT_MODEL", "deepseek-v4-pro")
+AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
+# Whether AGENT_MODEL accepts image content parts. Default 1 (Luna does).
+# When on, look_at / look_at_asset hand captured frames DIRECTLY to the
+# editing agent — its own eyes — instead of asking the separate VISION_*
+# provider to describe them second-hand.
+AGENT_MULTIMODAL = os.getenv("AGENT_MULTIMODAL", "1") == "1"
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
@@ -95,15 +101,18 @@ IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "") or (
 # image_url part (see the block at the top), which blinded the agent for hours
 # on Jul 26 2026 because vision silently inherited AGENT_MODEL.
 #
-# Defaults to xAI grok-4.5, which served every look_at successfully until that
-# switch. The key follows the SAME inheritance rule as IMAGE_API_KEY: taken
-# from whichever configured provider shares this base URL, never handed across
-# providers (a DeepSeek key sent to xAI is a 401 on every call). With no key
-# for it, vision_available() is False and every vision tool says so plainly
-# instead of failing — the honest-off contract. Empty VISION_MODEL disables
-# vision the same graceful way.
-VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://api.x.ai/v1")
-VISION_MODEL = os.getenv("VISION_MODEL", "grok-4.5")
+# Defaults to OpenAI gpt-5.6-luna (round 67) — the agent model is multimodal
+# now, so the indexing contact sheets, the preview self-check and any legacy
+# vision call run on the same provider and key as the agent. The key follows
+# the SAME inheritance rule as IMAGE_API_KEY: taken from whichever configured
+# provider shares this base URL, never handed across providers (a DeepSeek
+# key sent to xAI is a 401 on every call) — which on the Luna default means
+# it lights up from OPENAI_API_KEY with no extra config. With no key for it,
+# vision_available() is False and every vision tool says so plainly instead
+# of failing — the honest-off contract. Empty VISION_MODEL disables vision
+# the same graceful way.
+VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://api.openai.com/v1")
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-5.6-luna")
 VISION_API_KEY = (
     os.getenv("VISION_API_KEY", "")
     or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
@@ -286,10 +295,19 @@ WHISPER_COMPUTE = os.getenv(
     "WHISPER_COMPUTE", "int8" if WHISPER_DEVICE == "cpu" else "float16")
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # Domain vocabulary biased into EVERY decoding window (faster-whisper >=1.0
-# 'hotwords'; Deepgram's 'keyterm' — the same list feeds both). Proper nouns /
-# brand terms an ASR would otherwise mis-hear.
+# 'hotwords'; Deepgram's 'keyterm' — the same list feeds both).
 # Comma/space separated; empty disables.
-WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS", "Valmera, valmera.io")
+#
+# EMPTY BY DEFAULT, and the old default is the reason: it was "Valmera,
+# valmera.io" — our own brand biased into every CUSTOMER's transcript. On Jul
+# 31 2026 a real customer's 27s clip of a woman speaking came back from
+# Deepgram as language "Indonesian" with EXACTLY ONE transcribed word:
+# "Valmera." — the keyterm hallucinated itself as her entire transcript, and
+# captions are generated from the transcript, so her video got a "Valmera."
+# caption she never said (index 201, project 293). Brand hotwords belong on
+# the deployment that transcribes OUR demo videos, set explicitly via env —
+# never in the default path a customer's footage takes.
+WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS", "")
 # Optional priming context (style/topic) for the first window. Empty disables.
 WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "")
 # faster-whisper treats a window whose gzip compression ratio exceeds this as a
@@ -571,6 +589,12 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # runs one SIFT match. Synchronously inside an agent turn — same ceiling
     # logic as frames/track.
     "smatch": int(os.getenv("REMOTE_TIMEOUT_SMATCH_S", "240")),
+    # The erase/repaint pass (round 67): decodes + re-encodes every frame of
+    # the ORIGINAL (bounded by CLEAN_MAX_SOURCE_S / CLEAN_MAX_MPX_SECONDS),
+    # optionally chained with the cursor pass. Synchronously inside an agent
+    # turn, so it must stay under AGENT_TURN_TIMEOUT_S (720) with margin for
+    # the turn's other steps.
+    "clean": int(os.getenv("REMOTE_TIMEOUT_CLEAN_S", "600")),
 }
 
 
@@ -664,10 +688,11 @@ AGENT_TURN_BUDGET_GRACE = float(os.getenv("AGENT_TURN_BUDGET_GRACE", "3"))
 # silently wrong for Grok, and a silent constant-factor billing error is the bug
 # class this whole area keeps producing.
 #
-# Default = DeepSeek V4 Pro ($1.74 in / $3.48 out), ~13% cheaper in and ~42%
-# cheaper out than the Grok 4.5 it replaced.
-LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "1.74"))
-LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "3.48"))
+# Default = OpenAI GPT-5.6 Luna ($0.20 in / $1.20 out, list price from
+# OpenAI's own model page Jul 31 2026) — ~9x cheaper in and ~3x cheaper out
+# than the DeepSeek V4 Pro it replaced.
+LLM_PRICE_IN_PER_M = float(os.getenv("LLM_PRICE_IN_PER_M", "0.20"))
+LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "1.20"))
 # Cached input ($/1M). A provider that serves a repeated prompt PREFIX from
 # cache charges a fraction of a miss for it — DeepSeek $0.003625/1M (480x
 # cheaper), Grok $0.30/1M (6.7x cheaper). An agent turn re-sends the same system
@@ -683,8 +708,10 @@ LLM_PRICE_OUT_PER_M = float(os.getenv("LLM_PRICE_OUT_PER_M", "3.48"))
 # model_prices.MODEL_PRICES; this constant only covers unlisted models, and for
 # one that genuinely has no caching the reported hit count is 0, which makes the
 # rate inert anyway.
+# Default tracks Luna's cached-input list price ($0.02/1M — 10x cheaper
+# than a miss).
 LLM_PRICE_CACHED_IN_PER_M = float(
-    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.003625"))
+    os.getenv("LLM_PRICE_CACHED_IN_PER_M", "0.02"))
 
 # What price_for() falls back to for a model that is not in MODEL_PRICES.
 PRICE_FALLBACK = {"in": LLM_PRICE_IN_PER_M,

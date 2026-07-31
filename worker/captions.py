@@ -163,6 +163,15 @@ EFFECTS = {
 }
 CHROME_BAND_MIN_PX = 26   # below this the bands alias into mush
 PRESETS = {
+    # ROUND 67 — POSITION DEFAULTS MOVED OFF THE FACE. Every multi-word
+    # preset used to anchor "middle", which on a talking head is a block of
+    # text across the speaker's face — the owner's words: "put the captions
+    # always to the bottom area, not the face area, unless it's a single
+    # word at a time". Multi-word looks now default "bottom" (the burner's
+    # safe-area logic already lifts them clear of platform chrome); ONLY the
+    # single-word 'spotlight' keeps "middle", because one word at a time is
+    # small enough to share the frame with a face. style.position still
+    # overrides everything.
     "podcast": {
         # The reference reel look: bold white grotesque, left-aligned stack,
         # words land as spoken, keywords get yellow / a marker box / serif.
@@ -171,7 +180,7 @@ PRESETS = {
         "max_words": 5, "wpl": 2, "outline": 1.5, "shadow": 2.2,
         "emph_scale": 1.28, "num_scale": 1.85,
         "treatments": ("accent", "box", "serif"),
-        "active": "pop", "position": "middle",
+        "active": "pop", "position": "bottom",
     },
     "beast": {
         # Loud creator style: Anton caps, centered, spoken word pops in the
@@ -181,7 +190,29 @@ PRESETS = {
         "max_words": 3, "wpl": 3, "outline": 3.0, "shadow": 2.6,
         "emph_scale": 1.1, "num_scale": 1.35,
         "treatments": ("accent",),
-        "active": "accent", "position": "middle",
+        "active": "accent", "position": "bottom",
+    },
+    "spotlight": {
+        # ROUND 67 — ONE word at a time, dead centre, glowing. The modern
+        # single-word look ("Hormozi-style") the owner asked for by name:
+        # each word owns the frame for exactly as long as it is spoken, big
+        # bold caps with a soft accent halo. mode 'karaoke' with 1-word
+        # groups makes every word the ACTIVE word, so the glow treatment
+        # rides the existing active-word machinery — no new emission path.
+        # The ONLY preset that may sit "middle": a single word shares the
+        # frame with a face; a paragraph does not.
+        "font": "Inter Display Black", "char_w": 0.56, "base_size": 60,
+        "mode": "karaoke", "align": "center", "uppercase": True,
+        "max_words": 1, "wpl": 1, "outline": 0.0, "shadow": 2.6,
+        "emph_scale": 1.22, "num_scale": 1.45,
+        "treatments": ("glow",),
+        "active": "glow", "position": "middle",
+        # Stack emission, one word per line: the layered EFFECTS (the glow
+        # under-copies) only exist on the stack path, and a single word is
+        # trivially a one-line stack. effect='glow' applies the halo to
+        # EVERY word, not just emphasis — the whole point of the look.
+        "layout": "stack", "leading": 1.0, "stagger": 0.0,
+        "effect": "glow", "word_anim": "punch",
     },
     "karaoke": {
         # Submagic-style: the accent box FOLLOWS the spoken word.
@@ -217,7 +248,7 @@ PRESETS = {
         "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.4,
         "emph_scale": 2.05, "num_scale": 2.2,
         "treatments": ("big",), "emphasis": "big",
-        "active": "pop", "position": "middle",
+        "active": "pop", "position": "bottom",
         "layout": "stack", "leading": 0.86, "stagger": 0.055,
         "word_anim": "punch",
     },
@@ -229,7 +260,7 @@ PRESETS = {
         "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.0,
         "emph_scale": 1.85, "num_scale": 2.0,
         "treatments": ("chroma",), "emphasis": "chroma",
-        "active": "pop", "position": "middle",
+        "active": "pop", "position": "bottom",
         "layout": "stack", "leading": 0.84, "stagger": 0.06,
         "word_anim": "blur_in",
     },
@@ -241,7 +272,7 @@ PRESETS = {
         "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.6,
         "emph_scale": 2.0, "num_scale": 2.1,
         "treatments": ("chrome",), "emphasis": "chrome",
-        "active": "pop", "position": "middle",
+        "active": "pop", "position": "bottom",
         "layout": "stack", "leading": 0.88, "stagger": 0.05,
         "word_anim": "punch",
     },
@@ -254,7 +285,7 @@ PRESETS = {
         "max_words": 5, "wpl": 3, "outline": 0.0, "shadow": 1.4,
         "emph_scale": 1.5, "num_scale": 1.7,
         "treatments": ("big",), "emphasis": "big",
-        "active": "fade", "position": "middle",
+        "active": "fade", "position": "bottom",
         "layout": "stack", "leading": 1.06, "stagger": 0.0,
         "word_anim": "fade",
     },
@@ -265,7 +296,7 @@ PRESETS = {
         "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.0,
         "emph_scale": 1.6, "num_scale": 1.8,
         "treatments": ("big", "accent"), "emphasis": "big",
-        "active": "pop", "position": "middle",
+        "active": "pop", "position": "bottom",
         "layout": "stack", "leading": 0.98, "stagger": 0.04,
         "word_anim": "rise",
     },
@@ -277,7 +308,7 @@ PRESETS = {
         "max_words": 5, "wpl": 3, "outline": 0.0, "shadow": 1.8,
         "emph_scale": 1.55, "num_scale": 1.75,
         "treatments": ("accent", "big"), "emphasis": "accent",
-        "active": "fade", "position": "middle",
+        "active": "fade", "position": "bottom",
         "layout": "stack", "leading": 1.0, "stagger": 0.0,
         "word_anim": "fade",
     },
@@ -289,7 +320,7 @@ PRESETS = {
         "max_words": 4, "wpl": 2, "outline": 2.2, "shadow": 2.4,
         "emph_scale": 1.5, "num_scale": 1.7,
         "treatments": ("accent",), "emphasis": "accent",
-        "active": "accent", "position": "middle",
+        "active": "accent", "position": "bottom",
         "layout": "stack", "leading": 0.9, "stagger": 0.0,
         "word_anim": "punch",
     },

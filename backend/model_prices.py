@@ -66,7 +66,20 @@ separate and the flag must be True.
 # Keep every number sourced from the provider's own price page or a real
 # invoice. A guessed price is a silent, permanent billing error.
 MODEL_PRICES = {
-    # DeepSeek V4 Pro -- the default agent model since Jul 26 2026.
+    # OpenAI GPT-5.6 Luna -- the default agent AND vision model since Jul 31
+    # 2026 (round 67). List prices from OpenAI's own model page (developers.
+    # openai.com/api/docs/models/gpt-5.6-luna, checked Jul 31 2026): $0.20 in,
+    # $0.02 cached input, $1.20 out per 1M. NOTE a third-party blog quotes
+    # $1/$6 for "Luna" -- that is wrong (or Sol's); the official page and
+    # OpenRouter's list price agree on 0.20/1.20. Reasoning tokens are FOLDED:
+    # OpenAI's completion_tokens already contains them (the details object
+    # only breaks them out), so reasoning_separate must stay False or every
+    # reasoning turn double-charges.
+    "gpt-5.6-luna": {
+        "in": 0.20, "cached_in": 0.02, "out": 1.20,
+        "reasoning_separate": False,
+    },
+    # DeepSeek V4 Pro -- the default agent model Jul 26-31 2026.
     # Disk-cached prefix hits are 480x cheaper than a miss, which is why the
     # three-part charge exists at all: an agent turn re-sends the same system
     # prompt and tool schemas every iteration.

@@ -212,6 +212,21 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             f"apart (at {_num(a.get('start')):.1f}s and "
             f"{_num(b.get('start')):.1f}s) — back-to-back pushes fight each "
             "other. Space them out or keep the stronger one.")
+    # ABRUPT zooms (round 67). The owner traced "very weird and bad" edits
+    # to hard 30%+ snaps used as the routine move — modern emphasis is a
+    # gentle 8-18% push. ONE hard punch on the single peak is a legitimate
+    # device, so this fires only when hard snaps are the PATTERN, and never
+    # when the user asked for punchy/hard zooms.
+    hard = [z for z in zooms if _num(z.get("strength")) >= 0.3
+            and (z.get("mode") or "punch") == "punch"]
+    if len(hard) >= 2 and not any(h in ask for h in (
+            "punch", "hard zoom", "aggressive", "snap")):
+        add(f"{len(hard)} hard punch zooms at "
+            f"{int(_num(hard[0].get('strength')) * 100)}%+ — abrupt snaps "
+            "used as the routine move read as amateur editing. Keep at most "
+            "ONE hard punch on the single biggest peak and make the rest "
+            "gentle eased pushes (strength 0.08-0.18, mode 'ease' or "
+            "'push_in').")
     if len(zooms) >= 3:
         shapes = {(round(_num(z.get("strength")), 2), z.get("mode") or "punch")
                   for z in zooms}
@@ -355,6 +370,23 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             "watches muted, so uncaptioned speech is watched by nobody. "
             "add_captions('from_transcript') with a premium preset unless the "
             "user asked for none.")
+    # MULTI-WORD CAPTIONS ACROSS THE FACE (round 67). The placement law:
+    # multi-word captions live at the bottom; only a single-word-at-a-time
+    # look may hold the middle of the frame, because one word shares the
+    # frame with a face and a paragraph does not. Presets default correctly
+    # now, so this only fires when position='middle' was explicitly written.
+    if isinstance(caps, dict) and caps.get("mode") == "from_transcript":
+        cstyle = caps.get("style") or {}
+        multi = (cstyle.get("preset") or "") != "spotlight" \
+            and int(caps.get("max_words_per_caption") or 99) > 1
+        if multi and cstyle.get("position") == "middle" \
+                and "middle" not in ask and "center" not in ask \
+                and "centre" not in ask:
+            add("multi-word captions are anchored mid-frame — a block of "
+                "text across the speaker's face. Multi-word captions belong "
+                "at the BOTTOM (set_caption_style position 'bottom'); only "
+                "a single-word-at-a-time look ('spotlight', or "
+                "max_words_per_caption=1) may sit centred.")
 
     # ── overlapping text ────────────────────────────────────────────────
     texts = edl.get("texts") or []

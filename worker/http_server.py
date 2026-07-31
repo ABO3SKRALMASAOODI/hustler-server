@@ -32,6 +32,7 @@ import config
 import db as dbx
 import frameserve
 import indexer
+import inpaint
 import matte
 import renderer
 import screenmatch
@@ -69,6 +70,11 @@ RUNNERS = {
     # of a user original — tried on the dispatcher for exactly one live run,
     # which it OOM-killed (job 1513).
     "smatch": screenmatch.run_smatch_job,
+    # Round 67: the erase/repaint pass — a full decode + re-encode of a user
+    # ORIGINAL inside an agent turn, the heaviest member of the OOM class and
+    # the last one that still ran on the dispatcher. Job 1557 (Jul 31 2026)
+    # died minutes after a customer's erase ran there.
+    "clean": inpaint.run_clean_job,
 }
 
 

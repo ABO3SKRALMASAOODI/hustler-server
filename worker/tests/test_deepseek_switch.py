@@ -36,21 +36,33 @@ import model_prices                                            # noqa: E402
 
 # ── the model actually configured ──────────────────────────────────────
 
-def test_agent_runs_on_v4_pro():
-    assert config.AGENT_MODEL == "deepseek-v4-pro"
-    assert config.OPENAI_BASE_URL == "https://api.deepseek.com"
+def test_agent_runs_on_luna():
+    """Round 67: the default agent model is OpenAI GPT-5.6 Luna. The exact id
+    matters — the bare "gpt-5.6" alias routes to Sol, a different (pricier)
+    model."""
+    assert config.AGENT_MODEL == "gpt-5.6-luna"
+    assert config.OPENAI_BASE_URL == "https://api.openai.com/v1"
+    # Luna takes images, which is what powers the round-67 direct-sight
+    # look_at. A deployment pointed back at a blind provider must flip this
+    # off (or eat one latched 400).
+    assert config.AGENT_MULTIMODAL is True
 
 
-def test_vision_does_not_follow_the_agent_onto_deepseek():
-    """CORRECTS THIS FILE'S ORIGINAL CLAIM (round 46): v4-PRO does not accept
-    images either. It rejects an image_url content part at the JSON layer —
-    400 "unknown variant `image_url`, expected `text`" — so from 13:06 UTC on
-    Jul 26 2026 every look_at, look_at_asset and preview self-check failed,
-    59 in a row, and the agent asked users to describe their own footage.
-    Vision keeps its own provider, like image generation does."""
-    assert config.VISION_BASE_URL != config.OPENAI_BASE_URL or \
-        "deepseek" not in config.VISION_BASE_URL
+def test_vision_is_never_pointed_at_a_blind_provider():
+    """The round-46 lesson survives the provider change: NO DeepSeek V4 tier
+    accepts images (400 "unknown variant `image_url`"), and pointing vision
+    there once blinded every look for hours. Luna is multimodal, so vision
+    sharing the agent's provider is now correct — but it must never DEFAULT
+    onto DeepSeek."""
+    assert "deepseek" not in config.VISION_BASE_URL
     assert "deepseek" not in config.VISION_MODEL
+
+
+def test_vision_key_inherits_from_the_shared_openai_provider():
+    """On the Luna default vision and the agent share a base URL, so the one
+    OPENAI_API_KEY must light both up — no second env var to forget."""
+    assert config.VISION_BASE_URL == config.OPENAI_BASE_URL
+    assert config.VISION_MODEL == config.AGENT_MODEL
 
 
 def test_vision_key_is_never_inherited_across_providers():
@@ -113,10 +125,19 @@ def test_a_provider_that_rejects_images_turns_vision_off():
 
 def test_prices_match_the_configured_model():
     """CLAUDE.md's standing rule: change AGENT_MODEL, change these, or credits
-    drift from real cost."""
-    assert config.LLM_PRICE_IN_PER_M == 1.74
-    assert config.LLM_PRICE_OUT_PER_M == 3.48
+    drift from real cost. Luna's list price (OpenAI model page, Jul 31 2026):
+    $0.20 in / $0.02 cached / $1.20 out per 1M."""
+    assert config.LLM_PRICE_IN_PER_M == 0.20
+    assert config.LLM_PRICE_OUT_PER_M == 1.20
+    assert config.LLM_PRICE_CACHED_IN_PER_M == 0.02
     assert config.LLM_PRICE_CACHED_IN_PER_M < config.LLM_PRICE_IN_PER_M
+    # ...and the model is in the per-row table with the SAME numbers, so a
+    # listed-model turn and a fallback-priced turn cannot disagree.
+    row = model_prices.MODEL_PRICES[config.AGENT_MODEL]
+    assert row["in"] == config.LLM_PRICE_IN_PER_M
+    assert row["out"] == config.LLM_PRICE_OUT_PER_M
+    assert row["cached_in"] == config.LLM_PRICE_CACHED_IN_PER_M
+    assert row["reasoning_separate"] is False
 
 
 def test_worker_and_db_price_constants_agree():

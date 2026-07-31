@@ -1026,8 +1026,8 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     redraft = ""
     model = ctx.agent_model or config.AGENT_MODEL
     try:
-        resp = client.chat.completions.create(
-            model=model, messages=msgs, tools=tools,
+        resp = llm.create_with_dialect(
+            client, model, msgs, tools=tools,
             tool_choice="none", temperature=config.AGENT_TEMPERATURE,
             max_tokens=config.AGENT_REPLY_MAX_TOKENS)
         llm.record("honesty_regen",
@@ -1176,6 +1176,47 @@ def _taste_pushback(ctx, messages, t_start, pushed):
     return True
 
 
+def _messages_for_record(messages):
+    """What gets written to llm_calls: the image PARTS are replaced by a
+    marker. ask_vision has always recorded image names, never bytes — a
+    base64 frame in the request payload would put megabytes into every
+    llm_calls row of a turn that looked at something."""
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            out.append(m)
+            continue
+        parts = [p if not (isinstance(p, dict)
+                           and p.get("type") == "image_url")
+                 else {"type": "text", "text": "[image attached]"}
+                 for p in content]
+        out.append({**m, "content": parts})
+    return out
+
+
+def _strip_image_parts(messages):
+    """Remove every image content part in place, keeping the text parts.
+    Returns True when anything was removed — the caller uses that to tell 'the
+    provider is blind' apart from an unrelated 400 that merely pattern-matched
+    the error text (round 67)."""
+    changed = False
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        kept = [p for p in content
+                if not (isinstance(p, dict) and p.get("type") == "image_url")]
+        if len(kept) != len(content):
+            changed = True
+            kept.append({"type": "text", "text":
+                         "(the captured frames could not be shown to you — "
+                         "this model does not take images; use look_at "
+                         "again and read its text answer instead)"})
+            m["content"] = kept
+    return changed
+
+
 def _run_loop(ctx, worker_db, job, session_id, user_message,
               attachment_note=""):
     # Resolved from the user's plan in run_agent_job. _build_messages and the
@@ -1307,47 +1348,55 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 and not llm.reasoning_effort_rejected(model):
             extra["reasoning_effort"] = config.AGENT_REASONING_EFFORT
         try:
-            try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    temperature=config.AGENT_TEMPERATURE,
-                    max_tokens=max_tokens,
-                    **extra,
-                )
-            except Exception as e:
-                # THE KNOB HAS TO BE SAFE TO TURN ON.
-                #
-                # Reasoning is 402 of the 646 output tokens an average agent
-                # call produces, and output generation is what the user's 13
-                # seconds per round trip actually buys — so this is the single
-                # biggest latency lever there is. But it is an env var someone
-                # sets on Render against a provider we cannot test from here,
-                # and a provider that rejects the parameter would 400 EVERY
-                # iteration after the first, on every turn, for every user.
-                #
-                # So a rejection retries once without it and latches for the
-                # process: the setting degrades to "no effect", exactly like a
-                # missing capability elsewhere in this codebase, instead of
-                # taking the product down. Only the unknown-parameter shape is
-                # caught — a real API failure must still propagate.
-                if not extra or not llm.looks_like_bad_parameter(e,
-                                                                 "reasoning_effort"):
+            # THE KNOBS HAVE TO BE SAFE TO TURN ON. reasoning_effort is an
+            # env var someone sets against a provider we cannot test from
+            # here; max_tokens vs max_completion_tokens and whether a custom
+            # temperature is allowed are per-provider dialects (OpenAI's
+            # reasoning family — the Luna default — rejects both classics);
+            # and the direct-sight look_at puts image parts in the agent's
+            # own messages, which a blind provider rejects at the JSON
+            # layer. Any of those would 400 EVERY step of every turn, so
+            # each rejection is matched narrowly, corrected once, and
+            # latched for the process — a real API failure still propagates
+            # on the first try.
+            kw = llm.completion_kwargs(model, max_tokens,
+                                       config.AGENT_TEMPERATURE)
+            kw.update(extra)
+            _adapt_tries = 0
+            while True:
+                try:
+                    resp = client.chat.completions.create(
+                        model=model, messages=messages, tools=tools, **kw)
+                    break
+                except Exception as e:
+                    _adapt_tries += 1
+                    if _adapt_tries > 3:
+                        raise
+                    if "reasoning_effort" in kw and \
+                            llm.looks_like_bad_parameter(e,
+                                                         "reasoning_effort"):
+                        llm.mark_reasoning_effort_rejected(model)
+                        print(f"[agent {job['id']}] provider rejected "
+                              f"reasoning_effort="
+                              f"{config.AGENT_REASONING_EFFORT!r} for "
+                              f"{model} — retrying without it and not "
+                              "sending it again", flush=True)
+                        kw.pop("reasoning_effort")
+                        extra = {}
+                        continue
+                    adapted = llm.adapt_completion_kwargs(e, model, kw)
+                    if adapted is not None:
+                        kw = adapted
+                        continue
+                    if llm.looks_like_blind_model(e) \
+                            and _strip_image_parts(messages):
+                        llm.mark_agent_blind(model)
+                        print(f"[agent {job['id']}] {model} rejected an "
+                              "image part — agent direct sight DISABLED for "
+                              "this process; look tools fall back to the "
+                              "vision provider", flush=True)
+                        continue
                     raise
-                llm.mark_reasoning_effort_rejected(model)
-                print(f"[agent {job['id']}] provider rejected "
-                      f"reasoning_effort={config.AGENT_REASONING_EFFORT!r} for "
-                      f"{model} — retrying without it and not sending it again",
-                      flush=True)
-                extra = {}
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    temperature=config.AGENT_TEMPERATURE,
-                    max_tokens=max_tokens,
-                )
         except Exception as e:
             # llm.record only ran on success, so a failing agent call left NO
             # row anywhere: through the whole Jul 26 2026 provider outage the
@@ -1359,7 +1408,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 timings["llm_s"] + time.monotonic() - t0, 2)
             llm.record("agent",
                        {"model": model,
-                        "messages": messages[-2:],
+                        "messages": _messages_for_record(messages[-2:]),
                         "tools": [t["function"]["name"] for t in tools]},
                        {"error": f"{type(e).__name__}: {str(e)[:400]}"}, None)
             raise
@@ -1368,7 +1417,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         msg = resp.choices[0].message
         finish = getattr(resp.choices[0], "finish_reason", None)
         llm.record("agent",
-                   {"model": model, "messages": messages,
+                   {"model": model, "messages": _messages_for_record(messages),
                     "tools": [t["function"]["name"] for t in tools],
                     "max_tokens": max_tokens,
                     **({"reasoning_effort": extra["reasoning_effort"]}
@@ -1505,6 +1554,31 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             result = _time_pressure_note(result, t_start, warned)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
+
+        # Round 67 — direct sight. A look tool captured frames for the
+        # AGENT'S OWN eyes this step; deliver them as image parts in a user
+        # message right after the tool results (tool-role content is
+        # text-only on every OpenAI-compatible provider, a user message
+        # after the tool batch is the standard carrier). One message for
+        # the whole batch, then the queue clears so nothing leaks into the
+        # next step.
+        if getattr(ctx, "pending_images", None):
+            content = []
+            for label, path in ctx.pending_images:
+                try:
+                    part = llm.image_part(path)
+                except Exception as ex:
+                    print(f"[job {job['id']}] could not attach look frame "
+                          f"({ex})", flush=True)
+                    continue
+                content.append({"type": "text", "text": f"[{label}]"})
+                content.append(part)
+            ctx.pending_images = []
+            if content:
+                content.insert(0, {"type": "text", "text":
+                                   "Frames you asked to look at (timestamps "
+                                   "printed under each tile):"})
+                messages.append({"role": "user", "content": content})
 
     return _finalize(
         ctx, worker_db, session_id,

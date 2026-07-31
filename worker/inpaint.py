@@ -807,3 +807,81 @@ def text_energy(path, box, *, at=None, samples=6):
             continue
         vals.append(float(ink_mask(f[y0:y1, x0:x1], dilate=0).mean()))
     return round(sum(vals) / len(vals), 2) if vals else 0.0
+
+
+def run_clean_job(worker_db, job):
+    """Executor-side runner for the erase/repaint pass (round 67 — the
+    capture/frames/track/matte shape: synchronous, no row, remote failure
+    never falls back to heavy local work).
+
+    The clean pass decodes and re-encodes EVERY frame of the user's ORIGINAL,
+    plus an optional full-res cursor pass — the single heaviest thing an
+    agent turn could still do on the dispatcher, and the strongest suspect in
+    the Jul 31 2026 worker death that ate a customer's turn minutes after her
+    erase ran (job 1557: "Worker died and retries are exhausted"). Every
+    other original-decoder had already moved to the executor for exactly this
+    failure class; this is the last one following.
+
+    payload: {src_key, out_key, proxy_key, regions, cursor,
+              measure: [region boxes for the before/after ink check]}
+    -> clean_video's stats dict plus:
+       before / after   ink energies per measure box (the honesty check,
+                        measured HERE so the dispatcher never decodes the
+                        original or the cleaned full-res file at all)
+       out_bytes / proxy_bytes   sizes for the asset bookkeeping rows
+    On success both objects are already uploaded; nothing heavy rides back.
+    `worker_db` is unused — this writes no rows.
+    """
+    import shutil
+    import uuid as _uuid
+
+    import storage
+    payload = job.get("payload") or {}
+    src_key = payload.get("src_key")
+    out_key = payload.get("out_key")
+    proxy_key = payload.get("proxy_key")
+    regions = payload.get("regions") or []
+    cursor_cfg = payload.get("cursor") or None
+    if not src_key or not out_key or not proxy_key:
+        raise ValueError("clean job needs src_key, out_key, proxy_key")
+    if not regions and not cursor_cfg:
+        raise ValueError("clean job needs regions and/or a cursor pass")
+    workdir = os.path.join(config.TMP_DIR, f"cln_{_uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        src = os.path.join(workdir, "src" + os.path.splitext(src_key)[1])
+        storage.download_to(src_key, src)
+        measure = payload.get("measure") or []
+        before = [text_energy(src, (b["x"], b["y"], b["w"], b["h"]),
+                              samples=5) for b in measure]
+        out = os.path.join(workdir, "clean.mp4")
+        prox = os.path.join(workdir, "clean_proxy.mp4")
+        mid = None
+        stats = None
+        if regions and cursor_cfg:
+            # Same chaining rule as the dispatcher's local path: repaint
+            # first into a full-res intermediate ON DISK (never two live
+            # encoders), then the cursor pass derives the proxy at the end.
+            mid = os.path.join(workdir, "clean_mid.mp4")
+            stats = clean_video(src, regions, mid)
+        elif regions:
+            stats = clean_video(src, regions, out, prox)
+        if cursor_cfg:
+            import cursor as cursorlib
+            stats = cursorlib.enhance(
+                mid or src, out, prox,
+                scale=float(cursor_cfg.get("scale", 2.0)),
+                smoothing=float(cursor_cfg.get("smoothing", 0.5)),
+                click_highlight=bool(cursor_cfg.get("click_highlight", True)),
+                click_times=cursor_cfg.get("click_times") or [])
+        after = [text_energy(out, (b["x"], b["y"], b["w"], b["h"]),
+                             samples=5) for b in measure]
+        storage.upload_file(out, out_key, "video/mp4")
+        storage.upload_file(prox, proxy_key, "video/mp4")
+        stats = dict(stats or {})
+        stats.update({"before": before, "after": after,
+                      "out_bytes": os.path.getsize(out),
+                      "proxy_bytes": os.path.getsize(prox)})
+        return stats
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)

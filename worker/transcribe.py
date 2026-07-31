@@ -50,6 +50,44 @@ def _hotword_terms():
 DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
 DEEPGRAM_RETRIES = 2
 _FALLBACK_PREFIX = "speech recognition fell back to the local model"
+_SPARSE_PREFIX = "speech recognition re-ran on the local model"
+
+
+def _wav_duration_s(wav_path):
+    """Duration of the index wav from its header alone (16k mono PCM — a
+    few bytes read, never the audio). 0.0 when unreadable, which disables
+    the sparse check rather than failing the index."""
+    try:
+        import wave
+        with wave.open(wav_path, "rb") as w:
+            rate = w.getframerate() or 16000
+            return w.getnframes() / float(rate)
+    except Exception:
+        return 0.0
+
+
+def _too_sparse(words, dur):
+    """Is this transcript impossibly thin for audio this long?
+
+    Deepgram nova-3 supports a short list of languages, and detect_language
+    picks the nearest member of THAT list — so Arabic speech comes back as
+    "Portuguese" or "Turkish" with ZERO words, as a 2xx the caller reads as
+    success (projects 295/296, Jul 31 2026: a man visibly talking for 130s,
+    0 words, and the agent told the user their video had no speech). An
+    HTTP success carrying no transcript for real-length audio is a failed
+    transcription wearing a success code; whisper (which handles ~100
+    languages, Arabic included) must get its turn. Thresholds are deliberately
+    conservative — a genuinely silent video passes through whisper's VAD in
+    seconds, so a false positive costs little, while a false negative costs a
+    user their whole edit."""
+    if not words:
+        return dur >= 3.0
+    if dur < 20.0:
+        return False
+    # Under ~3 words per minute of audio: nobody talks that slowly; this is
+    # a mis-detected language emitting near-nothing (a real case emitted
+    # exactly one hallucinated word for 27s of continuous speech).
+    return len(words) < max(3.0, dur * 0.05)
 
 
 def _parse_deepgram(payload):
@@ -140,7 +178,37 @@ def transcribe(wav_path, warnings=None):
     """Returns (words: [Word], language: str)."""
     if config.TRANSCRIBER == "deepgram":
         try:
-            return _transcribe_deepgram(wav_path)
+            words, lang = _transcribe_deepgram(wav_path)
+            dur = _wav_duration_s(wav_path)
+            if not _too_sparse(words, dur):
+                return words, lang
+            # A 2xx with (near-)zero words on minutes of audio is not a
+            # transcript, it is nova-3 meeting a language it does not
+            # support. Whisper covers ~100; run it and keep whichever
+            # engine actually heard the speech.
+            print(f"[transcribe] deepgram returned {len(words)} word(s) for "
+                  f"{dur:.0f}s of audio (detected '{lang}') — likely an "
+                  "unsupported language; re-running on local whisper",
+                  flush=True)
+            try:
+                w_words, w_lang = _transcribe_whisper(wav_path)
+            except Exception as e:
+                print(f"[transcribe] whisper retry failed ({str(e)[:160]}); "
+                      "keeping the deepgram result", flush=True)
+                return words, lang
+            finally:
+                _release_model()
+            if len(w_words) > len(words):
+                if warnings is not None and not any(
+                        w.startswith(_SPARSE_PREFIX) for w in warnings):
+                    warnings.append(
+                        f"{_SPARSE_PREFIX}: the hosted engine heard almost "
+                        f"nothing (detected '{lang}', {len(words)} words) but "
+                        f"local whisper transcribed {len(w_words)} words "
+                        f"(language '{w_lang}') — the local engine's "
+                        "transcript is in use")
+                return w_words, w_lang
+            return words, lang
         except Exception as e:
             # A hosted ASR having a bad day must not fail the whole index — but
             # the user is then reading a transcript from the WEAKER engine, and

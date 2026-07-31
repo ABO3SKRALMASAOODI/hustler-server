@@ -21,7 +21,13 @@ from pydantic import BaseModel, Field, field_validator
 # full day (Jul 16-17 2026) and every project open triggered a 30-90 min
 # re-index that STILL wrote the old version — an infinite loop that starved
 # two real customers' jobs. Constants deploy atomically; env vars don't.
-PIPELINE_VERSION = 7
+# v8: transcription changed output (round 67) — brand keyterm biasing removed
+# from customer ASR (it hallucinated "Valmera." as a real customer's entire
+# transcript) and a sparse-result fallback re-runs whisper when Deepgram
+# returns (near-)zero words for real-length audio (Arabic → "Portuguese",
+# 0 words). Existing zero-word indexes MUST rebuild or those users stay
+# uncaptionable forever.
+PIPELINE_VERSION = 8
 
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0
@@ -207,6 +213,9 @@ class CaptionStyle(BaseModel):
     preset: Optional[Literal[
         # original four (single-Dialogue "flow" emission)
         "podcast", "beast", "karaoke", "elegant",
+        # round 67: one word at a time, centred, glowing (the modern
+        # single-word look — the only preset that defaults position middle)
+        "spotlight",
         # composed looks (per-line "stack" emission): scale-led hierarchy,
         # tight/overlapping leading, layered text effects
         "stacked", "iridescent", "chrome", "editorial", "fashion", "luxe",

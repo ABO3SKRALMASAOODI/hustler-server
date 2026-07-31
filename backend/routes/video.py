@@ -79,9 +79,11 @@ VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
 # model call fails. Calls are recorded to llm_calls with job_id NULL:
 # visible in admin, never charged (credit charging sums per agent-turn
 # job).
-CONCIERGE_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+# Round 67: defaults follow the worker onto OpenAI GPT-5.6 Luna. Use the
+# exact "-luna" id — the bare "gpt-5.6" alias routes to Sol.
+CONCIERGE_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL",
-                            os.getenv("AGENT_MODEL", "deepseek-v4-pro"))
+                            os.getenv("AGENT_MODEL", "gpt-5.6-luna"))
 CONCIERGE_TIMEOUT_S = float(os.getenv("CONCIERGE_TIMEOUT_S", "14"))
 
 _concierge_client = None
@@ -455,7 +457,25 @@ def _concierge_reply(stage, history, attachments, index_error=None,
             # create request can't be silently misread as chat (act=False) and
             # dropped with no agent turn.
             create_kwargs["response_format"] = {"type": "json_object"}
-        resp = _concierge_llm().chat.completions.create(**create_kwargs)
+        try:
+            resp = _concierge_llm().chat.completions.create(**create_kwargs)
+        except Exception as adapt_e:
+            # OpenAI's reasoning family (the Luna default) rejects the
+            # classic max_tokens and a non-default temperature. Mirror the
+            # worker's dialect adaptation in miniature: correct once, retry
+            # once — a real failure still lands in the outer except.
+            msg = str(adapt_e).lower()
+            adapted = False
+            if "max_tokens" in create_kwargs and "max_tokens" in msg:
+                create_kwargs["max_completion_tokens"] = \
+                    create_kwargs.pop("max_tokens")
+                adapted = True
+            if "temperature" in create_kwargs and "temperature" in msg:
+                create_kwargs.pop("temperature")
+                adapted = True
+            if not adapted:
+                raise
+            resp = _concierge_llm().chat.completions.create(**create_kwargs)
         raw = (resp.choices[0].message.content or "").strip()
         usage = getattr(resp, "usage", None)
         rec = {"model": CONCIERGE_MODEL, "request": req,
@@ -733,15 +753,12 @@ def _branch_edl(cur, session_id, project_id, base_row):
                          exclude_version=version)
     if twin is not None:
         _adopt_preview(cur, project_id, twin, version)
-    cur.execute("""INSERT INTO chat_messages (session_id, role, content,
-                                              meta)
-                   VALUES (%s, 'activity', %s, %s)""",
-                (session_id,
-                 f"you → EDL v{version}: went back to edit state "
-                 f"v{base_row['version']} and continued from there",
-                 Json({"tool": "user_edit", "op": "revert",
-                       "edl_version": version,
-                       "branched_from": base_row["version"]})))
+    # NO chat message (round 67). This used to write "you → EDL vN: went back
+    # to edit state vX and continued from there" into the chat, and the studio
+    # showed its own "editing from an earlier state" banner on top — the owner:
+    # "weird words appear at the chat area … remove all of those, I don't want
+    # 1000 things in the chat". The branch itself is fully recorded in the edls
+    # table (created_by + version lineage); the chat is for the conversation.
     return version
 
 

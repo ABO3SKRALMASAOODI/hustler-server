@@ -250,6 +250,26 @@ def run_smatch_remote(project_id, payload, user_id=None):
                         "attempts": 0, "payload": payload})
 
 
+def clean_available():
+    """Is there an executor to run the erase/repaint pass on? (round 67)
+    Same contract as track_available: the clean pass decodes AND re-encodes
+    every frame of a user original inside an agent turn — the heaviest member
+    of the job class that has OOM-killed the dispatcher repeatedly — so with
+    an executor configured it never runs locally, and a remote failure is an
+    honest refusal, never a local retry."""
+    return bool(config.REMOTE_EXECUTOR_URL)
+
+
+def run_clean_remote(project_id, payload, user_id=None):
+    """Repaint erase regions (and/or run the cursor pass) on the executor.
+    Returns inpaint.run_clean_job's dict — clean_video stats plus the
+    before/after ink measurements and object sizes; on success both cleaned
+    objects are already uploaded. Synchronous, no job row."""
+    return _run_remote({"id": None, "type": "clean",
+                        "project_id": project_id, "user_id": user_id,
+                        "attempts": 0, "payload": payload})
+
+
 def run_render_remote(worker_db, job):      # signature matches run_render_job
     return _run_remote(job)
 

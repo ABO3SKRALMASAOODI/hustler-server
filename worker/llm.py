@@ -253,6 +253,29 @@ _BAD_PARAM_MARKERS = ("unrecognized request argument", "unknown parameter",
 # per process so one rejection is one wasted call, not one per iteration.
 _no_reasoning_effort = set()
 
+# Agent models whose provider rejected an image content part (round 67). The
+# direct-sight look_at hands frames straight to the AGENT model; a blind
+# provider (DeepSeek) 400s on the part itself and would 400 identically
+# forever, so one rejection latches per model and look_at falls back to the
+# separate VISION_* provider — the pre-round-67 behaviour, not a failure.
+_agent_blind = set()
+
+
+def agent_sees(model):
+    """Can THIS agent model read image parts in its own context?"""
+    return bool(config.AGENT_MULTIMODAL) and model not in _agent_blind
+
+
+def mark_agent_blind(model):
+    _agent_blind.add(model)
+
+
+def looks_like_blind_model(exc):
+    """Is `exc` the provider refusing the IMAGE PART itself (not a transient
+    failure)? Same markers vision latches on."""
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    return any(m in msg for m in _BLIND_MARKERS)
+
 
 def looks_like_bad_parameter(exc, field):
     """Is `exc` the provider refusing a request FIELD, rather than failing?
@@ -274,6 +297,74 @@ def reasoning_effort_rejected(model):
 
 def mark_reasoning_effort_rejected(model):
     _no_reasoning_effort.add(model)
+
+
+# ── Completion-parameter dialects (round 67) ─────────────────────────────
+# OpenAI's reasoning-model family (which gpt-5.6-luna belongs to) rejects the
+# classic `max_tokens` field ("use max_completion_tokens") and any
+# non-default `temperature`, while DeepSeek/xAI accept both — so the same
+# call cannot be written one way for every provider. Same policy as
+# reasoning_effort: send the classic spelling, and on the narrow
+# unknown-parameter rejection adapt ONCE and latch per model, so the cost is
+# one failed call per process instead of a 400 on every step of every turn.
+_use_max_completion_tokens = set()
+_no_temperature = set()
+
+
+def completion_kwargs(model, max_tokens=None, temperature=None):
+    """The token-limit and temperature kwargs in the dialect this model has
+    proven to accept."""
+    kw = {}
+    if max_tokens is not None:
+        if model in _use_max_completion_tokens:
+            kw["max_completion_tokens"] = max_tokens
+        else:
+            kw["max_tokens"] = max_tokens
+    if temperature is not None and model not in _no_temperature:
+        kw["temperature"] = temperature
+    return kw
+
+
+def adapt_completion_kwargs(exc, model, kw):
+    """If `exc` is the provider refusing max_tokens or temperature, latch the
+    model's dialect and return corrected kwargs for one retry. None = not an
+    adaptable failure (let it propagate)."""
+    if "max_tokens" in kw and looks_like_bad_parameter(exc, "max_tokens"):
+        _use_max_completion_tokens.add(model)
+        out = dict(kw)
+        out["max_completion_tokens"] = out.pop("max_tokens")
+        print(f"[llm] {model} wants max_completion_tokens — latched",
+              flush=True)
+        return out
+    if "temperature" in kw and looks_like_bad_parameter(exc, "temperature"):
+        _no_temperature.add(model)
+        out = dict(kw)
+        out.pop("temperature")
+        print(f"[llm] {model} rejects a custom temperature — latched",
+              flush=True)
+        return out
+    return None
+
+
+def create_with_dialect(client_obj, model, messages, max_tokens=None,
+                        temperature=None, **extra):
+    """chat.completions.create with automatic parameter-dialect adaptation.
+    For the simple one-shot callers (ask_text / ask_vision / regen); the
+    agent loop integrates the same helpers into its richer retry chain."""
+    kw = completion_kwargs(model, max_tokens, temperature)
+    kw.update(extra)
+    attempts = 0
+    while True:
+        try:
+            return client_obj.chat.completions.create(
+                model=model, messages=messages, **kw)
+        except Exception as e:
+            attempts += 1
+            adapted = adapt_completion_kwargs(e, model, kw) \
+                if attempts <= 2 else None
+            if adapted is None:
+                raise
+            kw = adapted
 
 
 def vision_available(plan=None):
@@ -368,13 +459,14 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
     # own `model` column.
     vclient, vmodel = vision_client_for(turn_plan())
     try:
-        # Vision gets a MORE generous timeout than the text agent (spiky grok
-        # multimodal latency); retries stay at the client default.
-        resp = vclient.with_options(
-            timeout=config.VISION_TIMEOUT_S
-        ).chat.completions.create(
-            model=vmodel,
-            messages=[{"role": "user", "content": content}],
+        # Vision gets a MORE generous timeout than the text agent (spiky
+        # multimodal latency); retries stay at the client default. Dialect-
+        # aware (round 67): OpenAI reasoning models refuse max_tokens and a
+        # custom temperature.
+        resp = create_with_dialect(
+            vclient.with_options(timeout=config.VISION_TIMEOUT_S),
+            vmodel,
+            [{"role": "user", "content": content}],
             max_tokens=max_tokens,
             temperature=0.1,
         )
@@ -420,8 +512,8 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text"):
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
     try:
-        resp = client().chat.completions.create(
-            model=config.AGENT_MODEL, messages=messages,
+        resp = create_with_dialect(
+            client(), config.AGENT_MODEL, messages,
             max_tokens=max_tokens, temperature=temperature)
         text = (resp.choices[0].message.content or "").strip()
         usage = getattr(resp, "usage", None)

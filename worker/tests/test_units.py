@@ -3099,8 +3099,20 @@ check("the request carries the model, key and word-timestamp formatting",
       _calls[0]["params"]["model"] == wconfig.DEEPGRAM_MODEL
       and _calls[0]["headers"]["Authorization"] == "Token test-key"
       and _calls[0]["params"]["smart_format"] == "true")
-check("brand hotwords ride along as deepgram keyterms",
+# Round 67: brand keyterm biasing is OFF by default. The old default
+# ("Valmera, valmera.io") hallucinated "Valmera." as a real customer's ENTIRE
+# transcript (index 201, project 293) — the bias belongs only on deployments
+# that explicitly set WHISPER_HOTWORDS for their own demo footage.
+check("no keyterm biasing is sent by default (round 67)",
+      "keyterm" not in _calls[0]["params"])
+_saved_hot = wconfig.WHISPER_HOTWORDS
+wconfig.WHISPER_HOTWORDS = "Valmera, valmera.io"
+_calls = _stub_post([_Resp(200, _dg_ok)])
+_whisper_hits.clear()
+tr.transcribe(_wav.name, [])
+check("env-set hotwords still ride along as deepgram keyterms",
       "Valmera" in _calls[0]["params"]["keyterm"])
+wconfig.WHISPER_HOTWORDS = _saved_hot
 
 # 5xx is transient -> retry, then fall back rather than fail the index.
 _calls = _stub_post([_Resp(503, text="upstream"), _Resp(200, _dg_ok)])

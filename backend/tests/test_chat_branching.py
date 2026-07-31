@@ -84,14 +84,11 @@ def test_branch_appends_a_copy_and_adopts_the_existing_encode():
     assert meta["edl_version"] == 21
     assert meta["reused_from_asset_id"] == 9
 
-    # the branch announces itself in the chat, stamped for the rollback filter
-    act = cur.sql_containing("INSERT INTO chat_messages")
-    assert len(act) == 1
-    content, act_meta = act[0][1][1], act[0][1][2].adapted
-    assert "went back to edit state v3" in content
-    assert act_meta["edl_version"] == 21
-    assert act_meta["branched_from"] == 3
-    assert act_meta["tool"] == "user_edit"
+    # Round 67: the branch is SILENT in the chat. It used to write "went back
+    # to edit state vX and continued from there", and the owner's verdict on
+    # the whole family was "I don't want 1000 things in the chat" — the edls
+    # table records the lineage; the chat is for the conversation.
+    assert len(cur.sql_containing("INSERT INTO chat_messages")) == 0
 
 
 def test_branch_without_an_existing_encode_still_branches():
@@ -104,4 +101,5 @@ def test_branch_without_an_existing_encode_still_branches():
     )
     assert video._branch_edl(cur, "sess-1", 1, base) == 8
     assert len(cur.sql_containing("INSERT INTO assets")) == 0
-    assert len(cur.sql_containing("INSERT INTO chat_messages")) == 1
+    # round 67: no chat announcement — see above
+    assert len(cur.sql_containing("INSERT INTO chat_messages")) == 0

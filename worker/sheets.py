@@ -98,6 +98,37 @@ def caption_shots(sheets, shots_by_id):
     return any_ok
 
 
+def build_timestamp_sheet(frames, out_path):
+    """Assemble already-extracted frames into ONE labeled sheet — the
+    round-67 direct-sight look_at. frames: [(label, jpeg_path)], in order.
+
+    Tiles are deliberately larger than the indexing sheets' (480x270 vs
+    320x180): the AGENT reads this picture itself now, and it is answering
+    fine-grained questions ("is the subject left or right of frame at 12s?"),
+    not batch-captioning 25 shots. Two columns keep an 8-frame request under
+    ~1000px wide, which image-input providers downscale gracefully."""
+    tile_w, tile_h, label_h, cols = 480, 270, 30, 2
+    font = _font(17)
+    rows = (len(frames) + cols - 1) // cols
+    canvas = Image.new("RGB", (cols * tile_w if len(frames) > 1 else tile_w,
+                               rows * (tile_h + label_h)), (12, 12, 12))
+    draw = ImageDraw.Draw(canvas)
+    for i, (label, fp) in enumerate(frames):
+        x = (i % cols) * tile_w
+        y = (i // cols) * (tile_h + label_h)
+        try:
+            img = Image.open(fp).convert("RGB")
+            img.thumbnail((tile_w, tile_h))
+            canvas.paste(img, (x + (tile_w - img.width) // 2,
+                               y + (tile_h - img.height) // 2))
+        except Exception:
+            pass
+        draw.text((x + 8, y + tile_h + 5), label,
+                  fill=(235, 235, 235), font=font)
+    canvas.save(out_path, "JPEG", quality=85)
+    return out_path
+
+
 def build_result_sheet(video_path, out_path, duration, grid=3):
     """3x3 evenly-sampled sheet of a RENDER, for the agent's self-check."""
     import media
