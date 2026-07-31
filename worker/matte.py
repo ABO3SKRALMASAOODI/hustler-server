@@ -111,6 +111,17 @@ SEG_VOTE = 5                 # majority vote window, in sampled frames
 SEG_FLICKER_PRESENCE = 0.45  # static-ish: present in this share of frames...
 SEG_FLICKER_CONF = 0.75      # ...with mean confidence under this = furniture
 #                              flicker, dropped (when real motion exists)
+# The per-pixel TOGGLE budget (round 66b, from inspecting the v137 render
+# frame by frame: the title's "?" went on-off-on within 0.3s while the
+# walker was nowhere near it). Burst detections of 100-300ms defeat the vote
+# (too long) AND the presence gate (too short), but they cannot defeat
+# arithmetic: a passing subject turns a pixel on and off ONCE (~2
+# transitions, a few more at grazed silhouette edges), while a strobing
+# region transitions constantly. Pixels over budget are removed for the
+# whole window. The budget scales with sample count so long windows do not
+# strangle a subject who genuinely crosses several times.
+SEG_MAX_TOGGLE_FRAC = 0.06   # transitions allowed, as a share of samples...
+SEG_MIN_TOGGLES = 6          # ...with this floor
 
 # Sampling for the background plate. 24 samples spread over the window is
 # enough for a median to see past a subject that lingers, and few enough to hold
@@ -752,6 +763,21 @@ def _seg_stabilize(masks, cv2, sample_dt):
     return out
 
 
+def _seg_toggle_filter(masks):
+    """Per-pixel flicker kill (round 66b): pixels whose on/off transition
+    count across the (voted) samples exceeds the budget are zeroed for the
+    whole window. A passing subject costs a pixel ~2 transitions; a strobing
+    detection costs dozens. Returns a float32 multiplier or None."""
+    if len(masks) < 8:
+        return None
+    stack = np.stack([m > 127 for m in masks])
+    toggles = np.sum(stack[1:] != stack[:-1], axis=0)
+    budget = max(SEG_MIN_TOGGLES, int(SEG_MAX_TOGGLE_FRAC * len(masks)))
+    if int((toggles > budget).sum()) == 0:
+        return None
+    return (toggles <= budget).astype(np.float32)
+
+
 def _seg_mask_frames(idxs, masks, n_frames, w, h, cv2, keep=None):
     """One soft mask per OUTPUT frame at (w, h): linear blend between the
     bracketing sampled masks (identity when every frame was sampled), gated
@@ -821,6 +847,11 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
         sample_dt = ((idxs[1] - idxs[0]) / out_fps if len(idxs) > 1
                      else 1.0 / out_fps)
         proc = _seg_stabilize(s_masks, cv2, sample_dt)
+        # The toggle budget (round 66b) reads the VOTED stream: flicker that
+        # survived the vote is exactly what it exists to remove.
+        flick = _seg_toggle_filter(proc)
+        if flick is not None:
+            keep = flick if keep is None else keep * flick
         mask_iter = _seg_mask_frames(idxs, proc, n_frames, w, h, cv2,
                                      keep=keep)
     else:

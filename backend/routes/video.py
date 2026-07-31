@@ -678,6 +678,73 @@ def _preview_twin(cur, project_id, edl, exclude_version=None):
     return None
 
 
+def _adopt_preview(cur, project_id, twin_id, version):
+    """Point a new EDL version at an existing preview encode of the same
+    programme. The row is a pointer at the same storage key, not a copy: no
+    bytes move, and reused_from_asset_id stays canonical (an alias of an
+    alias still names the asset that owns the bytes) so the studio can tell
+    in one comparison that the object on screen has not changed."""
+    cur.execute("""SELECT storage_key, bytes, duration_s, width, height,
+                          fps, meta
+                   FROM assets WHERE id = %s""", (twin_id,))
+    src = cur.fetchone()
+    meta = dict(src["meta"] or {})
+    meta.update({"edl_version": version, "variant": "preview",
+                 "reused_from_asset_id":
+                     meta.get("reused_from_asset_id") or twin_id})
+    cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
+                                       bytes, duration_s, width,
+                                       height, fps, meta)
+                   VALUES (%s,'render',%s,%s,%s,%s,%s,%s,%s)
+                   RETURNING id""",
+                (project_id, src["storage_key"], src["bytes"],
+                 src["duration_s"], src["width"], src["height"],
+                 src["fps"], Json(meta)))
+    return cur.fetchone()["id"]
+
+
+def _branch_edl(cur, session_id, project_id, base_row):
+    """Append a copy of an older version as the new newest — "go back and
+    continue from here", the same append-only branch the user-op route has
+    done since round 59, now available to a chat message sent while the user
+    is viewing an older state. Returns the new version number.
+
+    The copy means the worker's latest_edl() IS the state the user was
+    looking at when they typed — without it the agent edited the newest
+    version while the user watched an older one, and the reply described a
+    timeline the user could not see."""
+    cur.execute("""INSERT INTO edls (project_id, version, json, created_by)
+                   VALUES (%s, (SELECT COALESCE(MAX(version), 0) + 1
+                                FROM edls WHERE project_id = %s),
+                           %s, 'user') RETURNING version""",
+                (project_id, project_id, Json(base_row["json"])))
+    version = cur.fetchone()["version"]
+    # Queued previews of older versions are already worthless — same sweep,
+    # same reasoning as the user-op route below.
+    cur.execute("""UPDATE video_jobs
+                      SET state = 'done', result = %s, updated_at = NOW()
+                    WHERE project_id = %s AND type = 'preview'
+                      AND state = 'queued'
+                      AND (payload->>'edl_version')::int < %s""",
+                (Json({"superseded_by": version}), project_id, version))
+    # The state being branched to was on the user's screen, so its encode
+    # almost always exists — adopt it and the player never has to reload.
+    twin = _preview_twin(cur, project_id, base_row["json"],
+                         exclude_version=version)
+    if twin is not None:
+        _adopt_preview(cur, project_id, twin, version)
+    cur.execute("""INSERT INTO chat_messages (session_id, role, content,
+                                              meta)
+                   VALUES (%s, 'activity', %s, %s)""",
+                (session_id,
+                 f"you → EDL v{version}: went back to edit state "
+                 f"v{base_row['version']} and continued from there",
+                 Json({"tool": "user_edit", "op": "revert",
+                       "edl_version": version,
+                       "branched_from": base_row["version"]})))
+    return version
+
+
 # ------------------------------------------------------------------ #
 #  Who pays for the encode, and when (round 60)                        #
 # ------------------------------------------------------------------ #
@@ -2068,6 +2135,15 @@ def post_message(user_id, project_id):
     data = request.get_json() or {}
     text = (data.get("text") or "").strip()
     client_msg_id = (str(data.get("client_msg_id") or "")[:64]) or None
+    # The EDL version the user was LOOKING AT when they typed (the studio
+    # sends it only while stepped back in the edit history). Same contract as
+    # the user-op route's base_version: a message sent from an older state
+    # means "continue from HERE", and the turn must branch, not edit the
+    # newest version behind the user's back.
+    try:
+        base_version = int(data.get("base_version"))
+    except (TypeError, ValueError):
+        base_version = None
     attachment_ids = data.get("attachments") or []
     if not isinstance(attachment_ids, list):
         attachment_ids = []
@@ -2216,7 +2292,31 @@ def post_message(user_id, project_id):
                  "duration_s": by_id[aid]["duration_s"]}
                 for aid in attachment_ids if aid in by_id]
 
+        # Resolve which edit state this message is ABOUT, and whether the
+        # turn must branch to it first. Every message is stamped with that
+        # version (meta.edl_version) so the studio can roll the chat back in
+        # step with the version stepper — the stamp is the state the user was
+        # looking at, which is base_version while stepped back and the newest
+        # version otherwise.
+        latest_row = _latest_edl(cur, project_id) if indexed else None
+        branch_base = None
+        msg_version = latest_row["version"] if latest_row else None
+        if latest_row and base_version is not None \
+                and base_version != latest_row["version"]:
+            picked = _edl_at(cur, project_id, base_version)
+            if picked:
+                msg_version = base_version
+                try:
+                    differs = (wschemas.edl_signature(picked["json"])
+                               != wschemas.edl_signature(latest_row["json"]))
+                except Exception:
+                    differs = True
+                if differs:
+                    branch_base = picked
+
         meta = {}
+        if msg_version is not None:
+            meta["edl_version"] = msg_version
         if client_msg_id:
             meta["client_msg_id"] = client_msg_id
         if attachments_meta:
@@ -2279,6 +2379,13 @@ def post_message(user_id, project_id):
                             (p["chat_session_id"],))
                 return jsonify({"queued": False, "message_id": message_id})
 
+            if branch_base is not None:
+                # Branch BEFORE the turn is queued, in the same transaction
+                # as the message: the worker's latest_edl() then already IS
+                # the state the user was looking at, and the studio's poll
+                # sees the branch (with its adopted preview) immediately.
+                _branch_edl(cur, p["chat_session_id"], project_id,
+                            branch_base)
             job_id = _enqueue(cur, project_id, user_id, "agent_turn",
                               {"message_id": message_id})
 
@@ -3149,26 +3256,7 @@ def user_edl_write(user_id, project_id):
         if plan == "defer":
             pass
         elif plan == "adopt":
-            cur.execute("""SELECT storage_key, bytes, duration_s, width,
-                                  height, fps, meta
-                           FROM assets WHERE id = %s""", (twin,))
-            src = cur.fetchone()
-            meta = dict(src["meta"] or {})
-            # Canonical, never a chain: an alias of an alias still names the
-            # asset that owns the bytes, so the studio can tell in one
-            # comparison that the object on screen has not changed.
-            meta.update({"edl_version": version, "variant": "preview",
-                         "reused_from_asset_id":
-                             meta.get("reused_from_asset_id") or twin})
-            cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
-                                               bytes, duration_s, width,
-                                               height, fps, meta)
-                           VALUES (%s,'render',%s,%s,%s,%s,%s,%s,%s)
-                           RETURNING id""",
-                        (project_id, src["storage_key"], src["bytes"],
-                         src["duration_s"], src["width"], src["height"],
-                         src["fps"], Json(meta)))
-            reused = cur.fetchone()["id"]
+            reused = _adopt_preview(cur, project_id, twin, version)
         else:
             preview_job = _enqueue(cur, project_id, user_id, "preview",
                                    {"edl_version": version,
@@ -3178,7 +3266,12 @@ def user_edl_write(user_id, project_id):
                        VALUES (%s, 'activity', %s, %s)""",
                     (p["chat_session_id"],
                      f"you → EDL v{version}: {desc}",
-                     Json({"tool": "user_edit", "op": op})))
+                     # edl_version is what lets the studio roll the chat back
+                     # in step with the version stepper.
+                     Json({"tool": "user_edit", "op": op,
+                           "edl_version": version,
+                           **({"branched_from": branched_from}
+                              if branched_from is not None else {})})))
 
     return jsonify({"version": version, "preview_job_id": preview_job,
                     "reused_preview_asset_id": reused,

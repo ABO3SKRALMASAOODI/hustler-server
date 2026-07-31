@@ -317,7 +317,8 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     return msgs
 
 
-def _activity(worker_db, session_id, name, args, result, source=None):
+def _activity(worker_db, session_id, name, args, result, source=None,
+              edl_version=None):
     res_str = (result or "").replace("\n", " ")
     # Long enough that a diff line PLUS its appended WARNING lines survive —
     # truncating warnings out of the activity feed would hide them from the
@@ -334,6 +335,10 @@ def _activity(worker_db, session_id, name, args, result, source=None):
             arg_str = arg_str[:160] + "…"
         label = f"{name}{arg_str if arg_str != '{}' else '()'}"
     meta = {"tool": name, "args": args}
+    if edl_version is not None:
+        # The EDL version current when this call ran — lets the studio roll
+        # the activity feed back in step with the version stepper.
+        meta["edl_version"] = edl_version
     if source:
         # Which driver made this call. The studio renders MCP activity exactly
         # like the agent's — it IS the same tool doing the same thing — but the
@@ -526,7 +531,9 @@ def run_agent_job(worker_db, job):
         print(f"[agent] job {job['id']} failed: {type(e).__name__}: {e}",
               flush=True)
         worker_db.run(dbx.add_message, session_id, "assistant",
-                      _user_facing_failure(e))
+                      _user_facing_failure(e),
+                      ({"edl_version": ctx.versions_written[-1]}
+                       if ctx.versions_written else None))
         raise
     finally:
         llm.set_recorder(None)
@@ -550,7 +557,8 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings):
         result = agent_tools.render_preview(ctx)
         timings["auto_render_s"] = round(time.monotonic() - t0, 2)
         _activity(worker_db, session_id, "render_preview",
-                  {"auto": "model skipped it"}, result)
+                  {"auto": "model skipped it"}, result,
+                  edl_version=latest["version"])
         if "FAILED" in result:
             fail_note = ("\n\n(Heads up: the preview render failed — "
                          f"{result[:200]})")
@@ -1474,10 +1482,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 try:
                     result = agent_tools.execute(ctx, name, args)
                 except agent_tools.AskUser as q:
+                    _cur_v = (ctx.versions_written[-1]
+                              if ctx.versions_written else start_version)
                     _activity(worker_db, session_id, name, args,
-                              f"asked: {q.question}")
+                              f"asked: {q.question}", edl_version=_cur_v)
                     worker_db.run(dbx.add_message, session_id, "assistant",
-                                  q.question, {"ask_user": True})
+                                  q.question,
+                                  {"ask_user": True, "edl_version": _cur_v})
                     return {"status": "awaiting_user", "steps": total_steps,
                             "timings": timings}
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
@@ -1487,7 +1498,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         isinstance(result, str) and result.startswith("EDL v"):
                     ctx.write_calls.append(name)
             total_steps += 1
-            _activity(worker_db, session_id, name, args, result)
+            _activity(worker_db, session_id, name, args, result,
+                      edl_version=(ctx.versions_written[-1]
+                                   if ctx.versions_written
+                                   else start_version))
             result = _time_pressure_note(result, t_start, warned)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})

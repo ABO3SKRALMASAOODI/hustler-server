@@ -275,6 +275,37 @@ def test_single_sample_flicker_dies_in_the_vote(walk, workdir, monkeypatch):
 
 
 @needs_ffmpeg
+def test_burst_flicker_is_killed_by_the_toggle_budget(walk, workdir,
+                                                      monkeypatch):
+    """Round 66b, seen frame by frame in a real render: a region strobed
+    on-off-on within 0.3s far from the walker. Bursts of ~5 samples defeat
+    the vote (too long) and the presence gate (too short) and can be fully
+    confident — but a passing subject toggles a pixel ~twice, a strobe
+    toggles constantly, and the budget kills it for the whole window."""
+    n_call = {"i": 0}
+
+    def bursty(frame_bgr, cv2):
+        m = _fake_segment(frame_bgr, cv2)
+        n_call["i"] += 1
+        if (n_call["i"] // 5) % 2 == 0:       # 5 on, 5 off, all window long
+            m[255:310, 220:300] = 1.0         # strong burst, fixed spot
+            #        ^ fully BELOW the walker's band, so no legit
+            #          subject pixels share the region
+        return m
+    monkeypatch.setattr(personseg, "segment", bursty)
+    out = os.path.join(workdir, "seg_burst.mp4")
+    res = matte.measure_and_build(walk, out, 0.0, DUR, width=W, height=H)
+    assert res["ok"], res
+    fy0, fy1 = int(255 / 320 * H), int(310 / 320 * H)
+    fx0, fx1 = int(220 / 320 * W), int(300 / 320 * W)
+    worst = max(float((m[fy0 + 6:fy1 - 6, fx0 + 6:fx1 - 6] > 127).mean())
+                for m in _decode_mask(out))
+    assert worst < 0.05, f"burst flicker survived: {worst}"
+    # ...and the walker himself is still there
+    assert res["coverage"] > 0.02, res
+
+
+@needs_ffmpeg
 def test_no_person_is_an_honest_refusal(workdir, monkeypatch):
     def nobody(frame_bgr, cv2):
         return np.zeros((personseg.INPUT_SIZE, personseg.INPUT_SIZE),
