@@ -166,7 +166,7 @@ def _takeover_edl(clip_key, hand=3.0, dur=TAKE_S, push=1.0, ease="smooth"):
     }
 
 
-def _render(src, clip_path, edl_dict, out):
+def _render(src, clip_path, edl_dict, out, fps=None):
     edl = validate_edl(dict(edl_dict), ROOM_S).model_dump()
     tl = Timeline(edl["keep"], edl.get("inserts") or [],
                   edl.get("speed") or [])
@@ -174,7 +174,7 @@ def _render(src, clip_path, edl_dict, out):
     # Input layout mirrors render_edl: [0] main, then inserts, then overlays.
     graph = renderer.build_filtergraph(
         edl, ROOM_S, True, tl, None, [], index, preview=False,
-        W=W, H=H, fps=float(FPS),
+        W=W, H=H, fps=float(fps or FPS),
         insert_inputs=[(1, edl["inserts"][0], True)],
         overlay_inputs=[(2, edl["overlays"][0])])
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", src, "-i", clip_path,
@@ -499,6 +499,24 @@ def test_content_covers_the_whole_frame_when_the_push_lands(rendered):
     f = _frame_at(rendered, 3.0 - 1.5 / FPS)
     m = _content_mask(f)
     assert m.mean() > 0.985, f"only {m.mean():.3f} of the frame is content"
+
+
+@needs_ffmpeg
+def test_content_supply_never_runs_out_before_the_cut(workdir, room, clip):
+    """Round 66, from a real render: trimmed to exactly the window length,
+    the pinned branch runs out of frames one or two frames before the cut at
+    fractional rates, and `overlay eof_action=pass` flashes the zoomed BASE
+    between the full-frame content and the incoming clip — "a frame of the
+    old screen reappears and goes off very fast". The supply now runs
+    SCREEN_SUPPLY_PAD_S past the window, so every frame up to the cut shows
+    content. Rendered at a real phone rate (59.969) to force the rounding."""
+    out = os.path.join(workdir, "takeover_frac.mp4")
+    _render(room, clip, _takeover_edl("clip.mp4"), out, fps=59.969)
+    for k in (1, 2, 3):
+        f = _frame_at(out, 3.0 - k / 59.969)
+        m = _content_mask(f)
+        assert m.mean() > 0.95, \
+            f"base showing {1 - m.mean():.2%} at {k} frame(s) before the cut"
 
 
 @needs_ffmpeg

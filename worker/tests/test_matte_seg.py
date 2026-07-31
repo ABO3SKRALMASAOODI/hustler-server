@@ -214,6 +214,67 @@ def test_the_budget_still_yields_every_frame(walk, workdir, monkeypatch):
 
 
 @needs_ffmpeg
+def test_flickering_weak_furniture_is_dropped(walk, workdir, monkeypatch):
+    """Round 66, from the first real render off v6: 'like a corrupt screen
+    that goes off and on in some places'. A chair the model detects in HALF
+    the frames has presence ~0.5 — under the 0.85 static rule, so v6 kept it
+    as 'motion' and it strobed over the title. Those detections hover near
+    the decision threshold (that is WHY they flicker), so the flicker gate
+    drops static-ish blobs with weak mean confidence — for the WHOLE window,
+    no strobing possible."""
+    def flickery(frame_bgr, cv2):
+        m = _fake_segment(frame_bgr, cv2)
+        f = cv2.resize(frame_bgr, (personseg.INPUT_SIZE, personseg.INPUT_SIZE),
+                       interpolation=cv2.INTER_AREA).astype(np.int16)
+        chair = np.all(np.abs(f - np.array(CHAIR, np.int16)) < 5, axis=2)
+        m[chair] = 0.0
+        # the chair comes back WEAK (0.6) in just over half the frames
+        if not hasattr(flickery, "_i"):
+            flickery._i = 0
+        flickery._i += 1
+        if flickery._i % 5 != 0:
+            m[chair] = 0.6
+        return m
+    monkeypatch.setattr(personseg, "segment", flickery)
+    out = os.path.join(workdir, "seg_flicker.mp4")
+    res = matte.measure_and_build(walk, out, 0.0, DUR, width=W, height=H)
+    assert res["ok"], res
+    masks = _decode_mask(out)
+    x0, y0, x1, y1 = CHAIR_BOX
+    chair_on = max(float((m[y0 + 12:y1 - 12, x0 + 12:x1 - 12] > 127).mean())
+                   for m in masks)
+    assert chair_on < 0.05, f"flickering furniture strobed: {chair_on}"
+
+
+@needs_ffmpeg
+def test_single_sample_flicker_dies_in_the_vote(walk, workdir, monkeypatch):
+    """A CONFIDENT detection that exists for one sample is still flicker —
+    the vote kills what the confidence gate cannot."""
+    blob_frame = {"n": 0}
+
+    def one_frame_blob(frame_bgr, cv2):
+        m = _fake_segment(frame_bgr, cv2)
+        blob_frame["n"] += 1
+        if blob_frame["n"] == 45:          # one strong blob, one sample
+            m[40:110, 40:110] = 1.0
+        return m
+    monkeypatch.setattr(personseg, "segment", one_frame_blob)
+    out = os.path.join(workdir, "seg_oneflick.mp4")
+    res = matte.measure_and_build(walk, out, 0.0, DUR, width=W, height=H)
+    assert res["ok"], res
+    # the blob region (model res 40:110 -> frame fractions) stays empty
+    # around the flicker's own moment — the walker crosses the same region
+    # legitimately EARLIER in the window, so only frames 40-50 are checked
+    fy0, fy1 = int(40 / 320 * H), int(110 / 320 * H)
+    fx0, fx1 = int(40 / 320 * W), int(110 / 320 * W)
+    masks = _decode_mask(out)[40:50]
+    assert masks
+    worst = max(float((m[fy0 + 4:fy1 - 4, fx0 + 4:fx1 - 4] > 127).mean())
+                for m in masks)
+    assert worst < 0.05, f"one-sample flicker survived the vote: {worst}"
+
+
+@needs_ffmpeg
 def test_no_person_is_an_honest_refusal(workdir, monkeypatch):
     def nobody(frame_bgr, cv2):
         return np.zeros((personseg.INPUT_SIZE, personseg.INPUT_SIZE),

@@ -119,6 +119,10 @@ SCREEN_HOLD_S = 0.30
 # Where along the push the shape/skew correction is allowed to begin, as a
 # fraction of the eased travel (see the g weight in screen_lock_corner_paths).
 SCREEN_CORR_E0 = 0.6
+# Extra seconds of content decoded past the window end so the pinned branch
+# can never run out of frames before the cut (round 66 — see the trim in the
+# takeover chain). Display is still gated by the overlay's enable window.
+SCREEN_SUPPLY_PAD_S = 0.35
 
 
 def screen_lock_hold(dur):
@@ -1743,7 +1747,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         chain = []
         if item["kind"] != "image":
             off = float(item.get("source_start_s") or 0.0)
-            chain.append(f"trim=start={off:.3f}:end={off + o_dur:.3f}")
+            # The content supply runs PAST the window end (round 66). Trimmed
+            # to exactly o_dur, fractional frame rates (59.969...) leave the
+            # pinned branch exhausted one or two frames BEFORE the cut, and
+            # `overlay eof_action=pass` then shows the zoomed BASE for those
+            # frames — a 16-33ms flash of the room between the full-frame
+            # content and the incoming clip, which a real user described as
+            # "a frame of the old screen reappears and goes off very fast".
+            # The extra frames are the same pixels the spliced clip opens
+            # with (source time runs continuously across the handoff), and
+            # the enable window below still gates what is DISPLAYED.
+            chain.append(
+                f"trim=start={off:.3f}"
+                f":end={off + o_dur + SCREEN_SUPPLY_PAD_S:.3f}")
             chain.append("setpts=PTS-STARTPTS")
         # The content is cover-fitted to the OUTPUT frame, not to the screen's
         # shape: the takeover ENDS full-frame, and an asset that changed aspect

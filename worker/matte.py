@@ -50,7 +50,7 @@ import personseg
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 6
+VERSION = 7
 
 # ── v6: the subject is FOUND, not inferred (round 64) ───────────────────────
 # Versions 2-5 are four consecutive rounds of cleverer photometrics failing on
@@ -90,6 +90,27 @@ SEG_MOVING_SHARE = 0.25      # ...and that moving mass is a real share of the
 SEG_MIN_BLOB_PX = 82         # union-blobs under this (model res) are speckle:
 #                              they neither count as moving mass nor as a
 #                              subject
+# ── v7: the mask must not STROBE (round 66) ─────────────────────────────────
+# The first real render off v6 flickered — the user's words: "like a corrupt
+# screen that goes off and on in some places... every time i walk". Two
+# mechanisms, both about time, which v6 never looked along:
+#   * NO TEMPORAL SMOOTHING. The photometric path earned its 3-frame vote in
+#     round 62 ("one frame's flicker cannot strobe the composite"); the v6
+#     seg path had none, so every frame's model output stood alone and every
+#     borderline detection strobed at the render rate.
+#   * INTERMITTENT FURNITURE. The static gate only drops blobs present in
+#     ~every sampled frame (presence > 0.85). A chair the model detects in
+#     HALF the frames reads as 'moving' and eats the title on and off. Those
+#     detections hover near the decision threshold — that is WHY they
+#     flicker — so the second gate drops static-ish blobs whose mean model
+#     confidence is weak. A pacing person is safe on both counts: their
+#     swept band unions into one blob with LOW mean presence, and the model
+#     is emphatic about people (confidence ~1.0 on the round-64 validation
+#     frames).
+SEG_VOTE = 5                 # majority vote window, in sampled frames
+SEG_FLICKER_PRESENCE = 0.45  # static-ish: present in this share of frames...
+SEG_FLICKER_CONF = 0.75      # ...with mean confidence under this = furniture
+#                              flicker, dropped (when real motion exists)
 
 # Sampling for the background plate. 24 samples spread over the window is
 # enough for a median to see past a subject that lingers, and few enough to hold
@@ -658,43 +679,83 @@ def _seg_keep_region(masks):
     binm = [(m > int(SEG_THRESHOLD * 255)) for m in masks]
     if not binm:
         return None
-    presence = np.mean(np.stack(binm), axis=0).astype(np.float32)
-    union = np.any(np.stack(binm), axis=0).astype(np.uint8) * 255
+    stack = np.stack(binm)
+    presence = np.mean(stack, axis=0).astype(np.float32)
+    # Mean model confidence where the pixel was claimed at all — near-
+    # threshold flicker (furniture) scores low, a person scores ~1.0.
+    softs = np.stack([m.astype(np.float32) / 255.0 for m in masks])
+    on_count = np.maximum(stack.sum(axis=0), 1)
+    conf = (softs * stack).sum(axis=0) / on_count
+    union = np.any(stack, axis=0).astype(np.uint8) * 255
     nlab, lab, stats, _ = cv2.connectedComponentsWithStats(union, 8)
     if nlab <= 1:
         return None
-    static = []
-    static_px = 0
+    drop = []
+    drop_px = 0
     moving_px = 0
     for b in range(1, nlab):
         area = int(stats[b, cv2.CC_STAT_AREA])
         if area < SEG_MIN_BLOB_PX:
             continue        # speckle: votes for nobody
         sel = lab == b
-        if float(presence[sel].mean()) > SEG_STATIC_KEEP:
-            static.append(b)
-            static_px += area
+        pres = float(presence[sel].mean())
+        bconf = float(conf[sel].mean())
+        if pres > SEG_STATIC_KEEP or \
+                (pres > SEG_FLICKER_PRESENCE and bconf < SEG_FLICKER_CONF):
+            drop.append(b)
+            drop_px += area
         else:
             moving_px += area
-    if not static:
+    if not drop:
         return None
-    # Drop the static furniture only when something person-sized genuinely
-    # moves: an absolute floor (codec flicker is a few hundred px of 'motion'
-    # on a perfectly still shot) AND a share of what would be dropped — a
-    # standing subject must never lose to their own edge shimmer.
+    # Drop the static/flickering furniture only when something person-sized
+    # genuinely moves: an absolute floor (codec flicker is a few hundred px
+    # of 'motion' on a perfectly still shot) AND a share of what would be
+    # dropped — a standing subject must never lose to their own edge shimmer.
     if moving_px < max(SEG_MIN_MOVING * union.size,
-                       SEG_MOVING_SHARE * static_px):
+                       SEG_MOVING_SHARE * drop_px):
         return None      # nothing meaningful moves: the standing subject stays
     keep = np.ones(union.shape, np.float32)
-    keep[np.isin(lab, static)] = 0.0
+    keep[np.isin(lab, drop)] = 0.0
     return keep
 
 
-def _seg_mask_frames(idxs, masks, n_frames, w, h, cv2):
+def _seg_stabilize(masks, cv2, sample_dt):
+    """Temporal majority vote over the BINARIZED sampled masks, then hole
+    filling. This is _vote3's job done for the model path: a detection that
+    lives for one or two samples is flicker and dies here; the subject
+    survives every vote.
+
+    The window is bounded in REAL TIME, not samples: a moving subject only
+    overlaps themselves across ~100ms, so voting across the WIDE gaps of a
+    budget-strided window would erase the walker outright (caught by the
+    budget test — 6 samples over 3s put him at 6 disjoint positions and the
+    majority killed every one). Under coarse sampling the vote narrows to
+    nothing and the masks pass through un-voted, which is the honest trade:
+    long windows get less flicker protection, never a missing subject.
+    Returns uint8 0/255 masks, same length as the input."""
+    width = SEG_VOTE
+    if sample_dt > 1e-9:
+        width = min(SEG_VOTE, 1 + 2 * int(0.075 / sample_dt))
+    binm = [(m > int(SEG_THRESHOLD * 255)).astype(np.uint8) for m in masks]
+    n = len(binm)
+    half = max(0, width // 2)
+    out = []
+    for i in range(n):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        window = binm[lo:hi]
+        s = np.sum(window, axis=0)
+        m = (s * 2 > len(window)).astype(np.uint8) * 255
+        if cv2 is not None:
+            m = _fill_holes(m, cv2)
+        out.append(m)
+    return out
+
+
+def _seg_mask_frames(idxs, masks, n_frames, w, h, cv2, keep=None):
     """One soft mask per OUTPUT frame at (w, h): linear blend between the
     bracketing sampled masks (identity when every frame was sampled), gated
     by the window-wide keep region, upscaled last. Yields uint8 (h, w)."""
-    keep = _seg_keep_region(masks)
     j = 0
     for i in range(n_frames):
         while j + 1 < len(idxs) and idxs[j + 1] <= i:
@@ -754,7 +815,14 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
             return {"ok": False,
                     "why": ("I could not read enough frames from that "
                             "moment to find the subject")}
-        mask_iter = _seg_mask_frames(idxs, s_masks, n_frames, w, h, cv2)
+        # The gate reads the SOFT masks (confidence is one of its cues); the
+        # vote then stabilizes the binarized stream (round 66).
+        keep = _seg_keep_region(s_masks)
+        sample_dt = ((idxs[1] - idxs[0]) / out_fps if len(idxs) > 1
+                     else 1.0 / out_fps)
+        proc = _seg_stabilize(s_masks, cv2, sample_dt)
+        mask_iter = _seg_mask_frames(idxs, proc, n_frames, w, h, cv2,
+                                     keep=keep)
     else:
         plate, noise, ref_sg = _plate(src, start, dur, w, h, extra_vf, cv2)
         if plate is None:
