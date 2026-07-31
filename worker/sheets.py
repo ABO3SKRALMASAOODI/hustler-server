@@ -1,8 +1,15 @@
-"""Contact sheets: PIL grids of numbered shot thumbnails with timestamps.
+"""Contact sheets: PIL grids of numbered frame thumbnails with timestamps.
 These are the ONLY thing the vision model ever sees during indexing — one
-call per sheet, never per-frame."""
+call per sheet, never per-frame.
+
+Round 69: the tiles are SAMPLE POINTS on a clock, not one-per-shot. See
+worker/visual.py for why. Nothing about the cost shape changed — still 25
+tiles to a sheet, still one vision call per sheet, still capped by
+MAX_VISION_SHEETS."""
 
 import os
+import threading
+from concurrent import futures
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -32,23 +39,29 @@ def _ts(t):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def build_contact_sheets(shots, thumb_paths, out_dir, prefix="sheet"):
-    """shots: [Shot]; thumb_paths: {shot_id: jpeg path}. Returns
-    [(sheet_path, [shot_ids])]."""
+def build_contact_sheets(points, frame_paths, out_dir, prefix="sheet"):
+    """points: [{t, ...}] in time order; frame_paths: {point index: jpeg}.
+    Returns [(sheet_path, [point indexes])].
+
+    A tile is labelled with its own index and its SOURCE timestamp, and the
+    index is what comes back from the vision model — so a tile can always be
+    tied to the exact instant it was pulled from, which is the whole point of
+    sampling on a clock.
+    """
     font = _font()
     sheets = []
-    chunk = [s for s in shots if s.id in thumb_paths]
-    for c0 in range(0, len(chunk), PER_SHEET):
-        group = chunk[c0:c0 + PER_SHEET]
+    usable = [i for i in range(len(points)) if frame_paths.get(i)]
+    for c0 in range(0, len(usable), PER_SHEET):
+        group = usable[c0:c0 + PER_SHEET]
         rows = (len(group) + COLS - 1) // COLS
         canvas = Image.new("RGB", (COLS * TILE_W, rows * (TILE_H + LABEL_H)),
                            (12, 12, 12))
         draw = ImageDraw.Draw(canvas)
-        for i, shot in enumerate(group):
-            x = (i % COLS) * TILE_W
-            y = (i // COLS) * (TILE_H + LABEL_H)
+        for slot, pi in enumerate(group):
+            x = (slot % COLS) * TILE_W
+            y = (slot // COLS) * (TILE_H + LABEL_H)
             try:
-                img = Image.open(thumb_paths[shot.id]).convert("RGB")
+                img = Image.open(frame_paths[pi]).convert("RGB")
                 img.thumbnail((TILE_W, TILE_H))
                 ox = x + (TILE_W - img.width) // 2
                 oy = y + (TILE_H - img.height) // 2
@@ -56,46 +69,89 @@ def build_contact_sheets(shots, thumb_paths, out_dir, prefix="sheet"):
             except Exception:
                 pass
             draw.text((x + 6, y + TILE_H + 4),
-                      f"#{shot.id}  {_ts(shot.start)}-{_ts(shot.end)}",
+                      f"#{pi}  {_ts(points[pi]['t'])}",
                       fill=(235, 235, 235), font=font)
         path = os.path.join(out_dir, f"{prefix}_{len(sheets) + 1}.jpg")
         canvas.save(path, "JPEG", quality=82)
-        sheets.append((path, [s.id for s in group]))
+        sheets.append((path, group))
     return sheets
 
 
-CAPTION_PROMPT = """This is a contact sheet of shots from one video. Each tile is labeled "#<shot id>  <start>-<end>".
-For EVERY tile, describe what you see. Reply with ONLY a JSON array, one object per tile:
-[{"shot": <id>, "setting": "<where/background>", "people": "<who is visible, or 'none'>", "action": "<what is happening>", "on_screen_text": "<any visible text, or ''>", "subtitles": <true if the tile shows SUBTITLE-STYLE captions burned into the footage (styled spoken-word text, usually lower/center third) — signs, UI, watermarks and usernames do NOT count; else false>}]
+CAPTION_PROMPT = """This is a contact sheet of frames sampled from one video, in time order. Each tile is labeled "#<tile id>  <timestamp>".
+For EVERY tile, describe what you see. Consecutive tiles are often near-identical — describe each one on its own terms anyway, and be specific about anything that CHANGES between them (someone enters or leaves, a graphic appears, the camera moves, the screen content changes).
+Reply with ONLY a JSON array, one object per tile:
+[{"tile": <id>, "setting": "<where/background>", "people": "<who is visible, or 'none'>", "action": "<what is happening>", "on_screen_text": "<any visible text, or ''>", "subtitles": <true if the tile shows SUBTITLE-STYLE captions burned into the footage (styled spoken-word text, usually lower/center third) — signs, UI, watermarks and usernames do NOT count; else false>}]
 Tiles present: %s"""
 
 
-def caption_shots(sheets, shots_by_id):
-    """Mutates shots in place with vision captions. Skips gracefully when the
-    vision model is unset or a call fails."""
-    if not llm.vision_available():
-        return False
-    any_ok = False
-    for sheet_path, ids in sheets:
-        reply = llm.ask_vision(CAPTION_PROMPT % ids, [sheet_path])
+def _caption_one(sheet_path, ids, recorder):
+    """One sheet -> {tile index: ShotCaption}. Runs on a pool thread, so it
+    installs the recorder itself: llm's recorder is THREAD-LOCAL (agent lanes
+    run turns concurrently), and without this every index vision call made off
+    the main thread would go unrecorded — the exact blind spot round 67 fixed
+    for the sequential version."""
+    if recorder is not None:
+        llm.set_recorder(recorder)
+    try:
+        reply = llm.ask_vision(CAPTION_PROMPT % ids, [sheet_path],
+                               purpose="vision_index")
         rows = llm.extract_json_array(reply) or []
-        for row in rows:
-            try:
-                sid = int(row.get("shot"))
-            except (TypeError, ValueError):
-                continue
-            shot = shots_by_id.get(sid)
-            if not shot:
-                continue
-            shot.caption = ShotCaption(
-                setting=str(row.get("setting") or "")[:200],
-                people=str(row.get("people") or "")[:200],
-                action=str(row.get("action") or "")[:300],
-                on_screen_text=str(row.get("on_screen_text") or "")[:300],
-                subtitles=bool(row.get("subtitles")),
-            )
-            any_ok = True
-    return any_ok
+    finally:
+        if recorder is not None:
+            llm.set_recorder(None)
+    out = {}
+    for row in rows:
+        try:
+            # "shot" accepted too: the key was called that until round 69 and
+            # a model that has seen the old shape must not silently produce
+            # an index with no captions in it.
+            ti = int(row.get("tile", row.get("shot")))
+        except (TypeError, ValueError):
+            continue
+        if ti not in ids:
+            continue
+        out[ti] = ShotCaption(
+            setting=str(row.get("setting") or "")[:200],
+            people=str(row.get("people") or "")[:200],
+            action=str(row.get("action") or "")[:300],
+            on_screen_text=str(row.get("on_screen_text") or "")[:300],
+            subtitles=bool(row.get("subtitles")),
+        )
+    return out
+
+
+def caption_points(sheets, recorder=None, parallelism=1):
+    """Caption every sheet. Returns {point index: ShotCaption}.
+
+    Sheets are independent network calls, so they overlap: going from one
+    sheet to as many as twelve would otherwise add minutes of pure round-trip
+    wait to an index. One sheet failing costs that sheet's captions and
+    nothing else — the same degrade-don't-fail contract the sequential
+    version had.
+    """
+    if not llm.vision_available() or not sheets:
+        return {}
+    n = max(1, min(int(parallelism or 1), len(sheets)))
+    out, lock = {}, threading.Lock()
+
+    def _run(job):
+        sheet_path, ids = job
+        try:
+            got = _caption_one(sheet_path, ids, recorder)
+        except Exception as e:
+            print(f"[sheets] captioning failed for {os.path.basename(sheet_path)}"
+                  f": {str(e)[:160]}", flush=True)
+            return
+        with lock:
+            out.update(got)
+
+    if n == 1:
+        for job in sheets:
+            _run(job)
+    else:
+        with futures.ThreadPoolExecutor(max_workers=n) as pool:
+            list(pool.map(_run, sheets))
+    return out
 
 
 def build_timestamp_sheet(frames, out_path):

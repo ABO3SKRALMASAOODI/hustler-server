@@ -16,6 +16,7 @@ import llm
 import music_library
 import sfx_library
 import storage
+import visual
 from agent_prompt import project_state_block, system_prompt
 from schemas import describe_edl
 
@@ -75,13 +76,55 @@ def _burned_captions_line(index):
             "user what you found and do that first.")
 
 
+def _speaker_line(index):
+    """Who is talking, when the transcriber knows (round 69). Silent on an
+    undiarized index rather than claiming one speaker — whisper does not
+    diarize, and "one speaker" is a real editorial fact we must not invent."""
+    n = index.get("speakers") or 0
+    if n < 2:
+        return None
+    return (f"SPEAKERS: {n} people talk in this video, labelled S0..S{n - 1} "
+            "on every transcript line. You can cut, keep or reorder by "
+            "speaker — 'keep only the interviewer' is answerable from the "
+            "transcript alone, no guessing from the picture.")
+
+
+def _filler_line(index):
+    n = sum(1 for w in (index.get("words") or []) if w.get("filler"))
+    if not n:
+        return None
+    return (f"FILLER SOUNDS: {n} hesitation(s) ('um', 'uh') are timestamped in "
+            "the transcript. remove_filler_words() cuts every one of them in "
+            "a single call. They are never burned into captions.")
+
+
+def _visual_lines(index, max_lines):
+    """The sampled visual timeline, or [] when the index predates it."""
+    moments = index.get("moments") or []
+    if not moments or max_lines <= 0:
+        return []
+    lines = visual.timeline_lines(moments, max_lines=max_lines)
+    if not lines:
+        return []
+    return [f"WHAT IS ON SCREEN OVER TIME — {len(moments)} frames sampled "
+            f"~every {config.VISUAL_SAMPLE_S:g}s across the whole video, "
+            "consecutive identical frames merged into one span. A span means "
+            "NOTHING CHANGED through it; a new line means something did. This "
+            "is your picture of the footage — do not call look_at to learn "
+            "what is already here:"] + lines
+
+
 def _full_index_block(index):
     """For SHORT videos, the ENTIRE index inlined into the turn prompt: every
-    transcript sentence (untruncated) + every shot description + language. The
-    model then never has to remember to call get_transcript/get_shots — the
-    single biggest "it didn't bother to look" failure class. Returns None when
-    the video is too long or the assembled text would exceed the char cap, so
-    the caller falls back to the elided summary + retrieval tools."""
+    transcript sentence (untruncated) + the sampled visual timeline + every
+    shot description + language. The model then never has to remember to call
+    get_transcript/get_shots — the single biggest "it didn't bother to look"
+    failure class, and the reason round 69 put the new visual sampling HERE
+    rather than behind another tool: 78% of measured agent turns never called
+    look_at once, because a look costs the user a 13-second round trip.
+    Returns None when the video is too long or the assembled text would exceed
+    the char cap even with no timeline, so the caller falls back to the elided
+    summary + retrieval tools."""
     v = index["video"]
     if float(v.get("duration") or 0) > config.FULL_INDEX_MAX_DURATION_S:
         return None
@@ -89,34 +132,50 @@ def _full_index_block(index):
     words = index.get("words", [])
     shots = index.get("shots", [])
     lang = index.get("language")
-    lines = []
-    if sentences:
+
+    def build(timeline_lines_budget):
+        lines = []
+        if sentences:
+            lines.append(
+                f"TRANSCRIPT — COMPLETE ({len(sentences)} sentences / "
+                f"{len(words)} words, every sentence below; you already have "
+                "the whole transcript, do NOT call get_transcript for this "
+                "video — use get_words only for word-exact cut points):")
+            for s in sentences:
+                lines.append(f"  [{s['id']} {s['t0']:.1f}-{s['t1']:.1f}] "
+                             f"{s['text']}")
+        else:
+            lines.append("TRANSCRIPT: none (no speech detected or no audio "
+                         "track).")
+        sl = _speaker_line(index)
+        if sl:
+            lines.append(sl)
+        fl = _filler_line(index)
+        if fl:
+            lines.append(fl)
+        lines += _visual_lines(index, timeline_lines_budget)
         lines.append(
-            f"TRANSCRIPT — COMPLETE ({len(sentences)} sentences / "
-            f"{len(words)} words, every sentence below; you already have the "
-            "whole transcript, do NOT call get_transcript for this video — "
-            "use get_words only for word-exact cut points):")
-        for s in sentences:
-            lines.append(f"  [{s['id']} {s['t0']:.1f}-{s['t1']:.1f}] "
-                         f"{s['text']}")
-    else:
-        lines.append("TRANSCRIPT: none (no speech detected or no audio "
-                     "track).")
-    lines.append(
-        f"SHOTS — COMPLETE ({len(shots)} shots, every visual description "
-        "below; do NOT call get_shots for this video):"
-        if shots else "SHOTS: none detected.")
-    lines += [_full_shot_line(s) for s in shots]
-    bc = _burned_captions_line(index)
-    if bc:
-        lines.append(bc)
-    lines.append(_silence_line(index))
-    if lang:
-        lines.append(f"LANGUAGE (detected): {lang}.")
-    text = "\n".join(lines)
-    if len(text) > config.FULL_INDEX_MAX_CHARS:
-        return None
-    return text
+            f"SHOTS — COMPLETE ({len(shots)} shots, every visual description "
+            "below; do NOT call get_shots for this video):"
+            if shots else "SHOTS: none detected.")
+        lines += [_full_shot_line(s) for s in shots]
+        bc = _burned_captions_line(index)
+        if bc:
+            lines.append(bc)
+        lines.append(_silence_line(index))
+        if lang:
+            lines.append(f"LANGUAGE (detected): {lang}.")
+        return "\n".join(lines)
+
+    # The TRANSCRIPT's completeness is an older promise than the timeline's,
+    # and dropping to the elided summary would lose both. So the newest signal
+    # thins first, and only a block that overflows with NO timeline at all
+    # falls back.
+    for budget in (80, 40, 20, 0):
+        text = build(budget)
+        if len(text) <= config.FULL_INDEX_MAX_CHARS:
+            return text
+    return None
 
 
 def _index_summary(index):
@@ -163,6 +222,20 @@ def _index_summary(index):
         lines += [shot_line(s) for s in shots[:12]]
         lines.append(f"  ... {len(shots) - 17} more (use get_shots) ...")
         lines += [shot_line(s) for s in shots[-5:]]
+
+    sl = _speaker_line(index)
+    if sl:
+        lines.append(sl)
+    fl = _filler_line(index)
+    if fl:
+        lines.append(fl)
+    # A long video is exactly where one-frame-per-shot hurt most, so the
+    # timeline is here too — thinner, and with the pointer to the full one.
+    vl = _visual_lines(index, 40)
+    if vl:
+        lines += vl
+        lines.append("  (get_shots(start, end) gives the full timeline for "
+                     "any range)")
 
     bc = _burned_captions_line(index)
     if bc:

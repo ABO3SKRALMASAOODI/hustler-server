@@ -2755,7 +2755,7 @@ check("the proxy upload still fails the job",
 check("sheet keys stay in sheet order",
       "for i in sorted(ok_sheets)" in _idx_src)
 check("thumbnail seeks are clamped to the proxy's real duration",
-      "seek_ceiling" in _idx_src and "min(mid, seek_ceiling)" in _idx_src)
+      "seek_ceiling" in _idx_src and "min(t, seek_ceiling)" in _idx_src)
 
 print("== Round-16b: probe describes the video a PLAYER shows ==")
 # Regression: an index claimed 16.654s / 1284x2778 portrait for a clip whose

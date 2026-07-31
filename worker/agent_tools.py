@@ -43,6 +43,7 @@ import tracker
 import travel
 import url_media
 import remote
+import visual
 import webrecord
 from captions import KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
@@ -388,11 +389,21 @@ def get_video_info(ctx):
         gap_txt = (f"{len(gaps)} pause(s) in the talking >=0.7s totalling "
                    f"{total_gap:.1f}s (use these for 'cut the silences'); "
                    f"{len(quiet)} of the video's quiet-waveform spans")
+    words = ctx.index.get("words", [])
+    n_spk = ctx.index.get("speakers") or 0
+    spk_txt = (f", {n_spk} speakers (labelled S0..S{n_spk - 1} in "
+               "get_transcript)" if n_spk > 1 else "")
+    n_fill = sum(1 for w in words if w.get("filler"))
+    fill_txt = (f", {n_fill} filler sound(s) — remove_filler_words() cuts them"
+                if n_fill else "")
+    n_mom = len(ctx.index.get("moments") or [])
+    mom_txt = (f", {n_mom} sampled frames described (get_shots shows what is "
+               "on screen over time)" if n_mom else "")
     return (f"duration={v['duration']}s, {v['width']}x{v['height']} @ "
             f"{v['fps']}fps, audio={'yes' if v['has_audio'] else 'NO'}. "
-            f"{len(ctx.index.get('shots', []))} shots, "
+            f"{len(ctx.index.get('shots', []))} shots{mom_txt}, "
             f"{len(ctx.index.get('sentences', []))} sentences / "
-            f"{len(ctx.index.get('words', []))} words, "
+            f"{len(words)} words{spk_txt}{fill_txt}, "
             f"{gap_txt}. "
             f"Current EDL v{edl['version']}: {describe_edl(edl['json'], v['duration'])}.")
 
@@ -408,7 +419,13 @@ def get_transcript(ctx, start=0, end=None):
         return (f"No transcribed speech between {start}s and {end}s."
                 if ctx.index.get("sentences") else
                 "This video has no transcript (no speech or no audio track).")
-    out = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}] {s['text']}"
+    # Only label speakers when there is more than one — "S0:" on every line of
+    # a solo talking head is noise the model pays for on every read.
+    multi = (ctx.index.get("speakers") or 0) > 1
+    out = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}]"
+           + (f" S{s['speaker']}:" if multi and s.get("speaker") is not None
+              else "")
+           + f" {s['text']}"
            for s in rows]
     # Transcripts get a much larger budget than other tools: silently losing
     # the tail of a long video is exactly how far-apart repetitions go unseen.
@@ -520,7 +537,12 @@ def get_words(ctx, start=0, end=None):
                 if words else
                 "This video has no transcript (no speech or no audio track).")
     shown = rows[:GET_WORDS_MAX_WORDS]
-    out = [f"{_fmt_t(w['t0'])}-{_fmt_t(w['t1'])} {w['w']}" for w in shown]
+    multi = (ctx.index.get("speakers") or 0) > 1
+    out = [f"{_fmt_t(w['t0'])}-{_fmt_t(w['t1'])} {w['w']}"
+           + (f" [S{w['speaker']}]" if multi and w.get("speaker") is not None
+              else "")
+           + (" [filler]" if w.get("filler") else "")
+           for w in shown]
     tail = ""
     if len(rows) > len(shown):
         # Floor the suggested start (int()): rounding UP could skip words
@@ -558,6 +580,13 @@ def search_transcript(ctx, query):
     return _cap(f"{len(exact)} exact matches:\n" + "\n".join(lines))
 
 
+# How many lines of visual timeline one get_shots call may return. Past this
+# the shortest moments are dropped with a pointer to a narrower range — an
+# unbounded timeline on a long video would bury the transcript in the same
+# context window.
+SHOT_TIMELINE_MAX_LINES = 60
+
+
 def get_shots(ctx, start=0, end=None):
     start = ctx.clamp(start or 0)
     end = ctx.clamp(end if end is not None else ctx.duration)
@@ -577,6 +606,18 @@ def get_shots(ctx, start=0, end=None):
             desc += "; [burned-in captions visible]"
         lines.append(f"[#{s['id']} {_fmt_t(s['start'])}-{_fmt_t(s['end'])}] "
                      f"{desc or '(no visual caption)'}")
+    # Round 69: shots are SCENE structure — on a locked-off talking head there
+    # is exactly one of them, and one line describing 19 minutes of footage was
+    # the whole of what the editor could see. The sampled timeline below says
+    # what is on screen over time, collapsed so that each line is a CHANGE.
+    tl = visual.timeline_lines(ctx.index.get("moments") or [], start, end,
+                               max_lines=SHOT_TIMELINE_MAX_LINES)
+    if tl:
+        step = config.VISUAL_SAMPLE_S
+        lines.append(f"\nWHAT IS ON SCREEN OVER TIME (sampled ~every {step:g}s, "
+                     "consecutive identical frames merged — a span means "
+                     "nothing changed through it):")
+        lines += tl
     return _cap("\n".join(lines))
 
 
@@ -1177,12 +1218,17 @@ def remove_filler_words(ctx, words=None):
         return ("REJECTED: this video has no transcript (no speech detected), "
                 "so there are no filler words to remove.")
     norm = [_norm_word(w.get("w")) for w in all_words]
+    # Round 69: the transcriber TAGS hesitations now, so a default run cuts
+    # what the engine itself heard as a filler rather than only the spellings
+    # in our list. A custom list stays exactly what the user asked for — the
+    # tag must never quietly cut words they did not name.
+    use_tag = not (isinstance(words, list) and words)
     cuts, hits = [], {}
     for idx, tok in enumerate(norm):
-        if tok in singles:
+        if tok in singles or (use_tag and all_words[idx].get("filler")):
             cuts.append([round(all_words[idx]["t0"], 2),
                          round(all_words[idx]["t1"], 2)])
-            hits[tok] = hits.get(tok, 0) + 1
+            hits[tok or "(hesitation)"] = hits.get(tok or "(hesitation)", 0) + 1
     for ph in phrases:
         n = len(ph)
         for start in range(0, len(norm) - n + 1):
@@ -1307,7 +1353,11 @@ def add_captions(ctx, mode=None, items=None, style=None,
         # exist AND survive the cut. A real music-heavy upload transcribed to
         # ONE hallucinated word that the edit then cut — the agent told the
         # user captions were on and the render showed nothing.
-        all_words = ctx.index.get("words") or []
+        # Filler words are in the index but never burned (see captions.py), so
+        # this gate counts what will actually be SHOWN — otherwise a video of
+        # nothing but hesitations would pass a check about visible text.
+        all_words = [w for w in (ctx.index.get("words") or [])
+                     if not w.get("filler")]
         keep_spans = edl.get("keep") or []
         visible = sum(
             1 for w in all_words

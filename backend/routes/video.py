@@ -1855,11 +1855,16 @@ TRANSCRIPT_MAX_CHARS = 400
 _WORD_RE = re.compile(r"\S+")
 
 
-def _retokenize_span(new_text, t0, t1):
+def _retokenize_span(new_text, t0, t1, speaker=None):
     """Split corrected sentence text into word tokens and lay them across the
     sentence's [t0,t1] window, proportional to token length. Captions are
     word-timed, so the corrected words must carry timings or karaoke captions
-    would desync."""
+    would desync.
+
+    The rewritten words inherit the sentence's SPEAKER (the user retyped that
+    person's line, not somebody else's) and re-derive their own filler flag,
+    so an edit cannot quietly take a video from diarized to undiarized.
+    """
     toks = _WORD_RE.findall(new_text)
     if not toks:
         return []
@@ -1872,7 +1877,9 @@ def _retokenize_span(new_text, t0, t1):
     for i, (tok, w) in enumerate(zip(toks, weights)):
         wt0 = cursor
         wt1 = t1 if i == len(toks) - 1 else cursor + span * (w / total)
-        out.append({"w": tok, "t0": round(wt0, 3), "t1": round(wt1, 3)})
+        out.append({"w": tok, "t0": round(wt0, 3), "t1": round(wt1, 3),
+                    "speaker": speaker,
+                    "filler": wschemas.is_filler_token(tok)})
         cursor = wt1
     return out
 
@@ -1894,15 +1901,20 @@ def _apply_transcript_edit(idx, sentence_id, new_text):
         wi0, wi1 = s.get("wi0"), s.get("wi1")
         if isinstance(wi0, int) and isinstance(wi1, int) \
                 and 0 <= wi0 <= wi1 < len(words):
-            return [{"w": w.get("w"), "t0": w.get("t0"), "t1": w.get("t1")}
-                    for w in words[wi0:wi1 + 1]]
+            # The WHOLE word, not a three-field copy. This used to rebuild
+            # {w,t0,t1} and drop everything else, which after round 69 would
+            # mean correcting one line of the transcript silently stripped
+            # speaker labels and filler tags from the ENTIRE video — taking
+            # remove_filler_words back to a no-op for that project.
+            return [dict(w) for w in words[wi0:wi1 + 1]]
         return None
 
     new_words, new_sentences, updated = [], [], None
     for s in sentences:
         s2 = dict(s)
         if s.get("id") == sentence_id:
-            toks = _retokenize_span(new_text, s.get("t0"), s.get("t1"))
+            toks = _retokenize_span(new_text, s.get("t0"), s.get("t1"),
+                                    speaker=s.get("speaker"))
             s2["text"] = new_text
             updated = s2
         else:

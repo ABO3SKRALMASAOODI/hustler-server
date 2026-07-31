@@ -9,6 +9,7 @@ assemble VideoIndex.
 import os
 import re
 import shutil
+import threading
 import time
 from concurrent import futures
 
@@ -21,8 +22,9 @@ import scenes
 import sheets
 import storage
 import transcribe
-from schemas import (VideoIndex, VideoInfo, clamp_word_times, default_edl,
-                     is_canvas_program, validate_edl)
+import visual
+from schemas import (Moment, VideoIndex, VideoInfo, clamp_word_times,
+                     default_edl, is_canvas_program, validate_edl)
 
 
 PROGRESS_EVERY_S = 5.0
@@ -272,11 +274,29 @@ def run_index_job(worker_db, job):
         worker_db.run(dbx.set_progress, job_id, 65)
         _mark("silences_s")
 
-        # 6. Shots + middle-frame thumbnails
+        # 6. Shots + frames sampled on a CLOCK (round 69).
+        #
+        # Frames used to be pulled one per SHOT, which meant 46% of real
+        # uploads — every locked-off talking head, screen recording and
+        # timelapse — were described to the agent by a single thumbnail, the
+        # worst measured case being 19.3 minutes of footage summarised from
+        # one frame at 9:38. Shots still mean "the camera changed" (transitions
+        # depend on that); the SAMPLING is now independent of them. See
+        # worker/visual.py.
         shots = scenes.detect_shots(proxy_local, info["duration"], warnings)
+        # The ceiling is the one that already existed: MAX_VISION_SHEETS sheets
+        # of PER_SHEET tiles. What changed is that a single-shot video used to
+        # spend 1 of those 300 tiles.
+        point_budget = max(1, config.MAX_VISION_SHEETS) * sheets.PER_SHEET
+        points, points_capped = visual.sample_points(
+            shots, info["duration"], config.VISUAL_SAMPLE_S, point_budget)
+        if points_capped:
+            warnings.append(
+                f"this video has {len(shots)} shots — more than the "
+                f"{point_budget}-frame analysis budget, so shots were sampled "
+                "evenly and some have no visual description")
         thumb_dir = os.path.join(workdir, "thumbs")
         os.makedirs(thumb_dir, exist_ok=True)
-        thumb_paths = {}
         # Shot times live on the ORIGINAL's timeline (that is what the EDL and
         # the renderer cut against), but thumbnails are pulled from the PROXY —
         # so the seek has to be inside the PROXY's own decodable range. The two
@@ -286,46 +306,59 @@ def run_index_job(worker_db, job):
         proxy_dur = proxy_info["duration"]
         seek_ceiling = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
 
-        # ONE THUMBNAIL PER SHOT, AND THERE CAN BE HUNDREDS. Pulled serially
-        # this was ~1s each — 141 shots on a real 4-minute upload cost 48s of
-        # seeking plus 139s of uploading, more than the whole rest of the
-        # index. Each seek is an independent ffmpeg that spends most of its
-        # life in I/O and single-threaded decode, so they run concurrently on
-        # a box with cores to spare. Bounded by the same knob the artifact
-        # uploads use, since both are "many small independent jobs".
-        def _thumb(shot):
-            mid = (shot.start + shot.end) / 2.0
+        # HUNDREDS OF SEEKS. Pulled serially this was ~1s each — 141 shots on a
+        # real 4-minute upload cost 48s of seeking plus 139s of uploading, more
+        # than the whole rest of the index. Each seek is an independent ffmpeg
+        # that spends most of its life in I/O and single-threaded decode, so
+        # they run concurrently on a box with cores to spare. Bounded by the
+        # same knob the artifact uploads use, since both are "many small
+        # independent jobs".
+        def _frame(pi):
+            t = points[pi]["t"]
             if seek_ceiling is not None:
-                mid = min(mid, seek_ceiling)
-            tp = os.path.join(thumb_dir, f"shot_{shot.id}.jpg")
+                t = min(t, seek_ceiling)
+            fp = os.path.join(thumb_dir, f"f_{pi:04d}.jpg")
             try:
-                media.frame_at(proxy_local, mid, tp, width=320)
-                return shot.id, tp
+                media.frame_at(proxy_local, t, fp, width=320)
+                return pi, fp
             except media.MediaError as e:
-                print(f"[index {job_id}] no thumbnail for shot {shot.id} "
-                      f"@{mid:.2f}s (proxy {proxy_dur}s): {e}", flush=True)
-                return shot.id, None
+                print(f"[index {job_id}] no frame at {t:.2f}s "
+                      f"(proxy {proxy_dur}s): {e}", flush=True)
+                return pi, None
 
-        if shots:
+        frame_paths = {}
+        if points:
             with futures.ThreadPoolExecutor(
-                    max_workers=max(1, min(len(shots),
+                    max_workers=max(1, min(len(points),
                                            config.THUMB_PARALLELISM))) as pool:
-                for sid, tp in pool.map(_thumb, shots):
-                    if tp:
-                        thumb_paths[sid] = tp
+                for pi, fp in pool.map(_frame, range(len(points))):
+                    if fp:
+                        frame_paths[pi] = fp
+        # Only the SHOT midpoints become uploaded per-shot thumbnails, so the
+        # storage and upload cost of an index is exactly what it was — the
+        # extra frames live and die inside this workdir, and reach the agent
+        # only through the contact sheets, which were always uploaded.
+        thumb_paths = {p["shot"]: frame_paths[i]
+                       for i, p in enumerate(points)
+                       if p["shot_mid"] and i in frame_paths}
+        print(f"[index {job_id}] {len(shots)} shot(s), sampled "
+              f"{len(frame_paths)}/{len(points)} frames "
+              f"(every ~{config.VISUAL_SAMPLE_S:g}s, budget {point_budget})",
+              flush=True)
         worker_db.run(dbx.set_progress, job_id, 75)
         _mark("shots_s")
 
-        # 7. Contact sheets + optional vision captions. All sheets are built
-        #    (cheap, local) and uploaded, but vision captioning is CAPPED: a
-        #    3-hour shot-heavy video would otherwise fire proportionally many
-        #    vision calls. Beyond the cap we sample sheets evenly and record a
-        #    warning so the cost is bounded and the gap is visible.
+        # 7. Contact sheets + optional vision captions. The cap now applies
+        #    UPSTREAM, at sample_points: a 3-hour video stretches its sampling
+        #    grid instead of firing proportionally many vision calls, so every
+        #    frame that exists here fits inside MAX_VISION_SHEETS sheets by
+        #    construction and the sheets are captioned concurrently.
         sheet_dir = os.path.join(workdir, "sheets")
         os.makedirs(sheet_dir, exist_ok=True)
-        sheet_list = sheets.build_contact_sheets(shots, thumb_paths, sheet_dir)
-        # Only sample + caption when vision is actually configured — otherwise
-        # caption_shots is a no-op and any "sampled N sheets" warning would
+        sheet_list = sheets.build_contact_sheets(points, frame_paths,
+                                                 sheet_dir)
+        # Only caption when vision is actually configured — otherwise
+        # caption_points is a no-op and any warning about sampling would
         # falsely claim captioning happened.
         #
         # AND RECORD WHAT IT SPENDS. llm.record() no-ops when no recorder is
@@ -338,45 +371,62 @@ def run_index_job(worker_db, job):
         # view has been under-reporting index spend. Same recorder shape as the
         # agent turn's, minus the per-turn usage accumulation (an index is not
         # charged to a user).
+        moments = []
         if llm.vision_available():
-            cap = max(1, config.MAX_VISION_SHEETS)   # 0/negative would divide by zero
-            to_caption = sheet_list
-            if len(sheet_list) > cap:
-                step = len(sheet_list) / cap
-                picks = sorted({min(len(sheet_list) - 1, int(i * step))
-                                for i in range(cap)})
-                to_caption = [sheet_list[i] for i in picks]
-                warnings.append(
-                    f"visual captioning sampled {len(to_caption)} of "
-                    f"{len(sheet_list)} contact sheets to bound cost — some "
-                    "shots have no visual description")
-            def _index_recorder(purpose, request, response, usage):
-                model = (request or {}).get("model")
-                cached_in = llm.cached_input_tokens(usage)
-                reasoning = llm.reasoning_tokens(usage)
-                if isinstance(response, dict) and (cached_in or reasoning):
-                    extra = {}
-                    if cached_in:
-                        extra["cached_in"] = cached_in
-                    if reasoning:
-                        extra["reasoning_out"] = reasoning
-                    response = dict(response, **extra)
-                worker_db.run(
-                    dbx.insert_llm_call, project_id, job_id, purpose, model,
-                    request, response,
-                    getattr(usage, "prompt_tokens", None) if usage else None,
-                    getattr(usage, "completion_tokens", None) if usage else None)
+            # BUFFERED, not written from the callback. Sheets are captioned
+            # concurrently now, and WorkerDB holds ONE psycopg connection with
+            # no lock — two sheets recording at once would corrupt the lane's
+            # connection mid-index. The buffer is drained on this thread below.
+            recorded, rec_lock = [], threading.Lock()
 
-            llm.set_recorder(_index_recorder)
+            def _index_recorder(purpose, request, response, usage):
+                with rec_lock:
+                    recorded.append((purpose, request, response, usage))
+
+            caps = {}
             try:
-                sheets.caption_shots(to_caption, {s.id: s for s in shots})
+                caps = sheets.caption_points(
+                    sheet_list, recorder=_index_recorder,
+                    parallelism=config.VISION_CAPTION_PARALLELISM)
             except Exception as e:
                 warnings.append(f"visual captioning failed ({str(e)[:120]}) — "
                                 "shots have no visual description")
                 print(f"[index {job_id}] vision captioning degraded: {e}",
                       flush=True)
-            finally:
-                llm.set_recorder(None)
+            # Round 67's lesson: an index vision call that goes unrecorded is
+            # invisible in the one place built to show whether vision is alive.
+            for purpose, request, response, usage in recorded:
+                try:
+                    model = (request or {}).get("model")
+                    cached_in = llm.cached_input_tokens(usage)
+                    reasoning = llm.reasoning_tokens(usage)
+                    if isinstance(response, dict) and (cached_in or reasoning):
+                        extra = {}
+                        if cached_in:
+                            extra["cached_in"] = cached_in
+                        if reasoning:
+                            extra["reasoning_out"] = reasoning
+                        response = dict(response, **extra)
+                    worker_db.run(
+                        dbx.insert_llm_call, project_id, job_id, purpose,
+                        model, request, response,
+                        getattr(usage, "prompt_tokens", None) if usage else None,
+                        getattr(usage, "completion_tokens", None) if usage
+                        else None)
+                except Exception as e:
+                    print(f"[index {job_id}] llm_call record failed: {e}",
+                          flush=True)
+            # A moment with no caption carries nothing but "a frame existed
+            # here", so only described instants are kept. Shot captions are
+            # then DERIVED from them, which is what leaves every existing
+            # reader of shot.caption working untouched.
+            moments = [Moment(t=p["t"], shot=p["shot"], caption=caps[i])
+                       for i, p in enumerate(points) if i in caps]
+            visual.derive_shot_captions(shots, moments)
+            if not caps and sheet_list:
+                warnings.append(
+                    "visual captioning returned nothing — shots have timings "
+                    "but no description of what is on screen")
         else:
             # SAY IT. Vision going dark is silent by design everywhere else
             # (the honest-off contract: tools report "visual inspection
@@ -533,16 +583,19 @@ def run_index_job(worker_db, job):
         worker_db.run(dbx.set_progress, job_id, 94)
 
         # 9. Assemble + persist the index
+        speakers = len({w.speaker for w in words if w.speaker is not None})
         index = VideoIndex(
             video=VideoInfo(duration=info["duration"], fps=info["fps"],
                             width=info["width"], height=info["height"],
                             has_audio=info["has_audio"],
                             vfr_normalized=info["vfr"]),
             shots=shots,
+            moments=moments,
             words=words,
             sentences=sentences,
             silences=silences,
             sheet_keys=sheet_keys,
+            speakers=speakers,
             language=language,
             warnings=warnings,
             perception=perception_sidecar,
@@ -555,6 +608,7 @@ def run_index_job(worker_db, job):
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,
+                "moments": len(moments), "speakers": speakers,
                 "words": len(words), "silences": len(silences),
                 "language": language, "warnings": warnings,
                 "timings": timings}

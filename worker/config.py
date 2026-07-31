@@ -281,6 +281,37 @@ TRANSCRIBER = os.getenv(
 DEEPGRAM_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3")
 DEEPGRAM_TIMEOUT_S = int(os.getenv("DEEPGRAM_TIMEOUT_S", "300"))
 
+# Round 69 — TWO FLAGS THAT WERE ALWAYS FREE AND ALWAYS OFF.
+#
+# DIARIZATION labels every word with a speaker index. Without it "keep only
+# the parts where the interviewer talks", "cut to the other person" and
+# "trim my co-host's rambling" have no data behind them at all; the agent
+# could read what was said and never who said it.
+#
+# FILLER WORDS are the sharper one. nova-3 DROPS "um"/"uh" from the
+# transcript unless asked for them, and remove_filler_words cuts the video
+# using word TIMESTAMPS — so with no filler words in the index there are no
+# spans to cut. Measured on prod before this shipped: ZERO filler tokens
+# across 12,263 transcribed words in 85 indexes. Not "few" — zero. The tool
+# has therefore answered "No filler words were found in the transcript, so
+# nothing was removed" for every video ever uploaded, while 5 users asked
+# for exactly that. Turning this on is what makes an already-shipped tool
+# start working.
+#
+# Both are included in nova-3's per-minute price — no extra billing, one
+# query parameter each. Deepgram's TEXT-level intelligence (sentiment,
+# topics, intents, summarize) is billed PER FEATURE on top, so it is a
+# separate opt-in below rather than part of this.
+DEEPGRAM_DIARIZE = os.getenv("DEEPGRAM_DIARIZE", "1") == "1"
+DEEPGRAM_FILLER_WORDS = os.getenv("DEEPGRAM_FILLER_WORDS", "1") == "1"
+# Billed extra, and text-level rather than acoustic — the vocal-stress
+# measurement in perception.py is a better emphasis signal for an editor
+# than transcript sentiment. Off by default; set to a comma list of
+# 'sentiment,topics,intents' to turn on.
+DEEPGRAM_INTELLIGENCE = tuple(
+    f.strip() for f in os.getenv("DEEPGRAM_INTELLIGENCE", "").split(",")
+    if f.strip() in ("sentiment", "topics", "intents", "summarize"))
+
 # Whisper (the fallback, and the default when no Deepgram key is set). Defaults
 # tuned for ACCURACY over raw speed — a mangled
 # transcript ("valmera.io" -> "Valmer de laio") poisons captions AND makes the
@@ -816,11 +847,31 @@ SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6
 SCENE_THRESHOLD = float(os.getenv("SCENE_THRESHOLD", "27.0"))
 
-# Vision-call cap during indexing: one contact sheet = 25 shots = one vision
+# Vision-call cap during indexing: one contact sheet = 25 tiles = one vision
 # call. A 3-hour shot-heavy video would otherwise fire proportionally many
 # calls; beyond this many sheets we sample evenly across the video and record a
 # warning so the cost is bounded and the degradation is visible.
 MAX_VISION_SHEETS = int(os.getenv("MAX_VISION_SHEETS", "12"))
+
+# How often the index looks at the picture, in SOURCE seconds (round 69).
+#
+# The sampling unit used to be the SHOT, and 46% of real prod videos are a
+# single shot — a locked-off talking head, a screen recording, a timelapse —
+# so the agent's entire visual description of them came from ONE frame. The
+# worst measured case was 19.3 minutes of footage described by a frame at
+# 9:38. See worker/visual.py for why shots could not simply be subdivided.
+#
+# 4s is chosen against the median prod video (79s -> ~20 tiles -> ONE sheet,
+# exactly today's cost) while a 10-minute video gets 150 tiles instead of
+# however many shots it happened to have. The ceiling is unchanged:
+# MAX_VISION_SHEETS x 25 tiles, which has bounded this since round 22 and
+# which a single-shot video used to spend 1 of.
+VISUAL_SAMPLE_S = float(os.getenv("VISUAL_SAMPLE_S", "4.0"))
+# Contact sheets are captioned concurrently — they are independent network
+# calls, and going from 1 sheet to as many as 12 would otherwise add minutes
+# of pure round-trip wait to an index. Kept small: the point is to overlap
+# latency, not to hammer the provider.
+VISION_CAPTION_PARALLELISM = int(os.getenv("VISION_CAPTION_PARALLELISM", "4"))
 
 # Render verification: after every encode, the output duration must match the
 # EDL's exact expected program duration (the renderer computes it), and the

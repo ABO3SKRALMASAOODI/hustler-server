@@ -1480,8 +1480,17 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
     if not captions:
         return None
     if isinstance(captions, dict) and captions.get("mode") == "from_transcript":
-        out_words = _mark_insert_breaks(tl.kept_words(index.get("words", [])),
-                                        tl)
+        # Hesitation sounds are in the INDEX (round 69) so remove_filler_words
+        # has real spans to cut — they were absent before, which is why that
+        # tool had never removed anything. They are not BURNED, though: every
+        # professional subtitle track omits them, and "So, um, uh, yeah" across
+        # the bottom of a reel is the amateur look the whole caption system
+        # exists to avoid. The audio is untouched either way; removing the
+        # hesitations from the video is a separate, explicit edit.
+        src_words = [w for w in (index.get("words") or [])
+                     if not (w.get("filler") if isinstance(w, dict)
+                             else getattr(w, "filler", False))]
+        out_words = _mark_insert_breaks(tl.kept_words(src_words), tl)
         # Text corrections (round 52) are applied to the DISPLAYED words only,
         # before any grouping, so every preset family inherits them and the
         # timings they were grouped by never move.

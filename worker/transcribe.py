@@ -18,7 +18,7 @@ import time
 import requests
 
 import config
-from schemas import Word, Sentence
+from schemas import Word, Sentence, is_filler_token
 
 _model = None
 _supports_hotwords = None
@@ -114,7 +114,16 @@ def _parse_deepgram(payload):
             t0, t1 = float(w["start"]), float(w["end"])
         except (KeyError, TypeError, ValueError):
             raise ValueError("deepgram word is missing start/end timestamps")
-        words.append(Word(w=token, t0=round(t0, 3), t1=round(t1, 3)))
+        # None, not 0, when the response carries no speaker: "everyone is
+        # speaker 0" and "nobody diarized this" are different facts, and only
+        # one of them can be acted on.
+        spk = w.get("speaker")
+        try:
+            spk = int(spk) if spk is not None else None
+        except (TypeError, ValueError):
+            spk = None
+        words.append(Word(w=token, t0=round(t0, 3), t1=round(t1, 3),
+                          speaker=spk, filler=is_filler_token(token)))
     lang = ch.get("detected_language") or alts[0].get("language") or "en"
     return words, str(lang)
 
@@ -128,6 +137,23 @@ def _transcribe_deepgram(wav_path):
         "punctuate": "true",
         "detect_language": "true",
     }
+    # Round 69. Both are included in nova-3's per-minute price and both were
+    # off, which cost far more than it looks:
+    #   diarize      — without it the index knows what was said and never who
+    #                  said it, so "keep only the interviewer" has no data.
+    #   filler_words — nova-3 DROPS "um"/"uh" unless asked. remove_filler_words
+    #                  cuts the video at word timestamps, so with no fillers in
+    #                  the transcript there is nothing to cut: measured across
+    #                  85 prod indexes and 12,263 words, ZERO filler tokens.
+    #                  That tool has been a guaranteed no-op on every video
+    #                  ever uploaded.
+    if config.DEEPGRAM_DIARIZE:
+        params["diarize"] = "true"
+    if config.DEEPGRAM_FILLER_WORDS:
+        params["filler_words"] = "true"
+    # Billed per feature on top of transcription — opt-in only.
+    for feat in config.DEEPGRAM_INTELLIGENCE:
+        params[feat] = "true"
     terms = _hotword_terms()
     if terms:
         params["keyterm"] = terms      # requests repeats the key per term
@@ -278,18 +304,28 @@ def _transcribe_whisper(wav_path):
             token = (w.word or "").strip()
             if not token:
                 continue
+            # No speaker: whisper does not diarize, and inventing one would
+            # make an undiarized transcript indistinguishable from a
+            # single-speaker one.
             words.append(Word(w=token,
                               t0=round(float(w.start), 3),
-                              t1=round(float(w.end), 3)))
+                              t1=round(float(w.end), 3),
+                              filler=is_filler_token(token)))
     return words, getattr(info, "language", "en")
 
 
 def group_sentences(words):
     """[Word] -> [Sentence].
 
-    Breaks on terminal punctuation, a pause > SENTENCE_GAP_S, or — hard caps
-    that make run-ons impossible — when adding the next word would exceed
-    MAX_SENTENCE_WORDS words or MAX_SENTENCE_S seconds.
+    Breaks on terminal punctuation, a pause > SENTENCE_GAP_S, a SPEAKER
+    change, or — hard caps that make run-ons impossible — when adding the
+    next word would exceed MAX_SENTENCE_WORDS words or MAX_SENTENCE_S
+    seconds.
+
+    The speaker break is round 69 and is not cosmetic: a sentence spanning
+    two people is a line the transcript panel attributes to one of them, a
+    caption that puts an interruption on the wrong face, and a cut range
+    that lands mid-handover.
     """
     sentences = []
     start_i = 0
@@ -298,11 +334,15 @@ def group_sentences(words):
         punct_break = bool(SENTENCE_END.search(w.w))
         gap_break = (not is_last and
                      words[i + 1].t0 - w.t1 > SENTENCE_GAP_S)
+        speaker_break = (not is_last and w.speaker is not None
+                         and words[i + 1].speaker is not None
+                         and words[i + 1].speaker != w.speaker)
         cap_break = (not is_last and (
             (i - start_i + 2) > MAX_SENTENCE_WORDS or
             (words[i + 1].t1 - words[start_i].t0) > MAX_SENTENCE_S))
-        if punct_break or gap_break or cap_break or is_last:
+        if punct_break or gap_break or speaker_break or cap_break or is_last:
             chunk = words[start_i:i + 1]
+            spk = {x.speaker for x in chunk if x.speaker is not None}
             sentences.append(Sentence(
                 id=f"s{len(sentences) + 1}",
                 text=" ".join(x.w for x in chunk),
@@ -310,6 +350,7 @@ def group_sentences(words):
                 t1=chunk[-1].t1,
                 wi0=start_i,
                 wi1=i,
+                speaker=spk.pop() if len(spk) == 1 else None,
             ))
             start_i = i + 1
     return sentences

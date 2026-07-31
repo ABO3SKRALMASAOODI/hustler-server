@@ -27,7 +27,16 @@ from pydantic import BaseModel, Field, field_validator
 # returns (near-)zero words for real-length audio (Arabic → "Portuguese",
 # 0 words). Existing zero-word indexes MUST rebuild or those users stay
 # uncaptionable forever.
-PIPELINE_VERSION = 8
+# v9: BOTH halves of the index's perception changed (round 69). The picture is
+# now sampled on a CLOCK rather than once per detected shot (see
+# worker/visual.py — 81 of 177 prod videos were a single shot, i.e. one frame
+# of visual description for the whole video), which adds `moments` and makes
+# `shots[].caption` a derived field. And transcription now asks Deepgram for
+# speaker labels and filler words, which adds `speaker`/`filler` to every word
+# and changes the token stream itself — 12,263 words across 85 prod indexes
+# contained ZERO "um"/"uh", so remove_filler_words could never have worked.
+# Existing indexes must rebuild to gain either.
+PIPELINE_VERSION = 9
 
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0
@@ -2334,10 +2343,37 @@ def describe_edl(edl_dict, duration=None):
 #  Index                                                               #
 # ------------------------------------------------------------------ #
 
+# Tokens tagged `filler` on the way out of the transcriber (round 69).
+#
+# Deliberately TIGHTER than agent_tools.FILLER_WORDS_DEFAULT, which is what
+# remove_filler_words cuts when the user asks. The two lists answer different
+# questions and the cost of a false positive is not the same: removing a word
+# is an explicit instruction the user can see and undo, while this tag decides
+# what is silently withheld from burned-in captions. "ah" and "er" are real
+# words in real languages, so they are removable-on-request but never tagged.
+FILLER_TOKENS = frozenset((
+    "um", "umm", "ummm", "uh", "uhh", "uhhh", "uhm", "erm", "mmm",
+))
+
+
+def is_filler_token(token):
+    """True when this transcript token is a hesitation sound, not a word."""
+    return re.sub(r"[^a-z]", "", str(token or "").lower()) in FILLER_TOKENS
+
+
 class Word(BaseModel):
     w: str
     t0: float
     t1: float
+    # Speaker index from ASR diarization (round 69), 0-based, or None when
+    # the engine does not diarize (whisper) — NEVER 0 as a stand-in, because
+    # "everything is speaker 0" and "nobody knows who spoke" are different
+    # facts and only one of them can be acted on.
+    speaker: Optional[int] = None
+    # Hesitation sound rather than a word. In the index so remove_filler_words
+    # has real spans to cut; excluded from burned-in caption text so the
+    # default look is not "So, um, uh, yeah".
+    filler: bool = False
 
 
 def clamp_word_times(words, duration):
@@ -2378,6 +2414,9 @@ class Sentence(BaseModel):
     t1: float
     wi0: int         # index into words[]
     wi1: int         # inclusive
+    # The speaker of this sentence, or None when undiarized. group_sentences
+    # breaks on a speaker change, so a sentence never spans two people.
+    speaker: Optional[int] = None
 
 
 class ShotCaption(BaseModel):
@@ -2398,6 +2437,21 @@ class Shot(BaseModel):
     start: float
     end: float
     thumb_key: Optional[str] = None
+    # DERIVED, since round 69: the caption of the moment nearest this shot's
+    # midpoint. Every existing reader of this field is unchanged; what changed
+    # is that it is no longer the ONLY thing the index knows about the picture.
+    caption: Optional[ShotCaption] = None
+
+
+class Moment(BaseModel):
+    """What is on screen at one sampled instant (round 69).
+
+    Sampled on a clock, not per shot — see worker/visual.py. `shot` is the
+    shot this instant falls inside, kept so a moment can always be related
+    back to the scene structure the renderer and transitions care about.
+    """
+    t: float
+    shot: int
     caption: Optional[ShotCaption] = None
 
 
@@ -2414,10 +2468,16 @@ class VideoIndex(BaseModel):
     version: int = 1
     video: VideoInfo
     shots: List[Shot] = Field(default_factory=list)
+    # Time-sampled visual track (round 69). Empty on indexes built before it,
+    # which read back exactly as they did — shots still carry their captions.
+    moments: List[Moment] = Field(default_factory=list)
     words: List[Word] = Field(default_factory=list)
     sentences: List[Sentence] = Field(default_factory=list)
     silences: List[List[float]] = Field(default_factory=list)
     sheet_keys: List[str] = Field(default_factory=list)
+    # Distinct speakers the transcriber diarized. 0 means "not diarized"
+    # (whisper, or an index built before round 69), never "nobody spoke".
+    speakers: int = 0
     # Whisper-detected language code (e.g. "en", "es"). Optional so cached
     # indexes from before this field render unchanged; used for caption
     # font/style decisions and admin analytics.
