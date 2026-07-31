@@ -50,7 +50,7 @@ import personseg
 # footage. It rides the mask's cache fingerprint, so a change here re-measures
 # instead of serving a mask built by the old arithmetic — the same reason the
 # erase path fingerprints its own derivation.
-VERSION = 7
+VERSION = 8
 
 # ── v6: the subject is FOUND, not inferred (round 64) ───────────────────────
 # Versions 2-5 are four consecutive rounds of cleverer photometrics failing on
