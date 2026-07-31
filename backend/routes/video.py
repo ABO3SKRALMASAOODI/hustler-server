@@ -792,7 +792,7 @@ def _preview_plan(twin, defer):
     return "defer" if defer else "enqueue"
 
 
-def _should_heal_preview(edl, indexed, drafting):
+def _should_heal_preview(edl, indexed, drafting, agent_turn_failed=False):
     """Should this poll enqueue a preview for the newest EDL?
 
     The heal exists because the current edit must always have a render on the
@@ -806,10 +806,21 @@ def _should_heal_preview(edl, indexed, drafting):
     later. Scoped to ONE version and to a client that keeps saying so — the
     moment a tab closes, navigates, or edits again it stops sending it and the
     net is back.
+
+    `agent_turn_failed` (round 67b): agent-made versions are normally the
+    turn's own responsibility — it renders its preview, or the worker
+    auto-renders one when it forgets. That contract has exactly one hole: a
+    turn KILLED mid-flight (a deploy restart, an OOM) leaves the versions it
+    already wrote with no preview, no job, and — before this flag — a safety
+    net that deliberately looked away. A real user watched "Updating your
+    preview…" forever over a stale video (project 298, job 1614, killed by
+    the round-67 worker deploy itself). When the project's newest agent turn
+    is FAILED there is no turn left to race and nothing speculative about
+    rendering the state it abandoned — so the net covers it.
     """
     if not edl or not indexed:
         return False
-    if edl["created_by"] != "user":
+    if edl["created_by"] != "user" and not agent_turn_failed:
         return False
     return drafting != edl["version"]
 
@@ -1907,7 +1918,20 @@ def project_state(user_id, project_id):
         # ...and EXCEPT while a client is drafting this exact version and will
         # ask for the render itself — see _should_heal_preview.
         drafting = request.args.get("drafting", type=int)
-        if _should_heal_preview(edl, indexed, drafting):
+        # Round 67b: a turn killed mid-flight (deploy restart, OOM) leaves its
+        # written versions unrendered and no job to wait on. Only when the
+        # newest agent_turn is terminally FAILED does the heal extend to
+        # agent-made versions — a live turn still owns its own render, and a
+        # completed one always left a preview behind.
+        agent_turn_failed = False
+        if edl and edl.get("created_by") != "user":
+            cur.execute("""SELECT state FROM video_jobs
+                           WHERE project_id = %s AND type = 'agent_turn'
+                           ORDER BY id DESC LIMIT 1""", (project_id,))
+            last_turn = cur.fetchone()
+            agent_turn_failed = bool(last_turn
+                                     and last_turn["state"] == "failed")
+        if _should_heal_preview(edl, indexed, drafting, agent_turn_failed):
             cur.execute("""SELECT 1 FROM video_jobs
                            WHERE project_id = %s AND type = 'preview'
                              AND (payload->>'edl_version')::int = %s

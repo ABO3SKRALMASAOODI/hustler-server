@@ -73,12 +73,29 @@ def test_a_closed_tab_stops_suppressing_immediately():
     assert video._should_heal_preview(edl_row(7), True, None) is True
 
 
-def test_agent_versions_are_still_never_healed():
-    """Unchanged policy: an agent turn enqueues its own preview and has its own
-    retry path, and healing those would speculatively render every project
-    whose last EDL was the agent's opening version."""
+def test_agent_versions_are_not_healed_while_their_turn_lives():
+    """Standing policy: a live or completed agent turn owns its own preview
+    (it renders one, or the worker auto-renders), and healing those would
+    speculatively render every project whose last EDL was the agent's
+    opening version."""
     assert video._should_heal_preview(edl_row(7, "agent"), True, None) is False
     assert video._should_heal_preview(edl_row(7, "agent"), True, 7) is False
+
+
+def test_a_dead_turns_orphan_versions_are_healed():
+    """Round 67b: the one hole in that contract. A turn KILLED mid-flight (a
+    deploy restart, an OOM) leaves the versions it already wrote with no
+    preview and no job — project 298 sat on 'Updating your preview…' forever
+    over a stale video while its turn's corpse said 'Worker died'. When the
+    newest agent_turn is FAILED there is no turn left to race: the net covers
+    agent versions too (drafting suppression still applies)."""
+    assert video._should_heal_preview(edl_row(7, "agent"), True, None,
+                                      agent_turn_failed=True) is True
+    assert video._should_heal_preview(edl_row(7, "agent"), True, 7,
+                                      agent_turn_failed=True) is False
+    # ...and the flag never bypasses the index gate
+    assert video._should_heal_preview(edl_row(7, "agent"), False, None,
+                                      agent_turn_failed=True) is False
 
 
 def test_nothing_is_healed_before_the_video_is_indexed_or_without_an_edl():
