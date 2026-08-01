@@ -231,8 +231,18 @@ def _change_ranges(prev, new):
 
     merged = _merge(ranges)
     if len(merged) > _MAX_RANGES:
-        glob, merged = True, []
-    merged_cuts = _merge(cuts)[:_MAX_RANGES]
+        # Too many white markers reads as noise — but if this write is
+        # dominated by REMOVALS the red set carries the story, so just drop
+        # the white set. Going global here painted the WHOLE bar in a white
+        # shimmer over a cut_silences pass, burying the red cut markers —
+        # the exact opposite of "show me what got cut" (owner report).
+        if cuts:
+            merged = []
+        else:
+            glob, merged = True, []
+    # Cuts get a higher cap on purpose: cut_silences removes dozens of thin
+    # slivers and every one of them is the answer to "what is being cut".
+    merged_cuts = _merge(cuts)[:48]
     return {"out_ranges": [[round(a, 2), round(b, 2)] for a, b in merged],
             "cut_ranges": [[round(a, 2), round(b, 2)] for a, b in merged_cuts],
             "global": bool(glob)}

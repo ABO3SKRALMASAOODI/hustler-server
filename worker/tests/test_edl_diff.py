@@ -138,3 +138,17 @@ def test_additions_have_no_cut_ranges():
                        "template": "title"}])
     c = change_ranges(_edl(), new)
     assert c["cut_ranges"] == []
+
+
+def test_many_cuts_stay_red_never_global_white():
+    """A cut_silences-style pass (dozens of removals) must NOT collapse to
+    the global full-bar shimmer — the red cut set carries the story."""
+    keep_new = []
+    t = 0.0
+    for _ in range(20):                     # 20 kept islands, 19 gaps cut
+        keep_new.append([t, t + 1.0])
+        t += 2.0
+    c = change_ranges(_edl([[0.0, t]]), _edl(keep_new))
+    assert c["global"] is False
+    assert c["out_ranges"] == []            # white noise dropped
+    assert len(c["cut_ranges"]) == 20       # the gaps, in old coordinates
