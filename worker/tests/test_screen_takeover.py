@@ -920,3 +920,26 @@ def test_frame_is_all_content_well_before_the_cut(rendered):
     m = _content_mask(f)
     assert m.mean() > 0.985, \
         f"room still visible at the arrival: {m.mean():.3f} content"
+
+
+def test_land_false_removes_both_settle_terms():
+    """settle:false (ScreenLock.land=False, round 71g): the filtergraph must
+    carry NO through-cut overshoot — neither the program-side post-cut sin
+    nor the overlay-side grow. A real user watched the render 'zoom on the
+    screen recording then return' after the handoff."""
+    land_tag = f"{renderer.SCREEN_LAND_ZOOM:.3f}*sin"
+
+    def _graph(extra):
+        e = _takeover_edl("clips/1/c.mov")
+        e["overlays"][0]["screen"].update(extra)
+        edl = validate_edl(dict(e), ROOM_S).model_dump()
+        tl = Timeline(edl["keep"], edl["inserts"], [])
+        index = {"video": {"duration": ROOM_S}, "words": [], "sentences": []}
+        return renderer.build_filtergraph(
+            edl, ROOM_S, True, tl, None, [], index, preview=False,
+            W=W, H=H, fps=float(FPS),
+            insert_inputs=[(1, edl["inserts"][0], True)],
+            overlay_inputs=[(2, edl["overlays"][0])])
+
+    assert land_tag in _graph({})               # default: the settle exists
+    assert land_tag not in _graph({"land": False})
