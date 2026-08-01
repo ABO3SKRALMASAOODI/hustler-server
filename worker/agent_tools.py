@@ -1043,6 +1043,16 @@ def _look_at_output(ctx, output_times, question):
         "any zoom active at each moment are applied (a tile says so in its "
         "label); captions/texts/grades/overlays still burn in at render "
         "and are not shown")
+    if any("zoom on screen" in lb for lb in labels):
+        # Round 74: an agent read a rect off a tile that was already zoomed
+        # and aimed the next zoom at those numbers — which are SCREEN
+        # coordinates of the magnified view, not frame coordinates. Say it
+        # at the moment it matters.
+        out += ("\nA tile marked with a zoom shows the viewer's FRAMED "
+                "shot — its grid reads SCREEN coordinates of the magnified "
+                "view, NOT aim coordinates. To aim (cx/cy/rect), read "
+                "positions off an UNZOOMED tile — ask for a moment outside "
+                "the zoom window.")
     if missing:
         out += f"\n({missing} requested time(s) could not be decoded)"
     return _cap(out)
@@ -5790,11 +5800,24 @@ def _detect_screen(ctx, edl, src_t, content_aspect=None, content=None):
     return out, res
 
 
-def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
+def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=None,
                         corners=None, clip_start_s=None, hold_s=None,
-                        push=1.0, ease="smooth", settle=True):
+                        push=None, ease=None, settle=None):
     """Push into a device screen in the footage and let an asset playing ON
-    that screen become the whole video, in one continuous move."""
+    that screen become the whole video, in one continuous move.
+
+    Round 74: calling this again at an arrival where a takeover of the same
+    asset already lands REPLACES that takeover. There is no edit tool for a
+    takeover, so "make the transition flat/smooth/shorter" used to mean
+    remove + re-add — two writes, and a re-detection that can come back
+    WORSE than the pin it replaced (a real session re-measured a good
+    0.30-wide laptop trapezoid into a 0.10-wide bright patch at 0.57
+    confidence, 1 of 3 frames agreeing). On replace, parameters not passed
+    are INHERITED from the existing takeover, and its already-accepted pin
+    corners are REUSED instead of re-measured unless new `corners` are
+    given. That is why every keyword here defaults to None: None means
+    "keep what the takeover has" on a replace and the documented default on
+    a fresh add."""
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
@@ -5814,6 +5837,23 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
         return ("REJECTED: at_output_s must be a number — the moment in the "
                 "FINAL edited video where the takeover FINISHES and the asset "
                 "is full screen, in seconds.")
+    # Same arrival + same asset = the SAME transition, re-parameterised.
+    prev_tk = next((o for o in (edl.get("overlays") or [])
+                    if o.get("screen") and o.get("asset_key") == asset_key
+                    and abs(float(o["start"]) + float(o["duration_s"]) - at)
+                    < 0.3), None)
+    replace_id = None
+    if prev_tk is not None:
+        replace_id = prev_tk.get("id")
+        prev_scr = dict(prev_tk.get("screen") or {})
+        if duration_s is None:
+            duration_s = float(prev_tk["duration_s"])
+        if ease is None:
+            ease = prev_scr.get("ease")
+        if push is None:
+            push = prev_scr.get("push")
+        if settle is None:
+            settle = prev_scr.get("land") is not False
     try:
         dur = round(float(duration_s if duration_s is not None else 1.2), 2)
     except (TypeError, ValueError):
@@ -5889,10 +5929,17 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
         probe_out = max(0.0, at - dur * 0.5)
 
     detected = None
+    reused_pin = False
     if corners is not None:
         quad, cerr = _parse_screen_corners(corners)
         if cerr:
             return cerr
+    elif prev_tk is not None and (prev_tk.get("screen") or {}).get("corners"):
+        # Replace: the pin geometry the user has already seen and accepted
+        # beats a fresh measurement of the same shot.
+        quad = [round(float(v), 4)
+                for v in (prev_tk.get("screen") or {})["corners"]]
+        reused_pin = True
     elif host is not None:
         h_ins, w0, w1 = host
         clip_t = float(h_ins.get("source_start_s") or 0.0) + (probe_out - w0)
@@ -6125,6 +6172,11 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
     # the window's start; measured/read corners keep the late dissolve.
     if corners is not None:
         c_src = "user"
+    elif reused_pin:
+        # keep the provenance of the pin that was kept — a reused "matched"
+        # pin keeps its content-on-glass-from-the-start behaviour.
+        c_src = (prev_tk.get("screen") or {}).get("corners_source") \
+            or "measured"
     elif detected and detected.get("method") == "content_match":
         c_src = "matched"
     elif detected and detected.get("read_not_measured"):
@@ -6141,7 +6193,10 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
         screen_spec["land"] = False
     if corner_path:
         screen_spec["corner_path"] = corner_path
-    overlays = [dict(o) for o in (edl.get("overlays") or [])]
+    # replace_id: the takeover this call supersedes leaves in the same write
+    # that lands its successor — never two pushes into one arrival.
+    overlays = [dict(o) for o in (edl.get("overlays") or [])
+                if o.get("id") != replace_id]
     item = {"id": _next_item_id(overlays, "tk"), "asset_key": asset_key,
             "kind": kind, "start": start, "duration_s": dur,
             "x": 0.5, "y": 0.5, "scale": 1.0, "fit": None, "opacity": None,
@@ -6161,6 +6216,13 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
 
     _cx, _cy, z_end = renderer.screen_lock_geometry(item["screen"])
     bits = [written]
+    if replace_id:
+        bits.append(
+            f"REPLACED the takeover already arriving at {at}s "
+            f"[{replace_id}] — same arrival, new parameters"
+            + ("; its accepted pin corners were KEPT (pass corners=... to "
+               "re-measure)" if reused_pin else
+               "; its pin was re-set from the corners you passed") + ".")
     if track_note:
         bits.append(("TRACKED: " if corner_path else "") + track_note + ".")
     if host_notes:
@@ -6215,15 +6277,26 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
                   "frame does the clip DISSOLVE onto it (fully there before "
                   "the picture lands, so the swap happens where the room is "
                   "already gone from view)")
+    # Say what the LANDING actually does. This sentence claimed the settle
+    # unconditionally for a version after settle=false existed, so an agent
+    # that had just turned the settle OFF read its own tool telling it the
+    # zoom-past-full-frame was still there — and a user asking for a flat
+    # landing was told the opposite of what was written.
+    landing = ("the landing is DEAD FLAT — full frame on the cut and it "
+               "stays there (settle=false), so the join reads as one clean "
+               "arrival"
+               if screen_spec.get("land") is False else
+               "the momentum carries through the cut (a brief punch past "
+               "full frame that settles), so the join sits inside one "
+               "continuous motion")
     bits.append(
         f"From {start}s the camera pushes {z_end:.1f}x into the screen over "
         f"{dur}s. {appear} — "
         f"and the picture arrives full frame at exactly {hand}s, where "
         f"'{name}' cuts in and keeps playing from the same instant "
         f"({round(off + dur, 2)}s into the clip). The last frame of the "
-        "push and the first frame of the clip are the SAME frame, and the "
-        "momentum carries through the cut (a brief punch past full frame "
-        "that settles), so the join sits inside one continuous motion.")
+        f"push and the first frame of the clip are the SAME frame, and "
+        f"{landing}.")
     bits.append(
         "The push and the pin are one item — remove it with "
         f"remove_screen_takeover('{item['id']}'), which also takes the "
@@ -11330,7 +11403,12 @@ TOOLS = {
         "landing. "
         "It REFUSES rather than guessing when it cannot measure the screen, "
         "and refuses when the screen is under 8% of the frame (the push "
-        "would be a >12x blowup). Undo with remove_screen_takeover.",
+        "would be a >12x blowup). TO CHANGE AN EXISTING TAKEOVER (flat "
+        "landing, different ease/length), call this again at the SAME "
+        "arrival: it REPLACES that takeover in one write — parameters you "
+        "omit are inherited, and its accepted pin corners are reused "
+        "instead of re-measured (pass corners to force a re-measure). "
+        "remove_screen_takeover is only for taking the transition OUT.",
         {"asset_key": {"type": "string"},
          "at_output_s": {"type": "number"},
          "duration_s": {"type": "number"},

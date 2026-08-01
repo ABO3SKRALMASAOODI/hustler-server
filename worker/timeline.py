@@ -18,10 +18,12 @@ pre-speed behavior (piece factor 1.0, one piece per segment).
 """
 
 try:
-    from schemas import speed_pieces, clip_anim, keep_boundaries
+    from schemas import (speed_pieces, clip_anim, keep_boundaries,
+                         SCREEN_TAKEOVER_MIN_S)
 except ImportError:      # loaded standalone by the backend (importlib):
     # routes/video.py registers the schemas module as 'worker_schemas'
-    from worker_schemas import speed_pieces, clip_anim, keep_boundaries
+    from worker_schemas import (speed_pieces, clip_anim, keep_boundaries,
+                                SCREEN_TAKEOVER_MIN_S)
 
 
 def _ins_tuple(i):
@@ -492,6 +494,27 @@ def remap_program_items(edl, old_tl, new_tl):
                 # a genuinely cut-away zoom maps to nothing.
                 if old_tl.out_to_src(float(z["start"])) is None or \
                         old_tl.out_to_src(float(z["end"])) is None:
+                    # Kept — but CLAMPED to the new program (round 74).
+                    # Stylize has clamped this exact case since round 71;
+                    # zooms never did, so an insert-anchored zoom left
+                    # hanging past a shortened edit made validate_edl
+                    # reject the WHOLE write: a user splitting the last
+                    # scene and deleting the tail chunk was refused with a
+                    # raw "effects.zooms[0]: end 9.5 exceeds the limit
+                    # 8.88s" — blocked from an ordinary cut by a zoom the
+                    # cut never touched.
+                    if float(z["start"]) > max(0.0, prog - 0.2):
+                        region_notes.append(
+                            f"note: zoom {z.get('id')} was removed — its "
+                            "window falls outside the shortened edit.")
+                        fx_changed = True
+                        continue
+                    if float(z["end"]) > prog:
+                        z["end"] = round(prog, 2)
+                        region_notes.append(
+                            f"note: zoom {z.get('id')} now ends at "
+                            f"{z['end']}s to fit the shortened edit.")
+                        fx_changed = True
                     kept_zooms.append(z)
                     continue
                 region_notes.append(
@@ -733,21 +756,77 @@ def remap_program_items(edl, old_tl, new_tl):
         # path below) would leave a push into a screen that hands off to
         # nothing, which renders as the shot snapping back at full zoom.
         tk_windows = insert_windows(edl.get("inserts"), new_tl)
+
+        def _scene_floor(t):
+            """out_start of the program block that ENDS at t — the scene the
+            push actually films. Falls back to the block containing t."""
+            try:
+                blocks = program_blocks(edl)
+            except Exception:
+                return 0.0
+            for b in blocks:
+                if abs(b["out_end"] - t) < 0.05:
+                    return float(b["out_start"])
+            for b in blocks:
+                if b["out_start"] - 1e-6 <= t - 0.01 < b["out_end"]:
+                    return float(b["out_start"])
+            return 0.0
+
         for ov in edl["overlays"]:
             ov = dict(ov)
             if ov.get("screen"):
-                win = next((w for iid, w in tk_windows.items()
+                hit = next(((iid, w) for iid, w in tk_windows.items()
                             if _ins_asset(edl.get("inserts"), iid)
                             == ov.get("asset_key")
                             and abs(w[0] - (float(ov["start"])
                                             + float(ov["duration_s"]))) < 2.5),
                            None)
-                if win is None:
+                if hit is None:
                     region_notes.append(
                         f"note: screen takeover {ov.get('id')} was removed — "
                         "the clip it pushed into is no longer in the edit.")
                     continue
-                new_start = round(win[0] - float(ov["duration_s"]), 2)
+                h_id, win = hit
+                dur = float(ov["duration_s"])
+                # The push films ONE scene (round 74). Its corners were
+                # measured on the shot right before the handoff, so a window
+                # crossing the cut BEHIND that shot pins content onto
+                # different footage: a real launch video carried a 2.42s
+                # push whose device shot had shrunk to 1.88s, and the first
+                # half-second of the "transition" played over the previous
+                # scene. The push shortens to the scene instead of bleeding
+                # across the cut behind it.
+                floor = _scene_floor(win[0])
+                room = round(win[0] - floor - 0.05, 2)
+                if room < SCREEN_TAKEOVER_MIN_S:
+                    region_notes.append(
+                        f"note: screen takeover {ov.get('id')} was removed — "
+                        f"only {max(room, 0.0):.2f}s of the shot it pushes "
+                        "into survives, too short for the push.")
+                    continue
+                if dur > room:
+                    shift = round(dur - room, 3)
+                    scr = dict(ov.get("screen") or {})
+                    path = scr.get("corner_path")
+                    if path:
+                        # Knots are seconds from the window START, and the
+                        # cut came off the FRONT: shift every knot and drop
+                        # the ones now before zero. The renderer holds flat
+                        # before the first surviving knot, so nothing needs
+                        # interpolating; under two knots is no track at all.
+                        kept_p = [[round(float(p[0]) - shift, 3)]
+                                  + [float(v) for v in p[1:]]
+                                  for p in path
+                                  if float(p[0]) >= shift - 1e-6]
+                        scr["corner_path"] = kept_p if len(kept_p) >= 2 \
+                            else None
+                        ov["screen"] = scr
+                    ov["duration_s"] = dur = room
+                    region_notes.append(
+                        f"note: screen takeover {ov.get('id')} now pushes "
+                        f"for {room}s — the shot it pushes into shrank, and "
+                        "the push stays inside it.")
+                new_start = round(win[0] - dur, 2)
                 if new_start < 0.0:
                     region_notes.append(
                         f"note: screen takeover {ov.get('id')} was removed — "
@@ -758,6 +837,26 @@ def remap_program_items(edl, old_tl, new_tl):
                         f"note: screen takeover {ov.get('id')} moved to "
                         f"{new_start}-{win[0]}s, staying joined to its clip.")
                     ov["start"] = new_start
+                # The handoff is invisible ONLY while the pin's last frame
+                # is the clip's first frame. The offset is re-derived from
+                # the clip EVERY pass: a clip whose own clip_start changed
+                # (set_insert_window) otherwise leaves the pin ending short
+                # of the frame the clip opens on — a real EDL carried
+                # source_start 5.66 against a clip at 8.78, a 0.7s jump
+                # inside the one join the effect exists to hide.
+                if ov.get("kind") == "video":
+                    h_ins = next((i for i in (edl.get("inserts") or [])
+                                  if i.get("id") == h_id), None)
+                    if h_ins is not None:
+                        want = round(max(0.0, float(
+                            h_ins.get("source_start_s") or 0.0) - dur), 2)
+                        if abs(want - float(ov.get("source_start_s")
+                                            or 0.0)) > 0.01:
+                            ov["source_start_s"] = want
+                            region_notes.append(
+                                f"note: screen takeover {ov.get('id')} "
+                                "re-aligned its pinned footage so the "
+                                "handoff stays on the same frame.")
                 kept_ov.append(ov)
                 continue
             if float(ov["start"]) > max(0.0, prog - 0.2):
