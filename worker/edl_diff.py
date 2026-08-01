@@ -77,9 +77,14 @@ def _canon(it):
 
 
 def change_ranges(prev, new):
-    """{"out_ranges": [[a, b], ...], "global": bool} in NEW-program output
-    seconds, or None when nothing could be derived. Zero-length ranges are
-    removal points. Never raises."""
+    """{"out_ranges": [[a, b], ...], "cut_ranges": [[a, b], ...],
+    "global": bool}, or None when nothing could be derived. Never raises.
+
+    out_ranges are NEW-program output seconds (zero-length = removal
+    point, where the cut closed up). cut_ranges are the REMOVED material
+    in the PREVIOUS program's output seconds — the coordinates of the
+    render the user is still watching while the turn runs, which is the
+    only clock in which "what is being cut" is visible at all."""
     try:
         return _change_ranges(prev or {}, new or {})
     except Exception:
@@ -92,12 +97,19 @@ def _change_ranges(prev, new):
     tl_prev = Timeline(_spans(prev.get("keep")), prev.get("inserts"),
                        prev.get("speed"))
     dur = tl_new.out_duration
-    ranges, glob = [], False
+    prev_dur = tl_prev.out_duration
+    ranges, cuts, glob = [], [], False
 
     def add(a, b):
         a = min(max(float(a), 0.0), dur)
         b = min(max(float(b), a), dur)
         ranges.append((a, b))
+
+    def add_cut(a, b):
+        a = min(max(float(a), 0.0), prev_dur)
+        b = min(max(float(b), a), prev_dur)
+        if b > a + 1e-3:
+            cuts.append((a, b))
 
     # ── footage: keep-list / speed changes ────────────────────────────────
     prev_keep = _spans(prev.get("keep"))
@@ -108,6 +120,9 @@ def _change_ranges(prev, new):
         for s, e in _interval_sub(prev_keep, new_keep):      # cut away
             t = _junction_out(tl_new, s)
             add(t, t)
+            # and where that footage sits in the render still on screen
+            for a, b in tl_prev.span_to_out(s, e):
+                add_cut(a, b)
     if (prev.get("speed") or []) != (new.get("speed") or []):
         seen = {repr(sp) for sp in (prev.get("speed") or [])}
         changed = [sp for sp in (new.get("speed") or [])
@@ -137,6 +152,8 @@ def _change_ranges(prev, new):
                 w = wins_prev.get(k)
                 t = w[0] if w else 0.0
                 add(t, t)
+                if w:
+                    add_cut(w[0], w[1])
 
     # ── program-anchored spans: texts, overlays, music ────────────────────
     for field, prefix in (("texts", "tx"), ("overlays", "ov"),
@@ -152,7 +169,11 @@ def _change_ranges(prev, new):
                 add(s, e)
         for k, it in p.items():
             if k not in n:
-                add(float(it.get("start", 0.0)), float(it.get("start", 0.0)))
+                s = float(it.get("start", 0.0))
+                e = float(it.get("end")) if it.get("end") is not None else \
+                    s + float(it.get("duration_s") or 0.0)
+                add(s, s)
+                add_cut(s, e)
 
     # ── sfx: points in the output ─────────────────────────────────────────
     p, n = _by_id(prev.get("sfx"), "sfx"), _by_id(new.get("sfx"), "sfx")
@@ -195,17 +216,23 @@ def _change_ranges(prev, new):
     if _fx_rest(fx_p) != _fx_rest(fx_n):
         glob = True
 
-    if not ranges and not glob:
+    if not ranges and not cuts and not glob:
         return None
-    # merge close/overlapping, points included
-    ranges.sort()
-    merged = []
-    for a, b in ranges:
-        if merged and a <= merged[-1][1] + _GAP:
-            merged[-1][1] = max(merged[-1][1], b)
-        else:
-            merged.append([a, b])
+
+    def _merge(spans):
+        spans = sorted(spans)
+        out = []
+        for a, b in spans:
+            if out and a <= out[-1][1] + _GAP:
+                out[-1][1] = max(out[-1][1], b)
+            else:
+                out.append([a, b])
+        return out
+
+    merged = _merge(ranges)
     if len(merged) > _MAX_RANGES:
         glob, merged = True, []
+    merged_cuts = _merge(cuts)[:_MAX_RANGES]
     return {"out_ranges": [[round(a, 2), round(b, 2)] for a, b in merged],
+            "cut_ranges": [[round(a, 2), round(b, 2)] for a, b in merged_cuts],
             "global": bool(glob)}

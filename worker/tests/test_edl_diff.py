@@ -96,3 +96,45 @@ def test_close_ranges_merge():
 
 def test_never_raises_on_garbage():
     assert change_ranges({"keep": "??"}, _edl()) is None
+
+
+def test_cut_range_reports_the_removed_span_in_old_coordinates():
+    """The viewer is still watching the PREVIOUS render while the turn
+    runs — cut_ranges point at the doomed material in that clock."""
+    prev = _edl([[0.0, 10.0]])
+    new = _edl([[0.0, 4.0], [6.0, 10.0]])
+    c = change_ranges(prev, new)
+    assert c["out_ranges"] == [[4.0, 4.0]]      # junction in the NEW program
+    assert c["cut_ranges"] == [[4.0, 6.0]]      # the span in the OLD program
+
+
+def test_cut_after_earlier_cut_maps_through_old_timeline():
+    """prev already has a cut, so old-program coordinates != source."""
+    prev = _edl([[0.0, 2.0], [5.0, 10.0]])      # old program: 7s
+    new = _edl([[0.0, 2.0], [8.0, 10.0]])       # cuts source 5-8
+    c = change_ranges(prev, new)
+    # source 5-8 sits at old-program 2-5
+    assert c["cut_ranges"] == [[2.0, 5.0]]
+
+
+def test_insert_removed_reports_its_old_window_as_cut():
+    prev = _edl([[0.0, 5.0]],
+                inserts=[{"id": "ins1", "asset_key": "k", "kind": "video",
+                          "at_output_s": 5.0, "duration_s": 3.0}])
+    c = change_ranges(prev, _edl([[0.0, 5.0]]))
+    assert c["out_ranges"] == [[5.0, 5.0]]
+    assert c["cut_ranges"] == [[5.0, 8.0]]
+
+
+def test_text_removed_reports_its_old_window_as_cut():
+    prev = _edl(texts=[{"id": "tx1", "text": "HI", "start": 2.0, "end": 3.5,
+                        "template": "title"}])
+    c = change_ranges(prev, _edl())
+    assert c["cut_ranges"] == [[2.0, 3.5]]
+
+
+def test_additions_have_no_cut_ranges():
+    new = _edl(texts=[{"id": "tx1", "text": "HI", "start": 2.0, "end": 3.5,
+                       "template": "title"}])
+    c = change_ranges(_edl(), new)
+    assert c["cut_ranges"] == []
