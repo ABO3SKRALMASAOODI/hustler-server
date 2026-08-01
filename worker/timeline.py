@@ -243,6 +243,106 @@ class Timeline:
         return out
 
 
+def program_blocks(edl):
+    """The ASSEMBLED PROGRAM in viewer order — round 71.
+
+    Users think in OUTPUT scenes ("the second scene is the laptop shot"),
+    while every index artifact speaks source time and the EDL summary only
+    counts inserts without placing them. This is the missing map: one entry
+    per render block (keep segment or spliced insert), in the exact order
+    build_filtergraph assembles them — the block loop below is the same one
+    transition_junctions uses and renderer.build_filtergraph mirrors, so a
+    scene number here IS the piece of program the viewer sees at that time.
+
+    Returns [{"n", "kind": "footage"|"insert", "out_start", "out_end",
+              "src_start"/"src_end" (footage) or
+              "id"/"asset_key"/"media"/"clip_start_s" (insert)}].
+    A canvas program (no keep) is just its inserts in order.
+    """
+    keep = [(float(k[0]), float(k[1])) for k in (edl.get("keep") or [])
+            if k is not None and len(k) >= 2]
+    inserts = sorted(list(edl.get("inserts") or []), key=_ins_sort_key)
+    tl = Timeline(keep, inserts, edl.get("speed"))
+    ins_order = [_ins_tuple(i) for i in inserts]
+    at_list = [at for at, _d in ins_order]
+    blocks, ins_j, pre = [], 0, 0.0
+    for i, (s, e) in enumerate(keep):
+        while ins_j < len(at_list) and at_list[ins_j] <= pre + 1e-6:
+            blocks.append(("ins", ins_j))
+            ins_j += 1
+        blocks.append(("seg", i))
+        pre += tl.seg_out_len[i]
+    while ins_j < len(at_list):
+        blocks.append(("ins", ins_j))
+        ins_j += 1
+
+    out, acc = [], 0.0
+    for n, (kind, i) in enumerate(blocks, start=1):
+        if kind == "seg":
+            L = tl.seg_out_len[i]
+            out.append({"n": n, "kind": "footage",
+                        "out_start": round(acc, 2),
+                        "out_end": round(acc + L, 2),
+                        "src_start": round(keep[i][0], 2),
+                        "src_end": round(keep[i][1], 2)})
+        else:
+            item = inserts[i]
+            d = float(item.get("duration_s") if isinstance(item, dict)
+                      else item.duration_s)
+            get = (item.get if isinstance(item, dict)
+                   else lambda k, _i=item: getattr(_i, k, None))
+            out.append({"n": n, "kind": "insert",
+                        "out_start": round(acc, 2),
+                        "out_end": round(acc + d, 2),
+                        "id": get("id"),
+                        "asset_key": get("asset_key"),
+                        "media": get("kind") or "video",
+                        "clip_start_s": get("source_start_s")})
+            L = d
+        acc += L
+    return out
+
+
+def describe_program(edl, name_of=None):
+    """Multi-line, viewer-ordered scene listing of the assembled program.
+
+    This is what lets the agent resolve "the second scene": scenes are
+    numbered in OUTPUT order, each with its program window and where its
+    pixels come from (main-footage source range, or the inserted clip and
+    the offset into it). `name_of` optionally maps an asset_key to a
+    display filename. Returns "" for an empty program.
+    """
+    try:
+        blocks = program_blocks(edl)
+    except Exception:
+        return ""
+    if not blocks:
+        return ""
+    total = blocks[-1]["out_end"]
+    lines = [f"THE ASSEMBLED PROGRAM — {len(blocks)} scene"
+             f"{'s' if len(blocks) != 1 else ''}, {total:g}s, in the order "
+             "the VIEWER sees them (output seconds). \"The second scene\" "
+             "means scene 2 of THIS list:"]
+    for b in blocks:
+        span = f"  scene {b['n']}  {b['out_start']:g}-{b['out_end']:g}s: "
+        if b["kind"] == "footage":
+            lines.append(span + f"main footage {b['src_start']:g}-"
+                         f"{b['src_end']:g}s (source clock)")
+        else:
+            name = None
+            if name_of:
+                try:
+                    name = name_of(b["asset_key"])
+                except Exception:
+                    name = None
+            label = name or (b["asset_key"] or "?").split("/")[-1]
+            frm = (f" from {b['clip_start_s']:g}s of that clip"
+                   if b.get("clip_start_s") else "")
+            lines.append(span + f"inserted {b['media']} '{label}' "
+                         f"[{b['id']}]{frm}")
+    return "\n".join(lines)
+
+
 def keep_anchor_times(keep):
     """The SOURCE time that identifies each keep boundary.
 

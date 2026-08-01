@@ -252,7 +252,10 @@ def run_mcp_job(worker_db, job):
                 out["preview"] = {
                     "edl_version": ctx.last_preview.get("edl_version"),
                     "duration_s": ctx.last_preview.get("duration_s"),
-                    "asset_id": ctx.last_preview.get("asset_id"),
+                    # The render job's result names this render_asset_id
+                    # (renderer.run_render_job); "asset_id" never existed,
+                    # so this field was silently null since round 63.
+                    "asset_id": ctx.last_preview.get("render_asset_id"),
                 }
             return out
         finally:

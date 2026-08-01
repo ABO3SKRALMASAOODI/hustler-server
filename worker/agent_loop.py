@@ -16,6 +16,7 @@ import llm
 import music_library
 import sfx_library
 import storage
+import timeline
 import visual
 from agent_prompt import project_state_block, system_prompt
 from schemas import describe_edl
@@ -339,6 +340,11 @@ def state_block(ctx, worker_db):
                          "indexed main video to read them from.")
     edl = ctx.latest_edl()
     edl_line = f"v{edl['version']} — {describe_edl(edl['json'], ctx.duration)}"
+    try:
+        program_lines = timeline.describe_program(
+            edl["json"], agent_tools.program_name_of(ctx))
+    except Exception:
+        program_lines = ""
     keep = edl["json"].get("keep") or []
     keep_line = json.dumps(keep[:40]) + \
         (f" ...(+{len(keep) - 40} more spans)" if len(keep) > 40 else "")
@@ -354,7 +360,8 @@ def state_block(ctx, worker_db):
     return project_state_block(video_line, index_summary, edl_line,
                                history_lines, music_lines,
                                keep_line=keep_line,
-                               captions_line=captions_line)
+                               captions_line=captions_line,
+                               program_lines=program_lines)
 
 
 def capabilities_block():
@@ -391,7 +398,7 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
 
 
 def _activity(worker_db, session_id, name, args, result, source=None,
-              edl_version=None):
+              edl_version=None, change=None):
     res_str = (result or "").replace("\n", " ")
     # Long enough that a diff line PLUS its appended WARNING lines survive —
     # truncating warnings out of the activity feed would hide them from the
@@ -412,6 +419,12 @@ def _activity(worker_db, session_id, name, args, result, source=None,
         # The EDL version current when this call ran — lets the studio roll
         # the activity feed back in step with the version stepper.
         meta["edl_version"] = edl_version
+    if change:
+        # Structural diff of THIS write (edl_diff.change_ranges): the output
+        # ranges the edit touched, so the studio can flash them briefly when
+        # the next preview lands. Only ever present on the row of an EDL
+        # write; read rows and non-writing calls never carry it.
+        meta["change"] = change
     if source:
         # Which driver made this call. The studio renders MCP activity exactly
         # like the agent's — it IS the same tool doing the same thing — but the
@@ -608,10 +621,20 @@ def run_agent_job(worker_db, job):
         # gets a sentence the user can act on. See _user_facing_failure.
         print(f"[agent] job {job['id']} failed: {type(e).__name__}: {e}",
               flush=True)
+        # Always stamped: an unstamped reply collapses the studio's version
+        # stepper grouping (bounds come from message stamps), so even a
+        # failed turn says which state it left the project in.
+        if ctx.versions_written:
+            fail_v = ctx.versions_written[-1]
+        else:
+            try:
+                fail_v = ctx.latest_edl()["version"]
+            except Exception:
+                fail_v = None
         worker_db.run(dbx.add_message, session_id, "assistant",
                       _user_facing_failure(e),
-                      ({"edl_version": ctx.versions_written[-1]}
-                       if ctx.versions_written else None))
+                      ({"edl_version": fail_v} if fail_v is not None
+                       else None))
         raise
     finally:
         llm.set_recorder(None)
@@ -1647,10 +1670,19 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         isinstance(result, str) and result.startswith("EDL v"):
                     ctx.write_calls.append(name)
             total_steps += 1
+            # A fresh write's change ranges belong to ITS activity row only —
+            # consume them here so a later read call the same step can never
+            # re-attach the same flash.
+            chg = None
+            if ctx.last_change and ctx.versions_written and \
+                    ctx.last_change.get("edl_version") == \
+                    ctx.versions_written[-1]:
+                chg, ctx.last_change = ctx.last_change, None
             _activity(worker_db, session_id, name, args, result,
                       edl_version=(ctx.versions_written[-1]
                                    if ctx.versions_written
-                                   else start_version))
+                                   else start_version),
+                      change=chg)
             result = _time_pressure_note(result, t_start, warned)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})

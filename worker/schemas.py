@@ -241,7 +241,9 @@ class CaptionStyle(BaseModel):
     # entrance animation for STATIC captions (fade/pop/slide_up); dynamic
     # karaoke captions animate word-by-word already, so animation is ignored
     # there. Optional so pre-round-9 EDLs keep their signatures.
-    animation: Optional[Literal["fade", "pop", "slide_up", "punch",
+    # "none" (round 71) explicitly turns a preset's animation OFF — distinct
+    # from None, which lets the preset's own animation apply.
+    animation: Optional[Literal["none", "fade", "pop", "slide_up", "punch",
                                 "blur_in", "whip", "flash", "rise",
                                 "drop"]] = None
 
@@ -979,8 +981,8 @@ class OverlayItem(BaseModel):
 # callouts, big numbers, quotes, chapter markers. PROGRAM-anchored.
 TEXT_TEMPLATES = ("title", "subtitle", "lower_third", "callout",
                   "big_number", "quote", "chapter")
-TEXT_ANIMS = ("fade", "pop", "slide_up", "blur_in", "whip", "rise", "drop",
-              "typewriter")
+TEXT_ANIMS = ("none", "fade", "pop", "slide_up", "blur_in", "whip", "rise",
+              "drop", "typewriter")
 TEXT_FONTS = ("Inter Display Black", "Inter Display ExtraBold",
               "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
               "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
@@ -1004,10 +1006,11 @@ class TextItem(BaseModel):
                            "Archivo Black", "Poppins Black", "Syne ExtraBold",
                            "Playfair Display Black", "Instrument Serif",
                            "DM Serif Display", "Montserrat"]] = None
-    entrance: Optional[Literal["fade", "pop", "slide_up", "blur_in", "whip",
-                               "rise", "drop", "typewriter"]] = None
-    exit: Optional[Literal["fade", "pop", "slide_up", "blur_in", "whip",
-                           "rise", "drop"]] = None
+    # "none" = instant: full opacity at frame one, gone at the last frame.
+    entrance: Optional[Literal["none", "fade", "pop", "slide_up", "blur_in",
+                               "whip", "rise", "drop", "typewriter"]] = None
+    exit: Optional[Literal["none", "fade", "pop", "slide_up", "blur_in",
+                           "whip", "rise", "drop"]] = None
     uppercase: Optional[bool] = None
     box: Optional[bool] = None      # backing panel behind the text
     # Round 40 — the text OWNS a spliced card rather than a span of the edit.

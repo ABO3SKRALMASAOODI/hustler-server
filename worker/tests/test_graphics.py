@@ -192,3 +192,45 @@ def test_lower_third_two_deck(tmp_path):
     sizes = [int(n) for n in re.findall(r"\\fs(\d+)", body)]
     assert len(sizes) >= 2 and sizes[-1] < sizes[0]
     assert r"\1c&HFFC200&" in body
+
+
+def test_none_is_instant(tmp_path):
+    """entrance/exit 'none' emits NO animation tags: no \\fad, no \\move,
+    no \\t transforms — just a static \\pos for the whole window."""
+    texts = [{"id": "n1", "text": "I TRAINED AN AI AGENT",
+              "start": 0.0, "end": 2.0, "template": "title",
+              "entrance": "none", "exit": "none"}]
+    path = _build(texts, out_dur=10.0, tmp_path=tmp_path)
+    content, evs, _ = _events(path)
+    body = evs[0].group(4)
+    assert r"\pos(" in body
+    assert r"\fad(" not in body
+    assert r"\move(" not in body
+    assert r"\t(" not in body
+
+
+def test_none_mixes_with_real_anim(tmp_path):
+    """'none' on one side leaves the other side's animation intact."""
+    texts = [{"id": "m1", "text": "INSTANT IN, RISING OUT",
+              "start": 0.0, "end": 2.0, "template": "title",
+              "entrance": "none", "exit": "rise"},
+             {"id": "m2", "text": "FADING IN, INSTANT OUT",
+              "start": 3.0, "end": 5.0, "template": "title",
+              "entrance": "fade", "exit": "none"}]
+    path = _build(texts, out_dur=10.0, tmp_path=tmp_path)
+    content, evs, _ = _events(path)
+    b1, b2 = evs[0].group(4), evs[1].group(4)
+    assert r"\move(" in b1                      # the rise exit animates
+    assert r"\fad(" in b2 and r"\move(" not in b2
+    assert ",0)" in b2.split(r"\fad(")[1][:12]  # fad(in,0): no fade-out
+
+
+def test_typewriter_with_none_exit_keeps_no_exit(tmp_path):
+    """typewriter forces exit='fade' UNLESS the caller explicitly asked
+    for 'none' — an instant disappearance needs no exit tag."""
+    texts = [{"id": "tw", "text": "TYPED", "start": 0.0, "end": 2.0,
+              "template": "title", "entrance": "typewriter", "exit": "none"}]
+    path = _build(texts, out_dur=10.0, tmp_path=tmp_path)
+    content, evs, _ = _events(path)
+    body = evs[0].group(4)
+    assert r"\fad(" not in body

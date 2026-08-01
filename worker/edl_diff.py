@@ -1,0 +1,211 @@
+"""What CHANGED between two EDL versions, as OUTPUT-time ranges of the NEW
+program — round 71.
+
+The studio flashes the changed region of the scrubber/timeline for a moment
+when a new preview lands, so the user recording a product-launch video can
+SEE where the agent just worked without hunting for it. That needs machine-
+readable ranges, and the prose diff line ("title text ... at 2.0-3.5s") was
+never that: some tools speak output time, some source time, and only English
+says which. This module diffs the two EDL dicts structurally and maps every
+localizable change into the NEW program's output clock.
+
+A REMOVAL has no extent in the new program — the place it used to be has
+closed up — so removals become zero-length ranges (points) at the junction
+where the removed material met the survivors. Changes with no meaningful
+locality (a color grade, caption restyle, mastering, a frame change) set
+"global" instead of pretending to a position.
+
+Consumed by ToolContext.write_edl -> agent_loop._activity, which attaches it
+as chat meta ("change") on the activity row of the write; the frontend reads
+it straight out of /state. Never raises: a diff failure returns None and the
+write proceeds — this is telemetry for a highlight, not part of the edit.
+"""
+
+from timeline import Timeline, insert_windows
+
+_GAP = 0.25          # merge flash ranges closer than this (seconds)
+_MAX_RANGES = 12     # beyond this the flash reads as noise: go global
+
+
+def _spans(lst):
+    return [(float(a), float(b)) for a, b in (lst or [])]
+
+
+def _interval_sub(a, b):
+    """Interval-list subtraction a - b (source-time [[s,e],...])."""
+    out = []
+    for s, e in a:
+        cur = [(s, e)]
+        for bs, be in b:
+            nxt = []
+            for cs, ce in cur:
+                if be <= cs + 1e-6 or bs >= ce - 1e-6:
+                    nxt.append((cs, ce))
+                    continue
+                if bs > cs:
+                    nxt.append((cs, bs))
+                if be < ce:
+                    nxt.append((be, ce))
+            cur = nxt
+        out.extend(cur)
+    return [(s, e) for s, e in out if e - s > 1e-3]
+
+
+def _junction_out(tl, src_t):
+    """Program time where footage cut around source time src_t closes up."""
+    best = 0.0
+    for (ks, ke), off, L in zip(tl.segs, tl.offsets, tl.seg_out_len):
+        if ke <= src_t + 1e-6:
+            best = off + L
+        elif ks >= src_t - 1e-6:
+            break
+    return best
+
+
+def _by_id(items, prefix):
+    out = {}
+    for i, it in enumerate(items or []):
+        key = (it.get("id") if isinstance(it, dict) else None) \
+            or f"{prefix}#{i}"
+        out[key] = it
+    return out
+
+
+def _canon(it):
+    """Comparable form of an item (dicts compare fine; None-safe)."""
+    return it if isinstance(it, dict) else repr(it)
+
+
+def change_ranges(prev, new):
+    """{"out_ranges": [[a, b], ...], "global": bool} in NEW-program output
+    seconds, or None when nothing could be derived. Zero-length ranges are
+    removal points. Never raises."""
+    try:
+        return _change_ranges(prev or {}, new or {})
+    except Exception:
+        return None
+
+
+def _change_ranges(prev, new):
+    new_keep = _spans(new.get("keep"))
+    tl_new = Timeline(new_keep, new.get("inserts"), new.get("speed"))
+    tl_prev = Timeline(_spans(prev.get("keep")), prev.get("inserts"),
+                       prev.get("speed"))
+    dur = tl_new.out_duration
+    ranges, glob = [], False
+
+    def add(a, b):
+        a = min(max(float(a), 0.0), dur)
+        b = min(max(float(b), a), dur)
+        ranges.append((a, b))
+
+    # ── footage: keep-list / speed changes ────────────────────────────────
+    prev_keep = _spans(prev.get("keep"))
+    if prev_keep != new_keep:
+        for s, e in _interval_sub(new_keep, prev_keep):      # restored
+            for a, b in tl_new.span_to_out(s, e):
+                add(a, b)
+        for s, e in _interval_sub(prev_keep, new_keep):      # cut away
+            t = _junction_out(tl_new, s)
+            add(t, t)
+    if (prev.get("speed") or []) != (new.get("speed") or []):
+        seen = {repr(sp) for sp in (prev.get("speed") or [])}
+        changed = [sp for sp in (new.get("speed") or [])
+                   if repr(sp) not in seen]
+        removed = [sp for sp in (prev.get("speed") or [])
+                   if repr(sp) not in {repr(x)
+                                       for x in (new.get("speed") or [])}]
+        for sp in changed + removed:
+            s = float(sp.get("start") if isinstance(sp, dict) else sp.start)
+            e = float(sp.get("end") if isinstance(sp, dict) else sp.end)
+            for a, b in tl_new.span_to_out(s, e):
+                add(a, b)
+
+    # ── inserts ───────────────────────────────────────────────────────────
+    ip, im = _by_id(prev.get("inserts"), "ins"), \
+        _by_id(new.get("inserts"), "ins")
+    if ip != im:
+        wins_new = insert_windows(new.get("inserts"), tl_new)
+        wins_prev = insert_windows(prev.get("inserts"), tl_prev)
+        for k, it in im.items():
+            if k not in ip or _canon(ip[k]) != _canon(it):
+                w = wins_new.get(k)
+                if w:
+                    add(w[0], w[1])
+        for k in ip:
+            if k not in im:
+                w = wins_prev.get(k)
+                t = w[0] if w else 0.0
+                add(t, t)
+
+    # ── program-anchored spans: texts, overlays, music ────────────────────
+    for field, prefix in (("texts", "tx"), ("overlays", "ov"),
+                          ("music", "mu")):
+        p, n = _by_id(prev.get(field), prefix), _by_id(new.get(field), prefix)
+        if p == n:
+            continue
+        for k, it in n.items():
+            if k not in p or _canon(p[k]) != _canon(it):
+                s = float(it.get("start", 0.0))
+                e = float(it.get("end")) if it.get("end") is not None else \
+                    s + float(it.get("duration_s") or 0.0)
+                add(s, e)
+        for k, it in p.items():
+            if k not in n:
+                add(float(it.get("start", 0.0)), float(it.get("start", 0.0)))
+
+    # ── sfx: points in the output ─────────────────────────────────────────
+    p, n = _by_id(prev.get("sfx"), "sfx"), _by_id(new.get("sfx"), "sfx")
+    if p != n:
+        for k, it in n.items():
+            if k not in p or _canon(p[k]) != _canon(it):
+                add(float(it.get("at", 0.0)), float(it.get("at", 0.0)) + 0.6)
+        for k, it in p.items():
+            if k not in n:
+                add(float(it.get("at", 0.0)), float(it.get("at", 0.0)))
+
+    # ── zooms (output-anchored, inside effects) ───────────────────────────
+    fx_p, fx_n = (prev.get("effects") or {}), (new.get("effects") or {})
+    p, n = _by_id(fx_p.get("zooms"), "z"), _by_id(fx_n.get("zooms"), "z")
+    if p != n:
+        for k, it in n.items():
+            if k not in p or _canon(p[k]) != _canon(it):
+                add(float(it.get("start", 0.0)), float(it.get("end", 0.0)))
+        for k, it in p.items():
+            if k not in n:
+                add(float(it.get("start", 0.0)), float(it.get("start", 0.0)))
+
+    # ── volume: source-anchored spans ─────────────────────────────────────
+    pv = {repr(v) for v in (prev.get("volume") or [])}
+    nv = {repr(v) for v in (new.get("volume") or [])}
+    if pv != nv:
+        for v in list(new.get("volume") or []) + list(prev.get("volume") or []):
+            if repr(v) in (pv ^ nv):
+                for a, b in tl_new.span_to_out(float(v.get("start", 0.0)),
+                                               float(v.get("end", 0.0))):
+                    add(a, b)
+
+    # ── everything else is global by nature ───────────────────────────────
+    def _fx_rest(fx):
+        return {k: v for k, v in fx.items() if k != "zooms"}
+    for field in ("captions", "frame", "master", "canvas", "caption_mutes",
+                  "source_clean", "voiceover"):
+        if (prev.get(field) or None) != (new.get(field) or None):
+            glob = True
+    if _fx_rest(fx_p) != _fx_rest(fx_n):
+        glob = True
+
+    if not ranges and not glob:
+        return None
+    # merge close/overlapping, points included
+    ranges.sort()
+    merged = []
+    for a, b in ranges:
+        if merged and a <= merged[-1][1] + _GAP:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    if len(merged) > _MAX_RANGES:
+        glob, merged = True, []
+    return {"out_ranges": [[round(a, 2), round(b, 2)] for a, b in merged],
+            "global": bool(glob)}

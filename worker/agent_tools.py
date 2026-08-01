@@ -38,6 +38,7 @@ import cursor as cursorlib
 import screendet
 import screenframe
 import screenmatch
+import edl_diff
 import timeline as timeline_mod
 import tracker
 import travel
@@ -139,6 +140,11 @@ class ToolContext:
         # argues with an explicit instruction is worse than no critic.
         self.user_message = ""
         self.versions_written = []    # EDL versions created this turn
+        # The last write's structural diff (edl_diff.change_ranges) plus the
+        # version it produced — attached to that write's activity row so the
+        # studio can flash the changed output ranges. Consumed (cleared) by
+        # the loop the moment it is attached; never blocks a write.
+        self.last_change = None
         # Every EDL state visited this turn -> the version it was first seen
         # at. A write that lands on a state already in here is a CYCLE: the
         # turn has undone itself and is about to repeat the same attempt.
@@ -311,6 +317,8 @@ class ToolContext:
         version = self.db.run(dbx.insert_edl, self.project_id, normalized,
                               "agent")
         self.versions_written.append(version)
+        chg = edl_diff.change_ranges(prev["json"], normalized)
+        self.last_change = dict(chg, edl_version=version) if chg else None
         before = describe_edl(prev["json"])
         after = describe_edl(normalized, self.duration)
         line = (f"EDL v{prev['version']} -> v{version}: {change_desc}. "
@@ -361,17 +369,48 @@ def _fmt_t(t):
 #  READ tools                                                          #
 # ------------------------------------------------------------------ #
 
+def program_name_of(ctx):
+    """asset_key -> display filename for the scene map (timeline.
+    describe_program), cached on the ctx so a turn does at most one DB
+    lookup per distinct key. Returns None for unknown keys — the caller
+    falls back to the key's basename."""
+    cache = getattr(ctx, "_asset_names", None)
+    if cache is None:
+        cache = ctx._asset_names = {}
+
+    def name_of(key):
+        if key not in cache:
+            try:
+                a = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
+                cache[key] = (a.get("meta") or {}).get("filename") \
+                    if a else None
+            except Exception:
+                cache[key] = None
+        return cache[key]
+    return name_of
+
+
+def _program_map(ctx, edl_json):
+    """The viewer-ordered scene listing for this EDL, or ''."""
+    try:
+        return timeline_mod.describe_program(edl_json, program_name_of(ctx))
+    except Exception:
+        return ""
+
+
 def get_video_info(ctx):
     if not ctx.has_main_video:
         edl = ctx.latest_edl()
         ins = edl["json"].get("inserts") or []
+        prog = _program_map(ctx, edl["json"])
         return ("No main video in this project — this is a blank canvas. Build "
                 "the program from generated or uploaded images/clips: create "
                 "with generate_image / generate_video, then place with "
                 "insert_media. "
                 f"Current EDL v{edl['version']}: {len(ins)} placed "
                 f"clip{'s' if len(ins) != 1 else ''}, "
-                f"{program_duration(edl['json'])}s total.")
+                f"{program_duration(edl['json'])}s total."
+                + (f"\n{prog}" if prog else ""))
     v = ctx.index["video"]
     gaps, basis = _dead_air(ctx, 0.7)
     total_gap = sum(g["end"] - g["start"] for g in gaps)
@@ -399,13 +438,16 @@ def get_video_info(ctx):
     n_mom = len(ctx.index.get("moments") or [])
     mom_txt = (f", {n_mom} sampled frames described (get_shots shows what is "
                "on screen over time)" if n_mom else "")
+    prog = _program_map(ctx, edl["json"])
     return (f"duration={v['duration']}s, {v['width']}x{v['height']} @ "
             f"{v['fps']}fps, audio={'yes' if v['has_audio'] else 'NO'}. "
             f"{len(ctx.index.get('shots', []))} shots{mom_txt}, "
             f"{len(ctx.index.get('sentences', []))} sentences / "
             f"{len(words)} words{spk_txt}{fill_txt}, "
             f"{gap_txt}. "
-            f"Current EDL v{edl['version']}: {describe_edl(edl['json'], v['duration'])}.")
+            f"Current EDL v{edl['version']}: "
+            f"{describe_edl(edl['json'], v['duration'])}."
+            + (f"\n{prog}" if prog else ""))
 
 
 def get_transcript(ctx, start=0, end=None):
@@ -768,10 +810,136 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
                           "proceed using the transcript and shot captions.")
 
 
-def look_at(ctx, times=None, question="", start=None, end=None):
+def _look_at_output(ctx, output_times, question):
+    """Frames of the ASSEMBLED PROGRAM at output seconds — round 71.
+
+    The user watches the OUTPUT, and until now the agent could only see the
+    source: look_at sampled the main video's clock, so a spliced insert (the
+    user's "second scene") was invisible, and after cuts every output second
+    named a different source second. This resolves each requested output time
+    through the current EDL — a time inside kept footage samples the main
+    video at the mapped source second; a time inside an insert samples the
+    inserted clip itself at the right offset — and labels every tile with the
+    scene it belongs to, so what comes back IS what the viewer sees there
+    (minus render-stage burn-ins: captions, texts, grades, overlays)."""
+    if not isinstance(output_times, (list, tuple)) or not output_times:
+        return ("REJECTED: output_times must be a non-empty array of "
+                "OUTPUT seconds of the edited video, e.g. "
+                "output_times=[0.5, 4.2].")
+    edl = ctx.latest_edl()
+    try:
+        blocks = timeline_mod.program_blocks(edl["json"])
+    except Exception as ex:
+        return f"REJECTED: could not map the program ({ex})."
+    if not blocks:
+        return ("REJECTED: the program is empty — nothing is kept and "
+                "nothing is inserted, so there is no output to look at.")
+    prog_end = blocks[-1]["out_end"]
+    keep = edl["json"].get("keep") or []
+    tl = Timeline(keep, edl["json"].get("inserts"), edl["json"].get("speed"))
+    try:
+        wants = [min(max(float(t), 0.0), max(0.0, prog_end - 0.05))
+                 for t in output_times][:8]
+    except (TypeError, ValueError):
+        return "REJECTED: output_times must be numbers of seconds."
+
+    def _block_at(t):
+        for b in blocks:
+            if b["out_start"] - 1e-6 <= t < b["out_end"] + 1e-6:
+                return b
+        return blocks[-1]
+
+    name_of = program_name_of(ctx)
+    # Plan every sample first, then decode: main-video times go through the
+    # proxy in one loop, insert times batch into ONE executor call per asset.
+    plan = []                        # (idx, kind, payload, label)
+    per_asset = {}                   # asset_key -> [(idx, local_t, label)]
+    for idx, t in enumerate(wants):
+        b = _block_at(t)
+        if b["kind"] == "footage":
+            src = tl.out_to_src(t)
+            if src is None:
+                src = b["src_start"]
+            plan.append((idx, "main", src,
+                         f"@out {t:.2f}s = scene {b['n']} "
+                         f"(main footage @{src:.2f}s)"))
+        else:
+            local = float(b.get("clip_start_s") or 0.0) + (t - b["out_start"])
+            label = (f"@out {t:.2f}s = scene {b['n']} "
+                     f"('{(name_of(b['asset_key']) or b['asset_key'].split('/')[-1])[:40]}'"
+                     f" @{local:.2f}s)")
+            per_asset.setdefault(b["asset_key"], []).append(
+                (idx, local, label))
+
+    results = {}                     # idx -> (path, label)
+    main_err = None
+    mains = [(i, s, lb) for i, k, s, lb in plan if k == "main"]
+    if mains:
+        try:
+            path = ctx.proxy_path()
+        except Exception:
+            try:
+                path = _original_local(ctx)
+            except Exception as ex:
+                path, main_err = None, str(ex)
+        if path:
+            for i, s, lb in mains:
+                fp = os.path.join(ctx.workdir, f"lookout_m{i}.jpg")
+                try:
+                    media.frame_at(path, s, fp)
+                    results[i] = (fp, lb)
+                except media.MediaError as ex:
+                    main_err = str(ex)
+    ins_err = None
+    for key, entries in per_asset.items():
+        asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
+        if not asset:
+            ins_err = f"insert asset {key} not found"
+            continue
+        if asset["kind"] == "image_ref":
+            try:
+                local = _asset_local_path(ctx, asset)
+                for i, _lt, lb in entries:
+                    results[i] = (local, lb)
+            except Exception as ex:
+                ins_err = str(ex)
+            continue
+        dur = _asset_media_duration(ctx, asset)
+        ts = [min(max(lt, 0.0), max(0.0, dur - 0.05)) for _i, lt, _lb in entries]
+        pairs, err = _asset_frames(ctx, asset, ts, width=640, tag="lookout")
+        ins_err = err or ins_err
+        for j, fp in pairs:
+            i, _lt, lb = entries[j]
+            results[i] = (fp, lb)
+
+    if not results:
+        why = "; ".join(x for x in (main_err, ins_err) if x) or "unknown error"
+        return (f"Could not extract output frames ({why[:220]}). The edit "
+                "itself is fine — fall back to look_at(times=...) on the "
+                "source and look_at_asset on the inserted clips.")
+    ordered = [results[i] for i in sorted(results)]
+    frames = [fp for fp, _lb in ordered]
+    labels = [lb for _fp, lb in ordered]
+    missing = len(wants) - len(frames)
+    out = _deliver_frames(
+        ctx, frames, labels, question,
+        f"Frames of the ASSEMBLED PROGRAM (EDL v{edl['version']} output "
+        f"timeline, {prog_end:g}s; captions/texts/grades burn in at render "
+        "and are not shown here)")
+    if missing:
+        out += f"\n({missing} requested time(s) could not be decoded)"
+    return _cap(out)
+
+
+def look_at(ctx, times=None, question="", start=None, end=None,
+            output_times=None):
     """Round 67: the agent's own eyes. Pass `times` (1-8 source seconds) and
     the exact frames at those moments come back as ONE labeled picture in the
-    agent's own context. start/end still work as a range and sample evenly."""
+    agent's own context. start/end still work as a range and sample evenly.
+    Round 71: `output_times` samples the ASSEMBLED PROGRAM instead — output
+    seconds of the current edit, inserts included."""
+    if output_times is not None:
+        return _look_at_output(ctx, output_times, question)
     if times is not None:
         if not isinstance(times, (list, tuple)) or not times:
             return ("REJECTED: times must be a non-empty array of source "
@@ -1415,7 +1583,7 @@ def _parse_partial_style(style):
                 '"color":"#RRGGBB","size":"s|m|l|xl","size_scale":0.5-3.0,'
                 '"position":"bottom|top|middle","uppercase":true|false,'
                 '"dynamic":true|false,"highlight_color":"#RRGGBB",'
-                '"animation":"fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop",'
+                '"animation":"none|fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop",'
                 '"font":"<bundled family>","effect":"chroma|chrome|glow",'
                 '"layout":"stack|flow","leading":0.5-2.2,'
                 '"emphasis":"big|huge|accent|pop|box|serif|chrome|glow|chroma",'
@@ -1448,7 +1616,7 @@ def _parse_partial_style(style):
                 '"color":"#RRGGBB","size":"s|m|l|xl",'
                 '"position":"bottom|top|middle","dynamic":true|false,'
                 '"highlight_color":"#RRGGBB","leading":0.5-2.2,'
-                '"emphasis_scale":1.0-3.0,"animation":"fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop"}.')
+                '"emphasis_scale":1.0-3.0,"animation":"none|fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop"}.')
     return {k: validated[k] for k in style}
 
 
@@ -8622,13 +8790,15 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
 
 def get_edl(ctx):
     row = ctx.latest_edl()
+    prog = _program_map(ctx, row["json"])
     # 20000 chars (was 8000): the EDL now carries overlays/texts/speed/
     # stylize too, and the old cap silently amputated exactly the
     # collections a v2 edit needs to see. The explicit budget matters —
     # _cap's default (TOOL_OUTPUT_CHAR_BUDGET) would undo the raise.
     return _cap(f"EDL v{row['version']} "
                 f"({describe_edl(row['json'], ctx.duration)}):\n"
-                + json.dumps(row["json"], indent=1)[:20000], budget=20500)
+                + (f"{prog}\n" if prog else "")
+                + json.dumps(row["json"], indent=1)[:20000], budget=22000)
 
 
 def render_preview(ctx):
@@ -9778,8 +9948,8 @@ CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
                  "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
                  "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
                  "Instrument Serif", "DM Serif Display", "Montserrat"]
-CAPTION_ANIMS = ["fade", "pop", "slide_up", "punch", "blur_in", "whip",
-                 "flash", "rise", "drop"]
+CAPTION_ANIMS = ["none", "fade", "pop", "slide_up", "punch", "blur_in",
+                 "whip", "flash", "rise", "drop"]
 _STYLE_PROPS = {
     "preset": {"type": "string", "enum": CAPTION_PRESETS},
     "color": {"type": "string"},
@@ -9838,20 +10008,29 @@ TOOLS = {
                     "'image' reference images (use with insert_media); "
                     "'render' past renders; 'all' everything.",
                     {"kind": {"type": "string"}}),
-    "look_at": (look_at, "YOUR OWN EYES on the MAIN video. Pass times=[...] "
-                "(1-8 exact source seconds) and the frames at those moments "
-                "come back as ONE timestamp-labeled picture in your own "
-                "context — you see the footage yourself and judge it "
-                "directly (composition, where the subject is, clear space "
-                "for text, what a moment looks like). start/end still work "
-                "as a range sampled evenly. USE IT WHEN THE DECISION "
-                "GENUINELY NEEDS THE PIXELS (aiming a zoom or crop, placing "
-                "text in clear space, verifying a visual complaint) — and "
-                "batch the moments you need into ONE call with several "
-                "times, never a string of separate calls. The transcript is "
-                "accurate, so read speech from get_words / the transcript — "
-                "never look to lip-read or guess a word.",
+    "look_at": (look_at, "YOUR OWN EYES on the footage. Pass times=[...] "
+                "(1-8 exact source seconds of the MAIN video) and the "
+                "frames at those moments come back as ONE timestamp-labeled "
+                "picture in your own context — you see the footage yourself "
+                "and judge it directly (composition, where the subject is, "
+                "clear space for text, what a moment looks like). start/end "
+                "still work as a range sampled evenly. OR pass "
+                "output_times=[...] to see the ASSEMBLED PROGRAM instead: "
+                "output seconds of the current edit, resolved through the "
+                "EDL — kept footage AND spliced inserts both sample "
+                "correctly, each tile labeled with its scene number — THE "
+                "way to check what the viewer sees at a moment of the "
+                "EDITED video ('the second scene') without rendering. USE "
+                "IT WHEN THE DECISION GENUINELY NEEDS THE PIXELS (aiming a "
+                "zoom or crop, placing text in clear space, verifying a "
+                "visual complaint) — and batch the moments you need into "
+                "ONE call with several times, never a string of separate "
+                "calls. The transcript is accurate, so read speech from "
+                "get_words / the transcript — never look to lip-read or "
+                "guess a word.",
                 {"times": {"type": "array", "items": {"type": "number"}},
+                 "output_times": {"type": "array",
+                                  "items": {"type": "number"}},
                  "question": {"type": "string"},
                  "start": {"type": "number"},
                  "end": {"type": "number"}}),
@@ -9947,7 +10126,8 @@ TOOLS = {
                      "Other style fields: color '#RRGGBB', size s|m|l|xl "
                      "(presets are already big at 'm'), size_scale "
                      "0.5-3.0, dynamic:true (legacy karaoke, no preset), "
-                     "animation fade|pop|slide_up (static captions only), "
+                     "animation fade|pop|slide_up, or 'none' to turn a "
+                     "preset's animation OFF (instant words), "
                      "max_words_per_caption 1-16. Example — premium reel "
                      "captions: {mode:'from_transcript', style:{preset:"
                      "'podcast'}, emphasis_words:['money','22','future',"
@@ -10800,9 +10980,12 @@ TOOLS = {
                  "the template's position (fractions of the frame); "
                  "size_scale 0.4-3.0; color/accent_color '#RRGGBB'; font "
                  "from the bundled families (exact name, e.g. 'Anton'); "
-                 "entrance/exit: fade, pop, slide_up, blur_in, whip, rise, "
-                 "drop, plus 'typewriter' (entrance only); uppercase forces "
-                 "casing; box adds a backing panel. Use for text the user "
+                 "entrance/exit: 'none' (INSTANT — the text is simply there "
+                 "at frame one and simply gone at the end, no animation at "
+                 "all; use when the user wants no effect), fade, pop, "
+                 "slide_up, blur_in, whip, rise, drop, plus 'typewriter' "
+                 "(entrance only); uppercase forces "
+                 "casing; box adds a backing panel.Use for text the user "
                  "dictates — titles, labels, stats; spoken-word captions "
                  "stay with add_captions.",
                  {"text": {"type": "string"},

@@ -279,7 +279,7 @@ The corollary is a hard cultural rule visible all over the code: **the render-ti
 
 **OverlayItem** (PIP) — `{id, asset_key, kind ∈ video/image, start, duration_s ∈ [0.2, remaining], x, y: AnimFloat (keyframeable! default 0.5, range −0.5..1.5), scale=0.4 ∈ [0.05, 1.0] (fraction of frame width), opacity ∈ [0.05, 1.0], rotation (static degrees), source_start_s, entrance/exit ∈ fade/slide_left/slide_right/slide_up}`. **Video overlay audio never plays (v1).** Overlays render above zooms (a PIP must not scale with a punch-in) and below both text layers.
 
-**TextItem** — `{id, text ≤200 chars, start, end (≥0.3s), template ∈ title/subtitle/lower_third/callout/big_number/quote/chapter, x, y, size_scale ∈ [0.4, 3.0], color, accent_color (default #FFE14D), font (12 families), entrance ∈ fade/pop/slide_up/blur_in/whip/rise/drop/typewriter, exit (same minus typewriter), uppercase, box}`.
+**TextItem** — `{id, text ≤200 chars, start, end (≥0.3s), template ∈ title/subtitle/lower_third/callout/big_number/quote/chapter, x, y, size_scale ∈ [0.4, 3.0], color, accent_color (default #FFE14D), font (12 families), entrance ∈ none/fade/pop/slide_up/blur_in/whip/rise/drop/typewriter, exit (same minus typewriter; "none" = instant, no animation), uppercase, box}`.
 
 **SpeedSpan** — `{id, start, end (SOURCE time, ≥0.2s), factor ∈ [0.25, 4.0]}`; audio is pitch-preserved via chained `atempo`; slow-mo **duplicates frames** (no optical-flow interpolation on this hardware — tools warn below 0.6×); factors within 0.01 of 1.0 rejected as no-ops; spans non-overlapping.
 

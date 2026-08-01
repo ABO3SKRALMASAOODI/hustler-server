@@ -432,7 +432,9 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     loose = [t for t in texts if not t.get("anchor_insert")]
     if len(loose) >= 3 and "template" not in ask:
         tpls = {str(t.get("template") or "title") for t in loose}
-        ents = {str(t.get("entrance") or "none") for t in loose}
+        # "unset" (template default), not "none": since round 71 "none" is a
+        # real entrance (instant text) and must count as its own style.
+        ents = {str(t.get("entrance") or "unset") for t in loose}
         if len(tpls) >= 3 or (len(tpls) >= 2 and len(ents) >= 3):
             add(f"{len(loose)} text cards use {len(tpls)} different templates "
                 f"and {len(ents)} different entrances — four styles in four "

@@ -361,7 +361,8 @@ def _concierge_reply(stage, history, attachments, index_error=None,
             "silent, and overlays do not track moving objects), add text "
             "and motion-graphics templates (title, subtitle, lower third, "
             "callout, big number, quote, chapter) with entrance/exit "
-            "animations including typewriter, zooms (including smooth Ken "
+            "animations including typewriter — or none at all for an "
+            "instant appear/disappear, zooms (including smooth Ken "
             "Burns style and punch-ins aimed at a chosen spot in the "
             "frame), transitions at every cut in 7 styles (dip to black or "
             "white, whip left/right, zoom punch, glitch, flash), fades, "
@@ -2176,11 +2177,17 @@ def project_state(user_id, project_id):
                     "project %s: NOT re-indexing (%s) — hit the "
                     "3-jobs-per-6h self-heal bound", project_id, heal_reason)
 
+        # First page 2500, follow-ups 500. A busy project holds thousands of
+        # activity rows, and at 500/page the studio spent its first minute
+        # filtering chat against PARTIAL history (2-8s per polling tick per
+        # page) — the version stepper and the rewind filter both compute
+        # from message stamps, so they were wrong until the backlog arrived.
+        page = 2500 if not after_id else 500
         cur.execute("""SELECT id, role, content, meta, created_at
                        FROM chat_messages
                        WHERE session_id = %s AND id > %s
-                       ORDER BY id ASC LIMIT 500""",
-                    (p["chat_session_id"], after_id))
+                       ORDER BY id ASC LIMIT %s""",
+                    (p["chat_session_id"], after_id, page))
         msgs = cur.fetchall()
 
         cur.execute("""SELECT version, created_by, created_at FROM edls
@@ -2494,12 +2501,14 @@ def post_message(user_id, project_id):
         # version otherwise.
         latest_row = _latest_edl(cur, project_id) if indexed else None
         branch_base = None
+        stepped_back = False
         msg_version = latest_row["version"] if latest_row else None
         if latest_row and base_version is not None \
                 and base_version != latest_row["version"]:
             picked = _edl_at(cur, project_id, base_version)
             if picked:
                 msg_version = base_version
+                stepped_back = True
                 try:
                     differs = (wschemas.edl_signature(picked["json"])
                                != wschemas.edl_signature(latest_row["json"]))
@@ -2511,6 +2520,12 @@ def post_message(user_id, project_id):
         meta = {}
         if msg_version is not None:
             meta["edl_version"] = msg_version
+        if stepped_back:
+            # This message CONTINUES from an older state — everything the
+            # chat said after that state now belongs to an abandoned branch.
+            # The studio prunes those rows on this marker (round 71); nothing
+            # server-side is deleted, and no banner/divider is ever written.
+            meta["branch_base"] = msg_version
         if client_msg_id:
             meta["client_msg_id"] = client_msg_id
         if attachments_meta:

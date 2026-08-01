@@ -398,11 +398,12 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0):
     entrance = tx.get("entrance") or tpl["entrance"]
     exit_a = tx.get("exit") or tpl["exit"]
     typewriter = entrance == "typewriter"
-    if typewriter:
+    if typewriter and exit_a != "none":
         # Per-glyph \alpha segments override a line-level exit \t placed
         # before them, so any non-fade exit would silently not render —
         # \fad is composited after per-segment alpha and is the one exit
-        # that provably works here.
+        # that provably works here. An explicit "none" needs no exit tag
+        # at all, so it survives the override.
         exit_a = "fade"
 
     # ── decks + wrapping (pre-wrapped; WrapStyle 2 keeps us authoritative)
