@@ -555,6 +555,125 @@ def frame_fit_filter(mode, W, H, focus=None, pad_color="black"):
             f"crop={W}:{H}")
 
 
+def fit_fractions(src_w, src_h, W, H, mode=None, focus=None):
+    """Python mirror of frame_fit_filter's geometry, in FRACTIONS.
+
+    Round 72: look_at(output_times) shows the assembled program, and 'what
+    the viewer sees' includes how a frame lands on the canvas — a 16:10
+    screen recording cover-cropped into a 16:9 program does not show its top
+    and bottom edges, and every aimed coordinate is a fraction of the CANVAS,
+    not of the raw frame. This returns what the two ffmpeg chains above
+    produce, without running them:
+
+      ('crop', x0, y0, x1, y1)  — the rect OF THE SOURCE frame the output
+          shows (cover fit; focus mirrors the clip() expressions above)
+      ('pad',  x0, y0, x1, y1)  — the rect OF THE OUTPUT frame the whole
+          source lands in (contain fit; the rest is bars)
+
+    Tests assert this against the emitted filter strings' arithmetic — the
+    two must never drift."""
+    src_ar = float(src_w) / float(src_h)
+    out_ar = float(W) / float(H)
+    if (mode or "crop") in ("pad", "pad_blur"):
+        if src_ar >= out_ar:            # bars top/bottom
+            fh = out_ar / src_ar
+            return ("pad", 0.0, (1.0 - fh) / 2.0, 1.0, (1.0 + fh) / 2.0)
+        fw = src_ar / out_ar            # bars left/right
+        return ("pad", (1.0 - fw) / 2.0, 0.0, (1.0 + fw) / 2.0, 1.0)
+    # cover fit: the shown rect keeps the output aspect and fills one axis
+    if src_ar >= out_ar:                # sides cropped
+        fw = out_ar / src_ar
+        fx = 0.5 if not focus or focus[0] is None else float(focus[0])
+        x0 = min(max(fx - fw / 2.0, 0.0), 1.0 - fw)
+        return ("crop", x0, 0.0, x0 + fw, 1.0)
+    fh = src_ar / out_ar                # top/bottom cropped
+    fy = 0.5 if not focus or focus[1] is None else float(focus[1])
+    y0 = min(max(fy - fh / 2.0, 0.0), 1.0 - fh)
+    return ("crop", 0.0, y0, 1.0, y0 + fh)
+
+
+def _clip01(v):
+    return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
+
+def _path_value_at(pts, key, t, a, b, default, ease):
+    """Python mirror of travel.path_value_expr — keyframe interpolation as a
+    running sum of eased deltas, matching the emitted expression term for
+    term (including its skip of near-zero segments and deltas)."""
+    v = float(pts[0].get(key, default))
+    for p0, p1 in zip(pts, pts[1:]):
+        t0 = a + float(p0["f"]) * (b - a)
+        t1 = a + float(p1["f"]) * (b - a)
+        dt = t1 - t0
+        if dt <= 1e-4:
+            continue
+        dv = float(p1.get(key, default)) - float(p0.get(key, default))
+        if abs(dv) < 1e-4:
+            continue
+        v += dv * travel.ease_value((t - t0) / dt, ease)
+    return v
+
+
+def zoom_state_at(zooms, t, out_duration):
+    """(z, cx, cy) of the shared zoompan at output second t — the python
+    mirror of the term emission below (punch/ease/push_in/pull_out plus the
+    travelling follow/path shapes), so a caller can know the zoomed viewport
+    without rendering. Round 72: look_at(output_times) crops frames through
+    this, which is what lets the agent SEE a zoom's framing before a render
+    instead of discovering it from the user's complaint.
+
+    Only the zooms list is evaluated — a screen takeover's push and an
+    aspect shift's compensation ride the same zoompan at render time but are
+    their own subsystems; callers overlapping those windows say so instead
+    of approximating them. The viewport at (z, cx, cy) is
+    x0=(1-1/z)*cx, width 1/z (zoompan's own clamp is mirrored by clamping
+    cx/cy to 0-1)."""
+    z = 1.0
+    cxo = 0.0
+    cyo = 0.0
+    for zm in zooms or []:
+        a = max(0.0, float(zm["start"]))
+        b = min(float(out_duration), float(zm["end"]))
+        if b - a < 0.05:
+            continue
+        st = float(zm.get("strength", 0.25))
+        mode = zm.get("mode") or "punch"
+        inside = a <= t <= b            # between() is inclusive
+        if mode in ("follow", "path"):
+            pts = travel.path_points(zm)
+            if len(pts) < 2:
+                continue
+            ease = zm.get("ease")
+            if mode == "follow":
+                r = max(0.15, min(0.4, (b - a) / 4.0))
+                z += st * _clip01((t - a) / r) * _clip01((b - t) / r)
+            elif inside:
+                z += _path_value_at(pts, "s", t, a, b, st, ease)
+            if inside:
+                cxo += _path_value_at(pts, "cx", t, a, b, 0.5, ease) - 0.5
+                cyo += _path_value_at(pts, "cy", t, a, b, 0.5, ease) - 0.5
+            continue
+        if mode == "ease":
+            r = max(0.15, min(0.4, (b - a) / 4.0))
+            z += st * _clip01((t - a) / r) * _clip01((b - t) / r)
+        elif mode == "push_in":
+            if inside:
+                z += st * (t - a) / (b - a)
+        elif mode == "pull_out":
+            if inside:
+                z += st * (1.0 - (t - a) / (b - a))
+        elif inside:                    # punch
+            z += st
+        if inside:
+            cx = zm.get("cx")
+            cy = zm.get("cy")
+            if cx is not None and abs(float(cx) - 0.5) > 1e-6:
+                cxo += float(cx) - 0.5
+            if cy is not None and abs(float(cy) - 0.5) > 1e-6:
+                cyo += float(cy) - 0.5
+    return z, _clip01(0.5 + cxo), _clip01(0.5 + cyo)
+
+
 def _region_parts(parts, in_label, out_label, regions, sw, sh,
                   seg_start, seg_dur, uid):
     """Censor-region chain for ONE source segment, in SOURCE-frame pixels

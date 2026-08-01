@@ -154,6 +154,40 @@ def caption_points(sheets, recorder=None, parallelism=1):
     return out
 
 
+def overlay_coord_grid(src_path, dst_path):
+    """Burn a faint tenths grid + edge labels onto a copy of a frame.
+
+    Round 72: every aimed tool (add_zoom cx/cy/rect, add_zoom_path,
+    blur_region, text placement) takes 0-1 fractions of the frame, and the
+    agent was reading those numbers off an unmarked picture by eye — a real
+    launch-video edit aimed a zoom at (0.13, 0.48) for a message that sat at
+    y=0.78, and the render framed empty UI with the subject clipped at the
+    edge. The grid turns that guess into a measurement: the line labeled .8
+    IS 0.8, and a coordinate read off the picture is the coordinate the tool
+    receives. Drawn on the delivered COPY only — sources are never touched."""
+    img = Image.open(src_path).convert("RGB")
+    w, h = img.size
+    ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov)
+    for i in range(1, 10):
+        a = 130 if i == 5 else 70          # the midline reads at a glance
+        d.line([(round(w * i / 10), 0), (round(w * i / 10), h)],
+               fill=(255, 255, 255, a), width=1)
+        d.line([(0, round(h * i / 10)), (w, round(h * i / 10))],
+               fill=(255, 255, 255, a), width=1)
+    font = _font(max(11, round(h * 0.032)))
+    for i in (2, 4, 6, 8):
+        for pos, txt in (((round(w * i / 10) + 3, 2), f".{i}"),
+                         ((3, round(h * i / 10) + 2), f".{i}")):
+            # shadow first so the label survives any background
+            d.text((pos[0] + 1, pos[1] + 1), txt, fill=(0, 0, 0, 220),
+                   font=font)
+            d.text(pos, txt, fill=(255, 255, 255, 235), font=font)
+    Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB").save(
+        dst_path, "JPEG", quality=88)
+    return dst_path
+
+
 def build_timestamp_sheet(frames, out_path):
     """Assemble already-extracted frames into ONE labeled sheet — the
     round-67 direct-sight look_at. frames: [(label, jpeg_path)], in order.

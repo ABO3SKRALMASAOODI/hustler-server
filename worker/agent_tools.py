@@ -780,21 +780,39 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
     the footage with its own eyes instead of reading a second-hand
     description. A blind agent model (or a queueing failure) falls back to
     the separate vision provider exactly as before round 67."""
+    # Round 72: every delivered frame carries a faint tenths grid with edge
+    # labels — burned onto COPIES, sources untouched. Aimed tools (add_zoom
+    # cx/cy/rect, add_zoom_path, blur_region, text placement) take fractions
+    # of the frame, and an unmarked picture made those numbers eyeball
+    # guesses: a real edit aimed a zoom at (0.13, 0.48) for a message that
+    # sat at y=0.78. On the grid a coordinate is READ, not estimated — and
+    # the fallback vision provider gets the same calibration.
+    try:
+        gridded = [sheets.overlay_coord_grid(
+            fp, os.path.join(ctx.workdir,
+                             f"grid_{uuid.uuid4().hex[:8]}.jpg"))
+            for fp in frames]
+    except Exception:
+        gridded = frames
     if getattr(ctx, "direct_sight", False) and llm.agent_sees(ctx.agent_model):
         try:
-            if len(frames) == 1:
-                sheet = frames[0]
+            if len(gridded) == 1:
+                sheet = gridded[0]
             else:
                 sheet = os.path.join(
                     ctx.workdir, f"look_sheet_{uuid.uuid4().hex[:8]}.jpg")
-                sheets.build_timestamp_sheet(list(zip(labels, frames)), sheet)
+                sheets.build_timestamp_sheet(list(zip(labels, gridded)),
+                                             sheet)
             ctx.pending_images.append(
                 (f"{subject_line} — {', '.join(labels)}", sheet))
             return (f"Captured {len(frames)} frame(s): {', '.join(labels)}. "
                     "The picture follows this message — LOOK AT IT YOURSELF "
                     "and answer from what you see"
                     + (f" (your question: {question})" if question else "")
-                    + ". Timestamps are printed under each tile.")
+                    + ". Timestamps are printed under each tile. The faint "
+                    "grid marks TENTHS of the frame ((0,0) = top-left, "
+                    "labels .2/.4/.6/.8): read zoom aims, rects and "
+                    "positions straight off it.")
         except Exception as ex:
             print(f"[look] direct-sight assembly failed ({ex}); "
                   "falling back to the vision provider", flush=True)
@@ -804,10 +822,73 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
     answer = llm.ask_vision(
         f"{subject_line}. Frames: {', '.join(labels)}. Question from the "
         f"editor: {question or 'describe what is on screen, concretely'}\n"
+        "A faint white grid on each frame marks tenths ((0,0) = top-left, "
+        "edge labels .2/.4/.6/.8) — give any position or box as 0-1 "
+        "fractions read from it.\n"
         "Answer concisely and concretely.",
-        frames, purpose="vision_look", image_names=labels)
+        gridded, purpose="vision_look", image_names=labels)
     return _cap(answer or "The vision model did not return an answer; "
                           "proceed using the transcript and shot captions.")
+
+
+def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
+                        prog_end, is_main):
+    """The round-72 geometry step of _look_at_output: one decoded frame ->
+    what the RENDER shows at that output second. Fit first (the same
+    cover-crop / letterbox _normalize_video applies, mirrored by
+    renderer.fit_fractions — focus reaches only main footage, exactly like
+    the render), then the shared zoompan's viewport at t
+    (renderer.zoom_state_at) cropped and blown back up. Returns
+    (path, label_suffix); the caller keeps the raw frame on any failure — a
+    look degrades, it never dies."""
+    from PIL import Image, ImageFilter
+
+    z, zcx, zcy = renderer.zoom_state_at(zooms, t, prog_end)
+    img = Image.open(fp).convert("RGB")
+    changed = False
+    if canvas:
+        w, h = img.size
+        ow = 640
+        oh = max(2, round(ow * canvas[1] / canvas[0]))
+        kind, x0, y0, x1, y1 = renderer.fit_fractions(
+            w, h, canvas[0], canvas[1], mode, focus if is_main else None)
+        if x1 - x0 < 0.999 or y1 - y0 < 0.999:
+            if kind == "crop":
+                img = img.crop((round(x0 * w), round(y0 * h),
+                                round(x1 * w), round(y1 * h))) \
+                         .resize((ow, oh), Image.LANCZOS)
+            else:
+                if (mode or "crop") == "pad_blur":
+                    _bk, bx0, by0, bx1, by1 = renderer.fit_fractions(
+                        w, h, canvas[0], canvas[1], "crop", None)
+                    base = img.crop((round(bx0 * w), round(by0 * h),
+                                     round(bx1 * w), round(by1 * h))) \
+                        .resize((ow, oh), Image.LANCZOS) \
+                        .filter(ImageFilter.GaussianBlur(14))
+                else:
+                    base = Image.new("RGB", (ow, oh), (0, 0, 0))
+                fg = img.resize((max(1, round(ow * (x1 - x0))),
+                                 max(1, round(oh * (y1 - y0)))),
+                                Image.LANCZOS)
+                base.paste(fg, (round(ow * x0), round(oh * y0)))
+                img = base
+            changed = True
+    suffix = ""
+    if z > 1.005:
+        w, h = img.size
+        vx0 = (1.0 - 1.0 / z) * zcx
+        vy0 = (1.0 - 1.0 / z) * zcy
+        img = img.crop((round(vx0 * w), round(vy0 * h),
+                        round((vx0 + 1.0 / z) * w),
+                        round((vy0 + 1.0 / z) * h))) \
+                 .resize((w, h), Image.LANCZOS)
+        suffix = f" [{z:.2f}x zoom on screen]"
+        changed = True
+    if not changed:
+        return fp, suffix
+    out = os.path.join(workdir, f"lookout_geo{idx}.jpg")
+    img.save(out, "JPEG", quality=88)
+    return out, suffix
 
 
 def _look_at_output(ctx, output_times, question):
@@ -820,8 +901,15 @@ def _look_at_output(ctx, output_times, question):
     through the current EDL — a time inside kept footage samples the main
     video at the mapped source second; a time inside an insert samples the
     inserted clip itself at the right offset — and labels every tile with the
-    scene it belongs to, so what comes back IS what the viewer sees there
-    (minus render-stage burn-ins: captions, texts, grades, overlays)."""
+    scene it belongs to, so what comes back IS what the viewer sees there.
+
+    Round 72: "what the viewer sees" now includes the GEOMETRY. Each frame
+    is fitted onto the output canvas the way the render fits it (cover-crop
+    by default, letterbox for frame mode 'pad'), and any zoom active at that
+    second is applied by cropping the same viewport the zoompan will show —
+    so an aimed zoom's framing is visible BEFORE a render instead of being
+    discovered from the user's complaint. Captions, texts, grades and
+    overlays still burn in at render only."""
     if not isinstance(output_times, (list, tuple)) or not output_times:
         return ("REJECTED: output_times must be a non-empty array of "
                 "OUTPUT seconds of the edited video, e.g. "
@@ -917,15 +1005,44 @@ def _look_at_output(ctx, output_times, question):
         return (f"Could not extract output frames ({why[:220]}). The edit "
                 "itself is fine — fall back to look_at(times=...) on the "
                 "source and look_at_asset on the inserted clips.")
-    ordered = [results[i] for i in sorted(results)]
-    frames = [fp for fp, _lb in ordered]
-    labels = [lb for _fp, lb in ordered]
+    fxz = (edl["json"].get("effects") or {}).get("zooms") or []
+    frame_cfg = edl["json"].get("frame") or {}
+    vid = (ctx.index or {}).get("video") or {}
+    canvas = None
+    if vid.get("width") and vid.get("height"):
+        canvas = renderer.frame_dims(vid["width"], vid["height"],
+                                     frame_cfg.get("ratio"))
+    gmode = frame_cfg.get("mode", "crop") if frame_cfg else "crop"
+    gfocus = ((frame_cfg.get("focus_x"), frame_cfg.get("focus_y"))
+              if frame_cfg.get("focus_x") is not None
+              or frame_cfg.get("focus_y") is not None else None)
+    tko = [(float(o.get("start") or 0.0),
+            float(o.get("start") or 0.0) + float(o.get("duration_s") or 0.0))
+           for o in (edl["json"].get("overlays") or []) if o.get("screen")]
+    frames, labels = [], []
+    for i in sorted(results):
+        fp, lb = results[i]
+        t = wants[i]
+        try:
+            fp, sfx = _fit_and_zoom_frame(
+                ctx.workdir, i, fp, t, canvas, gmode, gfocus, fxz,
+                prog_end, _block_at(t)["kind"] == "footage")
+        except Exception as ex:
+            print(f"[look] output geometry skipped ({ex})", flush=True)
+            sfx = ""
+        if any(a - 1e-6 <= t <= b + 1e-6 for a, b in tko):
+            sfx += (" [inside a screen-takeover window — its push/pin is "
+                    "not shown here]")
+        frames.append(fp)
+        labels.append(lb + sfx)
     missing = len(wants) - len(frames)
     out = _deliver_frames(
         ctx, frames, labels, question,
         f"Frames of the ASSEMBLED PROGRAM (EDL v{edl['version']} output "
-        f"timeline, {prog_end:g}s; captions/texts/grades burn in at render "
-        "and are not shown here)")
+        f"timeline, {prog_end:g}s) in TRUE output geometry — canvas fit and "
+        "any zoom active at each moment are applied (a tile says so in its "
+        "label); captions/texts/grades/overlays still burn in at render "
+        "and are not shown")
     if missing:
         out += f"\n({missing} requested time(s) could not be decoded)"
     return _cap(out)
@@ -2893,6 +3010,11 @@ ZOOM_MODE_DESC = {"punch": "punch-in", "ease": "eased",
                   "push_in": "Ken Burns push-in",
                   "pull_out": "Ken Burns pull-out",
                   "follow": "gliding follow"}
+# Round 72: the air a rect-framed zoom leaves around its region — the
+# viewport shows the rect plus this fraction of the rect's own size on each
+# side, so "zoom into the message" lands as a composed close-up with
+# breathing room, not an edge-to-edge crop of the box.
+ZOOM_RECT_MARGIN = 0.12
 
 
 def _parse_zoom_path(path):
@@ -2941,8 +3063,8 @@ def _parse_zoom_path(path):
     return out, None
 
 
-def add_zoom(ctx, start, end, strength=0.15, mode=None, cx=None, cy=None,
-             path=None):
+def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
+             path=None, rect=None):
     # Round 67 default: 15% (was 25%) — a gentle push the viewer feels
     # rather than sees. Big snaps are opt-in, not the default grammar.
     edl = dict(ctx.latest_edl()["json"])
@@ -2950,8 +3072,9 @@ def add_zoom(ctx, start, end, strength=0.15, mode=None, cx=None, cy=None,
     try:
         s = round(min(max(float(start), 0.0), max(0.0, prog - 0.2)), 2)
         e = round(min(max(float(end), s), prog), 2)
-        st = round(min(max(float(strength if strength is not None else 0.15),
-                           ZOOM_STRENGTH_MIN), ZOOM_STRENGTH_MAX), 2)
+        st = None if strength is None else \
+            round(min(max(float(strength), ZOOM_STRENGTH_MIN),
+                      ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
         return ("REJECTED: start/end/strength must be numbers. start/end are "
                 "OUTPUT-timeline seconds; strength 0.05-1.5 (0.25 = 25% "
@@ -2977,6 +3100,51 @@ def add_zoom(ctx, start, end, strength=0.15, mode=None, cx=None, cy=None,
             return ("REJECTED: cx/cy must be numbers 0-1 — fractions of the "
                     "output frame ((0,0) = top-left, (0.5,0.5) = center). "
                     "Use look_at to find the subject first.")
+    # rect (round 72): FRAME A REGION. cx/cy pin a POINT — the renderer keeps
+    # the aimed point at ITS OWN screen position while everything magnifies
+    # around it, which is right for emphasis on a well-composed subject and
+    # geometrically incapable of "zoom into the message": a subject near an
+    # edge stays near that edge at any strength (a real launch-video edit
+    # shipped the message clipped at the frame edge this way). Given the
+    # region's box instead, the tool solves the viewport — strength to fit
+    # it with margin (unless given), centred as far as the frame allows —
+    # and derives the pin cx/cy that renders that exact window, so the
+    # renderer, every stored EDL and every cached render stay untouched.
+    rct = None
+    if rect is not None:
+        if tgt:
+            return ("REJECTED: rect and cx/cy are two different answers to "
+                    "where the zoom should look — pass ONE. rect=[x0,y0,x1,"
+                    "y1] frames a region; cx/cy pins a point in place.")
+        if zmode == "follow":
+            return ("REJECTED: a follow zoom is aimed by its `path`; rect "
+                    "only applies to fixed zooms (punch/ease/push_in/"
+                    "pull_out).")
+        try:
+            rx0, ry0, rx1, ry1 = (float(v) for v in rect)
+        except (TypeError, ValueError):
+            return ("REJECTED: rect must be [x0, y0, x1, y1] — fractions of "
+                    "the output frame ((0,0) = top-left), read off the grid "
+                    "on a look_at frame.")
+        rx0, ry0 = min(max(rx0, 0.0), 1.0), min(max(ry0, 0.0), 1.0)
+        rx1, ry1 = min(max(rx1, 0.0), 1.0), min(max(ry1, 0.0), 1.0)
+        if rx1 - rx0 < 0.02 or ry1 - ry0 < 0.02:
+            return ("REJECTED: rect is empty or inverted — [x0, y0, x1, y1] "
+                    "needs x0 < x1 and y0 < y1 (at least 0.02 apart).")
+        rw, rh = rx1 - rx0, ry1 - ry0
+        if st is None:
+            z = 1.0 / (max(rw, rh) * (1.0 + 2.0 * ZOOM_RECT_MARGIN))
+            z = min(max(z, 1.0 + ZOOM_STRENGTH_MIN), 1.0 + ZOOM_STRENGTH_MAX)
+            st = round(z - 1.0, 2)
+        z = 1.0 + st
+        half = 0.5 / z
+        vx0 = min(max((rx0 + rx1) / 2.0 - half, 0.0), 1.0 - 2.0 * half)
+        vy0 = min(max((ry0 + ry1) / 2.0 - half, 0.0), 1.0 - 2.0 * half)
+        tgt = {"cx": round(vx0 / (1.0 - 1.0 / z), 3),
+               "cy": round(vy0 / (1.0 - 1.0 / z), 3)}
+        rct = [round(v, 3) for v in (rx0, ry0, rx1, ry1)]
+    if st is None:
+        st = 0.15
     pts = None
     if zmode == "follow":
         pts, err = _parse_zoom_path(path)
@@ -2998,6 +3166,8 @@ def add_zoom(ctx, start, end, strength=0.15, mode=None, cx=None, cy=None,
     if zmode != "punch":
         item["mode"] = zmode
     item.update(tgt)
+    if rct:
+        item["rect"] = rct
     if pts:
         item["path"] = pts
     zooms.append(item)
@@ -3007,9 +3177,29 @@ def add_zoom(ctx, start, end, strength=0.15, mode=None, cx=None, cy=None,
         aimed = (f", travelling ({pts[0]['cx']:g},{pts[0]['cy']:g}) → "
                  f"({pts[-1]['cx']:g},{pts[-1]['cy']:g}) across "
                  f"{len(pts)} points")
+    elif rct:
+        # The achieved shot, computed from the STORED (rounded) values —
+        # what the viewer will actually see, not what was asked for.
+        z = 1.0 + st
+
+        def _scr(u, c):
+            return min(max((u - (1.0 - 1.0 / z) * c) * z, 0.0), 1.0)
+
+        aimed = (f", framing x {rct[0]:g}-{rct[2]:g} / y {rct[1]:g}-{rct[3]:g}"
+                 f" at {z:.2f}x — on screen the region lands at x "
+                 f"{_scr(rct[0], tgt['cx']):.2f}-{_scr(rct[2], tgt['cx']):.2f}"
+                 f", y {_scr(rct[1], tgt['cy']):.2f}-"
+                 f"{_scr(rct[3], tgt['cy']):.2f}")
+        if strength is not None and max(rw, rh) > 1.0 / z + 1e-6:
+            aimed += (f" (at this strength the region does NOT fully fit; "
+                      f"strength {max(round(1.0 / max(rw, rh) - 1.0, 2), 0.05):g}"
+                      " would just contain it)")
     else:
         aimed = (f", aimed at ({tgt.get('cx', 0.5):g}, {tgt.get('cy', 0.5):g})"
-                 " of the frame" if tgt else "")
+                 " of the frame — that point HOLDS its screen position while "
+                 "everything magnifies around it (a point near an edge stays "
+                 "near that edge; to cut to a framed close-up of a region, "
+                 "pass rect=[x0,y0,x1,y1] instead)" if tgt else "")
     return ctx.write_edl(
         edl, f"{ZOOM_MODE_DESC[zmode]} zoom {int(st * 100)}% on {s}-{e}s "
              f"(output time){aimed} [{item['id']}]")
@@ -9059,10 +9249,11 @@ def _self_check(ctx, result):
         edl = ctx.latest_edl()["json"]
         frame_note = _frame_context(edl)
         fx_note = _deliberate_fx_note(edl)
+        zoom_note = _aimed_zoom_note(edl)
     except Exception:
-        frame_note = fx_note = ""
+        frame_note = fx_note = zoom_note = ""
     return llm.ask_vision(
-        frame_note + fx_note +
+        frame_note + fx_note + zoom_note +
         "This is a 3x3 contact sheet sampled evenly from an automatically "
         "edited video. In one or two sentences: does anything look broken "
         "(unexpected black frames, half-cut faces mid-action, missing "
@@ -9104,6 +9295,30 @@ def _deliberate_fx_note(edl):
     if not bits:
         return ""
     return ("Deliberate effects in this edit: " + "; ".join(bits) + ". ")
+
+
+def _aimed_zoom_note(edl):
+    """One line telling the self-check reviewer that a zoom is AIMED, and
+    what a wrong aimed zoom looks like.
+
+    Round 72: a launch-video render shipped a targeted zoom whose subject (a
+    chat message) sat half-clipped at the frame edge while the shot centred
+    on empty UI — and the self-check said 'looks clean', because nothing had
+    told it a close-up was even intended there. Naming the window turns the
+    generic damage question into the real one: is this tile a composed
+    close-up of SOMETHING?"""
+    fx = edl.get("effects") or {}
+    zs = [z for z in (fx.get("zooms") or [])
+          if z.get("cx") is not None or z.get("cy") is not None
+          or z.get("path")]
+    if not zs:
+        return ""
+    spans = "; ".join(f"{float(z['start']):.0f}-{float(z['end']):.0f}s"
+                      for z in zs[:4])
+    return (f"An AIMED zoom runs at {spans}: a frame inside those seconds "
+            "should read as a deliberate close-up with its subject fully in "
+            "frame — flag it if the subject is clipped at an edge or the "
+            "close-up centres on empty space. ")
 
 
 def ask_user(ctx, question):
@@ -10131,12 +10346,18 @@ TOOLS = {
                 "frames at those moments come back as ONE timestamp-labeled "
                 "picture in your own context — you see the footage yourself "
                 "and judge it directly (composition, where the subject is, "
-                "clear space for text, what a moment looks like). start/end "
+                "clear space for text, what a moment looks like). Every "
+                "frame carries a faint tenths grid ((0,0) = top-left): READ "
+                "aim points, cx/cy and rects off its labels instead of "
+                "estimating. start/end "
                 "still work as a range sampled evenly. OR pass "
                 "output_times=[...] to see the ASSEMBLED PROGRAM instead: "
                 "output seconds of the current edit, resolved through the "
                 "EDL — kept footage AND spliced inserts both sample "
-                "correctly, each tile labeled with its scene number — THE "
+                "correctly, each tile labeled with its scene number, in "
+                "TRUE output geometry (canvas fit and any active zoom "
+                "applied — so you can SEE an aimed zoom's framing before "
+                "rendering) — THE "
                 "way to check what the viewer sees at a moment of the "
                 "EDITED video ('the second scene') without rendering. USE "
                 "IT WHEN THE DECISION GENUINELY NEEDS THE PIXELS (aiming a "
@@ -10157,7 +10378,8 @@ TOOLS = {
                       "list_assets; kind='render' lists past previews/"
                       "finals). Same contract as look_at: pass times=[...] "
                       "(seconds into the clip) and the frames arrive as one "
-                      "labeled picture you read yourself. THE way to choose "
+                      "labeled picture you read yourself, with the same "
+                      "tenths grid for reading positions. THE way to choose "
                       "which moment of a long clip to splice in — one call "
                       "over the whole clip, then insert_media with "
                       "clip_start_s at the moment you saw. On a RENDER it is "
@@ -10682,25 +10904,37 @@ TOOLS = {
                                              "none"]}}),
     "add_zoom": (add_zoom, "Zoom on a time range of the FINAL edited video "
                  "(output seconds) — the standard retention effect for "
-                 "emphasis on a key line. strength 0.05-1.5 (default 0.25 = "
-                 "25% closer; above 1.0 is a dramatic 2x+ punch). mode: "
+                 "emphasis on a key line. strength 0.05-1.5 (default 0.15; "
+                 "above 1.0 is a dramatic 2x+ punch). mode: "
                  "'punch' (default, instant step), 'ease' (smoothly ramps "
                  "in and out — use when the user wants it subtle/animated), "
                  "'push_in' / 'pull_out' (continuous Ken Burns drift across "
-                 "the whole window — use for slow cinematic movement). "
-                 "cx/cy (0-1 fractions of the output frame, (0,0) = "
-                 "top-left) AIM the zoom at a subject instead of the "
-                 "center — find it with look_at first; omit both for the "
-                 "classic center zoom. Use 1-3 short zooms at emphatic "
-                 "moments, not wall-to-wall; for automatic zooms on the "
-                 "strongest spoken words use punch_in_on_emphasis.",
+                 "the whole window — use for slow cinematic movement). TWO "
+                 "ways to aim, and they answer different requests: "
+                 "rect=[x0,y0,x1,y1] (fractions of the output frame, read "
+                 "off look_at's grid) FRAMES A REGION — the tool solves "
+                 "strength and centre so that box fills the frame with "
+                 "margin, THE way to 'zoom into the message / that button / "
+                 "this panel', and its result reports where the region "
+                 "lands on screen. cx/cy instead PIN A POINT: that point "
+                 "keeps its exact screen position while everything "
+                 "magnifies around it — right for emphasis on a subject "
+                 "that is already well-composed, and wrong for framing a "
+                 "thing near an edge (an edge point stays at the edge at "
+                 "any strength — it never slides to centre). Omit all "
+                 "three for the classic center zoom. Use 1-3 short zooms "
+                 "at emphatic moments, not wall-to-wall; for automatic "
+                 "zooms on the strongest spoken words use "
+                 "punch_in_on_emphasis.",
                  {"start": {"type": "number"}, "end": {"type": "number"},
                   "strength": {"type": "number"},
                   "mode": {"type": "string",
                            "enum": ["punch", "ease", "push_in",
                                     "pull_out"]},
                   "cx": {"type": "number"},
-                  "cy": {"type": "number"}}),
+                  "cy": {"type": "number"},
+                  "rect": {"type": "array",
+                           "items": {"type": "number"}}}),
     "remove_zoom": (remove_zoom, "Remove one zoom by its id (see "
                     "get_edl).", {"id": {"type": "string"}}),
     "add_zoom_path": (

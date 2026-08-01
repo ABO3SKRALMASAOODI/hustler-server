@@ -591,6 +591,13 @@ class ZoomItem(BaseModel):
     'cubic_in_out' (the default the tool writes) settles at each keyframe,
     'linear' holds a constant velocity through them. None on a 'follow' zoom
     means the round-45 linear interpolation, byte-for-byte.
+
+    rect (round 72) is PROVENANCE, not render input: when add_zoom framed a
+    region ([x0, y0, x1, y1] output-frame fractions), the solved viewport is
+    already baked into cx/cy/strength — the renderer never reads rect. It is
+    stored so get_edl shows WHAT the zoom was framing, which is what a later
+    turn needs to adjust it. None on every zoom written before round 72, and
+    _sig_canon drops None keys, so old signatures and cached renders hold.
     """
     id: str
     start: float
@@ -602,6 +609,7 @@ class ZoomItem(BaseModel):
     cy: Optional[float] = None
     path: Optional[List[ZoomPathPoint]] = None
     ease: Optional[Literal["cubic_in_out", "linear"]] = None
+    rect: Optional[List[float]] = None
 
 
 # Round 35: the junction library grew past the two dips. Every style is
