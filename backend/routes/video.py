@@ -3150,10 +3150,35 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         final_of = {b: b + sum(d for a, d in others if a <= b + 1e-6)
                     for b in bounds}
         target = min(bounds, key=lambda b: abs(final_of[b] - at))
+        # Round 75b: at_output_s alone cannot express "between those two
+        # scenes". Inserts sharing a boundary play in LIST order, and this
+        # op never reordered the list — on a timeline built from splits
+        # (every scene an insert at ONE boundary, which is what splitting
+        # produces), dragging a scene anywhere snapped it to the same
+        # boundary and kept its old list position: the drag did literally
+        # nothing. The item is reinserted at the position among its
+        # boundary-mates whose window starts nearest the requested time.
+        rest = [i for i in inserts if i is not target_ins]
         target_ins["at_output_s"] = target
-        edl["inserts"] = inserts
+        mates = [i for i in rest
+                 if abs(float(i["at_output_s"]) - target) < 1e-6]
+        blk = target + sum(d for a, d in others if a < target - 1e-6)
+        starts, acc = [], blk
+        for m in mates:
+            starts.append(acc)
+            acc += float(m["duration_s"])
+        starts.append(acc)                    # the slot after the last mate
+        j = min(range(len(starts)), key=lambda k: abs(starts[k] - at))
+        if not mates:
+            pos = len(rest)
+        elif j < len(mates):
+            pos = rest.index(mates[j])
+        else:
+            pos = rest.index(mates[-1]) + 1
+        rest.insert(pos, target_ins)
+        edl["inserts"] = rest
         return edl, (f"moved insert {target_ins['id']} to "
-                     f"{round(final_of[target], 2)}s")
+                     f"{round(starts[j], 2)}s")
 
     if op == "remove_insert":
         before = edl.get("inserts") or []

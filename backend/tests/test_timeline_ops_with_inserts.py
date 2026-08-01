@@ -294,3 +294,37 @@ def test_splitting_footage_is_completely_unchanged_by_any_of_this():
     # 339.27 — round 60's rule). Splitting take one adds a boundary BEFORE it,
     # so its output value is unchanged even though its junction index moved.
     assert out["inserts"][0]["at_output_s"] == 18.23
+
+
+# ── round 75b: dragging a split scene between other splits ──────────────────
+
+def _split_edl():
+    """Every scene an insert at ONE boundary — exactly what splitting an
+    inserted recording produces, and the launch-video timeline's real shape."""
+    e = wschemas.default_edl(SRC_DUR)
+    e["keep"] = [[111.85, 115.4]]                     # 3.55s of footage
+    e["inserts"] = [
+        {"id": "a", "asset_key": "clips/1/rec.mov", "kind": "video",
+         "at_output_s": 3.55, "duration_s": 2.0, "source_start_s": 0.0},
+        {"id": "b", "asset_key": "clips/1/rec.mov", "kind": "video",
+         "at_output_s": 3.55, "duration_s": 3.0, "source_start_s": 2.0},
+        {"id": "c", "asset_key": "clips/1/rec.mov", "kind": "video",
+         "at_output_s": 3.55, "duration_s": 4.0, "source_start_s": 5.0}]
+    return wschemas.validate_edl(e, SRC_DUR).model_dump()
+
+
+def test_dragging_a_split_scene_between_two_other_splits_reorders():
+    """The drag used to change at_output_s only — which, with every scene at
+    the ONE boundary, was already its value: the drag did literally nothing,
+    reported success, and the user filed 'im still not being able to put
+    splitted scene between another splitted scenes'. The op now reorders
+    within the boundary by the requested program time."""
+    edl = _split_edl()
+    # scenes: a 3.55-5.55, b 5.55-8.55, c 8.55-12.55; drag c between a and b
+    out, desc = apply(edl, "move_insert", {"id": "c", "at_output_s": 5.55})
+    assert [i["id"] for i in out["inserts"]] == ["a", "c", "b"]
+    assert "5.55" in desc
+    out2, _d = apply(out, "move_insert", {"id": "c", "at_output_s": 3.55})
+    assert [i["id"] for i in out2["inserts"]] == ["c", "a", "b"]
+    out3, _d = apply(out2, "move_insert", {"id": "c", "at_output_s": 12.0})
+    assert [i["id"] for i in out3["inserts"]] == ["a", "b", "c"]
