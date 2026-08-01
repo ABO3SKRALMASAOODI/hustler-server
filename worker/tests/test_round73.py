@@ -234,3 +234,17 @@ def test_cancelled_cb_is_optional_everywhere():
     for fn in (__import__("renderer").render_edl,
                __import__("renderer")._render_canvas_edl):
         assert inspect.signature(fn).parameters["cancelled_cb"].default is None
+
+
+def test_requeue_cannot_resurrect_a_job_we_no_longer_hold():
+    """Round 73 made this reachable: an abandoned executor now RAISES instead
+    of rendering a dead job to completion, and process_one's except branch
+    requeues on a raise. Without the clause that error walks into the reaper's
+    terminal row, sets it `queued` again, and buys the job another 8-vCPU run
+    after the user has already been told it died."""
+    held = _Conn(rowcount=1)
+    assert wdb.requeue_job(held, 7, RuntimeError("boom")) is True
+    assert "state = 'running'" in held.sql[0][0]
+
+    gone = _Conn(rowcount=0)
+    assert wdb.requeue_job(gone, 7, RuntimeError("boom")) is False

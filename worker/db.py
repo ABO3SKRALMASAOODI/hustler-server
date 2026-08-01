@@ -288,10 +288,22 @@ def finish_job(conn, job_id, state, error=None, result=None):
 
 
 def requeue_job(conn, job_id, error):
+    """Only a job we STILL HOLD goes back on the queue.
+
+    Same rule as release_jobs and set_progress, and the last writer that was
+    missing it. Round 73 made it reachable: an abandoned executor now raises
+    instead of rendering a dead job to completion, and without this clause that
+    error would walk into the reaper's terminal row and set it `queued` again —
+    resurrecting a job the user has already been told died, and buying it
+    another 8-vCPU run in the process. Returns whether it actually requeued so
+    the caller's log cannot claim a requeue that did not happen.
+    """
     with conn.cursor() as cur:
         cur.execute("""UPDATE video_jobs
                        SET state = 'queued', error = %s, updated_at = NOW()
-                       WHERE id = %s""", (str(error)[:2000], job_id))
+                       WHERE id = %s AND state = 'running'""",
+                    (str(error)[:2000], job_id))
+        return cur.rowcount > 0
 
 
 def get_job(conn, job_id):

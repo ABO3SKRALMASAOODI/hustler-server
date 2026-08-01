@@ -127,8 +127,10 @@ def process_one(worker_db, job):
                         if job["type"] in MCP_TYPES
                         else config.MAX_ATTEMPTS_MEDIA)
         if job["attempts"] < max_attempts:
-            worker_db.run(dbx.requeue_job, job_id, e)
-            print(f"[job {job_id}] requeued after error: {e}", flush=True)
+            requeued = worker_db.run(dbx.requeue_job, job_id, e)
+            what = ("requeued" if requeued else
+                    "NOT requeued (already terminal — reaped or superseded)")
+            print(f"[job {job_id}] {what} after error: {e}", flush=True)
         else:
             worker_db.run(dbx.finish_job, job_id, "failed", e, None)
             print(f"[job {job_id}] FAILED: {e}", flush=True)
