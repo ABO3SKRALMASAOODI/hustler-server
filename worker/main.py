@@ -262,7 +262,14 @@ def reaper():
         time.sleep(60)
         publish_mcp_catalog(worker_db)
         try:
-            rows = worker_db.run(dbx.fail_exhausted_jobs) or []
+            # Two ways a job runs out of road, and BOTH have to end visibly.
+            # fail_exhausted_jobs is the refundable budget (attempts); the
+            # second is the non-refundable one (total_claims), which exists
+            # precisely because deploys keep refunding the first. A job the
+            # queue has stopped selecting is invisible, not finished — left
+            # alone it sits `queued` forever under a spinner.
+            rows = ((worker_db.run(dbx.fail_exhausted_jobs) or [])
+                    + (worker_db.run(dbx.fail_ceilinged_jobs) or []))
             for row in rows:
                 print(f"[reaper] failed exhausted job {row['id']} "
                       f"({row['type']})", flush=True)

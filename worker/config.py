@@ -651,6 +651,24 @@ THUMB_PARALLELISM = int(os.getenv("THUMB_PARALLELISM", "4"))
 STALE_AFTER_S = 120           # running + no heartbeat for this long => reclaimable
 MAX_ATTEMPTS_MEDIA = 3        # first run + 2 retries
 MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resend)
+# THE BACKSTOP UNDER THE REFUNDABLE BUDGET (round 73).
+#
+# `attempts` is a FAIRNESS counter: release_jobs gives one back on every
+# dispatcher SIGTERM, because a deploy killing a job is our fault, not the
+# job's. That is right, and it stays. But it means MAX_ATTEMPTS_MEDIA bounds
+# nothing on its own — a job that keeps getting caught by deploys is handed
+# another life every time, and each life on the executor is a full
+# FFMPEG_TIMEOUT_S of 8 vCPU.
+#
+# On Jul 26 2026 final job=836 ran FIVE times against a cap of three, each
+# attempt burning the whole 3000s wall-clock, and 50 deploys in that week is
+# what paid for it. Four jobs like it were 9.37 hours — half a $14 week.
+#
+# So the money question and the fairness question get separate counters:
+# total_claims counts what we have PHYSICALLY SPENT running this job and is
+# never given back. Sized to absorb a few genuine deploy interruptions on top
+# of the three real tries, then stop for good.
+MAX_CLAIMS_ABSOLUTE = int(os.getenv("MAX_CLAIMS_ABSOLUTE", "6"))
 
 AGENT_MAX_ITERATIONS = 30
 AGENT_TEMPERATURE = 0.2

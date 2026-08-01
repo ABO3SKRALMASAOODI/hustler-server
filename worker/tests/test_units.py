@@ -3261,7 +3261,10 @@ import db as wdb                                             # noqa: E402
 
 
 class _RelCur:
-    def __init__(self, sink): self.sink = sink
+    # rowcount is not decoration: since round 73 set_progress RETURNS whether
+    # the row was still ours, and that answer is what stops an abandoned
+    # executor rendering a job its own retry has already taken over.
+    def __init__(self, sink): self.sink, self.rowcount = sink, 1
     def __enter__(self): return self
     def __exit__(self, *a): return False
     def execute(self, sql, params=None): self.sink.append((sql, params))

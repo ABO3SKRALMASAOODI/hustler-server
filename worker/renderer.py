@@ -2299,7 +2299,7 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
-                       want_wm=False):
+                       want_wm=False, cancelled_cb=None):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
@@ -2444,17 +2444,19 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
            *encode, *_output_clock(fps), "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
     media.run(cmd, progress_cb=progress_cb,
-              expected_out_s=tl.out_duration + outro_s)
+              expected_out_s=tl.out_duration + outro_s,
+              cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
 
 
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
-               progress_cb=None, want_wm=False):
+               progress_cb=None, want_wm=False, cancelled_cb=None):
     """Render an EDL against a source file. Returns output duration (s)."""
     if is_canvas_program(edl_dict):
         # No main video: the program is built on the canvas from inserts alone.
         return _render_canvas_edl(edl_dict, out_path, workdir, preview,
-                                  progress_cb, want_wm=want_wm)
+                                  progress_cb, want_wm=want_wm,
+                                  cancelled_cb=cancelled_cb)
     info = media.probe(src_path)
     src_dur = info["duration"]
     edl = validate_edl(edl_dict, max(src_dur, max(e for _, e in edl_dict["keep"]))
@@ -2699,7 +2701,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # at the programme duration the bar hits 99.9% at programme end and then
     # flatlines through the whole end card.
     media.run(cmd, progress_cb=progress_cb,
-              expected_out_s=tl.out_duration + outro_s)
+              expected_out_s=tl.out_duration + outro_s,
+              cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
 
 
@@ -2871,6 +2874,10 @@ def _render_stamp(job_id):
 
 def run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
+    # Which run of this job we are. The dispatcher ships it (remote._job_payload)
+    # so an abandoned executor can tell "still mine" from "the retry has already
+    # claimed it and I am rendering for nobody". See _still_ours below.
+    my_attempt = job.get("attempts")
     variant = "preview" if job["type"] == "preview" else "final"
     version = int(job["payload"].get("edl_version"))
     # A render the USER could not play is the one case where re-encoding the
@@ -2980,15 +2987,42 @@ def run_render_job(worker_db, job):
         timings[stage] = round(time.monotonic() - t0, 2)
         t0 = time.monotonic()
 
+    # Set the moment a progress write reports the row is no longer ours. The
+    # encode watchdog reads it every 2s (media.run cancelled_cb) and kills
+    # ffmpeg — nothing here ever queries the DB on its own account.
+    _abandoned = [False]
+
+    def _still_ours(progress):
+        """Write progress; return False once this run has been superseded.
+
+        The answer costs nothing: set_progress' UPDATE already carries
+        `state='running' AND attempts=%s`, so its rowcount IS the answer and
+        was previously discarded. On a DB error assume we are still ours —
+        losing the connection for one tick must never kill a healthy export.
+        """
+        try:
+            ok = worker_db.run(dbx.set_progress, job_id, progress, my_attempt)
+        except Exception:
+            return True
+        if ok is False:
+            _abandoned[0] = True
+        return ok is not False
+
     try:
         if src_asset:
             src_local = os.path.join(
                 workdir, "src" + os.path.splitext(src_asset["storage_key"])[1])
-            worker_db.run(dbx.set_progress, job_id, 5)
+            # Checked BEFORE the download, which for a 14 GB original is the
+            # single most expensive thing this instance can be asked to do for
+            # a job that no longer exists.
+            if not _still_ours(5):
+                raise RuntimeError(
+                    "job was cancelled or handed to another worker")
             storage.download_to(src_asset["storage_key"], src_local)
         else:
             src_local = None            # canvas program: nothing to download
-        worker_db.run(dbx.set_progress, job_id, 10)
+        if not _still_ours(10):
+            raise RuntimeError("job was cancelled or handed to another worker")
         _mark("download_s")
 
         out_local = os.path.join(workdir, f"{variant}_v{version}.mp4")
@@ -3004,7 +3038,7 @@ def run_render_job(worker_db, job):
             if now - _last_prog[0] < 3.0 and frac < 0.99:
                 return
             _last_prog[0] = now
-            worker_db.run(dbx.set_progress, job_id, 10 + int(frac * 80))
+            _still_ours(10 + int(frac * 80))
 
         if variant == "final" and not endcard_path():
             # Exports keep working, but this must never be silent: it means a
@@ -3015,7 +3049,8 @@ def run_render_job(worker_db, job):
 
         out_dur = render_edl(edl_row["json"], index, src_local, out_local,
                              workdir, preview=(variant == "preview"),
-                             progress_cb=_prog, want_wm=want_wm)
+                             progress_cb=_prog, want_wm=want_wm,
+                             cancelled_cb=lambda: _abandoned[0])
         _mark("encode_s")
 
         # Render verification: the output must be the expected length and must

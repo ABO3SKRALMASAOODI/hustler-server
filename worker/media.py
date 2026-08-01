@@ -17,9 +17,19 @@ class MediaError(RuntimeError):
     pass
 
 
-def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
+def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
+        cancelled_cb=None):
     """Run ffmpeg/ffprobe. With progress_cb, parses -progress pipe:1 output
     and reports percent of expected_out_s.
+
+    `cancelled_cb` is the FOURTH watchdog reason (round 73): a callable that
+    returns True once the job this encode belongs to is no longer ours. It
+    hangs off the watchdog rather than off progress_cb because the watchdog
+    thread is the only thing here that can actually stop ffmpeg — raising out
+    of progress_cb unwinds the read loop and leaves the subprocess running,
+    which is the failure it exists to prevent, not a way to fix it. The callback
+    must not block: renderer feeds it a flag that the progress write already
+    set, so it never touches the database.
 
     Both branches decode with errors="replace". ffmpeg's log is NOT UTF-8: it
     echoes container metadata verbatim (a Shift-JIS title, a CP-1251 artist)
@@ -71,6 +81,18 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None):
                     kill_reason.append(f"no progress for {stall_s}s")
                     proc.kill()
                     return
+                # Abandoned: the dispatcher gave up on this job and requeued
+                # it, so every frame from here is being computed for nobody —
+                # next to the retry that replaced us, on a second 8-vCPU
+                # instance. Never let a diagnostic callback fail an encode.
+                try:
+                    if cancelled_cb and cancelled_cb():
+                        kill_reason.append(
+                            "job was cancelled or handed to another worker")
+                        proc.kill()
+                        return
+                except Exception:
+                    pass
                 time.sleep(2)
 
         wd = threading.Thread(target=_watchdog, daemon=True)

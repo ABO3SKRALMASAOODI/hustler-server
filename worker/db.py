@@ -72,19 +72,70 @@ class Db:
 #  Job queue                                                           #
 # ------------------------------------------------------------------ #
 
+_CLAIMS_COL = {"ok": False, "checked_at": 0.0}
+_CLAIMS_RECHECK_S = 60.0
+
+
+def claims_column_ready(conn):
+    """True once 014_total_claims.sql has run. Cached once True.
+
+    Same pattern (and same reason) as backend.billing.columns_ready: prod
+    schema is applied by hand from the Render shell, so this code has to
+    survive the window between the deploy and the psql. Until the column
+    exists the queue behaves exactly as it did before — refundable `attempts`
+    only, which is the pre-round-73 behaviour, not a broken one.
+    """
+    if _CLAIMS_COL["ok"]:
+        return True
+    if time.time() - _CLAIMS_COL["checked_at"] < _CLAIMS_RECHECK_S:
+        return False
+    _CLAIMS_COL["checked_at"] = time.time()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS n FROM information_schema.columns
+                 WHERE table_name = 'video_jobs' AND column_name = 'total_claims'
+            """)
+            row = cur.fetchone()
+        n = (row or {}).get("n") if isinstance(row, dict) else (row or [0])[0]
+        _CLAIMS_COL["ok"] = bool(n)
+    except Exception as e:                                  # pragma: no cover
+        print(f"[db] total_claims probe failed: {e}", flush=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    return _CLAIMS_COL["ok"]
+
+
 def claim_job(conn, types, max_attempts):
     # Previews (always a user or agent actively waiting) jump the queue over
     # finals, and both jump over indexing — a turn's render_preview never
     # waits behind another project's index job.
+    #
+    # TWO counters, deliberately. `attempts` is the refundable fairness budget
+    # (release_jobs hands one back after a deploy); `total_claims` counts what
+    # we have physically spent running this job and is NEVER given back. Job
+    # 836 ran five 50-minute finals against a cap of three because only the
+    # first counter existed. See config.MAX_CLAIMS_ABSOLUTE.
+    has_claims = claims_column_ready(conn)
+    claims_set = ", total_claims = COALESCE(total_claims, 0) + 1" if has_claims else ""
+    claims_where = "AND COALESCE(total_claims, 0) < %s" if has_claims else ""
+    params = [list(types), max_attempts]
+    if has_claims:
+        params.append(config.MAX_CLAIMS_ABSOLUTE)
+    params.append(config.STALE_AFTER_S)
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             UPDATE video_jobs
-            SET state = 'running', attempts = attempts + 1,
+            SET state = 'running', attempts = attempts + 1{claims_set},
                 heartbeat_at = NOW(), updated_at = NOW(), error = NULL
             WHERE id = (
                 SELECT id FROM video_jobs
                 WHERE type = ANY(%s)
                   AND attempts < %s
+                  {claims_where}
                   AND (state = 'queued'
                        OR (state = 'running'
                            AND heartbeat_at < NOW() - make_interval(secs => %s)))
@@ -94,8 +145,34 @@ def claim_job(conn, types, max_attempts):
                 LIMIT 1
             )
             RETURNING *
-        """, (list(types), max_attempts, config.STALE_AFTER_S))
+        """, tuple(params))
         return cur.fetchone()
+
+
+def fail_ceilinged_jobs(conn):
+    """Jobs that burned through MAX_CLAIMS_ABSOLUTE become failed, loudly.
+
+    Without this they would be invisible rather than bounded: claim_job simply
+    stops selecting them, so the row sits `queued` forever and the studio spins
+    on a job no worker will ever pick up again. A ceiling that strands the user
+    is not better than no ceiling — it just moves the damage off the invoice
+    and onto the person waiting.
+    """
+    if not claims_column_ready(conn):
+        return []
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE video_jobs
+            SET state = 'failed', updated_at = NOW(),
+                error = COALESCE(error, 'This job was restarted too many times '
+                                        'and has been stopped. Please try again.')
+            WHERE COALESCE(total_claims, 0) >= %s
+              AND (state = 'queued'
+                   OR (state = 'running'
+                       AND heartbeat_at < NOW() - make_interval(secs => %s)))
+            RETURNING id, type, project_id, error, payload
+        """, (config.MAX_CLAIMS_ABSOLUTE, config.STALE_AFTER_S))
+        return cur.fetchall()
 
 
 def fail_exhausted_jobs(conn):
@@ -131,6 +208,12 @@ def release_jobs(conn, ids):
     because a turn has side effects (it writes EDL versions), so replaying one
     could re-apply work. Those still die honestly via the reaper's "I lost my
     connection — please send it again".
+
+    This refund is still right, and it is deliberately NOT what bounds cost:
+    total_claims (claim_job) counts the runs we actually paid for and is never
+    handed back. Before it existed this line was the whole reason final job=836
+    could run five 50-minute encodes against MAX_ATTEMPTS_MEDIA=3 — 50 deploys
+    in a week, and every one of them bought that job another life.
     """
     if not ids:
         return 0
@@ -150,7 +233,7 @@ def active_job_ids():
         return list(ACTIVE_JOBS)
 
 
-def set_progress(conn, job_id, progress):
+def set_progress(conn, job_id, progress, attempts=None):
     """The `state = 'running'` clause is what makes a cancellation STICK.
 
     This writes heartbeat_at, so without it a job cancelled out from under a
@@ -161,12 +244,36 @@ def set_progress(conn, job_id, progress):
     stamping progress=89 onto a job that had been failed for twenty minutes,
     and it made "is it dead yet?" unanswerable. heartbeat_forever already has
     this clause; this is the same rule, applied to the other writer.
+
+    RETURNS whether the row is still ours (round 73). That answer was already
+    being computed by the WHERE clause above and thrown away, which is why the
+    executor had no way to learn it had been abandoned: when the dispatcher's
+    REMOTE_EXECUTOR_TIMEOUTS fired it requeued and retried, while the original
+    Cloud Run instance rendered the dead job to completion beside the retry —
+    two instances, 16 vCPU, one job. Nothing polls; this is the write the
+    renderer already makes every 3 seconds.
+
+    `attempts` closes the race the state check alone cannot: once the retry has
+    claimed the row it is `running` again, and an orphan checking only state
+    would see its own replacement and carry on. The dispatcher already ships
+    `attempts` to the executor in remote._job_payload, so the orphan knows
+    which run it is.
     """
     with conn.cursor() as cur:
-        cur.execute("""UPDATE video_jobs
-                       SET progress = %s, heartbeat_at = NOW(), updated_at = NOW()
-                       WHERE id = %s AND state = 'running'""",
-                    (min(100, max(0, int(progress))), job_id))
+        if attempts is None:
+            cur.execute("""UPDATE video_jobs
+                           SET progress = %s, heartbeat_at = NOW(),
+                               updated_at = NOW()
+                           WHERE id = %s AND state = 'running'""",
+                        (min(100, max(0, int(progress))), job_id))
+        else:
+            cur.execute("""UPDATE video_jobs
+                           SET progress = %s, heartbeat_at = NOW(),
+                               updated_at = NOW()
+                           WHERE id = %s AND state = 'running'
+                             AND attempts = %s""",
+                        (min(100, max(0, int(progress))), job_id, attempts))
+        return cur.rowcount > 0
 
 
 def finish_job(conn, job_id, state, error=None, result=None):
