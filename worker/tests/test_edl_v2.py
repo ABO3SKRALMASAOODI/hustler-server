@@ -133,7 +133,7 @@ def test_validation_clamps_not_rejections():
                     "transition": {"style": "whip_left",
                                    "duration_s": 9.0}}}, 60).model_dump()
     fx = n["effects"]
-    assert fx["zooms"][0]["strength"] == 1.5
+    assert fx["zooms"][0]["strength"] == 2.5     # the round-75 ceiling
     assert fx["zooms"][0]["cx"] == 1.0
     assert fx["fade_in_s"] == 10.0
     assert fx["transition"]["duration_s"] == 1.5

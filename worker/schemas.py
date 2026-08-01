@@ -529,10 +529,14 @@ class VoiceoverItem(BaseModel):
 
 GRADE_PRESETS = ("vibrant", "warm", "cool", "bw", "vintage", "cinematic")
 ZOOM_STRENGTH_MIN = 0.05
-# Widened from 1.0 (round 35): a 1.5 strength is a 2.5x punch — bold but
-# real; the old cap existed because center-only zooms past 2x looked lost,
-# and targeted zooms (cx/cy) don't.
-ZOOM_STRENGTH_MAX = 1.5
+# Widened from 1.0 (round 35), then from 1.5 (round 75): a launch video
+# needed the chat COLUMN alone to fill a 16:9 frame — a ~0.33-wide viewport,
+# which is strength ~2.0 — and the user asked for tighter still ("only that
+# message"). 2.5 is a 3.5x window: from 4K source that is still ~1100px of
+# real pixels. The round-35 worry (center-only zooms past 2x look lost)
+# holds for CENTER zooms, which is what the taste audit's hard-punch rule
+# watches; aimed rect/path zooms carry their own subject.
+ZOOM_STRENGTH_MAX = 2.5
 FADE_MAX_S = 10.0
 
 

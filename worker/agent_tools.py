@@ -3027,6 +3027,42 @@ ZOOM_MODE_DESC = {"punch": "punch-in", "ease": "eased",
 ZOOM_RECT_MARGIN = 0.12
 
 
+def _solve_zoom_rect(rect, strength=None):
+    """(err, strength, cx, cy, (rx0, ry0, rx1, ry1)) — ONE viewport solver
+    behind add_zoom's rect and add_zoom_path's rect keyframes (round 75).
+
+    The pin space (cx/cy) parameterizes every in-frame viewport, but pins a
+    POINT in place — so framing a region near an edge takes viewport math no
+    model should be doing by hand: solve z to fit the rect with margin
+    (unless a strength is given), centre the viewport as far as the frame
+    allows, derive the pin. strength 0 (a travelling zoom's seamless entry/
+    exit) still needs an AIM, so the pin is solved at the rect's fit-zoom
+    while the returned strength stays whatever the caller decides."""
+    try:
+        rx0, ry0, rx1, ry1 = (float(v) for v in rect)
+    except (TypeError, ValueError):
+        return ("REJECTED: rect must be [x0, y0, x1, y1] — fractions of "
+                "the output frame ((0,0) = top-left), read off the grid "
+                "on a look_at frame.", None, None, None, None)
+    rx0, ry0 = min(max(rx0, 0.0), 1.0), min(max(ry0, 0.0), 1.0)
+    rx1, ry1 = min(max(rx1, 0.0), 1.0), min(max(ry1, 0.0), 1.0)
+    if rx1 - rx0 < 0.02 or ry1 - ry0 < 0.02:
+        return ("REJECTED: rect is empty or inverted — [x0, y0, x1, y1] "
+                "needs x0 < x1 and y0 < y1 (at least 0.02 apart).",
+                None, None, None, None)
+    rw, rh = rx1 - rx0, ry1 - ry0
+    fit = 1.0 / (max(rw, rh) * (1.0 + 2.0 * ZOOM_RECT_MARGIN))
+    fit = min(max(fit, 1.0 + ZOOM_STRENGTH_MIN), 1.0 + ZOOM_STRENGTH_MAX)
+    st = round(fit - 1.0, 2) if strength is None else strength
+    z = 1.0 + st if st > 0 else fit
+    half = 0.5 / z
+    vx0 = min(max((rx0 + rx1) / 2.0 - half, 0.0), 1.0 - 2.0 * half)
+    vy0 = min(max((ry0 + ry1) / 2.0 - half, 0.0), 1.0 - 2.0 * half)
+    return (None, st, round(vx0 / (1.0 - 1.0 / z), 3),
+            round(vy0 / (1.0 - 1.0 / z), 3),
+            (rx0, ry0, rx1, ry1))
+
+
 def _parse_zoom_path(path):
     """Validate a follow-zoom path into EDL points, or return (None, reason).
 
@@ -3087,7 +3123,7 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
                       ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
         return ("REJECTED: start/end/strength must be numbers. start/end are "
-                "OUTPUT-timeline seconds; strength 0.05-1.5 (0.25 = 25% "
+                "OUTPUT-timeline seconds; strength 0.05-2.5 (0.25 = 25% "
                 "punch-in; above 1.0 is a dramatic 2x+ punch).")
     if e - s < 0.2:
         return "REJECTED: a zoom needs at least 0.2s."
@@ -3130,29 +3166,12 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
             return ("REJECTED: a follow zoom is aimed by its `path`; rect "
                     "only applies to fixed zooms (punch/ease/push_in/"
                     "pull_out).")
-        try:
-            rx0, ry0, rx1, ry1 = (float(v) for v in rect)
-        except (TypeError, ValueError):
-            return ("REJECTED: rect must be [x0, y0, x1, y1] — fractions of "
-                    "the output frame ((0,0) = top-left), read off the grid "
-                    "on a look_at frame.")
-        rx0, ry0 = min(max(rx0, 0.0), 1.0), min(max(ry0, 0.0), 1.0)
-        rx1, ry1 = min(max(rx1, 0.0), 1.0), min(max(ry1, 0.0), 1.0)
-        if rx1 - rx0 < 0.02 or ry1 - ry0 < 0.02:
-            return ("REJECTED: rect is empty or inverted — [x0, y0, x1, y1] "
-                    "needs x0 < x1 and y0 < y1 (at least 0.02 apart).")
-        rw, rh = rx1 - rx0, ry1 - ry0
-        if st is None:
-            z = 1.0 / (max(rw, rh) * (1.0 + 2.0 * ZOOM_RECT_MARGIN))
-            z = min(max(z, 1.0 + ZOOM_STRENGTH_MIN), 1.0 + ZOOM_STRENGTH_MAX)
-            st = round(z - 1.0, 2)
-        z = 1.0 + st
-        half = 0.5 / z
-        vx0 = min(max((rx0 + rx1) / 2.0 - half, 0.0), 1.0 - 2.0 * half)
-        vy0 = min(max((ry0 + ry1) / 2.0 - half, 0.0), 1.0 - 2.0 * half)
-        tgt = {"cx": round(vx0 / (1.0 - 1.0 / z), 3),
-               "cy": round(vy0 / (1.0 - 1.0 / z), 3)}
-        rct = [round(v, 3) for v in (rx0, ry0, rx1, ry1)]
+        err, st, scx, scy, rr = _solve_zoom_rect(rect, st)
+        if err:
+            return err
+        rw, rh = rr[2] - rr[0], rr[3] - rr[1]
+        tgt = {"cx": scx, "cy": scy}
+        rct = [round(v, 3) for v in rr]
     if st is None:
         st = 0.15
     pts = None
@@ -3250,35 +3269,63 @@ def add_zoom_path(ctx, keyframes, ease=None):
                 "each {t, cx, cy, strength}. t is OUTPUT-timeline seconds; "
                 "cx/cy are 0-1 fractions of the output frame ((0,0) = "
                 "top-left, the same convention as add_zoom); strength is "
-                "0-1.5. The window runs from the first t to the last.")
+                "0-2.5. The window runs from the first t to the last.")
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     clean = []
     for i, kf in enumerate(keyframes):
         if not isinstance(kf, dict):
             return (f"REJECTED: keyframes[{i}] must be an object "
-                    "{t, cx, cy, strength}.")
+                    "{t, cx, cy, strength} or {t, rect, strength}.")
         try:
             t = float(kf["t"])
-            cx = float(kf["cx"])
-            cy = float(kf["cy"])
         except (KeyError, TypeError, ValueError):
-            return (f"REJECTED: keyframes[{i}] needs numeric t, cx and cy. "
-                    "cx/cy are fractions of the output frame (0-1) — use "
-                    "look_at to find what you are aiming at.")
+            return f"REJECTED: keyframes[{i}] needs a numeric t (seconds)."
         s = kf.get("strength")
-        if s is None:
-            s = 0.25
-        try:
-            s = float(s)
-        except (TypeError, ValueError):
-            return (f"REJECTED: keyframes[{i}].strength must be a number "
-                    f"({ZOOM_STRENGTH_MIN}-{ZOOM_STRENGTH_MAX}), or omit it.")
-        # 0 is legal here and is NOT legal on add_zoom: it means "no push at
-        # this instant", which is how a travelling zoom starts from and
-        # returns to the untouched frame without a visible step.
-        s = 0.0 if s <= 0.0 else min(max(s, ZOOM_STRENGTH_MIN),
-                                     ZOOM_STRENGTH_MAX)
+        if s is not None:
+            try:
+                s = float(s)
+            except (TypeError, ValueError):
+                return (f"REJECTED: keyframes[{i}].strength must be a number "
+                        f"({ZOOM_STRENGTH_MIN}-{ZOOM_STRENGTH_MAX}), or omit "
+                        "it.")
+            # 0 is legal here and is NOT legal on add_zoom: it means "no push
+            # at this instant", which is how a travelling zoom starts from
+            # and returns to the untouched frame without a visible step.
+            s = 0.0 if s <= 0.0 else min(max(s, ZOOM_STRENGTH_MIN),
+                                         ZOOM_STRENGTH_MAX)
+        rct = kf.get("rect")
+        if rct is not None:
+            # Round 75: a keyframe can name the THING to frame instead of a
+            # pin. cx/cy pin a point in place, so a travelling zoom between
+            # two edge subjects (two chat bubbles down the left panel) took
+            # hand-derived viewport arithmetic per keyframe — exactly what
+            # the agent got wrong when a launch video asked the zoom to move
+            # from one message to another. Each rect goes through the same
+            # solver add_zoom uses; a strength-0 entry/exit keyframe still
+            # aims at its rect (the pin is solved at the rect's fit zoom).
+            if kf.get("cx") is not None or kf.get("cy") is not None:
+                return (f"REJECTED: keyframes[{i}] has both rect and cx/cy "
+                        "— two answers to where the frame should look. Pass "
+                        "ONE per keyframe.")
+            err, s_fit, cx, cy, _r = _solve_zoom_rect(
+                rct, s if s else None)
+            if err:
+                return err.replace("REJECTED:",
+                                   f"REJECTED: keyframes[{i}]:", 1)
+            if s is None:
+                s = s_fit
+        else:
+            try:
+                cx = float(kf["cx"])
+                cy = float(kf["cy"])
+            except (KeyError, TypeError, ValueError):
+                return (f"REJECTED: keyframes[{i}] needs numeric cx and cy "
+                        "(or a rect=[x0,y0,x1,y1]). cx/cy are fractions of "
+                        "the output frame (0-1) — use look_at to find what "
+                        "you are aiming at.")
+            if s is None:
+                s = 0.25
         clean.append({"t": t, "cx": cx, "cy": cy, "strength": s})
     clean.sort(key=lambda p: p["t"])
     start = round(min(max(clean[0]["t"], 0.0), max(0.0, prog - 0.2)), 2)
@@ -4649,6 +4696,62 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None):
     res = ctx.write_edl(
         edl, f"insert {id} now plays {off}-{round(off + dur, 2)}s of "
              f"'{os.path.basename(hit['asset_key'])}' ({dur}s on the timeline)")
+    if notes and res.startswith("EDL v"):
+        res += "\n" + "\n".join(notes)
+    return res
+
+
+def move_insert(ctx, id, after_id=None):
+    """Reorder a spliced scene — round 75.
+
+    "Move the uploaded clip between those two scenes" had no tool: inserts
+    at one boundary play in LIST order, and nothing could change the order
+    or the boundary of an existing insert — the only path was remove +
+    re-insert, two writes and the clip visibly vanishing from the timeline
+    in between (the same complaint that produced set_insert_window in round
+    61). This moves the item in place: after_id names the insert the moved
+    one should play right AFTER (adopting that insert's boundary); omitted,
+    it plays FIRST at its own boundary. Everything program-anchored
+    re-anchors through the shared remap — including a zoom choreographed on
+    the moved scene, which follows it to its new place."""
+    edl = dict(ctx.latest_edl()["json"])
+    before = [dict(i) for i in (edl.get("inserts") or [])]
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    hit = next((i for i in inserts if i.get("id") == id), None)
+    if not hit:
+        have = ", ".join(i.get("id", "?") for i in inserts) or "none"
+        return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
+                f"{have}. Call get_edl to see them.")
+    if after_id == id:
+        return "REJECTED: after_id must be a DIFFERENT insert."
+    rest = [i for i in inserts if i.get("id") != id]
+    if after_id:
+        anchor = next((i for i in rest if i.get("id") == after_id), None)
+        if anchor is None:
+            have = ", ".join(i.get("id", "?") for i in rest) or "none"
+            return (f"REJECTED: no insert with id '{after_id}' to place "
+                    f"after. Existing inserts: {have}. Call get_edl — the "
+                    "scene map names each scene's insert id.")
+        hit = dict(hit, at_output_s=anchor["at_output_s"])
+        k = rest.index(anchor)
+        new_list = rest[:k + 1] + [hit] + rest[k + 1:]
+    else:
+        # First at its own boundary: the sort is stable on at_output_s, so
+        # list-front makes it first among its boundary-mates.
+        new_list = [hit] + rest
+    speed = edl.get("speed") or []
+    old_tl = Timeline(edl.get("keep") or [], before, speed)
+    edl["inserts"] = new_list
+    new_tl = Timeline(edl.get("keep") or [], new_list, speed)
+    notes = _remap_program_items(edl, old_tl, new_tl)
+    win = insert_windows(new_list, new_tl).get(id)
+    where = (f"it now plays {round(win[0], 2)}-{round(win[1], 2)}s of the "
+             "program" if win else "moved")
+    res = ctx.write_edl(
+        edl, f"moved insert {id} "
+             + (f"to play right after {after_id}" if after_id
+                else "to play first at its boundary")
+             + f" — {where}")
     if notes and res.startswith("EDL v"):
         res += "\n" + "\n".join(notes)
     return res
@@ -8939,7 +9042,7 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
         strength = round(min(max(float(zoom_strength), ZOOM_STRENGTH_MIN),
                              ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
-        return "REJECTED: zoom_strength must be a number (0.05-1.5)."
+        return "REJECTED: zoom_strength must be a number (0.05-2.5)."
 
     edl0 = ctx.latest_edl()["json"]
     prog_before = program_duration(edl0)
@@ -9648,7 +9751,7 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
         st = round(min(max(float(strength), ZOOM_STRENGTH_MIN),
                        ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
-        return "REJECTED: strength must be a number (0.05-1.5)."
+        return "REJECTED: strength must be a number (0.05-2.5)."
     try:
         p = _get_perception(ctx)
     except Exception as e:
@@ -10806,6 +10909,18 @@ TOOLS = {
                           {"id": {"type": "string"},
                            "duration_s": {"type": "number"},
                            "clip_start_s": {"type": "number"}}),
+    "move_insert": (move_insert, "MOVE A SPLICED SCENE — reorder an inserted "
+                    "clip between any other scenes, in place. after_id is "
+                    "the insert it should play right AFTER (the scene map "
+                    "in get_edl names each scene's insert id); omit it to "
+                    "play FIRST at its boundary. THE tool for 'move this "
+                    "clip between those two scenes' / 'put the uploaded "
+                    "video after the intro' — never remove + re-insert, "
+                    "which costs two versions and the user watches the clip "
+                    "vanish. Everything anchored to the moved scenes "
+                    "(zooms, takeovers, texts) re-anchors and follows.",
+                    {"id": {"type": "string"},
+                     "after_id": {"type": "string"}}),
     "remove_insert": (remove_insert, "Remove one spliced insert by its id "
                       "(see get_edl) — the surrounding timing is restored "
                       "exactly. If an insert landed wrong, remove it BEFORE "
@@ -10956,7 +11071,7 @@ TOOLS = {
         "path to a coordinate I would have had to invent. With neither, it "
         "still places the clip and tells you plainly that nothing was synced. "
         "at_output_s defaults to the END of the current edit; zoom_strength "
-        "0.05-1.5 (0.4 default — screen text needs a real push to read); set "
+        "0.05-2.5 (0.4 default — screen text needs a real push to read); set "
         "zooms=false or click_sounds=false to place it plainly. Follow up "
         "with add_zoom_path to make the frame travel on a user recording, and "
         "enhance_cursor if the pointer is too small to follow.",
@@ -10977,7 +11092,7 @@ TOOLS = {
                                              "none"]}}),
     "add_zoom": (add_zoom, "Zoom on a time range of the FINAL edited video "
                  "(output seconds) — the standard retention effect for "
-                 "emphasis on a key line. strength 0.05-1.5 (default 0.15; "
+                 "emphasis on a key line. strength 0.05-2.5 (default 0.15; "
                  "above 1.0 is a dramatic 2x+ punch). mode: "
                  "'punch' (default, instant step), 'ease' (smoothly ramps "
                  "in and out — use when the user wants it subtle/animated), "
@@ -10998,7 +11113,11 @@ TOOLS = {
                  "three for the classic center zoom. Use 1-3 short zooms "
                  "at emphatic moments, not wall-to-wall; for automatic "
                  "zooms on the strongest spoken words use "
-                 "punch_in_on_emphasis.",
+                 "punch_in_on_emphasis. And if the zoom should MOVE while "
+                 "pushed in — 'then move it to X', 'keep it and go to the "
+                 "next message', 'follow the cursor' — that is ONE "
+                 "add_zoom_path (its keyframes take rect too), never a "
+                 "chain of static zooms.",
                  {"start": {"type": "number"}, "end": {"type": "number"},
                   "strength": {"type": "number"},
                   "mode": {"type": "string",
@@ -11012,26 +11131,30 @@ TOOLS = {
                     "get_edl).", {"id": {"type": "string"}}),
     "add_zoom_path": (
         add_zoom_path,
-        "A ZOOM THAT MOVES — THE tool for 'make the zoom follow the cursor' / "
-        "'move the zoom between buttons' on ANY footage, including a screen "
-        "recording the user made themselves. add_zoom aims at one point and "
-        "has to cut out before it can aim somewhere else; this one stays "
-        "pushed in and TRAVELS, which is the difference between a product "
-        "demo that reads as one continuous action and three disconnected "
-        "shots of it. keyframes is a list of at least two "
-        "{t, cx, cy, strength}: t is OUTPUT-timeline seconds, cx/cy are 0-1 "
-        "fractions of the output frame ((0,0) = top-left — the same "
-        "convention as add_zoom, and look_at is how you find them), strength "
-        "is 0-1.5 and is interpolated between the keyframes too, so the frame "
-        "can push in as it arrives and ease out as it leaves. The window runs "
-        "from the first t to the last. NO ramp is added at the edges: the "
-        "frame is exactly where and how close the keyframes say, so give the "
-        "first and last keyframe strength 0 for a seamless entry and exit. "
-        "ease: 'cubic_in_out' (default — settles at each keyframe, the right "
-        "answer for stopping at buttons) or 'linear' (constant speed, for a "
-        "steady scan across a wide screenshot). It re-anchors across later "
-        "cuts exactly like add_zoom, so cutting elsewhere never strands it. "
-        "Remove the whole move with remove_zoom_path.",
+        "A ZOOM THAT MOVES — THE tool for 'make the zoom follow the cursor' "
+        "/ 'move the zoom between buttons' / 'stay zoomed and then move to "
+        "the next thing' on ANY footage, including a screen recording the "
+        "user made themselves. Any request where ONE zoom should hold, "
+        "travel, or visit several subjects in sequence is THIS tool — never "
+        "a chain of static add_zoom calls, which cut out and back instead "
+        "of moving. keyframes is a list of at least two points, each "
+        "{t, rect, strength} or {t, cx, cy, strength}: t is OUTPUT-timeline "
+        "seconds; rect=[x0,y0,x1,y1] FRAMES the thing to look at there "
+        "(fractions of the frame from look_at's grid — the same solver as "
+        "add_zoom rect, so edge subjects come out framed, and omitting "
+        "strength on a rect keyframe picks the strength that fits it); "
+        "cx/cy instead PIN a point ((0,0) = top-left). strength 0-2.5 "
+        "interpolates between keyframes, so the frame can push in as it "
+        "arrives and ease out as it leaves; to HOLD on a subject, repeat "
+        "its keyframe at the hold's start and end times. The window runs "
+        "from the first t to the last. NO ramp is added at the edges: give "
+        "the first and last keyframe strength 0 for a seamless entry and "
+        "exit (a strength-0 rect keyframe still aims where the move is "
+        "going). ease: 'cubic_in_out' (default — settles at each keyframe, "
+        "the right answer for stopping at buttons) or 'linear' (constant "
+        "speed, for a steady scan across a wide screenshot). It re-anchors "
+        "across later cuts exactly like add_zoom, so cutting elsewhere "
+        "never strands it. Remove the whole move with remove_zoom_path.",
         {"keyframes": {"type": "array", "items": {"type": "object"}},
          "ease": {"type": "string", "enum": ["cubic_in_out", "linear"]}}),
     "remove_zoom_path": (
@@ -11736,7 +11859,7 @@ TOOLS = {
                              "times from the real word timestamps — never "
                              "guessed), spaced >=4s apart, in one EDL "
                              "version. count 1-8 (default 3); strength "
-                             "0.05-1.5 (default 0.14 — a gentle push the "
+                             "0.05-2.5 (default 0.14 — a gentle push the "
                              "viewer feels rather than sees; only go past "
                              "~0.3 when the user asks for hard punches or "
                              "the format is hype). The result lists "
@@ -11859,6 +11982,7 @@ REQUIRED_ARGS = {
     "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
     "set_insert_window": ["id"],
+    "move_insert": ["id"],
     "remove_insert": ["id"],
     "set_color_grade": ["preset"],
     "add_zoom": ["start", "end"],

@@ -181,6 +181,63 @@ def test_takeover_untouched_when_nothing_changed():
     assert not any("takeover" in n for n in notes)
 
 
+# -------------------------------------- the 16s-shift class (round 75) ----
+
+def test_zoom_follows_its_scene_when_a_clip_lands_in_front():
+    """The v327 incident: a choreographed zoom stayed at its absolute
+    seconds while a 16s intro spliced in FRONT shifted every scene — the
+    move played over a different recording entirely. Insert-anchored spans
+    now follow their scenes when they all moved together; spans touching
+    kept footage stay put."""
+    e = default_edl(SRC)
+    e["keep"] = [list(k) for k in KEEP]
+    old_ins = [_ins("ins1", 1.88, 12.41, LAPTOP),
+               _ins("ins2", 3.45, 8.78, REC),
+               _ins("ins4", 17.26, 30.7, "clips/1/rec2.mov")]
+    e["inserts"] = [dict(i) for i in old_ins]
+    e["effects"] = {"zooms": [
+        {"id": "zp1", "start": 6.6, "end": 8.8, "strength": 1.2,
+         "mode": "ease", "cx": 0.0, "cy": 1.0},
+        {"id": "zm0", "start": 2.0, "end": 7.0, "strength": 0.3,
+         "mode": "ease", "cx": 0.5, "cy": 0.5}]}
+    old_tl = Timeline(e["keep"], e["inserts"], [])
+    intro = {"id": "ins9", "asset_key": "clips/1/intro.mov", "kind": "video",
+             "at_output_s": 3.55, "duration_s": 16.0}
+    e["inserts"] = [intro] + [dict(i) for i in old_ins]
+    new_tl = Timeline(e["keep"], e["inserts"], [])
+    notes = remap_program_items(e, old_tl, new_tl)
+    z = e["effects"]["zooms"][0]
+    assert z["start"] == 22.6 and z["end"] == 24.8
+    assert any("stays on the same spliced footage" in n for n in notes)
+    z0 = e["effects"]["zooms"][1]
+    assert z0["start"] == 2.0 and z0["end"] == 7.0   # touches footage: stays
+    validate_edl(e, SRC)
+
+
+def test_takeover_survives_a_16s_shift():
+    """The same incident killed the takeover: the near-match caps at 2.5s,
+    read a 16s arrival shift as 'clip gone', and silently dropped a tuned
+    transition. The handoff is now found by the OLD windows (id-stable)."""
+    e = default_edl(SRC)
+    e["keep"] = [list(k) for k in KEEP]
+    old_ins = [_ins("ins1", 1.88, 12.41, LAPTOP),
+               _ins("ins2", 6.0, 8.78, REC)]
+    e["inserts"] = [dict(i) for i in old_ins]
+    e["overlays"] = [_tk(3.63, 1.8, 8.78 - 1.8)]
+    old_tl = Timeline(e["keep"], e["inserts"], [])
+    intro = {"id": "ins9", "asset_key": "clips/1/intro.mov", "kind": "video",
+             "at_output_s": 3.55, "duration_s": 16.0}
+    e["inserts"] = [intro] + [dict(i) for i in old_ins]
+    new_tl = Timeline(e["keep"], e["inserts"], [])
+    notes = remap_program_items(e, old_tl, new_tl)
+    ov = e["overlays"][0]
+    assert abs(ov["start"] - 19.63) < 0.02
+    assert ov["duration_s"] == 1.8
+    assert abs(ov["source_start_s"] - 6.98) < 0.02
+    assert any("staying joined to its clip" in n for n in notes)
+    validate_edl(e, SRC)
+
+
 # ------------------------------------------------- upsert / replace ----
 
 class _DB:
@@ -252,6 +309,41 @@ def test_readd_at_same_arrival_replaces_and_reuses_the_pin(monkeypatch):
     assert "REPLACED" in res and "KEPT" in res
     assert "DEAD FLAT" in res                   # the reply says what it did
     assert "brief punch past full frame" not in res
+
+
+def test_move_insert_reorders_and_anchored_zooms_follow():
+    """Round 75: 'move the uploaded video between any other split' had no
+    tool. move_insert reorders in place, and a zoom choreographed on the
+    moved scene follows it through the shared remap."""
+    e = default_edl(SRC)
+    e["keep"] = [list(k) for k in KEEP]
+    e["inserts"] = [
+        {"id": "a", "asset_key": "clips/1/a.mov", "kind": "video",
+         "at_output_s": 3.55, "duration_s": 2.0},
+        {"id": "b", "asset_key": "clips/1/b.mov", "kind": "video",
+         "at_output_s": 3.55, "duration_s": 3.0},
+        {"id": "c", "asset_key": "clips/1/c.mov", "kind": "video",
+         "at_output_s": 3.55, "duration_s": 4.0}]
+    e["effects"] = {"zooms": [{"id": "zm1", "start": 9.0, "end": 12.0,
+                               "strength": 0.5, "mode": "ease",
+                               "cx": 0.2, "cy": 0.5}]}
+    ctx = _Ctx(e, ASSETS)
+    res = agent_tools.move_insert(ctx, "c")          # first at the boundary
+    assert res.startswith("EDL v"), res
+    j = ctx.latest_edl()["json"]
+    assert [i["id"] for i in j["inserts"]] == ["c", "a", "b"]
+    z = j["effects"]["zooms"][0]
+    assert z["start"] == 4.0 and z["end"] == 7.0     # followed c back 5s
+    assert "3.55-7.55s" in res
+    res2 = agent_tools.move_insert(ctx, "c", after_id="b")
+    assert res2.startswith("EDL v"), res2
+    j2 = ctx.latest_edl()["json"]
+    assert [i["id"] for i in j2["inserts"]] == ["a", "b", "c"]
+    z2 = j2["effects"]["zooms"][0]
+    assert z2["start"] == 9.0 and z2["end"] == 12.0  # followed it back
+    assert "REJECTED" in agent_tools.move_insert(ctx, "zz")
+    assert "REJECTED" in agent_tools.move_insert(ctx, "c", after_id="c")
+    assert "REJECTED" in agent_tools.move_insert(ctx, "c", after_id="zz")
 
 
 def test_fresh_add_with_corners_is_unchanged_by_the_none_defaults(

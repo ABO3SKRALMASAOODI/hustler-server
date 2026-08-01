@@ -32,6 +32,7 @@ import renderer                                               # noqa: E402
 import sheets                                                 # noqa: E402
 import travel                                                 # noqa: E402
 from schemas import default_edl, validate_edl                 # noqa: E402
+from timeline import Timeline                                 # noqa: E402
 
 SRC = 354.6
 
@@ -88,15 +89,15 @@ def test_rect_frames_the_launch_video_message():
     res = agent_tools.add_zoom(ctx, 7.5, 9.5, mode="ease", rect=MSG_RECT)
     assert res.startswith("EDL v"), res
     zm = _zoom(ctx)
-    # box is 0.228 wide -> fit with margin wants 3.5x, capped at the 2.5x max
-    assert abs(zm["strength"] - 1.5) < 1e-6
-    assert zm["cx"] == 0.0                       # viewport clamped to left edge
-    assert abs(zm["cy"] - 0.9675) < 0.002
+    # box is 0.228 wide -> fit with margin wants 3.54x, capped at the 3.5x max
+    assert abs(zm["strength"] - 2.5) < 1e-6
+    assert abs(zm["cx"] - 0.013) < 0.002
+    assert abs(zm["cy"] - 0.893) < 0.002
     assert zm["rect"] == [round(v, 3) for v in MSG_RECT]
     # mid-window, the eased zoom is at full strength; the message's box must
     # sit entirely inside the viewport the renderer will show
     z, cx, cy = renderer.zoom_state_at([zm], 8.5, 18.17)
-    assert abs(z - 2.5) < 1e-6
+    assert abs(z - 3.5) < 1e-6
     vx0, vy0, vx1, vy1 = _viewport(z, cx, cy)
     assert vx0 <= MSG_RECT[0] and vx1 >= MSG_RECT[2]
     assert vy0 <= MSG_RECT[1] and vy1 >= MSG_RECT[3]
@@ -144,6 +145,17 @@ def test_default_strength_without_rect_is_unchanged():
     ctx = _Ctx(_session_edl())
     agent_tools.add_zoom(ctx, 7.5, 9.5)
     assert _zoom(ctx)["strength"] == 0.15        # the round-67 default
+
+
+def test_strength_cap_is_now_2_5():
+    """Round 75: a chat-column-only viewport needs ~2.0; 'only that
+    message' tighter still. 2.5 (3.5x) is the new ceiling."""
+    ctx = _Ctx(_session_edl())
+    agent_tools.add_zoom(ctx, 7.5, 9.5, strength=3.0)
+    assert _zoom(ctx)["strength"] == 2.5
+    ctx2 = _Ctx(_session_edl())
+    agent_tools.add_zoom(ctx2, 7.5, 9.5, strength=2.0, cx=0.0, cy=0.9)
+    assert _zoom(ctx2)["strength"] == 2.0        # was clamped to 1.5
 
 
 # ------------------------------------------------- zoom_state_at mirror ----
@@ -248,14 +260,88 @@ def test_look_geometry_shows_the_framed_message():
         img.save(src, "JPEG", quality=95)
         out, suffix = agent_tools._fit_and_zoom_frame(
             td, 0, src, 8.5, (3840, 2160), "crop", None, [zm], 18.17, False)
-        assert "2.50x zoom" in suffix
+        assert "3.50x zoom" in suffix
         assert out != src
         res = Image.open(out).convert("L")
-        # the box centre lands mid-frame-left (screen ~0.38, ~0.50) ...
-        assert res.load()[int(0.38 * 640), int(0.50 * 360)] > 200
-        # ... and the up-right quadrant, which the old pinned zoom filled
-        # with the subject-less UI, is not where the box is
-        assert res.load()[int(0.92 * 640), int(0.08 * 360)] < 60
+        # the box centre lands dead centre at the 3.5x fit ...
+        assert res.load()[int(0.50 * 640), int(0.50 * 360)] > 200
+        # ... and the far corner, which the old pinned zoom filled with the
+        # subject-less UI, is not where the box is
+        assert res.load()[int(0.95 * 640), int(0.05 * 360)] < 60
+
+
+def test_zoom_path_keyframes_take_rects():
+    """Round 75 — the launch-video choreography: hold on one message, glide
+    to the prompt, ease out. Each keyframe names the THING; the shared
+    solver derives the pin — the arithmetic the agent used to hand-derive
+    (and get wrong) for every travelling zoom between edge subjects."""
+    ctx = _Ctx(_session_edl())
+    prompt_rect = [0.19, 0.79, 0.30, 0.87]
+    res = agent_tools.add_zoom_path(ctx, [
+        {"t": 6.6, "rect": MSG_RECT, "strength": 0},
+        {"t": 7.4, "rect": MSG_RECT},
+        {"t": 10.8, "rect": prompt_rect},
+        {"t": 12.0, "rect": prompt_rect, "strength": 0},
+    ])
+    assert res.startswith("EDL v"), res
+    zp = ctx.latest_edl()["json"]["effects"]["zooms"][-1]
+    pts = zp["path"]
+    # rect keyframes with no strength solve to the fit (both cap at 2.5);
+    # explicit 0 stays 0 for the seamless entry/exit
+    assert [p["s"] for p in pts] == [0.0, 2.5, 2.5, 0.0]
+    assert abs(pts[0]["cx"] - 0.013) < 0.002
+    assert abs(pts[0]["cy"] - 0.893) < 0.002
+    assert abs(pts[2]["cx"] - 0.143) < 0.002
+    assert abs(pts[2]["cy"] - 0.962) < 0.002
+    # at the prompt keyframe the rendered viewport contains the prompt
+    z, cx, cy = renderer.zoom_state_at([zp], 10.8, 18.17)
+    assert abs(z - 3.5) < 1e-6
+    vx0, vy0, vx1, vy1 = _viewport(z, cx, cy)
+    assert vx0 <= prompt_rect[0] and vx1 >= prompt_rect[2]
+    assert vy0 <= prompt_rect[1] and vy1 >= prompt_rect[3]
+
+
+def test_zoom_path_rect_rejections():
+    ctx = _Ctx(_session_edl())
+    r = agent_tools.add_zoom_path(ctx, [
+        {"t": 1, "rect": MSG_RECT, "cx": 0.5, "cy": 0.5},
+        {"t": 2, "rect": MSG_RECT}])
+    assert "both rect and cx/cy" in r
+    r = agent_tools.add_zoom_path(ctx, [
+        {"t": 1, "rect": [0.5, 0.5, 0.4, 0.6]},
+        {"t": 2, "rect": MSG_RECT}])
+    assert r.startswith("REJECTED: keyframes[0]:")
+    assert not ctx.written
+
+
+def test_taste_adjacent_zooms_across_a_cut_are_deliberate():
+    """Round 75: the audit's back-to-back-pushes rule made the agent DELETE
+    a zoom the user explicitly asked to keep — the pair straddled a scene
+    cut, where cut-plus-punch is a standard deliberate move. Same pair on
+    continuous footage still fires."""
+    import taste
+    index = {"words": [{"w": f"w{i}", "t0": 0.5 + i * 0.4,
+                        "t1": 0.8 + i * 0.4} for i in range(30)],
+             "video": {"width": 1080, "height": 1920},
+             "shots": [{"t0": 0.0, "t1": 15.0}]}
+    zooms = [{"id": "z1", "start": 7.6, "end": 9.97, "strength": 0.15,
+              "mode": "ease", "cx": 0.0, "cy": 1.0},
+             {"id": "z2", "start": 10.0, "end": 12.0, "strength": 0.15,
+              "mode": "ease", "cx": 0.0, "cy": 1.0}]
+    keep = [[0.0, 10.0]]
+    ins = [{"id": "i1", "asset_key": "clips/1/a.mov", "kind": "video",
+            "at_output_s": 10.0, "duration_s": 5.0}]
+    edl = {"keep": keep, "inserts": ins,
+           "effects": {"zooms": [dict(z) for z in zooms]},
+           "captions": {"mode": "from_transcript"}}
+    f = taste.critique(edl, index, Timeline(keep, ins, []), 1080, 1920, "")
+    assert not any("fight each other" in x for x in f)
+    edl2 = {"keep": [[0.0, 15.0]], "inserts": [],
+            "effects": {"zooms": [dict(z) for z in zooms]},
+            "captions": {"mode": "from_transcript"}}
+    f2 = taste.critique(edl2, index, Timeline([[0.0, 15.0]], [], []),
+                        1080, 1920, "")
+    assert any("fight each other" in x for x in f2)
 
 
 def test_grid_overlay_is_visible_and_size_preserving():

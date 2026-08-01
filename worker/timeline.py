@@ -103,6 +103,13 @@ class Timeline:
         None for the classic 1:1 timeline."""
         self.segs = [(float(s), float(e)) for s, e in keep]
         self.speed = list(speed or [])
+        # The insert ITEMS, retained verbatim (round 75): remap_program_items
+        # needs the OLD inserts' ids and windows — to let a zoom follow its
+        # insert when a clip is spliced in front of it, and to let a takeover
+        # find its handoff after a shift bigger than a near-match tolerates —
+        # and the old Timeline is the only thing every caller already passes
+        # that ever saw them. Pure retention; no math reads this.
+        self.items = list(inserts or [])
         # Stable, keyed on at_output_s alone — insert_windows pairs ids to
         # windows by sorting the SAME way, so the two must agree exactly.
         self.ins = [_ins_tuple(i)
@@ -481,6 +488,41 @@ def remap_program_items(edl, old_tl, new_tl):
     region_notes = []
     prog = round(new_tl.out_duration, 2)
 
+    # OLD insert windows by id (round 75), read off the items the old
+    # Timeline retained. Everything insert-anchored resolves through these:
+    # a zoom that sits ON a spliced scene has no source time to follow, but
+    # its scene's window moved by a knowable delta, and "keep the program
+    # position" while every scene shifts 16s is how a choreographed zoom
+    # ends up over a different recording entirely.
+    old_items = [i for i in getattr(old_tl, "items", [])
+                 if isinstance(i, dict) and i.get("id")]
+    old_wins = insert_windows(old_items, old_tl) if old_items else {}
+    new_wins_all = insert_windows(edl.get("inserts") or [], new_tl)
+
+    def _insert_shift(s, e):
+        """One common delta when the span rides inserts that all moved
+        together. None when the span touches kept footage (footage does not
+        move with the inserts), when any underlying insert left the edit,
+        when the overlapped inserts moved apart, or when nothing moved."""
+        if not old_wins:
+            return None
+        if old_tl.out_to_src(s) is not None \
+                or old_tl.out_to_src(e) is not None:
+            return None
+        deltas, cover = [], 0.0
+        for iid, (w0, w1) in old_wins.items():
+            if w1 > s + 1e-6 and w0 < e - 1e-6:
+                nw = new_wins_all.get(iid)
+                if nw is None:
+                    return None
+                deltas.append(nw[0] - w0)
+                cover += min(e, w1) - max(s, w0)
+        if not deltas or cover < (e - s) - 0.1:
+            return None
+        if any(abs(d - deltas[0]) > 0.05 for d in deltas):
+            return None
+        return deltas[0] if abs(deltas[0]) > 0.01 else None
+
     fx = dict(edl.get("effects") or {})
     fx_changed = False
     if fx.get("zooms"):
@@ -494,6 +536,22 @@ def remap_program_items(edl, old_tl, new_tl):
                 # a genuinely cut-away zoom maps to nothing.
                 if old_tl.out_to_src(float(z["start"])) is None or \
                         old_tl.out_to_src(float(z["end"])) is None:
+                    # FOLLOW the scene first (round 75): when every insert
+                    # under the window moved by one delta — a clip spliced
+                    # in front shifted them all — the zoom moves with them.
+                    # A 20s travelling zoom choreographed over two chat
+                    # bubbles stayed at its absolute seconds while its
+                    # scenes moved 16s later, and played over a different
+                    # recording entirely.
+                    d = _insert_shift(float(z["start"]), float(z["end"]))
+                    if d:
+                        z["start"] = round(float(z["start"]) + d, 2)
+                        z["end"] = round(float(z["end"]) + d, 2)
+                        region_notes.append(
+                            f"note: zoom {z.get('id')} moved to "
+                            f"{z['start']}-{z['end']}s (output time) so it "
+                            "stays on the same spliced footage.")
+                        fx_changed = True
                     # Kept — but CLAMPED to the new program (round 74).
                     # Stylize has clamped this exact case since round 71;
                     # zooms never did, so an insert-anchored zoom left
@@ -755,7 +813,7 @@ def remap_program_items(edl, old_tl, new_tl):
         # when the clip is gone, so is the takeover. Clamping it (the generic
         # path below) would leave a push into a screen that hands off to
         # nothing, which renders as the shot snapping back at full zoom.
-        tk_windows = insert_windows(edl.get("inserts"), new_tl)
+        tk_windows = new_wins_all
 
         def _scene_floor(t):
             """out_start of the program block that ENDS at t — the scene the
@@ -775,12 +833,27 @@ def remap_program_items(edl, old_tl, new_tl):
         for ov in edl["overlays"]:
             ov = dict(ov)
             if ov.get("screen"):
-                hit = next(((iid, w) for iid, w in tk_windows.items()
-                            if _ins_asset(edl.get("inserts"), iid)
-                            == ov.get("asset_key")
-                            and abs(w[0] - (float(ov["start"])
-                                            + float(ov["duration_s"]))) < 2.5),
-                           None)
+                old_arr = float(ov["start"]) + float(ov["duration_s"])
+                # The handoff is found by the OLD windows first (round 75):
+                # id-stable, so an arrival shifted 16s by a clip spliced in
+                # FRONT still resolves to the same insert. The near-match
+                # below caps at 2.5s and read that shift as "clip gone",
+                # silently dropping a transition the user had tuned.
+                hit = None
+                for iid, w in old_wins.items():
+                    if abs(w[0] - old_arr) < 0.05 \
+                            and _ins_asset(old_items, iid) \
+                            == ov.get("asset_key"):
+                        nw = tk_windows.get(iid)
+                        if nw:
+                            hit = (iid, nw)
+                        break
+                if hit is None:
+                    hit = next(((iid, w) for iid, w in tk_windows.items()
+                                if _ins_asset(edl.get("inserts"), iid)
+                                == ov.get("asset_key")
+                                and abs(w[0] - old_arr) < 2.5),
+                               None)
                 if hit is None:
                     region_notes.append(
                         f"note: screen takeover {ov.get('id')} was removed — "

@@ -34,7 +34,7 @@ Each check earns its place by having actually shipped as a defect:
   * every zoom identical: same 35%, same mode, five times
 """
 
-from timeline import transition_junctions
+from timeline import program_blocks, transition_junctions
 
 # What counts as short-form: a vertical or square output, which on every
 # platform that takes one is a feed video watched thumb-down and muted.
@@ -203,9 +203,23 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             f"{out_dur / max(1, len(zooms)):.0f}s — when the frame is always "
             "moving, none of the moves mean anything. Keep the 2-3 that land "
             "on the real turns and remove the rest.")
+    # A push that lands ON a cut is not fighting the one before it: the cut
+    # resets the eye, and cut-plus-punch is a deliberate, standard move.
+    # Round 75: without this exemption, a scene-3 message zoom ending at
+    # 8.85s and a scene-4 zoom starting at the 8.88s scene boundary read as
+    # "back-to-back pushes", and the agent obeyed the audit over the user —
+    # deleting a zoom the user had EXPLICITLY asked to keep.
+    try:
+        cut_points = [float(bl["out_start"])
+                      for bl in program_blocks(edl)[1:]]
+    except Exception:
+        cut_points = []
     tight = [(a, b) for a, b in zip(zooms, zooms[1:])
              if _num(b.get("start")) - _num(a.get("start"))
-             < ZOOM_MIN_SPACING_S]
+             < ZOOM_MIN_SPACING_S
+             and not any(_num(a.get("end")) - 0.15 <= c
+                         <= _num(b.get("start")) + 0.15
+                         for c in cut_points)]
     if tight:
         a, b = tight[0]
         add(f"two zooms {_num(b.get('start')) - _num(a.get('start')):.1f}s "
