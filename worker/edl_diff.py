@@ -137,23 +137,64 @@ def _change_ranges(prev, new):
                 add(a, b)
 
     # ── inserts ───────────────────────────────────────────────────────────
+    # Trims and splits are diffed as CONTENT, per asset, not per id: a split
+    # re-mints the tail's id, so an id-level diff would call the surviving
+    # tail "added" (white) and the whole old body "changed" (white again)
+    # while the actually-REMOVED middle got no red at all — which is exactly
+    # the trim-goes-unhighlighted the owner reported.
     ip, im = _by_id(prev.get("inserts"), "ins"), \
         _by_id(new.get("inserts"), "ins")
     if ip != im:
         wins_new = insert_windows(new.get("inserts"), tl_new)
         wins_prev = insert_windows(prev.get("inserts"), tl_prev)
+
+        def _plays(items):
+            by_asset = {}
+            for it in (items or []):
+                off = float(it.get("source_start_s") or 0.0)
+                by_asset.setdefault(it.get("asset_key"), []).append(
+                    (off, off + float(it.get("duration_s") or 0.0)))
+            return by_asset
+        prev_plays, new_plays = _plays(prev.get("inserts")), \
+            _plays(new.get("inserts"))
         for k, it in im.items():
-            if k not in ip or _canon(ip[k]) != _canon(it):
-                w = wins_new.get(k)
-                if w:
-                    add(w[0], w[1])
+            old = ip.get(k)
+            if old is not None and _canon(old) == _canon(it):
+                continue
+            moved = old is not None and (
+                old.get("asset_key") != it.get("asset_key")
+                or float(old.get("at_output_s", 0)) !=
+                float(it.get("at_output_s", 0)))
+            if old is None:
+                # brand new id — but a split's tail carries content some
+                # prev item already played; that is survival, not addition
+                off = float(it.get("source_start_s") or 0.0)
+                span = [(off, off + float(it.get("duration_s") or 0.0))]
+                if not _interval_sub(span,
+                                     prev_plays.get(it.get("asset_key"), [])):
+                    continue
+            elif not moved:
+                # pure window trim: the red removed-content pass below is
+                # the whole story — white over the survivors is noise
+                continue
+            w = wins_new.get(k)
+            if w:
+                add(w[0], w[1])
         for k in ip:
             if k not in im:
                 w = wins_prev.get(k)
                 t = w[0] if w else 0.0
                 add(t, t)
-                if w:
-                    add_cut(w[0], w[1])
+        # removed CONTENT -> red, in the OLD program's coordinates
+        for it in (prev.get("inserts") or []):
+            w = wins_prev.get(it.get("id"))
+            if not w:
+                continue
+            off = float(it.get("source_start_s") or 0.0)
+            span = [(off, off + float(it.get("duration_s") or 0.0))]
+            for r0, r1 in _interval_sub(
+                    span, new_plays.get(it.get("asset_key"), [])):
+                add_cut(w[0] + (r0 - off), w[0] + (r1 - off))
 
     # ── program-anchored spans: texts, overlays, music ────────────────────
     for field, prefix in (("texts", "tx"), ("overlays", "ov"),

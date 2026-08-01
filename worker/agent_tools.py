@@ -4481,6 +4481,118 @@ def remove_insert(ctx, id):
     return res
 
 
+def cut_output_range(ctx, start, end):
+    """Cut a span of the ASSEMBLED program — output seconds — no matter what
+    plays there (round 71e).
+
+    cut_range speaks SOURCE time and therefore cannot touch a spliced insert
+    at all. A real user asked to cut 12-15s and 18-21s of the edited video —
+    both inside an inserted screen recording — was told three times it was
+    impossible, and then watched the agent mangle the insert's window with
+    set_insert_window instead. This tool resolves the span through the
+    program map: kept footage under it is cut in source time, and any insert
+    it crosses is SPLIT around it (head keeps the id, tail gets a new one,
+    both at the same boundary in list order — the round-61 contract) or
+    removed outright when the span swallows it. One version write, and the
+    shared remap re-anchors every program-time item exactly as a keep cut
+    does.
+    """
+    prev = ctx.latest_edl()
+    edl = dict(prev["json"])
+    keep = [list(x) for x in (edl.get("keep") or [])]
+    speed = edl.get("speed") or []
+    ins_before = [dict(i) for i in (edl.get("inserts") or [])]
+    tl = Timeline(keep, ins_before, speed)
+    prog = tl.out_duration
+    try:
+        a = min(max(float(start), 0.0), prog)
+        b = min(max(float(end), 0.0), prog)
+    except (TypeError, ValueError):
+        return "REJECTED: start/end must be numbers of OUTPUT seconds."
+    if b - a < 0.05:
+        return (f"REJECTED: the range to cut must be at least 0.05s inside "
+                f"the program (which is {round(prog, 2)}s long).")
+
+    # Kept footage under the span -> source-time cuts.
+    src_cuts = []
+    for (_s, _e), off, L in zip(tl.segs, tl.offsets, tl.seg_out_len):
+        lo, hi = max(a, off), min(b, off + L)
+        if hi - lo > 0.05:
+            s0, s1 = tl.out_to_src(lo), tl.out_to_src(hi)
+            if s0 is not None and s1 is not None and s1 - s0 > 0.01:
+                src_cuts.append([round(s0, 3), round(s1, 3)])
+
+    # Inserts under the span -> split / trim / remove.
+    wins = insert_windows(ins_before, tl)
+    new_inserts, removed, touched = [], [], []
+    for item in ins_before:
+        w = wins.get(item.get("id"))
+        if not w:
+            new_inserts.append(item)
+            continue
+        w0, w1 = w
+        lo, hi = max(a, w0), min(b, w1)
+        if hi - lo <= 0.05:
+            new_inserts.append(item)
+            continue
+        head_len = round(lo - w0, 2)
+        tail_len = round(w1 - hi, 2)
+        # Slivers under 0.2s are single frames nobody sees (the
+        # set_insert_window floor) — the cut swallows them.
+        if head_len < 0.2 and tail_len < 0.2:
+            removed.append(item["id"])
+            continue
+        off_c = float(item.get("source_start_s") or 0.0)
+        if head_len >= 0.2:
+            head = dict(item)
+            head["duration_s"] = head_len
+            new_inserts.append(head)
+        if tail_len >= 0.2:
+            tail = dict(item)
+            if head_len >= 0.2:
+                tail["id"] = _next_item_id(ins_before + new_inserts, "ins")
+            tail["duration_s"] = tail_len
+            if item.get("kind") == "video":
+                tail["source_start_s"] = round(off_c + (hi - w0), 2)
+            new_inserts.append(tail)
+        touched.append(item["id"])
+
+    if not src_cuts and not removed and not touched:
+        return (f"REJECTED: {round(a, 2)}-{round(b, 2)}s covers nothing in "
+                "the program — call get_edl and read THE ASSEMBLED PROGRAM "
+                "map for where things actually are.")
+    new_keep = keep
+    if src_cuts:
+        new_keep = [list(x) for x in audit.subtract_spans(keep, src_cuts)]
+        if not new_keep:
+            return ("REJECTED: that would remove ALL the kept footage. Cut "
+                    "a smaller span, or remove the inserts individually and "
+                    "reset_edit for the footage.")
+    ins_notes = []
+    if new_inserts and new_keep != keep:
+        new_inserts, ins_notes = timeline_mod.resnap_inserts(
+            new_inserts, keep, new_keep, speed, speed)
+    edl["keep"] = new_keep
+    edl["inserts"] = new_inserts
+    new_tl = Timeline(new_keep, new_inserts, speed)
+    notes = ins_notes + _remap_program_items(edl, tl, new_tl)
+    bits = []
+    if src_cuts:
+        bits.append("footage " + ", ".join(f"{s}-{e}s" for s, e in src_cuts)
+                    + " (source)")
+    if removed:
+        bits.append("removed " + ", ".join(removed))
+    split_ids = [i for i in touched if i not in removed]
+    if split_ids:
+        bits.append("split/trimmed " + ", ".join(split_ids))
+    res = ctx.write_edl(
+        edl, f"cut {round(a, 2)}-{round(b, 2)}s of the ASSEMBLED program "
+             f"({'; '.join(bits)})")
+    if notes and res.startswith("EDL v"):
+        res += "\n" + "\n".join(notes)
+    return res
+
+
 def _resolve_audio_upload(ctx, asset_key):
     """(asset, note, error) for any UPLOAD that is to be used as sound.
 
@@ -10065,9 +10177,28 @@ TOOLS = {
     "cut_range": (cut_range, "Remove ONE source-time range from the current "
                   "keep set (a local edit — the rest of the edit is "
                   "untouched). Creates a new EDL version. snap_to_words:true "
-                  "keeps neighbouring words whole.",
+                  "keeps neighbouring words whole. SOURCE seconds of the "
+                  "main video ONLY — when the user gives times of the "
+                  "EDITED video ('cut 12-15 of the video'), or the span "
+                  "sits inside an inserted clip, use cut_output_range.",
                   {"start": {"type": "number"}, "end": {"type": "number"},
                    "snap_to_words": {"type": "boolean"}}),
+    "cut_output_range": (cut_output_range, "Cut a span of the ASSEMBLED "
+                         "program — OUTPUT seconds, the clock the viewer "
+                         "and the scene map use — no matter what plays "
+                         "there. Kept footage under the span is cut in "
+                         "source time; an inserted clip it crosses is "
+                         "SPLIT around it (or removed when fully covered); "
+                         "one version write, everything re-anchored. THE "
+                         "tool for 'cut 12-15 of the video' / 'cut that "
+                         "part of the second scene' — never answer that "
+                         "cutting inside an insert is impossible, and "
+                         "never fake it with set_insert_window (that "
+                         "changes WHICH part plays, it cannot remove a "
+                         "middle). One range per call; batch several "
+                         "calls for several ranges.",
+                         {"start": {"type": "number"},
+                          "end": {"type": "number"}}),
     "restore_range": (restore_range, "Add a previously-cut source-time range "
                       "back into the keep set (undo one cut without touching "
                       "the rest). Creates a new EDL version.",
@@ -11451,7 +11582,8 @@ REQUIRED_ARGS = {
 # generate_image and fetch_url are here for the capabilities digest; their
 # successes are tracked separately via ctx.images_generated / ctx.urls_fetched
 # (neither writes the EDL — they create an ASSET the agent then places).
-WRITE_TOOLS = {"keep_segments", "cut_range", "restore_range",
+WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
+               "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "set_caption_style", "add_music", "remove_music",
                "swap_music", "set_music_fit", "extract_audio",

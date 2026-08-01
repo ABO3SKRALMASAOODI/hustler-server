@@ -152,3 +152,41 @@ def test_many_cuts_stay_red_never_global_white():
     assert c["global"] is False
     assert c["out_ranges"] == []            # white noise dropped
     assert len(c["cut_ranges"]) == 20       # the gaps, in old coordinates
+
+
+def _ins(id, at, dur, src=0.0, asset="k"):
+    return {"id": id, "asset_key": asset, "kind": "video",
+            "at_output_s": at, "duration_s": dur, "source_start_s": src}
+
+
+def test_trimmed_insert_reports_removed_content_as_red():
+    """set_insert_window shrinking a clip is a REMOVAL to the viewer — the
+    session that motivated this saw an 14.6s screen recording trimmed to
+    3s with no red at all."""
+    prev = _edl([[0.0, 5.0]], inserts=[_ins("ins2", 5.0, 14.62)])
+    new = _edl([[0.0, 5.0]], inserts=[_ins("ins2", 5.0, 3.0, src=4.0)])
+    c = change_ranges(prev, new)
+    # old window 5-19.62; surviving content 4-7 sat at old 9-12
+    assert c["cut_ranges"] == [[5.0, 9.0], [12.0, 19.62]]
+    # a pure trim adds NO white over the survivor
+    assert c["out_ranges"] == []
+
+
+def test_split_insert_reds_only_the_removed_middle():
+    """cut_output_range splits ins2 into head (id kept) + tail (new id):
+    only the cut middle is red, and neither surviving piece is white."""
+    prev = _edl([[0.0, 5.0]], inserts=[_ins("ins2", 5.0, 10.0)])
+    new = _edl([[0.0, 5.0]],
+               inserts=[_ins("ins2", 5.0, 4.0),
+                        _ins("ins3", 5.0, 3.0, src=7.0)])
+    c = change_ranges(prev, new)
+    # removed clip content 4-7 sat at old-program 9-12
+    assert c["cut_ranges"] == [[9.0, 12.0]]
+    assert c["out_ranges"] == []
+
+
+def test_moved_insert_is_still_white():
+    prev = _edl([[0.0, 5.0]], inserts=[_ins("ins1", 0.0, 3.0)])
+    new = _edl([[0.0, 5.0]], inserts=[_ins("ins1", 5.0, 3.0)])
+    c = change_ranges(prev, new)
+    assert c["out_ranges"] == [[5.0, 8.0]]
