@@ -2502,12 +2502,21 @@ def post_message(user_id, project_id):
         latest_row = _latest_edl(cur, project_id) if indexed else None
         branch_base = None
         stepped_back = False
+        # ROUND 71b: the stamp is the version the TURN STARTS FROM — never
+        # base_version. The studio cuts the rolled-back chat at the first
+        # user message stamped at-or-after the viewed state, so a message
+        # stamped with the OLD version it was typed against outlived its own
+        # rollback: the user stepped back onto the branched copy (a NEWER
+        # number showing the OLDER picture) and their request stayed in the
+        # chat over the picture from before it. Stamp = the head now, or the
+        # branched copy re-stamped after _branch_edl below; branch_base
+        # records where the user stepped back to, which is what prunes the
+        # abandoned exchanges.
         msg_version = latest_row["version"] if latest_row else None
         if latest_row and base_version is not None \
                 and base_version != latest_row["version"]:
             picked = _edl_at(cur, project_id, base_version)
             if picked:
-                msg_version = base_version
                 stepped_back = True
                 try:
                     differs = (wschemas.edl_signature(picked["json"])
@@ -2525,7 +2534,7 @@ def post_message(user_id, project_id):
             # chat said after that state now belongs to an abandoned branch.
             # The studio prunes those rows on this marker (round 71); nothing
             # server-side is deleted, and no banner/divider is ever written.
-            meta["branch_base"] = msg_version
+            meta["branch_base"] = base_version
         if client_msg_id:
             meta["client_msg_id"] = client_msg_id
         if attachments_meta:
@@ -2593,8 +2602,15 @@ def post_message(user_id, project_id):
                 # as the message: the worker's latest_edl() then already IS
                 # the state the user was looking at, and the studio's poll
                 # sees the branch (with its adopted preview) immediately.
-                _branch_edl(cur, p["chat_session_id"], project_id,
-                            branch_base)
+                new_v = _branch_edl(cur, p["chat_session_id"], project_id,
+                                    branch_base)
+                # Re-stamp with the branched copy — the state this turn
+                # actually starts from (see the round-71b note above). Same
+                # transaction as the insert, so no poll ever sees the old
+                # stamp.
+                meta["edl_version"] = new_v
+                cur.execute("UPDATE chat_messages SET meta = %s WHERE id = %s",
+                            (Json(meta), message_id))
             job_id = _enqueue(cur, project_id, user_id, "agent_turn",
                               {"message_id": message_id})
 
