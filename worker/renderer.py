@@ -312,9 +312,14 @@ def screen_lock_corner_paths(lock, W, H, fps, dur):
     # so the cut sits inside one uninterrupted zoom instead of at the exact
     # first full-frame instant. Zero during the push itself.
     l_tot = max(hold + SCREEN_LAND_S, 1e-3)
+    # land=False (round 71g): a dead-flat landing — no overshoot on either
+    # side of the cut. Must gate BOTH this overlay-side grow and the
+    # program-side post-cut term below in build_filtergraph, or the two
+    # halves of the cut disagree by the settle amount on the handoff frame.
     grow = (f"(1+{SCREEN_LAND_ZOOM:.3f}"
             f"*sin(PI*clip(({tvar}-{dur_push:.3f})/{l_tot:.4f},0,1))"
-            f"*gt({tvar},{dur_push:.3f}))") if hold > 0.02 else "1"
+            f"*gt({tvar},{dur_push:.3f}))") \
+        if hold > 0.02 and lock.get("land") is not False else "1"
     # The destination is grown by the transparent border's share so the CONTENT
     # (which sits inset by SCREEN_PAD_PX) lands where the quad says. Without
     # this the takeover hands off two pixels small and the cut shows.
@@ -1705,7 +1710,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         hold = screen_lock_hold(b - a)
         bp = b - hold
         le = min(tl.out_duration, bp + hold + SCREEN_LAND_S)
-        if le - b > 0.05:
+        # land=False: no post-cut settle — see the matching gate on the
+        # overlay-side `grow` term in _screen_pin_filter.
+        if le - b > 0.05 and (item.get("screen") or {}).get("land") \
+                is not False:
             p = f"clip(({tvar}-{bp:.3f})/{le - bp:.5f},0,1)"
             zoom_terms.append(f"{SCREEN_LAND_ZOOM:.3f}*sin(PI*{p})"
                               f"*gt({tvar},{b:.3f})*lt({tvar},{le:.3f})")

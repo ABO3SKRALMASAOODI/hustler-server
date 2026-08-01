@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 
 import agent_tools
@@ -20,6 +21,11 @@ import timeline
 import visual
 from agent_prompt import project_state_block, system_prompt
 from schemas import describe_edl
+
+# Set by main._on_shutdown when Render SIGTERMs the container (every deploy).
+# The turn loop checks it between iterations and finalizes honestly inside
+# the grace window instead of dying and leaving the reaper to guess.
+SHUTDOWN = threading.Event()
 
 
 def _silence_line(index):
@@ -366,11 +372,18 @@ def state_block(ctx, worker_db):
 
 def capabilities_block():
     """The CAPABILITIES message — generated from the tool registry, so it can
-    never advertise a tool this deployment turned off. Shared with MCP."""
+    never advertise a tool this deployment turned off.
+
+    Names only (round 71f): every tool's full contract already rides in the
+    request's tool schemas, so the old first-sentence-per-tool digest was
+    ~13k chars repeated in every call of every turn — context spent telling
+    the model things it was being told anyway. MCP is the same: its
+    catalog() ships openai_tools() next to this block."""
     return ("CAPABILITIES — the complete list of write operations that "
-            "exist, generated from the tool registry:\n"
-            + agent_tools.capabilities_digest()
-            + "\nNothing else exists. If the user asks for anything not "
+            "exist this deployment (each one's full contract is in your "
+            "tool schemas): "
+            + ", ".join(agent_tools.capability_names())
+            + ". Nothing else exists. If the user asks for anything not "
             "listed (motion-TRACKED stickers pinned to moving objects, "
             "true crossfades, custom font files, ...), say so plainly and "
             "offer the closest listed alternative — NEVER describe a "
@@ -384,7 +397,14 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     msgs = [{"role": "system", "content": system_prompt()},
             {"role": "system", "content": capabilities_block()},
             {"role": "system", "content": state_block(ctx, worker_db)}]
-    chat = worker_db.run(dbx.recent_chat, ctx.session_id, 20)
+    # The last few messages, not the last twenty (round 71f). Twenty was up
+    # to 40k chars of stale conversation re-read on EVERY call of EVERY
+    # turn, and it actively misled: superseded requests ("make the title
+    # blue" from ten exchanges ago) sat next to the current one with equal
+    # weight. Everything durable about the project lives in the STATE
+    # above — the EDL, the scene map, the index — not in old chat. The
+    # current request plus the last few messages of context is the job.
+    chat = worker_db.run(dbx.recent_chat, ctx.session_id, 4)
     for m in chat:
         if m["id"] == user_message["id"]:
             continue
@@ -1340,6 +1360,35 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     taste_pushed = False           # the craft audit was handed back once
 
     for iteration in range(config.AGENT_MAX_ITERATIONS):
+        if SHUTDOWN.is_set():
+            # Render SIGTERMs the worker before every deploy, and an agent
+            # turn is deliberately never retried (replaying re-applies EDL
+            # writes) — so before this check an in-flight turn just DIED and
+            # the reaper told the user "I lost my connection", sometimes over
+            # an edit that had in fact landed (v266, Aug 1). Now the loop
+            # finalizes inside the grace window instead: honest reply, job
+            # marked done, nothing for the reaper to lie about.
+            print(f"[job {job['id']}] shutdown drain: finalizing after "
+                  f"{total_steps} step(s)", flush=True)
+            # No _finalize here: its auto-render waits on a preview encode,
+            # which cannot fit inside Render's grace window. The reply is
+            # written directly and the studio's next poll shows the state.
+            if ctx.versions_written:
+                latest = ctx.latest_edl()
+                worker_db.run(dbx.add_message, session_id, "assistant",
+                              "I had to stop mid-request for a moment of "
+                              "maintenance on my side — the edits I finished "
+                              "are saved. Tell me to continue and I'll pick "
+                              "up exactly where I left off.",
+                              {"edl_version": latest["version"]})
+            else:
+                worker_db.run(dbx.add_message, session_id, "assistant",
+                              "I had to pause for a moment of maintenance on "
+                              "my side before I could change anything — your "
+                              "edit is untouched. Please send that again.",
+                              {"edl_version": ctx.latest_edl()["version"]})
+            return {"status": "shutdown", "steps": total_steps,
+                    "timings": timings}
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
             print(f"[job {job['id']}] turn timeout after "
                   f"{config.AGENT_TURN_TIMEOUT_S:.0f}s", flush=True)

@@ -5602,7 +5602,7 @@ def _detect_screen(ctx, edl, src_t, content_aspect=None, content=None):
 
 def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
                         corners=None, clip_start_s=None, hold_s=None,
-                        push=1.0, ease="smooth"):
+                        push=1.0, ease="smooth", settle=True):
     """Push into a device screen in the footage and let an asset playing ON
     that screen become the whole video, in one continuous move."""
     asset, err = _resolve_media_asset(ctx, asset_key,
@@ -5943,6 +5943,12 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=1.2,
         c_src = "measured"
     screen_spec = {"corners": quad, "push": pu, "ease": es,
                    "corners_source": c_src}
+    if settle is False:
+        # A dead-flat landing: full frame on the cut and STAYS there — no
+        # through-cut overshoot. The default settle reads as cinematic
+        # momentum to most, but a real user read it as "it zooms in the
+        # third scene then returns" and asked for it gone.
+        screen_spec["land"] = False
     if corner_path:
         screen_spec["corner_path"] = corner_path
     overlays = [dict(o) for o in (edl.get("overlays") or [])]
@@ -11080,8 +11086,14 @@ TOOLS = {
         "clip_start_s picks where in the asset the takeover starts playing; "
         "hold_s is how long the asset stays full screen afterwards (default: "
         "the rest of it). push 0-1 is how far the camera travels (1 = all "
-        "the way, the default). ease: 'smooth' (default), 'accelerate', "
-        "'linear'. "
+        "the way, the default — there is no further zoom past 1; a push that "
+        "feels weak is usually a short duration_s, so lengthen the move "
+        "instead). ease: 'smooth' (default), 'accelerate', "
+        "'linear'. settle:false turns OFF the through-cut momentum (the "
+        "brief zoom past full frame after the handoff that settles back) — "
+        "use it when the user says the video 'keeps zooming after the "
+        "transition' or 'zooms then returns', or asks for a dead-flat "
+        "landing. "
         "It REFUSES rather than guessing when it cannot measure the screen, "
         "and refuses when the screen is under 8% of the frame (the push "
         "would be a >12x blowup). Undo with remove_screen_takeover.",
@@ -11093,7 +11105,8 @@ TOOLS = {
          "hold_s": {"type": "number"},
          "push": {"type": "number"},
          "ease": {"type": "string",
-                  "enum": ["smooth", "accelerate", "linear"]}}),
+                  "enum": ["smooth", "accelerate", "linear"]},
+         "settle": {"type": "boolean"}}),
     "remove_screen_takeover": (
         remove_screen_takeover,
         "Undo a screen takeover by its id (see get_edl): the corner pin, the "
@@ -11649,9 +11662,11 @@ def _tool_disabled(name):
 
 
 def capabilities_digest():
-    """One line per WRITE tool, generated from the registry at turn start —
-    the model checks requests against this before promising anything, and it
-    can never go stale because nobody maintains it by hand."""
+    """One line per WRITE tool from the live registry. NOT sent to the model
+    since round 71f (it duplicated the tool schemas at ~13k chars per call)
+    — it survives as the honest-off probe the test suite pins: a tool whose
+    backing service is unconfigured must be absent here exactly as it is
+    absent from the schemas."""
     lines = []
     for name, (_fn, desc, props) in TOOLS.items():
         if name not in WRITE_TOOLS or _tool_disabled(name):
@@ -11660,6 +11675,16 @@ def capabilities_digest():
         first = desc.split(". ")[0].rstrip(".")
         lines.append(f"- {name}({params}): {first}.")
     return "\n".join(lines)
+
+
+def capability_names():
+    """Just the deployed write-tool names (round 71f). The CAPABILITIES
+    message shrank to this: every name here arrives with its FULL contract
+    in the tool schemas the same request carries — both for the in-house
+    agent and for MCP, whose catalog() ships openai_tools() alongside — so
+    the old first-sentence-per-tool digest was ~13k chars of pure
+    duplication in every call of every turn."""
+    return [n for n in TOOLS if n in WRITE_TOOLS and not _tool_disabled(n)]
 
 
 def openai_tools():

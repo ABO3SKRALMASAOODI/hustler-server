@@ -198,8 +198,13 @@ def lane(name, types, max_attempts, poll_interval=None):
 
 
 REAPER_NOTES = {
-    "agent_turn": ("I lost my connection while working on that request — "
-                   "nothing further was changed. Please send it again."),
+    # Never claims "nothing was changed" — the reaper cannot know that, and
+    # on Aug 1 it said exactly that over a turn whose edit HAD landed (v266).
+    # The graceful drain above it usually gets there first now; this is the
+    # hard-death fallback (OOM, kill -9).
+    "agent_turn": ("I was interrupted mid-request on our side. Any editing "
+                   "steps you can see above are saved — check the preview, "
+                   "and tell me to continue or send the request again."),
     "final": ("The final export was interrupted before it finished. "
               "Press Download again to restart it."),
     # An index dying to a dead worker used to say NOTHING — 'index' was in
@@ -319,7 +324,15 @@ def _on_shutdown(signum, _frame):
     """Render SIGTERMs us before every deploy/restart. Give back whatever we
     were holding so the next container picks it up instead of the job rotting
     through its retry budget for a death it did not cause. See db.release_jobs.
+
+    Agent turns can't be given back (a replay re-applies EDL writes), so
+    before round 71f they simply DIED here — every deploy shot whatever turn
+    was running and the user read "I lost my connection", once over an edit
+    that had actually landed. Now the loop drains: SHUTDOWN tells every
+    running turn to finalize honestly between steps, and exit waits for them
+    (bounded well inside Render's grace period).
     """
+    agent_loop.SHUTDOWN.set()
     ids = dbx.active_job_ids()
     try:
         n = dbx.Db().run(dbx.release_jobs, ids)
@@ -329,6 +342,13 @@ def _on_shutdown(signum, _frame):
         # Best effort — if we can't reach the DB the reaper still cleans up,
         # just the slower, attempt-charging way.
         print(f"[shutdown] could not release jobs: {e}", flush=True)
+    deadline = time.time() + 22       # Render's grace is ~30s; leave margin
+    while time.time() < deadline and dbx.active_job_ids():
+        time.sleep(0.5)
+    left = len(dbx.active_job_ids())
+    if left:
+        print(f"[shutdown] {left} job(s) still running at the wire — the "
+              "reaper will surface them", flush=True)
     os._exit(0)
 
 

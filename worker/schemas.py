@@ -920,6 +920,12 @@ class ScreenLock(BaseModel):
     corners: List[float]
     push: float = 1.0
     ease: Literal["smooth", "accelerate", "linear"] = "smooth"
+    # Round 71g: land=False turns OFF the through-cut momentum settle (the
+    # brief overshoot past full frame after the handoff). Default None keeps
+    # the settle AND the signature of every takeover already written — a
+    # real user read the settle as "it zooms in the third scene then
+    # returns" and there was no way to ask for a dead-flat landing.
+    land: Optional[bool] = None
     # Round 63: the filmed screen WOBBLES — the shot is handheld — and a pin
     # rigid at one measured quad slides visibly against the glass it claims to
     # hold. corner_path is the screen's measured motion through the window:
