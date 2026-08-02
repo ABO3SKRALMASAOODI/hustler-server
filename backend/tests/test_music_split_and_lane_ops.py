@@ -125,3 +125,47 @@ def test_add_overlay_rejects_audio():
     with pytest.raises(ValueError):
         apply(base_edl(), "add_overlay", {"asset_id": 9, "start": 0.0},
               {9: {"id": 9, "kind": "music", "storage_key": "m.mp3"}})
+
+
+# ── round 79f: the track outlives the window ───────────────────────────────
+
+TRACK_ASSET = {8: {"id": 8, "kind": "music", "storage_key": "music/1/song.mp3",
+                   "duration_s": 66.0}}
+
+
+def test_left_trim_consumes_track_head_and_restores_it():
+    m = dict(MUS, offset_s=0.13)
+    edl, _ = apply(base_edl([m]), "trim_music",
+                   {"id": "mus1", "start": 5.0, "end": 26.0}, TRACK_ASSET)
+    got = edl["music"][0]
+    assert got["start"] == 5.0
+    assert got["offset_s"] == 3.13          # 0.13 + (5.0 - 2.0)
+    # pulling the edge back out restores the head, bounded by the track
+    edl2, _ = apply(edl, "trim_music", {"id": "mus1", "start": 0.0,
+                                        "end": 26.0}, TRACK_ASSET)
+    got2 = edl2["music"][0]
+    # 0.0 normalizes to None in the schema — same meaning, stable signature
+    assert (got2["offset_s"] or 0.0) == 0.0
+    assert got2["start"] == 1.87            # only 3.13s of head existed
+
+
+def test_right_trim_clamps_to_the_tracks_remainder():
+    m = dict(MUS, offset_s=50.0)            # 16s of track left
+    edl, _ = apply(base_edl([m]), "trim_music",
+                   {"id": "mus1", "start": 2.0, "end": 28.0}, TRACK_ASSET)
+    got = edl["music"][0]
+    assert got["end"] == 18.0               # 2.0 + (66 - 50)
+
+
+def test_slip_music_slides_and_clamps():
+    m = dict(MUS)                           # window 24s, track 66s
+    edl, desc = apply(base_edl([m]), "slip_music",
+                      {"id": "mus1", "offset_s": 30.0}, TRACK_ASSET)
+    assert edl["music"][0]["offset_s"] == 30.0
+    assert "slipped" in desc
+    edl2, _ = apply(edl, "slip_music", {"id": "mus1", "offset_s": 60.0},
+                    TRACK_ASSET)
+    assert edl2["music"][0]["offset_s"] == 42.0   # 66 - 24
+    edl3, _ = apply(edl2, "slip_music", {"id": "mus1", "offset_s": -3.0},
+                    TRACK_ASSET)
+    assert (edl3["music"][0]["offset_s"] or 0.0) == 0.0

@@ -2954,13 +2954,55 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         prog = wschemas.program_duration(edl)
         for m in (edl.get("music") or []):
             if m.get("id") == args.get("id"):
+                old_start = float(m["start"])
+                off = max(0.0, float(m.get("offset_s") or 0.0))
+                track = next((a for a in assets_by_id.values()
+                              if a.get("storage_key") == m.get("storage_key")),
+                             None)
+                track_dur = float((track or {}).get("duration_s") or 0.0)
                 start = round(min(max(float(args.get("start",
                                                      m["start"]) or 0.0),
                                       0.0), max(0.0, prog - 0.5)), 2)
+                # Round 79f — the LEFT edge edits the TRACK, not the
+                # schedule: trimming the head consumes track head
+                # (offset_s advances) and pulling it back out restores it,
+                # so the song stays anchored in time like in any editor.
+                # Extending is bounded by the head the track actually has.
+                d = start - old_start
+                if d < 0:
+                    d = max(d, -off)
+                    start = round(old_start + d, 2)
+                if abs(d) > 1e-9:
+                    m["offset_s"] = round(off + d, 3)
+                    off = m["offset_s"]
                 end = round(min(max(float(args.get("end", m["end"])
                                           or prog), start + 0.5), prog), 2)
+                # A window longer than the track's remainder would play
+                # silence off the end (loop excepted) — clamp honestly.
+                if track_dur > 0.05 and not m.get("loop"):
+                    end = min(end, round(start + max(0.5, track_dur - off), 2))
                 m["start"], m["end"] = start, end
                 return edl, f"music {m['id']} now plays {start}-{end}s"
+        return edl, "music already gone"
+
+    if op == "slip_music":
+        # Round 79f — SLIP: slide the song under a fixed window. The block
+        # stays where it is on the timeline; offset_s picks which part of
+        # the track fills it. This is the missing verb that made everything
+        # past the first 28s of a 66s track unreachable from the UI.
+        for m in (edl.get("music") or []):
+            if m.get("id") == args.get("id"):
+                length = float(m["end"]) - float(m["start"])
+                off = max(0.0, float(args.get("offset_s") or 0.0))
+                track = next((a for a in assets_by_id.values()
+                              if a.get("storage_key") == m.get("storage_key")),
+                             None)
+                track_dur = float((track or {}).get("duration_s") or 0.0)
+                if track_dur > 0.05 and not m.get("loop"):
+                    off = min(off, max(0.0, track_dur - length))
+                m["offset_s"] = round(off, 3)
+                return edl, (f"music {m['id']} slipped — now plays from "
+                             f"{m['offset_s']}s into the track")
         return edl, "music already gone"
 
     if op == "split_music":
