@@ -2887,6 +2887,11 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
         keep = keep or edl_json["keep"]     # never let clamping empty it out
     program = Timeline(keep, edl_json.get("inserts") or [],
                        edl_json.get("speed")).out_duration
+    # Round 79j — the render legitimately extends past the scenes when
+    # unmuted music outlives them; the expectation must extend with it or
+    # the verifier rejects exactly the length the graph was asked to build.
+    tail = music_tail_ext(edl_json, program)
+    program += tail
     # The rendered file is the programme PLUS the branded end card. The
     # tolerance does not absorb it: 2.5s exceeds max(0.75s, 3%) for anything
     # under ~83s, so without this every short export fails verification and
@@ -2913,7 +2918,9 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
         # Measure the PROGRAMME only. The end card is black by design, and the
         # source it is compared against has none, so counting it is pure
         # unmatched numerator in the out_black - src_black comparison below.
-        prog_dur = max(0.1, out_dur - outro)
+        # The music tail is black BY DESIGN — measure the scenes only, or a
+        # short video under a long song reads as "the render looks broken".
+        prog_dur = max(0.1, out_dur - outro - tail)
         out_black = media.black_seconds(out_path, prog_dur) / prog_dur
         if out_black > config.RENDER_BLACK_MAX_RATIO:
             # The output is mostly black — but that's only a DEFECT if the
