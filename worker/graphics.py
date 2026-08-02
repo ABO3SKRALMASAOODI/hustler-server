@@ -628,7 +628,16 @@ def _stack_concurrent(items, out_dur, play_res, max_passes=4):
     H = play_res[1]
     shifts = [0.0] * len(items)
     events = [_compile_item(tx, out_dur, play_res) for tx in items]
-    live = [i for i, ev in enumerate(events) if ev]
+    # Round 79 — an item whose author PINNED both coordinates is deliberate
+    # composition, not an accident to repair: two chunks set side by side (a
+    # two-colour wordmark, "Valmera" white + ".io" red) are exactly what
+    # explicit x/y exists for, and "helpfully" restacking them into a column
+    # rendered a flush lockup 15% of the frame apart. Pinned items neither
+    # move nor cause others to move; template-positioned text (x/y None)
+    # keeps the collision layout that motivated this function.
+    live = [i for i, ev in enumerate(events) if ev
+            and not (items[i].get("x") is not None
+                     and items[i].get("y") is not None)]
     for _ in range(max_passes):
         # Groups of mutually-overlapping items, by transitive closure: three
         # stacked graphics must be laid out as one column of three, not as

@@ -234,3 +234,45 @@ def test_typewriter_with_none_exit_keeps_no_exit(tmp_path):
     content, evs, _ = _events(path)
     body = evs[0].group(4)
     assert r"\fad(" not in body
+
+
+# ── round 79: pinned composition is never restacked ─────────────────────────
+
+def _pos_ys(path):
+    """Each event's SETTLED y — \\pos's y, or \\move's destination y."""
+    with open(path, encoding="utf-8") as fh:
+        content = fh.read()
+    ys = []
+    for m in re.finditer(
+            r"\\(pos|move)\((-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)"
+            r"(?:,(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?))?", content):
+        ys.append(float(m.group(5) if m.group(5) is not None else m.group(3)))
+    return ys
+
+
+def test_pinned_pair_is_never_restacked(tmp_path):
+    """Two chunks the author set side by side (a two-colour wordmark) keep
+    their y — the collision stacker must not 'repair' deliberate layout."""
+    texts = [
+        {"id": "a", "text": "Valmera", "start": 1.0, "end": 4.0,
+         "template": "title", "x": 0.47, "y": 0.72},
+        {"id": "b", "text": ".io", "start": 1.0, "end": 4.0,
+         "template": "title", "x": 0.60, "y": 0.72},
+    ]
+    ys = _pos_ys(_build(texts, tmp_path=tmp_path))
+    assert len(ys) >= 2
+    assert abs(max(ys) - min(ys)) < 1.0, ys
+
+
+def test_unpinned_overlap_still_stacks(tmp_path):
+    """Template-positioned texts sharing a moment and a patch of frame keep
+    the round-58 collision layout — the pinned exemption must not undo it."""
+    texts = [
+        {"id": "a", "text": "A BIG CENTRED TITLE", "start": 1.0, "end": 4.0,
+         "template": "title"},
+        {"id": "b", "text": "ANOTHER TITLE RIGHT THERE", "start": 1.0,
+         "end": 4.0, "template": "title"},
+    ]
+    ys = _pos_ys(_build(texts, tmp_path=tmp_path))
+    assert len(ys) >= 2
+    assert abs(max(ys) - min(ys)) > 10.0, ys
