@@ -89,15 +89,15 @@ def test_rect_frames_the_launch_video_message():
     res = agent_tools.add_zoom(ctx, 7.5, 9.5, mode="ease", rect=MSG_RECT)
     assert res.startswith("EDL v"), res
     zm = _zoom(ctx)
-    # box is 0.228 wide -> fit with margin wants 3.54x, capped at the 3.5x max
-    assert abs(zm["strength"] - 2.5) < 1e-6
-    assert abs(zm["cx"] - 0.013) < 0.002
-    assert abs(zm["cy"] - 0.893) < 0.002
+    # box is 0.228 wide -> fit with margin solves 3.54x (under the cap now)
+    assert abs(zm["strength"] - 2.54) < 1e-6
+    assert abs(zm["cx"] - 0.015) < 0.002
+    assert abs(zm["cy"] - 0.891) < 0.002
     assert zm["rect"] == [round(v, 3) for v in MSG_RECT]
     # mid-window, the eased zoom is at full strength; the message's box must
     # sit entirely inside the viewport the renderer will show
     z, cx, cy = renderer.zoom_state_at([zm], 8.5, 18.17)
-    assert abs(z - 3.5) < 1e-6
+    assert abs(z - 3.54) < 1e-6
     vx0, vy0, vx1, vy1 = _viewport(z, cx, cy)
     assert vx0 <= MSG_RECT[0] and vx1 >= MSG_RECT[2]
     assert vy0 <= MSG_RECT[1] and vy1 >= MSG_RECT[3]
@@ -147,15 +147,15 @@ def test_default_strength_without_rect_is_unchanged():
     assert _zoom(ctx)["strength"] == 0.15        # the round-67 default
 
 
-def test_strength_cap_is_now_2_5():
-    """Round 75: a chat-column-only viewport needs ~2.0; 'only that
-    message' tighter still. 2.5 (3.5x) is the new ceiling."""
+def test_strength_cap_is_now_4_5():
+    """Round 76: excluding a NEIGHBOURING chat bubble from a close-up
+    needs ~4.2 (bubbles sit ~0.01 apart). 4.5 (5.5x) is the ceiling."""
     ctx = _Ctx(_session_edl())
-    agent_tools.add_zoom(ctx, 7.5, 9.5, strength=3.0)
-    assert _zoom(ctx)["strength"] == 2.5
+    agent_tools.add_zoom(ctx, 7.5, 9.5, strength=9.0)
+    assert _zoom(ctx)["strength"] == 4.5
     ctx2 = _Ctx(_session_edl())
     agent_tools.add_zoom(ctx2, 7.5, 9.5, strength=2.0, cx=0.0, cy=0.9)
-    assert _zoom(ctx2)["strength"] == 2.0        # was clamped to 1.5
+    assert _zoom(ctx2)["strength"] == 2.0        # far under the ceiling
 
 
 # ------------------------------------------------- zoom_state_at mirror ----
@@ -260,7 +260,7 @@ def test_look_geometry_shows_the_framed_message():
         img.save(src, "JPEG", quality=95)
         out, suffix = agent_tools._fit_and_zoom_frame(
             td, 0, src, 8.5, (3840, 2160), "crop", None, [zm], 18.17, False)
-        assert "3.50x zoom" in suffix
+        assert "3.54x zoom" in suffix
         assert out != src
         res = Image.open(out).convert("L")
         # the box centre lands dead centre at the 3.5x fit ...
@@ -286,16 +286,16 @@ def test_zoom_path_keyframes_take_rects():
     assert res.startswith("EDL v"), res
     zp = ctx.latest_edl()["json"]["effects"]["zooms"][-1]
     pts = zp["path"]
-    # rect keyframes with no strength solve to the fit (both cap at 2.5);
-    # explicit 0 stays 0 for the seamless entry/exit
-    assert [p["s"] for p in pts] == [0.0, 2.5, 2.5, 0.0]
-    assert abs(pts[0]["cx"] - 0.013) < 0.002
-    assert abs(pts[0]["cy"] - 0.893) < 0.002
-    assert abs(pts[2]["cx"] - 0.143) < 0.002
-    assert abs(pts[2]["cy"] - 0.962) < 0.002
+    # rect keyframes with no strength solve to each rect's own fit (the
+    # message 2.54, the smaller prompt caps at 4.5); explicit 0 stays 0
+    assert [p["s"] for p in pts] == [0.0, 2.54, 4.5, 0.0]
+    assert abs(pts[0]["cx"] - 0.015) < 0.002
+    assert abs(pts[0]["cy"] - 0.891) < 0.002
+    assert abs(pts[2]["cx"] - 0.188) < 0.002
+    assert abs(pts[2]["cy"] - 0.903) < 0.002
     # at the prompt keyframe the rendered viewport contains the prompt
     z, cx, cy = renderer.zoom_state_at([zp], 10.8, 18.17)
-    assert abs(z - 3.5) < 1e-6
+    assert abs(z - 5.5) < 1e-6
     vx0, vy0, vx1, vy1 = _viewport(z, cx, cy)
     assert vx0 <= prompt_rect[0] and vx1 >= prompt_rect[2]
     assert vy0 <= prompt_rect[1] and vy1 >= prompt_rect[3]

@@ -505,7 +505,13 @@ class InsertItem(BaseModel):
     source_start_s picks WHERE in the source clip the window starts;
     Optional so pre-round-8 EDLs keep their signatures.
     motion is a Ken Burns move for IMAGE inserts only (a still that slowly
-    zooms or pans instead of sitting frozen); Optional for signatures."""
+    zooms or pans instead of sitting frozen); Optional for signatures.
+    rate (round 76) plays the spliced clip FASTER (or slower) in place —
+    "don't shorten the editing screens, speed them up". duration_s stays
+    the OUTPUT length of the block; the clip consumes duration_s*rate of
+    source from source_start_s, video via setpts, audio pitch-corrected via
+    atempo. None (the default on every EDL written before round 76) renders
+    byte-identically to 1.0, so old signatures and cached renders hold."""
     id: str
     asset_key: str
     kind: Literal["video", "image"]
@@ -514,6 +520,14 @@ class InsertItem(BaseModel):
     source_start_s: Optional[float] = None
     motion: Optional[Literal["zoom_in", "zoom_out",
                              "pan_left", "pan_right"]] = None
+    rate: Optional[float] = None
+
+    @field_validator("rate")
+    @classmethod
+    def _clamp_rate(cls, v):
+        if v is None:
+            return None
+        return min(max(float(v), INSERT_RATE_MIN), INSERT_RATE_MAX)
 
 
 class VoiceoverItem(BaseModel):
@@ -528,15 +542,20 @@ class VoiceoverItem(BaseModel):
 
 
 GRADE_PRESETS = ("vibrant", "warm", "cool", "bw", "vintage", "cinematic")
+# Round 76: how fast a spliced scene may play in place. atempo pitch-corrects
+# cleanly in this band (two chained stages below 0.5); past 4x a screen
+# recording reads as a glitch, below 0.25 as a freeze.
+INSERT_RATE_MIN = 0.25
+INSERT_RATE_MAX = 4.0
 ZOOM_STRENGTH_MIN = 0.05
-# Widened from 1.0 (round 35), then from 1.5 (round 75): a launch video
-# needed the chat COLUMN alone to fill a 16:9 frame — a ~0.33-wide viewport,
-# which is strength ~2.0 — and the user asked for tighter still ("only that
-# message"). 2.5 is a 3.5x window: from 4K source that is still ~1100px of
-# real pixels. The round-35 worry (center-only zooms past 2x look lost)
-# holds for CENTER zooms, which is what the taste audit's hard-punch rule
-# watches; aimed rect/path zooms carry their own subject.
-ZOOM_STRENGTH_MAX = 2.5
+# Widened from 1.0 (round 35), 1.5 (round 75), 2.5 (round 76). The launch
+# video's chat bubbles sit ~0.01 of the frame apart, so excluding the
+# NEIGHBOURING message from a bubble close-up needs a ~0.19-tall viewport —
+# strength ~4.2. That is a 745px window from 4K source: soft in a 4K export,
+# fine at 1080p, and the subject at that magnification is a text bubble
+# filling half the screen. The cap is the ceiling of what aimed shots may
+# ask for — the audit's hard-punch rule still polices center zooms.
+ZOOM_STRENGTH_MAX = 4.5
 FADE_MAX_S = 10.0
 
 

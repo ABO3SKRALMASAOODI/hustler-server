@@ -306,7 +306,11 @@ def program_blocks(edl):
                         "id": get("id"),
                         "asset_key": get("asset_key"),
                         "media": get("kind") or "video",
-                        "clip_start_s": get("source_start_s")})
+                        "clip_start_s": get("source_start_s"),
+                        # rate (round 76): output seconds inside this block
+                        # cover rate x as much clip — every consumer mapping
+                        # an output moment to a clip moment must multiply.
+                        "rate": get("rate") or 1.0})
             L = d
         acc += L
     return out

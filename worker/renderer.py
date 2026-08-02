@@ -592,6 +592,15 @@ def fit_fractions(src_w, src_h, W, H, mode=None, focus=None):
     return ("crop", 0.0, y0, 1.0, y0 + fh)
 
 
+def _atempo_chain(rate):
+    """atempo stage(s) for an insert's rate — one stage covers [0.5, 4];
+    below 0.5 two stages chain (atempo's own floor is 0.5). Pitch-corrected
+    by the filter itself."""
+    if rate >= 0.5:
+        return f"atempo={rate:.4f}"
+    return f"atempo=0.5,atempo={rate / 0.5:.4f}"
+
+
 def _clip01(v):
     return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
 
@@ -1306,8 +1315,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         dur = float(item["duration_s"])
         off = float(item.get("source_start_s") or 0.0) \
             if item["kind"] != "image" else 0.0
-        parts.append(f"[{idx}:v]trim=start={off:.3f}:end={off + dur:.3f},"
-                     f"setpts=PTS-STARTPTS[insv{j}]")
+        # rate (round 76): the spliced clip plays FASTER in place — the
+        # block still occupies duration_s of the program, but consumes
+        # duration_s*rate of source. rate None/1.0 emits the exact legacy
+        # strings (tests pin whole filtergraphs, and cached renders match
+        # by EDL signature that _sig_canon keeps stable for None).
+        rate = float(item.get("rate") or 1.0) if item["kind"] != "image" \
+            else 1.0
+        if abs(rate - 1.0) > 1e-6:
+            parts.append(
+                f"[{idx}:v]trim=start={off:.3f}:end={off + dur * rate:.3f},"
+                f"setpts=(PTS-STARTPTS)/{rate:.4f}[insv{j}]")
+        else:
+            parts.append(f"[{idx}:v]trim=start={off:.3f}:end={off + dur:.3f},"
+                         f"setpts=PTS-STARTPTS[insv{j}]")
         # Ken Burns motion on image inserts: a per-block zoompan that
         # drifts across the still instead of freezing it.
         motion = item.get("motion") if item["kind"] == "image" else None
@@ -1329,9 +1350,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{norm_out}]zoompan=z='{z}':x='{x}':y='{y}'"
                          f":d=1:s={W}x{H}:fps={fps:.3f}[v_ins{j}]")
         if ins_audio:
-            parts.append(f"[{idx}:a]atrim=start={off:.3f}:end={off + dur:.3f},"
-                         f"asetpts=PTS-STARTPTS,{AUDIO_NORM},"
-                         f"apad=whole_dur={dur:.3f}[a_ins{j}]")
+            if abs(rate - 1.0) > 1e-6:
+                parts.append(
+                    f"[{idx}:a]atrim=start={off:.3f}"
+                    f":end={off + dur * rate:.3f},"
+                    f"asetpts=PTS-STARTPTS,{_atempo_chain(rate)},"
+                    f"{AUDIO_NORM},apad=whole_dur={dur:.3f}[a_ins{j}]")
+            else:
+                parts.append(f"[{idx}:a]atrim=start={off:.3f}"
+                             f":end={off + dur:.3f},"
+                             f"asetpts=PTS-STARTPTS,{AUDIO_NORM},"
+                             f"apad=whole_dur={dur:.3f}[a_ins{j}]")
         else:
             parts.append(f"[sil{sil_i}]atrim=start=0:end={dur:.3f},"
                          f"asetpts=PTS-STARTPTS,{AUDIO_NORM}[a_ins{j}]")

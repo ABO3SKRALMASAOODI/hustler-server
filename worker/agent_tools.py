@@ -55,6 +55,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      edl_signature, is_canvas_program, keep_boundaries,
                      output_duration, program_duration, validate_edl,
                      MAX_INSERT_DURATION_S, GAIN_MIN_DB, GAIN_MAX_DB,
+                     INSERT_RATE_MIN, INSERT_RATE_MAX,
                      GRADE_PRESETS, TRANSITION_STYLES, TRANSITION_MIN_S,
                      TRANSITION_MAX_S, TRANSITION_SCOPES,
                      OVERLAY_ANIMS, OVERLAY_SCALE_MIN,
@@ -952,7 +953,8 @@ def _look_at_output(ctx, output_times, question):
                          f"@out {t:.2f}s = scene {b['n']} "
                          f"(main footage @{src:.2f}s)"))
         else:
-            local = float(b.get("clip_start_s") or 0.0) + (t - b["out_start"])
+            local = float(b.get("clip_start_s") or 0.0) \
+                + (t - b["out_start"]) * float(b.get("rate") or 1.0)
             label = (f"@out {t:.2f}s = scene {b['n']} "
                      f"('{(name_of(b['asset_key']) or b['asset_key'].split('/')[-1])[:40]}'"
                      f" @{local:.2f}s)")
@@ -3123,7 +3125,7 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
                       ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
         return ("REJECTED: start/end/strength must be numbers. start/end are "
-                "OUTPUT-timeline seconds; strength 0.05-2.5 (0.25 = 25% "
+                "OUTPUT-timeline seconds; strength 0.05-4.5 (0.25 = 25% "
                 "punch-in; above 1.0 is a dramatic 2x+ punch).")
     if e - s < 0.2:
         return "REJECTED: a zoom needs at least 0.2s."
@@ -3269,7 +3271,7 @@ def add_zoom_path(ctx, keyframes, ease=None):
                 "each {t, cx, cy, strength}. t is OUTPUT-timeline seconds; "
                 "cx/cy are 0-1 fractions of the output frame ((0,0) = "
                 "top-left, the same convention as add_zoom); strength is "
-                "0-2.5. The window runs from the first t to the last.")
+                "0-4.5. The window runs from the first t to the last.")
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     clean = []
@@ -4612,7 +4614,8 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     return result
 
 
-def set_insert_window(ctx, id, duration_s=None, clip_start_s=None):
+def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
+                      rate=None):
     """Change WHICH PART of an already-spliced clip plays, in place.
 
     Round 61. Nothing could edit an insert once it existed — there was
@@ -4641,13 +4644,31 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None):
         have = ", ".join(i.get("id", "?") for i in inserts) or "none"
         return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
                 f"{have}. Call get_edl to see them.")
-    if duration_s is None and clip_start_s is None:
-        return ("REJECTED: give duration_s, clip_start_s, or both — otherwise "
-                "there is nothing to change.")
+    if duration_s is None and clip_start_s is None and rate is None:
+        return ("REJECTED: give duration_s, clip_start_s and/or rate — "
+                "otherwise there is nothing to change.")
     if hit.get("kind") == "image" and clip_start_s is not None:
         return ("REJECTED: clip_start_s is for video inserts — a still has no "
                 "timeline to seek into. Use duration_s to change how long it "
                 "shows.")
+    if hit.get("kind") == "image" and rate is not None:
+        return ("REJECTED: rate is for video inserts — a still has no speed. "
+                "Use duration_s to change how long it shows.")
+    # rate (round 76): the spliced scene plays FASTER (or slower) IN PLACE —
+    # "don't shorten the editing screens, speed them up". duration_s stays
+    # OUTPUT seconds. rate alone keeps the clip's source window and shrinks
+    # the block (10s of recording at 2x = a 5s scene, nothing lost); with
+    # duration_s the block is that long and consumes duration_s*rate of clip.
+    old_rate = float(hit.get("rate") or 1.0)
+    r = old_rate
+    if rate is not None:
+        try:
+            r = float(rate)
+        except (TypeError, ValueError):
+            return (f"REJECTED: rate must be a number "
+                    f"{INSERT_RATE_MIN}-{INSERT_RATE_MAX} (1 = normal "
+                    "speed, 2 = twice as fast, 0.5 = half speed).")
+        r = min(max(r, INSERT_RATE_MIN), INSERT_RATE_MAX)
     # The clip's real length bounds the window. Without it a duration longer
     # than the file renders as a block the footage cannot fill.
     src_len = None
@@ -4674,28 +4695,41 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None):
         if dur < 0.2:
             return ("REJECTED: an insert shorter than 0.2s is a single frame "
                     "nobody sees. Remove it instead if you want it gone.")
+    elif rate is not None:
+        # rate alone: same source window, new tempo — the block's length
+        # follows so no footage is gained or lost.
+        dur = round(float(hit["duration_s"]) * old_rate / r, 2)
     if hit.get("kind") == "video" and src_len:
         if off >= src_len - 0.05:
             return (f"REJECTED: clip_start_s {off}s is at or past the end of "
                     f"that clip ({round(src_len, 2)}s long).")
-        room = round(src_len - off, 2)
+        room = round((src_len - off) / r, 2)
         if dur > room:
             dur = room
-    prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0))
+    prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0),
+            old_rate)
     hit["duration_s"] = dur
     hit["source_start_s"] = round(off, 2) or None
     if hit["source_start_s"] is None:
         hit.pop("source_start_s", None)
-    if (dur, off) == prev:
-        return f"insert {id} already plays {off}-{round(off + dur, 2)}s"
+    if abs(r - 1.0) > 1e-6:
+        hit["rate"] = round(r, 3)
+    else:
+        hit.pop("rate", None)
+    span = round(dur * r, 2)
+    at_rate = f" at {r:g}x" if abs(r - 1.0) > 1e-6 else ""
+    if (dur, off, r) == prev:
+        return (f"insert {id} already plays {off}-{round(off + span, 2)}s"
+                f"{at_rate}")
     edl["inserts"] = inserts
     speed = edl.get("speed") or []
     old_tl = Timeline(edl.get("keep") or [], before, speed)
     new_tl = Timeline(edl.get("keep") or [], inserts, speed)
     notes = _remap_program_items(edl, old_tl, new_tl)
     res = ctx.write_edl(
-        edl, f"insert {id} now plays {off}-{round(off + dur, 2)}s of "
-             f"'{os.path.basename(hit['asset_key'])}' ({dur}s on the timeline)")
+        edl, f"insert {id} now plays {off}-{round(off + span, 2)}s of "
+             f"'{os.path.basename(hit['asset_key'])}'{at_rate} "
+             f"({dur}s on the timeline)")
     if notes and res.startswith("EDL v"):
         res += "\n" + "\n".join(notes)
     return res
@@ -4846,6 +4880,9 @@ def cut_output_range(ctx, start, end):
             removed.append(item["id"])
             continue
         off_c = float(item.get("source_start_s") or 0.0)
+        # A rated insert covers rate x as much CLIP per output second — the
+        # tail's clip offset scales, or the cut jumps the wrong footage.
+        rate_c = float(item.get("rate") or 1.0)
         if head_len >= 0.2:
             head = dict(item)
             head["duration_s"] = head_len
@@ -4856,7 +4893,7 @@ def cut_output_range(ctx, start, end):
                 tail["id"] = _next_item_id(ins_before + new_inserts, "ins")
             tail["duration_s"] = tail_len
             if item.get("kind") == "video":
-                tail["source_start_s"] = round(off_c + (hi - w0), 2)
+                tail["source_start_s"] = round(off_c + (hi - w0) * rate_c, 2)
             new_inserts.append(tail)
         touched.append(item["id"])
 
@@ -9042,7 +9079,7 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
         strength = round(min(max(float(zoom_strength), ZOOM_STRENGTH_MIN),
                              ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
-        return "REJECTED: zoom_strength must be a number (0.05-2.5)."
+        return "REJECTED: zoom_strength must be a number (0.05-4.5)."
 
     edl0 = ctx.latest_edl()["json"]
     prog_before = program_duration(edl0)
@@ -9751,7 +9788,7 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
         st = round(min(max(float(strength), ZOOM_STRENGTH_MIN),
                        ZOOM_STRENGTH_MAX), 2)
     except (TypeError, ValueError):
-        return "REJECTED: strength must be a number (0.05-2.5)."
+        return "REJECTED: strength must be a number (0.05-4.5)."
     try:
         p = _get_perception(ctx)
     except Exception as e:
@@ -10896,11 +10933,19 @@ TOOLS = {
     "set_insert_window": (set_insert_window, "Change which part of an "
                           "already-spliced clip plays, IN PLACE — duration_s "
                           "for how long it runs, clip_start_s for where in the "
-                          "clip it starts. USE THIS instead of remove_insert + "
+                          "clip it starts, rate for how FAST it plays. USE "
+                          "THIS instead of remove_insert + "
                           "insert_media to trim or re-window a clip that is "
                           "already on the timeline: removing and re-adding "
                           "costs two edit versions and two renders, and the "
                           "user watches their clip disappear and come back. "
+                          "rate (0.25-4, round 76) is THE tool for 'speed up "
+                          "that scene instead of cutting it': rate alone "
+                          "keeps the clip window and shortens the block (a "
+                          "10s screen recording at rate 2 becomes a 5s scene "
+                          "with nothing lost, audio pitch-corrected); with "
+                          "duration_s the block is duration_s long and "
+                          "consumes duration_s*rate of clip. "
                           "TO SPLIT a spliced clip in two: shorten it here to "
                           "the first part, then insert_media the same "
                           "asset_key at the SAME at_output_s with clip_start_s "
@@ -10908,7 +10953,8 @@ TOOLS = {
                           "play in the order you created them.",
                           {"id": {"type": "string"},
                            "duration_s": {"type": "number"},
-                           "clip_start_s": {"type": "number"}}),
+                           "clip_start_s": {"type": "number"},
+                           "rate": {"type": "number"}}),
     "move_insert": (move_insert, "MOVE A SPLICED SCENE — reorder an inserted "
                     "clip between any other scenes, in place. after_id is "
                     "the insert it should play right AFTER (the scene map "
@@ -11071,7 +11117,7 @@ TOOLS = {
         "path to a coordinate I would have had to invent. With neither, it "
         "still places the clip and tells you plainly that nothing was synced. "
         "at_output_s defaults to the END of the current edit; zoom_strength "
-        "0.05-2.5 (0.4 default — screen text needs a real push to read); set "
+        "0.05-4.5 (0.4 default — screen text needs a real push to read); set "
         "zooms=false or click_sounds=false to place it plainly. Follow up "
         "with add_zoom_path to make the frame travel on a user recording, and "
         "enhance_cursor if the pointer is too small to follow.",
@@ -11092,7 +11138,7 @@ TOOLS = {
                                              "none"]}}),
     "add_zoom": (add_zoom, "Zoom on a time range of the FINAL edited video "
                  "(output seconds) — the standard retention effect for "
-                 "emphasis on a key line. strength 0.05-2.5 (default 0.15; "
+                 "emphasis on a key line. strength 0.05-4.5 (default 0.15; "
                  "above 1.0 is a dramatic 2x+ punch). mode: "
                  "'punch' (default, instant step), 'ease' (smoothly ramps "
                  "in and out — use when the user wants it subtle/animated), "
@@ -11143,7 +11189,7 @@ TOOLS = {
         "(fractions of the frame from look_at's grid — the same solver as "
         "add_zoom rect, so edge subjects come out framed, and omitting "
         "strength on a rect keyframe picks the strength that fits it); "
-        "cx/cy instead PIN a point ((0,0) = top-left). strength 0-2.5 "
+        "cx/cy instead PIN a point ((0,0) = top-left). strength 0-4.5 "
         "interpolates between keyframes, so the frame can push in as it "
         "arrives and ease out as it leaves; to HOLD on a subject, repeat "
         "its keyframe at the hold's start and end times. The window runs "
@@ -11859,7 +11905,7 @@ TOOLS = {
                              "times from the real word timestamps — never "
                              "guessed), spaced >=4s apart, in one EDL "
                              "version. count 1-8 (default 3); strength "
-                             "0.05-2.5 (default 0.14 — a gentle push the "
+                             "0.05-4.5 (default 0.14 — a gentle push the "
                              "viewer feels rather than sees; only go past "
                              "~0.3 when the user asks for hard punches or "
                              "the format is hype). The result lists "

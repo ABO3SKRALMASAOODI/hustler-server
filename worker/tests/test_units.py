@@ -1194,10 +1194,10 @@ check("describe mentions the effects",
 # impossible).
 _zc = validate_edl({"keep": [[0, 20]],
                     "effects": {"zooms": [{"id": "z", "start": 0, "end": 2,
-                                           "strength": 3.0}]}}, 60
+                                           "strength": 9.0}]}}, 60
                    ).model_dump()
-check("zoom strength clamps to 2.5 (the round-75 ceiling)",
-      _zc["effects"]["zooms"][0]["strength"] == 2.5)
+check("zoom strength clamps to 4.5 (the round-76 ceiling)",
+      _zc["effects"]["zooms"][0]["strength"] == 4.5)
 _fc = validate_edl({"keep": [[0, 20]], "effects": {"fade_in_s": 30}}, 60
                    ).model_dump()
 check("fade clamps to 10s", _fc["effects"]["fade_in_s"] == 10.0)
@@ -1216,9 +1216,9 @@ check("set_color_grade rejects unknown presets listing the real ones",
       agent_tools.set_color_grade(ToolCtx({}), "sepia")
       .startswith("REJECTED"))
 tctx = ToolCtx({"keep": [[0.0, 20.0]]})
-agent_tools.add_zoom(tctx, 2, 4, strength=5.0)
+agent_tools.add_zoom(tctx, 2, 4, strength=9.0)
 check("add_zoom clamps strength and assigns an id",
-      tctx.written["effects"]["zooms"][0]["strength"] == 2.5 and
+      tctx.written["effects"]["zooms"][0]["strength"] == 4.5 and
       tctx.written["effects"]["zooms"][0]["id"] == "zm1")
 zctx = ToolCtx({"keep": [[0.0, 20.0]],
                 "effects": {"zooms": [{"id": "zm1", "start": 2.0,
