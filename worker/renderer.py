@@ -884,6 +884,27 @@ def shaping_current(meta, edl):
     return ((meta or {}).get("gfx_shape_v") or 0) == config.GFX_SHAPING_VERSION
 
 
+def music_tail_ext(edl, out_duration):
+    """Round 79j — seconds of BLACK the program extends by, so unmuted music
+    past the last scene plays to its end instead of being cut off with the
+    picture. 0 for every timeline whose music fits inside the video, which
+    keeps all of those renders byte-identical."""
+    ends = [float(m.get("end") or 0.0) for m in (edl or {}).get("music") or []
+            if not m.get("mute")]
+    end = max(ends) if ends else 0.0
+    return max(0.0, min(end, out_duration + 3600.0) - out_duration)
+
+
+def music_tail_current(meta, edl, out_duration):
+    """Does this cached render predate the music-tail extension?
+
+    Same grandfathering discipline as transitions_current: only EDLs whose
+    music actually outlives the program are ever busted."""
+    if music_tail_ext(edl, out_duration) <= 0.05:
+        return True
+    return ((meta or {}).get("tail_v") or 0) == config.MUSIC_TAIL_VERSION
+
+
 def transitions_current(meta, edl):
     """Does this cached render predate scene-scoped transitions?
 
@@ -1087,6 +1108,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     holds and therefore what the user approved in the preview — trimming a keep
     span that lands in there would otherwise yield no picture at all.
     """
+    # Round 79j — the SEQUENCE is as long as its content: unmuted music past
+    # the last scene extends the render over BLACK to its own end, so a song
+    # laid on the workbench simply plays. 0 whenever music fits the video,
+    # which keeps every such graph byte-identical.
+    tail_ext = music_tail_ext(edl, tl.out_duration)
+    total_dur = tl.out_duration + tail_ext
     keep = [(max(0.0, s), min(e, src_dur)) for s, e in edl["keep"]]
     keep = [(s, e) for s, e in keep if e - s > 0.01]
     # A canvas program (image/clip-only, no main video) has no keep segments and
@@ -2114,13 +2141,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{plate_idx}:v]format=rgba[vsfpl]")
         parts.append("[vsfb][vsfpl]overlay=0:0:format=auto[vsf]")
         vlabel = "vsf"
+    if tail_ext > 0.05:
+        parts.append(f"[{vlabel}]tpad=stop_mode=add:"
+                     f"stop_duration={tail_ext:.3f}:color=black[vext]")
+        vlabel = "vext"
     fade_in = float(fx.get("fade_in_s") or 0.0)
     fade_out = float(fx.get("fade_out_s") or 0.0)
     if fade_in:
         parts.append(f"[{vlabel}]fade=t=in:st=0:d={fade_in:.2f}[vfi]")
         vlabel = "vfi"
     if fade_out:
-        st = max(0.0, tl.out_duration - fade_out)
+        st = max(0.0, total_dur - fade_out)
         parts.append(f"[{vlabel}]fade=t=out:st={st:.2f}:d={fade_out:.2f}[vfo]")
         vlabel = "vfo"
     # ---- branded end card ---------------------------------------------
@@ -2193,6 +2224,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
     # program audio: duck under active voiceover, then mix music + voiceover
     alabel = "ac"
+    if tail_ext > 0.05:
+        # The mix is duration=first keyed to the program audio — pad it with
+        # silence to the extended duration or every tail note is cut off.
+        parts.append(f"[ac]apad=pad_dur={tail_ext:.3f}[acx]")
+        alabel = "acx"
     duck_wins = merge_spans(
         [(max(0.0, float(vo["start_output_s"])),
           min(tl.out_duration, float(vo["start_output_s"]) + vd))
@@ -2219,8 +2255,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if music_inputs:
         speech = _speech_spans_out(index, tl)
         for j, (input_idx, item, track_dur) in enumerate(music_inputs):
-            m_start = max(0.0, min(item["start"], tl.out_duration - 0.05))
-            m_end = max(m_start + 0.05, min(item["end"], tl.out_duration))
+            m_start = max(0.0, min(item["start"], total_dur - 0.05))
+            m_end = max(m_start + 0.05, min(item["end"], total_dur))
             dur = m_end - m_start
             # Offset seeks INTO the track — start on the drop instead of the
             # intro. With -stream_loop the trim window runs straight across
@@ -2306,15 +2342,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         if fade_in:
             chain.append(f"afade=t=in:st=0:d={fade_in:.2f}")
         if fade_out:
-            st = max(0.0, tl.out_duration - fade_out)
+            st = max(0.0, total_dur - fade_out)
             chain.append(f"afade=t=out:st={st:.2f}:d={fade_out:.2f}")
         elif outro_on:
             # Without this the programme's music or speech cuts dead into the
             # card's silence. Skipped when the EDL sets its own fade_out,
             # which already lands the programme in silence.
-            d = min(config.OUTRO_AUDIO_TAIL_FADE_S, tl.out_duration / 2)
+            d = min(config.OUTRO_AUDIO_TAIL_FADE_S, total_dur / 2)
             if d > 0.01:
-                chain.append(f"afade=t=out:st={tl.out_duration - d:.2f}"
+                chain.append(f"afade=t=out:st={total_dur - d:.2f}"
                              f":d={d:.2f}")
         parts.append(f"[apre]{','.join(chain) or 'anull'}[{a_prog}]")
 
@@ -2388,13 +2424,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     next_idx += 1
 
     for item in edl.get("music", []):
-        # Round 79f — a piece parked entirely PAST the program's end is
-        # workbench material, not sound: skip it before fetching, or the
-        # mix clamp below would render it as a 50ms blip at the very end.
         # Round 79i — a MUTED piece is the other half of A/B listening:
-        # on the timeline, silent, same skip.
-        if float(item.get("start") or 0.0) >= tl.out_duration - 0.06 \
-                or item.get("mute"):
+        # on the timeline, silent, skipped before it is fetched. (79j made
+        # the beyond-the-program skip obsolete: the render now EXTENDS to
+        # cover unmuted music, so those pieces play over black.)
+        if item.get("mute"):
             continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
@@ -2503,7 +2537,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
            *encode, *_output_clock(fps), "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
     media.run(cmd, progress_cb=progress_cb,
-              expected_out_s=tl.out_duration + outro_s,
+              expected_out_s=tl.out_duration
+                              + music_tail_ext(edl, tl.out_duration) + outro_s,
               cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
 
@@ -2572,13 +2607,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         next_idx += 1
 
     for item in edl.get("music", []):
-        # Round 79f — a piece parked entirely PAST the program's end is
-        # workbench material, not sound: skip it before fetching, or the
-        # mix clamp below would render it as a 50ms blip at the very end.
         # Round 79i — a MUTED piece is the other half of A/B listening:
-        # on the timeline, silent, same skip.
-        if float(item.get("start") or 0.0) >= tl.out_duration - 0.06 \
-                or item.get("mute"):
+        # on the timeline, silent, skipped before it is fetched. (79j made
+        # the beyond-the-program skip obsolete: the render now EXTENDS to
+        # cover unmuted music, so those pieces play over black.)
+        if item.get("mute"):
             continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
@@ -2772,7 +2805,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # at the programme duration the bar hits 99.9% at programme end and then
     # flatlines through the whole end card.
     media.run(cmd, progress_cb=progress_cb,
-              expected_out_s=tl.out_duration + outro_s,
+              expected_out_s=tl.out_duration
+                              + music_tail_ext(edl, tl.out_duration) + outro_s,
               cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
 
@@ -3005,9 +3039,14 @@ def run_render_job(worker_db, job):
         # here must therefore be the OPPOSITE of caption_fp's above: a MISSING
         # stamp means the render predates the card and must be re-encoded,
         # where a missing caption fingerprint is trusted.
+        _tail_out = Timeline(edl_row["json"].get("keep") or [],
+                             edl_row["json"].get("inserts") or [],
+                             edl_row["json"].get("speed")).out_duration
         if fp_ok and outro_current(cached.get("meta"), variant) \
                 and shaping_current(cached.get("meta"), edl_row["json"]) \
                 and transitions_current(cached.get("meta"), edl_row["json"]) \
+                and music_tail_current(cached.get("meta"), edl_row["json"],
+                                       _tail_out) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings):
             return {"render_asset_id": cached["id"],
@@ -3174,6 +3213,7 @@ def run_render_job(worker_db, job):
                               if outro_seconds(variant == "preview") else 0),
                   "gfx_shape_v": config.GFX_SHAPING_VERSION,
                   "trans_v": config.TRANSITION_VERSION,
+                  "tail_v": config.MUSIC_TAIL_VERSION,
                   "wm_v": watermark_version(variant, is_paid,
                                             wm_settings)})
         # Reclaim the renders this one just replaced. Unique-per-render keys

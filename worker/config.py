@@ -39,7 +39,31 @@ AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
 # provider to describe them second-hand.
 AGENT_MULTIMODAL = os.getenv("AGENT_MULTIMODAL", "1") == "1"
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
-LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
+
+# THE NUMBER THAT TURNS A FIVE-SECOND WAIT INTO A DEAD TURN (round 80).
+#
+# The OpenAI SDK retries 429 and 5xx itself, honouring the provider's own
+# `retry-after` header — this is how many times. At 1, a single rate-limit
+# blip ends the turn: MAX_ATTEMPTS_AGENT is 1 (an agent turn is deliberately
+# not re-run by the job lane, because half an edit has already been written),
+# so the SDK's retries are the ONLY retries an agent turn ever gets.
+#
+# What that cost, on Aug 1-2 2026: four agent turns died on a 429 whose body
+# read `Limit 200000, Used 191911, Requested 25416. Please try again in
+# 5.198s.` The provider named the wait, in seconds, in the error — and we
+# turned it into "I'm being rate-limited by the model right now" in the user's
+# chat. One customer asked three times for an edit to a 31-minute football
+# match and was refused three times in eleven minutes; he did not come back.
+# Nothing was wrong with the account: a token-per-minute ceiling is a function
+# of the org's usage TIER, not its balance, and a single agent turn on long
+# footage re-sends a growing 37k->73k-token context every few seconds, so ONE
+# turn can exceed a 200k TPM ceiling entirely on its own.
+#
+# 5 retries with the SDK's exponential backoff rides out a burst of roughly a
+# minute, which is the shape of a TPM window. It cannot mask a real outage
+# (those fail every attempt and still surface) and it costs nothing when the
+# provider is healthy — a retry only happens after a refusal.
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "5"))
 
 # Image generation runs on its OWN provider, independent of AGENT_MODEL.
 # DeepSeek publishes no image-generation model (its lineup is v4-pro/v4-flash
@@ -952,6 +976,13 @@ GFX_SHAPING_VERSION = 1
 # being served the broken file forever. Bump if junction selection changes
 # again.
 TRANSITION_VERSION = 2
+
+# Round 79j — the SEQUENCE is as long as its content: unmuted music past the
+# last scene extends the render over black instead of being cut off at the
+# picture's end. Renders made before this stamp are exactly program-length,
+# so an EDL whose music runs longer must not be served from that cache.
+# Bump if the extension semantics change.
+MUSIC_TAIL_VERSION = 1
 
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera
