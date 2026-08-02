@@ -1334,8 +1334,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # letterboxed at full width instead of being cover-cropped back to
         # the canvas (which would undo the crop). trunc(.../2)*2 keeps the
         # dims legal for yuv420p. crop None emits the exact legacy chain.
+        # fit (round 79): a per-insert override of the program frame mode —
+        # 'pad' shows the whole picture letterboxed instead of cover-cropping
+        # it to the canvas. None emits the exact legacy chain.
         crop = item.get("crop")
-        ins_in, imode = f"insv{j}", mode
+        ins_in, imode = f"insv{j}", (item.get("fit") or mode)
         if crop:
             cx0, cy0, cx1, cy1 = (float(c) for c in crop)
             parts.append(

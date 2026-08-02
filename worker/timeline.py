@@ -314,7 +314,11 @@ def program_blocks(edl):
                         # crop (round 77): the scene shows ONE region of the
                         # clip, letterboxed — consumers that show frames
                         # (look_at) must apply it or they lie about geometry.
-                        "crop": get("crop")})
+                        "crop": get("crop"),
+                        # fit (round 79): per-insert canvas mapping override
+                        # ('pad' letterboxes the whole picture) — same
+                        # consumers as crop.
+                        "fit": get("fit")})
             L = d
         acc += L
     return out
@@ -359,6 +363,11 @@ def describe_program(edl, name_of=None):
             reg = (f", showing only region x{crp[0]:g}-{crp[2]:g} "
                    f"y{crp[1]:g}-{crp[3]:g} of it (letterboxed)"
                    if crp else "")
+            fitv = b.get("fit")
+            if not crp and fitv in ("pad", "pad_blur"):
+                reg = (", fitted whole into the frame ("
+                       + ("blurred backdrop" if fitv == "pad_blur"
+                          else "black bars") + ")")
             lines.append(span + f"inserted {b['media']} '{label}' "
                          f"[{b['id']}]{frm}{reg}")
     return "\n".join(lines)

@@ -833,7 +833,7 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
 
 
 def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
-                        prog_end, is_main, crop=None):
+                        prog_end, is_main, crop=None, fit=None):
     """The round-72 geometry step of _look_at_output: one decoded frame ->
     what the RENDER shows at that output second. Fit first (the same
     cover-crop / letterbox _normalize_video applies, mirrored by
@@ -851,6 +851,8 @@ def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
     z, zcx, zcy = renderer.zoom_state_at(zooms, t, prog_end)
     img = Image.open(fp).convert("RGB")
     changed = False
+    if fit:                          # round 79 — per-insert fit override,
+        mode = fit                   # exactly like the renderer's imode
     if crop and len(crop) == 4:
         w, h = img.size
         img = img.crop((round(float(crop[0]) * w), round(float(crop[1]) * h),
@@ -1041,7 +1043,7 @@ def _look_at_output(ctx, output_times, question):
             fp, sfx = _fit_and_zoom_frame(
                 ctx.workdir, i, fp, t, canvas, gmode, gfocus, fxz,
                 prog_end, blk["kind"] == "footage",
-                crop=blk.get("crop"))
+                crop=blk.get("crop"), fit=blk.get("fit"))
         except Exception as ex:
             print(f"[look] output geometry skipped ({ex})", flush=True)
             sfx = ""
@@ -4668,7 +4670,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
 
 
 def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
-                      rate=None, crop=None, mute=None):
+                      rate=None, crop=None, mute=None, fit=None):
     """Change WHICH PART of an already-spliced clip plays, in place.
 
     Round 61. Nothing could edit an insert once it existed — there was
@@ -4698,9 +4700,30 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
                 f"{have}. Call get_edl to see them.")
     if duration_s is None and clip_start_s is None and rate is None \
-            and crop is None and mute is None:
-        return ("REJECTED: give duration_s, clip_start_s, rate, crop and/or "
-                "mute — otherwise there is nothing to change.")
+            and crop is None and mute is None and fit is None:
+        return ("REJECTED: give duration_s, clip_start_s, rate, crop, mute "
+                "and/or fit — otherwise there is nothing to change.")
+    # fit (round 79): how this ONE scene maps onto the canvas. The program's
+    # cover-crop default beheads a still whose aspect fights the canvas (a
+    # 9:16 logo on a 16:9 program shows only its middle band); 'pad' shows
+    # the whole picture on black bars, 'pad_blur' on a blurred backdrop,
+    # 'crop' forces the cover-crop, ''/'auto' clears back to the default.
+    fit_val = None                   # None = untouched; "clear"; or a mode
+    if fit is not None:
+        s = str(fit).strip().lower().replace("-", "_")
+        if s in ("", "none", "null", "auto", "default", "clear"):
+            fit_val = "clear"
+        elif s in ("pad", "letterbox", "fit", "contain"):
+            fit_val = "pad"
+        elif s in ("pad_blur", "blur", "blurred"):
+            fit_val = "pad_blur"
+        elif s in ("crop", "cover", "fill"):
+            fit_val = "crop"
+        else:
+            return ("REJECTED: fit must be 'pad' (whole picture, black "
+                    "bars), 'pad_blur' (whole picture over a blurred "
+                    "backdrop), 'crop' (fill the frame, edges cut), or "
+                    "'auto' to clear the override.")
     # mute (round 78): the scene's OWN audio off — "mute that clip" had no
     # tool at all (set_volume reaches only the main footage's source time),
     # which on an all-inserts program meant no way to silence anything.
@@ -4817,8 +4840,9 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
             dur = room
     old_crop = list(hit.get("crop") or [])
     old_mute = bool(hit.get("mute"))
+    old_fit = hit.get("fit") or None
     prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0),
-            old_rate, old_crop, old_mute)
+            old_rate, old_crop, old_mute, old_fit)
     hit["duration_s"] = dur
     hit["source_start_s"] = round(off, 2) or None
     if hit["source_start_s"] is None:
@@ -4835,8 +4859,13 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         hit["mute"] = True
     elif mute_val is False:
         hit.pop("mute", None)
+    if fit_val == "clear":
+        hit.pop("fit", None)
+    elif fit_val is not None:
+        hit["fit"] = fit_val
     new_crop = list(hit.get("crop") or [])
     new_mute = bool(hit.get("mute"))
+    new_fit = hit.get("fit") or None
     span = round(dur * r, 2)
     at_rate = f" at {r:g}x" if abs(r - 1.0) > 1e-6 else ""
     reg = ""
@@ -4853,11 +4882,20 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
                f"letterboxed, {bars}")
     elif crop_val == "clear" and old_crop:
         reg = ", back to the full frame"
+    if new_fit == "pad":
+        reg += (", fitted WHOLE into the frame (letterboxed on black "
+                "instead of cover-cropped)")
+    elif new_fit == "pad_blur":
+        reg += ", fitted whole over a blurred backdrop"
+    elif new_fit == "crop":
+        reg += ", cover-cropped to fill the frame"
+    elif fit_val == "clear" and old_fit:
+        reg += ", back to the program's default framing"
     if new_mute:
         reg += ", its own audio MUTED"
     elif mute_val is False and old_mute:
         reg += ", its own audio back ON"
-    if (dur, off, r, new_crop, new_mute) == prev:
+    if (dur, off, r, new_crop, new_mute, new_fit) == prev:
         return (f"insert {id} already plays {off}-{round(off + span, 2)}s"
                 f"{at_rate}{reg}")
     edl["inserts"] = inserts
@@ -11104,14 +11142,24 @@ TOOLS = {
                           "all scenes' (set_volume only reaches the main "
                           "footage; muting every scene = set_volume on the "
                           "kept spans + mute on each video insert). "
-                          "mute=false brings it back.",
+                          "mute=false brings it back. "
+                          "fit (round 79) sets how THIS scene maps onto the "
+                          "canvas: 'pad' shows the WHOLE picture letterboxed "
+                          "on black — THE fix for a portrait image or clip "
+                          "that the default cover-crop beheads ('the image "
+                          "looks corrupted / cut off') — 'pad_blur' fits it "
+                          "over a blurred backdrop, 'crop' forces the "
+                          "cover-crop, 'auto' clears the override.",
                           {"id": {"type": "string"},
                            "duration_s": {"type": "number"},
                            "clip_start_s": {"type": "number"},
                            "rate": {"type": "number"},
                            "crop": {"type": "array",
                                     "items": {"type": "number"}},
-                           "mute": {"type": "boolean"}}),
+                           "mute": {"type": "boolean"},
+                           "fit": {"type": "string",
+                                   "enum": ["pad", "pad_blur", "crop",
+                                            "auto"]}}),
     "move_insert": (move_insert, "MOVE A SPLICED SCENE — reorder an inserted "
                     "clip between any other scenes, in place. after_id is "
                     "the insert it should play right AFTER (the scene map "

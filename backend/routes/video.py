@@ -2963,6 +2963,60 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
                 return edl, f"music {m['id']} now plays {start}-{end}s"
         return edl, "music already gone"
 
+    if op == "split_music":
+        # Round 79 — the timeline's scissors reach the MUSIC lane. "Cut this
+        # part of the song out" was impossible from the UI: trim could only
+        # shorten an edge, so removing a middle passage meant deleting the
+        # whole track and re-adding it twice. The split is sample-continuous:
+        # the tail starts exactly at the head's cut, offset_s advanced by the
+        # head's length, so playback across the boundary is seamless until
+        # the user moves or deletes one half.
+        at = float(args.get("at_program_s") or 0.0)
+        items = list(edl.get("music") or [])
+        hit = next((m for m in items if m.get("id") == args.get("id")), None)
+        if hit is None:
+            # No id (or stale): split whatever plays under the playhead.
+            hit = next((m for m in items
+                        if float(m["start"]) < at < float(m["end"])), None)
+        if hit is None:
+            raise ValueError("No music under the playhead to split — put the "
+                             "playhead inside the track first.")
+        s0, e0 = float(hit["start"]), float(hit["end"])
+        if not (s0 + 0.25 <= at <= e0 - 0.25):
+            raise ValueError("Put the playhead at least 0.25s inside the "
+                             "music to split it.")
+        at = round(at, 2)
+        delta = at - s0
+        tail = json.loads(json.dumps(hit))
+        taken = {m.get("id") for m in items}
+        n = 1
+        while f"mus{n}" in taken:
+            n += 1
+        tail["id"] = f"mus{n}"
+        tail["start"], tail["end"] = at, e0
+        # The tail continues where the head stops. When the item loops a
+        # short track, wrap through the track's real length or the offset
+        # can point past the file and the render's loop math breaks.
+        off = float(hit.get("offset_s") or 0.0) + delta
+        track = next((a for a in assets_by_id.values()
+                      if a.get("storage_key") == hit.get("storage_key")), None)
+        track_dur = float((track or {}).get("duration_s") or 0.0)
+        if hit.get("loop") and track_dur > 0.05:
+            off = off % track_dur
+        tail["offset_s"] = round(off, 3)
+        # Edge fades stay at the OUTER edges: a fade at the cut itself would
+        # dip the music at a boundary the split promises is inaudible.
+        hit["end"] = at
+        if hit.get("fade_out_s"):
+            tail["fade_out_s"] = hit["fade_out_s"]
+        hit["fade_out_s"] = None
+        tail["fade_in_s"] = None
+        items.insert(items.index(hit) + 1, tail)
+        edl["music"] = items
+        return edl, (f"split music {hit['id']} at {at}s — "
+                     f"{hit['id']} plays {s0}-{at}s, {tail['id']} "
+                     f"plays {at}-{e0}s")
+
     if op == "retime_overlay":
         prog = wschemas.program_duration(edl)
         for ov in (edl.get("overlays") or []):
@@ -3244,6 +3298,41 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         return edl, (f"music added {start}-{end}s (mus{n})"
                      + (" — lead audio, no speech under it" if lead else
                         " — ducked under the speech"))
+
+    if op == "add_overlay":
+        # Round 79 — a drop aimed at the B-ROLL lane. The timeline's file
+        # drop used to route on file TYPE alone, so every video became a
+        # spliced scene whether the user aimed at the video lane or not;
+        # aiming at the b-roll lane now lays the media OVER the program (a
+        # full-frame cutaway: the picture switches, the audio keeps playing)
+        # instead of splicing it in and shifting everything after it.
+        asset = assets_by_id.get(int(args.get("asset_id") or 0))
+        if not asset or asset["kind"] not in ("video_clip", "image_ref"):
+            raise ValueError("Pick an uploaded video clip or image for "
+                             "b-roll.")
+        prog = wschemas.program_duration(edl)
+        start = round(min(max(float(args.get("start") or 0.0), 0.0),
+                          max(0.0, prog - 0.3)), 2)
+        kind = "video" if asset["kind"] == "video_clip" else "image"
+        if args.get("duration_s") is not None:
+            dur = float(args["duration_s"])
+        elif kind == "image":
+            dur = 4.0
+        else:
+            dur = float(asset.get("duration_s") or 4.0)
+        dur = round(min(max(dur, 0.3), max(0.3, prog - start)), 2)
+        items = list(edl.get("overlays") or [])
+        taken = {o.get("id") for o in items}
+        n = 1
+        while f"ov{n}" in taken:
+            n += 1
+        items.append({"id": f"ov{n}", "kind": kind,
+                      "asset_key": asset["storage_key"],
+                      "start": start, "duration_s": dur, "fit": "cover"})
+        edl["overlays"] = items
+        return edl, (f"b-roll added {start}-{round(start + dur, 2)}s "
+                     f"(ov{n}) — full-frame over the program, its audio "
+                     f"keeps playing")
 
     if op == "move_music":
         prog = wschemas.program_duration(edl)

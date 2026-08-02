@@ -200,6 +200,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
+# API font name -> the TTF's internal family name, where they differ.
+# PlusJakartaSans-ExtraBold.ttf declares family "Plus Jakarta Sans" with the
+# weight in its subfamily (verified via its name table); requesting the API
+# name as a family would silently fall back to libass's default face.
+GFX_FAMILY_ALIAS = {"Plus Jakarta Sans ExtraBold": "Plus Jakarta Sans"}
+
+
 def _gfx_style_line(name, fam, play_res):
     """Nominal style: family only matters (Bold=0 — the bundled fonts are
     already heavy weights; synthetic emboldening would distort them).
@@ -691,12 +698,17 @@ def build_gfx_ass(edl, out_duration_s, path, play_res=BASE_PLAY_RES):
         return None
 
     # One named style per font, in first-use order over the sorted events —
-    # a stable, deterministic assignment.
+    # a stable, deterministic assignment. The ASS family is normally the API
+    # name itself (Google ships heavy weights as their own families, so
+    # "Poppins Black" IS the TTF's family name) — but Plus Jakarta Sans keeps
+    # its weight in the subfamily, so its API name must map to the real
+    # family or libass falls back to a default face.
     styles, names = [], {}
     for ev in events:
         if ev["font"] not in names:
             names[ev["font"]] = f"G{len(names) + 1}"
-            styles.append((names[ev["font"]], ev["font"]))
+            fam = GFX_FAMILY_ALIAS.get(ev["font"], ev["font"])
+            styles.append((names[ev["font"]], fam))
 
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(GFX_HEADER.format(resx=int(play_res[0]),

@@ -536,6 +536,14 @@ class InsertItem(BaseModel):
     # set_volume), which on an all-inserts program meant no way at all.
     # None (every pre-round-78 EDL) keeps signatures and renders identically.
     mute: Optional[bool] = None
+    # fit (round 79): how THIS insert maps onto the canvas — overriding the
+    # program-wide frame mode for one scene. The default cover-crop is right
+    # for footage but beheads any still whose aspect fights the canvas (a
+    # 9:16 logo card on a 16:9 program shows only its middle band — the user
+    # called it "corrupted"). 'pad' shows the WHOLE picture on black bars,
+    # 'pad_blur' on a blurred backdrop, 'crop' forces the cover-crop. None
+    # (every pre-round-79 EDL) renders byte-identically to the legacy chain.
+    fit: Optional[Literal["crop", "pad", "pad_blur"]] = None
 
     @field_validator("rate")
     @classmethod
@@ -1052,7 +1060,11 @@ TEXT_ANIMS = ("none", "fade", "pop", "slide_up", "blur_in", "whip", "rise",
 TEXT_FONTS = ("Inter Display Black", "Inter Display ExtraBold",
               "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
               "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
-              "Instrument Serif", "DM Serif Display", "Montserrat")
+              "Instrument Serif", "DM Serif Display", "Montserrat",
+              # round 79 — the site's own wordmark face (the navbar renders
+              # "Valmera" in Plus Jakarta Sans 800), already bundled for the
+              # watermark; exposing it lets brand text match the product.
+              "Plus Jakarta Sans ExtraBold")
 
 
 class TextItem(BaseModel):
@@ -1071,7 +1083,8 @@ class TextItem(BaseModel):
                            "Inter Display Bold", "Anton", "Bebas Neue",
                            "Archivo Black", "Poppins Black", "Syne ExtraBold",
                            "Playfair Display Black", "Instrument Serif",
-                           "DM Serif Display", "Montserrat"]] = None
+                           "DM Serif Display", "Montserrat",
+                           "Plus Jakarta Sans ExtraBold"]] = None
     # "none" = instant: full opacity at frame one, gone at the last frame.
     entrance: Optional[Literal["none", "fade", "pop", "slide_up", "blur_in",
                                "whip", "rise", "drop", "typewriter"]] = None
