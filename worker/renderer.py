@@ -2416,7 +2416,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             has_ins_audio = False
         else:
             extra_inputs += ["-i", local]
-            has_ins_audio = media.probe(local)["has_audio"]
+            # mute (round 78): a muted scene takes the silence branch, as if
+            # the clip never had a track. anullsrc is guaranteed whenever any
+            # insert exists, on both program paths.
+            has_ins_audio = media.probe(local)["has_audio"] \
+                and not item.get("mute")
         insert_inputs.append((next_idx, item, has_ins_audio))
         next_idx += 1
 
@@ -2604,7 +2608,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             has_ins_audio = False
         else:
             extra_inputs += ["-i", local]
-            has_ins_audio = media.probe(local)["has_audio"]
+            # mute (round 78): a muted scene takes the silence branch, as if
+            # the clip never had a track. anullsrc is guaranteed whenever any
+            # insert exists, on both program paths.
+            has_ins_audio = media.probe(local)["has_audio"] \
+                and not item.get("mute")
         insert_inputs.append((next_idx, item, has_ins_audio))
         next_idx += 1
 

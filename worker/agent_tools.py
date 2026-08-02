@@ -4668,7 +4668,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
 
 
 def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
-                      rate=None, crop=None):
+                      rate=None, crop=None, mute=None):
     """Change WHICH PART of an already-spliced clip plays, in place.
 
     Round 61. Nothing could edit an insert once it existed — there was
@@ -4698,9 +4698,27 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
                 f"{have}. Call get_edl to see them.")
     if duration_s is None and clip_start_s is None and rate is None \
-            and crop is None:
-        return ("REJECTED: give duration_s, clip_start_s, rate and/or crop "
-                "— otherwise there is nothing to change.")
+            and crop is None and mute is None:
+        return ("REJECTED: give duration_s, clip_start_s, rate, crop and/or "
+                "mute — otherwise there is nothing to change.")
+    # mute (round 78): the scene's OWN audio off — "mute that clip" had no
+    # tool at all (set_volume reaches only the main footage's source time),
+    # which on an all-inserts program meant no way to silence anything.
+    mute_val = None                  # None = untouched; True; False
+    if mute is not None:
+        if isinstance(mute, str):    # stale-MCP passthrough types it string
+            s = mute.strip().lower()
+            if s in ("true", "1", "yes", "on"):
+                mute_val = True
+            elif s in ("false", "0", "no", "off", ""):
+                mute_val = False
+            else:
+                return ("REJECTED: mute must be true or false.")
+        else:
+            mute_val = bool(mute)
+        if hit.get("kind") == "image" and mute_val:
+            return ("REJECTED: an image insert has no audio to mute — "
+                    "stills always play silent.")
     # crop (round 77): the scene shows ONE REGION of the clip, letterboxed.
     # "The full timeline visible, static, with no player and no chat" is
     # geometrically impossible for a zoom — a 16:9 window that spans a 2.6:1
@@ -4798,8 +4816,9 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         if dur > room:
             dur = room
     old_crop = list(hit.get("crop") or [])
+    old_mute = bool(hit.get("mute"))
     prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0),
-            old_rate, old_crop)
+            old_rate, old_crop, old_mute)
     hit["duration_s"] = dur
     hit["source_start_s"] = round(off, 2) or None
     if hit["source_start_s"] is None:
@@ -4812,7 +4831,12 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         hit.pop("crop", None)
     elif crop_val is not None:
         hit["crop"] = crop_val
+    if mute_val is True:
+        hit["mute"] = True
+    elif mute_val is False:
+        hit.pop("mute", None)
     new_crop = list(hit.get("crop") or [])
+    new_mute = bool(hit.get("mute"))
     span = round(dur * r, 2)
     at_rate = f" at {r:g}x" if abs(r - 1.0) > 1e-6 else ""
     reg = ""
@@ -4829,7 +4853,11 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
                f"letterboxed, {bars}")
     elif crop_val == "clear" and old_crop:
         reg = ", back to the full frame"
-    if (dur, off, r, new_crop) == prev:
+    if new_mute:
+        reg += ", its own audio MUTED"
+    elif mute_val is False and old_mute:
+        reg += ", its own audio back ON"
+    if (dur, off, r, new_crop, new_mute) == prev:
         return (f"insert {id} already plays {off}-{round(off + span, 2)}s"
                 f"{at_rate}{reg}")
     edl["inserts"] = inserts
@@ -11070,13 +11098,20 @@ TOOLS = {
                           "holding what sits above it, so crop the insert "
                           "instead and leave the zoom wide over it. "
                           "Fractions of the CLIP's frame, read off a "
-                          "look_at_asset grid; pass 'full' to clear.",
+                          "look_at_asset grid; pass 'full' to clear. "
+                          "mute=true (round 78) silences the scene's OWN "
+                          "audio — THE answer to 'mute that clip' / 'mute "
+                          "all scenes' (set_volume only reaches the main "
+                          "footage; muting every scene = set_volume on the "
+                          "kept spans + mute on each video insert). "
+                          "mute=false brings it back.",
                           {"id": {"type": "string"},
                            "duration_s": {"type": "number"},
                            "clip_start_s": {"type": "number"},
                            "rate": {"type": "number"},
                            "crop": {"type": "array",
-                                    "items": {"type": "number"}}}),
+                                    "items": {"type": "number"}},
+                           "mute": {"type": "boolean"}}),
     "move_insert": (move_insert, "MOVE A SPLICED SCENE — reorder an inserted "
                     "clip between any other scenes, in place. after_id is "
                     "the insert it should play right AFTER (the scene map "

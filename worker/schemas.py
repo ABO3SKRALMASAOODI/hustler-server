@@ -529,6 +529,13 @@ class InsertItem(BaseModel):
                              "pan_left", "pan_right"]] = None
     rate: Optional[float] = None
     crop: Optional[List[float]] = None
+    # mute (round 78): the spliced scene plays SILENT — its own audio is
+    # dropped and the block renders over the shared anullsrc, exactly like a
+    # clip that never had a track. There was NO way to silence an insert
+    # before this ("mute all scenes" could only reach the main footage via
+    # set_volume), which on an all-inserts program meant no way at all.
+    # None (every pre-round-78 EDL) keeps signatures and renders identically.
+    mute: Optional[bool] = None
 
     @field_validator("rate")
     @classmethod
