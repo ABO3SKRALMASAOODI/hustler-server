@@ -2391,7 +2391,10 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         # Round 79f — a piece parked entirely PAST the program's end is
         # workbench material, not sound: skip it before fetching, or the
         # mix clamp below would render it as a 50ms blip at the very end.
-        if float(item.get("start") or 0.0) >= tl.out_duration - 0.06:
+        # Round 79i — a MUTED piece is the other half of A/B listening:
+        # on the timeline, silent, same skip.
+        if float(item.get("start") or 0.0) >= tl.out_duration - 0.06 \
+                or item.get("mute"):
             continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
@@ -2572,7 +2575,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # Round 79f — a piece parked entirely PAST the program's end is
         # workbench material, not sound: skip it before fetching, or the
         # mix clamp below would render it as a 50ms blip at the very end.
-        if float(item.get("start") or 0.0) >= tl.out_duration - 0.06:
+        # Round 79i — a MUTED piece is the other half of A/B listening:
+        # on the timeline, silent, same skip.
+        if float(item.get("start") or 0.0) >= tl.out_duration - 0.06 \
+                or item.get("mute"):
             continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))

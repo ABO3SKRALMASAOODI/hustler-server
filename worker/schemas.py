@@ -432,6 +432,11 @@ class MusicItem(BaseModel):
     # -12dB step). Opt-in per item by add_music so every music item written
     # before this field renders exactly as it always did.
     duck_mode: Optional[Literal["smooth"]] = None
+    # Round 79i — the piece stays on the timeline but does not sound: the
+    # A/B verb (mute one alternative, hear the other) and half of "put one
+    # split below the other". The renderer skips muted pieces before
+    # fetching them; None (every earlier EDL) keeps signatures and renders.
+    mute: Optional[bool] = None
 
 
 class SfxItem(BaseModel):

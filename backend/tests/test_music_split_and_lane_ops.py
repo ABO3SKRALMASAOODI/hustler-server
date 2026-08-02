@@ -169,3 +169,31 @@ def test_slip_music_slides_and_clamps():
     edl3, _ = apply(edl2, "slip_music", {"id": "mus1", "offset_s": -3.0},
                     TRACK_ASSET)
     assert (edl3["music"][0]["offset_s"] or 0.0) == 0.0
+
+
+# ── round 79i: mute is a press, not a deletion ─────────────────────────────
+
+def test_set_music_mute_toggles():
+    edl, desc = apply(base_edl([dict(MUS)]), "set_music_mute",
+                      {"id": "mus1", "mute": True})
+    assert edl["music"][0]["mute"] is True
+    assert "stays on the lane" in desc
+    edl2, _ = apply(edl, "set_music_mute", {"id": "mus1", "mute": False})
+    assert not edl2["music"][0].get("mute")
+
+
+def test_set_insert_mute_toggles_and_rejects_images():
+    e = wschemas.default_edl(SRC_DUR)
+    e["keep"] = [[100.0, 130.0]]
+    e["inserts"] = [
+        {"id": "ins1", "kind": "video", "asset_key": "clips/1/c.mov",
+         "at_output_s": 30.0, "duration_s": 4.0},
+        {"id": "im1", "kind": "image", "asset_key": "images/1/p.jpg",
+         "at_output_s": 30.0, "duration_s": 2.0}]
+    e = wschemas.validate_edl(e, SRC_DUR).model_dump()
+    edl, _ = apply(e, "set_insert_mute", {"id": "ins1", "mute": True})
+    assert edl["inserts"][0]["mute"] is True
+    edl2, _ = apply(edl, "set_insert_mute", {"id": "ins1", "mute": False})
+    assert not edl2["inserts"][0].get("mute")
+    with pytest.raises(ValueError):
+        apply(e, "set_insert_mute", {"id": "im1", "mute": True})

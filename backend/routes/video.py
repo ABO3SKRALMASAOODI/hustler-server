@@ -3397,6 +3397,33 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
                 return edl, f"moved music {m['id']} to {start}s"
         return edl, "music already gone"
 
+    if op == "set_music_mute":
+        # Round 79i — one press: the piece stays, the sound stops. With two
+        # alternatives stacked on the lane, muting one IS the A/B switch.
+        for m in (edl.get("music") or []):
+            if m.get("id") == args.get("id"):
+                if args.get("mute"):
+                    m["mute"] = True
+                    return edl, f"muted music {m['id']} — it stays on the lane"
+                m.pop("mute", None)
+                return edl, f"unmuted music {m['id']}"
+        return edl, "music already gone"
+
+    if op == "set_insert_mute":
+        # Round 79i — mute a SCENE on a press (round 78's InsertItem.mute,
+        # reachable from the timeline instead of only from chat).
+        for it in (edl.get("inserts") or []):
+            if it.get("id") == args.get("id"):
+                if it.get("kind") == "image":
+                    raise ValueError("A still image is always silent — "
+                                     "there is nothing to mute.")
+                if args.get("mute"):
+                    it["mute"] = True
+                    return edl, f"muted scene {it['id']}"
+                it.pop("mute", None)
+                return edl, f"unmuted scene {it['id']}"
+        raise ValueError("That scene is no longer in the edit.")
+
     if op == "remove_music":
         before = edl.get("music") or []
         edl["music"] = [m for m in before if m.get("id") != args.get("id")]
