@@ -511,7 +511,14 @@ class InsertItem(BaseModel):
     the OUTPUT length of the block; the clip consumes duration_s*rate of
     source from source_start_s, video via setpts, audio pitch-corrected via
     atempo. None (the default on every EDL written before round 76) renders
-    byte-identically to 1.0, so old signatures and cached renders hold."""
+    byte-identically to 1.0, so old signatures and cached renders hold.
+    crop (round 77) shows ONE REGION of the clip as the scene —
+    [x0, y0, x1, y1] fractions of the source frame — letterboxed to the
+    canvas (black bars) instead of fighting the surroundings with zoom. A
+    16:9 window can NEVER hold a 2.6:1 UI strip (a full editing timeline)
+    without also holding whatever sits above it; cropping the insert is the
+    honest way to show "the whole timeline, nothing else, static". None
+    renders byte-identically to the uncropped legacy chain."""
     id: str
     asset_key: str
     kind: Literal["video", "image"]
@@ -521,6 +528,7 @@ class InsertItem(BaseModel):
     motion: Optional[Literal["zoom_in", "zoom_out",
                              "pan_left", "pan_right"]] = None
     rate: Optional[float] = None
+    crop: Optional[List[float]] = None
 
     @field_validator("rate")
     @classmethod
@@ -528,6 +536,20 @@ class InsertItem(BaseModel):
         if v is None:
             return None
         return min(max(float(v), INSERT_RATE_MIN), INSERT_RATE_MAX)
+
+    @field_validator("crop")
+    @classmethod
+    def _chk_crop(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, (list, tuple)) or len(v) != 4:
+            raise ValueError("crop must be [x0, y0, x1, y1] fractions of "
+                             "the source frame")
+        x0, y0, x1, y1 = (min(max(float(a), 0.0), 1.0) for a in v)
+        if x1 - x0 < 0.1 or y1 - y0 < 0.1:
+            raise ValueError("crop region must span at least 10% of the "
+                             "frame on each axis")
+        return [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
 
 
 class VoiceoverItem(BaseModel):

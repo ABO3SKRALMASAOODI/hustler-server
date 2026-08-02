@@ -1329,12 +1329,27 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         else:
             parts.append(f"[{idx}:v]trim=start={off:.3f}:end={off + dur:.3f},"
                          f"setpts=PTS-STARTPTS[insv{j}]")
+        # crop (round 77): the scene IS one region of the clip — cut it out
+        # before normalizing, and normalize with 'pad' so the strip lands
+        # letterboxed at full width instead of being cover-cropped back to
+        # the canvas (which would undo the crop). trunc(.../2)*2 keeps the
+        # dims legal for yuv420p. crop None emits the exact legacy chain.
+        crop = item.get("crop")
+        ins_in, imode = f"insv{j}", mode
+        if crop:
+            cx0, cy0, cx1, cy1 = (float(c) for c in crop)
+            parts.append(
+                f"[insv{j}]crop=trunc(iw*{cx1 - cx0:.4f}/2)*2"
+                f":trunc(ih*{cy1 - cy0:.4f}/2)*2"
+                f":trunc(iw*{cx0:.4f}/2)*2"
+                f":trunc(ih*{cy0:.4f}/2)*2[insvc{j}]")
+            ins_in, imode = f"insvc{j}", "pad"
         # Ken Burns motion on image inserts: a per-block zoompan that
         # drifts across the still instead of freezing it.
         motion = item.get("motion") if item["kind"] == "image" else None
         norm_out = f"v_insn{j}" if motion else f"v_ins{j}"
-        _normalize_video(parts, f"insv{j}", norm_out, W, H, fps,
-                         mode, f"i{j}", seg_dur=dur)
+        _normalize_video(parts, ins_in, norm_out, W, H, fps,
+                         imode, f"i{j}", seg_dur=dur)
         if motion:
             nframes = max(1, int(round(dur * fps)))
             prog = f"(on/{nframes})"

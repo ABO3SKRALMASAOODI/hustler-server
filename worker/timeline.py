@@ -310,7 +310,11 @@ def program_blocks(edl):
                         # rate (round 76): output seconds inside this block
                         # cover rate x as much clip — every consumer mapping
                         # an output moment to a clip moment must multiply.
-                        "rate": get("rate") or 1.0})
+                        "rate": get("rate") or 1.0,
+                        # crop (round 77): the scene shows ONE region of the
+                        # clip, letterboxed — consumers that show frames
+                        # (look_at) must apply it or they lie about geometry.
+                        "crop": get("crop")})
             L = d
         acc += L
     return out
@@ -351,8 +355,12 @@ def describe_program(edl, name_of=None):
             label = name or (b["asset_key"] or "?").split("/")[-1]
             frm = (f" from {b['clip_start_s']:g}s of that clip"
                    if b.get("clip_start_s") else "")
+            crp = b.get("crop")
+            reg = (f", showing only region x{crp[0]:g}-{crp[2]:g} "
+                   f"y{crp[1]:g}-{crp[3]:g} of it (letterboxed)"
+                   if crp else "")
             lines.append(span + f"inserted {b['media']} '{label}' "
-                         f"[{b['id']}]{frm}")
+                         f"[{b['id']}]{frm}{reg}")
     return "\n".join(lines)
 
 
@@ -527,12 +535,232 @@ def remap_program_items(edl, old_tl, new_tl):
             return None
         return deltas[0] if abs(deltas[0]) > 0.01 else None
 
+    old_by_id = {_ins_id(i): i for i in old_items}
+    new_items = [i for i in (edl.get("inserts") or [])
+                 if isinstance(i, dict) and i.get("id")]
+    new_by_id = {i["id"]: i for i in new_items}
+
+    class _CannotReason(Exception):
+        """Not enough information to anchor this point — fall back to the
+        window-level logic instead of guessing."""
+
+    def _map_point(t):
+        """OLD program time -> NEW program time, through the content that
+        played there. Kept footage maps via its source second; a spliced
+        scene via its CLIP second — rate-aware, and re-found by asset key
+        when a split gave the covering half a new id. Returns None when that
+        content left the edit; raises _CannotReason when the point cannot be
+        attributed to anything (caller falls back)."""
+        src = old_tl.out_to_src(t)
+        if src is not None:
+            return new_tl.src_to_out(src)
+        for iid, (w0, w1) in old_wins.items():
+            if not (w0 - 1e-6 <= t <= w1 + 1e-6):
+                continue
+            old_it = old_by_id.get(iid)
+            if not isinstance(old_it, dict):
+                raise _CannotReason()
+            if (old_it.get("kind") or "video") == "image":
+                nw = new_wins_all.get(iid)
+                if nw is None:
+                    return None
+                rel = (t - w0) / max(w1 - w0, 1e-6)
+                return nw[0] + rel * (nw[1] - nw[0])
+            r_old = float(old_it.get("rate") or 1.0)
+            clip_t = float(old_it.get("source_start_s") or 0.0) \
+                + (t - w0) * r_old
+            cands = []
+            if iid in new_by_id:
+                cands.append(new_by_id[iid])
+            cands += [ni for ni in new_items
+                      if ni.get("id") != iid
+                      and ni.get("asset_key") == old_it.get("asset_key")
+                      and (ni.get("kind") or "video") == "video"]
+            for ni in cands:
+                nw = new_wins_all.get(ni.get("id"))
+                if nw is None:
+                    continue
+                r_new = float(ni.get("rate") or 1.0)
+                c0 = float(ni.get("source_start_s") or 0.0)
+                c1 = c0 + (nw[1] - nw[0]) * r_new
+                if c0 - 0.05 <= clip_t <= c1 + 0.05:
+                    return nw[0] + (min(max(clip_t, c0), c1) - c0) / r_new
+            return None
+        raise _CannotReason()
+
+    # travel.PATH_MAX_POINTS, restated: this module is loaded standalone by
+    # the backend (importlib, with only schemas registered as
+    # worker_schemas), so it cannot import travel. Keep the two in sync.
+    _PATH_MAX = 24
+
+    def _remap_path_zoom(z):
+        """Round 77. A travelling zoom's KEYFRAMES are program-time points
+        stored as fractions of the window — and remapping only the window
+        endpoints (all any earlier round did) silently stretches the middle
+        whenever content is added, moved, re-rated or removed inside the
+        span, landing every interior beat on the wrong scene. The observed
+        failure: a 3s meme dragged in after scene 6 pushed the later scenes
+        3s right while the keyframe fractions stayed put, so the chat
+        close-up choreographed for the next scene played ON the meme.
+
+        Each keyframe now re-anchors THROUGH ITS OWN CONTENT — the same
+        policy windows already follow — with two repairs on top:
+          * a tight pair (an instant re-aim at a cut) whose halves got
+            pushed apart keeps its jump: the first aim is HELD to just
+            before the second, otherwise the invisible cut-jump becomes a
+            multi-second on-screen drift;
+          * brand-new content (an asset the old edit never held) dropped
+            INSIDE the move plays WIDE — the old aims mean nothing on
+            pixels that did not exist when they were chosen.
+
+        Returns (status, z2, notes): 'ok' | 'drop' | 'fallback'."""
+        s0, e0 = float(z["start"]), float(z["end"])
+        span = e0 - s0
+        pts = [dict(p) for p in (z.get("path") or [])]
+        zid = z.get("id")
+        if span <= 1e-6 or len(pts) < 2:
+            return ("fallback", None, [])
+        mapped, dropped = [], 0
+        try:
+            for p in pts:
+                t_old = s0 + float(p["f"]) * span
+                t_new = _map_point(t_old)
+                if t_new is None:
+                    dropped += 1
+                    continue
+                mapped.append([round(min(max(t_new, 0.0), prog), 3),
+                               t_old, p])
+        except _CannotReason:
+            return ("fallback", None, [])
+        if len(mapped) < 2:
+            return ("drop", None,
+                    [f"note: zoom {zid} was removed — the scenes its "
+                     "keyframes were choreographed on are no longer in the "
+                     "edit."])
+        mapped.sort(key=lambda m: m[0])
+        for k in range(1, len(mapped)):     # keep the instants distinct
+            if mapped[k][0] - mapped[k - 1][0] < 0.05:
+                mapped[k][0] = round(min(mapped[k - 1][0] + 0.05, prog), 3)
+        aug = [(tn, p) for tn, _to, p in mapped]
+
+        def _kf(t, ref, s):
+            return (round(t, 3), {"f": 0.0,
+                                  "cx": ref.get("cx", 0.5),
+                                  "cy": ref.get("cy", 0.5),
+                                  "s": round(float(s), 3)})
+
+        def _near(t):
+            return any(abs(t0 - t) < 0.06 for t0, _p in aug)
+
+        # WIDE PASSAGES FIRST: brand-new content inside the move plays wide.
+        # Order matters — the pair-stretch repair below must see these, or a
+        # separated cut-pair would hold its close-up ACROSS the new scene
+        # instead of letting it play wide.
+        old_assets = {i.get("asset_key") for i in old_items}
+        wide_notes = []
+        for ni in new_items:
+            nid = ni.get("id")
+            if nid in old_wins or ni.get("asset_key") in old_assets:
+                continue
+            nw = new_wins_all.get(nid)
+            if not nw or nw[1] - nw[0] < 0.8:
+                continue
+            nw0, nw1 = nw
+            aug.sort(key=lambda ap: ap[0])
+            before = [ap for ap in aug if ap[0] <= nw0 + 0.05]
+            after = [ap for ap in aug if ap[0] >= nw1 - 0.05]
+            if not before or not after:
+                continue                    # outside the move — no zoom here
+            if any(nw0 + 0.1 < t < nw1 - 0.1 for t, _p in aug):
+                continue                    # something already governs it
+            a = max(before, key=lambda ap: ap[0])
+            b = min(after, key=lambda ap: ap[0])
+            sa = float(a[1].get("s") or 0.0)
+            if max(sa, float(b[1].get("s") or 0.0)) <= 0.3:
+                continue                    # already wide across it
+            inj = [_kf(nw0 + 0.05, b[1], 0.0)]
+            if not _near(nw0 - 0.05):       # hold the old aim to the cut
+                inj.append(_kf(nw0 - 0.05, a[1], sa))
+            if not _near(nw1 - 0.05):       # stay wide to the far cut
+                inj.append(_kf(nw1 - 0.05, b[1], 0.0))
+            if len(aug) + len(inj) > _PATH_MAX:
+                if len(aug) + 1 > _PATH_MAX:
+                    continue
+                inj = [_kf((nw0 + nw1) / 2.0, b[1], 0.0)]
+            aug += inj
+            wide_notes.append(
+                f"note: new scene [{nid}] landed inside zoom {zid}'s move — "
+                "it plays WIDE (the existing aims mean nothing on it); "
+                "re-aim deliberately if it deserves a shot.")
+        # PAIR-STRETCH REPAIR: a tight pair (an instant re-aim at a cut)
+        # whose halves got pushed apart keeps its jump — unless something
+        # (a wide passage) now governs the gap.
+        aug.sort(key=lambda ap: ap[0])
+        for k in range(len(mapped) - 1):
+            tn, to, p = mapped[k]
+            tn2, to2, _p2 = mapped[k + 1]
+            if to2 - to > 0.25 or tn2 - tn <= 0.6:
+                continue
+            if any(tn + 0.02 < t < tn2 - 0.02 for t, _p in aug):
+                continue
+            if len(aug) >= _PATH_MAX:
+                break
+            aug.append((round(tn2 - 0.15, 3), dict(p)))
+        aug.sort(key=lambda ap: ap[0])
+        new_s, new_e = aug[0][0], aug[-1][0]
+        if new_e - new_s < 0.2 or new_s > max(0.0, prog - 0.2):
+            return ("drop", None,
+                    [f"note: zoom {zid} was removed — its choreography no "
+                     "longer fits the edit."])
+        nspan = new_e - new_s
+        new_path = []
+        for t, p in aug:
+            q = {"f": round((t - new_s) / nspan, 4),
+                 "cx": p.get("cx"), "cy": p.get("cy")}
+            if p.get("s") is not None:
+                q["s"] = p["s"]
+            new_path.append(q)
+        z2 = dict(z)
+        z2["start"], z2["end"] = round(new_s, 2), round(new_e, 2)
+        z2["path"] = new_path
+        ss = [float(q["s"]) for q in new_path if q.get("s") is not None]
+        if ss and max(ss) > 0:
+            z2["strength"] = round(max(max(ss), 0.05), 2)
+        unchanged = (
+            z2["start"] == round(s0, 2) and z2["end"] == round(e0, 2)
+            and len(new_path) == len(pts)
+            and all(abs(a["f"] - float(b["f"])) < 0.002
+                    and abs(float(a.get("s") or 0) - float(b.get("s") or 0))
+                    < 0.01
+                    for a, b in zip(new_path, pts)))
+        if unchanged:
+            return ("ok", dict(z), [])
+        notes2 = [f"note: zoom {zid}'s choreography re-anchored to its "
+                  f"scenes ({z2['start']}-{z2['end']}s output time)."]
+        if dropped:
+            notes2.append(
+                f"note: {dropped} keyframe(s) of zoom {zid} were dropped — "
+                "the footage they aimed at left the edit.")
+        return ("ok", z2, notes2 + wide_notes)
+
     fx = dict(edl.get("effects") or {})
     fx_changed = False
     if fx.get("zooms"):
         kept_zooms = []
         for z in fx["zooms"]:
             z = dict(z)
+            if z.get("mode") == "path" and len(z.get("path") or []) >= 2 \
+                    and old_items:
+                status, z2, pnotes = _remap_path_zoom(z)
+                if status != "fallback":
+                    region_notes.extend(pnotes)
+                    if status == "drop":
+                        fx_changed = True
+                        continue
+                    if pnotes:
+                        fx_changed = True
+                    kept_zooms.append(z2)
+                    continue
             moved = remap_program_span(
                 old_tl, new_tl, float(z["start"]), float(z["end"]))
             if moved is None:
@@ -556,6 +784,35 @@ def remap_program_items(edl, old_tl, new_tl):
                             f"{z['start']}-{z['end']}s (output time) so it "
                             "stays on the same spliced footage.")
                         fx_changed = True
+                    elif old_items \
+                            and old_tl.out_to_src(float(z["start"])) is None \
+                            and old_tl.out_to_src(float(z["end"])) is None:
+                        # Round 77: the follow above needs ONE common delta
+                        # across everything under the span; a zoom inside a
+                        # single re-ordered (or re-rated) scene has a
+                        # perfectly knowable new home even when the other
+                        # inserts went elsewhere. Map each endpoint through
+                        # its own content, like path keyframes. PURE-insert
+                        # spans only: a span straddling kept footage and a
+                        # scene that moved 16s away has no contiguous home,
+                        # and stretching it across the gap would cover the
+                        # spliced-in middle — those stay put (clamped), as
+                        # the round-75 test pins.
+                        try:
+                            a2 = _map_point(float(z["start"]))
+                            b2 = _map_point(float(z["end"]))
+                        except _CannotReason:
+                            a2 = b2 = None
+                        if a2 is not None and b2 is not None \
+                                and b2 - a2 >= 0.2:
+                            na, nb = round(a2, 2), round(b2, 2)
+                            if (na, nb) != (z["start"], z["end"]):
+                                z["start"], z["end"] = na, nb
+                                region_notes.append(
+                                    f"note: zoom {z.get('id')} moved to "
+                                    f"{na}-{nb}s (output time) so it stays "
+                                    "on the same spliced footage.")
+                                fx_changed = True
                     # Kept — but CLAMPED to the new program (round 74).
                     # Stylize has clamped this exact case since round 71;
                     # zooms never did, so an insert-anchored zoom left

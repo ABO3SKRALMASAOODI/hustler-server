@@ -833,7 +833,7 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
 
 
 def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
-                        prog_end, is_main):
+                        prog_end, is_main, crop=None):
     """The round-72 geometry step of _look_at_output: one decoded frame ->
     what the RENDER shows at that output second. Fit first (the same
     cover-crop / letterbox _normalize_video applies, mirrored by
@@ -841,12 +841,23 @@ def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
     the render), then the shared zoompan's viewport at t
     (renderer.zoom_state_at) cropped and blown back up. Returns
     (path, label_suffix); the caller keeps the raw frame on any failure — a
-    look degrades, it never dies."""
+    look degrades, it never dies.
+
+    crop (round 77): the block's InsertItem.crop — the render cuts that
+    region out FIRST and letterboxes it, so the preview must do exactly the
+    same or the agent aims zooms at pixels the viewer never sees."""
     from PIL import Image, ImageFilter
 
     z, zcx, zcy = renderer.zoom_state_at(zooms, t, prog_end)
     img = Image.open(fp).convert("RGB")
     changed = False
+    if crop and len(crop) == 4:
+        w, h = img.size
+        img = img.crop((round(float(crop[0]) * w), round(float(crop[1]) * h),
+                        round(float(crop[2]) * w),
+                        round(float(crop[3]) * h)))
+        mode = "pad"                 # the render letterboxes a cropped strip
+        changed = True
     if canvas:
         w, h = img.size
         ow = 640
@@ -1026,9 +1037,11 @@ def _look_at_output(ctx, output_times, question):
         fp, lb = results[i]
         t = wants[i]
         try:
+            blk = _block_at(t)
             fp, sfx = _fit_and_zoom_frame(
                 ctx.workdir, i, fp, t, canvas, gmode, gfocus, fxz,
-                prog_end, _block_at(t)["kind"] == "footage")
+                prog_end, blk["kind"] == "footage",
+                crop=blk.get("crop"))
         except Exception as ex:
             print(f"[look] output geometry skipped ({ex})", flush=True)
             sfx = ""
@@ -3040,6 +3053,16 @@ def _solve_zoom_rect(rect, strength=None):
     allows, derive the pin. strength 0 (a travelling zoom's seamless entry/
     exit) still needs an AIM, so the pin is solved at the rect's fit-zoom
     while the returned strength stays whatever the caller decides."""
+    if isinstance(rect, str):
+        # Round 77: a list argument that crossed a STALE MCP session arrives
+        # as its JSON text (the frozen schema types the new param as a
+        # string and the transport stringifies the value). Scalars already
+        # survive that trip — float("1.6") parses — so lists get the same
+        # tolerance instead of a rejection nobody can act on.
+        try:
+            rect = json.loads(rect)
+        except ValueError:
+            pass
     try:
         rx0, ry0, rx1, ry1 = (float(v) for v in rect)
     except (TypeError, ValueError):
@@ -3330,6 +3353,36 @@ def add_zoom_path(ctx, keyframes, ease=None):
                 s = 0.25
         clean.append({"t": t, "cx": cx, "cy": cy, "strength": s})
     clean.sort(key=lambda p: p["t"])
+    # Round 77 drift check. Interpolation means the camera is IN MOTION for
+    # the ENTIRE gap between two keyframes that disagree — there is no
+    # implicit hold. A path that went straight from a 4.4x close-up to the
+    # next beat 3s later read as a "weird premature pull" the moment it left
+    # the first target: the ease starts pulling immediately, just slowly.
+    # Warn (don't block): a long travel across a wide gap is sometimes the
+    # intent (a slow scenic pan), but usually a missing hold keyframe.
+    drifts = []
+    for p, q in zip(clean, clean[1:]):
+        gap = q["t"] - p["t"]
+        moves = (abs(q["cx"] - p["cx"]) > 0.03
+                 or abs(q["cy"] - p["cy"]) > 0.03)
+        zooms_off = (q["strength"] or 0) - (p["strength"] or 0)
+        if gap > 1.5 and (moves or abs(zooms_off) > 0.3):
+            what = []
+            if moves:
+                what.append("the aim moves")
+            if abs(zooms_off) > 0.3:
+                what.append(f"zoom {p['strength']:g}->{q['strength']:g}")
+            drifts.append(f"{p['t']:g}s->{q['t']:g}s ({gap:.1f}s: "
+                          + ", ".join(what) + ")")
+    drift_note = ""
+    if drifts:
+        drift_note = (
+            "\nDRIFT CHECK: the camera is in continuous motion across "
+            + "; ".join(drifts[:3])
+            + ". If the frame should STAY on the earlier target until just "
+              "before the later beat, REPEAT its keyframe right before that "
+              "beat — a multi-second glide away from a close-up reads as a "
+              "premature pull, not a hold.")
     start = round(min(max(clean[0]["t"], 0.0), max(0.0, prog - 0.2)), 2)
     end = round(min(max(clean[-1]["t"], start), prog), 2)
     if end - start < 0.2:
@@ -3371,7 +3424,7 @@ def add_zoom_path(ctx, keyframes, ease=None):
                 "this tool is that the frame is where you put it. For a "
                 "seamless entry and exit, give the first and last keyframe "
                 "strength 0.")
-    return (written + note
+    return (written + note + drift_note
             + "\nThe frame travels between the keyframes; remove the whole "
               f"move with remove_zoom_path('{item['id']}').")
 
@@ -4615,7 +4668,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
 
 
 def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
-                      rate=None):
+                      rate=None, crop=None):
     """Change WHICH PART of an already-spliced clip plays, in place.
 
     Round 61. Nothing could edit an insert once it existed — there was
@@ -4644,9 +4697,47 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         have = ", ".join(i.get("id", "?") for i in inserts) or "none"
         return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
                 f"{have}. Call get_edl to see them.")
-    if duration_s is None and clip_start_s is None and rate is None:
-        return ("REJECTED: give duration_s, clip_start_s and/or rate — "
-                "otherwise there is nothing to change.")
+    if duration_s is None and clip_start_s is None and rate is None \
+            and crop is None:
+        return ("REJECTED: give duration_s, clip_start_s, rate and/or crop "
+                "— otherwise there is nothing to change.")
+    # crop (round 77): the scene shows ONE REGION of the clip, letterboxed.
+    # "The full timeline visible, static, with no player and no chat" is
+    # geometrically impossible for a zoom — a 16:9 window that spans a 2.6:1
+    # UI strip must also span what sits above it — and the answer is to
+    # crop the INSERT, not to fight the viewport. Accepts [x0,y0,x1,y1]
+    # fractions of the source frame, the same JSON as a string (stale MCP
+    # schemas stringify new list params), or "full"/"none"/[] to clear.
+    crop_val = None                  # None = untouched; "clear"; or [4]
+    if crop is not None:
+        cv = crop
+        if isinstance(cv, str):
+            s = cv.strip().lower()
+            if s in ("", "none", "null", "full", "clear"):
+                cv = []
+            else:
+                try:
+                    cv = json.loads(cv)
+                except ValueError:
+                    return ("REJECTED: crop must be [x0, y0, x1, y1] "
+                            "fractions of the clip's frame ((0,0) = "
+                            "top-left), or 'full' to clear it.")
+        if isinstance(cv, (list, tuple)) and len(cv) == 0:
+            crop_val = "clear"
+        else:
+            try:
+                cx0, cy0, cx1, cy1 = (min(max(float(v), 0.0), 1.0)
+                                      for v in cv)
+            except (TypeError, ValueError):
+                return ("REJECTED: crop must be [x0, y0, x1, y1] fractions "
+                        "of the clip's frame ((0,0) = top-left) — read them "
+                        "off a look_at_asset grid. Pass 'full' to clear.")
+            if cx1 - cx0 < 0.1 or cy1 - cy0 < 0.1:
+                return ("REJECTED: that crop region spans less than 10% of "
+                        "the frame on an axis — x0<x1 and y0<y1, and a "
+                        "sliver that small has nothing to show.")
+            crop_val = [round(cx0, 4), round(cy0, 4),
+                        round(cx1, 4), round(cy1, 4)]
     if hit.get("kind") == "image" and clip_start_s is not None:
         return ("REJECTED: clip_start_s is for video inserts — a still has no "
                 "timeline to seek into. Use duration_s to change how long it "
@@ -4706,8 +4797,9 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         room = round((src_len - off) / r, 2)
         if dur > room:
             dur = room
+    old_crop = list(hit.get("crop") or [])
     prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0),
-            old_rate)
+            old_rate, old_crop)
     hit["duration_s"] = dur
     hit["source_start_s"] = round(off, 2) or None
     if hit["source_start_s"] is None:
@@ -4716,11 +4808,30 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         hit["rate"] = round(r, 3)
     else:
         hit.pop("rate", None)
+    if crop_val == "clear":
+        hit.pop("crop", None)
+    elif crop_val is not None:
+        hit["crop"] = crop_val
+    new_crop = list(hit.get("crop") or [])
     span = round(dur * r, 2)
     at_rate = f" at {r:g}x" if abs(r - 1.0) > 1e-6 else ""
-    if (dur, off, r) == prev:
+    reg = ""
+    if new_crop:
+        rw, rh = new_crop[2] - new_crop[0], new_crop[3] - new_crop[1]
+        if rw >= rh:
+            bars = (f"black bars top+bottom (~{(1 - rh / rw) / 2:.0%} "
+                    "each)")
+        else:
+            bars = (f"black bars left+right (~{(1 - rw / rh) / 2:.0%} "
+                    "each)")
+        reg = (f", showing ONLY region x{new_crop[0]:g}-{new_crop[2]:g} "
+               f"y{new_crop[1]:g}-{new_crop[3]:g} of the frame — "
+               f"letterboxed, {bars}")
+    elif crop_val == "clear" and old_crop:
+        reg = ", back to the full frame"
+    if (dur, off, r, new_crop) == prev:
         return (f"insert {id} already plays {off}-{round(off + span, 2)}s"
-                f"{at_rate}")
+                f"{at_rate}{reg}")
     edl["inserts"] = inserts
     speed = edl.get("speed") or []
     old_tl = Timeline(edl.get("keep") or [], before, speed)
@@ -4729,7 +4840,7 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
     res = ctx.write_edl(
         edl, f"insert {id} now plays {off}-{round(off + span, 2)}s of "
              f"'{os.path.basename(hit['asset_key'])}'{at_rate} "
-             f"({dur}s on the timeline)")
+             f"({dur}s on the timeline){reg}")
     if notes and res.startswith("EDL v"):
         res += "\n" + "\n".join(notes)
     return res
@@ -10950,11 +11061,22 @@ TOOLS = {
                           "the first part, then insert_media the same "
                           "asset_key at the SAME at_output_s with clip_start_s "
                           "set to where the first part ended — the two halves "
-                          "play in the order you created them.",
+                          "play in the order you created them. "
+                          "crop=[x0,y0,x1,y1] (round 77) shows ONE REGION of "
+                          "the clip as the whole scene, letterboxed (black "
+                          "bars) — THE tool for 'show the full timeline "
+                          "strip/panel, nothing else, static': a zoom's 16:9 "
+                          "window can never hold a wide UI strip without also "
+                          "holding what sits above it, so crop the insert "
+                          "instead and leave the zoom wide over it. "
+                          "Fractions of the CLIP's frame, read off a "
+                          "look_at_asset grid; pass 'full' to clear.",
                           {"id": {"type": "string"},
                            "duration_s": {"type": "number"},
                            "clip_start_s": {"type": "number"},
-                           "rate": {"type": "number"}}),
+                           "rate": {"type": "number"},
+                           "crop": {"type": "array",
+                                    "items": {"type": "number"}}}),
     "move_insert": (move_insert, "MOVE A SPLICED SCENE — reorder an inserted "
                     "clip between any other scenes, in place. after_id is "
                     "the insert it should play right AFTER (the scene map "
