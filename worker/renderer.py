@@ -2432,6 +2432,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
+        # Round 79L — the item may be a VIDEO whose soundtrack plays (a song
+        # dropped on the music lane); a file with NO audio stream is skipped
+        # or the graph would reference a stream that does not exist.
+        if not media.has_audio_stream(local):
+            continue
         try:
             track_dur = media.probe_audio_duration(local)
         except Exception:
@@ -2615,6 +2620,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
+        # Round 79L — the item may be a VIDEO whose soundtrack plays (a song
+        # dropped on the music lane); a file with NO audio stream is skipped
+        # or the graph would reference a stream that does not exist.
+        if not media.has_audio_stream(local):
+            continue
         try:
             track_dur = media.probe_audio_duration(local)
         except Exception:

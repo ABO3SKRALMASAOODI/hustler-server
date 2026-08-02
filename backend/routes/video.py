@@ -3306,8 +3306,14 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         return edl, f"voiceover added (vo{n})"
 
     if op == "add_music":
+        # Round 79L — a VIDEO dropped on the music lane IS the request: its
+        # soundtrack becomes the music, its picture never enters the edit
+        # (ffmpeg reads a container's audio track natively; the renderer
+        # skips files with no audio stream). The old flow uploaded the file
+        # and then told the user to go ask the chat for what their drop had
+        # already said.
         asset = assets_by_id.get(int(args.get("asset_id") or 0))
-        if not asset or asset["kind"] != "music":
+        if not asset or asset["kind"] not in ("music", "video_clip"):
             raise ValueError(_pick_audio_error(asset, "the music"))
         prog = wschemas.program_duration(edl)
         start = round(min(max(float(args.get("start") or 0.0), 0.0),
@@ -3344,9 +3350,11 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
                       "duck": not lead,
                       "duck_mode": None if lead else "smooth"})
         edl["music"] = items
+        src_note = (" — using the clip's soundtrack; its picture stays out"
+                    if asset["kind"] == "video_clip" else "")
         return edl, (f"music added {start}-{end}s (mus{n})"
                      + (" — lead audio, no speech under it" if lead else
-                        " — ducked under the speech"))
+                        " — ducked under the speech") + src_note)
 
     if op == "add_overlay":
         # Round 79 — a drop aimed at the B-ROLL lane. The timeline's file

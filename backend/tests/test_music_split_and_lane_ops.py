@@ -197,3 +197,22 @@ def test_set_insert_mute_toggles_and_rejects_images():
     assert not edl2["inserts"][0].get("mute")
     with pytest.raises(ValueError):
         apply(e, "set_insert_mute", {"id": "im1", "mute": True})
+
+
+# ── round 79L: a video dropped on the music lane IS the request ────────────
+
+def test_add_music_accepts_a_video_clips_soundtrack():
+    assets = {5: {"id": 5, "kind": "video_clip",
+                  "storage_key": "clips/1/song-recording.mp4",
+                  "duration_s": 65.6}}
+    edl, desc = apply(base_edl(), "add_music",
+                      {"asset_id": 5, "start": 0.0}, assets)
+    m = edl["music"][0]
+    assert m["storage_key"] == "clips/1/song-recording.mp4"
+    assert "clip's soundtrack" in desc and "picture stays out" in desc
+
+
+def test_add_music_still_rejects_images():
+    with pytest.raises(ValueError):
+        apply(base_edl(), "add_music", {"asset_id": 4, "start": 0.0},
+              IMG_ASSET)

@@ -629,3 +629,21 @@ def probe_audio_duration(path):
         return round(float(out.strip()), 3)
     except (TypeError, ValueError):
         raise MediaError(f"Could not determine audio duration of {path}")
+
+
+def has_audio_stream(path):
+    """True if the file carries at least one audio stream.
+
+    Round 79L — a music item may point at a VIDEO container (a song dropped
+    on the music lane arrives as the only file the user has, and ffmpeg
+    reads its audio track natively). A file with NO audio stream would break
+    the graph ([idx:a] does not exist), so the renderer asks first.
+    Permissive on probe failure: a flaky probe must not silence a track that
+    plays."""
+    try:
+        out = run(["ffprobe", "-v", "error", "-select_streams", "a",
+                   "-show_entries", "stream=index", "-of", "csv=p=0",
+                   path], timeout=60)
+        return bool(str(out).strip())
+    except Exception:
+        return True
