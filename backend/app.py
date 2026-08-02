@@ -33,6 +33,17 @@ def create_app():
          allow_headers=["Content-Type", "Authorization"],
          methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"])
 
+    # Round 79 — which code is this service actually running? The worker and
+    # executor answer that (/health carries code_version); this service could
+    # not, and a stale deploy was only discoverable by a user-facing
+    # validation error quoting last week's schema. Render injects the commit.
+    @app.route("/healthz")
+    def healthz():
+        import os as _os
+        return {"status": "ok", "role": "backend",
+                "commit": (_os.environ.get("RENDER_GIT_COMMIT")
+                           or "unknown")[:12]}
+
     @app.before_request
     def handle_options():
         from flask import request, Response

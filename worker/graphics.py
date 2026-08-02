@@ -200,11 +200,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
-# API font name -> the TTF's internal family name, where they differ.
-# PlusJakartaSans-ExtraBold.ttf declares family "Plus Jakarta Sans" with the
-# weight in its subfamily (verified via its name table); requesting the API
-# name as a family would silently fall back to libass's default face.
-GFX_FAMILY_ALIAS = {"Plus Jakarta Sans ExtraBold": "Plus Jakarta Sans"}
+# API font name -> the ASS family, where they differ. Currently EMPTY, and
+# the reason it exists is the reason it must stay empty until PROVEN
+# otherwise: PlusJakartaSans-ExtraBold.ttf's nameID 1 — the record libass
+# matches — is "Plus Jakarta Sans ExtraBold", the same weight-in-the-family
+# convention as Poppins Black (nameID 16 is the bare "Plus Jakarta Sans",
+# which is what PIL's getname() reports, and trusting THAT produced an
+# alias that aliased the one working name to a miss — every wordmark
+# rendered in libass's thin fallback face). Verify with fontTools nameID 1
+# before ever adding an entry.
+GFX_FAMILY_ALIAS = {}
 
 
 def _gfx_style_line(name, fam, play_res):

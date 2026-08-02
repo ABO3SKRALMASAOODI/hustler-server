@@ -179,5 +179,7 @@ def test_gfx_ass_uses_the_ttf_family_name():
                                   os.path.join(wd, "gfx.ass"), (1280, 720))
     with open(path, encoding="utf-8") as fh:
         ass = fh.read()
-    assert "Plus Jakarta Sans," in ass             # the real family
-    assert "Plus Jakarta Sans ExtraBold," not in ass
+    # nameID 1 of the TTF — what libass actually matches — is the FULL
+    # "Plus Jakarta Sans ExtraBold" (verified with fontTools; the bare
+    # family is only nameID 16, and requesting it renders the fallback).
+    assert "Plus Jakarta Sans ExtraBold," in ass
