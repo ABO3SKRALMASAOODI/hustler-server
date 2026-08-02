@@ -1734,8 +1734,23 @@ def validate_edl(data, duration=None):
                     f"music[{i}].id must be non-empty and unique.")
             seen_music_ids.add(m.id)
         m.start, m.end = _r(m.start), _r(m.end)
-        # music positions live in the FINAL program timeline (incl. inserts)
-        _check_span(f"music[{i}]", m.start, m.end, prog_dur)
+        # Music lives on the FINAL program timeline (incl. inserts) but —
+        # round 79f — may extend PAST the program's end: the timeline is a
+        # workbench, and the unused remainder of a song is material the
+        # user splits, slips and trims, not an error. The renderer clamps
+        # the mix (and the fade-out) to the program, and skips items lying
+        # entirely beyond it, so nothing past the video is ever heard.
+        if not (0.0 <= m.start < m.end):
+            raise EDLValidationError(
+                f"music[{i}] span {m.start}-{m.end} is not a valid range.")
+        if m.end - m.start < 0.05:
+            raise EDLValidationError(
+                f"music[{i}] span {m.start}-{m.end} is shorter than 0.05s.")
+        if m.end > prog_dur + 3600:
+            raise EDLValidationError(
+                f"music[{i}].end {m.end} is more than an hour past the "
+                f"program ({round(prog_dur, 2)}s) — that is a stray value, "
+                "not a workbench tail.")
         if not (GAIN_MIN_DB <= m.gain_db <= GAIN_MAX_DB):
             raise EDLValidationError(
                 f"music[{i}].gain_db {m.gain_db} outside "

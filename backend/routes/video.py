@@ -2975,10 +2975,13 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
                 if abs(d) > 1e-9:
                     m["offset_s"] = round(off + d, 3)
                     off = m["offset_s"]
+                # Round 79f — the window may extend PAST the program: the
+                # timeline is a workbench and the song's tail is material.
+                # The renderer never mixes past the video, so the only real
+                # bound is the track itself (plus schema sanity).
                 end = round(min(max(float(args.get("end", m["end"])
-                                          or prog), start + 0.5), prog), 2)
-                # A window longer than the track's remainder would play
-                # silence off the end (loop excepted) — clamp honestly.
+                                          or prog), start + 0.5),
+                                prog + 3600), 2)
                 if track_dur > 0.05 and not m.get("loop"):
                     end = min(end, round(start + max(0.5, track_dur - off), 2))
                 m["start"], m["end"] = start, end
@@ -3309,9 +3312,13 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         prog = wschemas.program_duration(edl)
         start = round(min(max(float(args.get("start") or 0.0), 0.0),
                           max(0.0, prog - 0.2)), 2)
+        # Round 79f — a dropped song lands at its FULL length, running past
+        # the video's end onto the workbench if it is longer: the user
+        # splits/slips/trims from the whole track, and the renderer only
+        # ever mixes what lies inside the program.
         end_default = start + float(asset.get("duration_s") or prog)
         end = round(min(max(float(args.get("end") or end_default),
-                            start + 0.1), prog), 2)
+                            start + 0.1), prog + 3600), 2)
         items = list(edl.get("music") or [])
         taken = {m.get("id") for m in items}
         n = 1
@@ -3381,10 +3388,12 @@ def _apply_edl_op(edl, op, args, assets_by_id, src_dur=None,
         for m in (edl.get("music") or []):
             if m.get("id") == args.get("id"):
                 length = float(m["end"]) - float(m["start"])
+                # Round 79f — a piece may be parked past the video's end
+                # (the renderer skips it there); only schema sanity bounds.
                 start = round(min(max(float(args.get("start") or 0.0), 0.0),
-                                  max(0.0, prog - length)), 2)
+                                  max(0.0, prog + 3600 - length)), 2)
                 m["start"] = start
-                m["end"] = round(min(start + length, prog), 2)
+                m["end"] = round(start + length, 2)
                 return edl, f"moved music {m['id']} to {start}s"
         return edl, "music already gone"
 

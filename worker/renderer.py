@@ -2388,6 +2388,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     next_idx += 1
 
     for item in edl.get("music", []):
+        # Round 79f — a piece parked entirely PAST the program's end is
+        # workbench material, not sound: skip it before fetching, or the
+        # mix clamp below would render it as a 50ms blip at the very end.
+        if float(item.get("start") or 0.0) >= tl.out_duration - 0.06:
+            continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
         try:
@@ -2564,6 +2569,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         next_idx += 1
 
     for item in edl.get("music", []):
+        # Round 79f — a piece parked entirely PAST the program's end is
+        # workbench material, not sound: skip it before fetching, or the
+        # mix clamp below would render it as a 50ms blip at the very end.
+        if float(item.get("start") or 0.0) >= tl.out_duration - 0.06:
+            continue
         local = music_source(item["storage_key"],
                              lambda k: _fetch(k, "music", next_idx))
         try:
