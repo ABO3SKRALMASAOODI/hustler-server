@@ -287,3 +287,151 @@ def _change_ranges(prev, new):
     return {"out_ranges": [[round(a, 2), round(b, 2)] for a, b in merged],
             "cut_ranges": [[round(a, 2), round(b, 2)] for a, b in merged_cuts],
             "global": bool(glob)}
+
+
+# ── round 81: the self-check looks WHERE THE EDIT HAPPENED ────────────────
+# change_ranges answers "where do I flash the scrubber"; verify_plan answers
+# a stronger question: "what should a frame taken at that moment SHOW, if my
+# edit landed?" The render self-check has always reviewed a 3x3 sheet of the
+# WHOLE programme sampled evenly — nine tiles for any length of video, blind
+# to where the turn actually worked, asking a generic "anything broken?".
+# So a mis-rendered title at 2.6s of a 20-minute edit had a 9-in-1200 chance
+# of even appearing in a tile, and no tile came with the sentence that makes
+# the check falsifiable ("this should read INTO A VIDEO EDITOR, behind the
+# person"). Claims are that sentence, one per changed item, each with the
+# output second a frame should be pulled at.
+
+VERIFY_MAX_TILES = 6
+
+
+def _clip_name(key):
+    return str(key or "").rsplit("/", 1)[-1] or "clip"
+
+
+def verify_plan(prev, new, max_tiles=VERIFY_MAX_TILES):
+    """[(output_second, claim), ...] for the frame-checkable changes between
+    two EDLs, time-sorted and capped. Never raises; [] when nothing that a
+    single frame could confirm changed (cuts, music, speed and global passes
+    have their own deterministic audits)."""
+    try:
+        return _verify_plan(prev or {}, new or {}, int(max_tiles))
+    except Exception:
+        return []
+
+
+def _verify_plan(prev, new, max_tiles):
+    tl_new = Timeline(_spans(new.get("keep")), new.get("inserts"),
+                      new.get("speed"))
+    dur = tl_new.out_duration
+    if dur <= 0.2:
+        return []
+    claims = []
+
+    def at(t):
+        return min(max(float(t), 0.05), dur - 0.05)
+
+    def mid(s, e):
+        return at((float(s) + float(e or s)) / 2.0)
+
+    # texts — the claim carries the exact words, and whether they belong
+    # BEHIND the subject (the one placement a generic damage question can
+    # never falsify: front-rendered words over the person look "fine").
+    p, n = _by_id(prev.get("texts"), "tx"), _by_id(new.get("texts"), "tx")
+    for k, it in n.items():
+        if k in p and _canon(p[k]) == _canon(it):
+            continue
+        s = float(it.get("start", 0.0))
+        e = it.get("end")
+        where = ("with the person's body occluding the letters (the words "
+                 "sit BEHIND them)" if it.get("behind")
+                 else "over the picture")
+        claims.append((mid(s, e), 'the text "'
+                       + str(it.get("text") or "")[:60]
+                       + f'" is on screen and reads EXACTLY that, {where}'))
+    for k, it in p.items():
+        if k not in n:
+            claims.append((at(it.get("start", 0.0)),
+                           'the removed text "'
+                           + str(it.get("text") or "")[:40]
+                           + '" must NOT appear anywhere in the frame'))
+
+    # inserts — a spliced clip either fills the frame at its window or the
+    # splice failed; id-level is enough for a claim (a split's re-minted
+    # tail still truthfully "plays this clip here").
+    wins_new = insert_windows(new.get("inserts"), tl_new)
+    ip, im = _by_id(prev.get("inserts"), "ins"), \
+        _by_id(new.get("inserts"), "ins")
+    for k, it in im.items():
+        if k in ip and _canon(ip[k]) == _canon(it):
+            continue
+        w = wins_new.get(k) or wins_new.get(it.get("id"))
+        if not w:
+            continue
+        claims.append((mid(w[0], w[1]),
+                       f'the spliced {it.get("kind") or "clip"} '
+                       f'"{_clip_name(it.get("asset_key"))}" is what fills '
+                       "the frame here (not the main footage)"))
+    for k, it in ip.items():
+        if k not in im:
+            claims.append((at(it.get("at_output_s") or 0.0),
+                           f'the removed {it.get("kind") or "clip"} '
+                           f'"{_clip_name(it.get("asset_key"))}" must NOT '
+                           "appear"))
+
+    # overlays — b-roll laid OVER the program.
+    p, n = _by_id(prev.get("overlays"), "ov"), _by_id(new.get("overlays"),
+                                                      "ov")
+    for k, it in n.items():
+        if k in p and _canon(p[k]) == _canon(it):
+            continue
+        s = float(it.get("start", 0.0))
+        claims.append((mid(s, s + float(it.get("duration_s") or 0.0)),
+                       f'the b-roll overlay '
+                       f'"{_clip_name(it.get("asset_key"))}" covers the '
+                       "program here"))
+    for k, it in p.items():
+        if k not in n:
+            claims.append((at(it.get("start", 0.0)),
+                           "the removed overlay must NOT appear"))
+
+    # zooms — an aimed zoom is a COMPOSED close-up and fails by clipping its
+    # subject or centring on nothing (round 72's launch-video miss).
+    fx_p, fx_n = (prev.get("effects") or {}), (new.get("effects") or {})
+    p, n = _by_id(fx_p.get("zooms"), "z"), _by_id(fx_n.get("zooms"), "z")
+    for k, it in n.items():
+        if k in p and _canon(p[k]) == _canon(it):
+            continue
+        aimed = (it.get("cx") is not None or it.get("cy") is not None
+                 or it.get("path"))
+        claims.append((mid(it.get("start", 0.0), it.get("end")),
+                       "a deliberate close-up with its subject fully in "
+                       "frame — FAILED if the subject is clipped at an edge "
+                       "or the shot centres on empty space" if aimed else
+                       "a visible push-in, tighter than the shots around it"))
+
+    # windowed stylize — the effect must be visible where it was placed.
+    p = _by_id([s for s in (fx_p.get("stylize") or [])
+                if s.get("start") is not None], "st")
+    n = _by_id([s for s in (fx_n.get("stylize") or [])
+                if s.get("start") is not None], "st")
+    for k, it in n.items():
+        if k in p and _canon(p[k]) == _canon(it):
+            continue
+        claims.append((mid(it.get("start", 0.0), it.get("end")),
+                       f'a deliberate {it.get("kind") or "stylize"} effect '
+                       "is visibly applied to the picture"))
+
+    claims.sort(key=lambda c: c[0])
+    # Two claims about the same instant share one tile; then cap by thinning
+    # evenly so a big batch still gets looked at across its whole span
+    # rather than only at its start.
+    merged = []
+    for t, c in claims:
+        if merged and abs(merged[-1][0] - t) < 0.2:
+            merged[-1] = (merged[-1][0], merged[-1][1] + "; ALSO: " + c)
+        else:
+            merged.append((round(float(t), 2), c))
+    if len(merged) > max_tiles:
+        step = len(merged) / float(max_tiles)
+        merged = [merged[int(i * step)] for i in range(max_tiles)]
+    return merged

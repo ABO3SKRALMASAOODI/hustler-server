@@ -433,6 +433,19 @@ def any_asset_by_sha(conn, kind, sha256):
         return cur.fetchone()
 
 
+def latest_render_version(conn, project_id, variant):
+    """EDL version of the newest render of this variant, or None — the
+    baseline for round 81's verify plan: the render the user last SAW is the
+    state a "what changed" claim must be written against."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT (meta->>'edl_version')::int AS v FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = %s
+                       ORDER BY id DESC LIMIT 1""", (project_id, variant))
+        row = cur.fetchone()
+        return row["v"] if row else None
+
+
 def find_render_asset(conn, project_id, variant, edl_version):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets

@@ -3205,6 +3205,21 @@ def run_render_job(worker_db, job):
                 max(0.1, out_dur - outro_seconds(variant == "preview")))
         except Exception:
             sheet_local = None
+        # Round 81: the dispatcher may name the exact output seconds its edit
+        # changed (edl_diff.verify_plan); frames pulled HERE cost a few seeks
+        # on a file we already hold, where pulling them dispatcher-side would
+        # mean downloading the whole render to the box that must never decode
+        # video. Best-effort like the sheet — a render never fails over its
+        # own review artwork, and an executor that predates this field simply
+        # ignores it.
+        verify_local = None
+        vtimes = (job["payload"].get("verify_times") or [])
+        if vtimes:
+            try:
+                verify_local = os.path.join(workdir, "verify_sheet.jpg")
+                sheets.build_frames_sheet(out_local, verify_local, vtimes)
+            except Exception:
+                verify_local = None
         _mark("sheet_s")
 
         stamp = _render_stamp(job_id)
@@ -3214,6 +3229,10 @@ def run_render_job(worker_db, job):
         if sheet_local and os.path.exists(sheet_local):
             sheet_key = f"media/{project_id}/{stamp}_s.jpg"
             storage.upload_file(sheet_local, sheet_key, "image/jpeg")
+        verify_sheet_key = None
+        if verify_local and os.path.exists(verify_local):
+            verify_sheet_key = f"media/{project_id}/{stamp}_vf.jpg"
+            storage.upload_file(verify_local, verify_sheet_key, "image/jpeg")
         worker_db.run(dbx.set_progress, job_id, 96)
         _mark("upload_s")
 
@@ -3224,7 +3243,8 @@ def run_render_job(worker_db, job):
             width=out_info["width"], height=out_info["height"],
             fps=out_info["fps"],
             meta={"variant": variant, "edl_version": version,
-                  "sheet_key": sheet_key, "src_sha256": src_sha,
+                  "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
+                  "src_sha256": src_sha,
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
                   "outro_v": (config.OUTRO_VERSION
                               if outro_seconds(variant == "preview") else 0),
@@ -3246,6 +3266,7 @@ def run_render_job(worker_db, job):
                 for a in old:
                     keys.append(a["storage_key"])
                     keys.append((a.get("meta") or {}).get("sheet_key"))
+                    keys.append((a.get("meta") or {}).get("verify_sheet_key"))
                 storage.delete_keys(keys)
                 worker_db.run(dbx.delete_assets, [a["id"] for a in old])
                 print(f"[render {job_id}] pruned {len(old)} superseded "
@@ -3263,6 +3284,7 @@ def run_render_job(worker_db, job):
             print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
                   flush=True)
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
+                "verify_sheet_key": verify_sheet_key,
                 "duration_s": out_dur, "edl_version": version,
                 "variant": variant, "timings": timings,
                 "midword_audit": mw}

@@ -219,6 +219,50 @@ def build_timestamp_sheet(frames, out_path):
     return out_path
 
 
+def build_frames_sheet(video_path, out_path, times, cols=3):
+    """Numbered tiles at EXPLICIT times — round 81's verify sheet.
+
+    build_result_sheet samples the whole render evenly, which is the right
+    shape for "is anything broken anywhere". This one is the other question
+    — "did the thing I just changed land" — so the caller picks the moments
+    (the output seconds its edit touched) and each tile is numbered so a
+    claims list can address it ("tile 2 at 3.6s should show ...")."""
+    import media
+    font = _font()
+    times = [float(t) for t in (times or [])][:9]
+    if not times:
+        raise ValueError("no times")
+    tmp_frames = []
+    for i, t in enumerate(times):
+        fp = out_path + f".vframe{i}.jpg"
+        try:
+            media.frame_at(video_path, t, fp, width=426)
+            tmp_frames.append((t, fp))
+        except Exception:
+            tmp_frames.append((t, None))
+    cols = max(1, min(int(cols), len(tmp_frames)))
+    rows = (len(tmp_frames) + cols - 1) // cols
+    canvas = Image.new("RGB", (cols * TILE_W, rows * (TILE_H + LABEL_H)),
+                       (12, 12, 12))
+    draw = ImageDraw.Draw(canvas)
+    for i, (t, fp) in enumerate(tmp_frames):
+        x = (i % cols) * TILE_W
+        y = (i // cols) * (TILE_H + LABEL_H)
+        if fp and os.path.exists(fp):
+            try:
+                img = Image.open(fp).convert("RGB")
+                img.thumbnail((TILE_W, TILE_H))
+                canvas.paste(img, (x + (TILE_W - img.width) // 2,
+                                   y + (TILE_H - img.height) // 2))
+            except Exception:
+                pass
+            os.unlink(fp)
+        draw.text((x + 6, y + TILE_H + 4), f"{i + 1} · {_ts(t)}",
+                  fill=(235, 235, 235), font=font)
+    canvas.save(out_path, "JPEG", quality=85)
+    return out_path
+
+
 def build_result_sheet(video_path, out_path, duration, grid=3):
     """3x3 evenly-sampled sheet of a RENDER, for the agent's self-check."""
     import media

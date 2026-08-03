@@ -9506,8 +9506,16 @@ def render_preview(ctx):
             (ctx.last_preview or {}).get("edl_version") == version:
         return (f"Preview v{version} is already rendered and attached — "
                 "no need to render again.")
+    # Round 81: name the output seconds this edit changed, so the render job
+    # can pull a frame at each and the self-check can review the CLAIM
+    # ("this should read X, behind the person") instead of nine even samples
+    # of the whole programme that the edit may not even appear in.
+    plan = _verify_plan_for(ctx, row)
+    payload = {"edl_version": version}
+    if plan:
+        payload["verify_times"] = [t for t, _ in plan]
     job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id, ctx.job["user_id"],
-                        "preview", {"edl_version": version})
+                        "preview", payload)
     deadline = time.time() + config.PREVIEW_WAIT_TIMEOUT_S
     while time.time() < deadline:
         time.sleep(1)
@@ -9534,10 +9542,18 @@ def render_preview(ctx):
             # A cached result is byte-identical to a render that was already
             # self-checked — re-running the paid vision call would bill the
             # user's turn for confirming an unchanged file.
-            check = None if result.get("cached") else _self_check(ctx, result)
+            check = None if result.get("cached") \
+                else _self_check(ctx, result, plan)
             if check:
                 ctx.last_selfcheck = check
                 note += f" Visual self-check: {check}"
+                if plan and "all landed" not in check.lower() \
+                        and "looks clean" not in check.lower():
+                    note += (" If a claim FAILED, fix that exact item and "
+                             "re-render ONCE to confirm — if it fails a "
+                             "second time, stop re-trying and tell the user "
+                             "plainly what you attempted and what still "
+                             "looks wrong.")
             mw = result.get("midword_audit") or []
             if mw:
                 note += (" MID-WORD AUDIT: " + "; ".join(mw[:5])
@@ -9626,7 +9642,28 @@ def _frame_context(edl):
     return f"The output frame is tightly center-cropped to {ratio}. "
 
 
-def _self_check(ctx, result):
+def _verify_plan_for(ctx, row):
+    """[(output_second, claim)] for what this render changes vs the render
+    the user last saw — round 81. Baseline is the newest previewed version
+    (this turn's, else the project's), because claims are only meaningful
+    against the picture the user is still watching. Never raises; [] means
+    the self-check falls back to the whole-video sheet alone."""
+    try:
+        prev_v = (ctx.last_preview or {}).get("edl_version")
+        if prev_v is None:
+            prev_v = ctx.db.run(dbx.latest_render_version, ctx.project_id,
+                                "preview")
+        if prev_v is None or int(prev_v) == int(row["version"]):
+            return []
+        prev = ctx.db.run(dbx.get_edl_version, ctx.project_id, int(prev_v))
+        if not prev:
+            return []
+        return edl_diff.verify_plan(prev["json"], row["json"])
+    except Exception:
+        return []
+
+
+def _self_check(ctx, result, plan=None):
     sheet_key = result.get("sheet_key")
     if not sheet_key or not llm.vision_available():
         return None
@@ -9642,17 +9679,47 @@ def _self_check(ctx, result):
         zoom_note = _aimed_zoom_note(edl)
     except Exception:
         frame_note = fx_note = zoom_note = ""
+    # Round 81: when the render carried a verify sheet, the check reviews the
+    # CLAIMS first — one numbered tile per changed moment, each with the
+    # sentence that makes it falsifiable — and only then the generic damage
+    # question. Same single vision call either way; a stale executor that
+    # returned no verify sheet degrades to the sheet-only check unchanged.
+    images, names = [local], [sheet_key]
+    claims_note = ""
+    vkey = result.get("verify_sheet_key")
+    if plan and vkey:
+        vlocal = os.path.join(ctx.workdir, "verify_sheet.jpg")
+        try:
+            storage.download_to(vkey, vlocal)
+            images.append(vlocal)
+            names.append(vkey)
+            lines = " ".join(
+                f"Tile {i + 1} ({t:.1f}s): {c}."
+                for i, (t, c) in enumerate(plan))
+            claims_note = (
+                "IMAGE 2 samples ONLY the moments this edit CHANGED, one "
+                "numbered tile per claim. Check each claim against its "
+                f"tile: {lines} Answer per tile with LANDED or FAILED plus "
+                "a few words (a FAILED verdict must say what the tile "
+                "actually shows). Then review IMAGE 1. ")
+        except Exception:
+            pass
+    sheet_intro = ("IMAGE 1 is" if claims_note else "This is") + \
+        (" a 3x3 contact sheet sampled evenly from an automatically "
+         "edited video.")
     return llm.ask_vision(
-        frame_note + fx_note + zoom_note +
-        "This is a 3x3 contact sheet sampled evenly from an automatically "
-        "edited video. In one or two sentences: does anything look broken "
+        frame_note + fx_note + zoom_note + claims_note + sheet_intro +
+        " In one or two sentences: does anything look broken "
         "(unexpected black frames, half-cut faces mid-action, missing "
         "captions if text was expected)? Frames showing a DELIBERATE effect "
         "listed above are expected, not defects — but say so plainly if one "
         "of them looks OVERDONE for this footage (harsh, cheap, or so strong "
-        "the shot underneath is lost). If it looks fine, say 'looks clean'.",
-        [local], max_tokens=200, purpose="vision_selfcheck",
-        image_names=[sheet_key])
+        "the shot underneath is lost). " +
+        ("End with exactly 'all landed' if every numbered claim landed and "
+         "nothing looks broken; otherwise name what failed." if claims_note
+         else "If it looks fine, say 'looks clean'."),
+        images, max_tokens=(320 if claims_note else 200),
+        purpose="vision_selfcheck", image_names=names)
 
 
 def _deliberate_fx_note(edl):
