@@ -880,8 +880,9 @@ def _t_watch_video(tok, args):
             text += ("\n\n(The embedded copy could not be read back from "
                      "storage — use the link.)")
     # Text FIRST: it is what orients the model — which clock the video runs
-    # on, what is in it, what to do next — and it says the video follows.
+    # on, what is in it, what to do next — and it says the pictures follow.
     content = [{"type": "text", "text": f"{text}\n\nDownload: {url}"}]
+    content += _image_blocks(result.get("images"))
     if blob:
         content.append({"type": "resource", "resource": {
             "uri": url, "mimeType": video.get("mime") or "video/mp4",
@@ -919,6 +920,37 @@ def _error(req_id, code, message):
 
 def _text(s, is_error=False):
     return {"content": [{"type": "text", "text": s}], "isError": is_error}
+
+
+# Biggest picture to carry in a reply. A contact sheet is a few hundred KB;
+# this is a sanity bound, not a budget the caller ever notices.
+IMAGE_MAX_BYTES = int(float(os.getenv("MCP_IMAGE_MAX_MB", "6")) * 1048576)
+
+
+def _image_blocks(images):
+    """The worker's captured frames -> MCP image content.
+
+    IMAGE IS THE ONE NON-TEXT BLOCK WORTH TRUSTING. Video as a resource blob
+    ended two live sessions (see watch_video), but images are the oldest and
+    most widely implemented content type in the protocol, they are what the
+    in-house agent already receives, and one contact sheet is ~1.5k tokens
+    rather than four million characters. A client that drops them still has
+    the text and the link, so the downside is the behaviour we had before."""
+    out = []
+    for img in images or []:
+        key = (img or {}).get("storage_key")
+        if not key:
+            continue
+        raw = storage.get_object_whole(key, IMAGE_MAX_BYTES)
+        if not raw:
+            continue
+        label = img.get("label")
+        if label:
+            out.append({"type": "text", "text": f"[{label}]"})
+        out.append({"type": "image",
+                    "data": base64.b64encode(raw).decode("ascii"),
+                    "mimeType": "image/jpeg"})
+    return out
 
 
 def _handle(tok, msg):
@@ -979,7 +1011,15 @@ def _handle(tok, msg):
                     "Call tools/list for what is actually available — a tool "
                     "whose backing service is unconfigured is hidden rather "
                     "than failing at call time.", True))
-            return _result(req_id, _text(_run_tool_job(tok, name, args)))
+            # raw, because a look tool now answers with PICTURES as well as
+            # words — the outside model reads them itself instead of being
+            # told what our vision model saw in them.
+            out = _run_tool_job(tok, name, args, raw=True)
+            body = out.get("text") or json.dumps(out)
+            content = [{"type": "text", "text": body}] \
+                + _image_blocks(out.get("images"))
+            return _result(req_id, {"content": content,
+                                    "isError": bool(out.get("is_error"))})
         except Exception as e:
             current_app.logger.exception("mcp tool %s failed", name)
             return _result(req_id, _text(f"{name} errored: {e}", True))

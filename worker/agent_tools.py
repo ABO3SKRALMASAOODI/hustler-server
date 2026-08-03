@@ -115,15 +115,21 @@ class ToolContext:
         self._perception = None       # main video's audio analysis, cached
         self._asset_perception = {}   # asset/library key -> audio analysis
         self.last_preview = None      # set by render_preview
-        # Frames a look tool captured for the AGENT'S OWN EYES this step
-        # (round 67): [(label, jpeg_path)]. The loop injects them as image
-        # parts in a user message right after the tool results, then clears
-        # the list. Only populated when llm.agent_sees(model) AND
-        # direct_sight is on — the agent loop sets it, because only a loop
-        # that appends messages can actually deliver a picture; an MCP tool
-        # call's result is text and must get the vision-provider answer.
+        # Frames a look tool captured for whoever is DOING THE EDITING this
+        # step (round 67): [(label, jpeg_path)].
+        #
+        # Two consumers, and they were not equal until round 83e. The agent
+        # loop injects them as image parts in a user message right after the
+        # tool results (direct_sight, gated on llm.agent_sees). The MCP
+        # surface could not — "an MCP tool call's result is text", said the
+        # comment that used to live here — so an outside model got a PARAGRAPH
+        # from our vision model describing frames it never saw. That was true
+        # of the plumbing, never of the protocol: a tools/call result carries
+        # image content perfectly well. sight_out says the caller takes the
+        # pictures themselves, and mcp_exec drains them into the reply.
         self.pending_images = []
         self.direct_sight = False
+        self.sight_out = False
         self.last_selfcheck = None    # vision one-liner from the last preview
         # Craft findings from the most recent REAL preview render, and the EDL
         # version they were measured on. The loop reads these to stop a turn
@@ -810,7 +816,13 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
             for fp in frames]
     except Exception:
         gridded = frames
-    if getattr(ctx, "direct_sight", False) and llm.agent_sees(ctx.agent_model):
+    # sight_out (MCP): the model on the other end reads the pictures itself,
+    # so there is nothing to gate on OUR agent model — and nothing to pay a
+    # vision model for. direct_sight (the in-house loop): only if this model
+    # can take image parts at all.
+    if getattr(ctx, "sight_out", False) or \
+            (getattr(ctx, "direct_sight", False)
+             and llm.agent_sees(ctx.agent_model)):
         try:
             if len(gridded) == 1:
                 sheet = gridded[0]

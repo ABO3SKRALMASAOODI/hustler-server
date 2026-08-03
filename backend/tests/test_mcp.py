@@ -273,6 +273,39 @@ def test_editor_tool_returns_the_workers_own_text(client):
     assert r.get_json()["result"].get("isError") is not True
 
 
+def test_a_look_tool_returns_the_PICTURES_not_a_paragraph(client, monkeypatch):
+    """THE POINT OF ROUND 83e. Over MCP, look_at used to run OUR vision model
+    over the frames and send the outside model a description — second-hand,
+    billed to us, and impossible to argue with. A tools/call result carries
+    image content perfectly well; the plumbing just never did. Now the model
+    that is doing the editing sees the footage itself."""
+    DB["job_result"] = {"text": "Captured 3 frames.",
+                        "images": [{"storage_key": "media/3/look_a.jpg",
+                                    "label": "@4.20s"}]}
+    monkeypatch.setattr(mcpmod.storage, "get_object_whole",
+                        lambda key, cap: b"\xff\xd8jpegbytes")
+    res = rpc(client, "tools/call", STATIC_TOKEN,
+              {"name": "get_transcript", "arguments": {}}).get_json()["result"]
+    kinds = [c["type"] for c in res["content"]]
+    assert kinds == ["text", "text", "image"]     # body, label, picture
+    img = res["content"][2]
+    assert img["mimeType"] == "image/jpeg"
+    assert base64.b64decode(img["data"]) == b"\xff\xd8jpegbytes"
+
+
+def test_an_unreadable_frame_never_costs_the_answer(client, monkeypatch):
+    """The words are the tool's result; the picture is an attachment. A
+    storage hiccup must degrade to what we had before, not fail the call."""
+    DB["job_result"] = {"text": "Captured 3 frames.",
+                        "images": [{"storage_key": "media/3/gone.jpg"}]}
+    monkeypatch.setattr(mcpmod.storage, "get_object_whole",
+                        lambda key, cap: None)
+    res = rpc(client, "tools/call", STATIC_TOKEN,
+              {"name": "get_transcript", "arguments": {}}).get_json()["result"]
+    assert [c["type"] for c in res["content"]] == ["text"]
+    assert res.get("isError") is not True
+
+
 def test_unknown_tool_explains_the_likely_reason(client):
     r = rpc(client, "tools/call", STATIC_TOKEN,
             {"name": "nope", "arguments": {}})

@@ -193,7 +193,23 @@ picks up the finished file instead of starting a second render. Pass
 EDL version that was and that everything since is missing from what you are
 watching.
 
-**How it comes back: A LINK, unless you explicitly ask otherwise.** The reply
+**It hands over the PICTURES with the link.** A link on its own is homework:
+asked what was in a 28s program, Grok downloaded the MP4, shelled out to
+ffmpeg, extracted 29 frames and built a spectrogram — to answer a question the
+tool should have answered. So every `watch_video` reply carries a **contact
+sheet of the window** (default 12 tiles, `MCP_WATCH_FRAMES`, labelled in
+timeline seconds) as MCP `image` content. One picture, ~60 KB, ~1.5k tokens.
+`frames=false` turns it off.
+
+**And `look_at` now returns the frames themselves.** Over MCP it used to run
+*our* vision model over them and send back a paragraph — second-hand, billed
+to us, unarguable. The protocol always allowed image content in a tool result;
+the plumbing just never did it (`ctx.sight_out`, round 83e). Image is the one
+non-text block worth trusting: it is the most widely implemented type, it is
+what the in-house agent already receives, and it degrades to plain text if a
+client drops it — unlike a video blob, which cost two sessions.
+
+**How the FILE comes back: A LINK, unless you explicitly ask otherwise.** The reply
 is a text block — what it is, how long, and **which clock its seconds are on**
 — carrying a plain unauthenticated URL to an ordinary MP4. Fetch it and watch
 it. `delivery="inline"` additionally embeds the file as an MCP `resource`
@@ -283,6 +299,9 @@ encode settings, so asking for the same window twice encodes once.
 | `MCP_REFRESH_TTL_S` | backend | 7776000 | refresh-token lifetime |
 | `MCP_SYNC_WAIT_S` | backend | 25 | longest a call blocks before ticketing |
 | `MCP_INSTRUCTIONS` | backend | `full` | `brief` drops the doctrine |
+| `MCP_WATCH_FRAMES` | worker | 12 | tiles on the contact sheet `watch_video` returns |
+| `MCP_MAX_IMAGES` | worker | 4 | runaway guard on pictures per tool call |
+| `MCP_IMAGE_MAX_MB` | backend | 6 | biggest single picture carried in a reply |
 | `MCP_VIDEO_ALLOW_INLINE` | backend | **off** | may `watch_video` embed video bytes in a reply at all — the model cannot override this |
 | `MCP_VIDEO_INLINE_MAX_MB` | backend | 12 | biggest video it may embed, once allowed |
 | `MCP_VIDEO_DELIVERY` | backend | `auto` | default for `delivery` (`auto`/`url`, plus `inline` when allowed) |

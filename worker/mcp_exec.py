@@ -40,6 +40,7 @@ import config
 import db as dbx
 import llm
 import mcp_media
+import storage
 from agent_prompt import system_prompt
 
 # Control calls the backend makes on the model's behalf — not editor tools, so
@@ -106,6 +107,31 @@ def _drop_dead_sessions(now, keep=None):
             s.lock.release()
 
 
+def _drain_images(ctx):
+    """Frames a look tool captured this call -> [{storage_key, label}].
+
+    They go through STORAGE rather than riding the job row as base64: the
+    result column is JSONB, and a permanent copy of every picture anyone ever
+    looked at is not something a database should be carrying. The backend
+    reads them back and emits them as MCP image content."""
+    pending, ctx.pending_images = list(ctx.pending_images or []), []
+    out = []
+    for label, path in pending[:config.MCP_MAX_IMAGES]:
+        try:
+            key = (f"media/{ctx.project_id}/look_"
+                   f"{os.path.basename(path).rsplit('.', 1)[0]}_"
+                   f"{int(os.path.getsize(path))}.jpg")
+            storage.upload_file(path, key, "image/jpeg")
+        except Exception as ex:
+            print(f"[mcp] could not publish look frame ({ex})", flush=True)
+            continue
+        out.append({"storage_key": key, "label": label})
+    if len(pending) > config.MCP_MAX_IMAGES:
+        print(f"[mcp] {len(pending) - config.MCP_MAX_IMAGES} look frame(s) "
+              "not sent (per-call cap)", flush=True)
+    return out
+
+
 def _index_for(worker_db, project_id):
     """(index_json, sha, has_original) for the project's main video. index is
     None for a canvas program (no original at all) AND for a video that is
@@ -126,6 +152,10 @@ def _new_context(worker_db, job, project, index, sha):
                            f"mcp_{project['id']}_{int(time.time())}")
     os.makedirs(workdir, exist_ok=True)
     ctx = agent_tools.ToolContext(worker_db, job, project, index, workdir)
+    # The caller is a model, and a tools/call result carries image content.
+    # So a look tool hands over the FRAMES, not our vision model's paragraph
+    # about them — cheaper for us and first-hand for whoever is editing.
+    ctx.sight_out = True
     # Same resolution the agent loop does: the plan decides the vision provider
     # (Frontier looks at footage with the frontier model) and what an
     # out-of-credits message may honestly promise.
@@ -265,6 +295,9 @@ def run_mcp_job(worker_db, job):
                                  edl_version=after)
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
+            imgs = _drain_images(ctx)
+            if imgs:
+                out["images"] = imgs
             if ctx.last_preview:
                 out["preview"] = {
                     "edl_version": ctx.last_preview.get("edl_version"),

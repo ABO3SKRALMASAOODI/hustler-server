@@ -44,6 +44,7 @@ import time
 import config
 import db as dbx
 import media
+import sheets
 import storage
 
 MIME = "video/mp4"
@@ -340,13 +341,18 @@ def prepare(ctx, args, inline_max_bytes):
     # forces one, and `-maxrate infk` is not a bitrate.)
     untouched_ok = delivery == "url" and not max_mb
 
+    want_frames = args.get("frames") is not False
+    n_frames = int(_num(args, "frame_count") or config.MCP_WATCH_FRAMES)
+
     # ── The path that costs nothing: the object as it already is ──────────
     if not windowed and key.lower().endswith(".mp4") and nbytes \
             and (untouched_ok or nbytes <= budget):
+        seen = _look(ctx, key, nbytes, full_duration, 0.0, n_frames) \
+            if want_frames else 0
         return _answer(ctx, kind, key, what, nbytes, full_duration, win_start,
                        src_height, transcoded=False,
                        inline_max_bytes=inline_max_bytes, delivery=delivery,
-                       extra="")
+                       extra="", frames=seen)
 
     if not win_dur and full_duration:
         win_dur = full_duration - win_start
@@ -431,13 +437,72 @@ def prepare(ctx, args, inline_max_bytes):
                   "picture is degraded — judge framing and motion from it, "
                   "not fine detail. A shorter window (start/end) buys back "
                   "the quality.")
+    # Frames come off the SOURCE with the window's offset, not off the shrunk
+    # copy: same moments, full quality, and it is already on disk.
+    seen = (_filmstrip(ctx, local, win_dur, win_start, n_frames)
+            if want_frames and os.path.exists(local) else 0)
     return _answer(ctx, kind, out_key, what, nbytes, win_dur, win_start,
                    height, transcoded=True, inline_max_bytes=inline_max_bytes,
-                   delivery=delivery, extra=extra)
+                   delivery=delivery, extra=extra, frames=seen)
+
+
+def _filmstrip(ctx, local, duration, start, count):
+    """Evenly-spaced frames across the window, as ONE labeled sheet, queued
+    for the caller's own eyes.
+
+    This is what "watch it" has to mean while MCP has no video content type
+    and the one client we have proves a blob is worse than useless. The model
+    asked to see the program; it gets the program's pixels, in its own
+    context, in the same call — instead of a link and an afternoon of ffmpeg.
+    Labels are OUTPUT seconds of the real timeline (start + offset), so a
+    moment read off a tile can be handed straight to a tool."""
+    n = max(2, min(int(count), 20))
+    span = max(float(duration or 0), 0.1)
+    times = [span * (i + 0.5) / n for i in range(n)]
+    frames, labels = [], []
+    for i, t in enumerate(times):
+        fp = os.path.join(ctx.workdir, f"watch_{_sig(local, t)}_{i}.jpg")
+        try:
+            media.frame_at(local, t, fp, width=640)
+        except media.MediaError:
+            continue
+        frames.append(fp)
+        labels.append(f"@{start + t:.2f}s")
+    if not frames:
+        return 0
+    sheet = os.path.join(ctx.workdir, f"watch_sheet_{_sig(local, start)}.jpg")
+    try:
+        sheets.build_timestamp_sheet(list(zip(labels, frames)), sheet)
+    except Exception:
+        return 0
+    ctx.pending_images.append(
+        (f"The program, {len(frames)} moments across "
+         f"{start:.2f}-{start + span:.2f}s", sheet))
+    return len(frames)
+
+
+def _look(ctx, key, nbytes, duration, start, count):
+    """Filmstrip for the untouched path, which otherwise never touches the
+    bytes at all. Fetches once per session (the context outlives the call),
+    and declines rather than dragging a huge original onto the box for
+    pictures — the link still works, and the reply says which happened."""
+    if not duration:
+        return 0
+    if nbytes and nbytes > config.MCP_VIDEO_DOWNLOAD_MAX_MB * 1048576:
+        return 0
+    local = os.path.join(ctx.workdir, f"watch_src_{_sig(key)}"
+                         + (os.path.splitext(key)[1] or ".mp4"))
+    try:
+        if not os.path.exists(local):
+            storage.download_to(key, local)
+    except Exception as ex:
+        print(f"[mcp] no filmstrip, could not fetch {key} ({ex})", flush=True)
+        return 0
+    return _filmstrip(ctx, local, duration, start, count)
 
 
 def _answer(ctx, kind, key, what, nbytes, duration, start, height,
-            *, transcoded, inline_max_bytes, delivery, extra):
+            *, transcoded, inline_max_bytes, delivery, extra, frames=0):
     # EMBEDDING IS OPT-IN, and this line is the whole reason (Aug 3 2026).
     # It used to embed whenever the file happened to fit, on the assumption
     # that a client which cannot render a video block would ignore it. It does
@@ -455,6 +520,15 @@ def _answer(ctx, kind, key, what, nbytes, duration, start, height,
     lines.append(f"{duration:.1f}s" if duration else "full length")
     lines[-1] += (f", {height}p" if height else "")
     lines[-1] += f", H.264 + AAC, {_mb(nbytes)}."
+    if frames:
+        lines.append(
+            f"THE PICTURE THAT FOLLOWS THIS MESSAGE IS THE VIDEO — {frames} "
+            "moments spread evenly across it, in order, each tile labelled "
+            "with its second. LOOK AT IT YOURSELF and answer from what you "
+            "see. You do not need to download anything, extract frames or "
+            "run any tool to know what is in this program; it is already in "
+            "front of you. Call look_at with exact times only when you need "
+            "a moment BETWEEN these tiles, or a closer view of one.")
     lines.append(_clock_note(kind, start))
     if inline:
         lines.append("The video FOLLOWS THIS MESSAGE as an attachment — watch "

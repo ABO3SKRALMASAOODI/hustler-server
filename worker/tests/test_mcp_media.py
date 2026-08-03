@@ -5,6 +5,8 @@ notices is the arithmetic that decides WHAT to encode, and the sentence that
 tells the model which clock the video it just got runs on.
 """
 
+import os
+
 import pytest
 
 import config
@@ -33,6 +35,7 @@ class _Ctx:
     job = {"user_id": 1}
 
     def __init__(self, **asset):
+        self.pending_images = []
         row = {"storage_key": "media/3/prev.mp4", "duration_s": 60.0,
                "height": 480, "fps": 30.0, "bytes": 4 * MB}
         row.update(asset)
@@ -195,6 +198,53 @@ def test_a_non_mp4_asset_is_never_handed_over_untouched(monkeypatch):
         mcp_media.prepare(_Ctx(storage_key="clips/3/x.mov"),
                           {"delivery": "url"}, 12 * MB)
     assert str(e.value).endswith(".mp4")     # an mp4 copy, not the .mov
+
+
+# ── the pictures ─────────────────────────────────────────────────────
+#
+# THE POINT OF THE WHOLE FEATURE (Aug 4 2026). Handing over a link made the
+# model do the work itself: it downloaded the MP4, shelled out to ffmpeg,
+# extracted 29 frames and built a spectrogram, to answer "what is in this".
+# A tool that returns homework has not answered the question. The frames come
+# back IN THE REPLY now, as pictures the model already has.
+
+VIDEO = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "test_video.mp4")
+
+
+@pytest.mark.skipif(not os.path.exists(VIDEO), reason="no fixture video")
+def test_the_filmstrip_is_one_sheet_labelled_in_TIMELINE_seconds(tmp_path):
+    """A tile says 14.50s and the model passes 14.5 to a tool. If the labels
+    were offsets into a WINDOW instead of seconds of the timeline, every
+    moment read off a windowed watch would land somewhere else."""
+    ctx = _Ctx()
+    ctx.workdir = str(tmp_path)
+    n = mcp_media._filmstrip(ctx, VIDEO, duration=12.0, start=10.0, count=6)
+    assert n == 6
+    assert len(ctx.pending_images) == 1          # ONE picture, not six
+    label, path = ctx.pending_images[0]
+    assert os.path.getsize(path) > 0
+    assert "10.00-22.00s" in label               # the window it covers
+    # ...and the tiles inside it are stamped 10-22, not 0-12.
+    assert mcp_media._sig(VIDEO, 10.0)
+
+
+@pytest.mark.skipif(not os.path.exists(VIDEO), reason="no fixture video")
+def test_a_filmstrip_is_capped_and_never_degenerate(tmp_path):
+    ctx = _Ctx()
+    ctx.workdir = str(tmp_path)
+    assert mcp_media._filmstrip(ctx, VIDEO, 12.0, 0.0, count=999) == 20
+    ctx.pending_images = []
+    assert mcp_media._filmstrip(ctx, VIDEO, 12.0, 0.0, count=0) == 2
+
+
+def test_frames_can_be_turned_off_by_the_caller():
+    """A model that only wants the link — to hand to a user, say — should not
+    pay for a decode it is not going to look at."""
+    ctx = _Ctx()
+    out = mcp_media.prepare(ctx, {"frames": False}, 12 * MB)
+    assert out["video"]["storage_key"] == "media/3/prev.mp4"
+    assert ctx.pending_images == []
 
 
 # ── the surface ──────────────────────────────────────────────────────

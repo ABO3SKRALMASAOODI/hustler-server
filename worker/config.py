@@ -586,6 +586,15 @@ MCP_VIDEO_MAX_ENCODE_S = float(os.getenv("MCP_VIDEO_MAX_ENCODE_S", "1800"))
 # has to download gigabytes before it can look — so it gets a shrunk copy
 # instead. delivery="url" is the caller asking, and is not bound by this.
 MCP_VIDEO_URL_MAX_MB = float(os.getenv("MCP_VIDEO_URL_MAX_MB", "512"))
+# How many pictures one MCP tool call may hand back. A look tool assembles
+# its frames into ONE labeled sheet, so this is a runaway guard, not the
+# frame count — that is MCP_WATCH_FRAMES.
+MCP_MAX_IMAGES = int(os.getenv("MCP_MAX_IMAGES", "4"))
+# Frames watch_video lays out across the window it hands over. 12 tiles on a
+# 2-column sheet is the whole of a 30s program at ~2.5s apart — enough that
+# nothing between them is a surprise, few enough to stay one picture.
+MCP_WATCH_FRAMES = int(os.getenv("MCP_WATCH_FRAMES", "12"))
+
 # ...and what may be PULLED ONTO THIS BOX to make that shrunk copy. Only ever
 # reached by a project with no proxy yet (an index still running or failed),
 # where the sole copy of the footage is the user's 4K original: downloading it
