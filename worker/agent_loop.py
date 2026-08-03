@@ -13,6 +13,7 @@ import time
 import agent_tools
 import config
 import db as dbx
+import grammar
 import llm
 import music_library
 import sfx_library
@@ -386,11 +387,23 @@ def state_block(ctx, worker_db):
         f"{m['storage_key']} — {(m.get('meta') or {}).get('filename', '?')}"
         for m in music]
 
-    return project_state_block(video_line, index_summary, edl_line,
-                               history_lines, music_lines,
-                               keep_line=keep_line,
-                               captions_line=captions_line,
-                               program_lines=program_lines)
+    block = project_state_block(video_line, index_summary, edl_line,
+                                history_lines, music_lines,
+                                keep_line=keep_line,
+                                captions_line=captions_line,
+                                program_lines=program_lines)
+    # Round 82e: the HOUSE STYLE — what this footage most wants to become
+    # when the user gives no brief, measured from the exemplar corpus
+    # (worker/grammars/). Context, not command: the block itself says the
+    # user's words always win. Never allowed to break a turn.
+    if ctx.has_main_video:
+        try:
+            style = grammar.plan_block(ctx.index)
+            if style:
+                block += "\n\n" + style
+        except Exception as e:
+            print(f"[grammar] plan_block failed: {e}", flush=True)
+    return block
 
 
 def capabilities_block():

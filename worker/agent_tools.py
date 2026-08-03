@@ -6910,6 +6910,164 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
              f"[{item['id']}]")
 
 
+# ── Typography choreography (round 82e) ─────────────────────────────────
+# The #1 capability gap the exemplar corpus voted for: in every top
+# talking-head edit, the SPEECH is carried by kinetic words appearing at
+# the instant they are spoken, composed AROUND the speaker — dozens of
+# placed text events per minute. One add_text call per phrase would take
+# the agent 40+ tool calls and it would never attempt it; this composes
+# the whole pass from the transcript in ONE call, writing ordinary
+# TextItems (nothing new for the renderer, fully reversible per item).
+
+_KINETIC_MAX_ITEMS = 48
+_KINETIC_ZONES = {
+    # cycling placement slots (x, y): beside/above a centered subject's
+    # head, alternating sides so consecutive phrases converse across the
+    # frame. The face of a centered talking head lives ~y 0.30-0.55 —
+    # these keep out of it, and the render self-check shows the agent if
+    # a particular framing disagrees.
+    "upper": [(0.30, 0.22), (0.70, 0.20), (0.50, 0.13), (0.28, 0.32),
+              (0.72, 0.30)],
+    "lower": [(0.30, 0.72), (0.70, 0.74), (0.50, 0.80), (0.28, 0.66),
+              (0.72, 0.68)],
+    "sides": [(0.22, 0.38), (0.78, 0.36), (0.20, 0.55), (0.80, 0.55)],
+}
+_KINETIC_ENTRANCES = ("pop", "slide_up", "rise", "fade")
+
+
+def _kinetic_phrases(words, tl, out_start, out_end):
+    """Kept words inside the PROGRAM window -> [(text, start, end, stressed)]
+    phrases of 1-4 words, broken at speech gaps (>0.6s source) and length."""
+    timed = []
+    for w in words:
+        try:
+            t0, t1 = float(w["t0"]), float(w["t1"])
+            token = str(w.get("w") or "").strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not token:
+            continue
+        spans = tl.span_to_out(t0, t1)
+        if not spans:
+            continue
+        a, b = spans[0]
+        if b <= out_start or a >= out_end:
+            continue
+        timed.append((token, a, b, t0, t1))
+    phrases, cur = [], []
+    for tok in timed:
+        if cur:
+            gap = tok[3] - cur[-1][4]
+            joined = " ".join(t[0] for t in cur)
+            if gap > 0.6 or len(cur) >= 4 or len(joined) + len(tok[0]) > 24 \
+                    or cur[-1][0].rstrip().endswith((".", ",", "?", "!")):
+                phrases.append(cur)
+                cur = []
+        cur.append(tok)
+    if cur:
+        phrases.append(cur)
+    return [(" ".join(t[0] for t in p), p[0][1], p[-1][2]) for p in phrases]
+
+
+def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
+                     emphasis_words=None, zone="upper", color="#FFFFFF",
+                     font=None, size_scale=None):
+    """Choreograph the SPOKEN words onto the screen: one placed, animated
+    text event per phrase, timed to the transcript, in a single pass."""
+    if not ctx.has_main_video:
+        return "REJECTED: there is no main video (and so no transcript)."
+    words = ctx.index.get("words") or []
+    if not words:
+        return ("REJECTED: this video has no transcribed speech — kinetic "
+                "text is built FROM the spoken words. Use add_text for "
+                "designed titles instead.")
+    z = (zone or "upper").strip().lower()
+    if z not in _KINETIC_ZONES:
+        return ("REJECTED: zone must be one of "
+                + ", ".join(_KINETIC_ZONES) + ".")
+    if font is not None and font not in TEXT_FONTS:
+        return (f"REJECTED: font must be one of the bundled families: "
+                f"{', '.join(TEXT_FONTS)}.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    if prog <= 0.4:
+        return "REJECTED: there is no program yet to put text on."
+    try:
+        s = round(min(max(float(start if start is not None else 0.0), 0.0),
+                      prog - 0.3), 2)
+        e = round(min(max(float(end if end is not None else prog), s + 0.3),
+                      prog), 2)
+    except (TypeError, ValueError):
+        return "REJECTED: start/end must be numbers (PROGRAM seconds)."
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+    except Exception as ex:
+        return f"REJECTED: could not map the timeline ({str(ex)[:120]})."
+    phrases = _kinetic_phrases(words, tl, s, e)
+    if not phrases:
+        return (f"REJECTED: no kept speech inside {s}-{e}s of the program "
+                "— check get_kept_transcript for where the words actually "
+                "are.")
+    truncated = len(phrases) > _KINETIC_MAX_ITEMS
+    phrases = phrases[:_KINETIC_MAX_ITEMS]
+    emph = {str(w).strip().lower().strip(".,!?") for w in
+            (emphasis_words or []) if str(w).strip()}
+    texts = [dict(tx) for tx in (edl.get("texts") or [])]
+    slots = _KINETIC_ZONES[z]
+    base_scale = float(size_scale) if size_scale is not None else 0.55
+    made = []
+    for i, (ptext, pa, pb) in enumerate(phrases):
+        nxt = phrases[i + 1][1] if i + 1 < len(phrases) else None
+        hold_end = min(nxt if nxt is not None else pb + 1.4, pb + 2.2, e)
+        hold_end = max(hold_end, pa + 0.5)
+        x, y = slots[i % len(slots)]
+        stressed = bool(emph and
+                        emph & {t.lower().strip(".,!?")
+                                for t in ptext.split()})
+        item = {"id": _next_item_id(texts, "tx"), "text": ptext[:60],
+                "start": round(max(s, pa - 0.05), 2),
+                "end": round(hold_end, 2), "template": "callout",
+                "x": x, "y": y,
+                "size_scale": round(base_scale + (0.25 if stressed else 0.0),
+                                    2),
+                "color": accent_color if stressed else color,
+                "accent_color": accent_color, "font": font,
+                "entrance": "pop" if stressed
+                else _KINETIC_ENTRANCES[i % len(_KINETIC_ENTRANCES)],
+                "exit": "fade", "uppercase": None, "box": None}
+        texts.append(item)
+        made.append(item)
+    edl["texts"] = texts
+    # The spoken words are now ON screen — bottom captions repeating them
+    # over the same window would print everything twice.
+    muted_note = ""
+    if edl.get("captions"):
+        mutes = [list(m) for m in (edl.get("caption_mutes") or [])]
+        mutes.append([s, e])
+        edl["caption_mutes"] = mutes
+        muted_note = (" Captions are muted over this window so the words "
+                      "don't print twice.")
+    res = ctx.write_edl(
+        edl, f"kinetic typography: {len(made)} phrase(s) choreographed to "
+             f"the speech across {s}-{e}s (program time) "
+             f"[{made[0]['id']}-{made[-1]['id']}]")
+    if not res.startswith("EDL v"):
+        return res
+    sample = "; ".join(f'"{m["text"]}"@{m["start"]}s' for m in made[:4])
+    res += (f"\n{len(made)} phrases placed in the {z} zone, alternating "
+            f"sides, each appearing AT its spoken moment: {sample}..."
+            f"{muted_note}")
+    if truncated:
+        res += (f"\nStopped at {_KINETIC_MAX_ITEMS} items — continue with "
+                f"start={made[-1]['end']} for the rest.")
+    res += ("\nEvery phrase is an ordinary text item (remove_text by id, "
+            "or re-run over a window after remove_text to restyle). "
+            "RENDER and LOOK: if any phrase sits on the speaker's face in "
+            "this framing, re-run with zone='lower' or 'sides'.")
+    return res
+
+
 TEXT_BEHIND_DEFAULT_S = 3.0
 
 
@@ -12014,6 +12172,38 @@ TOOLS = {
                                     if a != "typewriter"]},
                   "uppercase": {"type": "boolean"},
                   "box": {"type": "boolean"}}),
+    "add_kinetic_text": (add_kinetic_text, "CHOREOGRAPH THE SPOKEN WORDS "
+                         "onto the screen in ONE pass — the signature move "
+                         "of top creator reels: each phrase of the "
+                         "transcript appears AT the instant it is spoken, "
+                         "placed in the empty space around the speaker, "
+                         "alternating sides, animated, and holding until "
+                         "the next phrase replaces it. Use it for 'edit "
+                         "this' talking-head footage, promo/educator "
+                         "reels, and whenever the house style calls for "
+                         "speech-carried typography — instead of dozens "
+                         "of add_text calls. start/end (PROGRAM seconds) "
+                         "scope it; default whole program. emphasis_words "
+                         "get the accent color, a size bump and a pop. "
+                         "zone: 'upper' (beside/above the head — default), "
+                         "'lower', 'sides'. Mutes bottom captions over its "
+                         "window so words never print twice. Each phrase "
+                         "is a normal text item — inspect with get_edl, "
+                         "remove_text by id, or remove and re-run to "
+                         "restyle. AFTER rendering, LOOK at the frames: "
+                         "wrong zone for this framing -> re-run with "
+                         "another zone.",
+                         {"start": {"type": "number"},
+                          "end": {"type": "number"},
+                          "accent_color": {"type": "string"},
+                          "emphasis_words": {"type": "array",
+                                             "items": {"type": "string"}},
+                          "zone": {"type": "string",
+                                   "enum": list(_KINETIC_ZONES)},
+                          "color": {"type": "string"},
+                          "font": {"type": "string",
+                                   "enum": list(TEXT_FONTS)},
+                          "size_scale": {"type": "number"}}),
     "add_text_behind": (add_text_behind, "Put words BEHIND the moving subject "
                         "— the person walks IN FRONT of the letters, the way a "
                         "title painted on the street or the wall behind them "
@@ -12437,6 +12627,7 @@ REQUIRED_ARGS = {
     "add_screen_takeover": ["asset_key", "at_output_s"],
     "remove_screen_takeover": ["id"],
     "add_text": ["text", "start", "end"],
+    "add_kinetic_text": [],
     "add_text_behind": ["text", "at_output_s"],
     "remove_text": ["id"],
     "add_title_card": ["text", "at_output_s"],
@@ -12471,6 +12662,7 @@ REQUIRED_ARGS = {
 WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
                "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
+               "add_kinetic_text",
                "set_caption_style", "add_music", "remove_music",
                "swap_music", "set_music_fit", "extract_audio",
                "add_sfx", "move_sfx", "remove_sfx",
