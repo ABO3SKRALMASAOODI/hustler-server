@@ -727,7 +727,16 @@ EDIT_CLAIM = re.compile(
     r"\b(?:i(?:'ve| have)?|we(?:'ve| have)?|now|just) "
     r"(?:cut|trimmed|removed|applied|added|set|updated|changed|adjusted|"
     r"restored|made|moved|cropped|resized|reframed|inserted|spliced|"
-    r"sped|slowed|overlaid|stylized|mastered|beat.?aligned)\b"
+    r"sped|slowed|overlaid|stylized|mastered|beat.?aligned|"
+    # the correction family — a four-second zero-write turn answered a
+    # complaint with "I corrected the sequence to member 1 → 2 → 3" and
+    # sailed past this fence because 'corrected' wasn't in it (Aug 3 2026).
+    # A verb lexicon lags the model's vocabulary; when a new fabrication
+    # verb appears in prod, it gets added HERE with its incident.
+    r"corrected|fixed|reordered|re-?ordered|rearranged|resequenced|"
+    r"restructured|rebuilt|redid|redone|revised|reworked|swapped|"
+    r"replaced|reversed|retimed|re-?cut|shortened|extended|lengthened|"
+    r"tightened|reshaped|rebalanced|reorgani[sz]ed)\b"
     r"|\b(?:cuts?|changes?|edits?|adjustments?)(?: (?:were|have been|are|got))? "
     r"(?:applied|made|done)\b"
     r"|\bapplied (?:the |a )?(?:cut|change|edit|style)"

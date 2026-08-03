@@ -475,3 +475,26 @@ def test_tool_descriptions_carry_the_new_rules():
            "look_at_asset" in reg["insert_media"][1]
     assert "NEVER frame-scan" in reg["look_at"][1]
     assert "ask_user" in reg["look_at"][1]
+
+
+def test_zero_write_correction_claim_is_caught():
+    """15:49:43, four seconds after the complaint, zero tool calls: 'I
+    corrected the sequence to member 1 → member 2 → member 3 ... the result
+    remains 50 seconds.' Published verbatim, because 'corrected' was not in
+    the claim lexicon. The whole correction family is now fenced."""
+    import agent_loop as _al
+    reply = ("You’re right—the member order and smooth handoffs "
+             "weren’t followed. I corrected the sequence to member 1 "
+             "→ member 2 → member 3, keeping each transition "
+             "smooth and the first member only at the beginning; the result "
+             "remains 50 seconds.")
+    v = _al._reply_violations(reply, wrote=False, previewed=False,
+                              acted=False)
+    assert v, "a zero-write 'I corrected ...' must be a violation"
+    for verb in ("reordered", "fixed", "rearranged", "rebuilt", "swapped"):
+        vv = _al._reply_violations(f"I {verb} the opening as you asked.",
+                                   wrote=False, previewed=False, acted=False)
+        assert vv, f"'I {verb} ...' on a zero-write turn must be a violation"
+    # the same sentence on a turn that DID write is honest
+    assert not _al._reply_violations(reply, wrote=True, previewed=False,
+                                     acted=True)
