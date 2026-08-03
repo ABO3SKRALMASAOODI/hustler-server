@@ -171,7 +171,10 @@ def _full_index_block(index):
             lines.append(bc)
         lines.append(_silence_line(index))
         if lang:
-            lines.append(f"LANGUAGE (detected): {lang}.")
+            lines.append(f"LANGUAGE OF THE SPEECH IN THE FOOTAGE: {lang} "
+                         "(whisper's guess about the AUDIO — it defaults to "
+                         "'en' on a silent clip and says nothing about which "
+                         "language to write your reply in).")
         return "\n".join(lines)
 
     # The TRANSCRIPT's completeness is an older promise than the timeline's,
@@ -249,7 +252,10 @@ def _index_summary(index):
         lines.append(bc)
     lines.append(_silence_line(index))
     if index.get("language"):
-        lines.append(f"LANGUAGE (detected): {index['language']}.")
+        lines.append(f"LANGUAGE OF THE SPEECH IN THE FOOTAGE: "
+                     f"{index['language']} (whisper's guess about the AUDIO — "
+                     "it defaults to 'en' on a silent clip and says nothing "
+                     "about which language to write your reply in).")
     return "\n".join(lines)
 
 

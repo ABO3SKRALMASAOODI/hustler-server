@@ -676,6 +676,19 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
                   "allowance is granted once, so do NOT tell them to wait "
                   "for a refresh — say plainly that they are out of credits "
                   "and can start their trial to keep editing.")
+    elif not words:
+        # The example must be something this footage can actually do. The
+        # fixed one was speech-shaped, and on a silent clip it invited the
+        # user to ask for the only edit we would have to refuse — see
+        # _opening_example.
+        branch = ("IMPORTANT: this video has NO SPEECH on its audio — no "
+                  "transcript, no filler words, no pauses in any talking. "
+                  "Do NOT suggest captions, cutting silences, removing ums "
+                  "or anything else that needs speech; those are the edits "
+                  "you would have to refuse. End by inviting their first "
+                  "editing request with ONE concrete example drawn from what "
+                  "this footage HAS — its shots, its motion, its colour, "
+                  "music over it, or cutting it to the strongest moments.")
     else:
         branch = ("End by inviting their first editing request, with ONE "
                   "concrete example — grounded in the transcript opening "
@@ -712,6 +725,26 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
               flush=True)
         return None
     return res["text"]
+
+
+def _opening_example(n_words, n_sil):
+    """The ONE example in the ready-notice, grounded in what the index
+    actually found.
+
+    It used to be a fixed string — "cut the dead air, caption every word, and
+    tighten the intro" — printed under every video including ones with no
+    speech in them at all. A real user read it on a silent 17-second clip,
+    asked for exactly that, and got "I couldn't make either change" as their
+    first experience of the product; they never sent a third message.
+    Suggesting the one edit this footage CANNOT take is worse than suggesting
+    nothing, and it is worse still because the user is obeying us when they
+    ask for it."""
+    if not n_words:
+        return ("cut it to the best moments, put music under it, and punch "
+                "in on the action")
+    if not n_sil:
+        return "caption every word, tighten the intro, and add music"
+    return "cut the dead air, caption every word, and tighten the intro"
 
 
 def _finish_setup(worker_db, project_id, session_id, info, index,
@@ -807,8 +840,14 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                                   silences=index.get("silences", [])))
     stats = (f"{mins:.1f} min, {n_shots} "
              f"shot{'s' if n_shots != 1 else ''}, "
-             f"{n_words} transcribed words, {n_sil} pause"
-             f"{'s' if n_sil != 1 else ''} in the talking")
+             + (f"{n_words} transcribed words, {n_sil} pause"
+                f"{'s' if n_sil != 1 else ''} in the talking" if n_words else
+                # "0 transcribed words, 0 pauses in the talking" is two
+                # numbers where the real fact is a sentence, and it reads as
+                # a failed transcription rather than as footage with nobody
+                # talking. Say which it is — it is also what stops the user
+                # asking for captions we would have to refuse.
+                "no speech on the audio"))
     summary = f"Your video is ready to edit — {stats}. "
     if pending:
         summary += ("I'm starting on the request you sent while I was "
@@ -818,9 +857,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                     "but you're out of credits. Start your trial and send it "
                     "again.")
     else:
-        summary += ("Tell me what you'd like changed — for example: \"cut "
-                    "the dead air, caption every word, and tighten the "
-                    "intro.\"")
+        summary += ("Tell me what you'd like changed — for example: "
+                    f"\"{_opening_example(n_words, n_sil)}.\"")
     if quiet:
         # Quiet refresh: only speak when there is something the user needs —
         # a saved request auto-starting, or the reason it CAN'T start.

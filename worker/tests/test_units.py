@@ -2506,7 +2506,8 @@ _short_index = {
 _full = agent_loop._index_summary(_short_index)
 check("short video inlines the COMPLETE transcript + shots + language",
       "COMPLETE" in _full and "Second line." in _full and
-      "office" in _full and "LANGUAGE (detected): en" in _full)
+      "office" in _full and
+      "LANGUAGE OF THE SPEECH IN THE FOOTAGE: en" in _full)
 _long_index = dict(_short_index, video=dict(_short_index["video"],
                                             duration=3600.0))
 _elided = agent_loop._index_summary(_long_index)

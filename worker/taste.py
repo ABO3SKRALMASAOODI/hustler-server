@@ -86,6 +86,17 @@ SFX_REQUEST_HINTS = (
 # wearing the look rather than the look serving the footage.
 MAX_GLOBAL_STYLIZE = 2
 
+# The same bound, applied to an INSTANT instead of to the whole programme.
+# DEVICE_MIN_SPACING_S divides devices by RUNTIME, so anything fired at the
+# same moment averages itself away: a real user asked for six things on a
+# 17.7s clip and got flash + shake + glow inside ONE 0.7-second window, with
+# fifteen untouched seconds around it. Five devices over 17.7s reads as "one
+# every 3.5s", every category rule passed, and what shipped was one moment
+# that detonates and a video that is otherwise raw. Asking for six devices is
+# asking for six MOMENTS — a pile is what a user means by "it did everything
+# at once".
+MAX_SIMULTANEOUS_DEVICES = 2
+
 # Speech that starts later than this into the programme is a cold open the
 # viewer did not ask for.
 HOOK_DEAD_AIR_S = 1.5
@@ -98,6 +109,29 @@ def _num(v, default=0.0):
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _densest_moment(items):
+    """The instant covered by the most WINDOWED devices, as
+    (start, end, [labels]) — or None when nothing overlaps anything.
+
+    `items` are (start, end, label) in programme seconds. Only devices that
+    fire AT a moment belong here: a whole-programme grain or vignette is a
+    LOOK, live everywhere, and counting it would report every edit that wears
+    one as a pile-up.
+
+    Sweeping the interval STARTS is exact — the maximum overlap of a set of
+    intervals is always reached at one of their start points — and needs no
+    event sort for the handful of devices an edit ever carries."""
+    best = []
+    for t, _end, _label in items:
+        live = [it for it in items if it[0] <= t < max(it[1], it[0] + 1e-6)]
+        if len(live) > len(best):
+            best = live
+    if not best:
+        return None
+    lo = max(i[0] for i in best)
+    return lo, max(lo, min(i[1] for i in best)), [i[2] for i in best]
 
 
 def _ratio_wh(edl, src_w, src_h):
@@ -541,6 +575,32 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
                 "nothing in it can register as emphasis because everything "
                 "is. Strip it back to the few beats that carry the piece — "
                 "restraint is the look.")
+
+    # ── the PEAK, not the average ────────────────────────────────────────
+    # The rate check above is blind to simultaneity by construction, and a
+    # list of requests ("zoom + flash + shake + glow + speed ramp + colour")
+    # is exactly the input that invites one moment to carry all of them. See
+    # MAX_SIMULTANEOUS_DEVICES. Windowed devices only — a global pass is a
+    # look, not a moment — and no `ask` suppression: the user asked for the
+    # devices, never for them to land on the same half-second.
+    if out_dur > 4:
+        pile = _densest_moment(
+            [(_num(z.get("start")), _num(z.get("end")),
+              f"zoom {z.get('id')}") for z in zooms]
+            + [(_num(s.get("start")), _num(s.get("end")),
+                f"{s.get('kind') or 'a'} stylize ({s.get('id')})")
+               for s in stylize if s.get("start") is not None])
+        if pile and len(pile[2]) > MAX_SIMULTANEOUS_DEVICES:
+            lo, hi, labels = pile
+            add(f"{len(labels)} full-frame devices are live at the same time "
+                f"({', '.join(sorted(labels))}) over {lo:.1f}-{hi:.1f}s — "
+                f"one {hi - lo:.1f}s moment carrying all of them while the "
+                f"other {out_dur - (hi - lo):.0f}s of the video carry none. "
+                "Simultaneous effects do not add up, they cancel: the viewer "
+                "sees one blown-out instant, not five ideas. SPREAD them "
+                "across the moments that earn them — the request was for "
+                "several devices, not for several at once — or keep the one "
+                "that carries this beat and remove the rest.")
 
     return found
 
