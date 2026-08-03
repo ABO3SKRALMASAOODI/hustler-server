@@ -207,8 +207,16 @@ input:focus{outline:none;border-color:#3a3a3a}
 .row{display:flex;gap:10px;margin-top:22px}
 button{flex:1;padding:12px;border-radius:10px;border:0;font-size:14px;
 font-weight:600;cursor:pointer}
-.allow{background:#f4f4f4;color:#0b0b0b}
-.deny{background:transparent;color:#a0a0a0;border:1px solid #262626}
+/* ALLOW IS FIRST IN THE MARKUP AND SECOND ON THE SCREEN, and that is not a
+   style choice. Pressing Enter in a form does IMPLICIT SUBMISSION, which
+   activates the FIRST submit button — so with Cancel written first, typing a
+   password and hitting Enter posted action=deny. The server read that
+   correctly as a refusal and bounced the app away with access_denied, and the
+   connector reported "Unable to authorize app": a login that failed for
+   everyone who does not reach for the mouse, blaming the wrong thing. Order
+   restores the layout without restoring the trap. */
+.allow{background:#f4f4f4;color:#0b0b0b;order:2}
+.deny{background:transparent;color:#a0a0a0;border:1px solid #262626;order:1}
 .err{background:#2a1215;border:1px solid #532228;color:#ff9aa2;padding:10px 12px;
 border-radius:10px;font-size:13px;margin-bottom:16px}
 .note{margin-top:20px;font-size:12px;color:#6d6d6d;line-height:1.5}
@@ -234,8 +242,8 @@ __HIDDEN__
 <input id="password" name="password" type="password"
  autocomplete="current-password" required>
 <div class="row">
-<button class="deny" name="action" value="deny" type="submit">Cancel</button>
 <button class="allow" name="action" value="allow" type="submit">Allow</button>
+<button class="deny" name="action" value="deny" type="submit">Cancel</button>
 </div>
 </form>
 <p class="note">Redirects to <b>__REDIRECT_HOST__</b> when you allow.
@@ -329,9 +337,20 @@ def authorize():
     if request.method == "GET":
         return Response(_page(params, name), mimetype="text/html")
 
-    if src.get("action") != "allow":
+    action = src.get("action") or ""
+    if action == "deny":
         return _redirect_err(uri, state, "access_denied",
                              "the user declined")
+    if action != "allow":
+        # A post carrying NO button value is not consent — but it is not a
+        # refusal either, and treating the two the same is what made the
+        # Enter-key bug unreadable: the user was sent back to the app with
+        # "you declined" over a form they had just filled in and submitted.
+        # Absent stays on our page, where the sentence can name the fix.
+        return Response(_page(params, name,
+                              "Press Allow to connect, or Cancel to stop.",
+                              (src.get("email") or "").strip()),
+                        status=400, mimetype="text/html")
 
     email = (src.get("email") or "").strip().lower()
     password = src.get("password") or ""

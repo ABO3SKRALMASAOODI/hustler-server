@@ -557,6 +557,38 @@ def test_deny_returns_access_denied(client):
     assert not DB["codes"]
 
 
+def test_pressing_enter_in_the_form_means_ALLOW(client):
+    """THE BUG THIS EXISTS FOR (Aug 3 2026). Enter in a text field does
+    implicit submission, which activates the FIRST submit button. Cancel was
+    written first, so typing a password and pressing Enter posted
+    action=deny — the server refused correctly, redirected the app away with
+    access_denied, and Grok showed "Unable to authorize app". Nothing in the
+    server logs looked wrong and no code row was ever written; it simply did
+    not work for anyone who does not click.
+
+    The default submit button must therefore be Allow. This asserts the
+    MARKUP order, because that is what the browser reads — the on-screen
+    order is CSS, and the two are deliberately opposite."""
+    body = client.get("/mcp/oauth/authorize", query_string=_q(
+        _registered(client))).get_data(as_text=True)
+    form = body[body.index("<form"):]
+    assert form.index('value="allow"') < form.index('value="deny"')
+
+
+def test_a_post_with_no_button_is_not_reported_as_a_refusal(client):
+    """Belt to the braces above: if a client ever submits without a button
+    value, that is ambiguous, not a decline. Bouncing the app away with
+    access_denied is what made the Enter bug impossible to read from the
+    outside — the user stays here instead, and is told which button to press."""
+    r = client.post("/mcp/oauth/authorize",
+                    data={**_q(_registered(client)), "email": EMAIL,
+                          "password": PASSWORD})
+    assert r.status_code == 400
+    assert "Location" not in r.headers
+    assert b"Press Allow" in r.data
+    assert not DB["codes"]
+
+
 def test_right_password_off_the_allowlist_is_refused_honestly(client,
                                                               monkeypatch):
     """The credentials were correct and the feature is still closed. Saying
