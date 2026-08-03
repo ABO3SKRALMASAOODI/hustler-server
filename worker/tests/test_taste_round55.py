@@ -27,12 +27,17 @@ PLAY_RES = (1080, 1920)
 
 
 def _card(title, subtitle, title_y=0.5, sub_y=0.5):
+    # y-only: an item is PINNED (and exempt from collision repair) only when
+    # the author sets BOTH coordinates — round 79b, where the stacker was
+    # "repairing" a deliberately side-by-side two-colour wordmark into a
+    # column. A y-only card is template composition and keeps the round-55
+    # protection these tests exist for.
     return [
         {"id": "tx1", "text": title, "start": 0.12, "end": 2.38,
-         "template": "title", "x": 0.5, "y": title_y, "font": "Anton",
+         "template": "title", "y": title_y, "font": "Anton",
          "entrance": "pop", "anchor_insert": "ins1"},
         {"id": "tx2", "text": subtitle, "start": 0.12, "end": 2.38,
-         "template": "subtitle", "x": 0.5, "y": sub_y, "entrance": "pop",
+         "template": "subtitle", "y": sub_y, "entrance": "pop",
          "anchor_insert": "ins1"},
     ]
 
@@ -79,6 +84,21 @@ def test_three_stacked_cards_all_separate():
     for i in range(len(evs)):
         for j in range(i + 1, len(evs)):
             assert not graphics._overlaps(evs[i], evs[j]), (i, j)
+
+
+def test_a_fully_pinned_pair_is_left_where_the_author_put_it():
+    """Round 79b: setting BOTH x and y is deliberate composition — two chunks
+    laid side by side (a two-colour wordmark) are exactly what explicit
+    coordinates exist for. The stacker must not "repair" them apart, even
+    when their boxes touch."""
+    texts = [
+        {"id": "tx1", "text": "Valmera", "start": 0.0, "end": 2.0,
+         "template": "title", "x": 0.46, "y": 0.5},
+        {"id": "tx2", "text": ".io", "start": 0.0, "end": 2.0,
+         "template": "title", "x": 0.58, "y": 0.5},
+    ]
+    for tx, ev in zip(texts, _boxes(texts)):
+        assert ev["text"] == graphics._compile_item(tx, 30.0, PLAY_RES)["text"]
 
 
 def test_non_overlapping_text_is_not_moved():
