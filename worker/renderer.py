@@ -1668,6 +1668,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             chain.append("eq=" + ":".join(eq_bits))
         if cb_bits:
             chain.append("colorbalance=" + ":".join(cb_bits))
+        # shadows/highlights are TONAL-REGION controls, so they are a master
+        # curve, not eq: a fixed midpoint (0.5) and a moved quarter-point is
+        # what makes "lift the shadows" brighten the dark corners without
+        # washing the whole image the way eq brightness does. The clamps keep
+        # the five points strictly monotone for any in-range value, which is
+        # all ffmpeg's curves requires.
+        sh = float(gc.get("shadows") or 0.0)
+        hl = float(gc.get("highlights") or 0.0)
+        if abs(sh) > 1e-4 or abs(hl) > 1e-4:
+            y0 = min(max(0.12 * sh, 0.0), 0.35)
+            y1 = min(max(0.25 + 0.14 * sh, 0.02), 0.48)
+            y2 = min(max(0.75 + 0.14 * hl, 0.52), 0.98)
+            y3 = min(1.0, max(1.0 + 0.10 * hl, y2 + 0.01))
+            chain.append(f"curves=master='0/{y0:.3f} 0.25/{y1:.3f} 0.5/0.5 "
+                         f"0.75/{y2:.3f} 1/{y3:.3f}'")
         if chain:
             parts.append(f"[{vlabel}]{','.join(chain)}[vgcust]")
             vlabel = "vgcust"

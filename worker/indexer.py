@@ -727,6 +727,13 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
     return res["text"]
 
 
+def _dur_text(seconds):
+    """Seconds under a minute and a half, minutes above — "0.2 min" for a
+    13-second clip reads like a rounding error, not a duration."""
+    return (f"{seconds:.0f} sec" if seconds < 90
+            else f"{seconds / 60.0:.1f} min")
+
+
 def _opening_example(n_words, n_sil):
     """The ONE example in the ready-notice, grounded in what the index
     actually found.
@@ -828,7 +835,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         except Exception as e:
             print(f"[index] auto-resume check failed: {e}", flush=True)
 
-    mins = info["duration"] / 60.0
+    dur_txt = _dur_text(info["duration"])
     n_shots = len(index.get("shots", []))
     n_words = len(index.get("words", []))
     # Gaps in the SPEECH, not dips in the waveform — the waveform test reads
@@ -838,7 +845,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     n_sil = len(audit.speech_gaps(index.get("words", []), info["duration"],
                                   min_s=0.7,
                                   silences=index.get("silences", [])))
-    stats = (f"{mins:.1f} min, {n_shots} "
+    stats = (f"{dur_txt}, {n_shots} "
              f"shot{'s' if n_shots != 1 else ''}, "
              + (f"{n_words} transcribed words, {n_sil} pause"
                 f"{'s' if n_sil != 1 else ''} in the talking" if n_words else

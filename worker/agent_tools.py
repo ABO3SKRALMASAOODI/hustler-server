@@ -661,6 +661,21 @@ def get_shots(ctx, start=0, end=None):
                      "consecutive identical frames merged — a span means "
                      "nothing changed through it):")
         lines += tl
+    elif not any(s.get("caption") for s in rows):
+        # A blind index (visual captioning was down when this video was
+        # analyzed) lists timings and nothing else. Left bare, the agent
+        # treats the empty list as license to choose blind — a real "use the
+        # whole video as a scene bank" request (Aug 3 2026) was answered by
+        # keeping the LAST 20 seconds of a 5-minute video, sight unseen,
+        # without one look_at. The degrade path is the agent's own eyes;
+        # this is the line that points there.
+        lines.append(
+            "\nNOTE: this index has NO visual descriptions — the timings "
+            "above tell you nothing about what is ON SCREEN, and picking "
+            "scenes, zoom targets or 'best moments' from them alone is "
+            "guessing. LOOK first: call look_at with times sampled across "
+            "the range you care about and read the frames yourself before "
+            "choosing anything visual.")
     return _cap("\n".join(lines))
 
 
@@ -2185,7 +2200,19 @@ def list_music_library(ctx, mood=None):
         used = set()
     head = (f"{len(hits)} built-in track(s)"
             + (f" for mood '{m}'" if m else "") +
-            ". Pass the library: reference to add_music.\n")
+            ". Pass the library: reference to add_music.\n"
+            # A real session asked for "techno hardcore" three times and got
+            # hip-hop three times, silently — the library has no electronic
+            # genre and the agent kept substituting without saying so. The
+            # user left. Substitution is fine; UNDISCLOSED substitution is
+            # what loses them.
+            "These moods are ALL the built-in music — there is no techno/"
+            "EDM/phonk/rock/metal category. If the user asked for a genre "
+            "outside this list, do NOT silently substitute: say the library "
+            "doesn't have that genre, offer the closest fit from below, and "
+            "offer the real thing — they can paste a LINK to a track "
+            "(fetch_url) or upload their own audio file, and you'll score "
+            "the edit with it.\n")
     lines = []
     for t in hits:
         ref = f"library:{t['slug']}"
@@ -4174,10 +4201,8 @@ def erase_burned_text(ctx, scope="captions", start=None, end=None):
                 "NOT claim the text was removed.")
 
 
-def erase_region(ctx, x, y, w, h, start=None, end=None, fill="text"):
-    """Repaint one rectangle out of the source pixels."""
-    if not ctx.has_main_video:
-        return "REJECTED: there is no main video in this project."
+def _erase_rect_item(existing, x, y, w, h, start, end, fill):
+    """Validate one erase rectangle -> item dict, or an error string."""
     f = (fill or "text").strip().lower()
     if f not in ("text", "box"):
         return ("REJECTED: fill must be 'text' (repaint the letter strokes "
@@ -4207,21 +4232,72 @@ def erase_region(ctx, x, y, w, h, start=None, end=None, fill="text"):
             return "REJECTED: start/end must be numbers of seconds."
         if span["end"] <= span["start"]:
             return "REJECTED: end must be after start."
-    edl = ctx.latest_edl()["json"]
-    regions = [dict(r) for r in
-               ((edl.get("source_clean") or {}).get("regions") or [])]
-    item = {"id": _next_item_id(regions, "er"), "x": round(rx, 3),
+    return {"id": _next_item_id(existing, "er"), "x": round(rx, 3),
             "y": round(ry, 3), "w": round(rw, 3), "h": round(rh, 3),
             "start": span.get("start"), "end": span.get("end"),
             "fill": f, "kind": None}
-    regions.append(item)
-    window = (f" from {item['start']}s to {item['end']}s (source time)"
-              if span else " for the whole video")
-    what = (f"erased the {'object' if f == 'box' else 'text'} at "
-            f"x={item['x']},y={item['y']} size {item['w']}x{item['h']}"
-            f"{window} from the source pixels [{item['id']}]")
+
+
+def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
+                 fill="text", regions=None):
+    """Repaint rectangle(s) out of the source pixels — several marks in ONE
+    repaint pass when `regions` is used.
+
+    The batch form exists because the pass is the cost: every call re-derives
+    the whole cleaned source (that is the design — one artifact, always from
+    the untouched original), so five separate calls repaint the video five
+    times, each pass redoing all the earlier rectangles again. A real "remove
+    all the TikTok UI" request (Aug 3 2026) did exactly that: five erases,
+    fourteen minutes, and the turn hit its time budget with the user's OTHER
+    request (a brightness lift) still undone. The same five rectangles in one
+    call are one pass."""
+    if not ctx.has_main_video:
+        return "REJECTED: there is no main video in this project."
+    if regions is not None and not isinstance(regions, (list, tuple)):
+        return ("REJECTED: regions must be a list of "
+                "{x, y, w, h, fill?, start?, end?} objects.")
+    edl = ctx.latest_edl()["json"]
+    existing = [dict(r) for r in
+                ((edl.get("source_clean") or {}).get("regions") or [])]
+    if regions:
+        if len(regions) > 8:
+            return ("REJECTED: at most 8 regions per call — erase the "
+                    "biggest marks first, check the result, then continue.")
+        if x is not None or y is not None or w is not None or h is not None:
+            return ("REJECTED: pass EITHER one rectangle (x,y,w,h) OR "
+                    "regions=[...], not both.")
+        batch = []
+        for i, r in enumerate(regions):
+            if not isinstance(r, dict):
+                return f"REJECTED: regions[{i}] must be an object."
+            item = _erase_rect_item(
+                existing + batch, r.get("x"), r.get("y"), r.get("w"),
+                r.get("h"), r.get("start", start), r.get("end", end),
+                r.get("fill", fill))
+            if isinstance(item, str):
+                return f"regions[{i}]: {item}"
+            batch.append(item)
+        if not batch:
+            return "REJECTED: regions is empty — pass at least one rectangle."
+        new_items = batch
+    else:
+        item = _erase_rect_item(existing, x, y, w, h, start, end, fill)
+        if isinstance(item, str):
+            return item
+        new_items = [item]
+    all_regions = existing + new_items
+    descs = []
+    for it in new_items:
+        window = (f" {it['start']}-{it['end']}s" if it["start"] is not None
+                  else "")
+        descs.append(f"{'object' if it['fill'] == 'box' else 'text'} at "
+                     f"x={it['x']},y={it['y']} size {it['w']}x{it['h']}"
+                     f"{window} [{it['id']}]")
+    what = ("erased from the source pixels in one pass: " + "; ".join(descs)
+            if len(new_items) > 1 else
+            f"erased the {descs[0]} from the source pixels")
     try:
-        return _apply_clean(ctx, regions, what)
+        return _apply_clean(ctx, all_regions, what)
     except ValueError as e:
         return f"REJECTED: {e}"
     except Exception as e:
@@ -8108,22 +8184,26 @@ def remove_stylize(ctx, id):
 # (lo, hi, neutral) per custom-grade axis — the neutral value IS the absence
 # of the control, so passing it clears the axis (schema normalizes the same).
 _GRADE_AXES = {"exposure": (-1.0, 1.0, 0.0), "contrast": (0.5, 1.6, 1.0),
+               "shadows": (-1.0, 1.0, 0.0), "highlights": (-1.0, 1.0, 0.0),
                "saturation": (0.0, 2.0, 1.0), "temperature": (-1.0, 1.0, 0.0),
                "tint": (-1.0, 1.0, 0.0)}
 
 
 def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
-                     temperature=None, tint=None):
+                     temperature=None, tint=None, shadows=None,
+                     highlights=None):
     """Continuous color controls, merged axis-by-axis into
     effects.grade_custom — None leaves an axis alone, its neutral clears it."""
     vals = {"exposure": exposure, "contrast": contrast,
             "saturation": saturation, "temperature": temperature,
-            "tint": tint}
+            "tint": tint, "shadows": shadows, "highlights": highlights}
     if all(v is None for v in vals.values()):
         return ("REJECTED: pass at least one axis — exposure -1..1, "
                 "contrast 0.5..1.6 (1.0 neutral), saturation 0..2 (1.0 "
                 "neutral), temperature -1 (cool)..1 (warm), tint -1 "
-                "(green)..1 (magenta). An axis's neutral value clears it.")
+                "(green)..1 (magenta), shadows -1..1 (positive lifts the "
+                "darks), highlights -1..1 (negative recovers blown areas). "
+                "An axis's neutral value clears it.")
     edl = dict(ctx.latest_edl()["json"])
     fx = dict(edl.get("effects") or {})
     # model_dump stores untouched axes as explicit None — drop them so an
@@ -10968,7 +11048,13 @@ TOOLS = {
                            "always available with nothing uploaded. Returns "
                            "'library:<slug>' references to pass to "
                            "add_music. Optionally filter by mood: "
-                           + ", ".join(music_library.MOODS) + ".",
+                           + ", ".join(music_library.MOODS) + ". These "
+                           "moods are the WHOLE library — if the user wants "
+                           "a genre outside them (techno, phonk, rock, "
+                           "jazz...), tell them so instead of silently "
+                           "substituting, offer the closest mood, and offer "
+                           "to use a track THEY provide (a link via "
+                           "fetch_url, or an uploaded file).",
                            {"mood": {"type": "string",
                                      "enum": list(music_library.MOODS)}}),
     "add_music": (add_music, "Mix music into the edit. The defaults are "
@@ -11676,11 +11762,16 @@ TOOLS = {
                                               "text"]},
                            "start": {"type": "number"},
                            "end": {"type": "number"}}),
-    "erase_region": (erase_region, "TRULY REMOVE whatever is inside one "
+    "erase_region": (erase_region, "TRULY REMOVE whatever is inside a "
                      "rectangle — repaints those pixels and reconstructs the "
                      "background, so the thing is GONE, not covered. Use it "
                      "for a word, a sign, a sticker, a logo, a person's name "
                      "on screen, or any object the user wants taken out. "
+                     "SEVERAL marks (a watermark AND a handle AND a caption "
+                     "bar) go in ONE call as regions=[{x,y,w,h,fill?,start?,"
+                     "end?}, ...] — every call repaints the whole source, so "
+                     "one call with 3 rectangles is ~3x faster than 3 calls "
+                     "and leaves time for the rest of the request. "
                      "x,y = TOP-LEFT corner, w,h = size, all FRACTIONS (0-1) "
                      "of the SOURCE frame — get them from find_burned_text "
                      "rather than estimating. fill: 'text' (default — "
@@ -11698,7 +11789,18 @@ TOOLS = {
                       "w": {"type": "number"}, "h": {"type": "number"},
                       "start": {"type": "number"},
                       "end": {"type": "number"},
-                      "fill": {"type": "string", "enum": ["text", "box"]}}),
+                      "fill": {"type": "string", "enum": ["text", "box"]},
+                      "regions": {"type": "array", "items": {
+                          "type": "object", "properties": {
+                              "x": {"type": "number"},
+                              "y": {"type": "number"},
+                              "w": {"type": "number"},
+                              "h": {"type": "number"},
+                              "fill": {"type": "string",
+                                       "enum": ["text", "box"]},
+                              "start": {"type": "number"},
+                              "end": {"type": "number"}},
+                          "required": ["x", "y", "w", "h"]}}}),
     "reset_edit": (reset_edit, "Throw the whole edit away and start again "
                    "from the full untouched source video. Use it when the "
                    "user asks to start over, and as the LAST RESORT when a "
@@ -12138,7 +12240,12 @@ TOOLS = {
                          "cinematic + temperature 0.2): exposure -1..1, "
                          "contrast 0.5..1.6 (1.0 neutral), saturation 0..2 "
                          "(1.0 neutral), temperature -1 (cool)..1 (warm), "
-                         "tint -1 (green)..1 (magenta). Pass ONLY the axes "
+                         "tint -1 (green)..1 (magenta), shadows -1..1 "
+                         "(positive LIFTS the dark regions — the answer to "
+                         "'brighten the shadows / too dark in the corners'), "
+                         "highlights -1..1 (negative RECOVERS bright areas). "
+                         "'More light' = exposure up; 'remove/soften the "
+                         "shadows' = shadows up. Pass ONLY the axes "
                          "to change; an axis's neutral value clears it; "
                          "all axes neutral clears the whole custom grade. "
                          "Captions and graphics are never graded.",
@@ -12146,7 +12253,9 @@ TOOLS = {
                           "contrast": {"type": "number"},
                           "saturation": {"type": "number"},
                           "temperature": {"type": "number"},
-                          "tint": {"type": "number"}}),
+                          "tint": {"type": "number"},
+                          "shadows": {"type": "number"},
+                          "highlights": {"type": "number"}}),
     "set_master_loudness": (set_master_loudness, "enabled=true normalizes "
                             "the FINAL MIX to -14 LUFS / -1.5 dBTP (the "
                             "social/streaming loudness target) on preview "
@@ -12307,7 +12416,7 @@ REQUIRED_ARGS = {
     "remove_zoom": ["id"],
     "set_transitions": ["style"],
     "blur_region": ["x", "y", "w", "h"],
-    "erase_region": ["x", "y", "w", "h"],
+    "erase_region": [],
     "add_voiceover": ["asset_key"],
     "remove_voiceover": ["id"],
     "set_speed": ["start", "end", "factor"],

@@ -801,6 +801,12 @@ class GradeCustom(BaseModel):
     saturation: Optional[float] = None     # 0..2   (1.0 neutral)
     temperature: Optional[float] = None    # -1 (cool) .. 1 (warm)
     tint: Optional[float] = None           # -1 (green) .. 1 (magenta)
+    # Round 82: "more light and remove shadows" is how a real user asked for
+    # a lift — the agent translated it to shadows=0.35 and the tool rejected
+    # the axis, so half their request was silently dropped. These are the
+    # tonal-region axes every consumer grading UI has.
+    shadows: Optional[float] = None        # -1 (deepen) .. 1 (lift darks)
+    highlights: Optional[float] = None     # -1 (recover) .. 1 (brighten)
 
 
 # ── The floating window (round 51) ──────────────────────────────────────────
@@ -2077,9 +2083,11 @@ def validate_edl(data, duration=None):
             gc = fx.grade_custom
             _GC_BOUNDS = {"exposure": (-1.0, 1.0), "contrast": (0.5, 1.6),
                           "saturation": (0.0, 2.0), "temperature": (-1.0, 1.0),
-                          "tint": (-1.0, 1.0)}
+                          "tint": (-1.0, 1.0), "shadows": (-1.0, 1.0),
+                          "highlights": (-1.0, 1.0)}
             _GC_NEUTRAL = {"exposure": 0.0, "contrast": 1.0,
-                           "saturation": 1.0, "temperature": 0.0, "tint": 0.0}
+                           "saturation": 1.0, "temperature": 0.0, "tint": 0.0,
+                           "shadows": 0.0, "highlights": 0.0}
             for fname, (lo, hi) in _GC_BOUNDS.items():
                 fv = getattr(gc, fname)
                 if fv is not None:
@@ -2383,7 +2391,8 @@ def describe_edl(edl_dict, duration=None):
             gc = fx.grade_custom
             axes = [f"{n[:4]} {getattr(gc, n):+g}" for n in
                     ("exposure", "contrast", "saturation", "temperature",
-                     "tint") if getattr(gc, n) is not None]
+                     "tint", "shadows", "highlights")
+                    if getattr(gc, n) is not None]
             bits.append("custom grade (" + ", ".join(axes) + ")")
         if fx.zooms:
             tgt = sum(1 for z in fx.zooms

@@ -1410,11 +1410,19 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             print(f"[job {job['id']}] turn timeout after "
                   f"{config.AGENT_TURN_TIMEOUT_S:.0f}s", flush=True)
             if ctx.versions_written:
+                # Name the half-done state plainly. The old copy ("the edits
+                # I completed are saved") read as DONE to a user who wasn't
+                # counting their asks: a real request for "remove the TikTok
+                # UI + brighten it" timed out after the erases with the
+                # brightness never applied, the user read the stop as the
+                # finish, and left (Aug 3 2026, project 335).
                 return _finalize(
                     ctx, worker_db, session_id,
                     "That took longer than I allow myself per request, so "
-                    "I'm stopping here — the edits I completed are saved "
-                    "and previewed below. Send a follow-up to continue.",
+                    "I'm stopping here — the edits I finished are saved "
+                    "and previewed below. If part of your request isn't in "
+                    "them yet, it is NOT done — say \"continue\" and I'll "
+                    "pick up where I stopped.",
                     "timeout", total_steps, timings, honesty)
             # "nothing was changed" is true of the EDL but not of the project:
             # a turn can time out after downloading a file, and telling the

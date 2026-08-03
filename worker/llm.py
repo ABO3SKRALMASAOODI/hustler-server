@@ -542,6 +542,14 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
                 mark_tools_need_effort_none(model)
                 kw["reasoning_effort"] = "none"
                 continue
+            if "reasoning_effort" in kw \
+                    and looks_like_bad_parameter(e, "reasoning_effort"):
+                # A provider that does not know the field (DeepSeek, xAI)
+                # says so once; strip it, latch, and never send it again —
+                # the same one-failed-call-per-process policy as max_tokens.
+                mark_reasoning_effort_rejected(model)
+                kw = {k: v for k, v in kw.items() if k != "reasoning_effort"}
+                continue
             adapted = adapt_completion_kwargs(e, model, kw)
             if adapted is None:
                 raise
@@ -626,10 +634,22 @@ def image_part(jpeg_path):
 
 
 def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
-               image_names=None):
+               image_names=None, reasoning_effort=None):
     """One call to VISION_MODEL with N images. Returns text, or None on any
     failure — vision is always optional. image_names (storage keys / labels)
-    are what gets recorded to llm_calls — never the image bytes."""
+    are what gets recorded to llm_calls — never the image bytes.
+
+    max_tokens is the whole output budget, and on a REASONING model (gpt-5.6-
+    luna) the thinking spends from it BEFORE the first answer token — so a cap
+    that merely fits the answer can return `content=""` with every token gone
+    to reasoning. That is not a hypothetical: from the Luna switch until Aug 3
+    2026 every 25-tile index sheet starved exactly like that (answer null,
+    reasoning_out == the cap), and every real upload indexed blind while the
+    provider, the key and the pipeline were all healthy. Two defenses, both
+    here so every caller gets them: callers ask for small reasoning on
+    descriptive work (reasoning_effort), and a starved call — no content, the
+    budget exhausted — is retried ONCE with triple the cap rather than
+    reported as "the model didn't answer"."""
     if not vision_available():
         return None
     content = [{"type": "text", "text": prompt}]
@@ -645,19 +665,37 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         # multimodal latency); retries stay at the client default. Dialect-
         # aware (round 67): OpenAI reasoning models refuse max_tokens and a
         # custom temperature.
-        resp = create_with_dialect(
-            vclient.with_options(timeout=config.VISION_TIMEOUT_S),
-            vmodel,
-            [{"role": "user", "content": content}],
-            max_tokens=max_tokens,
-            temperature=0.1,
-        )
-        answer = (resp.choices[0].message.content or "").strip() or None
-        record(purpose,
-               {"model": vmodel, "question": prompt,
-                "images": names},
-               {"answer": answer}, getattr(resp, "usage", None))
-        return answer
+        extra = {}
+        if reasoning_effort and not reasoning_effort_rejected(vmodel):
+            extra["reasoning_effort"] = reasoning_effort
+        cap = int(max_tokens)
+        for attempt in (1, 2):
+            resp = create_with_dialect(
+                vclient.with_options(timeout=config.VISION_TIMEOUT_S),
+                vmodel,
+                [{"role": "user", "content": content}],
+                max_tokens=cap,
+                temperature=0.1,
+                **extra,
+            )
+            answer = (resp.choices[0].message.content or "").strip() or None
+            usage = getattr(resp, "usage", None)
+            spent = max(reasoning_tokens(usage),
+                        int(getattr(usage, "completion_tokens", 0) or 0))
+            if answer is None and attempt == 1 and spent >= cap * 0.9:
+                # Starved, not refused: the model was still thinking when the
+                # budget ran out. Record the starved attempt so admin shows
+                # both calls, then retry with room to finish.
+                record(purpose,
+                       {"model": vmodel, "question": prompt, "images": names},
+                       {"answer": None, "starved_at_max_tokens": cap}, usage)
+                cap *= 3
+                continue
+            record(purpose,
+                   {"model": vmodel, "question": prompt,
+                    "images": names},
+                   {"answer": answer}, usage)
+            return answer
     except Exception as e:
         global _vision_blind
         msg = str(e)
@@ -930,14 +968,32 @@ def edit_image(image_path, instruction, out_path, image_name="image"):
 
 
 def extract_json_array(text):
-    """Lenient JSON array extraction from a model reply."""
+    """Lenient JSON array extraction from a model reply.
+
+    Lenient includes TRUNCATED: a reply that hit its token cap mid-array used
+    to lose every element (no closing bracket -> no match -> None), which for
+    an index sheet meant one long answer threw away 25 captions. The salvage
+    walks back to the last complete object and closes the array there —
+    partial captions beat blind."""
     if not text:
         return None
     m = re.search(r"\[[\s\S]*\]", text)
-    if not m:
+    if m:
+        try:
+            out = json.loads(m.group(0))
+            if isinstance(out, list):
+                return out
+        except json.JSONDecodeError:
+            pass
+    start = text.find("[")
+    if start < 0:
         return None
-    try:
-        out = json.loads(m.group(0))
-        return out if isinstance(out, list) else None
-    except json.JSONDecodeError:
-        return None
+    tail = text[start:]
+    last = tail.rfind("}")
+    while last > 0:
+        try:
+            out = json.loads(tail[:last + 1] + "]")
+            return out if isinstance(out, list) else None
+        except json.JSONDecodeError:
+            last = tail.rfind("}", 0, last)
+    return None

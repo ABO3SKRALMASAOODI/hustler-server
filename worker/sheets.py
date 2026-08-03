@@ -93,7 +93,17 @@ def _caption_one(sheet_path, ids, recorder):
     if recorder is not None:
         llm.set_recorder(recorder)
     try:
+        # The cap is sized by the work: ~240 tokens of JSON per tile plus
+        # headroom, because a fixed 1500 fits at most ~10 tiles of answer —
+        # and on a reasoning model the SAME budget pays for the thinking
+        # first, so every full 25-tile sheet of every real upload starved to
+        # `answer: null` (Aug 3 2026: reasoning_out == 1500, zero captions,
+        # blind index) while small test clips sailed through. Effort is
+        # pinned low: describing tiles is transcription, not deduction, and
+        # unbounded default reasoning is where the budget died.
         reply = llm.ask_vision(CAPTION_PROMPT % ids, [sheet_path],
+                               max_tokens=1200 + 240 * len(ids),
+                               reasoning_effort="low",
                                purpose="vision_index")
         rows = llm.extract_json_array(reply) or []
     finally:
