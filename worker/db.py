@@ -312,6 +312,18 @@ def get_job(conn, job_id):
         return cur.fetchone()
 
 
+def user_has_prior_agent_turn(conn, user_id, before_job_id):
+    """Round 81: anything but this user's FIRST agent turn ever? Consulted
+    only while the first-turn model lane is configured, so the common case
+    costs no query at all."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE user_id = %s AND type = 'agent_turn'
+                         AND id < %s LIMIT 1""",
+                    (user_id, int(before_job_id)))
+        return cur.fetchone() is not None
+
+
 def enqueue_job(conn, project_id, user_id, jtype, payload):
     with conn.cursor() as cur:
         cur.execute("""INSERT INTO video_jobs (project_id, user_id, type, payload)

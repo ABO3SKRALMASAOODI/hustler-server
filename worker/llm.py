@@ -114,6 +114,25 @@ def paid_client():
     return _paid_client
 
 
+_first_turn_client = None
+
+
+def first_turn_available():
+    """Is the round-81 first-turn A/B lane configured? OFF by default."""
+    return bool(config.FIRST_TURN_AGENT_MODEL and config.FIRST_TURN_API_KEY)
+
+
+def first_turn_client():
+    """Pooled client for the first-turn lane (config.FIRST_TURN_*)."""
+    global _first_turn_client
+    if _first_turn_client is None:
+        _first_turn_client = OpenAI(base_url=config.FIRST_TURN_BASE_URL,
+                                    api_key=config.FIRST_TURN_API_KEY,
+                                    timeout=config.LLM_TIMEOUT_S,
+                                    max_retries=config.LLM_MAX_RETRIES)
+    return _first_turn_client
+
+
 def paid_available():
     """True once the Pro-tier provider is fully configured. All three parts are
     required: a half-set trio would send an empty key at a real endpoint and
@@ -152,7 +171,7 @@ def is_frontier(plan):
     return (plan or "") in config.FRONTIER_PLANS
 
 
-def agent_client_for(subscribed, plan=None):
+def agent_client_for(subscribed, plan=None, first_turn=False):
     """(client, model) for one agent turn.
 
     One tier per plan, most specific first — this IS the "more intelligence" /
@@ -166,6 +185,12 @@ def agent_client_for(subscribed, plan=None):
     A trial runs its OWN plan's model, because a trial that previews a better
     model than the plan delivers is the bait-and-switch it was meant to avoid.
 
+    first_turn (round 81) is the A/B lever, not a tier: a FREE account's
+    first-ever agent turn runs FIRST_TURN_AGENT_MODEL when that lane is
+    configured. Free accounts only — a subscriber's model is a promise their
+    plan already resolved above, and boosting a trial is the same
+    bait-and-switch the trial rule exists to avoid.
+
     Every branch falls through to the next when its provider is not configured,
     so a missing key degrades the model rather than 401ing the turn. `plan`
     defaults to None so any two-tier caller keeps working unchanged.
@@ -174,6 +199,8 @@ def agent_client_for(subscribed, plan=None):
         return frontier_client(), config.FRONTIER_AGENT_MODEL
     if subscribed and is_paid_tier(plan) and paid_available():
         return paid_client(), config.PAID_AGENT_MODEL
+    if first_turn and not subscribed and first_turn_available():
+        return first_turn_client(), config.FIRST_TURN_AGENT_MODEL
     return client(), config.AGENT_MODEL
 
 

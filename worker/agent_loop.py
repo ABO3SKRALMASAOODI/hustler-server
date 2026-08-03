@@ -582,7 +582,18 @@ def run_agent_job(worker_db, job):
     ctx.subscribed = subscribed
     ctx.plan = plan
     ctx.trialing = trialing
-    ctx.llm_client, ctx.agent_model = llm.agent_client_for(subscribed, plan)
+    # Round 81: the first-turn A/B lane. The DB is consulted only while the
+    # lane is configured (it ships OFF), and any error means "not first" —
+    # the wrong side of that is one ordinary-model turn, never a dead one.
+    first_turn = False
+    if not subscribed and llm.first_turn_available():
+        try:
+            first_turn = not worker_db.run(dbx.user_has_prior_agent_turn,
+                                           job["user_id"], job["id"])
+        except Exception:
+            first_turn = False
+    ctx.llm_client, ctx.agent_model = llm.agent_client_for(
+        subscribed, plan, first_turn=first_turn)
     # Vision is reached from eight places that know nothing about plans, so the
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).

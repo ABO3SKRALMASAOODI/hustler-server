@@ -182,6 +182,32 @@ PAID_API_KEY = (
 # provider above stays configured so switching it on is one variable, not four.
 PAID_PLANS = set(
     p.strip() for p in os.getenv("PAID_PLANS", "").split(",") if p.strip())
+
+# ── The FIRST-TURN lane (round 81) — an A/B lever, not a tier ────────────────
+#
+# The first agent turn a FREE account ever runs is where retention lives or
+# dies (project 319: two turns, then gone forever), and it is the one turn
+# where model quality is marketing spend rather than margin. Setting
+# FIRST_TURN_AGENT_MODEL routes exactly that turn — free accounts only, first
+# 'agent_turn' job ever, everything after runs AGENT_MODEL as normal — to a
+# stronger model. OFF by default; measure a cohort before believing in it
+# (boosted turns are identifiable in llm_calls by this model id, which is the
+# whole readout). Subscribers never hit it: their plan's lane already answers,
+# and a paying customer's model is a promise, not an experiment.
+#
+# Defaults make the cheap case one variable: BASE_URL defaults to the chat
+# provider, so naming a bigger model on the SAME provider needs no key. A
+# different provider needs FIRST_TURN_BASE_URL + FIRST_TURN_API_KEY (keys
+# never cross providers — same rule as every lane above). Whatever model this
+# names MUST be in model_prices.MODEL_PRICES or it bills at the LLM_PRICE_*
+# fallback.
+FIRST_TURN_BASE_URL = os.getenv("FIRST_TURN_BASE_URL", OPENAI_BASE_URL).strip()
+FIRST_TURN_AGENT_MODEL = os.getenv("FIRST_TURN_AGENT_MODEL", "").strip()
+FIRST_TURN_API_KEY = (
+    os.getenv("FIRST_TURN_API_KEY", "").strip()
+    or (OPENAI_API_KEY if FIRST_TURN_BASE_URL == OPENAI_BASE_URL else "")
+    or (VISION_API_KEY if FIRST_TURN_BASE_URL == VISION_BASE_URL else "")
+    or (IMAGE_API_KEY if FIRST_TURN_BASE_URL == IMAGE_BASE_URL else ""))
 # ── The model the FRONTIER plan gets ─────────────────────────────────────────
 #
 # 'ai_max' ($100/mo) is sold on the model, not on the credit count: every agent
