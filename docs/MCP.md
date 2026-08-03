@@ -193,6 +193,20 @@ picks up the finished file instead of starting a second render. Pass
 EDL version that was and that everything since is missing from what you are
 watching.
 
+**It hands over the SOUND.** Asked "can you hear the music?", a model
+downloaded the MP4 and built a **spectrogram** — because the reply carried
+frames and no audio, while its own text said "H.264 + AAC" and so invited the
+model to claim it had heard something it was never sent. MCP has an `audio`
+content type. Every `watch_video` reply now carries the window's **complete,
+continuous audio** as a mono mp3 (`audio/mpeg`, 48 kbps, ~180 KB for 30s).
+
+Sound is cheap where picture is not — 30s of audio is ~180 KB against 2.9 MB
+of video — which is exactly why the whole track can ride in the reply when the
+video cannot. Past about **85 seconds** the budget can no longer pay for a
+listenable bitrate, so the reply attaches **no** audio and says to narrow the
+window; it never ships a silently truncated or unlistenable track.
+`MCP_AUDIO_OUT=0` turns it off.
+
 **It hands over the PICTURES with the link.** A link on its own is homework:
 asked what was in a 28s program, Grok downloaded the MP4, shelled out to
 ffmpeg, extracted 29 frames and built a spectrogram — to answer a question the
@@ -299,6 +313,9 @@ encode settings, so asking for the same window twice encodes once.
 | `MCP_REFRESH_TTL_S` | backend | 7776000 | refresh-token lifetime |
 | `MCP_SYNC_WAIT_S` | backend | 25 | longest a call blocks before ticketing |
 | `MCP_INSTRUCTIONS` | backend | `full` | `brief` drops the doctrine |
+| `MCP_AUDIO_OUT` | worker | on | attach the window's sound to `watch_video` |
+| `MCP_AUDIO_MAX_KB` / `MCP_AUDIO_MAX_KBPS` / `MCP_AUDIO_MIN_KBPS` | worker | 256 / 48 / 24 | the audio budget, and the floor below which a long window gets no sound rather than an unlistenable one |
+| `MCP_AUDIO_MAX_MB` | backend | 4 | outer bound on audio carried in a reply |
 | `MCP_WATCH_FRAMES` | worker | 12 | tiles on the contact sheet `watch_video` returns |
 | `MCP_MAX_IMAGES` | worker | 4 | runaway guard on pictures per tool call |
 | `MCP_IMAGE_MAX_MB` | backend | 6 | biggest single picture carried in a reply |

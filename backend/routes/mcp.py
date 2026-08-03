@@ -883,6 +883,7 @@ def _t_watch_video(tok, args):
     # on, what is in it, what to do next — and it says the pictures follow.
     content = [{"type": "text", "text": f"{text}\n\nDownload: {url}"}]
     content += _image_blocks(result.get("images"))
+    content += _audio_block(result.get("audio"))
     if blob:
         content.append({"type": "resource", "resource": {
             "uri": url, "mimeType": video.get("mime") or "video/mp4",
@@ -925,6 +926,30 @@ def _text(s, is_error=False):
 # Biggest picture to carry in a reply. A contact sheet is a few hundred KB;
 # this is a sanity bound, not a budget the caller ever notices.
 IMAGE_MAX_BYTES = int(float(os.getenv("MCP_IMAGE_MAX_MB", "6")) * 1048576)
+
+
+# Sound is CHEAP next to picture — 30s of mono mp3 is ~230 KB where the same
+# 30s of video was 2.9 MB — which is exactly why it can ride in a reply when
+# the video cannot. The worker already sizes it; this is the outer bound.
+AUDIO_MAX_BYTES = int(float(os.getenv("MCP_AUDIO_MAX_MB", "4")) * 1048576)
+
+
+def _audio_block(audio):
+    """The window's sound as MCP audio content, or nothing.
+
+    Nothing is a normal outcome — a silent program, a client-hostile length,
+    an encoder that failed — and the caller is told which in the text. What
+    must never happen is the text claiming sound that is not here: a reply
+    that overstates what it carried is how a model came to tell its user it
+    had heard music it was never sent."""
+    key = (audio or {}).get("storage_key")
+    if not key:
+        return []
+    raw = storage.get_object_whole(key, AUDIO_MAX_BYTES)
+    if not raw:
+        return []
+    return [{"type": "audio", "data": base64.b64encode(raw).decode("ascii"),
+             "mimeType": audio.get("mime") or "audio/mpeg"}]
 
 
 def _image_blocks(images):

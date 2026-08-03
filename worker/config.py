@@ -586,6 +586,35 @@ MCP_VIDEO_MAX_ENCODE_S = float(os.getenv("MCP_VIDEO_MAX_ENCODE_S", "1800"))
 # has to download gigabytes before it can look — so it gets a shrunk copy
 # instead. delivery="url" is the caller asking, and is not bound by this.
 MCP_VIDEO_URL_MAX_MB = float(os.getenv("MCP_VIDEO_URL_MAX_MB", "512"))
+# THE PROGRAM'S SOUND, handed over with its pictures (round 83f). A model
+# asked "can you hear the music" and had to download the MP4 and build a
+# SPECTROGRAM to answer, because the reply carried frames and no audio — and
+# the reply text said "H.264 + AAC", which invited it to claim it had heard
+# something it never received. MCP has an audio content type; we simply were
+# not using it.
+#
+# mp3 because audio/mpeg is the one audio mime a client that takes audio at
+# all will accept. Mono, and the bitrate falls out of the length: sound is
+# CHEAP next to video — 30s at 64 kbps is 230 KB, where the same 30s of video
+# was 2.9 MB — which is the whole reason this can ride in the reply when the
+# video cannot.
+MCP_AUDIO_OUT = os.getenv("MCP_AUDIO_OUT", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+#
+# The numbers are chosen against the ONE thing that has actually gone wrong
+# here: a payload big enough to end a session if the client stringifies it
+# instead of decoding it. 48 kbps mono is comfortably enough to hear what the
+# music is doing, and puts 30 seconds at ~180 KB — roughly 45k characters of
+# base64 in the worst case, against the FOUR MILLION that killed the video
+# blob. Raise them only if the client is known to take audio content.
+MCP_AUDIO_MAX_KB = float(os.getenv("MCP_AUDIO_MAX_KB", "256"))
+# Below this the music stops being music. A window longer than the budget can
+# pay for at this rate gets NO audio and a sentence saying to narrow it —
+# never a silently truncated or unlistenable track. At the floor the longest
+# window that still gets sound is ~85s.
+MCP_AUDIO_MIN_KBPS = int(os.getenv("MCP_AUDIO_MIN_KBPS", "24"))
+MCP_AUDIO_MAX_KBPS = int(os.getenv("MCP_AUDIO_MAX_KBPS", "48"))
+
 # How many pictures one MCP tool call may hand back. A look tool assembles
 # its frames into ONE labeled sheet, so this is a runaway guard, not the
 # frame count — that is MCP_WATCH_FRAMES.

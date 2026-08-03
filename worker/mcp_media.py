@@ -347,12 +347,12 @@ def prepare(ctx, args, inline_max_bytes):
     # ── The path that costs nothing: the object as it already is ──────────
     if not windowed and key.lower().endswith(".mp4") and nbytes \
             and (untouched_ok or nbytes <= budget):
-        seen = _look(ctx, key, nbytes, full_duration, 0.0, n_frames) \
-            if want_frames else 0
+        seen, heard, note = (_look(ctx, key, nbytes, full_duration, 0.0,
+                                   n_frames) if want_frames else (0, None, ""))
         return _answer(ctx, kind, key, what, nbytes, full_duration, win_start,
                        src_height, transcoded=False,
                        inline_max_bytes=inline_max_bytes, delivery=delivery,
-                       extra="", frames=seen)
+                       extra=note, frames=seen, audio=heard)
 
     if not win_dur and full_duration:
         win_dur = full_duration - win_start
@@ -437,13 +437,16 @@ def prepare(ctx, args, inline_max_bytes):
                   "picture is degraded — judge framing and motion from it, "
                   "not fine detail. A shorter window (start/end) buys back "
                   "the quality.")
-    # Frames come off the SOURCE with the window's offset, not off the shrunk
-    # copy: same moments, full quality, and it is already on disk.
-    seen = (_filmstrip(ctx, local, win_dur, win_start, n_frames)
-            if want_frames and os.path.exists(local) else 0)
+    # Pictures and sound come off the SOURCE with the window's offset, not off
+    # the shrunk copy: same moments, full quality, already on disk.
+    seen, heard, note = ((0, None, "") if not (want_frames
+                                               and os.path.exists(local))
+                         else _perceive(ctx, local, win_dur, win_start,
+                                        n_frames, True, True))
     return _answer(ctx, kind, out_key, what, nbytes, win_dur, win_start,
                    height, transcoded=True, inline_max_bytes=inline_max_bytes,
-                   delivery=delivery, extra=extra, frames=seen)
+                   delivery=delivery, extra=extra + note, frames=seen,
+                   audio=heard)
 
 
 def _filmstrip(ctx, local, duration, start, count):
@@ -481,15 +484,82 @@ def _filmstrip(ctx, local, duration, start, count):
     return len(frames)
 
 
+def audio_plan(duration):
+    """(kbps, max_seconds) for the sound of a window this long, or (0, max).
+
+    Sound is cheap next to picture, which is the entire reason it can ride in
+    the reply when the video cannot — but only up to a point, and past that
+    point the honest move is to say so rather than ship a track too thin to
+    hear or a silently truncated one."""
+    budget_bits = config.MCP_AUDIO_MAX_KB * 1024 * 8
+    ceiling = budget_bits / 1000.0 / max(float(duration or 0), 0.1)
+    max_s = budget_bits / 1000.0 / config.MCP_AUDIO_MIN_KBPS
+    if ceiling < config.MCP_AUDIO_MIN_KBPS:
+        return 0, max_s
+    return int(min(config.MCP_AUDIO_MAX_KBPS, ceiling)), max_s
+
+
+def _audio_clip(ctx, local, duration, start):
+    """The window's audio as a small mono mp3 in storage -> (dict, note)."""
+    if not config.MCP_AUDIO_OUT or not duration:
+        return None, ""
+    try:
+        if not media.has_audio_stream(local):
+            return None, " This program has no audio track at all — silence."
+    except Exception:
+        return None, ""
+    kbps, max_s = audio_plan(duration)
+    if not kbps:
+        return None, (
+            f" The SOUND is not attached: {duration:.0f}s at a listenable "
+            f"bitrate is over what a reply can carry. Ask for a window "
+            f"(start/end) of about {max_s:.0f}s or less and you get the audio "
+            "with it.")
+    key = (f"media/{ctx.project_id}/"
+           f"aud_{_sig(local, start, duration, kbps)}.mp3")
+    out = os.path.join(ctx.workdir, os.path.basename(key))
+    if not storage.exists(key):
+        cmd = ["ffmpeg", "-y"]
+        if start:
+            cmd += ["-ss", f"{start:.3f}"]
+        cmd += ["-i", local, "-t", f"{duration:.3f}", "-vn",
+                "-ac", "1", "-ar", "32000", "-c:a", "libmp3lame",
+                "-b:a", f"{kbps}k", out]
+        try:
+            media.run(cmd, timeout=max(120.0, duration * 2))
+        except media.MediaError as ex:
+            print(f"[mcp] no audio attached ({ex})", flush=True)
+            return None, ""
+        try:
+            storage.upload_file(out, key, "audio/mpeg")
+        except Exception as ex:
+            print(f"[mcp] audio upload failed ({ex})", flush=True)
+            return None, ""
+        nbytes = os.path.getsize(out)
+    else:
+        nbytes = storage.object_bytes(key)
+    return ({"storage_key": key, "mime": "audio/mpeg", "bytes": nbytes,
+             "seconds": round(float(duration), 3), "kbps": kbps}, "")
+
+
+def _perceive(ctx, local, duration, start, count, want_frames, want_audio):
+    """Pictures and sound off ONE local copy — (frames, audio, note)."""
+    frames = (_filmstrip(ctx, local, duration, start, count)
+              if want_frames else 0)
+    audio, note = (_audio_clip(ctx, local, duration, start)
+                   if want_audio else (None, ""))
+    return frames, audio, note
+
+
 def _look(ctx, key, nbytes, duration, start, count):
     """Filmstrip for the untouched path, which otherwise never touches the
     bytes at all. Fetches once per session (the context outlives the call),
     and declines rather than dragging a huge original onto the box for
     pictures — the link still works, and the reply says which happened."""
     if not duration:
-        return 0
+        return 0, None, ""
     if nbytes and nbytes > config.MCP_VIDEO_DOWNLOAD_MAX_MB * 1048576:
-        return 0
+        return 0, None, ""
     local = os.path.join(ctx.workdir, f"watch_src_{_sig(key)}"
                          + (os.path.splitext(key)[1] or ".mp4"))
     try:
@@ -497,12 +567,13 @@ def _look(ctx, key, nbytes, duration, start, count):
             storage.download_to(key, local)
     except Exception as ex:
         print(f"[mcp] no filmstrip, could not fetch {key} ({ex})", flush=True)
-        return 0
-    return _filmstrip(ctx, local, duration, start, count)
+        return 0, None, ""
+    return _perceive(ctx, local, duration, start, count, True, True)
 
 
 def _answer(ctx, kind, key, what, nbytes, duration, start, height,
-            *, transcoded, inline_max_bytes, delivery, extra, frames=0):
+            *, transcoded, inline_max_bytes, delivery, extra, frames=0,
+            audio=None):
     # EMBEDDING IS OPT-IN, and this line is the whole reason (Aug 3 2026).
     # It used to embed whenever the file happened to fit, on the assumption
     # that a client which cannot render a video block would ignore it. It does
@@ -520,15 +591,34 @@ def _answer(ctx, kind, key, what, nbytes, duration, start, height,
     lines.append(f"{duration:.1f}s" if duration else "full length")
     lines[-1] += (f", {height}p" if height else "")
     lines[-1] += f", H.264 + AAC, {_mb(nbytes)}."
-    if frames:
+    if frames or audio:
+        got = []
+        if frames:
+            got.append(f"{frames} FRAMES on one sheet, evenly spaced and in "
+                       "order, each tile labelled with its second")
+        if audio:
+            got.append(f"the COMPLETE SOUND of it — {audio['seconds']:.1f}s "
+                       "of continuous audio, every note of the music and "
+                       "anything else audible, nothing sampled or summarised")
         lines.append(
-            f"THE PICTURE THAT FOLLOWS THIS MESSAGE IS THE VIDEO — {frames} "
-            "moments spread evenly across it, in order, each tile labelled "
-            "with its second. LOOK AT IT YOURSELF and answer from what you "
-            "see. You do not need to download anything, extract frames or "
-            "run any tool to know what is in this program; it is already in "
-            "front of you. Call look_at with exact times only when you need "
-            "a moment BETWEEN these tiles, or a closer view of one.")
+            "WHAT FOLLOWS THIS MESSAGE IS THE PROGRAM: " + " and ".join(got)
+            + ". Look and listen yourself and answer from that. You do not "
+            "need to download the file, extract frames, decode audio or run "
+            "any tool to know what is in this program — it is already in "
+            "front of you.")
+        # Say exactly what it is NOT, in the same breath. This reply used to
+        # call a contact sheet "the video", and a model repeated that back as
+        # having received pixels AND audio when it had only pictures. A tool
+        # that overstates what it handed over teaches the model to overstate
+        # it to the user.
+        lines.append(
+            "BE PRECISE ABOUT THIS IF YOU ARE ASKED: the audio is complete "
+            "and continuous; the picture is " + (f"{frames} sampled moments"
+                                                 if frames else "not attached")
+            + ", not every frame at full rate. You are seeing stills and "
+            "hearing the whole track. If motion between two tiles matters, "
+            "say so, or ask for a narrower start/end — the same call over 5 "
+            "seconds puts the tiles a few frames apart.")
     lines.append(_clock_note(kind, start))
     if inline:
         lines.append("The video FOLLOWS THIS MESSAGE as an attachment — watch "
@@ -550,6 +640,7 @@ def _answer(ctx, kind, key, what, nbytes, duration, start, height,
                 "millions of characters of base64 in this conversation and "
                 "run out of context.")
     return {"text": "\n".join(lines),
+            "audio": audio,
             "video": {"storage_key": key, "mime": MIME, "bytes": nbytes,
                       "duration_s": round(duration, 3) if duration else None,
                       "height": height, "start_s": round(start, 3),

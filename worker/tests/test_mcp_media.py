@@ -238,6 +238,57 @@ def test_a_filmstrip_is_capped_and_never_degenerate(tmp_path):
     assert mcp_media._filmstrip(ctx, VIDEO, 12.0, 0.0, count=0) == 2
 
 
+# ── the sound ────────────────────────────────────────────────────────
+
+def test_a_short_program_gets_sound_at_full_quality():
+    kbps, _ = mcp_media.audio_plan(28.7)
+    assert kbps == config.MCP_AUDIO_MAX_KBPS
+    # ...and the payload stays nowhere near what killed the video blob.
+    assert 28.7 * kbps / 8 * 1024 < 300 * 1024
+
+
+def test_a_long_window_is_refused_rather_than_made_unlistenable():
+    """Silently dropping to 6 kbps, or truncating to the first 80 seconds and
+    saying nothing, are both worse than "ask for a narrower window"."""
+    kbps, max_s = mcp_media.audio_plan(600)
+    assert kbps == 0
+    assert 60 < max_s < 200            # a real number to put in the sentence
+
+
+def test_the_bitrate_falls_as_the_window_grows_but_never_below_the_floor():
+    long_kbps, _ = mcp_media.audio_plan(60)
+    short_kbps, _ = mcp_media.audio_plan(5)
+    assert short_kbps >= long_kbps
+    assert long_kbps == 0 or long_kbps >= config.MCP_AUDIO_MIN_KBPS
+
+
+@pytest.mark.skipif(not os.path.exists(VIDEO), reason="no fixture video")
+def test_the_sound_is_the_WINDOW_not_the_whole_programme(tmp_path,
+                                                         monkeypatch):
+    """A window's audio starting at 0 while its frames start at 10s would put
+    the model's ears and eyes in different places — the worst possible way to
+    be wrong, because both look right on their own."""
+    import media as _media
+    made = {}
+
+    class _S:
+        @staticmethod
+        def exists(key):
+            return False
+
+        @staticmethod
+        def upload_file(path, key, ct):
+            made["path"], made["ct"] = path, ct
+
+    monkeypatch.setattr(mcp_media, "storage", _S)
+    ctx = _Ctx()
+    ctx.workdir = str(tmp_path)
+    audio, note = mcp_media._audio_clip(ctx, VIDEO, duration=6.0, start=12.0)
+    assert note == "" and audio and audio["mime"] == "audio/mpeg"
+    assert made["ct"] == "audio/mpeg"
+    assert abs(_media.probe_audio_duration(made["path"]) - 6.0) < 0.5
+
+
 def test_frames_can_be_turned_off_by_the_caller():
     """A model that only wants the link — to hand to a user, say — should not
     pay for a decode it is not going to look at."""

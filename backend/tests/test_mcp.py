@@ -425,6 +425,35 @@ def test_the_default_NEVER_embeds(client, monkeypatch):
     assert "https://cdn.example/" in res["content"][0]["text"]
 
 
+def test_the_sound_comes_back_as_audio_content(client, monkeypatch):
+    """THE QUESTION THAT EXPOSED THIS (Aug 4 2026): "can you hear the music?"
+    The reply carried frames and no audio, so the model downloaded the MP4 and
+    built a SPECTROGRAM to answer — while the text said "H.264 + AAC", which
+    invited it to claim it had heard something it was never sent. MCP has an
+    audio content type; we simply were not using it."""
+    _served(monkeypatch)
+    DB["job_result"]["audio"] = {"storage_key": "media/3/aud_x.mp3",
+                                 "mime": "audio/mpeg", "bytes": 180000,
+                                 "seconds": 28.7, "kbps": 48}
+    monkeypatch.setattr(mcpmod.storage, "get_object_whole",
+                        lambda key, cap: b"ID3mp3bytes")
+    res = _call_watch(client)
+    kinds = [c["type"] for c in res["content"]]
+    assert "audio" in kinds
+    blk = res["content"][kinds.index("audio")]
+    assert blk["mimeType"] == "audio/mpeg"
+    assert base64.b64decode(blk["data"]) == b"ID3mp3bytes"
+
+
+def test_a_silent_programme_simply_has_no_audio_block(client, monkeypatch):
+    """No sound is a normal outcome, not an error — and the text is what says
+    so. What must never happen is a claim of audio with none attached."""
+    _served(monkeypatch)
+    res = _call_watch(client)
+    assert "audio" not in [c["type"] for c in res["content"]]
+    assert res.get("isError") is not True
+
+
 def test_delivery_url_never_embeds(client, monkeypatch):
     """A client that cannot read a video block must be able to say so and
     still get the file — the link is the universal answer."""
