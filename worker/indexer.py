@@ -174,10 +174,19 @@ def run_index_job(worker_db, job):
 
         # Cache hit: this exact file was indexed before (any project) BY THE
         # CURRENT PIPELINE. An index built by an older pipeline version is
-        # stale (different segmentation/VAD rules) and gets rebuilt.
+        # stale (different segmentation/VAD rules) and gets rebuilt — and so
+        # is a BLIND one, once vision is back. The cache key is the file
+        # hash, so an index captioned during a vision outage (Jul 31 - Aug 3
+        # 2026: every sheet starved to zero captions) would otherwise serve
+        # its blindness to every future upload of that file forever — a real
+        # user re-uploaded the same music video SIX times in her first hour
+        # and got the same blind index six times. When vision is still down,
+        # the blind cache keeps serving (degrade, don't loop).
         cached = worker_db.run(dbx.get_index_by_sha, sha)
-        if cached and cached.get("pipeline_version", 1) == \
-                config.PIPELINE_VERSION:
+        cached_blind = bool(cached) and _index_blind(cached["json"]) \
+            and llm.vision_available()
+        if cached and not cached_blind and \
+                cached.get("pipeline_version", 1) == config.PIPELINE_VERSION:
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                           workdir,
                           ready_proxy=src if from_client_proxy else None)
@@ -192,10 +201,12 @@ def run_index_job(worker_db, job):
                     "words": len(cached["json"].get("words", [])),
                     "timings": timings}
         if cached:
-            print(f"[index {job_id}] stale index (pipeline "
-                  f"v{cached.get('pipeline_version', 1)} < "
-                  f"v{config.PIPELINE_VERSION}) for sha {sha[:12]} — "
-                  "re-indexing", flush=True)
+            why = ("blind (no visual captions) and vision is back"
+                   if cached_blind else
+                   f"stale (pipeline v{cached.get('pipeline_version', 1)} < "
+                   f"v{config.PIPELINE_VERSION})")
+            print(f"[index {job_id}] cached index for sha {sha[:12]} is "
+                  f"{why} — re-indexing", flush=True)
 
         # Non-fatal degradations recorded here and stored on the index so a
         # partially-degraded analysis is visible in admin instead of silently
@@ -732,6 +743,30 @@ def _dur_text(seconds):
     13-second clip reads like a rounding error, not a duration."""
     return (f"{seconds:.0f} sec" if seconds < 90
             else f"{seconds / 60.0:.1f} min")
+
+
+def _index_blind(idx):
+    """A functionally BLIND index — built while visual captioning was down
+    or starving (key outage Jul 31, reasoning-cap starvation to Aug 3 2026).
+
+    Measured as COVERAGE, not zero-tolerance: partial starvation leaves a
+    few captions standing (a 203s music video shipped 2 captions across 97
+    shots — "not zero", and the agent still frame-hunted it for four
+    minutes), while a healthy index of a long STATIC video legitimately
+    merges to very few moments but its few shots DO carry captions. Blind =
+    under 20% of shots captioned AND less than one described sample per 30
+    seconds of footage."""
+    shots = idx.get("shots") or []
+    if not shots:
+        return False
+    caps = sum(1 for s in shots if s.get("caption"))
+    if caps * 5 >= len(shots):
+        return False
+    try:
+        dur = float((idx.get("video") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    return len(idx.get("moments") or []) * 30 < dur
 
 
 def _opening_example(n_words, n_sil):

@@ -291,9 +291,26 @@ def _attachment_context(worker_db, ctx, user_message):
         elif asset["kind"] == "video_clip":
             dur = (f" ({asset['duration_s']:.0f}s)"
                    if asset.get("duration_s") else "")
-            notes.append(f'[User attached a video clip "{name}"{dur} — '
-                         f'storage_key: {asset["storage_key"]}. It can be '
-                         "spliced into the edit with insert_media.]")
+            # The old note said only "it can be spliced with insert_media" —
+            # so when a user sent a screen recording of an edit she liked and
+            # said "make the beginning like here", the agent spliced HER
+            # REFERENCE into the teaser as its opening 24 seconds, and she
+            # spent her next two messages teaching the product what a
+            # reference is (Aug 3 2026, projects 342/343). The note must
+            # present both readings, because the attachment alone cannot say
+            # which it is — only their words can.
+            notes.append(
+                f'[User attached a video clip "{name}"{dur} — storage_key: '
+                f'{asset["storage_key"]}. Decide FROM THEIR WORDS what it is '
+                "for. If they want it IN the video (\"add this clip\", "
+                "\"insert this\", \"put this at the end\"), splice it with "
+                "insert_media. If it is a REFERENCE — \"like this\", \"make "
+                "it look like this\", \"recreate this\", \"here's an "
+                "example\" — do NOT insert it: study it with look_at_asset "
+                "(sample enough frames to read its pacing, shot order and "
+                "transitions), then rebuild that STYLE from the MAIN "
+                "footage. If their words could mean either, ask_user before "
+                "splicing.]")
         elif asset["kind"] == "image_ref":
             cap = m.get("caption")
             if not cap and llm.vision_available() and \

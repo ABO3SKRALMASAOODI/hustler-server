@@ -552,9 +552,31 @@ def _active_original(cur, project_id):
 
 
 def _index_row(cur, sha256):
+    # vision_blind: the index was built while visual captioning was down or
+    # starving. Coverage test, not zero-tolerance (partial starvation left 2
+    # captions on a 97-shot video; a healthy static video legitimately has
+    # few moments but its few shots ARE captioned): blind = under 20% of
+    # shots captioned AND less than one described sample per 30s of footage.
+    # The /state self-heal reads it to schedule a quiet re-index; the worker
+    # re-checks against its OWN vision availability before rebuilding, so a
+    # heal enqueued while vision is still down is a cheap cache-hit, not a
+    # loop (and the 3-per-6h bound holds either way). Mirrors
+    # worker/indexer._index_blind — change both together.
     if not sha256:
         return None
-    cur.execute("""SELECT id, created_at, pipeline_version FROM indexes
+    cur.execute("""SELECT id, created_at, pipeline_version,
+                          (jsonb_array_length(COALESCE(json->'shots',
+                                                       '[]'::jsonb)) > 0
+                           AND 5 * (SELECT COUNT(*) FROM
+                                    jsonb_array_elements(json->'shots') s
+                                    WHERE (s->'caption')::text <> 'null')
+                               < jsonb_array_length(json->'shots')
+                           AND 30 * jsonb_array_length(
+                                   COALESCE(json->'moments', '[]'::jsonb))
+                               < COALESCE((json->'video'->>'duration')
+                                          ::numeric, 0))
+                          AS vision_blind
+                   FROM indexes
                    WHERE video_sha256 = %s""", (sha256,))
     return cur.fetchone()
 
@@ -2133,6 +2155,14 @@ def project_state(user_id, project_id):
         if idx_row and idx_row.get("pipeline_version", 1) != PIPELINE_VERSION:
             heal_reason = (f"pipeline v{idx_row.get('pipeline_version')} != "
                            f"v{PIPELINE_VERSION}")
+            is_reindex = True
+        elif idx_row and idx_row.get("vision_blind"):
+            # Indexed during a vision outage: timings without one visual
+            # caption. The agent edits such a project by guessing (a real
+            # user burned her whole free grant on one — six re-uploads, a
+            # four-minute frame-hunt, zero exports). Quiet refresh; the
+            # worker rebuilds only if vision is actually back.
+            heal_reason = "index has no visual captions (built blind)"
             is_reindex = True
         elif original and not idx_row and ij and ij["state"] == "failed":
             heal_reason = "last index job failed"

@@ -390,3 +390,88 @@ def test_short_clips_greet_in_seconds():
     assert indexer._dur_text(13.6) == "14 sec"
     assert indexer._dur_text(61.4) == "61 sec"
     assert indexer._dur_text(316.8) == "5.3 min"
+
+
+# ── 82b: the Aug 3 evening user (six re-uploads, one hour, zero exports) ─
+#
+# elina@ signed up at 14:41, re-uploaded the same music video SIX times, and
+# left at 15:28 with 0.00 credits and no export. Four defects, pinned below:
+# the blind index was CACHED by file hash (so every re-upload got it back),
+# the attachment note told the agent her style reference "can be spliced"
+# (it opened her teaser with her own screen recording), the agent answered
+# her ninth consecutive English message in Russian (the reference's UI
+# language), and it frame-hunted 203s of footage for a balloon shot across
+# ~14 look_at calls instead of asking her for a timestamp.
+
+
+def test_index_blind_is_a_coverage_test():
+    import indexer as _ix
+
+    def idx(shots, caps, moments, dur):
+        return {"shots": [{"id": i, "caption": ({"setting": "x"}
+                                                if i < caps else None)}
+                          for i in range(shots)],
+                "moments": [{"t": i} for i in range(moments)],
+                "video": {"duration": dur}}
+
+    # the fully-starved shape (every index Aug 1 - Aug 3 morning)
+    assert _ix._index_blind(idx(97, 0, 0, 203))
+    # partial starvation: 2 captions on 97 shots is still blind — this is
+    # the exact index the six-re-upload user got
+    assert _ix._index_blind(idx(97, 2, 2, 203))
+    # a tiny clip whose one shot IS captioned is sighted
+    assert not _ix._index_blind(idx(1, 1, 3, 14))
+    # a long locked-off talking head: few moments is NORMAL (identical
+    # frames merge) — its captioned shot keeps it sighted
+    assert not _ix._index_blind(idx(1, 1, 2, 600))
+    # healthy coverage on a real cut
+    assert not _ix._index_blind(idx(97, 90, 70, 203))
+    # no shots at all = empty, not blind
+    assert not _ix._index_blind(idx(0, 0, 0, 60))
+
+
+def test_attachment_note_presents_both_readings_of_a_clip():
+    """The note used to say only "It can be spliced into the edit with
+    insert_media" — so "make the beginning like here" got the reference
+    ITSELF spliced in as the opening 24 seconds."""
+    import agent_loop as _al
+
+    class _Db:
+        def run(self, fn, *a, **k):
+            return {"id": 5, "project_id": 1, "kind": "video_clip",
+                    "storage_key": "clips/1/ref.mp4", "duration_s": 24.0,
+                    "meta": {"filename": "Screen_Recording_Telegram.mp4"}}
+
+    class _Ctx:
+        project_id = 1
+        workdir = "/tmp"
+
+    note = _al._attachment_context(_Db(), _Ctx(),
+                                   {"meta": {"attachments": [5]}})
+    assert "insert_media" in note
+    assert "REFERENCE" in note
+    assert "look_at_asset" in note
+    assert "do NOT insert it" in note
+
+
+def test_language_rule_covers_text_seen_inside_footage():
+    import agent_prompt
+    p = agent_prompt.SYSTEM_PROMPT
+    assert "TEXT YOU SEE INSIDE FOOTAGE OR ATTACHMENTS" in p
+    assert "DO NOT CHANGE LANGUAGE MID-CONVERSATION" in p
+
+
+def test_tool_descriptions_carry_the_new_rules():
+    import agent_tools as _at
+    reg = _at.TOOLS if hasattr(_at, "TOOLS") else None
+    if reg is None:                      # registry name differs — find it
+        for name in dir(_at):
+            v = getattr(_at, name)
+            if isinstance(v, dict) and "insert_media" in v and "look_at" in v:
+                reg = v
+                break
+    assert reg is not None
+    assert "STYLE" in reg["insert_media"][1] and \
+           "look_at_asset" in reg["insert_media"][1]
+    assert "NEVER frame-scan" in reg["look_at"][1]
+    assert "ask_user" in reg["look_at"][1]
