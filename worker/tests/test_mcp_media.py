@@ -127,14 +127,44 @@ def test_the_normal_call_re_encodes_nothing():
     out = mcp_media.prepare(_Ctx(), {}, 12 * MB)
     assert out["video"]["transcoded"] is False
     assert out["video"]["storage_key"] == "media/3/prev.mp4"
-    assert out["video"]["inline"] is True          # 4 MB fits in a 12 MB reply
 
 
-def test_a_file_too_big_to_embed_still_comes_back_as_a_link():
-    out = mcp_media.prepare(_Ctx(bytes=200 * MB), {}, 12 * MB)
-    assert out["video"]["transcoded"] is False
-    assert out["video"]["inline"] is False
-    assert "delivery=\"inline\"" in out["text"]     # ...and how to change that
+def test_the_default_never_embeds_however_small_the_file():
+    """THE BUG THIS EXISTS FOR (Aug 3 2026). Embedding whenever the file fit
+    assumed a client that cannot render a video block would ignore it. Grok
+    STRINGIFIED it — a 2.9 MB preview became 4 million characters of base64
+    and ended the session, and the tool call reported success. Being wrong
+    this way costs the whole conversation; being wrong the other way costs
+    one extra argument."""
+    for size in (1, 4 * MB, 11 * MB):
+        out = mcp_media.prepare(_Ctx(bytes=size), {}, 12 * MB)
+        assert out["video"]["inline"] is False, f"{size} bytes was embedded"
+    assert "LINK BELOW IS THE VIDEO" in out["text"]
+
+
+def test_embedding_is_opt_in_and_says_what_it_costs():
+    out = mcp_media.prepare(_Ctx(), {"delivery": "inline"}, 12 * MB)
+    assert out["video"]["inline"] is True
+    # ...and the caller that did NOT opt in is told the option exists AND
+    # what it does to a client that cannot decode it.
+    plain = mcp_media.prepare(_Ctx(), {}, 12 * MB)["text"]
+    assert "delivery=\"inline\"" in plain and "run out of context" in plain
+
+
+def test_inline_on_an_oversized_file_shrinks_it_rather_than_giving_up(
+        monkeypatch):
+    """delivery="inline" is a request for something embeddable. A 200 MB file
+    must reach the encoder — handing it back un-embedded would answer a
+    different question than the one asked."""
+    class _S:
+        @staticmethod
+        def exists(key):
+            raise _Reached(key)
+
+    monkeypatch.setattr(mcp_media, "storage", _S)
+    with pytest.raises(_Reached):
+        mcp_media.prepare(_Ctx(bytes=200 * MB), {"delivery": "inline"},
+                          12 * MB)
 
 
 def test_asking_for_the_url_takes_the_file_at_any_size():

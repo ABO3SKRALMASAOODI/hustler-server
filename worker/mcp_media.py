@@ -438,7 +438,17 @@ def prepare(ctx, args, inline_max_bytes):
 
 def _answer(ctx, kind, key, what, nbytes, duration, start, height,
             *, transcoded, inline_max_bytes, delivery, extra):
-    inline = delivery != "url" and bool(nbytes) and nbytes <= inline_max_bytes
+    # EMBEDDING IS OPT-IN, and this line is the whole reason (Aug 3 2026).
+    # It used to embed whenever the file happened to fit, on the assumption
+    # that a client which cannot render a video block would ignore it. It does
+    # not — it STRINGIFIES it. The first real call handed Grok a 2.9 MB
+    # preview, which arrived as 4 MILLION characters of base64 in the
+    # conversation and ended the session ("the conversation is too long"),
+    # while the tool reported success. Wrong-by-default costs one extra step
+    # here and costs the entire session there, so only an explicit
+    # delivery="inline" — from a caller that knows its own model reads video —
+    # ever puts bytes in the reply.
+    inline = delivery == "inline" and bool(nbytes) and nbytes <= inline_max_bytes
     lines = [f"Here is {what}."]
     if extra:
         lines.append(extra.strip())
@@ -453,13 +463,18 @@ def _answer(ctx, kind, key, what, nbytes, duration, start, height,
                      "cannot play the attachment.")
     else:
         lines.append(
-            "Fetch it from the link below — it is a plain, unauthenticated "
-            "GET, so anything that can download a file can read it."
-            + (" It was too large to send inside this reply"
-               f" ({_mb(nbytes)} against a {_mb(inline_max_bytes)} limit): "
-               "pass delivery=\"inline\" (or max_mb) and you get a smaller "
-               "copy embedded directly, or narrow it with start/end."
-               if delivery != "url" and nbytes else ""))
+            "THE LINK BELOW IS THE VIDEO. It is a plain, unauthenticated GET "
+            "of an ordinary MP4 — fetch it and watch it with whatever your "
+            "model uses for video. This is the right way to get it, not a "
+            "fallback.")
+        if nbytes and nbytes <= inline_max_bytes:
+            lines.append(
+                "It is small enough to be embedded in the reply itself "
+                f"({_mb(nbytes)}) — but ONLY ask for that (delivery="
+                "\"inline\") if your client decodes video content blocks "
+                "natively. A client that cannot will turn the file into "
+                "millions of characters of base64 in this conversation and "
+                "run out of context.")
     return {"text": "\n".join(lines),
             "video": {"storage_key": key, "mime": MIME, "bytes": nbytes,
                       "duration_s": round(duration, 3) if duration else None,

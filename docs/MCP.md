@@ -193,13 +193,23 @@ picks up the finished file instead of starting a second render. Pass
 EDL version that was and that everything since is missing from what you are
 watching.
 
-**How it comes back.** Two content blocks: text first (what it is, how long,
-and **which clock its seconds are on**), then — when it fits — the video as an
-MCP `resource` block, `mimeType: video/mp4`, base64. The text always carries a
-plain unauthenticated download URL as well, so a client that cannot read a
-video block can still `curl` it. `delivery` decides: `auto` (default) embeds
-only a file that already fits under `MCP_VIDEO_INLINE_MAX_MB`; `inline`
-shrinks until it does; `url` never embeds.
+**How it comes back: A LINK, unless you explicitly ask otherwise.** The reply
+is a text block — what it is, how long, and **which clock its seconds are on**
+— carrying a plain unauthenticated URL to an ordinary MP4. Fetch it and watch
+it. `delivery="inline"` additionally embeds the file as an MCP `resource`
+block (`mimeType: video/mp4`, base64), capped at `MCP_VIDEO_INLINE_MAX_MB`.
+
+**Only ask for `inline` if your client decodes video content blocks
+natively.** This defaulted to embedding-when-it-fits for about half an hour on
+2026-08-03, on the assumption that a client which cannot render a video block
+would ignore it. Grok **stringified** it: a 2.9 MB preview arrived as **4
+million characters** of base64 and ended the session ("the conversation is too
+long"), while the tool call reported success. Being wrong that way costs the
+whole conversation; being wrong the other way costs one extra argument. So
+embedding is opt-in, enforced independently in the worker (which decides) and
+the backend (which carries the bytes) — neither alone can put a file in a
+reply. `MCP_VIDEO_DELIVERY=inline` flips the default for a deployment whose
+client is known to handle it.
 
 **The trap it is written to avoid:** a watched *program* runs on OUTPUT
 seconds, and most editing tools take SOURCE seconds — after one cut the two

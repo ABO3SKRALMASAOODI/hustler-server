@@ -329,7 +329,7 @@ def test_watch_video_is_on_the_surface(client):
 
 def test_a_small_video_comes_back_embedded_beside_its_link(client, monkeypatch):
     _served(monkeypatch)
-    res = _call_watch(client)
+    res = _call_watch(client, delivery="inline")
     kinds = [c["type"] for c in res["content"]]
     # Text FIRST — it says which clock the video runs on, and the model has to
     # read that before it acts on anything it saw.
@@ -338,6 +338,21 @@ def test_a_small_video_comes_back_embedded_beside_its_link(client, monkeypatch):
     blob = res["content"][1]["resource"]
     assert blob["mimeType"] == "video/mp4"
     assert base64.b64decode(blob["blob"]) == MOVIE
+
+
+def test_the_default_NEVER_embeds(client, monkeypatch):
+    """THE BUG THIS EXISTS FOR (Aug 3 2026). It used to embed whenever the
+    file happened to fit, on the assumption that a client which cannot render
+    a video block would ignore it. Grok STRINGIFIED it: a 2.9 MB preview
+    arrived as 4 million characters of base64 and ended the session, while
+    the tool reported success. Embedding is opt-in now, forever."""
+    # The worker is faked here as saying inline=True — i.e. even if it
+    # regressed, this service must still refuse. The rule is enforced twice,
+    # independently, because it is enforced across two deployables.
+    _served(monkeypatch, inline=True)
+    res = _call_watch(client)
+    assert [c["type"] for c in res["content"]] == ["text"]
+    assert "https://cdn.example/" in res["content"][0]["text"]
 
 
 def test_delivery_url_never_embeds(client, monkeypatch):

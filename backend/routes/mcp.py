@@ -313,9 +313,9 @@ SESSION_TOOLS = [
         "the viewer sees it — it renders the current edit first if it has "
         "not been rendered; 'source' is the raw uploaded footage; 'asset' is "
         "one uploaded clip (pass asset_key). start/end watch a window rather "
-        "than the whole thing. The file comes back embedded in the reply "
-        "when it fits, and always as a direct download link. Cheap: normally "
-        "it hands over a file that already exists, untouched.",
+        "than the whole thing. It comes back as a direct download link — a "
+        "plain MP4 you fetch and watch. Cheap: normally it hands over a file "
+        "that already exists, untouched.",
      "inputSchema": {"type": "object", "properties": {
          "kind": {"type": "string", "enum": ["timeline", "source", "asset"],
                   "description": "Default 'timeline' — the current edit."},
@@ -327,10 +327,14 @@ SESSION_TOOLS = [
                                   "'timeline', source seconds otherwise."},
          "end": {"type": "number", "description": "Watch up to this second."},
          "delivery": {"type": "string", "enum": ["auto", "inline", "url"],
-                      "description": "'inline' shrinks the video until it fits "
-                                     "inside this reply and embeds it; 'url' "
-                                     "never embeds; 'auto' (default) embeds "
-                                     "only if the existing file already fits."},
+                      "description": "Default 'auto' = a download link, which "
+                                     "is what you want. 'inline' EMBEDS the "
+                                     "video in this reply — only ask for that "
+                                     "if your client decodes video content "
+                                     "blocks natively; one that cannot will "
+                                     "turn the file into millions of "
+                                     "characters of base64 and run out of "
+                                     "context."},
          "max_mb": {"type": "number",
                     "description": "Shrink to about this many megabytes. Use "
                                    "when your model has a file-size limit."},
@@ -815,8 +819,14 @@ def _t_watch_video(tok, args):
         return _text(f"{text}\n\nThe file is ready but no download link could "
                      f"be minted for it ({e}).", True)
 
+    # BOTH conditions, independently. The worker only sets `inline` for an
+    # explicit delivery="inline", and this service re-checks the same thing
+    # rather than trusting it — see mcp_media._answer for what one accidental
+    # embed cost (a 2.9 MB file became 4 million characters in a live session
+    # and ended it). Two services, one invariant, and neither alone can
+    # decide to put bytes in a reply.
     blob = None
-    if video.get("inline") and delivery != "url":
+    if video.get("inline") and delivery == "inline":
         raw = storage.get_object_whole(video["storage_key"], inline_max)
         if raw:
             blob = base64.b64encode(raw).decode("ascii")
