@@ -1,0 +1,91 @@
+{
+  "slug": "kinetic-typography-talking-head",
+  "v": 1,
+  "genre": "creator promo / educational talking-head (Instagram reels)",
+  "identity": "One continuous seated talking-head take, subject matted onto a designed near-monochrome canvas, with the SPEECH carried visually by kinetic typography: words fly in around the speaker at the instant they are spoken. Cut rhythm is irrelevant — typography choreography IS the rhythm. Sections are announced by giant accent-colored display words; brightness flips with the narrative (bright=solution, dark=problem); a music bed swells only at the CTA.",
+  "source": {
+    "file": "87195f37b8c34e5fae7e5483855c020b.MP4",
+    "measured": "measure_reference.py output, Aug 3 2026",
+    "duration_s": 45.2,
+    "creator_watermark": "@mr.k.videography"
+  },
+
+  "canvas": {
+    "base": "cream/paper texture with faint grid, near-monochrome",
+    "measured_brightness": 0.62,
+    "measured_saturation": 0.035,
+    "measured_contrast_spread": 0.50,
+    "accent": "one saturated color only (red here) — used for the hook disc, section display words, and key UI highlights",
+    "secondary_accents": "at most 1-2 tinted words (blue product name, orange CTA keyword)",
+    "watermark": "small handle top-right, persistent"
+  },
+
+  "subject": {
+    "treatment": "background-removed (matted) with soft drop shadow, seated, centered or slightly off-center; a colored disc or shape may sit behind the subject in the hook",
+    "scale": "medium shot, whole torso visible — text needs the empty space around the head and shoulders",
+    "narrative_lighting": "bright canvas for hook/solution/features; DARK desk scene for the problem section — brightness follows the story, flipping exactly at narrative turns"
+  },
+
+  "typography": {
+    "sync_rule": "each word/phrase appears AT the moment it is spoken (word-level transcript timing), never as a bottom caption bar",
+    "placement_rule": "words compose AROUND the subject — beside the head, arcing over shoulders, stacked in clear space; never covering the face",
+    "scales": [
+      {"role": "kinetic speech words", "size": "small-medium", "color": "near-black on bright canvas / white on dark", "font": "clean grotesk", "animations": ["pop", "stagger in", "arc/rotate along a curve", "diagonal stack"]},
+      {"role": "section markers", "size": "giant (1/3 of frame width)", "color": "accent red", "font": "bold display", "examples": ["First", "Second", "Third", "And More"], "animation": "slam/scale in, slight settle"},
+      {"role": "emphasis words", "treatment": "accent tint or heavier weight inside a kinetic phrase"}
+    ],
+    "ui_mockups": "when the speech describes product actions, animated UI props (pill buttons, dropdowns, toggles, sliders) appear and act out the words"
+  },
+
+  "structure": {
+    "sections": [
+      {"name": "hook", "span_frac": [0.0, 0.09], "content": "claim + tease, subject on accent disc, highest motion of the whole video (measured YDIF 16.9 vs 5.3 avg)"},
+      {"name": "problem", "span_frac": [0.09, 0.27], "content": "DARK scene; the pain acted out visually (wall of broken text); ends at the pivot word ('but then I found ...')"},
+      {"name": "solution reveal", "span_frac": [0.27, 0.38], "content": "flip back to bright; product named; one hero UI prop"},
+      {"name": "features x3", "span_frac": [0.38, 0.88], "content": "numbered display-word sections, ~8-10s each, one capability acted out per section"},
+      {"name": "cta", "span_frac": [0.88, 1.0], "content": "dark backdrop, platform logo, comment-keyword instruction; music swells (+21dB at 0.90 of runtime)"}
+    ],
+    "motion_curve": "front-loaded and decaying: measured per-section motion 16.9 → 9.5 → 5.8 → 4.3 → 4.2 → 2.0",
+    "scene_changes": "5-6 background changes in 45s, at section boundaries only — every one marked by a whip/glitch/flash transition (measured flash clusters at 2.1, 7.9, 13.0, 31.2, 41.2s)"
+  },
+
+  "audio": {
+    "role": "music is a BED, not a driver — cuts do not lock to beats (40% within 100ms vs 28% random baseline)",
+    "measured_bpm": 83.1,
+    "bpm_confidence": 0.44,
+    "dynamics": "flat and low under speech; single +21dB swell at the CTA",
+    "speech": "the voice is the lead audio throughout"
+  },
+
+  "rubric": {
+    "words_visualized": "every spoken phrase has a synced typographic event; target: >=90% of transcript words appear on screen within 150ms of utterance",
+    "face_never_covered": true,
+    "saturation_base_max": 0.10,
+    "single_accent_color": true,
+    "section_marker_max_gap_s": 12,
+    "brightness_flips_at_narrative_turns": true,
+    "hook_motion_ratio_min": 2.0,
+    "transition_at_every_scene_change": true,
+    "cta_final_frac_max": 0.12,
+    "music_swell_at_cta": true
+  },
+
+  "capability_map": {
+    "expressible_today": [
+      "word-level timing from the transcript (get_words)",
+      "per-phrase placed text with entrance animations (add_text at x/y)",
+      "text behind/around a matted subject (add_text_behind, personseg)",
+      "emphasis-word tinting (add_captions emphasis, accent_color)",
+      "whip/glitch junctions (set_transitions), flashes",
+      "music bed + fades (add_music, set_fades, set_music_fit)",
+      "near-monochrome grade + accent (set_grade_custom saturation down)",
+      "title cards / color screens for the CTA (add_title_card, add_color_screen)"
+    ],
+    "gaps": [
+      "typography CHOREOGRAPHY as a composed program: N per-phrase text groups with varied curves/arcs generated from the transcript in one pass (today: one add_text call per phrase, no arc/rotate paths)",
+      "subject matte onto a DESIGNED canvas (disc/texture behind a removed background) as a persistent look, not a per-frame effect",
+      "animated UI-mockup props (pills, toggles, dropdowns) as a graphics pack",
+      "narrative brightness flip as a scene-level design move the agent plans (needs the agent to map problem/solution spans from the transcript)"
+    ]
+  }
+}
