@@ -1,0 +1,34 @@
+{
+  "slug": "quote-reel",
+  "v": 1,
+  "genre": "motivational voiceover reel (no talking head)",
+  "identity": "A voiceover (or on-screen statement) carried by cinematic footage of ONE subject who never addresses the camera. Typography builds phrase-by-phrase at the spoken rhythm and settles into a full composed quote; the footage is a mood, not a story. Short (14-18s in corpus), heavily graded, ends on a dimmed frame with logo + handle.",
+  "exemplars": {
+    "bright-serif": {"file": "b6f8a278", "duration_s": 14.3, "shots": 2, "sat": 0.023, "brightness": 0.30},
+    "dark-bw-red": {"file": "9fc248eb", "duration_s": 18.0, "shots": 6, "sat": 0.016, "brightness": 0.33},
+    "text-cards": {"file": "2335499e", "duration_s": 17.5, "shots": 8, "sat": 0.034, "brightness": 0.25}
+  },
+  "rules": {
+    "footage": "1-8 shots total; a single human subject seen cinematically (from behind, silhouetted, in rain, at a desk) — never lip-synced to the words",
+    "typography": {
+      "build": "words/phrases appear AT the voiceover's pace and STAY, accumulating into the full composed quote by the end",
+      "mix": "two contrasting faces: a plain sans/serif for connective words + an expressive face (script italic, or huge colored display) for the 3-6 EMOTIONAL keywords",
+      "emphasis_placement": "keywords land in the frame's empty space (sky, wall, darkness), never on the subject's face"
+    },
+    "skins": {
+      "bright-serif": "daylight footage, elegant serif + script-italic keywords in white",
+      "dark-bw-red": "monochrome moody footage, small serif whispers + giant RED display keywords",
+      "text-cards": "full-black (or white) statement cards alternating with b-roll; payoff section repeats one anchor phrase ('locked in.') centered over every shot"
+    },
+    "ending": "frame dims 20-40%, full quote or final line holds, Instagram logo + handle fade in"
+  },
+  "rubric": {
+    "words_on_screen_within_ms_of_speech": 200,
+    "emotional_keywords_get_display_treatment": true,
+    "keywords_in_negative_space": true,
+    "saturation_max": 0.05,
+    "shot_count_max_per_10s": 5,
+    "dim_logo_outro": true
+  },
+  "capability_notes": "Fully expressible today except the accumulate-and-stay text build (add_text events with staggered starts and a common end time reproduce it) and the script-italic display faces (font availability — check worker/fonts)."
+}

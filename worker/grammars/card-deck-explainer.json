@@ -1,0 +1,26 @@
+{
+  "slug": "card-deck-explainer",
+  "v": 1,
+  "genre": "concept-slide listicle (marketing-lesson deck)",
+  "identity": "A talking-head bookend opens and closes, but the body is a DECK: full-frame art-directed slides in a strict alternating pattern (item card -> concept card), one beat each, synced to the narration. The corpus exemplar teaches 'brands sell feelings': logo slide (Tesla on red fabric) -> script-font concept slide ('Innovation,') -> subversion slide ('not cars.'). Highest slide rate in the corpus (7.3 cards/10s) with every slide readable in under a second.",
+  "exemplars": {
+    "brand-slides": {"file": "a5875fa1", "duration_s": 24.8, "cards_per_10s": 7.3, "median_card_s": 1.1, "sat": 0.085, "brightness": 0.43, "beat_lock_pct": 44, "notes": "Tesla/Coca-Cola/Rolex/Apple sequence; script serif for feelings, giant condensed sans for negations; b/w portrait-grid wall for 'people'; night-desk b-roll bridge; handle outro"}
+  },
+  "rules": {
+    "pattern": "a repeating 2-3 slide unit per item: [icon/logo slide] -> [concept word in expressive type] -> [optional subversion slide]; the unit repeats for 3-5 items",
+    "slide_design": "each slide is ONE idea: a logo on a textured field, or 1-3 words centered; backgrounds alternate color fields (brand color, gradient, black, white)",
+    "type_contrast": "script/serif for the emotional concept, heavy condensed sans for the blunt correction — the contrast IS the joke/insight",
+    "timing": "one slide per spoken beat (~1s); the deck never waits for the narration to catch up",
+    "bookends": "talking head opens with the promise and returns for 'the lesson is simple' + CTA",
+    "grade": "slides are flat graphic color; footage bookends stay muted"
+  },
+  "rubric": {
+    "slide_per_spoken_beat": true,
+    "one_idea_per_slide": true,
+    "type_contrast_pairs": true,
+    "items_min": 3,
+    "median_card_s_max": 1.5,
+    "bookend_frac_max": 0.35
+  },
+  "capability_notes": "Closest family to current tools: add_color_screen + add_title_card + add_text templates cover the slide vocabulary; logo slides need user-supplied or generated images (generate_image). The dependency is deck PLANNING from the transcript (find the items and their concept/correction pairs) and sub-second slide pacing."
+}

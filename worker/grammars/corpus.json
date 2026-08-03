@@ -1,0 +1,35 @@
+{
+  "v": 1,
+  "about": "The exemplar corpus behind the grammar library (round 82d, Aug 3 2026). 19 files gathered from Instagram by the owner as 'perfect edits'; 16 unique videos (3 re-export duplicates). Each was measured by worker/tools/measure_reference.py and read frame-by-frame from contact sheets; grammars distill per-family rules.",
+
+  "universal_invariants": {
+    "saturation": "0.004-0.088 across ALL 16 — every exemplar is heavily desaturated/muted with at most ONE accent color. Raw phone footage runs ~0.15-0.3; graded-down is the single most universal taste marker in the corpus.",
+    "cuts_follow_speech_not_beats": "no exemplar beat-locks meaningfully above its random baseline (best: 86% vs 64% chance). Typography, cuts and props sync to WORDS and story beats; music is a bed. 'Beat-align everything' is the wrong default for these genres.",
+    "duration_band_s": [14, 87],
+    "watermark": "small creator handle persistent in a corner on nearly all",
+    "ending": "dark/dimmed final 1-3s with Instagram logo + handle, usually after a comment-keyword or follow CTA",
+    "typography_is_the_energy": "in talking-head families the cut rate is LOW (1-3 cuts/10s) and visual energy comes from type/graphics; in montage families the cut rate is HIGH (5-7 cuts/10s, ~1s median shots) and captions stay minimal"
+  },
+
+  "files": {
+    "87195f37b8c34e5fae7e5483855c020b": {"family": "talking-head-promo", "skin": "bright-kinetic", "creator": "@mr.k.videography", "dup_of": null},
+    "e56cbc4aed1045248b553959d359f9e0": {"family": "talking-head-promo", "skin": "bright-kinetic", "creator": "@mr.k.videography", "dup_of": "87195f37b8c34e5fae7e5483855c020b"},
+    "93221f6da0694337ac07c7c94caa2be5": {"family": "talking-head-promo", "skin": "dark-minimal", "creator": "after-effects educator", "dup_of": null},
+    "1ac1840de70048728153b8f7f3c300d4": {"family": "talking-head-promo", "skin": "dark-maximalist", "creator": "@imzache", "dup_of": null},
+    "5a6ac6880bb942a697e17e6bf67849f0": {"family": "talking-head-promo", "skin": "dark-maximalist", "creator": "@imzache", "dup_of": null},
+    "291f65fa9e044e8ca0b74b1d96524481": {"family": "talking-head-promo", "skin": "walking-pitch", "creator": "@crowndigitalmktgllc", "dup_of": null},
+    "df19090f43a74813a5b31ca1b3e801ba": {"family": "talking-head-promo", "skin": "filmmaker-street", "creator": "@austinwhite711", "dup_of": null},
+    "7914a7d6957e4e338b25f081437c4b14": {"family": "talking-head-promo", "skin": "resource-cards", "creator": "@devinjatho", "dup_of": null},
+    "b6f8a278948a4fa089b5a8c707c2b25d": {"family": "quote-reel", "skin": "bright-serif", "creator": "@laron.joseph", "dup_of": null},
+    "9fc248eb41914c5b90ffc4591ee47c8b": {"family": "quote-reel", "skin": "dark-bw-red", "creator": "@akkuu_photography", "dup_of": null},
+    "217788d0f24a49ef851ef35e9cf5b9e7": {"family": "quote-reel", "skin": "dark-bw-red", "creator": "@akkuu_photography", "dup_of": "9fc248eb41914c5b90ffc4591ee47c8b"},
+    "2335499eb1674dacad72f177feb2ebaa": {"family": "quote-reel", "skin": "text-cards", "creator": "@lensofyuvy", "dup_of": null},
+    "62a5bf96cfcc41f1ac16522f0d745c0a": {"family": "voiceover-montage", "skin": "movie-audio-bw", "creator": "@imad.json", "dup_of": null},
+    "bb4148f6b15b49e99ebfe9c3870afe71": {"family": "voiceover-montage", "skin": "lifestyle-money", "creator": "@longevitypenguin", "dup_of": null},
+    "4e69aa510e914cde81b4332c6bee9ef1": {"family": "voiceover-montage", "skin": "raw-startup-vlog", "creator": "@imad.json", "dup_of": null},
+    "83851f82e8f54189b30c6d9c255cf0dd": {"family": "voiceover-montage", "skin": "designed-travel", "creator": "@johnbucog", "dup_of": null},
+    "6061bbabf03546479305537321c09930": {"family": "narrative-vlog", "skin": "cinematic-story", "creator": "unknown", "dup_of": null},
+    "be9287fbe6b04f02a9a9fa8178f69145": {"family": "narrative-vlog", "skin": "cinematic-story", "creator": "unknown", "dup_of": "6061bbabf03546479305537321c09930"},
+    "a5875fa15e0c47129e1100a673f3e35c": {"family": "card-deck-explainer", "skin": "brand-slides", "creator": "@nathanazareth", "dup_of": null}
+  }
+}

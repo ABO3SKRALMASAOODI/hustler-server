@@ -1,0 +1,34 @@
+{
+  "slug": "talking-head-promo",
+  "v": 1,
+  "genre": "creator educator/promo reel (the corpus's dominant family — 7 of 16)",
+  "identity": "One continuous talking-head take is the spine (seated, standing, or walking); the visual energy comes from SPEECH-SYNCED typography and graphic props, not from cuts (1-3 cuts/10s across all skins). Sections are announced typographically, claims are acted out by props (UI mockups, photo collages, item cards, big labels), and it closes with a comment-keyword or follow CTA. Detailed base grammar: kinetic-typography-talking-head.json (the bright-kinetic skin).",
+  "exemplars_by_skin": {
+    "bright-kinetic": {"file": "87195f37", "sat": 0.035, "brightness": 0.62, "cuts_per_10s": 1.1, "notes": "cream canvas, matted subject, red display sections, words orbit the speaker — see kinetic-typography-talking-head.json"},
+    "dark-minimal": {"file": "93221f6d", "sat": 0.022, "brightness": 0.17, "cuts_per_10s": 1.7, "notes": "moody room, tiny captions, full-screen GRAPHIC INTERLUDES (floating panels, progress bars, title cards) between talking spans"},
+    "dark-maximalist": {"files": ["1ac1840d", "5a6ac688"], "sat": 0.04, "brightness": 0.23, "cuts_per_10s": 5.2, "flash_frames": "14-30", "notes": "3D slab/neon type, comic sunburst radials behind the subject, prop gags (framed self-portrait), metaphor b-roll interludes, whip transitions, ONE accent (red or yellow)"},
+    "walking-pitch": {"file": "291f65fa", "sat": 0.037, "brightness": 0.43, "cuts_per_10s": 2.0, "notes": "walking toward camera through a location; floating photo-collage props fan out beside the walker; gauge graphics for numbers; neon logo outro"},
+    "filmmaker-street": {"file": "df19090f", "sat": 0.071, "brightness": 0.30, "cuts_per_10s": 4.5, "notes": "giant condensed LABELS name each demo shot (WIDE / 70MM MEDIUM / 135MM CLOSE UP); app-UI demo segments on grid-paper background; word cards (TIME, MONEY)"},
+    "resource-cards": {"file": "7914a7d6", "sat": 0.041, "brightness": 0.19, "cuts_per_10s": 2.6, "notes": "pinned title card through the hook; N item cards on a fixed template (cover + title + view-count ladder animating up); blurred list tease behind the speaker; comment-keyword pill"}
+  },
+  "shared_rules": {
+    "spine": "one take, one location (or one walk); punch-ins allowed; cuts only at section boundaries",
+    "typography_sync": "every on-screen word appears at its spoken instant; placement in the empty space around the speaker, never on the face",
+    "sections": "announced by display words or title cards every 8-12s; numbered lists are the default structure (First/Second/Third)",
+    "props_act_out_claims": "when speech describes a thing, a graphic of the thing appears and DOES it (button clicks, toggle flips, cards count up, photos fan out)",
+    "one_accent_rule": "desaturated base (sat <= 0.09) + exactly one loud accent color used for sections/emphasis",
+    "transitions": "whips/flashes/glitches at section boundaries only; hard cuts elsewhere",
+    "cta": "final 8-12%: darker backdrop, comment-keyword or follow instruction, logo + handle"
+  },
+  "rubric": {
+    "words_synced_pct_min": 90,
+    "section_marker_max_gap_s": 12,
+    "face_never_covered": true,
+    "single_accent_color": true,
+    "saturation_max": 0.09,
+    "props_for_every_numbered_claim": true,
+    "cta_final_frac_max": 0.12,
+    "cut_rate_talking_spans_max_per_10s": 3
+  },
+  "capability_notes": "Same four gaps as the base doc: typography choreography as one composed pass; matte-onto-designed-canvas; UI/graphics prop pack (now also: item-card template with count-up ladder, gauge, progress bar, photo-fan collage); transcript-driven section planning. Everything else exists."
+}
