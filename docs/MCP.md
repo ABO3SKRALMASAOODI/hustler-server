@@ -199,17 +199,28 @@ is a text block — what it is, how long, and **which clock its seconds are on**
 it. `delivery="inline"` additionally embeds the file as an MCP `resource`
 block (`mimeType: video/mp4`, base64), capped at `MCP_VIDEO_INLINE_MAX_MB`.
 
-**Only ask for `inline` if your client decodes video content blocks
-natively.** This defaulted to embedding-when-it-fits for about half an hour on
-2026-08-03, on the assumption that a client which cannot render a video block
-would ignore it. Grok **stringified** it: a 2.9 MB preview arrived as **4
-million characters** of base64 and ended the session ("the conversation is too
-long"), while the tool call reported success. Being wrong that way costs the
-whole conversation; being wrong the other way costs one extra argument. So
-embedding is opt-in, enforced independently in the worker (which decides) and
-the backend (which carries the bytes) — neither alone can put a file in a
-reply. `MCP_VIDEO_DELIVERY=inline` flips the default for a deployment whose
-client is known to handle it.
+**Embedding is OFF unless the operator turns it on** (`MCP_VIDEO_ALLOW_INLINE
+=1`), and the model cannot override that. It took two dead sessions on
+2026-08-03 to get this right:
+
+1. It first embedded whenever the file fit, assuming a client that cannot
+   render a video block would ignore it. Grok **stringified** it — a 2.9 MB
+   preview arrived as **4 million characters** of base64 and ended the session
+   ("the conversation is too long"), while the tool call reported success.
+2. So embedding became an opt-in argument. Grok passed it. Of course it did:
+   it had just been asked whether it could hear the music, the tool offered
+   the actual file, and the only caveat was *"if your client decodes video
+   content blocks"* — a fact about the CLIENT, which the model cannot check
+   and will assume is yes.
+
+**An opt-in is only honest when whoever takes it can evaluate the
+consequence.** Here the model cannot and the consequence is unrecoverable, so
+the switch belongs to the operator, who can see what their client does with a
+resource block. With it off, `inline` is not in the `delivery` enum at all
+(honest-off gating, same as an editor tool with no API key) and a stale client
+that asks anyway gets the link plus a plain sentence saying why. With it on,
+the rule is still enforced independently in the worker and the backend, so
+neither alone can put bytes in a reply.
 
 **The trap it is written to avoid:** a watched *program* runs on OUTPUT
 seconds, and most editing tools take SOURCE seconds — after one cut the two
@@ -272,8 +283,9 @@ encode settings, so asking for the same window twice encodes once.
 | `MCP_REFRESH_TTL_S` | backend | 7776000 | refresh-token lifetime |
 | `MCP_SYNC_WAIT_S` | backend | 25 | longest a call blocks before ticketing |
 | `MCP_INSTRUCTIONS` | backend | `full` | `brief` drops the doctrine |
-| `MCP_VIDEO_INLINE_MAX_MB` | backend | 12 | biggest video `watch_video` may embed in a reply |
-| `MCP_VIDEO_DELIVERY` | backend | `auto` | default for `delivery` (`auto`/`inline`/`url`) |
+| `MCP_VIDEO_ALLOW_INLINE` | backend | **off** | may `watch_video` embed video bytes in a reply at all — the model cannot override this |
+| `MCP_VIDEO_INLINE_MAX_MB` | backend | 12 | biggest video it may embed, once allowed |
+| `MCP_VIDEO_DELIVERY` | backend | `auto` | default for `delivery` (`auto`/`url`, plus `inline` when allowed) |
 | `MCP_VIDEO_HEIGHT` | worker | 540 | ceiling a `watch_video` re-encode aims at (never up-scales) |
 | `MCP_VIDEO_FPS_CAP` | worker | 30 | frame-rate cap on a re-encode |
 | `MCP_VIDEO_MAX_ENCODE_S` | worker | 1800 | longest window one call will re-encode |

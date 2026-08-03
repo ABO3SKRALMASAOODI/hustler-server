@@ -329,6 +329,7 @@ def test_watch_video_is_on_the_surface(client):
 
 def test_a_small_video_comes_back_embedded_beside_its_link(client, monkeypatch):
     _served(monkeypatch)
+    monkeypatch.setattr(mcpmod, "VIDEO_ALLOW_INLINE", True)
     res = _call_watch(client, delivery="inline")
     kinds = [c["type"] for c in res["content"]]
     # Text FIRST — it says which clock the video runs on, and the model has to
@@ -338,6 +339,42 @@ def test_a_small_video_comes_back_embedded_beside_its_link(client, monkeypatch):
     blob = res["content"][1]["resource"]
     assert blob["mimeType"] == "video/mp4"
     assert base64.b64decode(blob["blob"]) == MOVIE
+
+
+def test_the_model_cannot_turn_embedding_on_by_itself(client, monkeypatch):
+    """THE BUG THIS EXISTS FOR (Aug 3 2026, the SECOND time). Making embedding
+    an opt-in argument was not enough: asked whether it could hear the music,
+    Grok passed delivery="inline" — reasonably, since the tool offered it and
+    the only caveat was a fact about its own CLIENT that it cannot check. It
+    embedded 2.9 MB and the session ended.
+
+    Whether a client can decode a video block is the operator's knowledge, so
+    it is the operator's switch. The model asking must never be enough."""
+    _served(monkeypatch, inline=True)
+    assert mcpmod.VIDEO_ALLOW_INLINE is False       # off unless the env says
+    res = _call_watch(client, delivery="inline")
+    assert [c["type"] for c in res["content"]] == ["text"]
+    body = res["content"][0]["text"]
+    assert "does not do that" in body               # ...and says so honestly
+    assert res.get("isError") is not True           # refusing is not failing
+
+
+def test_inline_is_not_even_offered_when_it_is_off(client):
+    """Honest-off gating: a capability this deployment will refuse is hidden
+    from the schema rather than left out for the model to trip over."""
+    tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
+    watch = [t for t in tools if t["name"] == "watch_video"][0]
+    assert watch["inputSchema"]["properties"]["delivery"]["enum"] == \
+        ["auto", "url"]
+
+
+def test_the_worker_is_told_not_to_advertise_embedding_either(client,
+                                                              monkeypatch):
+    """The worker writes the reply text and has no other way to know. A zero
+    budget is how it is told to stop inviting the model to ask."""
+    _served(monkeypatch)
+    _call_watch(client)
+    assert DB["enqueued"][-1]["args"]["_inline_max_bytes"] == 0
 
 
 def test_the_default_NEVER_embeds(client, monkeypatch):
@@ -376,6 +413,7 @@ def test_the_worker_is_told_the_backends_own_inline_budget(client, monkeypatch):
     down with the call is what stops the two services keeping two copies of
     the number and drifting."""
     _served(monkeypatch)
+    monkeypatch.setattr(mcpmod, "VIDEO_ALLOW_INLINE", True)
     _call_watch(client)
     args = DB["enqueued"][-1]["args"]
     assert args["_inline_max_bytes"] == int(mcpmod.VIDEO_INLINE_MAX_MB * 1048576)

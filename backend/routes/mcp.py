@@ -85,13 +85,46 @@ POLL_S = 0.2
 # This is the single source of truth: the worker is TOLD the budget rather
 # than keeping its own copy, so the two can never drift.
 VIDEO_INLINE_MAX_MB = float(os.getenv("MCP_VIDEO_INLINE_MAX_MB", "12"))
-# Deployment-wide default for `delivery`, for a client that is known one way
-# or the other. "auto" embeds only a file that already fits. A typo in the env
-# falls back rather than refusing every call — the model would be told to fix
-# an argument it never sent.
+# MAY THIS DEPLOYMENT PUT VIDEO BYTES IN A REPLY AT ALL? Default no, and the
+# MODEL CANNOT OVERRIDE IT — this is the round-83d lesson and it cost two live
+# sessions to learn.
+#
+# Embedding was made opt-in in 83c, via a `delivery="inline"` argument the
+# model could pass. Grok passed it. Of course it did: it had just been asked
+# whether it could hear the music, the tool offered a way to receive the
+# actual file, and the only caveat was "ask for this if your client decodes
+# video content blocks" — which is a fact about the CLIENT, that the model has
+# no way to check and every reason to assume is yes. It embedded a 2.9 MB
+# file, which is 4 million characters of base64, and the session ended.
+#
+# An opt-in is only honest when whoever takes it can evaluate the consequence.
+# Here they cannot, and the consequence is unrecoverable, so the switch moves
+# to the one party that KNOWS: whoever runs the deployment and can see what
+# their client does with a resource block. Off by default; `inline` is not
+# even offered in the schema until it is on. This is the same honest-off
+# gating the editor tools use — a capability that cannot work here is hidden,
+# not left out for the model to trip over.
+VIDEO_ALLOW_INLINE = os.getenv("MCP_VIDEO_ALLOW_INLINE", "").strip().lower() \
+    in ("1", "true", "yes", "on")
+
+# Deployment-wide default for `delivery`. A typo in the env falls back rather
+# than refusing every call — the model would be told to fix an argument it
+# never sent.
 VIDEO_DELIVERY = os.getenv("MCP_VIDEO_DELIVERY", "auto").strip().lower()
-if VIDEO_DELIVERY not in ("auto", "inline", "url"):
+if VIDEO_DELIVERY not in ("auto", "inline", "url") or \
+        (VIDEO_DELIVERY == "inline" and not VIDEO_ALLOW_INLINE):
     VIDEO_DELIVERY = "auto"
+
+_DELIVERY_SCHEMA = (
+    {"type": "string", "enum": ["auto", "url", "inline"],
+     "description": "Default 'auto' = a download link. 'inline' also EMBEDS "
+                    "the video in this reply — this deployment has that "
+                    "enabled, so only use it if you know your client decodes "
+                    "video content blocks natively."}
+    if VIDEO_ALLOW_INLINE else
+    {"type": "string", "enum": ["auto", "url"],
+     "description": "A download link either way. Embedding the file in the "
+                    "reply is off on this deployment."})
 
 TOKEN_PREFIX = "vlm_mcp_"
 
@@ -326,15 +359,7 @@ SESSION_TOOLS = [
                    "description": "Watch from this second. OUTPUT seconds for "
                                   "'timeline', source seconds otherwise."},
          "end": {"type": "number", "description": "Watch up to this second."},
-         "delivery": {"type": "string", "enum": ["auto", "inline", "url"],
-                      "description": "Default 'auto' = a download link, which "
-                                     "is what you want. 'inline' EMBEDS the "
-                                     "video in this reply — only ask for that "
-                                     "if your client decodes video content "
-                                     "blocks natively; one that cannot will "
-                                     "turn the file into millions of "
-                                     "characters of base64 and run out of "
-                                     "context."},
+         "delivery": _DELIVERY_SCHEMA,
          "max_mb": {"type": "number",
                     "description": "Shrink to about this many megabytes. Use "
                                    "when your model has a file-size limit."},
@@ -800,9 +825,18 @@ def _t_watch_video(tok, args):
     delivery = (args.get("delivery") or VIDEO_DELIVERY).strip().lower()
     if delivery not in ("auto", "inline", "url"):
         return _text("delivery must be 'auto', 'inline' or 'url'.", True)
+    # A client caches tools/list from connection start, so one that connected
+    # while inline was enabled keeps offering it after it is turned off. The
+    # schema is a hint; this is the rule.
+    refused = delivery == "inline" and not VIDEO_ALLOW_INLINE
+    if refused:
+        delivery = "url"
     args["delivery"] = delivery
     inline_max = int(VIDEO_INLINE_MAX_MB * 1048576)
-    args["_inline_max_bytes"] = inline_max
+    # 0 tells the worker not to offer embedding in its reply either — it has
+    # no other way to know, and inviting the model to ask for something this
+    # deployment refuses is how a model wastes a turn discovering it.
+    args["_inline_max_bytes"] = inline_max if VIDEO_ALLOW_INLINE else 0
 
     result = _run_tool_job(tok, "__media__", args, raw=True)
     text = result.get("text") or "Could not fetch the video."
@@ -825,8 +859,17 @@ def _t_watch_video(tok, args):
     # embed cost (a 2.9 MB file became 4 million characters in a live session
     # and ended it). Two services, one invariant, and neither alone can
     # decide to put bytes in a reply.
+    if refused:
+        text += ("\n\nYou asked for the video to be embedded in this reply. "
+                 "This deployment does not do that — the link above is the "
+                 "video, and fetching it is how you watch it. (Embedding was "
+                 "turned off because a client that cannot decode a video "
+                 "content block turns the file into millions of characters of "
+                 "base64 and runs out of context. Nothing is wrong with your "
+                 "request or with the file.)")
+
     blob = None
-    if video.get("inline") and delivery == "inline":
+    if video.get("inline") and delivery == "inline" and VIDEO_ALLOW_INLINE:
         raw = storage.get_object_whole(video["storage_key"], inline_max)
         if raw:
             blob = base64.b64encode(raw).decode("ascii")
