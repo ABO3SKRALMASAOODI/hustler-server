@@ -190,6 +190,110 @@ def vision_client():
     return _vision_client
 
 
+def shared_vision_configured():
+    """Is the DEDICATED VISION_* provider usable right now?"""
+    return bool(config.VISION_MODEL and config.VISION_API_KEY
+                and not _vision_blind)
+
+
+def vision_fallback():
+    """(client, model) for vision when no dedicated VISION_* provider is
+    configured — the AGENT's own provider, if the agent model can see.
+
+    THE INCIDENT THIS EXISTS FOR (round 80). VISION_API_KEY inherits
+    OPENAI_API_KEY only when `VISION_BASE_URL == OPENAI_BASE_URL` — a STRING
+    EQUALITY between two independently-set env vars. That is a fine default and
+    a terrible invariant: it holds until someone moves the chat provider and
+    leaves VISION_BASE_URL pointing at the old one, at which point the key
+    inherits from nothing, `vision_available()` goes False, and the whole
+    product quietly loses its eyes. It has now happened twice —
+
+      * Jul 26 2026, the DeepSeek switch: 419 agent turns across two days with
+        ZERO look_at (already recorded in indexer.py's warning branch).
+      * Jul 31 2026, the Luna switch: index-time captioning stopped dead at
+        13:24 and did not run again. EVERY index for the next two days shipped
+        with `moments: []` and not one shot caption — so `get_shots` answered
+        "(no visual caption)" for every shot of every upload, and the agent
+        edited blind. One user asked for the women in his footage to be
+        covered; the agent had no visual timeline to find them in, burned six
+        look_at calls sampling six frames across fifteen minutes, and ended up
+        offering to black out the whole frame. Another uploaded a 31-minute
+        match with two transcribed words in it — where the picture is the ONLY
+        signal there is.
+
+    The fix is not a better string comparison. It is that the agent model is
+    ALREADY a funded, working, multimodal provider on this box (Luna takes
+    images — it is the entire basis of round 67's direct-sight look_at), so
+    there is no such thing as "no vision configured" while the agent itself can
+    see. Vision now degrades to the agent's own eyes instead of to nothing, and
+    the only way to lose sight completely is to lose the agent too.
+
+    Honesty is preserved in both directions: a genuinely text-only agent model
+    (`AGENT_MULTIMODAL=0`, or one that has already latched blind on an image
+    part) returns None here, and `vision_available()` goes False exactly as
+    before — the honest-off contract, not a fallback that 400s per look.
+    """
+    if not vision_fallback_available():
+        return None
+    return client(), config.AGENT_MODEL
+
+
+def vision_fallback_available():
+    """Same question as vision_fallback(), without constructing a client —
+    so a health probe can ask it for free."""
+    return bool(config.OPENAI_API_KEY and config.AGENT_MODEL
+                and agent_sees(config.AGENT_MODEL))
+
+
+def _host(url):
+    """The hostname out of a base URL. Never the key."""
+    try:
+        return (url or "").split("//", 1)[-1].split("/", 1)[0] or None
+    except Exception:                                    # pragma: no cover
+        return None
+
+
+def config_report():
+    """Which PROVIDER this process is actually wired to, as plain JSON.
+
+    version.py made CODE skew between the dispatcher and the executor cost one
+    curl instead of a day of forensics. This is the same answer for CONFIG
+    skew, which has now cost more than the code kind ever did: the executor is
+    deployed by hand with its own env, so a provider change applied to the
+    Render dispatcher leaves it pointing at the old vendor, and every symptom
+    of that is silent by design.
+
+    Live example, Jul 28 - Aug 2 2026: the executor kept `OPENAI_BASE_URL` on
+    xAI while `AGENT_MODEL` moved to OpenAI's `gpt-5.6-luna`. xAI answered
+    `Model not found: gpt-5.6-luna` to every index greeting for five days — so
+    every new user got the canned notice instead of a written one — and the
+    same mismatch broke `VISION_API_KEY`'s inheritance (it keys off
+    `VISION_BASE_URL == OPENAI_BASE_URL`), which is what put the indexer's eyes
+    out. One vendor mismatch, two capabilities, nothing said either.
+
+    `agent_model` next to `llm_host` is the whole point: an OpenAI model id
+    beside `api.x.ai` is the bug, visible at a glance. Leaks nothing — model
+    ids and hostnames are public config, and no key is reported beyond whether
+    one is set. Never a gate; it only ever explains.
+    """
+    if shared_vision_configured():
+        vision, vhost, vmodel = ("shared", _host(config.VISION_BASE_URL),
+                                 config.VISION_MODEL)
+    elif vision_fallback_available():
+        vision, vhost, vmodel = ("agent", _host(config.OPENAI_BASE_URL),
+                                 config.AGENT_MODEL)
+    else:
+        vision, vhost, vmodel = "off", None, None
+    return {
+        "agent_model": config.AGENT_MODEL or None,
+        "llm_host": _host(config.OPENAI_BASE_URL),
+        "llm_key_set": bool(config.OPENAI_API_KEY),
+        "vision": vision,
+        "vision_host": vhost,
+        "vision_model": vmodel,
+    }
+
+
 def vision_client_for(plan):
     """(client, model) for one vision call.
 
@@ -197,11 +301,14 @@ def vision_client_for(plan):
     reasoning about it — which is the half of that promise that would be
     easiest to quietly not deliver, since vision has always had its own
     provider and nobody would see the difference in the chat. Everyone else
-    gets the shared VISION_* provider.
+    gets the shared VISION_* provider, or — when there isn't one — the agent's
+    own eyes (see vision_fallback).
     """
     if is_frontier(plan) and frontier_available() and config.FRONTIER_VISION_MODEL:
         return frontier_client(), config.FRONTIER_VISION_MODEL
-    return vision_client(), config.VISION_MODEL
+    if shared_vision_configured():
+        return vision_client(), config.VISION_MODEL
+    return vision_fallback() or (vision_client(), config.VISION_MODEL)
 
 
 # Which plan the turn running on THIS THREAD belongs to.
@@ -427,8 +534,9 @@ def vision_available(plan=None):
     if (is_frontier(plan) and frontier_available()
             and config.FRONTIER_VISION_MODEL):
         return True
-    return bool(config.VISION_MODEL and config.VISION_API_KEY
-                and not _vision_blind)
+    # ...and when the shared VISION_* provider is unconfigured or has latched
+    # blind, the agent's own eyes still count as vision (see vision_fallback).
+    return shared_vision_configured() or vision_fallback() is not None
 
 
 def cached_input_tokens(usage):
@@ -535,12 +643,25 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         # Only the SHARED provider may latch this process-wide. A Frontier-only
         # failure must not blind every other user's turns — and a shared-model
         # 400 says nothing about the frontier one.
-        if any(m in msg for m in _BLIND_MARKERS) and vmodel == config.VISION_MODEL:
-            _vision_blind = True
-            print(f"[vision] {config.VISION_MODEL} at {config.VISION_BASE_URL} "
-                  "does not accept images — vision DISABLED for this process. "
-                  "Set VISION_BASE_URL/VISION_MODEL/VISION_API_KEY to a "
-                  "multimodal provider.", flush=True)
+        #
+        # Latch by WHICH MODEL proved blind, not by which path chose it. The
+        # two latches can both fire on one failure (VISION_MODEL and
+        # AGENT_MODEL default to the same id), and that is the correct
+        # outcome: a model that cannot see must not be reached down either
+        # route. Latching only _vision_blind would have handed the very next
+        # look to vision_fallback — the same blind model, one layer down.
+        if any(m in msg for m in _BLIND_MARKERS):
+            if vmodel == config.VISION_MODEL and shared_vision_configured():
+                _vision_blind = True
+                print(f"[vision] {config.VISION_MODEL} at "
+                      f"{config.VISION_BASE_URL} does not accept images — the "
+                      "shared vision provider is DISABLED for this process. "
+                      "Set VISION_BASE_URL/VISION_MODEL/VISION_API_KEY to a "
+                      "multimodal provider.", flush=True)
+            if vmodel == config.AGENT_MODEL:
+                mark_agent_blind(vmodel)
+                print(f"[vision] {vmodel} does not accept images — the agent "
+                      "model can no longer stand in for vision.", flush=True)
         _note_error(e)
         record(purpose,
                {"model": vmodel, "question": prompt,

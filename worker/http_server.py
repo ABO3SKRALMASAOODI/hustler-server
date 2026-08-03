@@ -116,6 +116,17 @@ class Handler(BaseHTTPRequestHandler):
                 body.update(version.version_report())
             except Exception as e:
                 body["version_error"] = str(e)[:200]
+            # WHICH PROVIDER IS THIS. The code fingerprint above cannot see a
+            # vendor mismatch — the executor ran the RIGHT code against the
+            # WRONG base URL for five days (see llm.config_report), failing
+            # every index greeting and every visual caption without one loud
+            # symptom. Same contract as the fingerprint: best effort, no keys,
+            # never a gate.
+            try:
+                import llm as _llm
+                body["llm"] = _llm.config_report()
+            except Exception as e:
+                body["llm_error"] = str(e)[:200]
             # HOW BIG A VIDEO CAN THIS INSTANCE ACTUALLY STAGE. On Cloud Run
             # TMP_DIR is an in-memory filesystem sized by `--memory`, so this
             # is the number that decides whether the upload cap is real — and
