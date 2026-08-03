@@ -96,3 +96,4 @@ def test_control_tools_are_not_offered_to_the_model():
     published = {t["function"]["name"] for t in mcp_exec.catalog()["tools"]}
     assert mcp_exec.CATALOG_TOOL not in published
     assert mcp_exec.STATE_TOOL not in published
+    assert mcp_exec.MEDIA_TOOL not in published

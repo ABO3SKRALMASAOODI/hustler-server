@@ -39,12 +39,14 @@ import agent_tools
 import config
 import db as dbx
 import llm
+import mcp_media
 from agent_prompt import system_prompt
 
 # Control calls the backend makes on the model's behalf — not editor tools, so
 # they never appear in the catalog the model sees.
 CATALOG_TOOL = "__catalog__"
 STATE_TOOL = "__state__"
+MEDIA_TOOL = "__media__"        # watch_video — see mcp_media.py
 
 
 class _Session:
@@ -174,7 +176,13 @@ def _session(worker_db, job, project):
 
 def run_mcp_job(worker_db, job):
     """One MCP tool call. Returns {"text": ..., ...} — stored on the job row
-    and handed back to the model verbatim by the backend."""
+    and handed back to the model verbatim by the backend.
+
+    The one non-text answer is watch_video's: it adds a "video" field naming
+    an object in storage, which the backend presigns and (when it fits) embeds
+    as an MCP resource block. The BYTES never come through here — a base64
+    video on the job row would be a permanent copy in Postgres of a file that
+    is already in the bucket."""
     payload = job.get("payload") or {}
     tool = payload.get("tool") or ""
     args = payload.get("args") or {}
@@ -223,6 +231,15 @@ def run_mcp_job(worker_db, job):
             if tool == STATE_TOOL:
                 return {"text": agent_loop.state_block(ctx, worker_db),
                         "edl_version": ctx.latest_edl()["version"]}
+
+            if tool == MEDIA_TOOL:
+                # Reads and (rarely) transcodes; never touches the EDL, so it
+                # is not an edit and does not belong in the activity feed.
+                # The inline budget is the BACKEND's — it is the one that has
+                # to carry the base64 through a JSON-RPC reply.
+                return mcp_media.prepare(
+                    ctx, args, int(args.get("_inline_max_bytes")
+                                   or 12 * 1048576))
 
             if tool not in agent_tools.TOOLS:
                 return {"text": f"Unknown tool '{tool}'.", "is_error": True}

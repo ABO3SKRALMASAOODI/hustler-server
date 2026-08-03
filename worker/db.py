@@ -469,6 +469,19 @@ def find_render_asset(conn, project_id, variant, edl_version):
         return cur.fetchone()
 
 
+def latest_render(conn, project_id, variant):
+    """The newest render of a variant REGARDLESS of EDL version — what the
+    project last actually produced. find_render_asset answers "is version N
+    rendered"; this answers "is there anything to watch", which is the only
+    question with a useful answer when the edit has moved on since."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = %s
+                       ORDER BY id DESC LIMIT 1""", (project_id, variant))
+        return cur.fetchone()
+
+
 def superseded_renders(conn, project_id, variant, edl_version, keep_asset_id):
     """Render assets for this exact (project, variant, version) that an id
     newer than keep_asset_id has replaced.

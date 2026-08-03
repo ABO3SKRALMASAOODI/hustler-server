@@ -23,10 +23,10 @@ the same `ToolContext` an agent turn uses. There is nothing to keep in sync
 because there is no copy — `worker/tests/test_mcp_surface.py` fails if one
 ever appears.
 
-On top of that, ten **session tools** the studio UI normally covers and a
+On top of that, eleven **session tools** the studio UI normally covers and a
 headless model cannot: `list_projects`, `open_project`, `create_project`,
 `project_state`, `upload_start`, `upload_finish`, `index_status`,
-`export_final`, `wait_for_job`, `download_url`.
+`export_final`, `wait_for_job`, `download_url`, `watch_video`.
 
 ## Turning it on (once)
 
@@ -156,6 +156,63 @@ it can be edited — minutes on a long one. `index_status` reports it.
 project's chat, tagged `source: "mcp"`. Open the project in the studio and you
 see your Claude session edit in real time, with the preview updating.
 
+## `watch_video` — for a model that can actually watch video
+
+Every other way an MCP caller can "see" the footage ends in *our* words:
+`look_at` decodes frames, runs them through **Valmera's** vision model, and
+what crosses the wire is a paragraph. That was the only option while every
+model on the far end read images at best. It is the wrong one for a model that
+takes video input — Grok, and whatever comes next — because a lossy summary
+written by a smaller model is standing between the editor and the material.
+
+`watch_video` hands over the **file**. Pixels, audio, timing.
+
+```
+watch_video()                                  the current edit, whole
+watch_video(kind="source")                     the raw uploaded footage
+watch_video(start=12, end=30)                  just that window of the program
+watch_video(delivery="inline", max_mb=8)       shrunk until it fits in the reply
+watch_video(kind="asset", asset_key="clips/…") one uploaded clip
+```
+
+**It usually costs nothing.** The artifacts already exist and are already the
+right shape: the assembled program is the **preview render** of the current
+EDL (~480p H.264+AAC — literally what the studio player streams), and the raw
+footage is the **540p index proxy** every `look_at` and render already reads.
+So the normal answer is a presigned link to an object that already exists — no
+decode, no encode, no wait. Re-encoding happens for exactly two reasons, both
+of them things the caller asked for: a `start`/`end` **window**, or `delivery:
+"inline"` / `max_mb`, because a 60 MB file cannot travel inside a JSON-RPC
+reply. Both say so in the answer.
+
+`kind="timeline"` **renders the current edit first** if it has never been
+rendered — a render can outrun the request, in which case you get the usual
+`STILL RUNNING — job N`, and calling `watch_video` again after `wait_for_job`
+picks up the finished file instead of starting a second render. Pass
+`render=false` to watch the last render that exists; it then tells you which
+EDL version that was and that everything since is missing from what you are
+watching.
+
+**How it comes back.** Two content blocks: text first (what it is, how long,
+and **which clock its seconds are on**), then — when it fits — the video as an
+MCP `resource` block, `mimeType: video/mp4`, base64. The text always carries a
+plain unauthenticated download URL as well, so a client that cannot read a
+video block can still `curl` it. `delivery` decides: `auto` (default) embeds
+only a file that already fits under `MCP_VIDEO_INLINE_MAX_MB`; `inline`
+shrinks until it does; `url` never embeds.
+
+**The trap it is written to avoid:** a watched *program* runs on OUTPUT
+seconds, and most editing tools take SOURCE seconds — after one cut the two
+clocks disagree everywhere. Every reply names the clock and the tools that
+speak it (`cut_output_range`, `look_at(output_times=…)`, the scene map in
+`project_state`). `look_at` is still the better tool for reading exact
+coordinates off a frame: it burns a tenths grid onto what it captures, which
+is where zoom aims and text boxes get their numbers.
+
+Shrunk copies are written to `media/{project_id}/mv_*.mp4` — the same prefix
+renders use, so deleting a project reclaims them — and are keyed by their
+encode settings, so asking for the same window twice encodes once.
+
 ## Things worth knowing
 
 - **Slow tools answer with a ticket, not a lie.** A render or a burned-text
@@ -169,7 +226,9 @@ see your Claude session edit in real time, with the preview updating.
   credits are deducted. But vision (`look_at`), image/video generation and
   stock fetches are real money on real providers, recorded to `llm_calls`
   under the MCP job id — visible in admin, billed to nobody. **Decide this
-  before the surface is ever sold**, not after.
+  before the surface is ever sold**, not after. `watch_video` costs no
+  provider anything, but a shrunk copy is CPU on the dispatcher and every
+  fetch of the link is R2 egress — cheap per call, unbounded per session.
 - **The instructions are the whole doctrine.** `initialize` returns the agent's
   44 KB system prompt + the generated capability list + an MCP workflow note,
   so your model edits the way Valmera edits rather than merely reaching its
@@ -203,6 +262,13 @@ see your Claude session edit in real time, with the preview updating.
 | `MCP_REFRESH_TTL_S` | backend | 7776000 | refresh-token lifetime |
 | `MCP_SYNC_WAIT_S` | backend | 25 | longest a call blocks before ticketing |
 | `MCP_INSTRUCTIONS` | backend | `full` | `brief` drops the doctrine |
+| `MCP_VIDEO_INLINE_MAX_MB` | backend | 12 | biggest video `watch_video` may embed in a reply |
+| `MCP_VIDEO_DELIVERY` | backend | `auto` | default for `delivery` (`auto`/`inline`/`url`) |
+| `MCP_VIDEO_HEIGHT` | worker | 540 | ceiling a `watch_video` re-encode aims at (never up-scales) |
+| `MCP_VIDEO_FPS_CAP` | worker | 30 | frame-rate cap on a re-encode |
+| `MCP_VIDEO_MAX_ENCODE_S` | worker | 1800 | longest window one call will re-encode |
+| `MCP_VIDEO_URL_MAX_MB` | worker | 512 | above this even a link gets a shrunk copy instead |
+| `MCP_VIDEO_DOWNLOAD_MAX_MB` | worker | 2048 | biggest file that may be pulled onto the box to shrink |
 | `WORKER_MCP_SLOTS` | worker | 2 | concurrent MCP tool calls |
 | `WORKER_MCP_POLL_INTERVAL_S` | worker | 0.25 | queue poll for the MCP lane |
 | `WORKER_MCP_SESSION_TTL_S` | worker | 1800 | how long a project's cached context lives |

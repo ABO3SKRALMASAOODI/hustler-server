@@ -559,6 +559,41 @@ MCP_SESSION_TTL_S = float(os.getenv("WORKER_MCP_SESSION_TTL_S", "1800"))
 # on the same small disk the renders use.
 MCP_MAX_SESSIONS = int(os.getenv("WORKER_MCP_MAX_SESSIONS", "3"))
 
+# ── Handing the model the VIDEO itself (round 83, mcp_media.py) ────────────
+# Some models on the other end of MCP can watch video, not just read our
+# description of it. watch_video hands them the real file. Re-encoding is the
+# EXCEPTION — the proxy and the preview render are already small H.264 with
+# audio, so the normal answer is a presigned URL to the object that already
+# exists and these numbers never come into it.
+#
+# The ceiling a re-encode aims at. Never UP-scales: it is a cap, and a 540p
+# proxy stays 540p.
+MCP_VIDEO_HEIGHT = int(os.getenv("MCP_VIDEO_HEIGHT", "540"))
+MCP_VIDEO_CRF = int(os.getenv("MCP_VIDEO_CRF", "28"))
+MCP_VIDEO_PRESET = os.getenv("MCP_VIDEO_PRESET", "veryfast")
+MCP_VIDEO_AUDIO_KBPS = int(os.getenv("MCP_VIDEO_AUDIO_KBPS", "96"))
+# Frame rate is kept as the source has it, capped here. Dropping frames is the
+# last thing to trade away: a video model reading motion needs them, and the
+# bitrate ladder in mcp_media already spends the byte budget first.
+MCP_VIDEO_FPS_CAP = float(os.getenv("MCP_VIDEO_FPS_CAP", "30"))
+# Longest window this will RE-ENCODE in one call. Nothing to do with what can
+# be watched — the untouched-object path has no limit at all — but a 40-minute
+# transcode on the dispatcher holds an MCP lane for the whole run. Past this
+# the answer names the number and asks for start/end.
+MCP_VIDEO_MAX_ENCODE_S = float(os.getenv("MCP_VIDEO_MAX_ENCODE_S", "1800"))
+# What the DEFAULT (delivery="auto") may hand over as a plain URL with no
+# re-encode. Above this, a link is a bad answer nobody asked for — the caller
+# has to download gigabytes before it can look — so it gets a shrunk copy
+# instead. delivery="url" is the caller asking, and is not bound by this.
+MCP_VIDEO_URL_MAX_MB = float(os.getenv("MCP_VIDEO_URL_MAX_MB", "512"))
+# ...and what may be PULLED ONTO THIS BOX to make that shrunk copy. Only ever
+# reached by a project with no proxy yet (an index still running or failed),
+# where the sole copy of the footage is the user's 4K original: downloading it
+# to re-encode would fill the dispatcher's scratch disk to answer a question
+# the untouched link already answers.
+MCP_VIDEO_DOWNLOAD_MAX_MB = float(os.getenv("MCP_VIDEO_DOWNLOAD_MAX_MB",
+                                            "2048"))
+
 # ── Remote executor (round 38): request-based media/index compute ──────────
 # The worker image runs in one of two ROLES, chosen by WORKER_ROLE:
 #   "worker"   (default) — the always-on DISPATCHER. Polls the queue and owns

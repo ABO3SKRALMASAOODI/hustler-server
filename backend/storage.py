@@ -434,6 +434,23 @@ def get_range_at(key, offset, length):
         return None
 
 
+def get_object_whole(key, max_bytes):
+    """A WHOLE object in memory, or None if it is bigger than max_bytes.
+
+    The only caller is the MCP surface embedding a small video in a tool reply
+    (routes/mcp.watch_video), and the cap is what keeps that honest: this
+    service runs 3 SYNC gunicorn workers, so a body held here is a third of
+    the API holding it. Size is checked with a HEAD first — reading and then
+    discarding would already have paid for the download."""
+    n = head_bytes(key)
+    if n is None or n > int(max_bytes):
+        return None
+    try:
+        return client().get_object(Bucket=bucket(), Key=key)["Body"].read()
+    except Exception:
+        return None
+
+
 def content_matches_kind(head, kind):
     """Best-effort magic-byte check on the first bytes of an upload. Returns
     True when the bytes match the declared kind, False on a CLEAR mismatch

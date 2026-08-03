@@ -60,7 +60,8 @@ def _reset():
     # state for an editing call; the one test that needs no open project
     # clears it explicitly.
     DB.update(clients={}, grants={}, codes={}, tokens={}, seq=0,
-              static_project=3, expired_codes=set())
+              static_project=3, expired_codes=set(), enqueued=[],
+              job_result=None)
 
 
 def _next_id():
@@ -157,7 +158,8 @@ class FakeCur:
             self.rows = [{"id": 5, "type": "mcp_tool", "state": "done",
                           "progress": 100, "error": None, "payload": {},
                           "project_id": 3,
-                          "result": {"text": "12 sentences."}}]
+                          "result": DB.get("job_result")
+                          or {"text": "12 sentences."}}]
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
@@ -176,6 +178,13 @@ def fake_vdb():
     yield FakeConn()
 
 
+def _fake_enqueue(cur, pid, uid, jtype, payload):
+    """Records what the backend asked the worker to run — the ONLY place the
+    injected arguments (an inline budget the model never sees) are visible."""
+    DB["enqueued"].append(payload)
+    return 5
+
+
 @pytest.fixture(autouse=True)
 def stub_db(monkeypatch):
     _reset()
@@ -183,8 +192,7 @@ def stub_db(monkeypatch):
     monkeypatch.setattr(oauth, "vdb", fake_vdb)
     monkeypatch.setattr(mcpmod, "_project_for_user",
                         lambda cur, pid, uid: {"id": pid, "title": "P"})
-    monkeypatch.setattr(mcpmod, "_enqueue",
-                        lambda cur, pid, uid, t, payload: 5)
+    monkeypatch.setattr(mcpmod, "_enqueue", _fake_enqueue)
     mcpmod._catalog_cache.update(at=0.0, json=None)
 
 
@@ -282,6 +290,109 @@ def test_editing_without_an_open_project_says_what_to_do(client):
 def test_unknown_method_is_a_jsonrpc_error(client):
     assert rpc(client, "nonsense", STATIC_TOKEN).get_json()["error"]["code"] \
         == -32601
+
+
+# ── watch_video: the one tool whose answer is not a sentence ─────────
+#
+# Every other tool returns text. This one has to put a real MP4 into a
+# JSON-RPC reply for a model that can watch video, and fall back to a link
+# for one that cannot — so what is tested here is the CONTENT SHAPE, which
+# nothing else on the surface exercises.
+
+MOVIE = b"\x00\x00\x00\x18ftypmp42" + b"fake bytes" * 20
+
+
+def _served(monkeypatch, *, inline=True, nbytes=len(MOVIE)):
+    DB["job_result"] = {
+        "text": "Here is the assembled program.",
+        "video": {"storage_key": "media/3/mv_abc.mp4", "mime": "video/mp4",
+                  "bytes": nbytes, "duration_s": 8.9, "height": 480,
+                  "start_s": 0, "kind": "timeline", "transcoded": False,
+                  "inline": inline}}
+    monkeypatch.setattr(mcpmod.storage, "presign_get",
+                        lambda key, **kw: f"https://cdn.example/{key}?sig=1")
+    monkeypatch.setattr(mcpmod.storage, "get_object_whole",
+                        lambda key, cap: MOVIE if len(MOVIE) <= cap else None)
+
+
+def _call_watch(client, **args):
+    return rpc(client, "tools/call", STATIC_TOKEN,
+               {"name": "watch_video", "arguments": args}
+               ).get_json()["result"]
+
+
+def test_watch_video_is_on_the_surface(client):
+    names = [t["name"] for t in
+             rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]]
+    assert "watch_video" in names
+
+
+def test_a_small_video_comes_back_embedded_beside_its_link(client, monkeypatch):
+    _served(monkeypatch)
+    res = _call_watch(client)
+    kinds = [c["type"] for c in res["content"]]
+    # Text FIRST — it says which clock the video runs on, and the model has to
+    # read that before it acts on anything it saw.
+    assert kinds == ["text", "resource"]
+    assert "https://cdn.example/media/3/mv_abc.mp4" in res["content"][0]["text"]
+    blob = res["content"][1]["resource"]
+    assert blob["mimeType"] == "video/mp4"
+    assert base64.b64decode(blob["blob"]) == MOVIE
+
+
+def test_delivery_url_never_embeds(client, monkeypatch):
+    """A client that cannot read a video block must be able to say so and
+    still get the file — the link is the universal answer."""
+    _served(monkeypatch)
+    res = _call_watch(client, delivery="url")
+    assert [c["type"] for c in res["content"]] == ["text"]
+    assert "https://cdn.example/" in res["content"][0]["text"]
+
+
+def test_a_video_too_big_to_embed_is_still_delivered(client, monkeypatch):
+    _served(monkeypatch, inline=False, nbytes=400 * 1048576)
+    res = _call_watch(client)
+    assert [c["type"] for c in res["content"]] == ["text"]
+    assert res.get("isError") is not True
+
+
+def test_the_worker_is_told_the_backends_own_inline_budget(client, monkeypatch):
+    """The cap lives here, where the base64 is actually carried. Sending it
+    down with the call is what stops the two services keeping two copies of
+    the number and drifting."""
+    _served(monkeypatch)
+    _call_watch(client)
+    args = DB["enqueued"][-1]["args"]
+    assert args["_inline_max_bytes"] == int(mcpmod.VIDEO_INLINE_MAX_MB * 1048576)
+    assert args["delivery"] == "auto"
+
+
+def test_a_bad_delivery_value_is_refused_before_any_work(client, monkeypatch):
+    _served(monkeypatch)
+    res = _call_watch(client, delivery="telepathy")
+    assert res["isError"] is True
+    assert not DB["enqueued"]
+
+
+def test_the_workers_refusal_survives_as_a_refusal(client, monkeypatch):
+    """No video means the worker had a reason. It must reach the model as an
+    error, not as a cheerful text block with nothing attached."""
+    DB["job_result"] = {"text": "This project has no main video.",
+                        "is_error": True}
+    res = _call_watch(client, kind="source")
+    assert res["isError"] is True
+    assert "no main video" in res["content"][0]["text"]
+
+
+def test_a_render_that_outran_the_wait_is_not_reported_as_a_failure(
+        client, monkeypatch):
+    """watch_video renders the current edit when it has to, and a render can
+    outlast the HTTP request. STILL RUNNING is the protocol's normal answer —
+    flagging it as an error sends the model looking for a bug."""
+    DB["job_result"] = {"text": "STILL RUNNING — rendering v12 is job 9."}
+    res = _call_watch(client)
+    assert res.get("isError") is not True
+    assert "STILL RUNNING" in res["content"][0]["text"]
 
 
 # ── the claude.ai connector flow, in order ───────────────────────────

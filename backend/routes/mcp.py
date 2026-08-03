@@ -44,6 +44,7 @@ admin's alone) — re-checked on every single request, so revoking is a row or
 one env var, not a deploy.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -74,6 +75,23 @@ ALLOWED_EMAILS = {e.strip().lower()
 # Longest a tool call may block the HTTP request. See the gunicorn note above.
 SYNC_WAIT_S = float(os.getenv("MCP_SYNC_WAIT_S", "25"))
 POLL_S = 0.2
+
+# How big a video watch_video may EMBED in a tool reply (round 83). It leaves
+# here base64'd, so the JSON-RPC body is ~4/3 of this, and it is read whole
+# into one of 3 sync gunicorn workers on the way — which is what the number is
+# really sized against, not any model's input limit. A caller whose model
+# takes more should raise this AND be sure its own transport will carry it;
+# everything above the cap still comes back as a link, which has no limit.
+# This is the single source of truth: the worker is TOLD the budget rather
+# than keeping its own copy, so the two can never drift.
+VIDEO_INLINE_MAX_MB = float(os.getenv("MCP_VIDEO_INLINE_MAX_MB", "12"))
+# Deployment-wide default for `delivery`, for a client that is known one way
+# or the other. "auto" embeds only a file that already fits. A typo in the env
+# falls back rather than refusing every call — the model would be told to fix
+# an argument it never sent.
+VIDEO_DELIVERY = os.getenv("MCP_VIDEO_DELIVERY", "auto").strip().lower()
+if VIDEO_DELIVERY not in ("auto", "inline", "url"):
+    VIDEO_DELIVERY = "auto"
 
 TOKEN_PREFIX = "vlm_mcp_"
 
@@ -285,6 +303,45 @@ SESSION_TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "kind": {"type": "string", "enum": ["preview", "final"]},
          "edl_version": {"type": "integer"}}}},
+    {"name": "watch_video",
+     "description":
+        "WATCH THE VIDEO YOURSELF — the real file, pixels and audio, not a "
+        "description of it. Use this instead of look_at whenever your own "
+        "model can take video input: look_at sends frames to Valmera's "
+        "vision model and hands you back a PARAGRAPH, while this hands you "
+        "the footage. kind 'timeline' (default) is the assembled program as "
+        "the viewer sees it — it renders the current edit first if it has "
+        "not been rendered; 'source' is the raw uploaded footage; 'asset' is "
+        "one uploaded clip (pass asset_key). start/end watch a window rather "
+        "than the whole thing. The file comes back embedded in the reply "
+        "when it fits, and always as a direct download link. Cheap: normally "
+        "it hands over a file that already exists, untouched.",
+     "inputSchema": {"type": "object", "properties": {
+         "kind": {"type": "string", "enum": ["timeline", "source", "asset"],
+                  "description": "Default 'timeline' — the current edit."},
+         "asset_key": {"type": "string",
+                       "description": "kind='asset' only: the storage_key "
+                                      "list_assets prints."},
+         "start": {"type": "number",
+                   "description": "Watch from this second. OUTPUT seconds for "
+                                  "'timeline', source seconds otherwise."},
+         "end": {"type": "number", "description": "Watch up to this second."},
+         "delivery": {"type": "string", "enum": ["auto", "inline", "url"],
+                      "description": "'inline' shrinks the video until it fits "
+                                     "inside this reply and embeds it; 'url' "
+                                     "never embeds; 'auto' (default) embeds "
+                                     "only if the existing file already fits."},
+         "max_mb": {"type": "number",
+                    "description": "Shrink to about this many megabytes. Use "
+                                   "when your model has a file-size limit."},
+         "max_height": {"type": "integer",
+                        "description": "Cap the picture height (e.g. 360). "
+                                       "Never up-scales."},
+         "render": {"type": "boolean",
+                    "description": "kind='timeline': false watches the last "
+                                   "render that exists instead of rendering "
+                                   "the current edit, and says how stale it "
+                                   "is. Default true."}}}},
 ]
 
 SESSION_TOOL_NAMES = {t["name"] for t in SESSION_TOOLS}
@@ -309,6 +366,17 @@ Two things are different from a normal tool session, and both matter:
    auto-renders when you stop: call render_preview yourself before you tell
    the user what you did, so what you claim is something you have actually
    seen. Then hand them download_url so they can watch it.
+
+3. IF YOU CAN WATCH VIDEO, WATCH IT. The doctrine above tells you to look
+   before you claim, and describes look_at as your eyes — that is written for
+   a model that reads pictures, and look_at pays a SECOND model to describe
+   frames to you. watch_video hands you the file itself: the assembled
+   program with its audio, the raw footage, or one clip, embedded in the
+   reply or on a link you can fetch. Use it for anything about pace, timing,
+   music, delivery or "does this cut work", where stills cannot answer and a
+   description is someone else's judgement. look_at is still the better tool
+   for reading exact positions off a frame — it burns a tenths grid onto what
+   it captures, which is how zoom aims and text boxes get their coordinates.
 
 Nothing is charged to their Valmera credits for the thinking you do — but a
 render, a look at the footage and a generated image are real work on real
@@ -381,18 +449,26 @@ def _still_running(row, what):
             f"wait_for_job(job_id={row['id']}) to pick the result up.")
 
 
-def _run_tool_job(tok, name, args):
-    """Enqueue one editor tool call for the worker and wait for its answer."""
+def _run_tool_job(tok, name, args, raw=False):
+    """Enqueue one editor tool call for the worker and wait for its answer.
+
+    `raw=True` returns the worker's whole result dict instead of just its
+    text — only watch_video needs it, because the file it produced has to
+    become an MCP content block and a string cannot carry one."""
+    def _out(text, result=None):
+        return (result if raw and result is not None
+                else ({"text": text} if raw else text))
+
     project_id = tok["active_project_id"]
     if not project_id:
-        return ("No project is open. Call list_projects and then "
-                "open_project(project_id) — every editing tool acts on the "
-                "active project.")
+        return _out("No project is open. Call list_projects and then "
+                    "open_project(project_id) — every editing tool acts on "
+                    "the active project.")
     with vdb() as conn:
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, tok["user_id"]):
-            return ("The active project no longer exists. Call "
-                    "list_projects and open another.")
+            return _out("The active project no longer exists. Call "
+                        "list_projects and open another.")
         # Two editors on one timeline write conflicting EDL versions and each
         # reads state the other is halfway through changing. The studio's own
         # agent owns the project while its turn runs.
@@ -400,24 +476,25 @@ def _run_tool_job(tok, name, args):
                        WHERE project_id = %s AND type = 'agent_turn'
                          AND state IN ('queued','running')""", (project_id,))
         if cur.fetchone():
-            return ("Valmera's own agent is mid-turn on this project — wait "
-                    "for it to finish before editing, or the two of you will "
-                    "overwrite each other's edit.")
+            return _out("Valmera's own agent is mid-turn on this project — "
+                        "wait for it to finish before editing, or the two of "
+                        "you will overwrite each other's edit.")
         job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
                           {"tool": name, "args": args})
     # The control calls are plumbing the model never asked for by name, so a
     # failure must not be reported as "__state__ failed".
-    label = {"__state__": "Reading the project state"}.get(name, name)
+    label = {"__state__": "Reading the project state",
+             "__media__": "Fetching the video"}.get(name, name)
     row = _wait(job_id, tok["user_id"])
     if not row:
-        return f"Tool call {name} vanished from the queue — try it again."
+        return _out(f"Tool call {name} vanished from the queue — try it again.")
     if row["state"] == "failed":
-        return (f"{label} failed: {row.get('error') or 'unknown error'}. "
-                "Nothing was changed by it.")
+        return _out(f"{label} failed: {row.get('error') or 'unknown error'}. "
+                    "Nothing was changed by it.")
     if row["state"] in ("queued", "running"):
-        return _still_running(row, label)
+        return _out(_still_running(row, label))
     result = row.get("result") or {}
-    return result.get("text") or json.dumps(result)
+    return _out(result.get("text") or json.dumps(result), result)
 
 
 # ------------------------------------------------------------------ #
@@ -707,6 +784,58 @@ def _t_download_url(tok, args):
             f"user as-is):\n{url}")
 
 
+def _t_watch_video(tok, args):
+    """The video itself, as MCP content the caller's model can actually watch.
+
+    Returns a tools/call RESULT, not a string: the whole point is the second
+    content block. The bytes are read HERE rather than travelling out of the
+    worker through the job row — a 12 MB base64 string in a JSONB column is a
+    permanent row in Postgres for a file that is already in object storage,
+    and the row would be written whether or not the caller could use it."""
+    args = dict(args)
+    delivery = (args.get("delivery") or VIDEO_DELIVERY).strip().lower()
+    if delivery not in ("auto", "inline", "url"):
+        return _text("delivery must be 'auto', 'inline' or 'url'.", True)
+    args["delivery"] = delivery
+    inline_max = int(VIDEO_INLINE_MAX_MB * 1048576)
+    args["_inline_max_bytes"] = inline_max
+
+    result = _run_tool_job(tok, "__media__", args, raw=True)
+    text = result.get("text") or "Could not fetch the video."
+    video = result.get("video")
+    if not video:
+        return _text(text, bool(result.get("is_error"))
+                     or not result.get("text"))
+
+    # Presigned HERE, never in the worker: the worker's S3 endpoint may be the
+    # internal one, and a URL the caller cannot reach is worse than no URL.
+    try:
+        url = storage.presign_get(video["storage_key"])
+    except Exception as e:
+        return _text(f"{text}\n\nThe file is ready but no download link could "
+                     f"be minted for it ({e}).", True)
+
+    blob = None
+    if video.get("inline") and delivery != "url":
+        raw = storage.get_object_whole(video["storage_key"], inline_max)
+        if raw:
+            blob = base64.b64encode(raw).decode("ascii")
+        else:
+            # It fit when the worker measured it and does not now — say so
+            # rather than silently degrading to a link the model was told to
+            # expect an attachment beside.
+            text += ("\n\n(The embedded copy could not be read back from "
+                     "storage — use the link.)")
+    # Text FIRST: it is what orients the model — which clock the video runs
+    # on, what is in it, what to do next — and it says the video follows.
+    content = [{"type": "text", "text": f"{text}\n\nDownload: {url}"}]
+    if blob:
+        content.append({"type": "resource", "resource": {
+            "uri": url, "mimeType": video.get("mime") or "video/mp4",
+            "blob": blob}})
+    return {"content": content, "isError": False}
+
+
 SESSION_IMPL = {
     "list_projects": _t_list_projects,
     "open_project": _t_open_project,
@@ -718,6 +847,7 @@ SESSION_IMPL = {
     "export_final": _t_export_final,
     "wait_for_job": _t_wait_for_job,
     "download_url": _t_download_url,
+    "watch_video": _t_watch_video,
 }
 
 
@@ -778,7 +908,12 @@ def _handle(tok, msg):
             return _result(req_id, _text("arguments must be an object.", True))
         try:
             if name in SESSION_IMPL:
-                return _result(req_id, _text(SESSION_IMPL[name](tok, args)))
+                out = SESSION_IMPL[name](tok, args)
+                # Almost every session tool answers with a string. watch_video
+                # answers with a whole tools/call result, because a video
+                # cannot be a sentence.
+                return _result(req_id, out if isinstance(out, dict)
+                               else _text(out))
             catalog = _catalog()
             known = {t["name"] for t in _editor_tools(catalog)}
             if name not in known:
