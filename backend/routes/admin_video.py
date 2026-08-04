@@ -706,6 +706,13 @@ def video_project_detail(project_id):
             out_assets.append({"id": None, "kind": "sheet",
                                "storage_key": skey, "meta": {},
                                "url": _presign(skey)})
+    # v10: the filmstrip tiles ARE the visual index — show them where the
+    # contact sheets used to appear.
+    for tkey in idx.get("tile_keys") or []:
+        if tkey not in seen_keys:
+            out_assets.append({"id": None, "kind": "sheet",
+                               "storage_key": tkey, "meta": {"tile": True},
+                               "url": _presign(tkey)})
     for shot in idx.get("shots") or []:
         tkey = shot.get("thumb_key")
         if tkey and tkey not in seen_keys:
