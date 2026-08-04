@@ -232,16 +232,104 @@ CATALOG_MISSING = (
     "restart the worker service.")
 
 
+# ------------------------------------------------------------------ #
+#  Tool titles and behaviour hints                                     #
+# ------------------------------------------------------------------ #
+#
+# WHY THESE EXIST. Every tool shipped as exactly {name, description,
+# inputSchema}. Two things follow from that, and both cost us:
+#
+# 1. Anthropic's connector directory syncs the tool list from the live server
+#    and flags any tool missing a title or annotations, with instructions to
+#    fix it on the server BEFORE submitting. All 110 would have been flagged.
+#    Third-party registries (Glama and friends) index the same fields.
+# 2. Without readOnlyHint, a client must treat `get_transcript` exactly like
+#    `cut_range` and ask the user to approve it. An editing session is mostly
+#    LOOKING — look_at, get_words, project_state, get_shots — so an unannotated
+#    registry turns a 40-call edit into 40 confirmation prompts, which is the
+#    difference between an agent that edits and an agent you supervise.
+#
+# The hints are advisory by protocol and untrusted by well-built clients, so
+# they are a UX and discovery signal, not a security boundary. `_authenticate`
+# is the security boundary and it has not moved.
+#
+# Classified by name, in the backend, because the worker's catalog is an
+# OpenAI-shaped function list with nowhere to carry them. Anything unmatched
+# falls through to the conservative default: a write, not idempotent, not
+# read-only — so a new tool is never accidentally auto-approved by omission.
+
+_READ_ONLY_PREFIXES = ("get_", "find_", "list_", "search_", "look_at")
+_READ_ONLY_EXACT = {
+    "project_state", "index_status", "watch_video", "read_skill",
+    "suggest_emphasis", "download_url", "wait_for_job", "get_edl",
+}
+# Reaches something outside this project's own files: a stock library, a URL,
+# a generation provider, a live web page.
+_OPEN_WORLD = {
+    "search_stock", "add_stock_media", "fetch_url", "download_url",
+    "generate_image", "generate_video", "generate_sfx",
+    "record_website", "record_website_demo", "showcase_demo",
+}
+# Titles that read badly when derived mechanically from the snake_case name.
+_TITLE_OVERRIDES = {
+    "look_at": "Look at frames of the video",
+    "look_at_asset": "Look at frames of an uploaded asset",
+    "get_edl": "Read the edit decision list",
+    "cut_output_range": "Cut a range of the finished edit",
+    "add_text_behind": "Put text behind the subject",
+    "set_master_loudness": "Master the mix to a loudness target",
+    "punch_in_on_emphasis": "Punch in on emphasized words",
+    "beat_align_cuts": "Snap cuts to the musical beat",
+    "erase_burned_text": "Erase burned-in text from the picture",
+    "add_aspect_shift": "Change aspect ratio mid-video",
+    "auto_reframe": "Reframe for a vertical or square platform",
+    "reset_edit": "Discard the edit and start from the source",
+    "read_skill": "Read an editing skill",
+    "wait_for_job": "Wait for a running job",
+}
+
+
+def _title_for(name):
+    if name in _TITLE_OVERRIDES:
+        return _TITLE_OVERRIDES[name]
+    words = (name or "").replace("_", " ").strip()
+    return words[:1].upper() + words[1:] if words else name
+
+
+def _annotations_for(name):
+    name = name or ""
+    read_only = name in _READ_ONLY_EXACT or name.startswith(_READ_ONLY_PREFIXES)
+    return {
+        "readOnlyHint": read_only,
+        # NOTHING here is destructive except a deliberate reset, and that is a
+        # property of the design rather than a claim: tools edit a versioned
+        # EDL, the uploaded file is never modified, and any cut can be restored.
+        # Saying so in the registry is the honest answer to the question a user
+        # is really asking when a client warns them about a video-editing tool.
+        "destructiveHint": name == "reset_edit",
+        # A setter lands the same state however many times it is called. A
+        # remover of something already gone is a no-op. Adders are not
+        # idempotent — calling add_zoom twice means two zooms.
+        "idempotentHint": (not read_only) and (
+            name.startswith("set_") or name.startswith("remove_")),
+        "openWorldHint": name in _OPEN_WORLD,
+    }
+
+
 def _editor_tools(catalog):
-    """OpenAI function specs -> MCP tool specs. A rename of two keys; the
-    schema itself is passed through untouched, which is the point."""
+    """OpenAI function specs -> MCP tool specs. Mostly a rename of two keys —
+    the schema itself is passed through untouched, which is the point — plus
+    the title and behaviour hints the OpenAI shape has nowhere to put."""
     out = []
     for t in (catalog or {}).get("tools", []):
         fn = t.get("function") or {}
-        out.append({"name": fn.get("name"),
+        name = fn.get("name")
+        out.append({"name": name,
+                    "title": _title_for(name),
                     "description": fn.get("description"),
                     "inputSchema": fn.get("parameters")
-                    or {"type": "object", "properties": {}}})
+                    or {"type": "object", "properties": {}},
+                    "annotations": _annotations_for(name)})
     return out
 
 
@@ -1068,6 +1156,122 @@ def _unauthorized(err):
         f'resource_metadata="{mcp_oauth.base_url()}'
         '/.well-known/oauth-protected-resource"')
     return resp, 401
+
+
+@mcp_bp.route("/.well-known/mcp/server-card.json")
+def server_card():
+    """A PUBLIC description of this server, for machines that cannot log in.
+
+    Every directory that lists MCP servers — Smithery, Glama, the mirrors that
+    rank for "video editing mcp" — discovers a server by connecting to it and
+    calling tools/list. Ours answers 401, correctly: the tool registry is behind
+    the same OAuth that everything else is behind. So the automatic scan finds
+    nothing and the listing is a name and a URL, on the one channel where
+    Valmera's actual advantage is the size and shape of its toolset.
+
+    This file is the documented fallback for exactly that case. It carries what
+    a directory needs to write an accurate card — what the server is, what it
+    can do, how to authenticate, what it refuses — and no user data, no tokens,
+    and no per-account state. Nothing here is a secret; the same facts are on
+    valmera.io in prose. Tool NAMES are published too, since a capability list
+    that cannot be read is a capability list that cannot be recommended.
+
+    Deliberately hand-written rather than derived from the live catalog: this is
+    marketing-facing copy with a stable shape, and a directory re-scraping it
+    should not see it churn every time the worker restarts. The tool COUNT is
+    read from the catalog, because a number that drifts is worse than no number.
+    """
+    catalog = _catalog()
+    editor = _editor_tools(catalog)
+    groups = {}
+    for t in editor:
+        groups.setdefault(_group_of(t["name"]), []).append(t["name"])
+    return jsonify({
+        "name": "io.valmera/video-editor",
+        "title": "Valmera — agentic AI video editor",
+        "description":
+            "Edit real video from inside an AI conversation. Upload footage, "
+            "describe the edit in plain English, and the agent cuts silences "
+            "and filler words, adds word-timed captions, reframes to 9:16, "
+            "mixes music, grades the picture, renders a preview, looks at the "
+            "frames it produced, and exports a full-quality MP4 from the "
+            "ORIGINAL file. It edits footage you already have — it is not a "
+            "text-to-video generator.",
+        "version": SERVER_INFO["version"],
+        "websiteUrl": "https://valmera.io",
+        "documentationUrl": "https://valmera.io/mcp",
+        "toolReferenceUrl": "https://valmera.io/mcp/tools",
+        "iconUrl": "https://valmera.io/icon-512.png",
+        "remotes": [{"type": "streamable-http",
+                     "url": f"{mcp_oauth.base_url()}/mcp"}],
+        "authentication": {
+            "type": "oauth2",
+            "dynamicClientRegistration": True,
+            "pkce": "S256",
+            "alsoAccepts": "bearer token minted at https://valmera.io/mcp",
+            "metadata": (f"{mcp_oauth.base_url()}"
+                         "/.well-known/oauth-authorization-server"),
+        },
+        "toolCount": len(editor) + len(SESSION_TOOLS),
+        "toolGroups": {k: sorted(v) for k, v in sorted(groups.items())},
+        "sessionTools": sorted(t["name"] for t in SESSION_TOOLS),
+        "notes": [
+            "Slow work (renders, exports, pixel repainting) returns a job id "
+            "and a wait_for_job tool rather than a fabricated completion.",
+            "Tools edit a versioned edit decision list. The uploaded file is "
+            "never modified and any cut can be restored.",
+            "The registry served here is the same one Valmera's own agent "
+            "uses — it is not re-declared for MCP, so there is no second list "
+            "that can drift.",
+            "A tool whose backing service is unconfigured is hidden from "
+            "tools/list rather than exposed and failing at call time.",
+            "Editing one project from the web studio and over MCP at the same "
+            "time is refused in both directions.",
+        ],
+        "notSupported": [
+            "text-to-video generation of a whole video",
+            "SRT/VTT import or export (captions are burned in)",
+            "team seats or collaboration",
+            "direct publishing to YouTube or TikTok",
+            "custom font uploads",
+            "true crossfade/dissolve transitions",
+            "motion-tracked overlays or stickers",
+            "denoise / studio sound",
+            "AI music generation",
+        ],
+        "pricing": {
+            "free": "50 one-time credits, no credit card",
+            "paidFrom": "USD 30/month",
+            "url": "https://valmera.io/subscribe",
+        },
+    })
+
+
+def _group_of(name):
+    """Coarse buckets for the public card. Name-based on purpose: it has to
+    keep working for a tool that did not exist when this was written."""
+    n = name or ""
+    if n.startswith(("get_", "find_", "search_", "look_at", "list_", "read_")):
+        return "reading the footage"
+    if n.startswith(("cut_", "keep_", "restore_", "remove_filler")):
+        return "cutting"
+    if "caption" in n or "text" in n or "title_card" in n:
+        return "captions and on-screen text"
+    if any(k in n for k in ("music", "sfx", "audio", "volume", "gain",
+                            "voiceover", "loudness", "beat")):
+        return "audio"
+    if any(k in n for k in ("zoom", "frame", "reframe", "aspect", "speed",
+                            "takeover", "cursor")):
+        return "framing and motion"
+    if any(k in n for k in ("grade", "stylize", "look", "fades",
+                            "transitions", "enhance_video")):
+        return "colour and finishing"
+    if any(k in n for k in ("insert", "overlay", "stock", "generate",
+                            "fetch_url", "record_", "showcase")):
+        return "media, generation and screen capture"
+    if any(k in n for k in ("blur", "erase", "corrupt", "color_screen")):
+        return "repair and censoring"
+    return "editing"
 
 
 @mcp_bp.route("/mcp", methods=["POST"])
