@@ -418,6 +418,48 @@ def asset_by_key(conn, project_id, storage_key):
         return cur.fetchone()
 
 
+def indexed_clips(conn, project_id, limit=12):
+    """Uploaded video clips whose perception pass finished (round 84) —
+    every one of these has a filmstrip + transcript in `indexes` keyed by
+    its sha256. Oldest first, so filmstrip order matches upload order."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = 'video_clip'
+                         AND sha256 IS NOT NULL
+                         AND COALESCE(meta->>'indexed', '') = 'true'
+                       ORDER BY id ASC LIMIT %s""", (project_id, limit))
+        return cur.fetchall()
+
+
+def tray_pending_assets(conn, project_id):
+    """Assets a tray submit marked for timeline placement
+    (meta.tray_place = {order, before_main, duration_s}) that no one has
+    placed yet. Ordered by the user's tray arrangement."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s
+                         AND kind IN ('video_clip', 'image_ref')
+                         AND meta ? 'tray_place'
+                         AND (meta->'tray_place') IS NOT NULL
+                         AND jsonb_typeof(meta->'tray_place') = 'object'
+                       ORDER BY COALESCE(
+                           (meta->'tray_place'->>'order')::float, 1e9),
+                                id ASC""", (project_id,))
+        return cur.fetchall()
+
+
+def staged_assets(conn, project_id):
+    """Uploads sitting in the staging tray — not yet submitted to the
+    timeline. Ordered by the tray position the client last saved, then id."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s
+                         AND COALESCE(meta->>'staged', '') = 'true'
+                       ORDER BY COALESCE((meta->>'tray_pos')::float, 1e9),
+                                id ASC""", (project_id,))
+        return cur.fetchall()
+
+
 def extracted_audio_asset(conn, project_id, source_key, source_sha=None):
     """The music asset previously extracted from THIS video, or None.
 

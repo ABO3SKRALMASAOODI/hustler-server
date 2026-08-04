@@ -994,6 +994,16 @@ SCENE_THRESHOLD = float(os.getenv("SCENE_THRESHOLD", "27.0"))
 # warning so the cost is bounded and the degradation is visible.
 MAX_VISION_SHEETS = int(os.getenv("MAX_VISION_SHEETS", "12"))
 
+# ── Filmstrip tiles (round 84): the visual index the agent READS ITSELF ──
+# Per-turn attachment budgets, in TILES (one tile = 4 labeled frames).
+# The main footage's strip is the biggest sense; each uploaded clip gets a
+# smaller strip; the turn total bounds the worst case (many clips). The
+# strips themselves are built at index time (worker/tiles.py) and cached
+# locally per sha, so these caps price CONTEXT, not compute.
+TILES_MAIN_MAX = int(os.getenv("TILES_MAIN_MAX", "36"))
+TILES_CLIP_MAX = int(os.getenv("TILES_CLIP_MAX", "10"))
+TILES_TURN_MAX = int(os.getenv("TILES_TURN_MAX", "60"))
+
 # How often the index looks at the picture, in SOURCE seconds (round 69).
 #
 # The sampling unit used to be the SHOT, and 46% of real prod videos are a

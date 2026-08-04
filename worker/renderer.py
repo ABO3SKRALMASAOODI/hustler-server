@@ -2421,6 +2421,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                       play_res=(W, H))
 
     def _fetch(key, tag, idx):
+        cached = _cached_source(key)
+        if cached:
+            return cached
         local = os.path.join(workdir, f"{tag}_{idx}"
                              + os.path.splitext(key)[1].lower())
         storage.download_to(key, local)
@@ -2606,6 +2609,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                       play_res=(W, H))
 
     def _fetch(key, tag, idx):
+        cached = _cached_source(key)
+        if cached:
+            return cached
         local = os.path.join(workdir, f"{tag}_{idx}"
                              + os.path.splitext(key)[1].lower())
         storage.download_to(key, local)
@@ -2989,6 +2995,44 @@ def _caption_index_fp(edl_json, index):
     return h.hexdigest()[:16]
 
 
+def _cached_source(storage_key):
+    """A sha-keyed local copy of an IMMUTABLE storage object (proxies are
+    content-addressed, originals/clean sources never change under a key), so
+    the second and third render of an agent turn stop re-downloading the
+    same file. Returns a local path OUTSIDE any job workdir. Falls back to
+    None on any failure — the caller downloads into its workdir as before.
+
+    Round 84: an agent turn typically renders 2-3 times (edit → check → fix
+    → check); the source download was the fixed tax on every one of them.
+    """
+    try:
+        cache_dir = os.path.join(config.TMP_DIR, "srccache")
+        os.makedirs(cache_dir, exist_ok=True)
+        name = hashlib.sha256(storage_key.encode()).hexdigest()[:32] + \
+            os.path.splitext(storage_key)[1]
+        local = os.path.join(cache_dir, name)
+        if os.path.exists(local) and os.path.getsize(local) > 0:
+            os.utime(local, None)      # LRU touch
+            return local
+        tmp = local + f".part{uuid.uuid4().hex[:6]}"
+        storage.download_to(storage_key, tmp)
+        os.replace(tmp, local)
+        # Best-effort prune: drop cache entries untouched for 6+ hours.
+        now = time.time()
+        for fn in os.listdir(cache_dir):
+            fp = os.path.join(cache_dir, fn)
+            try:
+                if now - os.path.getmtime(fp) > 6 * 3600:
+                    os.remove(fp)
+            except OSError:
+                pass
+        return local
+    except Exception as e:
+        print(f"[render] source cache miss-path failed ({e}) — "
+              "downloading into the workdir", flush=True)
+        return None
+
+
 def _render_stamp(job_id):
     """Name fragment for a render object. Unique PER RENDER, and carrying no
     word a client-side content blocker can pattern-match. Both properties are
@@ -3152,15 +3196,18 @@ def run_render_job(worker_db, job):
 
     try:
         if src_asset:
-            src_local = os.path.join(
-                workdir, "src" + os.path.splitext(src_asset["storage_key"])[1])
             # Checked BEFORE the download, which for a 14 GB original is the
             # single most expensive thing this instance can be asked to do for
             # a job that no longer exists.
             if not _still_ours(5):
                 raise RuntimeError(
                     "job was cancelled or handed to another worker")
-            storage.download_to(src_asset["storage_key"], src_local)
+            src_local = _cached_source(src_asset["storage_key"])
+            if not src_local:
+                src_local = os.path.join(
+                    workdir,
+                    "src" + os.path.splitext(src_asset["storage_key"])[1])
+                storage.download_to(src_asset["storage_key"], src_local)
         else:
             src_local = None            # canvas program: nothing to download
         if not _still_ours(10):

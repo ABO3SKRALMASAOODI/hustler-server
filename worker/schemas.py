@@ -27,16 +27,15 @@ from pydantic import BaseModel, Field, field_validator
 # returns (near-)zero words for real-length audio (Arabic → "Portuguese",
 # 0 words). Existing zero-word indexes MUST rebuild or those users stay
 # uncaptionable forever.
-# v9: BOTH halves of the index's perception changed (round 69). The picture is
-# now sampled on a CLOCK rather than once per detected shot (see
-# worker/visual.py — 81 of 177 prod videos were a single shot, i.e. one frame
-# of visual description for the whole video), which adds `moments` and makes
-# `shots[].caption` a derived field. And transcription now asks Deepgram for
-# speaker labels and filler words, which adds `speaker`/`filler` to every word
-# and changes the token stream itself — 12,263 words across 85 prod indexes
-# contained ZERO "um"/"uh", so remove_filler_words could never have worked.
-# Existing indexes must rebuild to gain either.
-PIPELINE_VERSION = 9
+# v9: clock-sampled moments + diarized transcription (round 69).
+# v10: THE VISUAL INDEX IS PICTURES, NOT PROSE. The vision-captioning stage is
+# gone; in its place every video (main footage AND uploaded clips) gets a
+# filmstrip of labeled tiles — 2x2 grids of frames sampled ~1s apart (see
+# worker/tiles.py) whose storage keys live in `tile_keys`. The agent reads the
+# tiles with its own eyes each turn instead of reading second-hand captions.
+# `moments`/`shots[].caption` remain readable on old rows but are no longer
+# produced. Existing indexes must rebuild to gain the strip.
+PIPELINE_VERSION = 10
 
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0
@@ -2586,6 +2585,11 @@ class VideoIndex(BaseModel):
     sentences: List[Sentence] = Field(default_factory=list)
     silences: List[List[float]] = Field(default_factory=list)
     sheet_keys: List[str] = Field(default_factory=list)
+    # Filmstrip tiles (v10): storage keys of the labeled 2x2 frame grids the
+    # agent reads directly, in time order, plus the sampling step used. Empty
+    # on pre-v10 rows (which read back unchanged).
+    tile_keys: List[str] = Field(default_factory=list)
+    tile_step_s: Optional[float] = None
     # Distinct speakers the transcriber diarized. 0 means "not diarized"
     # (whisper, or an index built before round 69), never "nobody spoke".
     speakers: int = 0

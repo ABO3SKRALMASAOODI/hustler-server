@@ -1,15 +1,26 @@
 """Perception pipeline (job type "index"): video file -> JSON index.
 
-Runs ONCE per unique file (sha256-keyed cache), then the agent works from
-text forever after. Steps: probe -> proxy + wav -> whisper words/sentences ->
-silences -> shots + thumbs -> contact sheets -> optional vision captions ->
-assemble VideoIndex.
+Runs ONCE per unique file (sha256-keyed cache). Since v10 the visual record
+is a FILMSTRIP OF TILES — labeled 2x2 frame grids sampled on a clock
+(worker/tiles.py) that the agent reads with its own eyes every turn — plus a
+word-level transcript when the audio carries speech. There is no vision-
+captioning stage any more: no scene prose, no per-sheet model calls, no
+TPM ceiling, and the minutes an index used to spend describing frames are
+gone.
+
+EVERY video gets the same treatment: the main footage and every uploaded
+clip run through this same job (clips skip the proxy encode, the EDL seeding
+and the chat greeting — they are perception-only).
+
+Steps (main video): probe -> proxy + wav -> whisper words/sentences ->
+silences -> shots -> filmstrip tiles -> assemble VideoIndex -> seed EDL +
+greet. Steps (clip): probe -> wav -> whisper -> silences -> shots -> tiles
+-> assemble VideoIndex -> stamp the asset indexed.
 """
 
 import os
 import re
 import shutil
-import threading
 import time
 from concurrent import futures
 
@@ -19,11 +30,10 @@ import db as dbx
 import llm
 import media
 import scenes
-import sheets
 import storage
+import tiles as tilestrip
 import transcribe
-import visual
-from schemas import (Moment, VideoIndex, VideoInfo, clamp_word_times,
+from schemas import (VideoIndex, VideoInfo, clamp_word_times,
                      default_edl, is_canvas_program, validate_edl)
 
 
@@ -54,11 +64,110 @@ def _stage_progress(worker_db, job_id, lo, hi):
     return cb
 
 
+def _index_has_tiles(idx):
+    """v10 usability test: the strip exists and its first tile is readable.
+    A cached row whose tiles were deleted from storage re-indexes rather
+    than serving a filmstrip of dead keys."""
+    keys = (idx or {}).get("tile_keys") or []
+    if not keys:
+        return False
+    try:
+        return storage.exists(keys[0])
+    except Exception:
+        return False
+
+
+def _transcribe_wav(job_id, wav_local, duration, warnings):
+    """words, sentences, language — with one retry on a transient crash."""
+    words, sentences, language = [], [], None
+    if not wav_local:
+        return words, sentences, language
+    for attempt in range(2):
+        try:
+            words, language = transcribe.transcribe(wav_local, warnings)
+            # ASR on music invents timings past the end of the file — clamp
+            # before sentences inherit the bad spans.
+            words = clamp_word_times(words, duration)
+            sentences = transcribe.group_sentences(words)
+            break
+        except Exception as e:
+            if attempt == 0:
+                print(f"[index {job_id}] transcription failed "
+                      f"({str(e)[:120]}); retrying once", flush=True)
+                continue
+            raise
+    return words, sentences, language
+
+
+def _detect_silences(job_id, wav_local, duration, warnings):
+    silences = []
+    if wav_local:
+        try:
+            silences = media.detect_silences(wav_local, duration)
+        except Exception as e:
+            warnings.append(f"silence detection failed ({str(e)[:120]}) — "
+                            "silence-based trimming may be less accurate")
+            print(f"[index {job_id}] silence detection degraded: {e}",
+                  flush=True)
+    return silences
+
+
+def _build_and_upload_tiles(job_id, project_id, sha, src_path, duration,
+                            workdir, warnings, seek_ceiling=None):
+    """Filmstrip tiles from src_path -> uploaded keys. Returns
+    (tile_keys, tile_step_s). Degrades to an empty strip with a warning —
+    the transcript and cut points are unaffected."""
+    tile_dir = os.path.join(workdir, "tiles")
+    try:
+        built, step = tilestrip.build_for_video(
+            src_path, duration, tile_dir, seek_ceiling=seek_ceiling,
+            parallelism=config.THUMB_PARALLELISM)
+    except Exception as e:
+        warnings.append(f"filmstrip build failed ({str(e)[:120]}) — the "
+                        "video has no visual strip; use look_at instead")
+        print(f"[index {job_id}] filmstrip degraded: {e}", flush=True)
+        return [], None
+    if not built:
+        warnings.append("filmstrip build produced no tiles — the video has "
+                        "no visual strip; use look_at instead")
+        return [], None
+
+    jobs = [(tp, f"tiles/{project_id}/{sha}/tile_{i:03d}.jpg")
+            for i, (tp, _t0, _t1) in enumerate(built, start=1)]
+    ok = {}
+    with futures.ThreadPoolExecutor(
+            max_workers=config.UPLOAD_PARALLELISM) as pool:
+        futs = {pool.submit(storage.upload_file, tp, key, "image/jpeg"):
+                (i, key) for i, (tp, key) in enumerate(jobs)}
+        for fut, (i, key) in futs.items():
+            try:
+                fut.result()
+                ok[i] = key
+            except Exception as e:
+                print(f"[index {job_id}] tile upload failed ({key}): {e}",
+                      flush=True)
+    # Keys stay POSITIONAL (time order); a failed upload drops the tail
+    # coverage warning in, never a hole that mislabels later tiles.
+    keys = []
+    for i in range(len(jobs)):
+        if i in ok:
+            keys.append(ok[i])
+        else:
+            break
+    if len(keys) < len(jobs):
+        warnings.append(f"only {len(keys)} of {len(jobs)} filmstrip tiles "
+                        "uploaded — the strip ends early; use look_at for "
+                        "the rest")
+    return keys, step
+
+
 def run_index_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     asset = worker_db.run(dbx.get_asset, job["payload"].get("asset_id"))
     if not asset:
         raise RuntimeError("Original asset not found")
+    if asset["kind"] in ("video_clip", "music"):
+        return _run_clip_index(worker_db, job, asset)
     project = worker_db.run(dbx.get_project, project_id)
     session_id = project["chat_session_id"]
 
@@ -173,20 +282,10 @@ def run_index_job(worker_db, job):
         proxy_key = f"proxies/{project_id}/{sha}.mp4"
 
         # Cache hit: this exact file was indexed before (any project) BY THE
-        # CURRENT PIPELINE. An index built by an older pipeline version is
-        # stale (different segmentation/VAD rules) and gets rebuilt — and so
-        # is a BLIND one, once vision is back. The cache key is the file
-        # hash, so an index captioned during a vision outage (Jul 31 - Aug 3
-        # 2026: every sheet starved to zero captions) would otherwise serve
-        # its blindness to every future upload of that file forever — a real
-        # user re-uploaded the same music video SIX times in her first hour
-        # and got the same blind index six times. When vision is still down,
-        # the blind cache keeps serving (degrade, don't loop).
+        # CURRENT PIPELINE, and its filmstrip is still readable in storage.
         cached = worker_db.run(dbx.get_index_by_sha, sha)
-        cached_blind = bool(cached) and _index_blind(cached["json"]) \
-            and llm.vision_available()
-        if cached and not cached_blind and \
-                cached.get("pipeline_version", 1) == config.PIPELINE_VERSION:
+        if cached and cached.get("pipeline_version", 1) == \
+                config.PIPELINE_VERSION and _index_has_tiles(cached["json"]):
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                           workdir,
                           ready_proxy=src if from_client_proxy else None)
@@ -201,12 +300,10 @@ def run_index_job(worker_db, job):
                     "words": len(cached["json"].get("words", [])),
                     "timings": timings}
         if cached:
-            why = ("blind (no visual captions) and vision is back"
-                   if cached_blind else
-                   f"stale (pipeline v{cached.get('pipeline_version', 1)} < "
-                   f"v{config.PIPELINE_VERSION})")
             print(f"[index {job_id}] cached index for sha {sha[:12]} is "
-                  f"{why} — re-indexing", flush=True)
+                  f"stale (pipeline v{cached.get('pipeline_version', 1)} < "
+                  f"v{config.PIPELINE_VERSION} or tiles missing) — "
+                  "re-indexing", flush=True)
 
         # Non-fatal degradations recorded here and stored on the index so a
         # partially-degraded analysis is visible in admin instead of silently
@@ -216,8 +313,7 @@ def run_index_job(worker_db, job):
         # 3. Proxy (VFR -> CFR here) + 16k mono wav
         if from_client_proxy:
             # Already have it: the browser encoded it and adopt_client_proxy
-            # normalized it. This is the 386.8s that a 4K index used to spend
-            # here — 78% of the whole job — and it is now zero.
+            # normalized it.
             proxy_local = src
         else:
             proxy_local = os.path.join(workdir, "proxy.mp4")
@@ -225,8 +321,8 @@ def run_index_job(worker_db, job):
                              info["has_audio"], duration=info["duration"],
                              progress_cb=_stage_progress(worker_db, job_id,
                                                          12, 30))
-            # Probed here, not at upload time: step 6 needs the proxy's REAL
-            # duration to keep thumbnail seeks inside it.
+            # Probed here, not at upload time: tile extraction needs the
+            # proxy's REAL duration to keep frame seeks inside it.
             proxy_info = media.probe(proxy_local)
         # The index is about to describe this video to the agent, the player
         # and every cut. If the proxy still doesn't cover the recording, say so
@@ -249,266 +345,45 @@ def run_index_job(worker_db, job):
         worker_db.run(dbx.set_progress, job_id, 35)
         _mark("wav_s")
 
-        # 4. Transcription (retry once — a transient whisper crash shouldn't
-        #    fail the whole job and force a full re-download/re-proxy)
-        words, sentences, language = [], [], None
-        if wav_local:
-            for attempt in range(2):
-                try:
-                    words, language = transcribe.transcribe(wav_local,
-                                                            warnings)
-                    # ASR on music invents timings past the end of the file
-                    # (a real 16.65s clip got a 'word' ending at 34.72s) —
-                    # clamp before sentences inherit the bad spans.
-                    words = clamp_word_times(words, info["duration"])
-                    sentences = transcribe.group_sentences(words)
-                    break
-                except Exception as e:
-                    if attempt == 0:
-                        print(f"[index {job_id}] transcription failed "
-                              f"({str(e)[:120]}); retrying once", flush=True)
-                        continue
-                    raise
+        # 4. Transcription
+        words, sentences, language = _transcribe_wav(
+            job_id, wav_local, info["duration"], warnings)
         worker_db.run(dbx.set_progress, job_id, 60)
         _mark("whisper_s")
 
         # 5. Silences (degrade with a recorded warning, never silently to [])
-        silences = []
-        if wav_local:
-            try:
-                silences = media.detect_silences(wav_local, info["duration"])
-            except Exception as e:
-                warnings.append(f"silence detection failed ({str(e)[:120]}) — "
-                                "silence-based trimming may be less accurate")
-                print(f"[index {job_id}] silence detection degraded: {e}",
-                      flush=True)
+        silences = _detect_silences(job_id, wav_local, info["duration"],
+                                    warnings)
         worker_db.run(dbx.set_progress, job_id, 65)
         _mark("silences_s")
 
-        # 6. Shots + frames sampled on a CLOCK (round 69).
-        #
-        # Frames used to be pulled one per SHOT, which meant 46% of real
-        # uploads — every locked-off talking head, screen recording and
-        # timelapse — were described to the agent by a single thumbnail, the
-        # worst measured case being 19.3 minutes of footage summarised from
-        # one frame at 9:38. Shots still mean "the camera changed" (transitions
-        # depend on that); the SAMPLING is now independent of them. See
-        # worker/visual.py.
+        # 6. Shots — scene changes only. Transitions and the program map
+        # depend on these boundaries; nothing describes them any more.
         shots = scenes.detect_shots(proxy_local, info["duration"], warnings)
-        # The ceiling is the one that already existed: MAX_VISION_SHEETS sheets
-        # of PER_SHEET tiles. What changed is that a single-shot video used to
-        # spend 1 of those 300 tiles.
-        point_budget = max(1, config.MAX_VISION_SHEETS) * sheets.PER_SHEET
-        points, points_capped = visual.sample_points(
-            shots, info["duration"], config.VISUAL_SAMPLE_S, point_budget)
-        if points_capped:
-            warnings.append(
-                f"this video has {len(shots)} shots — more than the "
-                f"{point_budget}-frame analysis budget, so shots were sampled "
-                "evenly and some have no visual description")
-        thumb_dir = os.path.join(workdir, "thumbs")
-        os.makedirs(thumb_dir, exist_ok=True)
-        # Shot times live on the ORIGINAL's timeline (that is what the EDL and
-        # the renderer cut against), but thumbnails are pulled from the PROXY —
-        # so the seek has to be inside the PROXY's own decodable range. The two
-        # can disagree: a source's container duration counts its audio tail and
-        # its edit lists, so a re-encoded proxy is routinely a hair (sometimes a
-        # lot) shorter. Seeking past its last frame yields no frame at all.
-        proxy_dur = proxy_info["duration"]
-        seek_ceiling = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
-
-        # HUNDREDS OF SEEKS. Pulled serially this was ~1s each — 141 shots on a
-        # real 4-minute upload cost 48s of seeking plus 139s of uploading, more
-        # than the whole rest of the index. Each seek is an independent ffmpeg
-        # that spends most of its life in I/O and single-threaded decode, so
-        # they run concurrently on a box with cores to spare. Bounded by the
-        # same knob the artifact uploads use, since both are "many small
-        # independent jobs".
-        def _frame(pi):
-            t = points[pi]["t"]
-            if seek_ceiling is not None:
-                t = min(t, seek_ceiling)
-            fp = os.path.join(thumb_dir, f"f_{pi:04d}.jpg")
-            try:
-                media.frame_at(proxy_local, t, fp, width=320)
-                return pi, fp
-            except media.MediaError as e:
-                print(f"[index {job_id}] no frame at {t:.2f}s "
-                      f"(proxy {proxy_dur}s): {e}", flush=True)
-                return pi, None
-
-        frame_paths = {}
-        if points:
-            with futures.ThreadPoolExecutor(
-                    max_workers=max(1, min(len(points),
-                                           config.THUMB_PARALLELISM))) as pool:
-                for pi, fp in pool.map(_frame, range(len(points))):
-                    if fp:
-                        frame_paths[pi] = fp
-        # Only the SHOT midpoints become uploaded per-shot thumbnails, so the
-        # storage and upload cost of an index is exactly what it was — the
-        # extra frames live and die inside this workdir, and reach the agent
-        # only through the contact sheets, which were always uploaded.
-        thumb_paths = {p["shot"]: frame_paths[i]
-                       for i, p in enumerate(points)
-                       if p["shot_mid"] and i in frame_paths}
-        print(f"[index {job_id}] {len(shots)} shot(s), sampled "
-              f"{len(frame_paths)}/{len(points)} frames "
-              f"(every ~{config.VISUAL_SAMPLE_S:g}s, budget {point_budget})",
-              flush=True)
-        worker_db.run(dbx.set_progress, job_id, 75)
+        worker_db.run(dbx.set_progress, job_id, 70)
         _mark("shots_s")
 
-        # 7. Contact sheets + optional vision captions. The cap now applies
-        #    UPSTREAM, at sample_points: a 3-hour video stretches its sampling
-        #    grid instead of firing proportionally many vision calls, so every
-        #    frame that exists here fits inside MAX_VISION_SHEETS sheets by
-        #    construction and the sheets are captioned concurrently.
-        sheet_dir = os.path.join(workdir, "sheets")
-        os.makedirs(sheet_dir, exist_ok=True)
-        sheet_list = sheets.build_contact_sheets(points, frame_paths,
-                                                 sheet_dir)
-        # Only caption when vision is actually configured — otherwise
-        # caption_points is a no-op and any warning about sampling would
-        # falsely claim captioning happened.
-        #
-        # AND RECORD WHAT IT SPENDS. llm.record() no-ops when no recorder is
-        # installed, and only agent_loop and mcp_exec ever installed one — so
-        # every contact-sheet caption call an index has ever made was invisible
-        # in llm_calls. That is not a cosmetic gap: `SELECT ... FROM llm_calls
-        # WHERE purpose='vision...'` is the documented way to check whether
-        # vision is alive after a provider change, and it read ZERO for a
-        # capability that was working perfectly. It also means every admin cost
-        # view has been under-reporting index spend. Same recorder shape as the
-        # agent turn's, minus the per-turn usage accumulation (an index is not
-        # charged to a user).
-        moments = []
-        if llm.vision_available():
-            # BUFFERED, not written from the callback. Sheets are captioned
-            # concurrently now, and WorkerDB holds ONE psycopg connection with
-            # no lock — two sheets recording at once would corrupt the lane's
-            # connection mid-index. The buffer is drained on this thread below.
-            recorded, rec_lock = [], threading.Lock()
-
-            def _index_recorder(purpose, request, response, usage):
-                with rec_lock:
-                    recorded.append((purpose, request, response, usage))
-
-            caps = {}
-            try:
-                caps = sheets.caption_points(
-                    sheet_list, recorder=_index_recorder,
-                    parallelism=config.VISION_CAPTION_PARALLELISM)
-            except Exception as e:
-                warnings.append(f"visual captioning failed ({str(e)[:120]}) — "
-                                "shots have no visual description")
-                print(f"[index {job_id}] vision captioning degraded: {e}",
-                      flush=True)
-            # Round 67's lesson: an index vision call that goes unrecorded is
-            # invisible in the one place built to show whether vision is alive.
-            for purpose, request, response, usage in recorded:
-                try:
-                    model = (request or {}).get("model")
-                    cached_in = llm.cached_input_tokens(usage)
-                    reasoning = llm.reasoning_tokens(usage)
-                    if isinstance(response, dict) and (cached_in or reasoning):
-                        extra = {}
-                        if cached_in:
-                            extra["cached_in"] = cached_in
-                        if reasoning:
-                            extra["reasoning_out"] = reasoning
-                        response = dict(response, **extra)
-                    worker_db.run(
-                        dbx.insert_llm_call, project_id, job_id, purpose,
-                        model, request, response,
-                        getattr(usage, "prompt_tokens", None) if usage else None,
-                        getattr(usage, "completion_tokens", None) if usage
-                        else None)
-                except Exception as e:
-                    print(f"[index {job_id}] llm_call record failed: {e}",
-                          flush=True)
-            # A moment with no caption carries nothing but "a frame existed
-            # here", so only described instants are kept. Shot captions are
-            # then DERIVED from them, which is what leaves every existing
-            # reader of shot.caption working untouched.
-            moments = [Moment(t=p["t"], shot=p["shot"], caption=caps[i])
-                       for i, p in enumerate(points) if i in caps]
-            visual.derive_shot_captions(shots, moments)
-            if not caps and sheet_list:
-                warnings.append(
-                    "visual captioning returned nothing — shots have timings "
-                    "but no description of what is on screen")
-        else:
-            # SAY IT. Vision going dark is silent by design everywhere else
-            # (the honest-off contract: tools report "visual inspection
-            # unavailable" rather than failing), and the cost of that silence
-            # was measured: after the Jul 26 2026 provider switch the
-            # dispatcher lost its inherited vision key and ran 419 agent calls
-            # across two days with ZERO look_at, while indexes quietly shipped
-            # without a single visual description. Nothing anywhere said so.
-            # An index with no captions is a materially worse index — the agent
-            # is left with transcript and timings and no idea what is on
-            # screen — so it belongs in the warnings an admin already reads.
-            warnings.append(
-                "no visual descriptions: the vision provider is not "
-                "configured on this service (set VISION_API_KEY, or point "
-                "VISION_BASE_URL at a provider whose key it can inherit) — "
-                "shots have timings but no description of what is on screen")
-            print(f"[index {job_id}] VISION UNAVAILABLE — indexing without "
-                  f"shot captions (VISION_MODEL={config.VISION_MODEL!r}, "
-                  f"key set={bool(config.VISION_API_KEY)})", flush=True)
+        # 7. FILMSTRIP TILES — the visual index. Built from the proxy
+        # (already 540p, fast to seek) and uploaded concurrently.
+        proxy_dur = proxy_info["duration"]
+        seek_ceiling = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
+        tile_keys, tile_step = _build_and_upload_tiles(
+            job_id, project_id, sha, proxy_local, info["duration"], workdir,
+            warnings, seek_ceiling=seek_ceiling)
+        print(f"[index {job_id}] filmstrip: {len(tile_keys)} tile(s), "
+              f"step {tile_step}s, {len(shots)} shot(s)", flush=True)
         worker_db.run(dbx.set_progress, job_id, 85)
-        _mark("sheets_vision_s")
+        _mark("tiles_s")
 
-        # 8. Upload artifacts — ALL AT ONCE.
-        #
-        # These PUTs used to run one after another, and they are the last thing
-        # standing between the user and "your video is ready": a ~7MB proxy, a
-        # wav, dozens of thumbnails and a handful of contact sheets, each
-        # waiting for the previous round trip to finish. Measured at ~24.5s of
-        # an index, roughly 40% of its cost, and almost all of it network wait
-        # on a box that is otherwise idle.
-        #
-        # They are completely independent objects, so the wall clock should be
-        # the slowest single upload, not their sum. Threads (not processes) are
-        # right here because every one of them is blocked in a socket with the
-        # GIL released.
-        #
-        # The failure contract is UNCHANGED and is the reason each group is
-        # collected separately below: the proxy is load-bearing and a failure
-        # must fail the job, while thumbnails and contact sheets are
-        # conveniences the agent can re-derive — one un-extractable 320px jpeg
-        # once raised FileNotFoundError here and buried ~200s of good analysis
-        # under "I couldn't analyze that video. Try a different format like
-        # mp4", advice that could not possibly have helped for a video that had
-        # in fact been analyzed fine.
+        # 8. Upload the load-bearing artifacts (proxy + wav) — concurrent.
         audio_key = f"audio/{project_id}/{sha}.wav" if wav_local else None
-        thumb_jobs = [(shot, thumb_paths.get(shot.id),
-                       f"thumbs/{project_id}/{sha}/shot_{shot.id}.jpg")
-                      for shot in shots]
-        sheet_jobs = [(sp, f"sheets/{project_id}/{sha}/sheet_{i}.jpg")
-                      for i, (sp, _ids) in enumerate(sheet_list, start=1)]
-
         with futures.ThreadPoolExecutor(
                 max_workers=config.UPLOAD_PARALLELISM) as pool:
-            # Required: the job dies if either of these does.
             required = {pool.submit(storage.upload_file, proxy_local,
                                     proxy_key, "video/mp4"): "proxy"}
             if audio_key:
                 required[pool.submit(storage.upload_file, wav_local,
                                      audio_key, "audio/wav")] = "audio"
-            # Best-effort: a failure drops the key and adds a warning.
-            thumb_futs = {
-                pool.submit(storage.upload_file, tp, tkey, "image/jpeg"):
-                    (shot, tkey)
-                for shot, tp, tkey in thumb_jobs if tp}
-            sheet_futs = {
-                pool.submit(storage.upload_file, sp, skey, "image/jpeg"):
-                    (i, skey)
-                for i, (sp, skey) in enumerate(sheet_jobs)}
-
-            # Resolve the required ones FIRST so a storage outage still fails
-            # fast and loudly, exactly as it did when these ran in sequence.
             for fut, what in required.items():
                 try:
                     fut.result()
@@ -516,52 +391,6 @@ def run_index_job(worker_db, job):
                     print(f"[index {job_id}] {what} upload failed",
                           flush=True)
                     raise
-
-            missing = [shot.id for shot, tp, _k in thumb_jobs if not tp]
-            for fut, (shot, tkey) in thumb_futs.items():
-                try:
-                    fut.result()
-                    shot.thumb_key = tkey
-                except Exception as e:
-                    missing.append(shot.id)
-                    print(f"[index {job_id}] thumb upload failed for shot "
-                          f"{shot.id}: {e}", flush=True)
-
-            # Contact sheets keep their ORDER: sheet_keys is positional (the
-            # agent asks for "sheet 3"), so collect by index and then compact,
-            # never by completion order.
-            ok_sheets = {}
-            for fut, (i, skey) in sheet_futs.items():
-                try:
-                    fut.result()
-                    ok_sheets[i] = skey
-                except Exception as e:
-                    print(f"[index {job_id}] sheet upload failed ({skey}): {e}",
-                          flush=True)
-
-        if missing:
-            warnings.append(
-                f"{len(missing)} of {len(shots)} shot thumbnails could not be "
-                "made — those shots have no still image (the transcript and "
-                "cut points are unaffected)")
-        sheet_keys = []
-        for i in sorted(ok_sheets):
-            sp, skey = sheet_jobs[i]
-            sheet_keys.append(skey)
-            # Record contact sheets as assets so admin storage totals count
-            # them and any future DB-driven cleanup finds them (thumbs are
-            # covered by the sheets/ + thumbs/ R2 prefix delete). Guard against
-            # duplicate rows on re-index / job-retry (same key) so totals don't
-            # double-count — mirror the proxy asset_by_key check. Best-effort.
-            try:
-                exists = worker_db.run(
-                    lambda conn: dbx.asset_by_key(conn, project_id, skey))
-                if not exists:
-                    worker_db.run(dbx.insert_asset, project_id, "sheet", skey,
-                                  bytes_=os.path.getsize(sp), sha256=sha,
-                                  meta={"index_artifact": True})
-            except Exception:
-                pass
         worker_db.run(dbx.set_progress, job_id, 92)
 
         worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,
@@ -575,13 +404,8 @@ def run_index_job(worker_db, job):
                           duration_s=info["duration"], sha256=sha)
 
         # 8.5 Perception sidecar (round 35): beat grid / energy / speech
-        # stress from the wav that already exists. Computed inline for NEW
-        # indexes because it is cheap (~seconds of numpy) while the wav is
-        # local; cached pre-v35 indexes get it LAZILY the first time a tool
-        # asks (perception.get_or_compute_for_index) — deliberately NOT a
-        # PIPELINE_VERSION bump, so shipping this re-indexes nothing.
-        # Non-fatal by the same contract as thumbnails: perception feeds
-        # DECISIONS, never renders, so a failure degrades to a warning.
+        # stress from the wav that already exists. Non-fatal by the same
+        # contract as tiles: perception feeds DECISIONS, never renders.
         perception_sidecar = None
         if wav_local:
             try:
@@ -601,11 +425,11 @@ def run_index_job(worker_db, job):
                             has_audio=info["has_audio"],
                             vfr_normalized=info["vfr"]),
             shots=shots,
-            moments=moments,
             words=words,
             sentences=sentences,
             silences=silences,
-            sheet_keys=sheet_keys,
+            tile_keys=tile_keys,
+            tile_step_s=tile_step,
             speakers=speakers,
             language=language,
             warnings=warnings,
@@ -619,8 +443,126 @@ def run_index_job(worker_db, job):
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,
-                "moments": len(moments), "speakers": speakers,
+                "tiles": len(tile_keys), "speakers": speakers,
                 "words": len(words), "silences": len(silences),
+                "language": language, "warnings": warnings,
+                "timings": timings}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _run_clip_index(worker_db, job, asset):
+    """Perception for a NON-MAIN upload — a spliced clip or a music file.
+
+    Exactly the same senses as the main video (tiles + transcript + silences
+    + shots), minus everything that belongs to the program: no proxy encode,
+    no EDL seeding, no greeting. Music files get transcript/silences only.
+    The result is stored in `indexes` by sha, and the asset is stamped
+    indexed so every reader (state, agent context) can find it."""
+    job_id, project_id = job["id"], job["project_id"]
+    is_music = asset["kind"] == "music"
+    workdir = os.path.join(config.TMP_DIR, f"index_{job_id}")
+    os.makedirs(workdir, exist_ok=True)
+    timings, _t = {}, time.monotonic()
+
+    def _mark(stage):
+        nonlocal _t
+        timings[stage] = round(time.monotonic() - _t, 2)
+        _t = time.monotonic()
+
+    try:
+        src = os.path.join(workdir,
+                           "src" + os.path.splitext(asset["storage_key"])[1])
+        storage.download_to(asset["storage_key"], src)
+        worker_db.run(dbx.set_progress, job_id, 10)
+        _mark("download_s")
+        sha = media.sha256_file(src)
+        if is_music:
+            dur = media.probe_audio_duration(src)
+            info = {"duration": dur or (asset.get("duration_s") or 0.0),
+                    "width": 0, "height": 0, "fps": 0.0, "has_audio": True,
+                    "vfr": False}
+        else:
+            info = media.probe(src)
+        worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
+                      info["width"], info["height"], info["fps"], sha)
+        worker_db.run(dbx.set_progress, job_id, 20)
+        _mark("probe_s")
+
+        cached = worker_db.run(dbx.get_index_by_sha, sha)
+        if cached and cached.get("pipeline_version", 1) == \
+                config.PIPELINE_VERSION and \
+                (is_music or _index_has_tiles(cached["json"])):
+            worker_db.run(dbx.update_asset_meta, asset["id"],
+                          {"indexed": True, "staged": None})
+            return {"sha256": sha, "cached": True, "kind": asset["kind"],
+                    "timings": timings}
+
+        warnings = []
+        wav_local = None
+        if info["has_audio"]:
+            wav_local = os.path.join(workdir, "audio.wav")
+            try:
+                media.extract_wav(src, wav_local)
+            except Exception as e:
+                wav_local = None
+                warnings.append(f"audio extraction failed ({str(e)[:120]})")
+        worker_db.run(dbx.set_progress, job_id, 35)
+        words, sentences, language = _transcribe_wav(
+            job_id, wav_local, info["duration"], warnings)
+        worker_db.run(dbx.set_progress, job_id, 60)
+        _mark("whisper_s")
+        silences = _detect_silences(job_id, wav_local, info["duration"],
+                                    warnings)
+
+        shots, tile_keys, tile_step = [], [], None
+        if not is_music:
+            try:
+                shots = scenes.detect_shots(src, info["duration"], warnings)
+            except Exception as e:
+                warnings.append(f"shot detection failed ({str(e)[:120]})")
+            worker_db.run(dbx.set_progress, job_id, 70)
+            tile_keys, tile_step = _build_and_upload_tiles(
+                job_id, project_id, sha, src, info["duration"], workdir,
+                warnings,
+                seek_ceiling=max(0.0, info["duration"] - 0.05))
+            _mark("tiles_s")
+
+        perception_sidecar = None
+        if wav_local:
+            try:
+                import perception as perception_mod
+                perception_sidecar = perception_mod.analyze_audio(wav_local)
+            except Exception:
+                pass
+        worker_db.run(dbx.set_progress, job_id, 92)
+
+        speakers = len({w.speaker for w in words if w.speaker is not None})
+        index = VideoIndex(
+            video=VideoInfo(duration=info["duration"], fps=info["fps"] or 0.0,
+                            width=info["width"], height=info["height"],
+                            has_audio=info["has_audio"],
+                            vfr_normalized=False),
+            shots=shots,
+            words=words,
+            sentences=sentences,
+            silences=silences,
+            tile_keys=tile_keys,
+            tile_step_s=tile_step,
+            speakers=speakers,
+            language=language,
+            warnings=warnings,
+            perception=perception_sidecar,
+        ).model_dump()
+        worker_db.run(dbx.upsert_index, project_id, sha, index)
+        worker_db.run(dbx.update_asset_meta, asset["id"],
+                      {"indexed": True, "staged": None})
+        _mark("persist_s")
+        print(f"[index {job_id}] {asset['kind']} indexed: "
+              f"{info['duration']:.1f}s, {len(words)} words, "
+              f"{len(tile_keys)} tile(s)", flush=True)
+        return {"sha256": sha, "cached": False, "kind": asset["kind"],
+                "words": len(words), "tiles": len(tile_keys),
                 "language": language, "warnings": warnings,
                 "timings": timings}
     finally:
@@ -705,10 +647,10 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
                   "concrete example — grounded in the transcript opening "
                   "if it gives you anything to go on.")
     system = ("You are Valmera, an AI video editor. You just finished "
-              "analyzing the user's uploaded video (transcription, shot "
-              "mapping). Write the short chat message (2-3 sentences, "
-              "plain text, no markdown, no emoji) telling them their "
-              "video is ready to edit. State the real stats you were "
+              "analyzing the user's uploaded video (transcription, "
+              "filmstrip mapping). Write the short chat message (2-3 "
+              "sentences, plain text, no markdown, no emoji) telling them "
+              "their video is ready to edit. State the real stats you were "
               "given. You have NOT made any edits yet — never claim or "
               "imply you did, and never invent facts beyond what is "
               "given.")
@@ -745,42 +687,9 @@ def _dur_text(seconds):
             else f"{seconds / 60.0:.1f} min")
 
 
-def _index_blind(idx):
-    """A functionally BLIND index — built while visual captioning was down
-    or starving (key outage Jul 31, reasoning-cap starvation to Aug 3 2026).
-
-    Measured as COVERAGE, not zero-tolerance: partial starvation leaves a
-    few captions standing (a 203s music video shipped 2 captions across 97
-    shots — "not zero", and the agent still frame-hunted it for four
-    minutes), while a healthy index of a long STATIC video legitimately
-    merges to very few moments but its few shots DO carry captions. Blind =
-    under 20% of shots captioned AND less than one described sample per 30
-    seconds of footage."""
-    shots = idx.get("shots") or []
-    if not shots:
-        return False
-    caps = sum(1 for s in shots if s.get("caption"))
-    if caps * 5 >= len(shots):
-        return False
-    try:
-        dur = float((idx.get("video") or {}).get("duration") or 0)
-    except (TypeError, ValueError):
-        dur = 0.0
-    return len(idx.get("moments") or []) * 30 < dur
-
-
 def _opening_example(n_words, n_sil):
     """The ONE example in the ready-notice, grounded in what the index
-    actually found.
-
-    It used to be a fixed string — "cut the dead air, caption every word, and
-    tighten the intro" — printed under every video including ones with no
-    speech in them at all. A real user read it on a silent 17-second clip,
-    asked for exactly that, and got "I couldn't make either change" as their
-    first experience of the product; they never sent a third message.
-    Suggesting the one edit this footage CANNOT take is worse than suggesting
-    nothing, and it is worse still because the user is obeying us when they
-    ask for it."""
+    actually found. Never suggest the edit this footage cannot take."""
     if not n_words:
         return ("cut it to the best moments, put music under it, and punch "
                 "in on the action")
@@ -789,25 +698,85 @@ def _opening_example(n_words, n_sil):
     return "cut the dead air, caption every word, and tighten the intro"
 
 
+def _sweep_tray_placements(worker_db, project_id):
+    """Round 84: splice every asset the tray submit marked for placement
+    (meta.tray_place = {order, before_main, duration_s}) into the EDL — in
+    tray order, exactly where the user arranged them (before the footage
+    for items ahead of the main video, after it for the rest).
+
+    DB-flag driven, not job-payload driven, so it is race-free by design:
+    the submit endpoint places directly when an EDL already exists, and
+    this sweep catches everything marked while the main index was still
+    running — including a submit that raced the job claim. Idempotent per
+    asset (the flag is cleared under the same write) and per asset_key."""
+    pending = worker_db.run(dbx.tray_pending_assets, project_id)
+    if not pending:
+        return 0
+    row = worker_db.run(dbx.latest_edl, project_id)
+    if not row:
+        return 0
+    edl = row["json"]
+    inserts = list(edl.get("inserts") or [])
+    have_keys = {i.get("asset_key") for i in inserts}
+    keep = edl.get("keep") or []
+    end_boundary = keep[-1][1] if keep else 0.0
+    taken = {i.get("id") for i in inserts}
+    added, placed_ids = 0, []
+    for a in pending:
+        try:
+            place = (a.get("meta") or {}).get("tray_place") or {}
+            key = a["storage_key"]
+            placed_ids.append(a["id"])
+            if not key or key in have_keys:
+                continue
+            dur = round(float(place.get("duration_s")
+                              or a.get("duration_s") or 3.0), 2)
+            dur = min(max(dur, 0.2), 600.0)
+            n = 1
+            while f"ins{n}" in taken:
+                n += 1
+            taken.add(f"ins{n}")
+            inserts.append({
+                "id": f"ins{n}", "asset_key": key,
+                "kind": "image" if a["kind"] == "image_ref" else "video",
+                "at_output_s": 0.0 if place.get("before_main")
+                else float(end_boundary),
+                "duration_s": dur,
+            })
+            have_keys.add(key)
+            added += 1
+        except Exception as e:
+            print(f"[index] tray insert skipped ({e})", flush=True)
+    if added:
+        new_edl = dict(edl, inserts=inserts)
+        try:
+            src_dur = keep[-1][1] if keep else 0.0
+            new_edl = validate_edl(new_edl, src_dur).model_dump()
+        except Exception as e:
+            # Belt-and-braces (positions are keep boundaries by
+            # construction); never lose the placements over a nit.
+            print(f"[index] tray EDL validation note: {e}", flush=True)
+        worker_db.run(dbx.insert_edl, project_id, new_edl, "agent")
+    for aid in placed_ids:
+        try:
+            worker_db.run(dbx.update_asset_meta, aid,
+                          {"tray_place": None, "placed": True})
+        except Exception:
+            pass
+    return added
+
+
 def _finish_setup(worker_db, project_id, session_id, info, index,
                   user_id=None, reindex=False, asset_id=None):
-    """Seed EDL v1 (keep everything) if none exists, greet in chat, and
-    auto-start the agent on any request the user sent while indexing was
-    still running (instead of asking them to resend it — nobody does).
+    """Seed EDL v1 (keep everything) if none exists, splice any staged tray
+    items around it, greet in chat, and auto-start the agent on any request
+    the user sent while indexing was still running.
 
     reindex=True marks a background pipeline refresh of an already-greeted
-    project (the /state self-heal sets it on the job payload) — those stay
-    QUIET: a real customer got a second "Your video is ready to edit ... I
-    haven't made any edits" over a session where the agent had already cut
-    her video.
-
-    The flag alone is not enough (round 67): an index job reaped after a
-    worker death and re-claimed re-runs this whole function with NO reindex
-    flag, and project 300 was greeted twice from one job row, 3.5 minutes
-    apart. So the greet is idempotent against the CHAT, keyed on the ASSET —
-    any re-run for the same asset (retry, self-heal, original-lands
-    re-index, pipeline bump) stays quiet, while a genuine replacement upload
-    is a new asset row and greets normally."""
+    project — those stay QUIET. The greet is idempotent against the CHAT,
+    keyed on the ASSET — any re-run for the same asset (retry, self-heal,
+    original-lands re-index, pipeline bump) stays quiet, while a genuine new
+    upload is a new asset row and greets normally."""
     already_greeted = False
     if session_id and asset_id is not None:
         try:
@@ -830,17 +799,10 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         migrated["inserts"] = _latest["json"].get("inserts") or []
         worker_db.run(dbx.insert_edl, project_id, migrated, "agent")
     else:
-        # A REPLACEMENT upload re-bases the whole timeline. Every EDL time is
-        # a source time, so an edit built against a 276s video is nonsense
-        # against the 202s one that replaced it — and because every write tool
-        # validates the WHOLE EDL, one out-of-range span makes the project
-        # permanently unwritable: keep blocks a volume fix, volume blocks a
-        # keep fix, and nothing can ever land. A real customer hit exactly
-        # that on 2026-07-25 and the agent had to tell them "the edit is stuck
-        # and I can't change it from here". Re-validating against the NEW
-        # duration is the precise test: a re-index of the same file still
-        # validates and keeps every edit, and only a genuine replacement
-        # resets.
+        # The uploads flow appends now — it never replaces the main video —
+        # but this validation stays as the safety net for a re-index of a
+        # genuinely different file landing on an old project: one out-of-range
+        # span would otherwise make the project permanently unwritable.
         try:
             validate_edl(_latest["json"], info["duration"])
         except Exception as e:
@@ -850,6 +812,12 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                   f"fit the new source ({str(e)[:160]}) — reset to the full "
                   "video so edits can land again", flush=True)
             edl_was_reset = True
+
+    tray_added = 0
+    try:
+        tray_added = _sweep_tray_placements(worker_db, project_id)
+    except Exception as e:
+        print(f"[index] tray placement failed: {e}", flush=True)
 
     pending, out_of_credits = None, False
     if session_id and user_id and config.OPENAI_API_KEY:
@@ -874,9 +842,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     n_shots = len(index.get("shots", []))
     n_words = len(index.get("words", []))
     # Gaps in the SPEECH, not dips in the waveform — the waveform test reads
-    # zero on anything with a continuous bed (gameplay, music, a noisy room),
-    # so this line used to greet those users with "0 noticeable silences"
-    # over a video full of nobody talking. See audit.speech_gaps.
+    # zero on anything with a continuous bed (gameplay, music, a noisy room).
     n_sil = len(audit.speech_gaps(index.get("words", []), info["duration"],
                                   min_s=0.7,
                                   silences=index.get("silences", [])))
@@ -884,12 +850,10 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
              f"shot{'s' if n_shots != 1 else ''}, "
              + (f"{n_words} transcribed words, {n_sil} pause"
                 f"{'s' if n_sil != 1 else ''} in the talking" if n_words else
-                # "0 transcribed words, 0 pauses in the talking" is two
-                # numbers where the real fact is a sentence, and it reads as
-                # a failed transcription rather than as footage with nobody
-                # talking. Say which it is — it is also what stops the user
-                # asking for captions we would have to refuse.
                 "no speech on the audio"))
+    if tray_added:
+        stats += (f", plus {tray_added} more upload"
+                  f"{'s' if tray_added != 1 else ''} placed on the timeline")
     summary = f"Your video is ready to edit — {stats}. "
     if pending:
         summary += ("I'm starting on the request you sent while I was "
@@ -902,10 +866,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         summary += ("Tell me what you'd like changed — for example: "
                     f"\"{_opening_example(n_words, n_sil)}.\"")
     if quiet:
-        # Quiet refresh: only speak when there is something the user needs —
-        # a saved request auto-starting, or the reason it CAN'T start.
-        # Staying silent on the out-of-credits case would break the
-        # concierge's "I'll start on it automatically" promise invisibly.
+        # Quiet refresh: only speak when there is something the user needs.
         if session_id and pending:
             worker_db.run(dbx.add_message, session_id, "assistant",
                           "Analysis refreshed — I'm starting on the request "

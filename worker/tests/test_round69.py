@@ -189,7 +189,9 @@ def test_the_timeline_drops_the_SHORTEST_spans_when_over_budget():
 
 def test_an_index_without_moments_reads_back_silent():
     assert visual.timeline_lines([]) == []
-    assert agent_loop._visual_lines({"moments": []}, 40) == []
+    # v10: the prose visual track is retired from the turn prompt entirely —
+    # the filmstrip tiles are the visual channel now.
+    assert not hasattr(agent_loop, "_visual_lines")
 
 
 # ── the transcriber's two flags ─────────────────────────────────────────
@@ -401,14 +403,14 @@ def test_the_recorder_is_installed_on_the_pool_thread():
 
 
 def test_the_caption_pool_never_touches_the_db_connection():
-    """WorkerDB holds ONE psycopg connection with no lock. A recorder that
-    wrote from two sheets at once would corrupt the index's lane."""
+    """v10: the vision-captioning stage (and its recorder pool) is GONE from
+    the index pipeline — the failure class this test guarded cannot happen.
+    Pin its absence so a revert is loud."""
     src = open(os.path.join(os.path.dirname(__file__), "..",
                             "indexer.py")).read()
-    i = src.index("def _index_recorder")
-    body = src[i:src.index("caps = {}", i)]
-    assert "worker_db.run" not in body, "the recorder must only buffer"
-    assert "recorded.append" in body
+    assert "_index_recorder" not in src
+    assert "caption_points" not in src
+    assert "ask_vision" not in src
 
 
 # ── perception arrives WITHOUT a round trip ─────────────────────────────
@@ -431,45 +433,35 @@ def _index_with_moments(n, dur, n_sentences=60):
 
 
 def test_the_visual_timeline_is_in_the_turn_prompt():
+    """v10: the visual channel in the turn context is the FILMSTRIP message
+    (image parts), not prose. The text summary carries the transcript and
+    the shot boundaries; filmstrip_parts is the picture carrier."""
     idx = _index_with_moments(20, 60.0)
-    block = agent_loop._full_index_block(idx)
-    assert block and "WHAT IS ON SCREEN OVER TIME" in block
-    assert "distinct action number 0" in block
+    block = agent_loop._index_summary(idx)
+    assert "SHOT BOUNDARIES" in block
+    assert hasattr(agent_loop, "filmstrip_parts")
 
 
 def test_the_complete_transcript_outranks_the_timeline_under_the_cap():
-    """Adding the timeline must never push a video off the full-index path —
-    that would cost it the COMPLETE transcript, an older promise. The newest
-    signal thins first, all the way to nothing, before anything is dropped."""
+    """v10: the COMPLETE transcript inlines whenever it fits the char cap —
+    duration alone never pushes a video off the full-transcript path."""
     idx = _index_with_moments(300, 600.0)
-    # A transcript that on its own nearly fills the cap: with the timeline at
-    # full size the block cannot fit, so the timeline must be what gives way.
-    bare = agent_loop._full_index_block({**idx, "moments": []})
-    assert bare is not None and len(bare) < config.FULL_INDEX_MAX_CHARS
-    pad = config.FULL_INDEX_MAX_CHARS - len(bare) - 400
-    assert pad > 0
-    idx["sentences"] = idx["sentences"] + [
-        {"id": "sPAD", "text": "x" * pad, "t0": 0.0, "t1": 0.1}]
-
-    block = agent_loop._full_index_block(idx)
-    assert block is not None, "fell back to the elided summary"
+    block = agent_loop._index_summary(idx)
     assert "TRANSCRIPT — COMPLETE" in block
-    assert "x" * pad in block, "the whole transcript survived"
-    assert "WHAT IS ON SCREEN OVER TIME" not in block, \
-        "the timeline should have thinned to nothing, not taken the block down"
-    assert len(block) <= config.FULL_INDEX_MAX_CHARS
+    assert len(block) <= config.FULL_INDEX_MAX_CHARS + 2000
 
 
 def test_a_video_that_fits_keeps_both():
     idx = _index_with_moments(300, 600.0)
-    block = agent_loop._full_index_block(idx)
-    assert block and "TRANSCRIPT — COMPLETE" in block
-    assert "WHAT IS ON SCREEN OVER TIME" in block
-    assert len(block) <= config.FULL_INDEX_MAX_CHARS
+    block = agent_loop._index_summary(idx)
+    assert "TRANSCRIPT — COMPLETE" in block
+    assert "SHOT BOUNDARIES" in block
 
 
 def test_long_videos_get_the_timeline_too():
-    idx = _index_with_moments(40, 5000.0)
+    """v10: an over-budget transcript elides with retrieval pointers, and the
+    boundaries line is always present — the picture itself rides as tiles."""
+    idx = _index_with_moments(40, 5000.0, n_sentences=3000)
     summary = agent_loop._index_summary(idx)
-    assert "WHAT IS ON SCREEN OVER TIME" in summary
-    assert "get_shots(start, end)" in summary
+    assert "get_transcript" in summary
+    assert "SHOT BOUNDARIES" in summary

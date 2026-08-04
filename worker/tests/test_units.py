@@ -2504,14 +2504,25 @@ _short_index = {
                            "action": "talking", "on_screen_text": ""}}],
     "silences": [], "language": "en"}
 _full = agent_loop._index_summary(_short_index)
-check("short video inlines the COMPLETE transcript + shots + language",
+# v10: the index summary is transcript + shot BOUNDARIES + language — the
+# picture itself is the filmstrip tiles, so no caption prose is inlined.
+check("short video inlines the COMPLETE transcript + boundaries + language",
       "COMPLETE" in _full and "Second line." in _full and
-      "office" in _full and
+      "SHOT BOUNDARIES" in _full and
       "LANGUAGE OF THE SPEECH IN THE FOOTAGE: en" in _full)
-_long_index = dict(_short_index, video=dict(_short_index["video"],
-                                            duration=3600.0))
+# v10: the ONLY gate on inlining is the char budget — a 1-hour video whose
+# transcript is two lines still inlines them (nothing is gained by hiding
+# two lines behind a tool call). Overflow the budget to see the elision.
+_long_index = dict(_short_index,
+                   video=dict(_short_index["video"], duration=3600.0),
+                   sentences=[{"id": f"s{i}", "t0": float(i),
+                               "t1": float(i) + 1.0,
+                               "text": f"Sentence number {i} keeps talking "
+                                       "about the thing at hand."}
+                              for i in range(1500)])
 _elided = agent_loop._index_summary(_long_index)
-check("long video falls back to elided summary + retrieval pointers",
+check("over-budget transcript falls back to elided summary + retrieval "
+      "pointers",
       "COMPLETE" not in _elided and "get_transcript" in _elided)
 
 print("== Round-13: render verification (duration check) ==")
@@ -2721,42 +2732,42 @@ try:
 finally:
     mediamod.run = _real_run
 
-# The indexer must treat thumbnails as cosmetic: shipped source is checked
-# so the isolation can't be refactored away silently.
+# v10: the cosmetic artifact is the FILMSTRIP. The indexer must treat it as
+# cosmetic — a tile failure degrades to a warning, never fails the job —
+# while the proxy upload stays load-bearing. Shipped source is checked so
+# the isolation can't be refactored away silently.
 _idx_src = open(os.path.join(os.path.dirname(__file__), "..",
                              "indexer.py")).read()
-_thumb_fn = None
-for node in ast.walk(ast.parse(_idx_src)):
-    if isinstance(node, ast.FunctionDef) and node.name == "run_index_job":
-        _thumb_fn = node
-check("index job found", _thumb_fn is not None)
-# The uploads run concurrently now (one PUT per artifact, all in flight at
-# once), so the isolation moved from the call to the RESULT: every best-effort
-# artifact's fut.result() must sit inside a try, and there must be at least one
-# per group (thumbs, sheets). The property under test is unchanged — a cosmetic
-# artifact failing must never fail the job.
+_idx_fns = {node.name: node for node in ast.walk(ast.parse(_idx_src))
+            if isinstance(node, ast.FunctionDef)}
+check("index job found", "run_index_job" in _idx_fns)
+check("tile builder found", "_build_and_upload_tiles" in _idx_fns)
 _guarded = []
-for node in ast.walk(_thumb_fn):
-    if isinstance(node, ast.Try):
-        for sub in ast.walk(node):
-            if (isinstance(sub, ast.Call) and
-                    getattr(sub.func, "attr", "") in ("upload_file",
-                                                      "result")):
-                _guarded.append(sub.lineno)
-check("thumb + sheet uploads are isolated from the job's fate",
+for fn_name in ("run_index_job", "_build_and_upload_tiles"):
+    for node in ast.walk(_idx_fns[fn_name]):
+        if isinstance(node, ast.Try):
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call) and
+                        getattr(sub.func, "attr", "") in ("upload_file",
+                                                          "result")):
+                    _guarded.append(sub.lineno)
+check("tile + required uploads resolve inside try blocks",
       len(_guarded) >= 2)
-check("a thumb failure degrades to a warning",
-      "shot thumbnails could not be" in _idx_src)
+check("a filmstrip failure degrades to a warning",
+      "filmstrip build failed" in _idx_src and
+      "filmstrip tiles" in _idx_src)
 # ...and the load-bearing ones are NOT best-effort: a proxy that never reached
 # storage is an index that cannot be previewed or looked at, so it must raise.
 check("the proxy upload still fails the job",
       "required" in _idx_src and "raise" in _idx_src)
-# Contact sheets are addressed positionally by the agent ("sheet 3"), so
-# completion order must not become key order.
-check("sheet keys stay in sheet order",
-      "for i in sorted(ok_sheets)" in _idx_src)
-check("thumbnail seeks are clamped to the proxy's real duration",
-      "seek_ceiling" in _idx_src and "min(t, seek_ceiling)" in _idx_src)
+# Tiles are addressed positionally (time order), so a mid-strip upload
+# failure truncates the strip rather than mislabeling later tiles.
+check("tile keys stay in time order and stop at the first hole",
+      "keys.append(ok[i])" in _idx_src and "break" in _idx_src)
+_tiles_src = open(os.path.join(os.path.dirname(__file__), "..",
+                               "tiles.py")).read()
+check("tile frame seeks are clamped to the decodable range",
+      "seek_ceiling" in _idx_src and "min(t, seek_ceiling)" in _tiles_src)
 
 print("== Round-16b: probe describes the video a PLAYER shows ==")
 # Regression: an index claimed 16.654s / 1284x2778 portrait for a clip whose
@@ -4090,30 +4101,26 @@ check("renderer: a missing library track fails loudly, not silently",
 # --- honesty: the prompt must no longer send users to the paperclip ---
 check("prompt: music no longer requires an upload",
       "do not attempt anything else" not in agent_prompt.system_prompt())
-check("prompt: the library is offered to the agent",
-      ("list_music_library" in agent_prompt.system_prompt())
-      == bool(music_library.CATALOG))
 
-# The system prompt is the LAST ungated surface: the tool hides itself, the
-# state block omits the library and the fallback hint drops it — but a
-# constant prompt would still swear a library exists while giving the agent
-# no way to reach one, and forbid it from asking for an upload. Then it
-# invents a track or stalls. Assert the claim tracks reality BOTH ways.
-_sp_on = agent_prompt.system_prompt()
+# v10: the system prompt is CAPABILITY-NEUTRAL by design — the gated music
+# claim lives in the STATE BLOCK (present exactly when tracks shipped) and
+# the audio skill tells the agent to read it there. A neutral prompt cannot
+# advertise a library an image doesn't ship, in either direction.
+check("prompt: capability-neutral (no library claim baked in)",
+      "list_music_library" not in agent_prompt.system_prompt())
+_sb_kwargs = dict(keep_line=None, captions_line=None, program_lines=None)
+_sb_on = agent_prompt.project_state_block("v", "i", "e", [], [], **_sb_kwargs)
 _saved_catalog = music_library.CATALOG
 try:
     music_library.CATALOG = []
-    _sp_off = agent_prompt.system_prompt()
+    _sb_off = agent_prompt.project_state_block("v", "i", "e", [], [],
+                                               **_sb_kwargs)
 finally:
     music_library.CATALOG = _saved_catalog
-check("prompt: with no tracks shipped it makes NO library claim",
-      "list_music_library" not in _sp_off
-      and "built-in library" not in _sp_off
-      and "royalty-free library" not in _sp_off)
-check("prompt: with no tracks shipped it asks for an upload instead",
-      "paperclip" in _sp_off)
-check("prompt: the gate only changes the music wording",
-      abs(len(_sp_on) - len(_sp_off)) < 900)
+check("state: the library is offered exactly when tracks shipped",
+      ("list_music_library" in _sb_on) == bool(music_library.CATALOG)
+      and "list_music_library" not in _sb_off
+      and "royalty-free" not in _sb_off)
 # The hint must track what this deployment can ACTUALLY do: offer the library
 # when tracks shipped, and say nothing about one when they didn't. An empty
 # image promising a music library is the exact shape of a round-22 lie.
@@ -4453,18 +4460,23 @@ _sp = agent_prompt.system_prompt()
 check("outro: the agent is told exports carry the card",
       "end card" in _sp.lower())
 check("outro: the agent is told NOT to cut footage to remove it",
-      "cut_range the last seconds" in _sp)
+      "Don't cut the user's footage" in _sp
+      and "part of every export" in _sp)
 
-# --- prompt gating, both directions ---------------------------------------
-check("sfx pack is claimed when it shipped",
-      ("list_sfx_library" in _sp) == bool(sfx_library.CATALOG))
+# --- capability gating, both directions (v10: the gated claim lives in the
+# STATE BLOCK; the prompt itself is capability-neutral) ---------------------
+check("sfx: the prompt is capability-neutral",
+      "list_sfx_library" not in _sp)
+_sb_on2 = agent_prompt.project_state_block("v", "i", "e", [], [])
+check("sfx pack is claimed in state when it shipped",
+      ("list_sfx_library" in _sb_on2) == bool(sfx_library.CATALOG))
 _saved_sfx = list(sfx_library.CATALOG)
 try:
     sfx_library.CATALOG.clear()
-    _sp0 = agent_prompt.system_prompt()
-    check("sfx: no pack shipped -> the prompt asks for an upload instead",
-          "list_sfx_library" not in _sp0
-          and "ask them to attach the sound" in _sp0)
+    _sb0 = agent_prompt.project_state_block("v", "i", "e", [], [])
+    check("sfx: no pack shipped -> no state claim",
+          "list_sfx_library" not in _sb0
+          and "sound-effects pack" not in _sb0)
     check("sfx: the browse tool is hidden when no pack shipped",
           agent_tools._tool_disabled("list_sfx_library"))
     check("sfx: the fallback hint stops offering a pack that isn't there",
@@ -4474,9 +4486,6 @@ finally:
     sfx_library.CATALOG.extend(_saved_sfx)
 check("sfx: the browse tool is offered when the pack shipped",
       not agent_tools._tool_disabled("list_sfx_library"))
-check("sfx: every claim pair in the gate still matches the prompt",
-      all(left in agent_prompt.SYSTEM_PROMPT
-          for left, _ in agent_prompt._SFX_CLAIMS))
 print("== Round-26: sfx through the real tool path ==")
 # The layer the schema tests do not reach: tools -> _write_keep -> validate_edl.
 _sctx = EdlStubCtx({"video": {"duration": 60.0}, "words": [], "silences": [],
@@ -4863,23 +4872,18 @@ check("a music request with no link still reaches the music hint",
       and "with a link" not in
       (agent_loop._nearest_alternative("add some music") or ""))
 
-# Deployment gating. These string pairs are applied by literal str.replace, so
-# editing a gated sentence in SYSTEM_PROMPT without updating the left column
-# turns the replace into a silent no-op — the prompt then claims a capability
-# the deployment does not have. That is the round-22 failure shape and nothing
-# else in the suite catches it, so every gate list is asserted here.
-for _label, _claims in (("music library", agent_prompt._LIBRARY_CLAIMS),
-                        ("sfx pack", agent_prompt._SFX_CLAIMS),
-                        ("link fetching", agent_prompt._URL_FETCH_CLAIMS)):
-    for _i, (_shipped, _fallback) in enumerate(_claims):
-        check(f"{_label} gate {_i} still matches the prompt verbatim",
-              _shipped in agent_prompt.SYSTEM_PROMPT)
-
-check("with fetching off, the prompt claims no link capability",
-      "DOWNLOAD IT with fetch_url" not in
-      agent_prompt.SYSTEM_PROMPT.replace(
-          agent_prompt._URL_FETCH_CLAIMS[0][0],
-          agent_prompt._URL_FETCH_CLAIMS[0][1]))
+# Deployment gating (v10). The old str.replace claim tables are gone — the
+# CORE prompt is capability-neutral by construction, so there is nothing to
+# swap out per deployment. Assert the neutrality directly: none of the gated
+# capabilities may be claimed unconditionally in the prompt (the CAPABILITIES
+# block, the state block and the skills' own "when listed" phrasing are the
+# gated surfaces).
+_core = agent_prompt.CORE_PROMPT
+for _tok in ("list_music_library", "list_sfx_library", "fetch_url",
+             "record_website", "search_stock", "generate_image",
+             "generate_video"):
+    check(f"core prompt never claims {_tok} unconditionally",
+          _tok not in _core)
 
 # A URL can LOOK direct and not be one — Wikipedia and many CMSes serve HTML
 # at a path ending ".webm"/".mp4". Found by smoke-testing a real Commons file

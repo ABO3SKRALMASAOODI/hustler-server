@@ -19,7 +19,6 @@ import music_library
 import sfx_library
 import storage
 import timeline
-import visual
 from agent_prompt import project_state_block, system_prompt
 from schemas import describe_edl
 
@@ -34,19 +33,6 @@ def _silence_line(index):
     return (f"SILENCES >=0.7s: {len(sil)}, "
             f"totalling {sum(e - s for s, e in sil):.1f}s "
             "(use find_silences for the exact list with word context).")
-
-
-def _full_shot_line(s):
-    cap = s.get("caption") or {}
-    parts = [cap.get("setting"), cap.get("people"), cap.get("action")]
-    desc = " | ".join(p for p in parts if p)
-    ost = cap.get("on_screen_text")
-    if ost:
-        desc += f'  on-screen text: "{ost}"'
-    if cap.get("subtitles"):
-        desc += "  [burned-in captions visible]"
-    return (f"  [#{s['id']} {s['start']:.1f}-{s['end']:.1f}] "
-            f"{desc or '(no visual description)'}")
 
 
 def _burned_captions_line(index):
@@ -106,133 +92,67 @@ def _filler_line(index):
             "a single call. They are never burned into captions.")
 
 
-def _visual_lines(index, max_lines):
-    """The sampled visual timeline, or [] when the index predates it."""
-    moments = index.get("moments") or []
-    if not moments or max_lines <= 0:
-        return []
-    lines = visual.timeline_lines(moments, max_lines=max_lines)
-    if not lines:
-        return []
-    return [f"WHAT IS ON SCREEN OVER TIME — {len(moments)} frames sampled "
-            f"~every {config.VISUAL_SAMPLE_S:g}s across the whole video, "
-            "consecutive identical frames merged into one span. A span means "
-            "NOTHING CHANGED through it; a new line means something did. This "
-            "is your picture of the footage — do not call look_at to learn "
-            "what is already here:"] + lines
-
-
-def _full_index_block(index):
-    """For SHORT videos, the ENTIRE index inlined into the turn prompt: every
-    transcript sentence (untruncated) + the sampled visual timeline + every
-    shot description + language. The model then never has to remember to call
-    get_transcript/get_shots — the single biggest "it didn't bother to look"
-    failure class, and the reason round 69 put the new visual sampling HERE
-    rather than behind another tool: 78% of measured agent turns never called
-    look_at once, because a look costs the user a 13-second round trip.
-    Returns None when the video is too long or the assembled text would exceed
-    the char cap even with no timeline, so the caller falls back to the elided
-    summary + retrieval tools."""
-    v = index["video"]
-    if float(v.get("duration") or 0) > config.FULL_INDEX_MAX_DURATION_S:
-        return None
-    sentences = index.get("sentences", [])
-    words = index.get("words", [])
-    shots = index.get("shots", [])
-    lang = index.get("language")
-
-    def build(timeline_lines_budget):
-        lines = []
-        if sentences:
-            lines.append(
-                f"TRANSCRIPT — COMPLETE ({len(sentences)} sentences / "
-                f"{len(words)} words, every sentence below; you already have "
-                "the whole transcript, do NOT call get_transcript for this "
-                "video — use get_words only for word-exact cut points):")
-            for s in sentences:
-                lines.append(f"  [{s['id']} {s['t0']:.1f}-{s['t1']:.1f}] "
-                             f"{s['text']}")
-        else:
-            lines.append("TRANSCRIPT: none (no speech detected or no audio "
-                         "track).")
-        sl = _speaker_line(index)
-        if sl:
-            lines.append(sl)
-        fl = _filler_line(index)
-        if fl:
-            lines.append(fl)
-        lines += _visual_lines(index, timeline_lines_budget)
-        lines.append(
-            f"SHOTS — COMPLETE ({len(shots)} shots, every visual description "
-            "below; do NOT call get_shots for this video):"
-            if shots else "SHOTS: none detected.")
-        lines += [_full_shot_line(s) for s in shots]
-        bc = _burned_captions_line(index)
-        if bc:
-            lines.append(bc)
-        lines.append(_silence_line(index))
-        if lang:
-            lines.append(f"LANGUAGE OF THE SPEECH IN THE FOOTAGE: {lang} "
-                         "(whisper's guess about the AUDIO — it defaults to "
-                         "'en' on a silent clip and says nothing about which "
-                         "language to write your reply in).")
-        return "\n".join(lines)
-
-    # The TRANSCRIPT's completeness is an older promise than the timeline's,
-    # and dropping to the elided summary would lose both. So the newest signal
-    # thins first, and only a block that overflows with NO timeline at all
-    # falls back.
-    for budget in (80, 40, 20, 0):
-        text = build(budget)
-        if len(text) <= config.FULL_INDEX_MAX_CHARS:
-            return text
-    return None
+def _shot_boundaries_line(index):
+    """Scene changes as one compact line — where transitions may land. The
+    PICTURE itself is in the filmstrip; this is just the cut geometry."""
+    shots = index.get("shots") or []
+    if not shots:
+        return "SHOT BOUNDARIES: none detected (one continuous take)."
+    if len(shots) == 1:
+        return (f"SHOT BOUNDARIES: one continuous shot "
+                f"({shots[0]['start']:.1f}-{shots[0]['end']:.1f}s) — no "
+                "scene changes for transitions to land on.")
+    starts = [f"{s['start']:.1f}" for s in shots]
+    if len(starts) > 60:
+        head = ", ".join(starts[:50])
+        return (f"SHOT BOUNDARIES ({len(shots)} shots — scene changes, "
+                f"where transitions may land): {head}, ... "
+                f"+{len(starts) - 50} more (get_shots for any range).")
+    return (f"SHOT BOUNDARIES ({len(shots)} shots — scene changes, where "
+            f"transitions may land): {', '.join(starts)}.")
 
 
 def _index_summary(index):
-    full = _full_index_block(index)
-    if full is not None:
-        return full
-
-    # Long-video fallback: elided head/tail with pointers to the retrieval
-    # tools, which stay available for pulling any range on demand.
+    """The main footage's text senses: the transcript (complete when it
+    fits), speakers, fillers, shot boundaries, silences, language. The
+    PICTURE is not described here — the filmstrip tiles that follow the
+    state ARE the visual index, read directly."""
     sentences = index.get("sentences", [])
     words = index.get("words", [])
-    shots = index.get("shots", [])
-    lines = [f"TRANSCRIPT: {len(sentences)} sentences / {len(words)} words "
-             "(long video — only the head/tail is shown here; call "
-             "get_transcript / search_transcript / get_words for the rest)."
-             if sentences else
-             "TRANSCRIPT: none (no speech detected or no audio track)."]
+    lines = []
 
-    def sent_line(s):
-        return f"  [{s['id']} {s['t0']:.1f}-{s['t1']:.1f}] {s['text'][:110]}"
+    def sent_line(s, cap=None):
+        text = s['text'] if cap is None else s['text'][:cap]
+        spk = f" S{s['speaker']}" if s.get("speaker") is not None else ""
+        return f"  [{s['id']}{spk} {s['t0']:.1f}-{s['t1']:.1f}] {text}"
 
+    full_text = None
     if sentences:
-        for s in sentences[:3]:
-            lines.append(sent_line(s))
-        if len(sentences) > 5:
-            lines.append(f"  ... {len(sentences) - 5} more "
+        candidate = [
+            f"TRANSCRIPT — COMPLETE ({len(sentences)} sentences / "
+            f"{len(words)} words; do NOT call get_transcript for this "
+            "video — use get_words only for word-exact cut points):"]
+        candidate += [sent_line(s) for s in sentences]
+        joined = "\n".join(candidate)
+        if len(joined) <= config.FULL_INDEX_MAX_CHARS:
+            full_text = joined
+    if full_text is not None:
+        lines.append(full_text)
+    elif sentences:
+        lines.append(
+            f"TRANSCRIPT: {len(sentences)} sentences / {len(words)} words "
+            "(long video — head/tail below; call get_transcript / "
+            "search_transcript / get_words for the rest).")
+        for s in sentences[:4]:
+            lines.append(sent_line(s, cap=110))
+        if len(sentences) > 6:
+            lines.append(f"  ... {len(sentences) - 6} more "
                          "(use get_transcript) ...")
-            for s in sentences[-2:]:
-                lines.append(sent_line(s))
-        elif len(sentences) > 3:
-            for s in sentences[3:]:
-                lines.append(sent_line(s))
-
-    lines.append(f"SHOTS: {len(shots)} total.")
-
-    def shot_line(s):
-        cap = s.get("caption") or {}
-        desc = (cap.get("action") or cap.get("setting") or "")[:70]
-        return (f"  [#{s['id']} {s['start']:.1f}-{s['end']:.1f}] {desc}")
-
-    if len(shots) <= 25:
-        lines += [shot_line(s) for s in shots]
+        for s in sentences[-2:]:
+            lines.append(sent_line(s, cap=110))
     else:
-        lines += [shot_line(s) for s in shots[:12]]
-        lines.append(f"  ... {len(shots) - 17} more (use get_shots) ...")
-        lines += [shot_line(s) for s in shots[-5:]]
+        lines.append("TRANSCRIPT: none (no speech detected or no audio "
+                     "track).")
 
     sl = _speaker_line(index)
     if sl:
@@ -240,14 +160,7 @@ def _index_summary(index):
     fl = _filler_line(index)
     if fl:
         lines.append(fl)
-    # A long video is exactly where one-frame-per-shot hurt most, so the
-    # timeline is here too — thinner, and with the pointer to the full one.
-    vl = _visual_lines(index, 40)
-    if vl:
-        lines += vl
-        lines.append("  (get_shots(start, end) gives the full timeline for "
-                     "any range)")
-
+    lines.append(_shot_boundaries_line(index))
     bc = _burned_captions_line(index)
     if bc:
         lines.append(bc)
@@ -258,6 +171,136 @@ def _index_summary(index):
                      "it defaults to 'en' on a silent clip and says nothing "
                      "about which language to write your reply in).")
     return "\n".join(lines)
+
+
+def _pending_clips(conn, project_id):
+    """Video clips still waiting on their perception pass — listed so the
+    agent knows they exist before their filmstrip arrives."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = 'video_clip'
+                         AND COALESCE(meta->>'indexed', '') != 'true'
+                         AND COALESCE(meta->>'staged', '') != 'true'
+                       ORDER BY id ASC LIMIT 20""", (project_id,))
+        return cur.fetchall()
+
+
+def _image_assets(conn, project_id):
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = 'image_ref'
+                         AND COALESCE(meta->>'staged', '') != 'true'
+                       ORDER BY id ASC LIMIT 20""", (project_id,))
+        return cur.fetchall()
+
+
+# ── Filmstrips: the agent's standing eyes on every video in the project ──
+
+def _tile_local(sha, key):
+    """Local cache path for one tile — tiles are immutable per sha, so a
+    turn only downloads what no earlier turn on this box already has."""
+    d = os.path.join(config.TMP_DIR, "tilecache", sha[:16])
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, os.path.basename(key))
+
+
+def _strip_for(worker_db, sha, max_tiles):
+    """[(key, local_path)] for one indexed video, evenly thinned to
+    max_tiles. Missing/unfetchable tiles are skipped — a shorter strip, not
+    a dead turn."""
+    row = worker_db.run(dbx.get_index_by_sha, sha) if sha else None
+    idx = (row or {}).get("json") or {}
+    keys = idx.get("tile_keys") or []
+    if not keys:
+        return [], idx
+    if len(keys) > max_tiles > 0:
+        stride = len(keys) / float(max_tiles)
+        keys = [keys[min(len(keys) - 1, int(i * stride))]
+                for i in range(max_tiles)]
+    out = []
+    for key in keys:
+        local = _tile_local(sha, key)
+        if not os.path.exists(local):
+            try:
+                storage.download_to(key, local)
+            except Exception as e:
+                print(f"[filmstrip] tile fetch failed ({key}): {e}",
+                      flush=True)
+                continue
+        out.append((key, local))
+    return out, idx
+
+
+def filmstrip_parts(ctx, worker_db):
+    """The per-turn filmstrip message content: labeled image parts for the
+    main footage and EVERY indexed uploaded clip — the agent's fresh eyes on
+    everything in the project, rebuilt each turn so nothing is ever stale.
+
+    Returns a content list ([{type: text}, {type: image_url}, ...]) or None
+    when there is nothing visual to attach."""
+    strips = []      # (label, [(key, local)])
+    total = 0
+    if ctx.has_main_video:
+        original = worker_db.run(dbx.latest_asset, ctx.project_id, "original")
+        sha = original and original.get("sha256")
+        if sha:
+            tiles, idx = _strip_for(worker_db, sha, config.TILES_MAIN_MAX)
+            if tiles:
+                v = idx.get("video") or {}
+                step = idx.get("tile_step_s")
+                strips.append((
+                    f"MAIN FOOTAGE — {v.get('duration', 0):.1f}s, frames "
+                    f"every {step or '?'}s, timestamps under each frame "
+                    "(SOURCE seconds)", tiles))
+                total += len(tiles)
+
+    # Every indexed clip in the project, newest last — same senses, same
+    # freshness. A clip that just finished indexing appears here on the very
+    # next turn with no one having to remember it exists.
+    try:
+        clips = worker_db.run(dbx.indexed_clips, ctx.project_id)
+    except Exception:
+        clips = []
+    for c in clips:
+        if total >= config.TILES_TURN_MAX:
+            break
+        sha = c.get("sha256")
+        if not sha:
+            continue
+        budget = min(config.TILES_CLIP_MAX, config.TILES_TURN_MAX - total)
+        tiles, idx = _strip_for(worker_db, sha, budget)
+        if not tiles:
+            continue
+        name = (c.get("meta") or {}).get("filename") or \
+            os.path.basename(c["storage_key"])
+        dur = c.get("duration_s") or (idx.get("video") or {}).get("duration")
+        strips.append((
+            f"UPLOADED CLIP \"{name}\" — {float(dur or 0):.1f}s, "
+            f"storage_key {c['storage_key']} (timestamps are CLIP seconds)",
+            tiles))
+        total += len(tiles)
+
+    if not strips:
+        return None
+    content = [{"type": "text", "text":
+                "FILMSTRIPS — your eyes on every video in this project, "
+                "current as of THIS message. Each tile is a 2x2 grid of "
+                "frames with the timestamp printed under each frame. Read "
+                "the footage from these directly: what is on screen, who is "
+                "in frame, burned-in text or captions, UI content, framing, "
+                "where the action is. For a closer or exact look at any "
+                "moment, call look_at (main footage / program) or "
+                "look_at_asset (a clip) — look as often as you need."}]
+    for label, tiles in strips:
+        content.append({"type": "text", "text": f"[{label}]"})
+        for _key, local in tiles:
+            try:
+                content.append(llm.image_part(local))
+            except Exception as e:
+                print(f"[filmstrip] attach failed: {e}", flush=True)
+    if len(content) == 1:
+        return None
+    return content
 
 
 IMAGE_CAPTION_PROMPT = (
@@ -387,11 +430,61 @@ def state_block(ctx, worker_db):
         f"{m['storage_key']} — {(m.get('meta') or {}).get('filename', '?')}"
         for m in music]
 
+    # MEDIA INVENTORY — every video/image the project holds, its state, and
+    # whether it is placed in the program. Rebuilt each turn: a clip that
+    # finished indexing seconds ago shows up here (and its filmstrip below)
+    # with nobody having to remember it.
+    media_lines = []
+    try:
+        placed_keys = {i.get("asset_key")
+                       for i in (edl["json"].get("inserts") or [])}
+        clips = worker_db.run(
+            lambda conn: dbx.indexed_clips(conn, ctx.project_id, 50))
+        all_clips = {c["id"]: c for c in clips}
+        # Also list clips still indexing, so the agent never denies having
+        # a file the user just added.
+        pending = worker_db.run(
+            lambda conn: _pending_clips(conn, ctx.project_id))
+        for c in list(all_clips.values()) + pending:
+            name = (c.get("meta") or {}).get("filename") or \
+                os.path.basename(c["storage_key"])
+            dur = c.get("duration_s")
+            state = ("indexed" if (c.get("meta") or {}).get("indexed")
+                     else "still analyzing — filmstrip/transcript arrive "
+                          "shortly")
+            where = ("placed in the program" if c["storage_key"] in
+                     placed_keys else "NOT placed in the program")
+            media_lines.append(
+                f'  clip "{name}" ({float(dur or 0):.1f}s) — {state}, '
+                f'{where}, storage_key {c["storage_key"]}')
+        images = worker_db.run(
+            lambda conn: _image_assets(conn, ctx.project_id))
+        for a in images:
+            name = (a.get("meta") or {}).get("filename") or \
+                os.path.basename(a["storage_key"])
+            where = ("placed in the program" if a["storage_key"] in
+                     placed_keys else "NOT placed in the program")
+            media_lines.append(f'  image "{name}" — {where}, storage_key '
+                               f'{a["storage_key"]}')
+        staged = worker_db.run(dbx.staged_assets, ctx.project_id)
+        if staged:
+            names = ", ".join(
+                (s.get("meta") or {}).get("filename")
+                or os.path.basename(s["storage_key"]) for s in staged[:8])
+            media_lines.append(
+                f"  STAGING TRAY (not on the timeline yet — the user has "
+                f"not pressed Submit): {names}. You cannot place these; "
+                "if the user asks about them, tell them to press Submit "
+                "on the tray.")
+    except Exception as e:
+        print(f"[state] media inventory failed: {e}", flush=True)
+
     block = project_state_block(video_line, index_summary, edl_line,
                                 history_lines, music_lines,
                                 keep_line=keep_line,
                                 captions_line=captions_line,
-                                program_lines=program_lines)
+                                program_lines=program_lines,
+                                media_lines=media_lines)
     # Round 82e: the HOUSE STYLE — what this footage most wants to become
     # when the user gives no brief, measured from the exemplar corpus
     # (worker/grammars/). Context, not command: the block itself says the
@@ -433,6 +526,17 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     msgs = [{"role": "system", "content": system_prompt()},
             {"role": "system", "content": capabilities_block()},
             {"role": "system", "content": state_block(ctx, worker_db)}]
+    # THE FILMSTRIPS — rebuilt fresh every turn for every video in the
+    # project, so the agent's picture of the footage can never go stale. A
+    # blind provider strips these on first rejection (_strip_image_parts)
+    # and the turn continues on text + look_at's vision fallback.
+    if ctx.direct_sight and llm.agent_sees(ctx.agent_model):
+        try:
+            parts = filmstrip_parts(ctx, worker_db)
+            if parts:
+                msgs.append({"role": "user", "content": parts})
+        except Exception as e:
+            print(f"[filmstrip] skipped ({e})", flush=True)
     # The last few messages, not the last twenty (round 71f). Twenty was up
     # to 40k chars of stale conversation re-read on EVERY call of EVERY
     # turn, and it actively misled: superseded requests ("make the title
@@ -1821,8 +1925,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             ctx.pending_images = []
             if content:
                 content.insert(0, {"type": "text", "text":
-                                   "Frames you asked to look at (timestamps "
-                                   "printed under each tile):"})
+                                   "Frames for your own eyes (each picture "
+                                   "is labeled; timestamps are printed "
+                                   "under the tiles):"})
                 messages.append({"role": "user", "content": content})
 
     return _finalize(

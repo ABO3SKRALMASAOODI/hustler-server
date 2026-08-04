@@ -227,7 +227,7 @@ def _parse_act(raw):
 
 
 def _concierge_reply(stage, history, attachments, index_error=None,
-                     can_act=False):
+                     can_act=False, tray_count=0):
     """LLM-authored reply for chat while no indexed main video exists yet.
     stage: 'indexing' | 'index_failed' | 'no_video'.
 
@@ -303,6 +303,20 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                      "and arrange them into an edit. AI generation of images, "
                      "video or sound is NOT enabled on this deployment, so do "
                      "not offer or promise it.")
+    if tray_count:
+        tray_note = (
+            f"IMPORTANT: they have {tray_count} upload"
+            f"{'s' if tray_count != 1 else ''} sitting in the STAGING TRAY "
+            "(the strip above the chat box / on the timeline), NOT yet "
+            "submitted. Nothing can be analyzed or edited until they press "
+            "Submit on the tray — when they ask you to edit those files or "
+            "wonder where their upload went, tell them to arrange the strip "
+            "and press Submit, and that analysis starts the moment they do.")
+        state += " " + tray_note
+        if stage == "no_video":
+            fallback = ("Your uploads are staged — arrange them in the strip "
+                        "and press Submit, and I'll analyze them and set up "
+                        "your timeline.")
     if not os.getenv("OPENAI_API_KEY"):
         return fallback, {"kind": "canned", "stage": stage}, None, False
 
@@ -1122,8 +1136,14 @@ def create_upload(user_id, project_id):
         # the indexer is not yet deployed to understand.
         return jsonify({"error": "Prepared uploads are not enabled"}), 400
 
+    # A STAGED video (round 84's tray) may become the project's MAIN footage
+    # at submit, so it validates against the full original cap — the 500MB
+    # clip cap is for mid-edit b-roll attachments, not for someone's footage.
+    staged = bool(data.get("staged"))
     try:
-        ext, content_type = storage.validate_upload(filename, nbytes, kind)
+        ext, content_type = storage.validate_upload(
+            filename, nbytes, "original" if (staged and kind == "clip")
+            else kind)
     except ValueError as e:
         # Recorded server-side as well as client-side: this is the twin of the
         # studio's own pre-flight check, and it is the copy that survives a
@@ -1625,6 +1645,16 @@ def complete_upload_core(user_id, project_id, data):
     except (TypeError, ValueError):
         duration_s = None
 
+    # STAGED uploads (round 84): the file lands in the tray, not on the
+    # timeline — no index job, no original designation. The tray submit
+    # decides all of that later, uniformly for the first upload and the
+    # fortieth.
+    staged = bool(data.get("staged"))
+    try:
+        tray_pos = float(data.get("tray_pos"))
+    except (TypeError, ValueError):
+        tray_pos = None
+
     with vdb() as conn:
         cur = conn.cursor()
         # The early dedupe ran in its OWN transaction, so two overlapping
@@ -1649,20 +1679,25 @@ def complete_upload_core(user_id, project_id, data):
             return {"asset_id": dup["id"],
                     "index_job_id": ij["id"] if ij else None,
                     "kind": dup["kind"], "duplicate": True}, 200
+        meta = {"filename": filename}
+        if staged:
+            meta["staged"] = True
+            if tray_pos is not None:
+                meta["tray_pos"] = tray_pos
         cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
                                            bytes, duration_s, meta)
                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
                     (project_id, asset_kind, key, nbytes,
                      duration_s if kind in ("music", "clip") else None,
-                     Json({"filename": filename})))
+                     Json(meta)))
         asset_id = cur.fetchone()["id"]
         job_id = None
-        if kind == "original":
+        if kind == "original" and not staged:
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": asset_id})
 
     return {"asset_id": asset_id, "index_job_id": job_id,
-            "kind": asset_kind}, 200
+            "kind": asset_kind, "staged": staged}, 200
 
 
 @video_bp.route("/projects/<int:project_id>/uploads/complete", methods=["POST"])
@@ -1671,6 +1706,293 @@ def complete_upload(user_id, project_id):
     payload, status = complete_upload_core(user_id, project_id,
                                            request.get_json() or {})
     return jsonify(payload), status
+
+
+# ------------------------------------------------------------------ #
+#  The staging tray (round 84)                                         #
+# ------------------------------------------------------------------ #
+# EVERY upload lands here first — chat, upload page, first file or fortieth,
+# all the same: a staged asset the user can arrange, add to, or remove.
+# Pressing Submit is what commits the batch: the first video of a project
+# becomes the main footage, everything else is spliced onto the timeline in
+# tray order, and every video/song gets the same perception pass (filmstrip
+# + transcript). Uploads never replace the main video any more — they add.
+
+def _tray_rows(cur, project_id):
+    cur.execute("""SELECT * FROM assets
+                   WHERE project_id = %s
+                     AND COALESCE(meta->>'staged', '') = 'true'
+                   ORDER BY COALESCE((meta->>'tray_pos')::float, 1e9),
+                            id ASC""", (project_id,))
+    return cur.fetchall()
+
+
+def _tray_out(a):
+    m = a.get("meta") or {}
+    return {"id": a["id"], "kind": a["kind"],
+            "filename": m.get("filename"),
+            "duration_s": a.get("duration_s"),
+            "tray_pos": m.get("tray_pos"),
+            "storage_key": a["storage_key"]}
+
+
+def _asset_meta_patch(cur, asset_id, patch):
+    cur.execute("""UPDATE assets
+                   SET meta = COALESCE(meta, '{}'::jsonb) || %s::jsonb
+                   WHERE id = %s""", (Json(patch), asset_id))
+
+
+def _index_job_for_asset(cur, project_id, asset_id):
+    cur.execute("""SELECT id FROM video_jobs
+                   WHERE project_id = %s AND type = 'index'
+                     AND (payload->>'asset_id')::int = %s
+                     AND state IN ('queued', 'running', 'done')
+                   ORDER BY id DESC LIMIT 1""", (project_id, asset_id))
+    row = cur.fetchone()
+    return row["id"] if row else None
+
+
+def _place_tray_now(cur, project_id, session_id, user_id):
+    """Splice every tray_place-marked asset into the CURRENT EDL — the
+    mid-session path, mirroring the worker's _sweep_tray_placements for
+    when the EDL already exists at submit time. Returns (version, added)
+    or (None, 0) when there is nothing to do or no EDL to place into."""
+    cur.execute("""SELECT * FROM assets
+                   WHERE project_id = %s
+                     AND kind IN ('video_clip', 'image_ref')
+                     AND jsonb_typeof(meta->'tray_place') = 'object'
+                   ORDER BY COALESCE(
+                       (meta->'tray_place'->>'order')::float, 1e9),
+                            id ASC""", (project_id,))
+    pending = cur.fetchall()
+    if not pending:
+        return None, 0
+    edl_row = _latest_edl(cur, project_id)
+    if not edl_row:
+        return None, 0
+    edl = json.loads(json.dumps(edl_row["json"]))
+    inserts = list(edl.get("inserts") or [])
+    have_keys = {i.get("asset_key") for i in inserts}
+    keep = edl.get("keep") or []
+    end_boundary = keep[-1][1] if keep else 0.0
+    taken = {i.get("id") for i in inserts}
+    added, placed_ids = 0, []
+    for a in pending:
+        place = (a.get("meta") or {}).get("tray_place") or {}
+        key = a["storage_key"]
+        placed_ids.append(a["id"])
+        if not key or key in have_keys:
+            continue
+        try:
+            dur = float(place.get("duration_s") or a.get("duration_s") or 3.0)
+        except (TypeError, ValueError):
+            dur = 3.0
+        dur = round(min(max(dur, 0.2), _INSERT_MAX_S), 2)
+        n = 1
+        while f"ins{n}" in taken:
+            n += 1
+        taken.add(f"ins{n}")
+        inserts.append({
+            "id": f"ins{n}", "asset_key": key,
+            "kind": "image" if a["kind"] == "image_ref" else "video",
+            "at_output_s": 0.0 if place.get("before_main")
+            else float(end_boundary),
+            "duration_s": dur})
+        have_keys.add(key)
+        added += 1
+    for aid in placed_ids:
+        _asset_meta_patch(cur, aid, {"tray_place": None, "placed": True})
+    if not added:
+        return None, 0
+    edl["inserts"] = inserts
+    try:
+        src_dur = keep[-1][1] if keep else 0.0
+        edl = wschemas.validate_edl(edl, src_dur).model_dump()
+    except Exception as e:
+        current_app.logger.warning("tray placement validation note: %s", e)
+    version = edl_row["version"] + 1
+    cur.execute("""INSERT INTO edls (project_id, version, json, created_by)
+                   VALUES (%s, %s, %s, 'user')""",
+                (project_id, version, Json(edl)))
+    _enqueue(cur, project_id, user_id, "preview",
+             {"edl_version": version, "source": "user_edit"})
+    cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
+                   VALUES (%s, 'activity', %s, %s)""",
+                (session_id,
+                 f"you → EDL v{version}: added {added} upload"
+                 f"{'s' if added != 1 else ''} to the timeline",
+                 Json({"tool": "user_edit", "op": "tray_submit",
+                       "edl_version": version})))
+    return version, added
+
+
+@video_bp.route("/projects/<int:project_id>/tray/order", methods=["POST"])
+@token_required
+def tray_order(user_id, project_id):
+    """Persist the tray arrangement (drag-to-reorder) so it survives a
+    refresh and is the order Submit commits."""
+    data = request.get_json() or {}
+    order = data.get("order") or []
+    if not isinstance(order, list):
+        return jsonify({"error": "order must be a list of asset ids"}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+        staged = {a["id"]: a for a in _tray_rows(cur, project_id)}
+        pos = 0
+        for aid in order:
+            try:
+                aid = int(aid)
+            except (TypeError, ValueError):
+                continue
+            if aid in staged:
+                _asset_meta_patch(cur, aid, {"tray_pos": pos})
+                pos += 1
+        return jsonify({"ok": True})
+
+
+@video_bp.route("/projects/<int:project_id>/tray/remove", methods=["POST"])
+@token_required
+def tray_remove(user_id, project_id):
+    """Take one staged upload back out of the tray (delete its asset row;
+    the stored object is removed best-effort)."""
+    data = request.get_json() or {}
+    try:
+        aid = int(data.get("asset_id") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "asset_id required"}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+        cur.execute("""SELECT * FROM assets WHERE id = %s AND project_id = %s
+                       AND COALESCE(meta->>'staged', '') = 'true'""",
+                    (aid, project_id))
+        a = cur.fetchone()
+        if not a:
+            return jsonify({"error": "Not in the tray"}), 404
+        cur.execute("DELETE FROM assets WHERE id = %s", (aid,))
+    try:
+        storage.client().delete_object(Bucket=storage.bucket(),
+                                       Key=a["storage_key"])
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
+@video_bp.route("/projects/<int:project_id>/tray/submit", methods=["POST"])
+@token_required
+def tray_submit(user_id, project_id):
+    """Commit the tray: promote the project's first video to main footage
+    (when none exists yet), splice everything else onto the timeline in tray
+    order, and give every video and song the same perception pass. Works
+    identically at the start of a session and mid-session."""
+    data = request.get_json() or {}
+    order = data.get("order") or []
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        session_id = p["chat_session_id"]
+        # Serialize concurrent submits (double-click, two tabs).
+        cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                    (project_id,))
+        staged = _tray_rows(cur, project_id)
+        if not staged:
+            return jsonify({"error": "Nothing in the tray"}), 400
+        # Arrange by the submitted order; unlisted ids keep tray order after.
+        by_id = {a["id"]: a for a in staged}
+        ordered = []
+        for aid in order:
+            try:
+                aid = int(aid)
+            except (TypeError, ValueError):
+                continue
+            if aid in by_id:
+                ordered.append(by_id.pop(aid))
+        ordered.extend(by_id.values())
+
+        original = _active_original(cur, project_id)
+        promoted, promoted_idx = None, -1
+        main_index_job = None
+        if not original:
+            promoted_idx, promoted = next(
+                ((i, a) for i, a in enumerate(ordered)
+                 if a["kind"] == "video_clip"), (-1, None))
+        jobs = []
+        for i, a in enumerate(ordered):
+            if promoted is not None and a["id"] == promoted["id"]:
+                # The project's main footage. Kind flips to original; the
+                # index job seeds the EDL and greets when done.
+                cur.execute("""UPDATE assets SET kind = 'original'
+                               WHERE id = %s""", (a["id"],))
+                _asset_meta_patch(cur, a["id"],
+                                  {"staged": None, "tray_place": None})
+                main_index_job = _enqueue(cur, project_id, user_id, "index",
+                                          {"asset_id": a["id"]})
+                jobs.append(main_index_job)
+                continue
+            patch = {"staged": None}
+            if a["kind"] in ("video_clip", "image_ref"):
+                before_main = bool(promoted is not None and promoted_idx > i)
+                patch["tray_place"] = {
+                    "order": i, "before_main": before_main,
+                    "duration_s": a.get("duration_s")}
+            _asset_meta_patch(cur, a["id"], patch)
+            if a["kind"] in ("video_clip", "music"):
+                # The same perception pass as the main footage — filmstrip
+                # + transcript, keyed by sha. Idempotent per asset.
+                if not _index_job_for_asset(cur, project_id, a["id"]):
+                    jobs.append(_enqueue(cur, project_id, user_id, "index",
+                                         {"asset_id": a["id"]}))
+
+        placed_version, placed = None, 0
+        if promoted is None:
+            # The main footage already exists (or the tray is images/music
+            # only). If an EDL exists, splice now; otherwise the worker's
+            # sweep places these the moment the main index seeds one.
+            edl_row = _latest_edl(cur, project_id)
+            if not edl_row and not original:
+                # No main video anywhere and none in the tray: a canvas
+                # program (images-only tray). Seed it so placement lands.
+                has_visual = any(a["kind"] in ("video_clip", "image_ref")
+                                 for a in ordered)
+                if has_visual:
+                    cur.execute("""INSERT INTO edls (project_id, version,
+                                                     json, created_by)
+                                   VALUES (%s, 1, %s, 'user')""",
+                                (project_id,
+                                 Json(wschemas.canvas_edl())))
+            placed_version, placed = _place_tray_now(cur, project_id,
+                                                     session_id, user_id)
+        n = len(ordered)
+        if session_id and (promoted is not None or placed or jobs):
+            what = []
+            if promoted is not None:
+                pm = (promoted.get("meta") or {}).get("filename") or "video"
+                what.append(f'"{pm}" is your main footage — analyzing it '
+                            "now (transcript + filmstrip)")
+            extra_n = n - (1 if promoted is not None else 0)
+            if extra_n > 0:
+                what.append(f"{extra_n} more upload"
+                            f"{'s' if extra_n != 1 else ''} "
+                            + ("placed on the timeline" if placed or promoted
+                               else "joining the timeline")
+                            + " in your order")
+            cur.execute("""INSERT INTO chat_messages (session_id, role,
+                                                      content, meta)
+                           VALUES (%s, 'assistant', %s, %s)""",
+                        (session_id,
+                         "Got your uploads — " + "; ".join(what) + ".",
+                         Json({"kind": "tray_submitted"})))
+    return jsonify({"ok": True, "submitted": n,
+                    "promoted_asset_id":
+                        promoted["id"] if promoted is not None else None,
+                    "main_index_job_id": main_index_job,
+                    "placed_version": placed_version,
+                    "index_jobs": jobs})
 
 
 def _pending_original(cur, project_id, asset_id):
@@ -2276,7 +2598,18 @@ def project_state(user_id, project_id):
         latest_preview = {"asset_id": pv["id"], "edl_version": vmax,
                           "object_id": pv.get("object_id") or pv["id"],
                           "created_at": pv["created_at"].isoformat()}
-    music = [a for a in extra if a["kind"] == "music"]
+    # The tray is its own surface: staged uploads never appear in the music
+    # picker or the media picker until Submit commits them.
+    def _is_staged(a):
+        return bool((a.get("meta") or {}).get("staged"))
+
+    tray = sorted([a for a in extra if _is_staged(a)],
+                  key=lambda a: ((a.get("meta") or {}).get("tray_pos")
+                                 if isinstance((a.get("meta") or {})
+                                               .get("tray_pos"),
+                                               (int, float)) else 1e9,
+                                 a["id"]))
+    music = [a for a in extra if a["kind"] == "music" and not _is_staged(a)]
     proxies = [a for a in extra if a["kind"] == "proxy"]
     # Only ever hand back a proxy that belongs to the ACTIVE original. The
     # proxies[0] fallback could serve a previous upload's proxy (a different
@@ -2329,8 +2662,19 @@ def project_state(user_id, project_id):
              "generated": bool((a.get("meta") or {}).get("generated")
                                or (a.get("meta") or {}).get("fetched")
                                or (a.get("meta") or {}).get("recorded")),
+             "indexed": bool((a.get("meta") or {}).get("indexed")),
              "duration_s": a["duration_s"]}
-            for a in extra if a["kind"] in ("video_clip", "image_ref")],
+            for a in extra if a["kind"] in ("video_clip", "image_ref")
+            and not _is_staged(a)],
+        # The staging tray (round 84): uploads waiting for Submit. The studio
+        # renders these as the temporary timeline above the chat and on the
+        # timeline panel.
+        "tray": [
+            {"id": a["id"], "kind": a["kind"],
+             "filename": (a.get("meta") or {}).get("filename"),
+             "duration_s": a["duration_s"],
+             "tray_pos": (a.get("meta") or {}).get("tray_pos")}
+            for a in tray],
     })
 
 
@@ -2605,15 +2949,25 @@ def post_message(user_id, project_id):
                            ORDER BY id DESC LIMIT 12""",
                         (p["chat_session_id"],))
             _stage = _concierge_stage(idx_job["state"] if idx_job else None)
+            _history = list(reversed(cur.fetchall()))
+            # Round 84: uploads sitting unsubmitted in the tray are the one
+            # thing the stage machine can't see — the honest reply to "edit
+            # my clips" is "press Submit on the tray", not "upload a video".
+            cur.execute("""SELECT COUNT(*) AS n FROM assets
+                           WHERE project_id = %s
+                             AND COALESCE(meta->>'staged', '') = 'true'""",
+                        (project_id,))
+            _tray_n = (cur.fetchone() or {}).get("n") or 0
             concierge = {
                 "stage": _stage,
                 "index_error": idx_job["error"] if idx_job else None,
-                "history": list(reversed(cur.fetchall())),
+                "history": _history,
                 "session_id": p["chat_session_id"],
                 # A canvas agent turn (no main video) can run only in the
                 # 'no_video' blank-canvas stage; while a video indexes or after
                 # a failed index, the pending/failed video is the program.
-                "can_act": _stage == "no_video",
+                "can_act": _stage == "no_video" and not _tray_n,
+                "tray_count": _tray_n,
                 "user_id": user_id,
                 "message_id": message_id,
             }
@@ -2668,7 +3022,8 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
     try:
         reply, reply_meta, llm_rec, act = _concierge_reply(
             ctx["stage"], ctx["history"], attachments,
-            index_error=ctx.get("index_error"), can_act=ctx.get("can_act"))
+            index_error=ctx.get("index_error"), can_act=ctx.get("can_act"),
+            tray_count=ctx.get("tray_count") or 0)
         conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
         try:
             cur = conn.cursor()

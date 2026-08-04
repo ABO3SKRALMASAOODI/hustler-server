@@ -457,7 +457,29 @@ def get_video_info(ctx):
             + (f"\n{prog}" if prog else ""))
 
 
-def get_transcript(ctx, start=0, end=None):
+def get_transcript(ctx, start=0, end=None, asset_key=None):
+    if asset_key:
+        # Round 84: every uploaded clip/music file is indexed too — read ITS
+        # transcript by the asset's sha. Times are CLIP seconds.
+        asset = ctx.db.run(
+            lambda conn: dbx.asset_by_key(conn, ctx.project_id, asset_key))
+        if not asset:
+            return f"REJECTED: no asset with storage_key {asset_key!r}."
+        row = asset.get("sha256") and \
+            ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+        idx = (row or {}).get("json") or {}
+        sents = idx.get("sentences") or []
+        if not sents:
+            return ("That upload has no transcript (no speech, no audio "
+                    "track, or its analysis has not finished yet).")
+        multi = (idx.get("speakers") or 0) > 1
+        out = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}]"
+               + (f" S{s['speaker']}:" if multi
+                  and s.get("speaker") is not None else "")
+               + f" {s['text']}" for s in sents]
+        return _cap(f"Transcript of {asset_key} (CLIP seconds):\n"
+                    + "\n".join(out),
+                    budget=config.TRANSCRIPT_CHAR_BUDGET)
     start = ctx.clamp(start or 0)
     end = ctx.clamp(end if end is not None else ctx.duration)
     if end <= start:
@@ -668,20 +690,14 @@ def get_shots(ctx, start=0, end=None):
                      "nothing changed through it):")
         lines += tl
     elif not any(s.get("caption") for s in rows):
-        # A blind index (visual captioning was down when this video was
-        # analyzed) lists timings and nothing else. Left bare, the agent
-        # treats the empty list as license to choose blind — a real "use the
-        # whole video as a scene bank" request (Aug 3 2026) was answered by
-        # keeping the LAST 20 seconds of a 5-minute video, sight unseen,
-        # without one look_at. The degrade path is the agent's own eyes;
-        # this is the line that points there.
+        # v10 indexes carry no captions by design: the PICTURE is the
+        # filmstrip in your context and look_at. These timings are the cut
+        # geometry only — never pick scenes or zoom targets from them alone.
         lines.append(
-            "\nNOTE: this index has NO visual descriptions — the timings "
-            "above tell you nothing about what is ON SCREEN, and picking "
-            "scenes, zoom targets or 'best moments' from them alone is "
-            "guessing. LOOK first: call look_at with times sampled across "
-            "the range you care about and read the frames yourself before "
-            "choosing anything visual.")
+            "\nThese are scene-change timings only. WHAT IS ON SCREEN is in "
+            "your filmstrip tiles (timestamps under each frame) — read those, "
+            "or look_at exact times for a closer view, before choosing "
+            "anything visual.")
     return _cap("\n".join(lines))
 
 
@@ -9789,10 +9805,30 @@ def render_preview(ctx):
                 note = (f"Preview v{version} rendered: {out_dur}s "
                         f"(source {ctx.duration}s). It is attached to the "
                         "chat and the player updates to it automatically.")
-            # A cached result is byte-identical to a render that was already
-            # self-checked — re-running the paid vision call would bill the
-            # user's turn for confirming an unchanged file.
-            check = None if result.get("cached") \
+            # THE SELF-CHECK IS THE AGENT'S OWN EYES (round 84). On a real
+            # (non-cached) render the frames of the changed moments + the
+            # whole-video sheet are handed straight into the agent's context
+            # — the editor reviews its own work directly and only finishes
+            # when it has SEEN the edit is right. A blind agent model falls
+            # back to the separate vision reviewer exactly as before.
+            delivered = False if result.get("cached") \
+                else _queue_check_frames(ctx, result, plan)
+            if delivered:
+                claims = ""
+                if plan:
+                    claims = (" CHECK EACH CLAIM against its numbered tile: "
+                              + " ".join(f"Tile {i + 1} ({t:.1f}s): {c}."
+                                         for i, (t, c) in enumerate(plan)))
+                note += (" The frames follow this message — LOOK AT THEM "
+                         "YOURSELF before replying: the numbered tiles are "
+                         "the exact moments this edit changed, the 3x3 "
+                         "sheet is the whole video." + claims +
+                         " If a change did not land or something looks "
+                         "broken, fix that exact item and re-render — only "
+                         "reply once what you SEE matches what you claim. "
+                         "If a fix fails twice, stop and tell the user "
+                         "plainly what still looks wrong.")
+            check = None if (result.get("cached") or delivered) \
                 else _self_check(ctx, result, plan)
             if check:
                 ctx.last_selfcheck = check
@@ -9911,6 +9947,48 @@ def _verify_plan_for(ctx, row):
         return edl_diff.verify_plan(prev["json"], row["json"])
     except Exception:
         return []
+
+
+def _queue_check_frames(ctx, result, plan=None):
+    """Round 84: put the render's OWN frames in front of the agent.
+
+    Downloads the verify sheet (numbered tiles of the exact output moments
+    this edit changed) and the whole-video result sheet, and queues them on
+    ctx.pending_images — the loop injects them right after this tool result,
+    so the editor reviews its own render with its own eyes. Returns True
+    when at least one picture was queued; False falls back to the separate
+    vision reviewer (blind agent model, missing sheets, storage hiccup)."""
+    can_see = getattr(ctx, "sight_out", False) or \
+        (getattr(ctx, "direct_sight", False)
+         and llm.agent_sees(ctx.agent_model))
+    if not can_see:
+        return False
+    queued = 0
+    vkey = result.get("verify_sheet_key")
+    if plan and vkey:
+        vlocal = os.path.join(ctx.workdir,
+                              f"verify_own_{uuid.uuid4().hex[:8]}.jpg")
+        try:
+            storage.download_to(vkey, vlocal)
+            ctx.pending_images.append(
+                ("RENDER CHECK — the exact moments this edit changed, one "
+                 "numbered tile per claim", vlocal))
+            queued += 1
+        except Exception as e:
+            print(f"[render] verify sheet fetch failed: {e}", flush=True)
+    skey = result.get("sheet_key")
+    if skey:
+        slocal = os.path.join(ctx.workdir,
+                              f"result_own_{uuid.uuid4().hex[:8]}.jpg")
+        try:
+            storage.download_to(skey, slocal)
+            ctx.pending_images.append(
+                ("RENDER OVERVIEW — 3x3 sheet sampled evenly across the "
+                 "whole rendered video", slocal))
+            queued += 1
+        except Exception as e:
+            print(f"[render] result sheet fetch failed: {e}", flush=True)
+    return queued > 0
 
 
 def _self_check(ctx, result, plan=None):
@@ -10033,6 +10111,19 @@ def ask_user(ctx, question):
     if not q:
         return "REJECTED: question is empty."
     raise AskUser(q[:600])
+
+
+def read_skill(ctx, name):
+    """Load one of the on-demand playbooks (worker/skills/*.md) into the
+    turn. The catalog in the system prompt names them; content arrives when
+    it is relevant instead of riding in every request."""
+    import agent_prompt
+    text = agent_prompt.read_skill_text(name)
+    if text is None:
+        names = ", ".join(agent_prompt.skill_names()) or "(none installed)"
+        return (f"REJECTED: no skill named {name!r}. Available skills: "
+                f"{names}.")
+    return text
 
 
 # ------------------------------------------------------------------ #
@@ -11016,9 +11107,12 @@ TOOLS = {
     "get_transcript": (get_transcript, "Sentence-level SOURCE transcript "
                        "with timestamps for a time range (source seconds). "
                        "For word-exact timing use get_words; for what the "
-                       "current EDIT keeps, use get_kept_transcript.",
+                       "current EDIT keeps, use get_kept_transcript. Pass "
+                       "asset_key to read an UPLOADED clip's or song's own "
+                       "transcript instead (clip seconds).",
                        {"start": {"type": "number"},
-                        "end": {"type": "number"}}),
+                        "end": {"type": "number"},
+                        "asset_key": {"type": "string"}}),
     "get_kept_transcript": (get_kept_transcript, "The transcript the CURRENT "
                             "edit actually keeps, in program time with "
                             "matching source spans, plus automatic "
@@ -11035,9 +11129,17 @@ TOOLS = {
     "search_transcript": (search_transcript, "Find where something is said "
                           "(substring + fuzzy over sentences).",
                           {"query": {"type": "string"}}),
-    "get_shots": (get_shots, "Shot list with visual captions for a time "
-                  "range.", {"start": {"type": "number"},
-                             "end": {"type": "number"}}),
+    "get_shots": (get_shots, "Shot boundaries (scene changes — where "
+                  "transitions may land) for a time range. The PICTURE "
+                  "itself is in your filmstrips and look_at.",
+                  {"start": {"type": "number"},
+                   "end": {"type": "number"}}),
+    "read_skill": (read_skill, "Load a focused editing playbook (captions, "
+                   "zooms, audio, transitions, ...) into this turn. The "
+                   "SKILLS list in your instructions names them. Read the "
+                   "matching skill before your first edit of that kind — "
+                   "batch it with your other reading calls.",
+                   {"name": {"type": "string"}}),
     "find_silences": (find_silences, "Silences of at least min_seconds, with "
                       "midpoints and surrounding words — cut points should "
                       "snap to these midpoints or word boundaries.",
@@ -11066,17 +11168,14 @@ TOOLS = {
                 "applied — so you can SEE an aimed zoom's framing before "
                 "rendering) — THE "
                 "way to check what the viewer sees at a moment of the "
-                "EDITED video ('the second scene') without rendering. USE "
-                "IT WHEN THE DECISION GENUINELY NEEDS THE PIXELS (aiming a "
-                "zoom or crop, placing text in clear space, verifying a "
-                "visual complaint) — and batch the moments you need into "
-                "ONE call with several times, never a string of separate "
-                "calls. NEVER frame-scan: if two samplings in a row have "
-                "not found the specific moment you are hunting ('the "
-                "balloon shot'), STOP — sweeping a video sliver by sliver "
-                "burns the user's credits and rarely lands. ask_user for "
-                "the rough timestamp instead (they can scrub the player "
-                "and tell you in seconds). The transcript is accurate, so "
+                "EDITED video ('the second scene') without rendering. Look "
+                "as often as you need — there is no cap on looking; before "
+                "aiming anything and before disputing what a user saw, "
+                "look. Batch the moments you need into ONE call with "
+                "several times rather than a string of separate calls. The "
+                "filmstrips already gave you the whole video at a glance — "
+                "use look_at for the CLOSER look: exact framing, small "
+                "text, a precise instant. The transcript is accurate, so "
                 "read speech from "
                 "get_words / the transcript — never look to lip-read or "
                 "guess a word.",
@@ -12664,6 +12763,7 @@ REQUIRED_ARGS = {
     "generate_video": ["prompt"],
     "fetch_url": ["url"],
     "ask_user": ["question"],
+    "read_skill": ["name"],
 }
 
 # The loop uses this to build TURN FACTS: a write "succeeded" when its result

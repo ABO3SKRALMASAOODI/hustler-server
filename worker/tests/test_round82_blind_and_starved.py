@@ -368,7 +368,9 @@ def test_get_shots_on_a_blind_index_points_to_look_at():
     out = agent_tools.get_shots(_ShotsCtx(), 0, 316.8)
     assert "no visual caption" in out
     assert "look_at" in out
-    assert "guessing" in out.lower()
+    # v10: the degrade path is the agent's standing filmstrip + look_at —
+    # the note points there instead of merely warning about guessing.
+    assert "filmstrip" in out.lower()
 
 
 def test_get_shots_with_captions_carries_no_blind_warning():
@@ -405,29 +407,18 @@ def test_short_clips_greet_in_seconds():
 
 
 def test_index_blind_is_a_coverage_test():
+    """v10 retired the whole blind-index class: there is no vision-captioning
+    stage to starve, so _index_blind is gone. What replaced it is a direct
+    usability test — a cached index only serves if its filmstrip tiles are
+    still readable in storage (_index_has_tiles)."""
     import indexer as _ix
-
-    def idx(shots, caps, moments, dur):
-        return {"shots": [{"id": i, "caption": ({"setting": "x"}
-                                                if i < caps else None)}
-                          for i in range(shots)],
-                "moments": [{"t": i} for i in range(moments)],
-                "video": {"duration": dur}}
-
-    # the fully-starved shape (every index Aug 1 - Aug 3 morning)
-    assert _ix._index_blind(idx(97, 0, 0, 203))
-    # partial starvation: 2 captions on 97 shots is still blind — this is
-    # the exact index the six-re-upload user got
-    assert _ix._index_blind(idx(97, 2, 2, 203))
-    # a tiny clip whose one shot IS captioned is sighted
-    assert not _ix._index_blind(idx(1, 1, 3, 14))
-    # a long locked-off talking head: few moments is NORMAL (identical
-    # frames merge) — its captioned shot keeps it sighted
-    assert not _ix._index_blind(idx(1, 1, 2, 600))
-    # healthy coverage on a real cut
-    assert not _ix._index_blind(idx(97, 90, 70, 203))
-    # no shots at all = empty, not blind
-    assert not _ix._index_blind(idx(0, 0, 0, 60))
+    assert not hasattr(_ix, "_index_blind")
+    assert not _ix._index_has_tiles({"tile_keys": []})
+    assert not _ix._index_has_tiles({})
+    # and no vision model is called anywhere in the pipeline
+    src = open(_ix.__file__).read()
+    assert "ask_vision" not in src
+    assert "caption_points" not in src
 
 
 def test_attachment_note_presents_both_readings_of_a_clip():
@@ -473,8 +464,10 @@ def test_tool_descriptions_carry_the_new_rules():
     assert reg is not None
     assert "STYLE" in reg["insert_media"][1] and \
            "look_at_asset" in reg["insert_media"][1]
-    assert "NEVER frame-scan" in reg["look_at"][1]
-    assert "ask_user" in reg["look_at"][1]
+    # Round 84: looking is uncapped by decision — the description must say
+    # so, and must point at the filmstrips as the wide view.
+    assert "no cap on looking" in reg["look_at"][1]
+    assert "filmstrip" in reg["look_at"][1]
 
 
 def test_zero_write_correction_claim_is_caught():
