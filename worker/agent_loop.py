@@ -207,7 +207,9 @@ def _tile_local(sha, key):
 def _strip_for(worker_db, sha, max_tiles):
     """[(key, local_path)] for one indexed video, evenly thinned to
     max_tiles. Missing/unfetchable tiles are skipped — a shorter strip, not
-    a dead turn."""
+    a dead turn. Cache misses download CONCURRENTLY: the first turn on a
+    project pulls the whole strip, and 36 sequential round trips would tax
+    exactly the turn that should feel instant."""
     row = worker_db.run(dbx.get_index_by_sha, sha) if sha else None
     idx = (row or {}).get("json") or {}
     keys = idx.get("tile_keys") or []
@@ -217,18 +219,28 @@ def _strip_for(worker_db, sha, max_tiles):
         stride = len(keys) / float(max_tiles)
         keys = [keys[min(len(keys) - 1, int(i * stride))]
                 for i in range(max_tiles)]
-    out = []
-    for key in keys:
-        local = _tile_local(sha, key)
-        if not os.path.exists(local):
+    plan = [(key, _tile_local(sha, key)) for key in keys]
+    missing = [(key, local) for key, local in plan
+               if not os.path.exists(local)]
+    if missing:
+        import concurrent.futures as _cf
+
+        def _fetch(job):
+            key, local = job
             try:
                 storage.download_to(key, local)
+                return None
             except Exception as e:
-                print(f"[filmstrip] tile fetch failed ({key}): {e}",
-                      flush=True)
-                continue
-        out.append((key, local))
-    return out, idx
+                return (key, str(e)[:120])
+
+        with _cf.ThreadPoolExecutor(
+                max_workers=min(8, len(missing))) as pool:
+            for err in pool.map(_fetch, missing):
+                if err:
+                    print(f"[filmstrip] tile fetch failed ({err[0]}): "
+                          f"{err[1]}", flush=True)
+    return [(key, local) for key, local in plan
+            if os.path.exists(local)], idx
 
 
 def filmstrip_parts(ctx, worker_db):
