@@ -4484,41 +4484,69 @@ try:
           agent_loop._nearest_alternative("add a whoosh please"))
 finally:
     sfx_library.CATALOG.extend(_saved_sfx)
-check("sfx: the browse tool is offered when the pack shipped",
-      not agent_tools._tool_disabled("list_sfx_library"))
+# Round 85: every shipped sound is RETIRED — still resolvable so old EDLs
+# keep rendering, never offered again. The gate now reads "no live sounds"
+# off the real catalog; the ON direction is proved with an injected entry.
+check("sfx: the browse tool is hidden while every shipped sound is retired",
+      agent_tools._tool_disabled("list_sfx_library")
+      == (not sfx_library.CATALOG))
+sfx_library.CATALOG.append({"slug": "_live", "title": "Live",
+                            "category": "ui", "file": "click.wav"})
+try:
+    check("sfx: the browse tool is offered when live sounds exist",
+          not agent_tools._tool_disabled("list_sfx_library"))
+finally:
+    sfx_library.CATALOG[:] = [t for t in sfx_library.CATALOG
+                              if t.get("slug") != "_live"]
 print("== Round-26: sfx through the real tool path ==")
 # The layer the schema tests do not reach: tools -> _write_keep -> validate_edl.
+# Round 85 retired the shipped pack, so the three sounds these checks ride on
+# are un-retired for the block's duration — the ADD->EDL machinery is what is
+# under test here; the retirement contract has its own checks.
 _sctx = EdlStubCtx({"video": {"duration": 60.0}, "words": [], "silences": [],
                     "sentences": []}, 60.0,
                    {"keep": [[0.0, 40.0]], "captions": None})
-_r = agent_tools.add_sfx(_sctx, storage_key="sfx:whoosh", at=10.0)
-check("add_sfx writes a version", _r.startswith("EDL v"))
-check("add_sfx stored the sound", _sctx.latest_edl()["json"]["sfx"][0]["at"] == 10.0)
-_r2 = agent_tools.add_sfx(_sctx, storage_key="sfx:boom", at=25.0)
-_ids = [x["id"] for x in _sctx.latest_edl()["json"]["sfx"]]
-check("add_sfx mints unique ids", len(set(_ids)) == 2, )
-check("move_sfx retimes it",
-      agent_tools.move_sfx(_sctx, id=_ids[0], at=12.0).startswith("EDL v"))
-check("set_audio_gain works on kind 'sfx'",
-      agent_tools.set_audio_gain(_sctx, kind="sfx", id=_ids[1],
-                                 gain_db=-12.0).startswith("EDL v"))
-check("remove_sfx deletes it",
-      agent_tools.remove_sfx(_sctx, id=_ids[0]).startswith("EDL v")
-      and len(_sctx.latest_edl()["json"]["sfx"]) == 1)
-check("remove_sfx on an unknown id is REJECTED, not a silent no-op",
-      agent_tools.remove_sfx(_sctx, id="nope").startswith("REJECTED"))
-check("add_sfx refuses an invented library slug",
-      agent_tools.add_sfx(_sctx, storage_key="sfx:airhorn",
-                          at=1.0).startswith("REJECTED"))
-check("add_sfx refuses a position past the program",
-      agent_tools.add_sfx(_sctx, storage_key="sfx:pop",
-                          at=999.0).startswith("REJECTED"))
-# A cut that shortens the program must DROP orphaned sounds, not reject the cut.
-_before = len(_sctx.latest_edl()["json"]["sfx"])
-_cut = agent_tools.cut_range(_sctx, start=5.0, end=39.0)
-check("cutting the program drops orphaned sfx instead of rejecting the cut",
-      _cut.startswith("EDL v") and "sound effect" in _cut.lower()
-      and len(_sctx.latest_edl()["json"]["sfx"]) < _before)
+check("add_sfx refuses a retired pack sound (and names the way forward)",
+      agent_tools.add_sfx(_sctx, storage_key="sfx:whoosh",
+                          at=10.0).startswith("REJECTED"))
+_unretired = [sfx_library.resolve(f"sfx:{s}")
+              for s in ("whoosh", "boom", "pop")]
+for _t in _unretired:
+    _t.pop("retired", None)
+try:
+    _r = agent_tools.add_sfx(_sctx, storage_key="sfx:whoosh", at=10.0)
+    check("add_sfx writes a version", _r.startswith("EDL v"))
+    check("add_sfx stored the sound",
+          _sctx.latest_edl()["json"]["sfx"][0]["at"] == 10.0)
+    _r2 = agent_tools.add_sfx(_sctx, storage_key="sfx:boom", at=25.0)
+    _ids = [x["id"] for x in _sctx.latest_edl()["json"]["sfx"]]
+    check("add_sfx mints unique ids", len(set(_ids)) == 2, )
+    check("move_sfx retimes it",
+          agent_tools.move_sfx(_sctx, id=_ids[0], at=12.0).startswith("EDL v"))
+    check("set_audio_gain works on kind 'sfx'",
+          agent_tools.set_audio_gain(_sctx, kind="sfx", id=_ids[1],
+                                     gain_db=-12.0).startswith("EDL v"))
+    check("remove_sfx deletes it",
+          agent_tools.remove_sfx(_sctx, id=_ids[0]).startswith("EDL v")
+          and len(_sctx.latest_edl()["json"]["sfx"]) == 1)
+    check("remove_sfx on an unknown id is REJECTED, not a silent no-op",
+          agent_tools.remove_sfx(_sctx, id="nope").startswith("REJECTED"))
+    check("add_sfx refuses an invented library slug",
+          agent_tools.add_sfx(_sctx, storage_key="sfx:airhorn",
+                              at=1.0).startswith("REJECTED"))
+    check("add_sfx refuses a position past the program",
+          agent_tools.add_sfx(_sctx, storage_key="sfx:pop",
+                              at=999.0).startswith("REJECTED"))
+    # A cut that shortens the program must DROP orphaned sounds, not reject
+    # the cut.
+    _before = len(_sctx.latest_edl()["json"]["sfx"])
+    _cut = agent_tools.cut_range(_sctx, start=5.0, end=39.0)
+    check("cutting the program drops orphaned sfx instead of rejecting the cut",
+          _cut.startswith("EDL v") and "sound effect" in _cut.lower()
+          and len(_sctx.latest_edl()["json"]["sfx"]) < _before)
+finally:
+    for _t in _unretired:
+        _t["retired"] = True
 
 print("== Round-26 review fixes ==")
 # (1) HIGH: sfx is CONTENT-anchored. The prompt tells the agent to land a
@@ -4616,9 +4644,11 @@ check("a card-less final is still downloadable (intent preserved)",
       _fic({"outro_v": 0}) and not _fic({"outro_v": _OV - 1}))
 
 # (4) the sfx fallback hint must not be swallowed by the effects hint, whose
-# regex matches the bare word "effect".
+# regex matches the bare word "effect". (Round 85 retired the pack, so the
+# hint's WORDING varies with what's configured — the routing is the check.)
 check("'add some sound effects' reaches the sfx hint, not the effects hint",
-      "built-in sound pack" in agent_loop._nearest_alternative(
+      "sound" in agent_loop._nearest_alternative("add some sound effects")
+      and "color-grade" not in agent_loop._nearest_alternative(
           "add some sound effects"))
 check("'make the captions pop' still reaches the captions hint",
       "captions" in agent_loop._nearest_alternative("make the captions pop"))

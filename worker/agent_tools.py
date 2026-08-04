@@ -352,10 +352,12 @@ class ToolContext:
                 "wrong, so verify before editing further: read get_edl for "
                 "the real item positions, and if you are reacting to a render "
                 "(a black frame, missing text), call look_at on that exact "
-                "time to see what is actually there. If you still cannot make "
-                "it work, stop and tell the user plainly what you tried and "
-                "what you observed — an honest dead end costs them far less "
-                "than another lap.")
+                "time to see what is actually there. Then take a genuinely "
+                "DIFFERENT route — another tool, another order, another "
+                "diagnosis — not another lap of this one; only tell the user "
+                "something is beyond you once every distinct route you can "
+                "think of has actually been tried, and then say exactly what "
+                "you tried and observed.")
         else:
             self._states_seen[sig] = version
         return line
@@ -2168,6 +2170,13 @@ def _resolve_music(ctx, storage_key):
                 f"REJECTED: '{storage_key}' is not a track in the built-in "
                 f"library. Call list_music_library() and use a slug it "
                 f"returns — never invent one. Known slugs: {have or 'none'}.")
+        if t.get("retired"):
+            # Still renders in old EDLs; never offered or re-added. The slug
+            # can reach here from chat history of a project that used it.
+            return None, (
+                f"REJECTED: '{t['title']}' was retired from the built-in "
+                "library and can't be added to new edits. Call "
+                "list_music_library() and pick a current track.")
         return {"name": t["title"], "duration_s": t.get("duration_s"),
                 "library": True, "storage_key": storage_key}, None
 
@@ -2474,6 +2483,13 @@ def _resolve_sfx(ctx, storage_key):
                 f"REJECTED: '{storage_key}' is not a sound in the built-in "
                 f"pack. Call list_sfx_library() and use a slug it returns — "
                 f"never invent one. Known slugs: {have or 'none'}.")
+        if s.get("retired"):
+            # Renders forever in old EDLs; never placed in a new edit.
+            return None, (
+                f"REJECTED: '{s['title']}' was retired from the built-in "
+                "pack and can't be added to new edits. Generate the exact "
+                "sound you need with generate_sfx, or place a file the "
+                "user uploaded.")
         return {"name": s["title"], "duration_s": s.get("duration_s"),
                 "library": True, "storage_key": storage_key}, None
 
@@ -2506,9 +2522,11 @@ def list_sfx_library(ctx, category=None):
     and risers that carry short-form video. Every one is ours outright, so no
     upload is needed."""
     if not sfx_library.CATALOG:
+        gen = (" Generate the exact sound you need from a text description "
+               "with generate_sfx." if eleven.sound_gen_available() else "")
         return ("The built-in sound-effects pack is empty in this "
-                "deployment. Use list_assets(kind='music') for the user's own "
-                "uploads, or ask them to attach a sound.")
+                "deployment." + gen + " Uploaded sounds still work — "
+                "list_assets(kind='music') for the user's own files.")
     c = (category or "").strip().lower()
     if c and c not in sfx_library.CATEGORIES:
         return (f"REJECTED: unknown category '{category}'. Available: "
@@ -8660,9 +8678,12 @@ def generate_sfx(ctx, prompt, at, duration_s=None, gain_db=-6.0):
     """Generate a one-shot sound effect from a text description and place it at
     a moment in the program (program-time seconds)."""
     if not eleven.sound_gen_available():
+        alt = (" You can still drop a sound from the built-in pack with "
+               "add_sfx / list_sfx_library." if sfx_library.CATALOG else
+               " Ask the user to upload the sound they want and place it "
+               "with add_sfx.")
         return ("Sound generation is unavailable (no sound provider "
-                "configured). You can still drop a sound from the built-in "
-                "pack with add_sfx / list_sfx_library. Tell the user honestly.")
+                "configured)." + alt + " Tell the user honestly.")
     p = (prompt or "").strip()
     if not p:
         return "REJECTED: prompt is empty — describe the sound to create."
@@ -9826,8 +9847,11 @@ def render_preview(ctx):
                          " If a change did not land or something looks "
                          "broken, fix that exact item and re-render — only "
                          "reply once what you SEE matches what you claim. "
-                         "If a fix fails twice, stop and tell the user "
-                         "plainly what still looks wrong.")
+                         "If a fix doesn't land, change the diagnosis or "
+                         "the tool and come at it a different way — never "
+                         "repeat the exact call that just failed, and never "
+                         "give up while a genuinely different approach "
+                         "remains.")
             check = None if (result.get("cached") or delivered) \
                 else _self_check(ctx, result, plan)
             if check:
@@ -9836,10 +9860,10 @@ def render_preview(ctx):
                 if plan and "all landed" not in check.lower() \
                         and "looks clean" not in check.lower():
                     note += (" If a claim FAILED, fix that exact item and "
-                             "re-render ONCE to confirm — if it fails a "
-                             "second time, stop re-trying and tell the user "
-                             "plainly what you attempted and what still "
-                             "looks wrong.")
+                             "re-render to confirm — and if it fails again, "
+                             "attack it a different way (another tool, "
+                             "another diagnosis) rather than repeating the "
+                             "same call or giving up.")
             mw = result.get("midword_audit") or []
             if mw:
                 note += (" MID-WORD AUDIT: " + "; ".join(mw[:5])

@@ -1951,24 +1951,24 @@ def tray_submit(user_id, project_id):
             placed_version, placed = _place_tray_now(cur, project_id,
                                                      session_id, user_id)
         n = len(ordered)
-        if session_id and (promoted is not None or placed or jobs):
-            what = []
-            if promoted is not None:
-                pm = (promoted.get("meta") or {}).get("filename") or "video"
-                what.append(f'"{pm}" is your main footage — analyzing it '
-                            "now (transcript + filmstrip)")
-            extra_n = n - (1 if promoted is not None else 0)
-            if extra_n > 0:
-                what.append(f"{extra_n} more upload"
-                            f"{'s' if extra_n != 1 else ''} "
-                            + ("placed on the timeline" if placed or promoted
-                               else "joining the timeline")
-                            + " in your order")
+        # ONE technical message at the start of a session, not two. When this
+        # submit promoted main footage, the index greet ("your video is ready
+        # to edit…") arrives minutes later at most and already counts the
+        # extra uploads — posting a "got your uploads, analyzing" ack first
+        # meant every new project opened with two system messages in a row
+        # (the second of which quoted a UUID filename at the user). The tray
+        # UI itself shows the submit, and the prep screen shows the analyzing
+        # state. The ack survives ONLY for tray-only additions to an existing
+        # project, where no index greet will speak for them.
+        if session_id and promoted is None and (placed or jobs):
+            what = (f"{n} upload{'s' if n != 1 else ''} "
+                    + ("placed on the timeline" if placed
+                       else "joining the timeline") + " in your order")
             cur.execute("""INSERT INTO chat_messages (session_id, role,
                                                       content, meta)
                            VALUES (%s, 'assistant', %s, %s)""",
                         (session_id,
-                         "Got your uploads — " + "; ".join(what) + ".",
+                         "Got your uploads — " + what + ".",
                          Json({"kind": "tray_submitted"})))
     return jsonify({"ok": True, "submitted": n,
                     "promoted_asset_id":

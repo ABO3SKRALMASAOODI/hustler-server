@@ -8,7 +8,8 @@
     "tags": "click tap ui select",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "tick",
@@ -19,7 +20,8 @@
     "tags": "tick typewriter counter",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "pop",
@@ -30,7 +32,8 @@
     "tags": "pop bubble text-appear",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "shutter",
@@ -41,7 +44,8 @@
     "tags": "shutter photo snapshot",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "whoosh",
@@ -52,7 +56,8 @@
     "tags": "whoosh swipe transition cut",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "whoosh-deep",
@@ -63,7 +68,8 @@
     "tags": "whoosh heavy transition cinematic",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "swipe",
@@ -74,7 +80,8 @@
     "tags": "swipe fast short transition",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "whoosh-reverse",
@@ -85,7 +92,8 @@
     "tags": "reverse suck pre-cut build",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "glitch",
@@ -96,7 +104,8 @@
     "tags": "glitch stutter digital datamosh",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "impact",
@@ -107,7 +116,8 @@
     "tags": "impact hit shock emphasis",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "impact-soft",
@@ -118,7 +128,8 @@
     "tags": "impact subtle thud gentle",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "boom",
@@ -129,7 +140,8 @@
     "tags": "boom braam trailer huge shock",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "sub-drop",
@@ -140,7 +152,8 @@
     "tags": "bass drop sub emphasis",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "zap",
@@ -151,7 +164,8 @@
     "tags": "zap electric shock zing",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "riser",
@@ -162,7 +176,8 @@
     "tags": "riser build tension reveal",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "ding",
@@ -173,7 +188,8 @@
     "tags": "ding bell notification correct",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "chime-up",
@@ -184,7 +200,8 @@
     "tags": "chime success positive unlock",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   },
   {
     "slug": "buzz",
@@ -195,6 +212,7 @@
     "tags": "buzz error wrong negative",
     "license": "CC0-1.0",
     "author": "Valmera (synthesized)",
-    "source_url": "worker/tools/build_sfx.py"
+    "source_url": "worker/tools/build_sfx.py",
+    "retired": true
   }
 ]

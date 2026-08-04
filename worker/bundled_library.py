@@ -44,7 +44,15 @@ class Library:
                                 dirname)
         self.group_field = group_field       # "mood" for music, "category" for sfx
         self.groups = tuple(groups)
-        self.catalog = self._load()
+        # entries = every shipped asset, retired ones included — the RENDER
+        # surface. catalog = what the agent may still OFFER. A `"retired":
+        # true` manifest entry stays resolvable forever (an old EDL or a
+        # chat-rewind to an earlier version must keep rendering) but is
+        # never listed, advertised, or accepted by the add_* tools again —
+        # that split is how an asset is pulled from the library without
+        # breaking a single existing project.
+        self.entries = self._load()
+        self.catalog = [t for t in self.entries if not t.get("retired")]
 
     def _load(self):
         """Load the shipped manifest. A missing/broken manifest leaves the
@@ -81,13 +89,14 @@ class Library:
     def resolve(self, key):
         """Catalog entry for a `<scheme>:<slug>` reference, or None.
 
-        WHITELIST lookup — the slug must be in the catalog. Returning an entry
-        for an arbitrary string would let a crafted reference reach the
-        filesystem."""
+        WHITELIST lookup — the slug must be in the shipped manifest (retired
+        entries included, so existing EDLs keep rendering). Returning an
+        entry for an arbitrary string would let a crafted reference reach
+        the filesystem."""
         if not self.is_ref(key):
             return None
         slug = key[len(self.scheme):]
-        for t in self.catalog:
+        for t in self.entries:
             if t.get("slug") == slug:
                 return t
         return None

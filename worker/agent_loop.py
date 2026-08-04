@@ -13,6 +13,7 @@ import time
 import agent_tools
 import config
 import db as dbx
+import eleven
 import grammar
 import llm
 import music_library
@@ -532,6 +533,74 @@ def capabilities_block():
             "impossible when a tool above covers it.")
 
 
+# ── Reply language (round 85) ────────────────────────────────────────────────
+# A real session: the user wrote one English sentence, the footage was a
+# silent 19s reel carrying foreign burned-in text, and after twenty tool steps
+# the reply came back in Russian — the system prompt's language rule (which
+# forbids exactly that) sat 9k tokens away from the moment of writing. Two
+# deterministic layers now hold the anchor:
+#   1. PREVENTION: a one-line note appended to the user's own message naming
+#      the script their messages are written in, so the instruction travels
+#      WITH the request instead of living only at the top of the prompt.
+#   2. CORRECTION: a cross-script check on the drafted reply
+#      (_enforce_reply_language) with one forced rewrite — the same shape as
+#      _enforce_honesty, and fail-open at every step.
+# This is unicode-range counting, not language guessing: it only ever fires on
+# flagrant cross-script flips (a Latin-script user answered in Cyrillic),
+# never on English-vs-Spanish judgment calls the model must keep owning.
+
+_SCRIPT_RANGES = (
+    ("Latin", ((0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F))),
+    ("Cyrillic", ((0x0400, 0x04FF), (0x0500, 0x052F))),
+    ("Arabic", ((0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF))),
+    ("Hebrew", ((0x0590, 0x05FF),)),
+    ("Greek", ((0x0370, 0x03FF),)),
+    ("Devanagari", ((0x0900, 0x097F),)),
+    ("Thai", ((0x0E00, 0x0E7F),)),
+    ("Hangul", ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F))),
+    ("Kana", ((0x3040, 0x30FF),)),
+    ("Han", ((0x4E00, 0x9FFF), (0x3400, 0x4DBF))),
+)
+
+
+def _script_counts(text):
+    counts = {}
+    for ch in text or "":
+        cp = ord(ch)
+        for name, ranges in _SCRIPT_RANGES:
+            if any(lo <= cp <= hi for lo, hi in ranges):
+                counts[name] = counts.get(name, 0) + 1
+                break
+    return counts
+
+
+def _dominant_script(text, min_letters=6):
+    """The script most of `text`'s letters are written in, or None when there
+    are too few letters to say (an emoji-only or numbers-only message) or no
+    script clearly dominates (a heavy mix). None always means "don't act"."""
+    counts = _script_counts(text)
+    total = sum(counts.values())
+    if total < min_letters:
+        return None
+    name = max(counts, key=counts.get)
+    return name if counts[name] > 0.6 * total else None
+
+
+def _reply_language_note(user_texts):
+    """The anchor line appended to the user's message. It names the SCRIPT (a
+    measurement), never a guessed language — 'their language' plus the script
+    is enough to hold the anchor, and it can never mislabel a Ukrainian as a
+    Russian. Empty when the user hasn't written enough letters to measure."""
+    joined = " ".join(t for t in user_texts if t)
+    script = _dominant_script(joined)
+    if not script:
+        return ""
+    return (f"\n\n[system note: the user's own messages are written in "
+            f"{script} script — write your reply in THEIR language. Speech, "
+            "captions or on-screen text inside the footage NEVER set your "
+            "reply language.]")
+
+
 def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     # system_prompt(), not the raw constant: it drops the built-in-library
     # claims when this image shipped no tracks.
@@ -557,6 +626,7 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     # above — the EDL, the scene map, the index — not in old chat. The
     # current request plus the last few messages of context is the job.
     chat = worker_db.run(dbx.recent_chat, ctx.session_id, 4)
+    user_texts = []
     for m in chat:
         if m["id"] == user_message["id"]:
             continue
@@ -564,8 +634,12 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
         content = (m["content"] or "")[:2000]
         if content:
             msgs.append({"role": role, "content": content})
+            if m["role"] == "user":
+                user_texts.append(content)
+    user_texts.append(user_message["content"] or "")
     msgs.append({"role": "user",
-                 "content": user_message["content"][:4000] + attachment_note})
+                 "content": user_message["content"][:4000] + attachment_note
+                 + _reply_language_note(user_texts)})
     return msgs
 
 
@@ -1267,6 +1341,12 @@ def _nearest_alternative(user_text):
                         "it. I can also lay an uploaded voiceover over the "
                         "edit (other audio ducks while it speaks).")
             if "built-in sound pack" in hint and not sfx_library.CATALOG:
+                if eleven.sound_gen_available():
+                    return ("What I CAN do: generate the exact sound effect "
+                            "you describe (a whoosh, a click, an impact...) "
+                            "and place it at any moment in the edit — or "
+                            "place a sound file you upload, set how loud it "
+                            "is, and move or remove it afterwards.")
                 return ("What I CAN do: place a sound file you upload at an "
                         "exact moment in the edit, set how loud it is, and "
                         "move or remove it afterwards.")
@@ -1371,6 +1451,59 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
           flush=True)
     hint = _nearest_alternative(user_text)
     return FALLBACK_REPLY + (f"\n\n{hint}" if hint else "")
+
+
+def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
+                            honesty):
+    """Deterministic cross-script check of the drafted reply against the
+    user's own message, with one forced rewrite — _enforce_honesty's shape
+    applied to round 85's bug (an English one-liner answered in Russian).
+
+    Fires ONLY when the reply is dominated by a script that appears NOWHERE
+    in the user's message — never on same-script language pairs, never when
+    either side is too short to measure — so it cannot cage a legitimate
+    reply; it only catches the flip the system prompt already forbids.
+    Fail-open at every step: any doubt returns the draft unchanged."""
+    user_script = _dominant_script(user_text)
+    reply_script = _dominant_script(final, min_letters=10)
+    if not user_script or not reply_script or reply_script == user_script:
+        return final
+    if _script_counts(user_text).get(reply_script, 0) > 0:
+        return final        # the user themselves used that script; their call
+    honesty["language_flip"] = f"{user_script}->{reply_script}"
+    print(f"[language] job {ctx.job['id']}: reply drafted in {reply_script} "
+          f"script for a {user_script}-script user — forcing one rewrite",
+          flush=True)
+    msgs = messages + [
+        {"role": "assistant", "content": final},
+        {"role": "system",
+         "content": (f"Your reply above is written in {reply_script} script, "
+                     f"but the user's own messages are {user_script}-script. "
+                     "Rewrite the reply in the USER'S language — a faithful "
+                     "translation with every fact, number and timing kept "
+                     "identical, nothing added. Output only the rewritten "
+                     "reply.")},
+    ]
+    model = ctx.agent_model or config.AGENT_MODEL
+    try:
+        resp = llm.create_with_dialect(
+            client, model, msgs, tools=tools, tool_choice="none",
+            temperature=config.AGENT_TEMPERATURE,
+            max_tokens=config.AGENT_REPLY_MAX_TOKENS)
+        llm.record("language_regen",
+                   {"model": model, "messages": msgs[-2:],
+                    "note": "rewrite after a cross-script reply"},
+                   {"content": (resp.choices[0].message.content or "")},
+                   getattr(resp, "usage", None))
+        redraft = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[language] rewrite failed ({e}) — posting the draft as-is",
+              flush=True)
+        return final
+    if redraft and _dominant_script(redraft, min_letters=10) == user_script:
+        honesty["language_fixed"] = True
+        return redraft
+    return final
 
 
 def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
@@ -1838,6 +1971,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final = _enforce_honesty(ctx, client, messages, tools, draft,
                                      start_version, honesty,
                                      user_text=user_message["content"] or "")
+            final = _enforce_reply_language(
+                ctx, client, messages, tools, final,
+                user_text=user_message["content"] or "", honesty=honesty)
             if fail_note:
                 final += fail_note
             honesty["auto_render"] = ctx.autorendered
