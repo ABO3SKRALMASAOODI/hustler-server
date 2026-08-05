@@ -2200,9 +2200,21 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                               if ctx.versions_written else start_version)
                     _activity(worker_db, session_id, name, args,
                               f"asked: {q.question}", edl_version=_cur_v)
+                    # A turn that EDITED and then asked a question used to
+                    # leave that version with no render and nothing that would
+                    # ever request one — the studio's self-heal covers user
+                    # versions and failed turns, and this is neither — so the
+                    # user was asked to choose between options while the
+                    # player still showed the cut from before. Not fixed
+                    # earlier because the only tool for it blocked on a full
+                    # encode, and making someone wait a minute for a QUESTION
+                    # is worse than a stale frame. Queuing costs one INSERT.
+                    _queue_turn_preview(ctx, worker_db, session_id, timings)
                     worker_db.run(dbx.add_message, session_id, "assistant",
                                   q.question,
-                                  {"ask_user": True, "edl_version": _cur_v})
+                                  {"ask_user": True, "edl_version": _cur_v,
+                                   "preview_pending": getattr(
+                                       ctx, "preview_pending", None)})
                     return {"status": "awaiting_user", "steps": total_steps,
                             "timings": timings}
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
