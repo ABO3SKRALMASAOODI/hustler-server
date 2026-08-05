@@ -1663,6 +1663,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     truncated_retries = 0
     truncated_out = False          # last step died at the ceiling, saying nothing
     taste_pushed = False           # the craft audit was handed back once
+    _responses_warned = False      # say the lane fell back ONCE, not per step
 
     for iteration in range(config.AGENT_MAX_ITERATIONS):
         if SHUTDOWN.is_set():
@@ -1831,8 +1832,30 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             kw = llm.completion_kwargs(model, max_tokens,
                                        config.AGENT_TEMPERATURE)
             kw.update(extra)
+            # THINKING, ON THE MODEL WE ALREADY PAY FOR (round 91). When this
+            # model has told us it will not reason alongside tools on
+            # chat/completions, ask the endpoint it named instead. Any failure
+            # — transport, HTTP, or a body llm._from_responses does not
+            # recognise — falls straight through to the call below, which is
+            # byte-for-byte what runs today. The lane can only add thinking;
+            # it cannot take a turn away.
+            resp = None
+            if llm.responses_available(model, config.OPENAI_BASE_URL):
+                try:
+                    resp = llm.responses_create(
+                        config.OPENAI_BASE_URL, config.OPENAI_API_KEY, model,
+                        messages, tools, max_tokens=max_tokens,
+                        effort=config.AGENT_REASONING_EFFORT)
+                except Exception as e:
+                    if not _responses_warned:
+                        _responses_warned = True
+                        print(f"[agent {job['id']}] the responses lane failed "
+                              f"({str(e)[:180]}) — falling back to "
+                              "chat/completions for this turn; the model "
+                              "answers WITHOUT reasoning there", flush=True)
+                    resp = None
             _adapt_tries = 0
-            while True:
+            while resp is None:
                 try:
                     resp = client.chat.completions.create(
                         model=model, messages=messages, tools=tools, **kw)

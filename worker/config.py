@@ -260,6 +260,14 @@ FRONTIER_PLANS = {"ai_max"}
 # honours it or costs one failed call per process, ever. Set
 # AGENT_REASONING_EFFORT="" on Render to send nothing again.
 AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "low").strip()
+# Ask /v1/responses when — and only when — the model has already refused to
+# reason alongside function tools on /v1/chat/completions. That refusal is why
+# the agent ran 875 straight calls with ZERO reasoning tokens from Jul 31 2026
+# (see llm.responses_available). Set AGENT_RESPONSES_LANE=0 to turn the lane
+# off from Render without a deploy; every failure inside it already falls back
+# to the chat/completions call that runs today, so off and broken are the same
+# behaviour, not different ones.
+AGENT_RESPONSES_LANE = os.getenv("AGENT_RESPONSES_LANE", "1") == "1"
 # Vision (look_at) is the slowest thing the agent does, so it gets a MORE
 # generous per-call timeout than the text agent (grok multimodal latency is
 # spiky) — retries stay at the client default. The agent isn't capped on how

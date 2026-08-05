@@ -494,6 +494,228 @@ def completion_kwargs(model, max_tokens=None, temperature=None):
     return kw
 
 
+# ── The Responses lane: how a reasoning model keeps its tools (round 91) ──
+#
+# gpt-5.6-luna refuses the two things an editing agent needs at once, and says
+# so precisely:
+#
+#   400: "Function tools with reasoning_effort are not supported for
+#         gpt-5.6-luna in /v1/chat/completions. To use function tools, use
+#         /v1/responses or set reasoning_effort to 'none'."
+#
+# The loop obeys that by latching reasoning_effort='none' — tools are not
+# optional for an editor — and the consequence was invisible: from Jul 31 2026
+# the agent planned every edit with NO deliberation at all. Measured over the
+# ten days after the switch: 875 agent calls, ZERO reasoning tokens. The model
+# it replaced (deepseek-v4-pro) was spending 335-621 reasoning tokens on every
+# single call, and the "the edits are disgusting" complaints date from exactly
+# the changeover.
+#
+# So the same model gets its thinking back by asking the endpoint that allows
+# both. Deliberately NOT via the OpenAI SDK: both services pin openai==1.59.9,
+# which predates .responses, and bumping a shared dependency to buy one call is
+# a far larger blast radius than one HTTPS request through `requests` — which
+# this module already imports and already uses for image generation.
+#
+# This is a LANE, not a migration. /v1/responses is OpenAI-only; the paid,
+# frontier and image providers are xAI, which serves chat/completions. Every
+# other caller is untouched, and any failure here falls back to exactly what
+# runs today (see agent_loop._agent_completion). Not being able to reach the
+# live API from the dev machine is precisely why that fallback is mandatory
+# rather than optional.
+
+
+class _RespToolCall:
+    def __init__(self, call_id, name, arguments):
+        self.id = call_id
+        self.type = "function"
+        self.function = type("F", (), {"name": name,
+                                       "arguments": arguments})()
+
+
+class _RespMessage:
+    """A chat-completions-shaped message, so the agent loop needs no new
+    branch to read one."""
+
+    def __init__(self, content, tool_calls):
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _RespChoice:
+    def __init__(self, message, finish_reason):
+        self.message = message
+        self.finish_reason = finish_reason
+
+
+class _RespUsage:
+    def __init__(self, raw):
+        self.prompt_tokens = raw.get("input_tokens") or 0
+        self.completion_tokens = raw.get("output_tokens") or 0
+        self.total_tokens = raw.get("total_tokens") or 0
+        det = raw.get("output_tokens_details") or {}
+        # The number this whole lane exists to make non-zero. Named to match
+        # what reasoning_tokens() already looks for, so the recorder writes
+        # llm_calls.response->>'reasoning_out' with no change there — which is
+        # also how anyone verifies the lane is really working, in SQL.
+        self.reasoning_tokens = det.get("reasoning_tokens") or 0
+        # Likewise for the cache discount: cached_input_tokens() reads
+        # prompt_tokens_details.cached_tokens, so present it under that name
+        # rather than the Responses spelling, or every cached turn would be
+        # billed at the full input price.
+        self.prompt_tokens_details = {
+            "cached_tokens":
+                (raw.get("input_tokens_details") or {}).get("cached_tokens")
+                or 0}
+
+
+class _RespCompletion:
+    def __init__(self, choices, usage):
+        self.choices = choices
+        self.usage = usage
+
+
+def _to_responses_input(messages):
+    """chat `messages` -> Responses `input`.
+
+    Raises on anything it cannot map, so a shape this does not understand
+    falls back to chat/completions instead of being sent half-translated.
+    """
+    out = []
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            out.append({"type": "function_call_output",
+                        "call_id": m.get("tool_call_id"),
+                        "output": str(m.get("content") or "")})
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            if (m.get("content") or "").strip():
+                out.append({"role": "assistant",
+                            "content": [{"type": "output_text",
+                                         "text": m["content"]}]})
+            for tc in m["tool_calls"]:
+                fn = tc.get("function") or {}
+                out.append({"type": "function_call",
+                            "call_id": tc.get("id"),
+                            "name": fn.get("name"),
+                            "arguments": fn.get("arguments") or "{}"})
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            kind = "output_text" if role == "assistant" else "input_text"
+            out.append({"role": role,
+                        "content": [{"type": kind, "text": content}]})
+            continue
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if p.get("type") == "text":
+                    parts.append({"type": "input_text", "text": p["text"]})
+                elif p.get("type") == "image_url":
+                    url = (p.get("image_url") or {}).get("url")
+                    if not url:
+                        raise ValueError("image part without a url")
+                    parts.append({"type": "input_image", "image_url": url})
+                else:
+                    raise ValueError(f"unmapped content part "
+                                     f"{p.get('type')!r}")
+            out.append({"role": role, "content": parts})
+            continue
+        raise ValueError(f"unmapped message shape for role {role!r}")
+    return out
+
+
+def _to_responses_tools(tools):
+    """chat tool schemas -> Responses tool schemas (the function is flattened
+    up one level: {type, function:{name,...}} becomes {type, name, ...})."""
+    out = []
+    for t in tools or []:
+        fn = t.get("function") or {}
+        if not fn.get("name"):
+            raise ValueError("tool without a name")
+        out.append({"type": "function", "name": fn["name"],
+                    "description": fn.get("description") or "",
+                    "parameters": fn.get("parameters")
+                    or {"type": "object", "properties": {}}})
+    return out
+
+
+def _from_responses(payload):
+    """Responses output -> a chat-completions-shaped object.
+
+    Raises when the body is not what this understands, so a provider change
+    degrades to the old lane rather than to garbage tool calls.
+    """
+    if not isinstance(payload, dict) or "output" not in payload:
+        raise ValueError("no output in the responses payload")
+    text_bits, calls = [], []
+    for item in payload.get("output") or []:
+        kind = item.get("type")
+        if kind == "message":
+            for c in item.get("content") or []:
+                if c.get("type") in ("output_text", "text") and c.get("text"):
+                    text_bits.append(c["text"])
+        elif kind == "function_call":
+            calls.append(_RespToolCall(item.get("call_id") or item.get("id"),
+                                       item.get("name"),
+                                       item.get("arguments") or "{}"))
+        # 'reasoning' items carry the thinking itself. They are deliberately
+        # NOT fed back into the next request yet: threading them is what
+        # preserves one chain of thought ACROSS tool calls, and getting that
+        # wrong while unable to test against the live API would be worse than
+        # the model thinking afresh on each step — which is already the entire
+        # difference between this lane and reasoning_effort='none'.
+    if not text_bits and not calls:
+        raise ValueError("responses returned neither text nor a tool call")
+    # 'length' is what the loop's truncation retry keys on, and an incomplete
+    # response with nothing in it is exactly that case.
+    finish = ("length" if payload.get("status") == "incomplete"
+              else ("tool_calls" if calls else "stop"))
+    msg = _RespMessage("\n".join(text_bits) or None, calls or None)
+    return _RespCompletion([_RespChoice(msg, finish)],
+                           _RespUsage(payload.get("usage") or {}))
+
+
+def responses_available(model, base_url):
+    """Is the Responses lane worth trying for this model?
+
+    Only for a model that has ALREADY told us it will not reason alongside
+    tools on chat/completions, and only against an endpoint that serves
+    /v1/responses at all (OpenAI's). Anything else keeps the path it has.
+    """
+    if not config.AGENT_RESPONSES_LANE or not config.AGENT_REASONING_EFFORT:
+        return False
+    if not tools_need_effort_none(model):
+        return False
+    return "api.openai.com" in (base_url or "")
+
+
+def responses_create(base_url, api_key, model, messages, tools,
+                     max_tokens=None, effort=None, timeout=None):
+    """One /v1/responses call, in and out in chat-completions shape.
+
+    Raises on ANY problem — transport, HTTP status, or a body this does not
+    understand — because the only correct answer to "this lane did not work"
+    is to fall back to the lane that does.
+    """
+    url = (base_url or "").rstrip("/") + "/responses"
+    body = {"model": model,
+            "input": _to_responses_input(messages),
+            "tools": _to_responses_tools(tools)}
+    if max_tokens:
+        body["max_output_tokens"] = int(max_tokens)
+    if effort:
+        body["reasoning"] = {"effort": effort}
+    r = requests.post(url, json=body,
+                      timeout=timeout or config.LLM_TIMEOUT_S,
+                      headers={"Authorization": f"Bearer {api_key}",
+                               "Content-Type": "application/json"})
+    if r.status_code >= 400:
+        raise RuntimeError(f"responses HTTP {r.status_code}: {r.text[:300]}")
+    return _from_responses(r.json())
+
+
 def adapt_completion_kwargs(exc, model, kw):
     """If `exc` is the provider refusing max_tokens or temperature, latch the
     model's dialect and return corrected kwargs for one retry. None = not an
