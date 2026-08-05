@@ -1847,12 +1847,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         messages, tools, max_tokens=max_tokens,
                         effort=config.AGENT_REASONING_EFFORT)
                 except Exception as e:
+                    # A definite "not here" latches the lane off for the
+                    # process so a doomed request is paid once, not once per
+                    # step. A timeout or a 500 does NOT — that would cost the
+                    # agent its thinking for the life of the worker over a
+                    # blip.
+                    permanent = llm.looks_like_responses_unsupported(e)
+                    if permanent:
+                        llm.mark_responses_dead(model)
                     if not _responses_warned:
                         _responses_warned = True
                         print(f"[agent {job['id']}] the responses lane failed "
                               f"({str(e)[:180]}) — falling back to "
-                              "chat/completions for this turn; the model "
-                              "answers WITHOUT reasoning there", flush=True)
+                              "chat/completions; the model answers WITHOUT "
+                              "reasoning there"
+                              + (" [latched off for this process]"
+                                 if permanent else " [will retry next step]"),
+                              flush=True)
                     resp = None
             _adapt_tries = 0
             while resp is None:

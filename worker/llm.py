@@ -677,18 +677,51 @@ def _from_responses(payload):
                            _RespUsage(payload.get("usage") or {}))
 
 
+_responses_dead = set()
+
+
+def mark_responses_dead(model):
+    """Stop trying the lane for this model in this process."""
+    _responses_dead.add(model)
+
+
 def responses_available(model, base_url):
     """Is the Responses lane worth trying for this model?
 
-    Only for a model that has ALREADY told us it will not reason alongside
-    tools on chat/completions, and only against an endpoint that serves
-    /v1/responses at all (OpenAI's). Anything else keeps the path it has.
+    Gated on configuration and on the endpoint being one that serves
+    /v1/responses at all (OpenAI's) — NOT on the model having already failed
+    on chat/completions.
+
+    It was gated on that latch for one deploy and the gate never opened. The
+    latch is process-local and starts EMPTY, so a fresh worker's first agent
+    call found it unset, took the chat path, ate the 400, latched, retried
+    with effort='none' and answered without thinking. Job 2602 was a
+    single-call turn, so that was the whole turn. Requiring the failure
+    before allowing the fix means every process's first call — and every
+    short turn — never reasons at all.
+
+    So: try the lane, and let the fallback be the safety net it already is.
+    A model that proves the endpoint is not there for it is latched OFF
+    (mark_responses_dead) so a doomed request is paid once per process, not
+    once per step.
     """
     if not config.AGENT_RESPONSES_LANE or not config.AGENT_REASONING_EFFORT:
         return False
-    if not tools_need_effort_none(model):
+    if model in _responses_dead:
         return False
     return "api.openai.com" in (base_url or "")
+
+
+def looks_like_responses_unsupported(exc):
+    """Is this the endpoint or model saying "not here", as opposed to a
+    transient failure? Only these latch the lane off for the process — a
+    timeout or a 500 must not cost the agent its thinking for the rest of
+    the worker's life."""
+    text = f"{exc}".lower()
+    return any(k in text for k in (
+        "http 404", "http 400", "http 405", "not found", "unknown endpoint",
+        "unsupported", "does not exist", "invalid_request_error",
+        "no output in the responses payload"))
 
 
 def responses_create(base_url, api_key, model, messages, tools,

@@ -31,15 +31,25 @@ def check(name, cond):
     print(f"  ok  {name}")
 
 
-print("== the lane only opens where it is needed ==")
+print("== the lane opens WITHOUT waiting for the model to fail first ==")
 
 MODEL = "gpt-5.6-luna"
+llm._responses_dead.discard(MODEL)
+
+# THE BUG THIS PINS. The gate first required tools_need_effort_none(model) —
+# i.e. the model must ALREADY have been refused on chat/completions in THIS
+# process. That latch starts empty on every boot, so a fresh worker's first
+# agent call found it unset, took the chat path, ate the 400, latched, retried
+# with effort='none' and answered without thinking. Job 2602 (Aug 5 2026,
+# 20:55, eleven minutes after the deploy) was a ONE-CALL turn, so that was the
+# entire turn: 0 reasoning tokens, and the fix that had just shipped never ran.
 llm._tools_effort_none.discard(MODEL)
-check("closed for a model that has never refused reasoning+tools",
-      llm.responses_available(MODEL, "https://api.openai.com/v1") is False)
-llm.mark_tools_need_effort_none(MODEL)
-check("open once that model HAS refused",
+check("OPEN on a fresh process, before any failure has been seen",
       llm.responses_available(MODEL, "https://api.openai.com/v1") is True)
+llm.mark_tools_need_effort_none(MODEL)
+check("...and still open once the model has refused",
+      llm.responses_available(MODEL, "https://api.openai.com/v1") is True)
+
 check("closed against a provider that does not serve /v1/responses (xAI)",
       llm.responses_available(MODEL, "https://api.x.ai/v1") is False)
 _lane = config.AGENT_RESPONSES_LANE
@@ -52,6 +62,25 @@ config.AGENT_REASONING_EFFORT = ""
 check("closed when there is no reasoning to ask for anyway",
       llm.responses_available(MODEL, "https://api.openai.com/v1") is False)
 config.AGENT_REASONING_EFFORT = _eff
+
+print("== a doomed lane is paid once per process, a blip is not ==")
+
+llm.mark_responses_dead(MODEL)
+check("a model latched dead stops being tried",
+      llm.responses_available(MODEL, "https://api.openai.com/v1") is False)
+llm._responses_dead.discard(MODEL)
+check("a 404 counts as 'not here' and latches",
+      llm.looks_like_responses_unsupported(
+          RuntimeError("responses HTTP 404: no such endpoint")) is True)
+check("so does the model refusing the request shape",
+      llm.looks_like_responses_unsupported(
+          RuntimeError("responses HTTP 400: invalid_request_error")) is True)
+check("a TIMEOUT does not — that must not cost thinking for the whole process",
+      llm.looks_like_responses_unsupported(
+          RuntimeError("Read timed out after 120s")) is False)
+check("nor does a 500",
+      llm.looks_like_responses_unsupported(
+          RuntimeError("responses HTTP 503: upstream unavailable")) is False)
 
 print("== chat messages translate into Responses input ==")
 
