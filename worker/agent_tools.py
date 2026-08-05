@@ -159,6 +159,11 @@ class ToolContext:
         self._states_seen = {}
         self.rendered_versions = set()  # versions with a successful preview
         self.autorendered = False     # loop set: model skipped render_preview
+        # Round 90: {job, edl_version} of the turn-end preview the loop
+        # QUEUED without waiting for it. The reply is written while this
+        # renders, so it is a promise the reply may make and the honesty
+        # fence must know about — see agent_loop._queue_turn_preview.
+        self.preview_pending = None
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
         self.sfx_generated = []       # sounds created by generate_sfx
@@ -11179,7 +11184,124 @@ _STYLE_PROPS = {
     "emphasis_scale": {"type": "number"},
 }
 
+# How many calls one batch may carry. A bound, not a tuning knob: past this
+# the combined result stops being readable and a single bad plan costs more
+# than it saves. 24 covers the dense-typography pass the reference reels are
+# built from (a 30s reel is ~20 text events) in ONE round trip.
+BATCH_MAX_CALLS = 24
+_BATCH_RESULT_CAP = 700
+
+
+def _batch_digest(name, result):
+    """One line per call. A write returns 'EDL vN -> vM: <change>. Before:
+    <state>. After: <state>.' — nineteen intermediate states are nineteen
+    copies of the same paragraph, so only the change survives here and the
+    FINAL state is appended once, by the caller."""
+    if not isinstance(result, str):
+        result = str(result)
+    head = result.split(". Before:", 1)[0]
+    if len(head) < len(result):
+        return head + "."
+    if len(result) > _BATCH_RESULT_CAP:
+        return result[:_BATCH_RESULT_CAP] + " …(truncated)"
+    return result
+
+
+def batch(ctx, calls=None):
+    """Run several INDEPENDENT tool calls in ONE round trip.
+
+    Round 90. A turn averaged 5.6 model round trips re-sending ~35k tokens to
+    emit ~272, and a reference-grade reel needs on the order of a hundred
+    edits — arithmetic that never closes, and the reason the agent's edits
+    stay thin. Anything whose arguments you already know can go in here
+    together: twenty add_text calls, a grade plus a music bed plus fades, a
+    row of zooms. What may NOT go in here is a call whose arguments depend on
+    another's ANSWER — read first, then batch the writes.
+
+    Calls run in order and a failure does not stop the rest: each one's
+    result comes back on its own numbered line, so a rejected argument is
+    visible and fixable without losing the nineteen edits that landed.
+    """
+    if not isinstance(calls, (list, tuple)) or not calls:
+        return ("REJECTED: batch needs calls=[{\"tool\": \"add_text\", "
+                "\"args\": {...}}, ...] — a non-empty array of tool calls.")
+    if len(calls) > BATCH_MAX_CALLS:
+        return (f"REJECTED: {len(calls)} calls in one batch (max "
+                f"{BATCH_MAX_CALLS}). Send them in two batches.")
+    lines, n_ok, n_bad = [], 0, 0
+    for i, call in enumerate(calls):
+        if not isinstance(call, dict):
+            lines.append(f"{i + 1}. REJECTED: each entry must be an object "
+                         "with 'tool' and 'args'.")
+            n_bad += 1
+            continue
+        name = call.get("tool") or call.get("name")
+        args = call.get("args")
+        if isinstance(args, str):
+            # Some providers stringify nested objects. Recover rather than
+            # reject 24 good edits over a serialization habit.
+            try:
+                args = json.loads(args)
+            except (TypeError, ValueError):
+                args = None
+        if not isinstance(args, dict):
+            args = {}
+        if name == "batch":
+            lines.append(f"{i + 1}. REJECTED: batch cannot contain a batch.")
+            n_bad += 1
+            continue
+        if name not in TOOLS:
+            lines.append(f"{i + 1}. REJECTED: unknown tool '{name}'.")
+            n_bad += 1
+            continue
+        # AskUser propagates: a question to the user ends the turn, and
+        # swallowing it here would drop the question on the floor.
+        result = execute(ctx, name, args)
+        # The turn's write ledger is keyed on the tool that wrote, and the
+        # loop only sees "batch" — so the writes inside are recorded here or
+        # the honesty fence would report a real edit as no writes at all.
+        if name in WRITE_TOOLS and isinstance(result, str) \
+                and result.startswith("EDL v"):
+            ctx.write_calls.append(name)
+        bad = isinstance(result, str) and (result.startswith("REJECTED")
+                                           or "NO CHANGE" in result[:40]
+                                           or result.startswith("Unknown tool")
+                                           or " errored:" in result[:60])
+        n_bad += 1 if bad else 0
+        n_ok += 0 if bad else 1
+        lines.append(f"{i + 1}. {name}: {_batch_digest(name, result)}")
+    try:
+        row = ctx.latest_edl()
+        state = f"\nNow: EDL v{row['version']} — " \
+                f"{describe_edl(row['json'], ctx.duration)}"
+    except Exception:
+        state = ""
+    head = (f"BATCH: {len(calls)} call(s), {n_ok} succeeded"
+            + (f", {n_bad} did NOT" if n_bad else "") + ".")
+    if n_bad:
+        head += (" Read each line — the failed ones did NOT happen, and your "
+                 "reply may not claim them.")
+    return head + "\n" + "\n".join(lines) + state
+
+
 TOOLS = {
+    "batch": (batch, "Run up to 24 INDEPENDENT tool calls in ONE round trip — "
+              "the way to build a dense edit. Twenty add_text events, a grade "
+              "+ music + fades, a row of zooms: if you already know the "
+              "arguments, they belong in one batch, not twenty messages. Each "
+              "call returns its own numbered result and one failure does not "
+              "stop the others. NEVER put a call in here whose arguments "
+              "depend on another call's ANSWER (find_silences then "
+              "cut_silences, look_at then a zoom aimed from it) — read first, "
+              "then batch the writes.",
+              {"calls": {"type": "array",
+                         "description": "Tool calls in execution order.",
+                         "items": {"type": "object", "properties": {
+                             "tool": {"type": "string",
+                                      "description": "Tool name."},
+                             "args": {"type": "object",
+                                      "description": "That tool's arguments."},
+                         }}}}),
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
                        "summary. Call this first.", {}),
     "get_transcript": (get_transcript, "Sentence-level SOURCE transcript "

@@ -494,6 +494,27 @@ def completion_kwargs(model, max_tokens=None, temperature=None):
     return kw
 
 
+def looks_like_rate_limit(exc):
+    """Is this the provider saying "slow down" rather than "no"?
+
+    Round 90. Six turns died on 429s over three weeks with no retry anywhere
+    in the stack — every one of them a user mid-edit reading "give it a minute
+    and resend that", when a single wait would have finished the job. The
+    distinction that matters is against the quota family (402/403, "used all
+    available credits"): those fail identically forever, and retrying them
+    burns the turn's clock to arrive at the same place. Rate limits recover on
+    their own.
+    """
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if any(k in text for k in ("insufficient", "quota", "billing",
+                               "spending limit", "credit balance",
+                               "permission-denied")):
+        return False
+    return (status == 429 or "rate limit" in text or "rate_limit" in text
+            or "too many requests" in text)
+
+
 def adapt_completion_kwargs(exc, model, kw):
     """If `exc` is the provider refusing max_tokens or temperature, latch the
     model's dialect and return corrected kwargs for one retry. None = not an

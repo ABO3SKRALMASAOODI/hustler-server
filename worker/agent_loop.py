@@ -19,6 +19,7 @@ import llm
 import music_library
 import sfx_library
 import storage
+import taste
 import timeline
 from agent_prompt import project_state_block, system_prompt
 from schemas import describe_edl
@@ -93,6 +94,53 @@ def _filler_line(index):
             "a single call. They are never burned into captions.")
 
 
+def _audio_spine_line(index):
+    """What the footage SOUNDS like, as measured — tempo, the beat grid, and
+    where the energy actually moves. Or None when nothing was measured.
+
+    Round 90. The agent had never heard one second of anything: audio reached
+    it only as derived numbers behind get_audio_analysis, an OPT-IN call made
+    on 65 turns out of 512. So music choices, ducking and any sense of where a
+    piece lifts were guesses on 87% of turns — while this exact analysis was
+    already sitting in the index row, computed once by the indexer and never
+    read. Free to print, so it is printed: the beat grid belongs beside the
+    transcript, not behind a call the model has to think to make.
+
+    Deliberately NOT computed here. get_or_compute_for_index streams and
+    analyses the audio when the sidecar is missing, which is seconds of work
+    on the smallest box in the fleet — and this function runs while a user
+    watches a spinner. An unindexed sidecar means silence, honestly.
+    """
+    p = (index or {}).get("perception")
+    if not isinstance(p, dict):
+        return None
+    bpm = p.get("bpm")
+    conf = float(p.get("bpm_conf") or 0.0)
+    beats = p.get("beats") or []
+    bits = []
+    if bpm and conf >= 0.5:
+        bits.append(f"{bpm:g} BPM (confidence {conf:.2f})")
+    elif bpm:
+        bits.append(f"a weak {bpm:g} BPM pulse (confidence {conf:.2f} — too "
+                    "low to cut to; beat_align_cuts will refuse)")
+    else:
+        bits.append("no detectable musical pulse — do NOT beat-sync anything "
+                    "to this audio")
+    if beats:
+        bits.append(f"{len(beats)} beats on the grid, first at "
+                    f"{', '.join(f'{b:g}' for b in beats[:6])}s")
+    rng = p.get("energy_db_range")
+    if rng:
+        try:
+            bits.append(f"loudness moves over a {float(rng):.0f}dB range")
+        except (TypeError, ValueError):
+            pass
+    return ("SOUND (measured from the footage's own audio): " + "; ".join(bits)
+            + ". get_audio_analysis adds per-word vocal stress and the full "
+            "energy arc. Remember the corpus law: cuts and typography follow "
+            "the SPOKEN words, not the beat — music is a bed.")
+
+
 def _shot_boundaries_line(index):
     """Scene changes as one compact line — where transitions may land. The
     PICTURE itself is in the filmstrip; this is just the cut geometry."""
@@ -162,6 +210,9 @@ def _index_summary(index):
     if fl:
         lines.append(fl)
     lines.append(_shot_boundaries_line(index))
+    au = _audio_spine_line(index)
+    if au:
+        lines.append(au)
     bc = _burned_captions_line(index)
     if bc:
         lines.append(bc)
@@ -901,26 +952,57 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _auto_render_if_needed(ctx, worker_db, session_id, timings):
-    """If the EDL changed this turn without a successful render_preview,
-    render one now (logged + counted). Returns (latest_edl_row, fail_note)."""
+def _queue_turn_preview(ctx, worker_db, session_id, timings):
+    """Hand the turn's final version to the render queue and RETURN — the
+    reply does not wait for pixels. Returns the latest EDL row.
+
+    Round 90. This used to call render_preview inline and block the reply on
+    a full encode. Measured over 21 days that was 29% of all turn time, and
+    the cost scales with the FOOTAGE, not with the edit: across real projects
+    in one afternoon the same encode ran between 0.12 and 4.3 seconds per
+    second of output (10s for one 64s edit, 82s for a 19s one). A user who
+    renamed a caption waited a minute to be told it was renamed.
+
+    Nothing in the reply needs the file. The agent's own verification is a
+    separate thing it asks for deliberately (render_preview is still a tool,
+    and still blocks when it is called — that is the agent paying for its own
+    eyes); this is the artifact the PLAYER shows, and the studio picks it up
+    on its next poll of project_state, which resolves the newest preview by
+    EDL version on every tick. So the render lands in the player seconds
+    after the reply lands in the chat, and neither waits for the other.
+
+    A failure still reaches the user: the job carries source='turn' and
+    main._notify_failure posts an honest note (their edit is saved), exactly
+    like a failed user-edit preview.
+    """
     latest = ctx.latest_edl()
-    fail_note = None
-    if ctx.versions_written and latest["version"] not in ctx.rendered_versions:
-        ctx.autorendered = True
-        print(f"[honesty] job {ctx.job['id']}: model ended the turn without "
-              f"render_preview after writing v{latest['version']} — "
-              "auto-rendering", flush=True)
-        t0 = time.monotonic()
-        result = agent_tools.render_preview(ctx)
-        timings["auto_render_s"] = round(time.monotonic() - t0, 2)
-        _activity(worker_db, session_id, "render_preview",
-                  {"auto": "model skipped it"}, result,
-                  edl_version=latest["version"])
-        if "FAILED" in result:
-            fail_note = ("\n\n(Heads up: the preview render failed — "
-                         f"{result[:200]})")
-    return latest, fail_note
+    if not ctx.versions_written or latest["version"] in ctx.rendered_versions:
+        return latest
+    ctx.autorendered = True
+    t0 = time.monotonic()
+    try:
+        job_id = worker_db.run(dbx.enqueue_job, ctx.project_id,
+                               ctx.job["user_id"], "preview",
+                               {"edl_version": latest["version"],
+                                "source": "turn"})
+    except Exception as e:
+        # The self-heal in project_state re-queues an unrendered user version,
+        # and a preview is not worth failing a landed edit over.
+        print(f"[job {ctx.job['id']}] could not queue the turn preview for "
+              f"v{latest['version']} ({e})", flush=True)
+        return latest
+    timings["queue_preview_s"] = round(time.monotonic() - t0, 2)
+    ctx.preview_pending = {"job": job_id, "edl_version": latest["version"]}
+    print(f"[job {ctx.job['id']}] queued preview job {job_id} for "
+          f"v{latest['version']} — the reply does not wait for it", flush=True)
+    # The 'auto' key is what makes the studio label this row "auto preview"
+    # in the activity feed, exactly as the blocking auto-render used to.
+    _activity(worker_db, session_id, "render_preview",
+              {"auto": "queued — renders after the reply"},
+              f"Preview v{latest['version']} queued (job {job_id}); it renders "
+              "while the user reads the reply and the player updates itself.",
+              edl_version=latest["version"])
+    return latest
 
 
 # ── TURN FACTS: the reply must match what the tools actually did ──────
@@ -1181,11 +1263,18 @@ def _turn_facts(ctx, start_version):
                     + " — that sound is IN the video only if an "
                       "add_music/add_sfx/add_voiceover write also succeeded, "
                       "and the source video's PICTURE is not in the edit")
+    pending = getattr(ctx, "preview_pending", None)
     if ctx.last_preview is not None:
         pv = (f"rendered v{ctx.last_preview.get('edl_version')} "
               f"({ctx.last_preview.get('duration_s')}s)")
         if ctx.last_selfcheck:
             pv += f"; self-check: {ctx.last_selfcheck[:120]}"
+    elif pending:
+        pv = (f"v{pending.get('edl_version')} is RENDERING NOW — it was "
+              "queued the moment your last edit landed and the player "
+              "updates to it by itself. You may hand the cut over in the "
+              "past tense; you may NOT claim to have watched it, because "
+              "you have not seen a frame of this render")
     else:
         pv = "none"
     return ("TURN FACTS (system-verified):\n"
@@ -1374,7 +1463,13 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
                  or ctx.urls_fetched
                  or getattr(ctx, "web_recordings", None)
                  or getattr(ctx, "audio_extracted", None))
-    previewed = ctx.last_preview is not None
+    # A QUEUED turn-end preview counts (round 90). The render is under way
+    # before this fence runs and the player swaps to it on the studio's next
+    # poll, so "here's the cut" is a true sentence — the pixels are simply not
+    # waited for. Without this every async turn would be rewritten as a
+    # fabricated render, which is the opposite of honest.
+    previewed = (ctx.last_preview is not None
+                 or getattr(ctx, "preview_pending", None) is not None)
     viol = _reply_violations(draft, wrote, previewed, acted)
     # Echo detection only polices turns that DID nothing: a working turn's
     # summary may legitimately resemble the last one (same request repeated),
@@ -1512,11 +1607,9 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     auto-rendering first when the EDL changed without a preview. extra_meta is
     merged into the message meta so the studio can react to it (e.g. render an
     Upgrade CTA on the out-of-credits stop instead of a dead-end 402 later)."""
-    latest, fail_note = _auto_render_if_needed(ctx, worker_db, session_id,
-                                               timings)
-    if fail_note:
-        final_text += fail_note
-    meta = {"edl_version": latest["version"], "preview": ctx.last_preview}
+    latest = _queue_turn_preview(ctx, worker_db, session_id, timings)
+    meta = {"edl_version": latest["version"], "preview": ctx.last_preview,
+            "preview_pending": getattr(ctx, "preview_pending", None)}
     if extra_meta:
         meta.update(extra_meta)
     worker_db.run(dbx.add_message, session_id, "assistant", final_text, meta)
@@ -1558,23 +1651,65 @@ def _time_pressure_note(result, t_start, warned):
     return result
 
 
-_TASTE_PUSHBACK = """[system: the TASTE AUDIT on the preview you just \
-rendered is still outstanding. These are craft defects in YOUR edit — things \
-the user did not ask for — and the turn does not end with them unanswered:
+_TASTE_PUSHBACK = """[system: the TASTE AUDIT of the edit you are about to \
+hand over is still outstanding. These are craft findings against YOUR edit, \
+measured from the EDL itself, and the turn does not end with them unanswered:
 
 {findings}
 
 Do ONE of two things now, not neither:
-  1. FIX them — remove the devices that are not earning their place, then \
-render_preview again. Removing is a normal edit: remove_sfx, remove_zoom, \
-remove_stylize, set_transitions('none'), set_fades(0, 0). An edit gets good by \
-having things taken OUT of it.
-  2. KEEP one deliberately — only when the user's own request requires it — \
-and say which one and why, in one clause, in your reply.
+  1. FIX them. A finding that says there is too much of something is fixed by \
+taking it OUT (remove_sfx, remove_zoom, remove_stylize, \
+set_transitions('none'), set_fades(0, 0)) — an edit gets good by having things \
+removed. A finding that says the edit is BARE is the opposite instruction: it \
+means this cut has nothing in it that makes anyone watch, and the fix is to \
+build the missing layer, not to trim further.
+  2. KEEP it deliberately — when the user's own request requires it, or when \
+the footage genuinely calls for restraint — and say which and why, in one \
+clause, in your reply.
 
-What you may not do is reply as though the preview came back clean. \
-"Preview is ready" over an audit like this is how an edit nobody wants gets \
-handed over as finished.]"""
+You do NOT need to render to answer this: the findings are computed from the \
+edit, so fixing them and stopping is a complete answer. What you may not do \
+is reply as though nothing was flagged.]"""
+
+
+def audit_taste_now(ctx):
+    """Run the craft audit on the CURRENT EDL — no render, no encode, no
+    network. Populates ctx.last_taste/ctx.last_taste_version exactly like the
+    render-time audit does, and returns the findings.
+
+    Round 90, and it is a correction of an ordering mistake rather than a new
+    feature. The audit used to live inside render_preview's result, so the
+    edit was only ever criticised AFTER paying to encode it — which is what
+    produced the churn in the numbers: 65% of texts, 42% of sfx and 36% of
+    zooms were added and then removed again, usually in the same turn, at a
+    full re-encode per round. Every check in taste.py is structural (device
+    counts, spacing, dead air, caption coverage, the type system): it reads
+    the EDL and the index and nothing else. Nothing about it ever needed the
+    pixels.
+
+    Idempotent per version so a turn that DID render is not audited twice.
+    Never raises — a critic that can kill a landed edit is worse than none.
+    """
+    try:
+        row = ctx.latest_edl()
+        version = row.get("version")
+        if ctx.last_taste_version == version:
+            return ctx.last_taste or []
+        edl = row["json"]
+        tl = timeline.Timeline(edl["keep"], edl.get("inserts") or [],
+                               edl.get("speed") or [])
+        vid = (ctx.index or {}).get("video") or {}
+        findings = taste.critique(edl, ctx.index or {}, tl,
+                                  src_w=vid.get("width"),
+                                  src_h=vid.get("height"),
+                                  user_asked=ctx.user_message or "")
+        ctx.last_taste = list(findings)
+        ctx.last_taste_version = version
+        return ctx.last_taste
+    except Exception as e:
+        print(f"[taste] EDL audit skipped ({e})", flush=True)
+        return []
 
 
 def _taste_pushback(ctx, messages, t_start, pushed):
@@ -1675,11 +1810,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # marked done, nothing for the reaper to lie about.
             print(f"[job {job['id']}] shutdown drain: finalizing after "
                   f"{total_steps} step(s)", flush=True)
-            # No _finalize here: its auto-render waits on a preview encode,
-            # which cannot fit inside Render's grace window. The reply is
-            # written directly and the studio's next poll shows the state.
+            # No _finalize here: its honesty fence would spend another model
+            # call, which cannot fit inside Render's grace window. The reply
+            # is written directly and the studio's next poll shows the state.
+            # Queueing the preview IS safe here (round 90) — it is one INSERT
+            # — and it is the only thing that renders this version: the
+            # studio's self-heal covers agent versions only when the turn
+            # FAILED, and a drained turn is marked done.
             if ctx.versions_written:
-                latest = ctx.latest_edl()
+                latest = _queue_turn_preview(ctx, worker_db, session_id,
+                                             timings)
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "I had to stop mid-request for a moment of "
                               "maintenance on my side — the edits I finished "
@@ -1832,12 +1972,35 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                        config.AGENT_TEMPERATURE)
             kw.update(extra)
             _adapt_tries = 0
+            _rate_tries = 0
             while True:
                 try:
                     resp = client.chat.completions.create(
                         model=model, messages=messages, tools=tools, **kw)
                     break
                 except Exception as e:
+                    # A rate limit is not a dialect problem and not a dead
+                    # end — it is the provider asking us to wait, and waiting
+                    # keeps everything this turn has already built. Bounded by
+                    # what is left of the turn: sleeping past the deadline
+                    # would trade a rate-limited edit for a timed-out one.
+                    if llm.looks_like_rate_limit(e) \
+                            and _rate_tries < config.AGENT_RATE_LIMIT_RETRIES:
+                        wait = config.AGENT_RATE_LIMIT_BACKOFF_S * (
+                            2 ** _rate_tries)
+                        left = config.AGENT_TURN_TIMEOUT_S - (
+                            time.monotonic() - t_start)
+                        if wait < left - 15:
+                            _rate_tries += 1
+                            print(f"[agent {job['id']}] rate-limited by the "
+                                  f"provider — waiting {wait:.0f}s and "
+                                  f"retrying ({_rate_tries}/"
+                                  f"{config.AGENT_RATE_LIMIT_RETRIES}), "
+                                  f"{left:.0f}s left in the turn", flush=True)
+                            time.sleep(wait)
+                            continue
+                        print(f"[agent {job['id']}] rate-limited with only "
+                              f"{left:.0f}s left — not waiting", flush=True)
                     _adapt_tries += 1
                     if _adapt_tries > 3:
                         raise
@@ -1937,9 +2100,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             truncated_out = True
 
         if not msg.tool_calls:
-            # Before anything else: if the preview this turn rendered came
-            # back with craft findings, the turn is not finished. Send them
-            # back once as work rather than as commentary.
+            # Audit the edit the model is about to hand over. On a turn that
+            # rendered, this is already done and returns the same findings;
+            # on one that did not, it is the ONLY craft review that happens —
+            # and since round 90 most turns do not render, because the user's
+            # preview no longer costs the turn anything.
+            if ctx.versions_written:
+                audit_taste_now(ctx)
+            # If the edit has craft findings against it, the turn is not
+            # finished. Send them back once as work rather than as commentary.
             if _taste_pushback(ctx, messages, t_start, taste_pushed):
                 taste_pushed = True
                 print(f"[job {job['id']}] taste audit outstanding "
@@ -1949,9 +2118,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     messages.append({"role": "assistant",
                                      "content": msg.content})
                 continue
-            # Auto-render first so the turn facts include the real preview.
-            latest, fail_note = _auto_render_if_needed(ctx, worker_db,
-                                                       session_id, timings)
+            # Queue the preview BEFORE the honesty fence runs, so the turn
+            # facts can say the render is already on its way.
+            latest = _queue_turn_preview(ctx, worker_db, session_id, timings)
             draft = (msg.content or "").strip()
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
@@ -1974,12 +2143,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final = _enforce_reply_language(
                 ctx, client, messages, tools, final,
                 user_text=user_message["content"] or "", honesty=honesty)
-            if fail_note:
-                final += fail_note
             honesty["auto_render"] = ctx.autorendered
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           {"edl_version": latest["version"],
-                           "preview": ctx.last_preview})
+                           "preview": ctx.last_preview,
+                           "preview_pending": getattr(ctx, "preview_pending",
+                                                      None)})
             return {"status": "replied", "edl_version": latest["version"],
                     "steps": total_steps, "auto_render": ctx.autorendered,
                     "honesty": honesty, "timings": timings,

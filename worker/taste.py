@@ -103,6 +103,119 @@ HOOK_DEAD_AIR_S = 1.5
 
 _AGGRESSIVE_STYLIZE = ("flash", "chromatic", "vhs", "shake", "glitch")
 
+# ── THE FLOOR (round 90) ─────────────────────────────────────────────────
+# Every check above this line is a CEILING: it fires when the edit does too
+# much. Measured over three weeks of production that turned out to be the
+# whole problem — of 447 self-checks, 244 came back "looks clean", and the
+# median finished project shipped at 4.2 cuts per minute with zero text
+# events and zero sound effects, against reference reels that run at 32 cuts
+# per minute with word-synced typography throughout. An edit with one cut and
+# nothing else passed every test in this file. A critic that can only ever
+# say "too much" does not teach restraint; it teaches timidity, because doing
+# nothing is the strategy that always survives it.
+#
+# So these fire on an edit that is BARE. They are deliberately narrow:
+#   * only when the user's brief was OPEN ("edit it", "make it viral", or a
+#     turn with no ask at all). Someone who said "make the text bigger" is
+#     not asking for captions and a grade, and a floor that fired there would
+#     be the same disease in the other direction.
+#   * only on short-form, where a scrolling viewer decides in one second.
+#   * never as a demand for a specific device — each says what is MISSING and
+#     leaves the choice of what to do about it where it belongs.
+#
+# What "bare" means is not a taste judgement, it is the corpus: 17 of 17
+# reference reels carry music, every talking one carries captions, and all 16
+# measured exemplars sit at saturation 0.004-0.088 (raw phone footage is
+# 0.15-0.3) — a graded-down picture with one accent colour is the single most
+# universal marker in the set.
+OPEN_BRIEF_HINTS = (
+    "edit it", "edit this", "edit my", "edit the video", "edit that",
+    "make it viral", "go viral", "make this viral", "make it good",
+    "make it better", "make it pop", "make it nice", "make it look good",
+    "make it professional", "make it engaging", "make it interesting",
+    "make it fire", "make it banger", "do your thing", "your best",
+    "you decide", "up to you", "whatever you think", "surprise me",
+    "make a reel", "make it a reel", "make this a reel", "turn this into a",
+    "work your magic", "make something", "just edit", "edit please",
+    # the same ask in the languages real users have sent it in
+    "عدل الفيديو", "عدل هذا", "editalo", "edita esto", "haz un reel",
+    "monte cette", "bearbeite das",
+)
+
+# Constraint -> the finding kinds it makes INADMISSIBLE. The user's own
+# instruction outranks the critic, and until round 90 nothing enforced that:
+# on project 234 the brief said, in writing, "Use the full duration of the
+# selected clip and do not shorten it". The dead-air finding fired anyway,
+# the agent obeyed the critic over the customer, and cut 68s -> 32.5 -> 26.8
+# -> 25 -> 22s across two turns. The user re-sent the identical brief, the
+# agent restored the length, the audit fired again. Then the credits ran out
+# and that user never came back.
+CONSTRAINT_PATTERNS = (
+    ("keep_length", ("do not shorten", "don't shorten", "dont shorten",
+                     "do not cut", "don't cut", "dont cut", "no cuts",
+                     "full duration", "full length", "entire clip",
+                     "entire video", "whole clip", "whole video",
+                     "keep the length", "keep it long", "keep all of it",
+                     "leave the length", "without shortening",
+                     "لا تقصر", "no lo acortes", "duración completa")),
+    ("no_music", ("no music", "without music", "no soundtrack", "no song",
+                  "don't add music", "do not add music", "بدون موسيقى",
+                  "sin música", "sin musica")),
+    ("no_text", ("no text", "without text", "no titles", "no on-screen text",
+                 "don't add text", "do not add text", "بدون نص")),
+    ("no_grade", ("no filter", "no grade", "don't change the color",
+                  "do not change the color", "keep the colors",
+                  "keep the color", "no color change", "natural colors")),
+    ("minimal", ("keep it simple", "keep it clean", "nothing fancy",
+                 "no effects", "minimal", "don't add anything",
+                 "do not add anything", "just cut", "only cut",
+                 "raw", "subtle", "understated")),
+)
+
+# A 'minimal' brief is a request for restraint, and restraint is a real
+# editorial choice — it silences the whole floor rather than any one finding.
+_ALL_FLOORS = ("bare_edit", "no_typography", "no_music_floor", "no_grade_floor",
+               "under_cut")
+
+CONSTRAINT_VOIDS = {
+    # "do not shorten it" makes every finding that asks for a cut inadmissible.
+    "keep_length": ("dead_air", "long_vertical", "under_cut"),
+    "no_music": ("no_music_floor",),
+    "no_text": ("no_typography",),
+    "no_grade": ("no_grade_floor",),
+    "minimal": _ALL_FLOORS,
+}
+
+
+def user_constraints(user_asked):
+    """The set of constraint tokens the user's own words impose this turn.
+
+    Only ever used to SUPPRESS a finding — never to raise one — so a false
+    positive costs a review the agent would otherwise have acted on, and a
+    false negative costs nothing new. That asymmetry is why the patterns are
+    literal phrases rather than anything clever.
+    """
+    ask = (user_asked or "").lower()
+    out = set()
+    for token, phrases in CONSTRAINT_PATTERNS:
+        if any(p in ask for p in phrases):
+            out.add(token)
+    return out
+
+
+def _is_open_brief(user_asked):
+    """Did the user hand over the edit rather than name a change?
+
+    The floor fires only here. "Users just drop a video and say edit it" is
+    the exact case it exists for; "make the text bigger" is the exact case it
+    must stay out of. An empty ask counts — a turn continuing earlier work
+    ("continue", "") is still the agent's edit to finish.
+    """
+    ask = (user_asked or "").strip().lower()
+    if len(ask) < 3:
+        return True
+    return any(h in ask for h in OPEN_BRIEF_HINTS)
+
 
 def _num(v, default=0.0):
     try:
@@ -203,8 +316,10 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     fx = edl.get("effects") or {}
     found = []
 
-    def add(msg):
-        found.append(msg)
+    def add(msg, kind=None):
+        """kind tags a finding the user's own words can make inadmissible
+        (see CONSTRAINT_VOIDS). Untagged findings are never suppressed."""
+        found.append((kind, msg))
 
     # ── the opening ──────────────────────────────────────────────────────
     fade_in = _num(fx.get("fade_in_s"))
@@ -220,7 +335,8 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             and fmt["short_form"]:
         add(f"the first words land at {speech_at:.1f}s — everything before "
             "that is dead air at the most expensive moment of the video. "
-            "Cut into the strongest line, or move it to the front.")
+            "Cut into the strongest line, or move it to the front.",
+            "dead_air")
 
     zooms = sorted((fx.get("zooms") or []),
                    key=lambda z: _num(z.get("start")))
@@ -517,7 +633,8 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     if fmt["vertical"] and out_dur > SHORT_FORM_MAX_S:
         add(f"a vertical edit running {out_dur / 60:.1f} minutes — vertical "
             "feeds are watched thumb-down and the drop-off is brutal past a "
-            "minute or two. Say so and offer a tighter cut, or a series.")
+            "minute or two. Say so and offer a tighter cut, or a series.",
+            "long_vertical")
 
     # ── the frame ────────────────────────────────────────────────────────
     # A crop is a CHOICE to lose the sides, right only when the frame has a
@@ -602,7 +719,77 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
                 "several devices, not for several at once — or keep the one "
                 "that carries this beat and remove the rest.")
 
-    return found
+    # ── THE FLOOR: is there an edit here at all? ─────────────────────────
+    # See OPEN_BRIEF_HINTS. Everything above asks whether the edit does too
+    # much; this asks whether it does anything.
+    if fmt["short_form"] and out_dur > 5 and _is_open_brief(user_asked):
+        caps_present = caps_on
+        texts_present = bool(texts)
+        music_present = bool(music)
+        graded = bool(grade or fx.get("grade_custom") or stylize)
+        devices_present = bool(zooms or sfx or trans or fx.get("transition"))
+        n_blocks = len(edl.get("keep") or []) + len(edl.get("inserts") or [])
+
+        if not any((caps_present, texts_present, music_present, graded,
+                    devices_present)):
+            # Nothing at all. One finding, not five — an agent told five
+            # times that its edit is empty learns to ignore the audit.
+            add(f"THIS IS NOT AN EDIT YET — {out_dur:.0f}s of "
+                f"{'trimmed ' if n_blocks > 1 else ''}footage with no "
+                "captions, no on-screen text, no music, no grade and no "
+                "devices of any kind. The user handed you the whole edit and "
+                "this is what a viewer scrolling past would see: the raw "
+                "clip. Every reference edit in this genre carries at least "
+                "a graded-down picture, a music bed, and the spoken words on "
+                "screen. Decide what THIS footage wants and build it — do "
+                "not hand back the source with a trim.",
+                "bare_edit")
+        else:
+            if fmt["n_words"] >= 25 and not caps_present and not texts_present:
+                add(f"{fmt['n_words']} words are spoken and not one of them "
+                    "is on screen. Most of the feed watches muted, and in "
+                    "this genre the typography IS the energy — word-synced "
+                    "text is what makes a talking take watchable. "
+                    "add_captions('from_transcript'), or add_kinetic_text "
+                    "for the per-phrase placed style.",
+                    "no_typography")
+            if not music_present:
+                add("there is no music under this edit. Every reference reel "
+                    "in the library carries a bed — under speech it sits "
+                    "around -18dB and ducked, under a montage it carries the "
+                    "whole piece. Pick one that fits the footage "
+                    "(list_music_library / add_music) or say why silence is "
+                    "the right choice here.",
+                    "no_music_floor")
+            if not graded:
+                add("the picture is ungraded — this is the source straight "
+                    "off the camera. Measured across every exemplar in the "
+                    "grammar library the saturation sits at 0.004-0.088, "
+                    "against 0.15-0.3 for raw phone footage: desaturating "
+                    "toward a muted base with ONE accent colour is the most "
+                    "universal marker of a finished edit there is. "
+                    "apply_look / set_color_grade.",
+                    "no_grade_floor")
+            # Under-cut, measured against the family band rather than a
+            # universal number: a montage lives at ~1s shots, a talking head
+            # legitimately holds one take for a minute. Only the montage case
+            # is unambiguous enough to report.
+            if fmt["n_words"] < 20 and n_blocks and out_dur / n_blocks > 6.0 \
+                    and out_dur > 15:
+                add(f"{n_blocks} shot(s) across {out_dur:.0f}s — one every "
+                    f"{out_dur / n_blocks:.0f}s on footage with almost no "
+                    "speech. A montage is carried by its cut rate (the "
+                    "reference band is roughly one shot per 1-3.5s); held "
+                    "this long with nothing being said, the viewer has "
+                    "nothing to hold on to. Cut it tighter to the music or "
+                    "the action.",
+                    "under_cut")
+
+    # ── the user's own words outrank the critic ──────────────────────────
+    voided = set()
+    for token in user_constraints(user_asked):
+        voided.update(CONSTRAINT_VOIDS.get(token, ()))
+    return [msg for kind, msg in found if kind is None or kind not in voided]
 
 
 def audit_line(findings, limit=4):
@@ -611,8 +798,9 @@ def audit_line(findings, limit=4):
         return ""
     head = findings[:limit]
     more = len(findings) - len(head)
-    line = " TASTE AUDIT (craft, not correctness — fix what the user did not "
-    line += "explicitly ask for): " + "; ".join(head)
+    line = (" TASTE AUDIT (craft, not correctness — it reports BOTH an edit "
+            "that overreaches and one that is bare; read which each finding "
+            "is before acting): ") + "; ".join(head)
     if more:
         line += f"; (+{more} more)"
     return line + " Re-render after fixing."
