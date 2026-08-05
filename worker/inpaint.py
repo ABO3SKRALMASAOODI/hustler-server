@@ -715,9 +715,20 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
                     if mask.any():
                         frame[r.y0:r.y1, r.x0:r.x1] = _repaint(band, mask, r)
                         touched += 1
+                out = (frame.tobytes() if frame.flags["C_CONTIGUOUS"]
+                       else np.ascontiguousarray(frame).tobytes())
+            else:
+                # A FRAME NOBODY REPAINTED IS THE BYTES WE ALREADY HAVE.
+                # np.frombuffer gives a C-contiguous VIEW over `buf`, so
+                # frame.tobytes() on an untouched frame allocates and copies a
+                # whole frame to reproduce `buf` exactly — 24.9 MB per frame at
+                # 4K, for nothing. Most repaints are windowed to a few seconds
+                # of a much longer video (the request this was measured
+                # against covered 1.26s of 28.76s, so 96% of frames took this
+                # branch) and every one of them paid that copy.
+                out = buf
             last = frame
-            enc.stdin.write(frame.tobytes() if frame.flags["C_CONTIGUOUS"]
-                            else np.ascontiguousarray(frame).tobytes())
+            enc.stdin.write(out)
             i += 1
             if progress_cb and i % 30 == 0:
                 progress_cb(min(0.99, i / float(expected)))
