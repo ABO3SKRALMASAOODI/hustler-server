@@ -11184,26 +11184,35 @@ _STYLE_PROPS = {
     "emphasis_scale": {"type": "number"},
 }
 
-# How many calls one batch may carry. A bound, not a tuning knob: past this
-# the combined result stops being readable and a single bad plan costs more
-# than it saves. 24 covers the dense-typography pass the reference reels are
-# built from (a 30s reel is ~20 text events) in ONE round trip.
-BATCH_MAX_CALLS = 24
-_BATCH_RESULT_CAP = 700
+# A runaway backstop, deliberately set ABOVE what the model can physically
+# emit: one call is 50-100 tokens of JSON and a step's completion ceiling is
+# AGENT_MAX_TOKENS, so ~100 is already the natural limit. Set below that and
+# this stops being a backstop and starts being a leash on how dense an edit
+# is allowed to be — and the number of text events a reel wants is decided by
+# the footage, not by us. If a plan ever legitimately needs more, the answer
+# is two batches, not a smaller edit.
+BATCH_MAX_CALLS = 100
 
 
 def _batch_digest(name, result):
-    """One line per call. A write returns 'EDL vN -> vM: <change>. Before:
-    <state>. After: <state>.' — nineteen intermediate states are nineteen
-    copies of the same paragraph, so only the change survives here and the
-    FINAL state is appended once, by the caller."""
+    """One line per call.
+
+    A write returns 'EDL vN -> vM: <change>. Before: <state>. After: <state>.'
+    and twenty of those are twenty copies of the same paragraph, so only the
+    change line survives — losslessly, because the FINAL state is appended
+    once by the caller.
+
+    READ results come back WHOLE. They were briefly truncated here to a flat
+    character budget, which would have silently handed the agent a shortened
+    transcript or half a word list and let it edit from them — the tools that
+    return long text already cap themselves deliberately (_cap), and a second
+    blind cap on top of that deletes information nobody chose to lose.
+    """
     if not isinstance(result, str):
         result = str(result)
     head = result.split(". Before:", 1)[0]
     if len(head) < len(result):
         return head + "."
-    if len(result) > _BATCH_RESULT_CAP:
-        return result[:_BATCH_RESULT_CAP] + " …(truncated)"
     return result
 
 

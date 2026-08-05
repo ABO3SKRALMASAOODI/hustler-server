@@ -265,9 +265,11 @@ check("it is offered to the model as an array of {tool, args}",
               ["properties"]) == {"tool", "args"})
 check("an empty batch is rejected, not silently ignored",
       agent_tools.batch(None, calls=[]).startswith("REJECTED"))
-check("a batch over the cap is rejected with the number in it",
-      "25 calls" in agent_tools.batch(
-          None, calls=[{"tool": "get_edl"}] * 25))
+check("the runaway backstop sits ABOVE what a step can physically emit",
+      agent_tools.BATCH_MAX_CALLS >= 100)
+check("...and past it the refusal says how to proceed, not just no",
+      "two batches" in agent_tools.batch(
+          None, calls=[{"tool": "get_edl"}] * (agent_tools.BATCH_MAX_CALLS + 1)))
 check("a batch cannot contain a batch",
       "cannot contain a batch" in agent_tools.batch(
           None, calls=[{"tool": "batch", "args": {}}]))
@@ -279,11 +281,9 @@ check("the intermediate Before/After states are stripped from a write",
           "add_text",
           "EDL v3 -> v4: added text 'hi'. Before: A. After: B.")
       == "EDL v3 -> v4: added text 'hi'.")
-check("a non-write result is kept whole when it is short",
-      agent_tools._batch_digest("get_edl", "short result")
-      == "short result")
-check("...and truncated when it is not",
-      agent_tools._batch_digest("get_edl", "x" * 5000).endswith("(truncated)"))
+check("a READ result is never truncated — a half transcript is worse than a "
+      "long one",
+      agent_tools._batch_digest("get_words", "x" * 5000) == "x" * 5000)
 
 
 print(f"\n{PASS} checks passed")
