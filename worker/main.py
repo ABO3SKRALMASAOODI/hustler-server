@@ -163,17 +163,6 @@ FORCED_PREVIEW_FAIL_NOTE = (
     "I couldn't rebuild that preview for playback ({err}). Your edit itself is "
     "intact — you can still download it, or try opening the project in another "
     "browser.")
-# Round 90: an agent turn no longer waits for its own preview — it queues one
-# and replies. That reply has already told the user what the edit now is, so a
-# render that then dies leaves them reading a description of a cut whose
-# player never updates, with nothing to explain the gap. This is that
-# explanation, and it must not repeat the reply's content or contradict it:
-# the EDIT landed and is saved; only the picture of it failed.
-TURN_PREVIEW_FAIL_NOTE = (
-    "One correction to what I just said: the edit is saved exactly as I "
-    "described it, but its preview failed to render ({err}), so the player "
-    "above may still be showing the previous version. Ask me to try again, or "
-    "just make your next edit — it will render with that one.")
 
 
 def _notify_failure(worker_db, job, err):
@@ -182,8 +171,6 @@ def _notify_failure(worker_db, job, err):
     if not note and job["type"] == "preview":
         if payload.get("force"):
             note = FORCED_PREVIEW_FAIL_NOTE
-        elif payload.get("source") == "turn":
-            note = TURN_PREVIEW_FAIL_NOTE
         elif payload.get("source") == "user_edit":
             note = USER_PREVIEW_FAIL_NOTE
     if not note:

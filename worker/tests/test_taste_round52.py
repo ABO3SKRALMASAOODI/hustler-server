@@ -47,13 +47,7 @@ def _index(words=40, shots=1):
             "shots": [{"t0": 0.0, "t1": 40.0}] * shots}
 
 
-# The default ask is a NARROW one on purpose (round 90). Every assertion in
-# this file is about a CEILING — the edit doing too much — and a ceiling
-# applies whatever the user asked for. The floor findings added in round 90
-# fire only on an OPEN brief ("edit it", or no ask at all), so running these
-# under a specific request keeps each check measuring the one thing it was
-# written for. The floors have their own file: tests/test_round90_turn.py.
-def _crit(edl, index=None, ask="make it 30 seconds"):
+def _crit(edl, index=None, ask=""):
     index = index or _index()
     tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
     return taste.critique(edl, index, tl, VERTICAL["width"],

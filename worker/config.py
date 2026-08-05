@@ -795,17 +795,6 @@ MAX_CLAIMS_ABSOLUTE = int(os.getenv("MAX_CLAIMS_ABSOLUTE", "6"))
 
 AGENT_MAX_ITERATIONS = 30
 AGENT_TEMPERATURE = 0.2
-# A 429 is the provider saying "slow down", and until round 90 nothing in the
-# stack waited: six turns died on rate limits in three weeks, each one a user
-# mid-edit told to resend. Retried in place inside the step, so the turn keeps
-# everything it has already done — never by re-running the job, which would
-# replay its EDL writes. Backoff doubles from here (5s, 10s, 20s) and every
-# wait is checked against what is left of the turn, so a rate-limited turn
-# spends its remaining time waiting rather than dying immediately, but never
-# eats the whole budget in sleeps.
-AGENT_RATE_LIMIT_RETRIES = int(os.getenv("AGENT_RATE_LIMIT_RETRIES", "3"))
-AGENT_RATE_LIMIT_BACKOFF_S = float(os.getenv("AGENT_RATE_LIMIT_BACKOFF_S",
-                                             "5"))
 # Completion ceiling for ONE agent step. 8000 (was a hardcoded 2000).
 #
 # A REASONING model spends this budget before it ever reaches `content`: on
