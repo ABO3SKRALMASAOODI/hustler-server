@@ -833,18 +833,13 @@ AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
 # edits in 95s of model time and spent 762s inside three sequential inpaint
 # passes; job 2353 spent 823s of 863s inside five. Raising the ceiling alone
 # would only have made the user wait longer for the same wall, so it moves
-# together with the two things that actually caused it: previews now render
-# at the proof budget (PREVIEW_MAX_LONG_EDGE, ~4x less encode) and a tool
-# whose measured cost cannot fit in what remains is refused BEFORE it starts
-# (AGENT_TURN_RESERVE_S) instead of running into the guillotine.
+# together with the two things that actually caused it: previews render at the
+# proof budget (PREVIEW_MAX_LONG_EDGE — ~4.5x less encode) and the repaint
+# diffuses at the scale of its hole (INPAINT_MAX_PX — 5.9x on the shape that
+# ate project 360). The work got faster; the agent was NOT given a shorter
+# leash. A version of this round refused expensive tools near the deadline and
+# it was removed — an agent that may not finish the job is not a fixed agent.
 AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "900"))
-
-# What must still be on the clock when a slow tool is asked for. The turn owes
-# the user a rendered proof and a written reply; a turn that spends its last
-# second inside an inpaint hands over a wall of activity rows and no video.
-# Guards only the tools that can plausibly exceed a minute — see
-# agent_loop.SLOW_TOOL_COST_S. Set to 0 to disable the pre-flight refusal.
-AGENT_TURN_RESERVE_S = float(os.getenv("AGENT_TURN_RESERVE_S", "150"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # Transcript tools get a far larger budget: silently dropping the tail of a
@@ -964,6 +959,25 @@ CLEAN_X264_LOOKAHEAD = int(os.getenv("CLEAN_X264_LOOKAHEAD", "10"))
 # input-seeks, so each sample is a seek, not a decode; 28 covers a caption that
 # is only on screen for part of the video without making the scan noticeable.
 CLEAN_DETECT_SAMPLES = int(os.getenv("CLEAN_DETECT_SAMPLES", "28"))
+
+# ── The inpaint runs at the scale of the HOLE, not of the frame (round 88) ──
+#
+# cv2.inpaint(TELEA) reconstructs a hole by diffusing inward from its boundary.
+# Its cost grows with the hole's AREA; the detail it can invent does not — past
+# a few pixels from the edge it is producing smooth diffusion whatever the
+# resolution. Running it at full frame scale on a big hole therefore buys
+# nothing and costs everything: project 360 (Aug 5 2026) asked for a 0.9x0.45
+# 'box' repaint of a 1080x1920 video — ~840,000 masked pixels, TELEA'd 330
+# times, one per frame — and that single call took 425 seconds and ate the
+# turn. Two earlier passes on the same footage took 120s and 162s.
+#
+# So the mask's area picks the scale: under the budget nothing changes (thin
+# text strokes, where the boundary IS the output, keep full resolution), and a
+# large fill is diffused at the resolution its own smoothness justifies and
+# scaled back. Only masked pixels are ever taken from the scaled result, so
+# the surrounding picture stays bit-exact either way.
+INPAINT_MAX_PX = int(os.getenv("INPAINT_MAX_PX", "120000"))
+INPAINT_MIN_SCALE = float(os.getenv("INPAINT_MIN_SCALE", "0.25"))
 
 # Person-segmentation model for the text-behind matte (round 64). The ONNX
 # file is baked into the image by the Dockerfile (same policy as the whisper

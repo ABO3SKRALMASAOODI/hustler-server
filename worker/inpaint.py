@@ -555,6 +555,50 @@ def _grain_sigma(band, mask):
     return float(np.clip(np.std(hi[keep]), 0.0, 12.0))
 
 
+def _telea(band, m):
+    """TELEA over the masked pixels, at a resolution matched to the HOLE.
+
+    Small masks — thin caption strokes, a watermark's letters — run exactly as
+    before: there the boundary detail IS the output, and there is nothing to
+    save. A large 'box' fill is a different animal. TELEA's cost scales with
+    the masked area while the detail it can synthesise does not, so a 840k-pixel
+    hole is being diffused smooth at 1080p 330 times over (project 360: 425s in
+    one call). Diffusing it at the scale its own smoothness justifies and
+    resizing back gives the same picture for a fraction of the work.
+
+    Untouched pixels are taken from the ORIGINAL band, never from the resized
+    result, so everything outside the mask is bit-exact at any scale.
+    """
+    m8 = (m.astype(np.uint8) * 255)
+    area = int(np.count_nonzero(m))
+    budget = config.INPAINT_MAX_PX
+    if not budget or area <= budget:
+        return cv2.inpaint(np.ascontiguousarray(band), m8, 3,
+                           cv2.INPAINT_TELEA)
+    h, w = m.shape
+    k = max(config.INPAINT_MIN_SCALE, (budget / float(area)) ** 0.5)
+    # Two resizes and a compositing where-select are not free. Just over the
+    # budget they cost more than the TELEA they save (measured: a 128k-pixel
+    # mask came out 2ms SLOWER), so only take the scaled path when the saving
+    # is real. Below 0.8 it is: 0.8 is already a 36% cut in masked pixels.
+    if k > 0.8:
+        return cv2.inpaint(np.ascontiguousarray(band), m8, 3,
+                           cv2.INPAINT_TELEA)
+    sw, sh = max(8, int(round(w * k))), max(8, int(round(h * k)))
+    if sw >= w or sh >= h:
+        return cv2.inpaint(np.ascontiguousarray(band), m8, 3,
+                           cv2.INPAINT_TELEA)
+    small = cv2.resize(band, (sw, sh), interpolation=cv2.INTER_AREA)
+    # Round the shrunken mask OUTWARD (any partial coverage counts as ink).
+    # A mask that eroded instead would leave a ring of the original ink around
+    # the hole — the one failure mode that would read as "it didn't work".
+    sm = cv2.resize(m8, (sw, sh), interpolation=cv2.INTER_LINEAR)
+    sm = ((sm > 0).astype(np.uint8) * 255)
+    fixed = cv2.inpaint(np.ascontiguousarray(small), sm, 3, cv2.INPAINT_TELEA)
+    up = cv2.resize(fixed, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.where(m[..., None], up, band)
+
+
 def _repaint(band, mask, region, rng=None):
     """Replace the masked pixels of one band, feathered and re-grained."""
     if not mask.any():
@@ -569,9 +613,10 @@ def _repaint(band, mask, region, rng=None):
     filled = np.zeros(mask.shape, bool)
     if m.any():
         # TELEA reconstructs from the boundary inwards — the right algorithm
-        # for thin strokes and small shapes, which is what is left here.
-        out = cv2.inpaint(np.ascontiguousarray(out),
-                          (m.astype(np.uint8) * 255), 3, cv2.INPAINT_TELEA)
+        # for thin strokes and small shapes, which is what is left here after
+        # the plate has covered whatever it could. _telea picks the resolution
+        # from the mask's own area (see config.INPAINT_MAX_PX).
+        out = _telea(out, m)
         filled = m
     sigma = _grain_sigma(band, mask)
     if sigma > 0.6 and filled.any():

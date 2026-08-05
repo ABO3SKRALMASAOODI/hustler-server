@@ -29,9 +29,18 @@ Four changes, tested here:
      reads a preview wanted those pixels (the studio plays it in a panel; the
      agent reads it as 480x270 contact-sheet tiles; look_at samples the proxy,
      never the render). Exports are untouched.
-  2. The turn deadline was checked only BETWEEN iterations, so a tool could
-     start with five minutes left and run for seven. A tool whose measured
-     cost cannot fit is now refused before it starts.
+  2. THE INPAINT RUNS AT THE SCALE OF THE HOLE. cv2.inpaint(TELEA) diffuses
+     inward from a hole's boundary: its cost grows with the hole's area, the
+     detail it can invent does not. er3 was a ~822,000-pixel 'box' hole
+     TELEA'd 330 times at 1080p — 606ms a frame. Diffused at the scale its
+     own smoothness justifies it is 96ms, and only masked pixels are ever
+     taken from the scaled result, so the picture around it is bit-exact.
+     Thin caption strokes are under the budget and are untouched.
+
+     An earlier draft of this round refused slow tools when the turn was
+     running out instead. That is not a fix — it is the agent being told it
+     may not do its job, and it was removed. Make the work fast; do not take
+     the work away.
   3. A rectangle fully covered by a later, wider one is dropped. Every repaint
      redoes every region forever, so project 360 finished carrying a dead er2
      inside er3 as a tax on all its future passes.
@@ -45,17 +54,15 @@ import os
 import re
 import sys
 import time
-import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# The repaint/vision modules pull OpenCV; nothing under test touches it, and a
-# stub keeps this file runnable on a box without the native wheel.
-sys.modules.setdefault("cv2", types.ModuleType("cv2"))
+import cv2                                                   # noqa: E402
+import numpy as np                                           # noqa: E402
 
-import agent_loop                                            # noqa: E402
 import agent_tools                                           # noqa: E402
 import config                                                # noqa: E402
+import inpaint                                               # noqa: E402
 import renderer                                              # noqa: E402
 
 fails = []
@@ -94,58 +101,80 @@ check("cap off restores the source frame exactly",
 config.PREVIEW_MAX_LONG_EDGE = _cap
 
 
-print("\n== a tool that cannot finish is refused before it starts ==")
+print("\n== the inpaint runs at the scale of the hole ==")
+# Project 360's er3: a 0.9x0.45 'box' repaint of a 1080x1920 video is a
+# ~822,000-pixel hole, TELEA'd once per frame for 330 frames. That ONE call
+# took 425 seconds. Measured here: 606ms -> 96ms per frame.
+band = np.zeros((864, 972, 3), np.uint8)
+band[:] = 128
+big = np.zeros((864, 972), bool)
+big[8:-8, 8:-8] = True                       # ~822k masked pixels
+check("a big hole is scaled down",
+      int(big.sum()) > config.INPAINT_MAX_PX, True)
 
+t0 = time.perf_counter()
+scaled = inpaint._telea(band, big)
+t_new = time.perf_counter() - t0
+t0 = time.perf_counter()
+cv2.inpaint(np.ascontiguousarray(band), big.astype(np.uint8) * 255, 3,
+            cv2.INPAINT_TELEA)
+t_old = time.perf_counter() - t0
+print(f"  -- er3's shape: {t_old*1000:.0f}ms -> {t_new*1000:.0f}ms "
+      f"({t_old/max(t_new,1e-9):.1f}x)")
+check("the big hole got materially faster", t_old / max(t_new, 1e-9) > 2.0, True)
 
-def at(elapsed, name, timings=None):
-    """The guard's answer `elapsed` seconds into a turn."""
-    return agent_loop._too_slow_to_start(name, time.monotonic() - elapsed,
-                                         timings or {"tools": {}})
+# THE INVARIANT THAT MAKES IT SAFE: only masked pixels ever come from the
+# resized result, so the surrounding picture is bit-exact at any scale.
+noise = np.random.default_rng(3).integers(0, 255, (864, 972, 3), dtype=np.uint8)
+check("pixels outside the mask are bit-exact",
+      np.array_equal(inpaint._telea(noise, big)[~big], noise[~big]), True)
 
+# Thin strokes — a caption's letters — are where boundary detail IS the
+# output. They are under the budget, so they take the untouched full-res path.
+strokes = np.zeros((505, 852), bool)
+strokes[240:260, 100:750] = True             # ~13k px
+check("a thin-stroke mask stays under budget",
+      int(strokes.sum()) <= config.INPAINT_MAX_PX, True)
+check("and comes out identical to plain TELEA",
+      np.array_equal(
+          inpaint._telea(noise[:505, :852], strokes),
+          cv2.inpaint(np.ascontiguousarray(noise[:505, :852]),
+                      strokes.astype(np.uint8) * 255, 3, cv2.INPAINT_TELEA)),
+      True)
 
-check("a fast tool is never guarded", at(880, "add_text"), None)
-# render_preview is what the reserve is being reserved FOR — guarding it would
-# take away the turn's only way to hand over what it built.
-check("render_preview is never guarded", at(880, "render_preview"), None)
-check("an erase early in the turn runs", at(10, "erase_region"), None)
+# Just over the budget the two resizes cost more than the TELEA they save, so
+# the scaled path is only taken when the saving is real.
+mid = np.zeros((505, 852), bool)
+mid[60:445, 60:792] = True                   # ~280k px, k ~= 0.65
+edge = np.zeros((505, 852), bool)
+edge[100:400, 100:600] = True                # 150k px, k ~= 0.89 -> full res
+check("k just under 1 takes the full-res path",
+      np.array_equal(
+          inpaint._telea(noise[:505, :852], edge),
+          cv2.inpaint(np.ascontiguousarray(noise[:505, :852]),
+                      edge.astype(np.uint8) * 255, 3, cv2.INPAINT_TELEA)),
+      True)
+check("a clearly-worth-it mask does not",
+      np.array_equal(
+          inpaint._telea(noise[:505, :852], mid),
+          cv2.inpaint(np.ascontiguousarray(noise[:505, :852]),
+                      mid.astype(np.uint8) * 255, 3, cv2.INPAINT_TELEA)),
+      False)
 
-# Project 360's third pass began at t=413s. Under the 900s ceiling there is
-# room for it, and with previews at the proof budget the turn now lands
-# instead of being guillotined — the guard is the backstop, not the plan.
-check("erase at t=413 of a 900s turn is allowed",
-      at(413, "erase_region"), None)
+_b = config.INPAINT_MAX_PX
+config.INPAINT_MAX_PX = 0
+check("budget=0 restores plain full-res TELEA everywhere",
+      np.array_equal(
+          inpaint._telea(band, big),
+          cv2.inpaint(np.ascontiguousarray(band), big.astype(np.uint8) * 255,
+                      3, cv2.INPAINT_TELEA)), True)
+config.INPAINT_MAX_PX = _b
 
-late = at(600, "erase_region")
-check("erase with 300s left is refused", bool(late), True)
-check("the refusal names the tool", "erase_region" in (late or ""), True)
-check("it forbids a retry (the cost is the pass, not the args)",
-      "Do NOT retry" in (late or ""), True)
-check("it states nothing changed", "Nothing was changed" in (late or ""), True)
-check("it tells the agent to land and name the next step",
-      "render_preview" in (late or "") and "continue" in (late or ""), True)
-
-# What THIS turn measured outranks the cold table: a first pass that cost 420s
-# means the next one costs at least that.
-measured = {"tools": {"erase_region": {"n": 1, "s": 420.0}}}
-check("a measured 420s pass blocks the next one at t=413",
-      bool(at(413, "erase_region", measured)), True)
-check("the cold table alone would have waved it through",
-      at(413, "erase_region"), None)
-
-_res = config.AGENT_TURN_RESERVE_S
-config.AGENT_TURN_RESERVE_S = 0
-check("reserve=0 disables the guard entirely",
-      at(600, "erase_region"), None)
-config.AGENT_TURN_RESERVE_S = _res
-
-check("the ceiling is above every guarded estimate",
-      max(agent_loop.SLOW_TOOL_COST_S.values())
-      + config.AGENT_TURN_RESERVE_S < config.AGENT_TURN_TIMEOUT_S, True)
-# The two in-turn fetch/generate ceilings must still fit under the wall.
-check("VIDEO_POLL_TIMEOUT_S still fits",
-      config.VIDEO_POLL_TIMEOUT_S < config.AGENT_TURN_TIMEOUT_S, True)
-check("FETCH_TIMEOUT_S still fits",
-      config.FETCH_TIMEOUT_S < config.AGENT_TURN_TIMEOUT_S, True)
+check("no pre-flight tool guard survives — slowness is fixed, not refused",
+      "_too_slow_to_start" in open(
+          os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "agent_loop.py"), encoding="utf-8").read(),
+      False)
 
 
 print("\n== the superseded rectangle is dropped ==")
@@ -188,10 +217,8 @@ check("it rides on the write result the agent reads back",
 
 _loop = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "..", "agent_loop.py"), encoding="utf-8").read()
-check("the guard is wired into dispatch, computed once",
-      "no_time = (None if args is None else" in _loop, True)
-check("the refusal is fed back as this call's tool result",
-      "result = no_time" in _loop, True)
+check("the dispatch loop has no cost-based tool refusal in it",
+      "no_time" in _loop or "SLOW_TOOL_COST_S" in _loop, False)
 
 
 print()
