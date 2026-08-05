@@ -1984,13 +1984,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # keeps everything this turn has already built. Bounded by
                     # what is left of the turn: sleeping past the deadline
                     # would trade a rate-limited edit for a timed-out one.
-                    if llm.looks_like_rate_limit(e) \
-                            and _rate_tries < config.AGENT_RATE_LIMIT_RETRIES:
-                        wait = config.AGENT_RATE_LIMIT_BACKOFF_S * (
-                            2 ** _rate_tries)
+                    if llm.looks_like_rate_limit(e):
                         left = config.AGENT_TURN_TIMEOUT_S - (
                             time.monotonic() - t_start)
-                        if wait < left - 15:
+                        wait = config.AGENT_RATE_LIMIT_BACKOFF_S * (
+                            2 ** _rate_tries)
+                        if _rate_tries < config.AGENT_RATE_LIMIT_RETRIES \
+                                and wait < left - 15:
                             _rate_tries += 1
                             print(f"[agent {job['id']}] rate-limited by the "
                                   f"provider — waiting {wait:.0f}s and "
@@ -1999,8 +1999,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                   f"{left:.0f}s left in the turn", flush=True)
                             time.sleep(wait)
                             continue
-                        print(f"[agent {job['id']}] rate-limited with only "
-                              f"{left:.0f}s left — not waiting", flush=True)
+                        # Out of waits, or out of turn. Give up HERE rather
+                        # than falling into the dialect chain below: none of
+                        # those adaptations can fix a 429, and trying them
+                        # would fire three more immediate calls at a provider
+                        # that has just asked us to slow down.
+                        print(f"[agent {job['id']}] rate-limited after "
+                              f"{_rate_tries} wait(s) with {left:.0f}s left "
+                              "in the turn — giving up on this step",
+                              flush=True)
+                        raise
                     _adapt_tries += 1
                     if _adapt_tries > 3:
                         raise
