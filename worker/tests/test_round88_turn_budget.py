@@ -77,16 +77,28 @@ def check(label, got, want):
 
 
 print("== the preview renders at the proof budget ==")
-# The exact shape of project 360's footage.
-check("1080x1920@60 -> 720x1280@30",
-      renderer.preview_geometry(1080, 1920, 60.0), (720, 1280, 30.0))
-check("1920x1080@60 landscape",
-      renderer.preview_geometry(1920, 1080, 60.0), (1280, 720, 30.0))
-# A cap, never a resize: anything already under it is left exactly alone.
-check("1080x1080 square untouched",
-      renderer.preview_geometry(1080, 1080, 30.0), (1080, 1080, 30.0))
-check("540x960@24 never up-scaled",
-      renderer.preview_geometry(540, 960, 24.0), (540, 960, 24.0))
+# Round 90b: preview_geometry now returns the size the FILE IS WRITTEN AT,
+# not an intermediate. These numbers moved because the graph used to carry a
+# SECOND, unrelated cap — a literal `scale=-2:min(480,...)` at the very end —
+# which quietly won every time and threw away everything the filters had just
+# computed at the larger size. The values asserted here are the ones the old
+# graph already produced in the FILE (project 363's stored renders are
+# 270x480, project 368's are 854x480); what changed is that the grade, the
+# vignette, the unsharp, the zoom and the burned text now run at that size
+# instead of being computed larger and resampled down. Measured on project
+# 368's real chain: 43.2s -> 32.2s.
+check("1080x1920@60 -> 270x480@30 (the size that ships)",
+      renderer.preview_geometry(1080, 1920, 60.0), (270, 480, 30.0))
+check("1920x1080@60 landscape -> 854x480",
+      renderer.preview_geometry(1920, 1080, 60.0), (854, 480, 30.0))
+check("1080x1080 square -> 480x480",
+      renderer.preview_geometry(1080, 1080, 30.0), (480, 480, 30.0))
+# Still a cap and never a resize: anything already under BOTH caps is left
+# exactly alone, and nothing is ever scaled UP.
+check("a 640x360 source is left exactly alone",
+      renderer.preview_geometry(640, 360, 24.0), (640, 360, 24.0))
+check("360-high footage is never up-scaled to 480",
+      renderer.preview_geometry(202, 360, 24.0), (202, 360, 24.0))
 
 w, h, fps = renderer.preview_geometry(1080, 1920, 60.0)
 check("aspect ratio preserved", round(w / h, 4), round(1080 / 1920, 4))
@@ -94,11 +106,22 @@ check("dims stay even (x264 needs it)", (w % 2, h % 2), (0, 0))
 check("throughput cut at least 4x",
       (1080 * 1920 * 60) / (w * h * fps) >= 4.0, True)
 
+# ...and the trailing downscale is no longer emitted, because there is
+# nothing left for it to do. That scale was not free: it is one more
+# full-frame pass through swscale on every frame of every preview.
+check("no trailing downscale once the graph is already at height",
+      renderer._needs_preview_downscale(480), False)
+check("...but a graph built above it still gets one",
+      renderer._needs_preview_downscale(720), True)
+
 _cap = config.PREVIEW_MAX_LONG_EDGE
+_hcap = config.PREVIEW_MAX_HEIGHT
 config.PREVIEW_MAX_LONG_EDGE = 0
-check("cap off restores the source frame exactly",
+config.PREVIEW_MAX_HEIGHT = 0
+check("both caps off restores the source frame exactly",
       renderer.preview_geometry(1080, 1920, 60.0)[:2], (1080, 1920))
 config.PREVIEW_MAX_LONG_EDGE = _cap
+config.PREVIEW_MAX_HEIGHT = _hcap
 
 
 print("\n== the inpaint runs at the scale of the hole ==")

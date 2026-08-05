@@ -460,6 +460,28 @@ def frame_dims(src_w, src_h, ratio):
     return _even(long_out), _even(short_out)
 
 
+def _needs_preview_downscale(H):
+    """Is a trailing preview downscale still worth emitting?
+
+    False whenever the graph is already at (or under) the preview height,
+    which since this round is every graph built through preview_geometry. A
+    scale to the size you already are is not free — it is one more full-frame
+    pass through swscale for every frame — so it is skipped rather than
+    emitted and relied upon to be a no-op.
+
+    TRUE when H is unknown. A caller that builds a graph without dimensions
+    has not been through preview_geometry, so nothing has capped it and the
+    height could be anything; the two outcomes are not symmetric. Emitting a
+    scale that turns out to be redundant costs one pass, while skipping one
+    that was needed ships a full-resolution file as the "preview" — slower to
+    encode and larger than the final it stands in for.
+    """
+    cap = config.PREVIEW_MAX_HEIGHT
+    if not cap:
+        return False
+    return H is None or H > cap
+
+
 def preview_geometry(W, H, fps):
     """Shrink a PREVIEW's frame and rate to the proof-of-the-edit budget.
 
@@ -471,10 +493,33 @@ def preview_geometry(W, H, fps):
     edge derived and made even), so nothing in the graph has to know: text,
     captions, watermark and zoom viewports are all expressed against W/H and
     scale with them. NEVER up-scales — a 540p source stays 540p.
+
+    TWO CAPS USED TO DISAGREE, AND THE GRAPH PAID FOR IT. The long-edge cap
+    below decided the size every filter ran at, and then a SECOND, unrelated
+    `scale=-2:min(480,...)` at the very end of the graph decided the size the
+    file was actually written at. For every real project the second one won:
+    a 960x540 proxy sailed under the 1280 long-edge cap untouched, ran the
+    whole stack at 540p, and was then thrown away down to 854x480. So the
+    grade, the custom grade, the vignette, the unsharp, the zoom, the burned
+    captions and the watermark each processed 1.26x the pixels that survived
+    — and on the project this was measured against that stack is SIX
+    full-frame passes at 6-9s apiece.
+
+    Measured on project 368's real graph (55s, 960x540 proxy): the whole
+    chain takes 43.2s with the downscale last, and 32.2s with it first — 25%
+    of the render, paid for pixels nobody ever sees. Capping here instead
+    means the trailing scale has nothing left to do and every filter runs at
+    output size, which is also where sharpening and text SHOULD happen: text
+    burned at 480 is text rendered at 480, not text rendered at 540 and then
+    resampled.
     """
     cap = config.PREVIEW_MAX_LONG_EDGE
     if cap and max(W, H) > cap:
         k = cap / float(max(W, H))
+        W, H = _even(W * k), _even(H * k)
+    hcap = config.PREVIEW_MAX_HEIGHT
+    if hcap and H > hcap:
+        k = hcap / float(H)
         W, H = _even(W * k), _even(H * k)
     if config.PREVIEW_MAX_FPS:
         fps = min(fps, config.PREVIEW_MAX_FPS)
@@ -2213,8 +2258,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
     outro_here = outro_s > 0.0 and card_idx is not None
     v_final = "vout"
-    if not outro_here and preview:
-        parts.append(rf"[{vlabel}]scale=-2:min(480\,floor(ih/2)*2)[vsc]")
+    # Only when the programme is still taller than the preview height —
+    # preview_geometry now caps H there, so on every path that goes through it
+    # this is a no-op and is skipped rather than emitted as an extra
+    # full-frame pass. Kept for any caller that builds a graph without it.
+    if not outro_here and preview and _needs_preview_downscale(H):
+        parts.append(rf"[{vlabel}]scale=-2:min({config.PREVIEW_MAX_HEIGHT}\,"
+                     r"floor(ih/2)*2)[vsc]")
         vlabel = "vsc"
     if outro_here:
         # Force exact geometry before concat. concat demands identical
@@ -2404,12 +2454,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if outro_on:
         parts.append(f"anullsrc=r=48000:cl=stereo:d={outro_s:.3f},"
                      "aformat=sample_fmts=fltp:channel_layouts=stereo[osil]")
-        cat_v = "vcat" if preview else "vout"
+        shrink = preview and _needs_preview_downscale(H)
+        cat_v = "vcat" if shrink else "vout"
         parts.append(f"[{v_final}][{a_prog}][ovid][osil]"
                      f"concat=n=2:v=1:a=1[{cat_v}][aout]")
-        if preview:
-            parts.append(rf"[vcat]scale=-2:min(480\,floor(ih/2)*2),"
-                         r"format=yuv420p[vout]")
+        if shrink:
+            parts.append(rf"[vcat]scale=-2:min({config.PREVIEW_MAX_HEIGHT}\,"
+                         r"floor(ih/2)*2),format=yuv420p[vout]")
 
     return ";".join(parts)
 

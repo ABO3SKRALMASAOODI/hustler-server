@@ -1037,6 +1037,14 @@ PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 # element scales with the frame and the preview stays a true proof of the
 # edit. Set PREVIEW_MAX_LONG_EDGE=0 to render previews at source size.
 PREVIEW_MAX_LONG_EDGE = int(os.getenv("PREVIEW_MAX_LONG_EDGE", "1280"))
+# The height a preview is actually WRITTEN at. This number is not new — the
+# graph has always ended with `scale=-2:min(480,...)` — but it lived as a
+# literal at the end of the filter chain, which meant every filter before it
+# ran at the SOURCE proxy's height and had its work thrown away. Declared here
+# and applied in renderer.preview_geometry so one cap decides the size, and
+# the filters run at the size that ships. Set to 0 to render previews at the
+# long-edge cap alone. See preview_geometry for the measurement (25%).
+PREVIEW_MAX_HEIGHT = int(os.getenv("PREVIEW_MAX_HEIGHT", "480"))
 PREVIEW_MAX_FPS = float(os.getenv("PREVIEW_MAX_FPS", "30"))
 
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /
