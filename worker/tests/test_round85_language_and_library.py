@@ -214,3 +214,47 @@ def test_the_prompt_no_longer_orders_a_stop_after_two_failures():
     assert "stop retrying" not in p
     # What replaced it: change the approach, keep going.
     assert "different route" in p
+
+
+# ── round 91b: a short reply must not disable the language check ─────────
+#
+# _dominant_script needs a handful of letters to name a script, so the check
+# measured the LAST user message only and a one-word answer measured nothing —
+# it failed open and the flip went out. Real case, 2026-08-05 21:11: a user who
+# had written "What happened", "How many pictures do you see" and "Enhance the
+# video and make it look like a one that goes viral" replied "Sure" (four
+# letters) and was answered in Russian.
+
+RU_REPLY = ("Я проверил: красный «.io» находится на фиксированной "
+            "Valmera-заставке, которую экспорт добавляет автоматически.")
+
+
+def _users(*texts):
+    return [{"role": "user", "content": t} for t in texts]
+
+
+def test_a_four_letter_message_no_longer_blinds_the_check():
+    # The message on its own is unmeasurable — that is the whole bug.
+    assert agent_loop._dominant_script("Sure") is None
+    # The conversation is not.
+    history = _users("What happened", "How many pictures do you see",
+                     "Enhance the video and make it look like a one that "
+                     "goes viral", "Sure")
+    joined = " ".join(m["content"] for m in history)
+    assert agent_loop._dominant_script(joined) == "Latin"
+    assert agent_loop._dominant_script(RU_REPLY, min_letters=10) == "Cyrillic"
+
+
+def test_the_enforcement_reads_the_whole_conversation():
+    import inspect
+    src = inspect.getsource(agent_loop._enforce_reply_language)
+    assert 'm.get("role") == "user"' in src, "must scan the message history"
+    # ...and BOTH halves of the decision must use that same evidence, or a
+    # bilingual user's deliberate Cyrillic reply gets rewritten because their
+    # last message happened to be "ok".
+    assert src.count("history") >= 3
+
+
+def test_a_user_who_writes_cyrillic_is_still_left_alone():
+    ru = " ".join(["Привет, сделай монтаж покороче", "ок"])
+    assert agent_loop._script_counts(ru).get("Cyrillic", 0) > 0

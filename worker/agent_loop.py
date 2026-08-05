@@ -1464,12 +1464,34 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
     either side is too short to measure — so it cannot cage a legitimate
     reply; it only catches the flip the system prompt already forbids.
     Fail-open at every step: any doubt returns the draft unchanged."""
-    user_script = _dominant_script(user_text)
+    # MEASURE THE USER FROM THE WHOLE CONVERSATION, NOT THE LAST MESSAGE.
+    # _dominant_script needs a handful of letters to name a script, so a short
+    # reply ("Sure", "ok", "نعم") measured nothing, the check failed open, and
+    # the flip it exists to catch went out. That is not hypothetical: on
+    # 2026-08-05 21:11 a user who had written "What happened", "How many
+    # pictures do you see" and "Enhance the video..." answered "Sure" — four
+    # letters — and got a reply in Russian. Their language was never in doubt;
+    # it just was not in THAT message. The prompt anchor already reads every
+    # user message for exactly this reason (_reply_language_note); the
+    # enforcement now agrees with it instead of being strictly weaker.
+    history = " ".join(
+        m["content"] for m in messages
+        if m.get("role") == "user" and isinstance(m.get("content"), str))
+    user_script = (_dominant_script(user_text)
+                   or _dominant_script(" ".join(x for x in (history, user_text)
+                                                if x)))
     reply_script = _dominant_script(final, min_letters=10)
     if not user_script or not reply_script or reply_script == user_script:
         return final
-    if _script_counts(user_text).get(reply_script, 0) > 0:
-        return final        # the user themselves used that script; their call
+    # Same evidence on both sides of the decision: if the user has written in
+    # that script ANYWHERE in this conversation it is their call, not a flip.
+    # Checking only the latest message here while deciding their script from
+    # the history would be the mirror of the bug above — a bilingual user's
+    # deliberate Russian reply rewritten into English because their last
+    # message happened to be "ok".
+    if _script_counts(" ".join(x for x in (history, user_text) if x)) \
+            .get(reply_script, 0) > 0:
+        return final
     honesty["language_flip"] = f"{user_script}->{reply_script}"
     print(f"[language] job {ctx.job['id']}: reply drafted in {reply_script} "
           f"script for a {user_script}-script user — forcing one rewrite",
