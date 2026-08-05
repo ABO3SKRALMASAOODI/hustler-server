@@ -828,7 +828,23 @@ AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
 # (240) and FETCH_TIMEOUT_S (180) still sit safely under it. Cost of raising:
 # a genuinely stuck turn holds one shared agent slot longer, so do NOT push
 # this to many minutes on a 1-vCPU box.
-AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "720"))
+# 900 (was 720): three real turns died at 720 in a week (prod jobs 2353, 2491,
+# 2521) and in every one the MODEL was not the problem — job 2521 made its
+# edits in 95s of model time and spent 762s inside three sequential inpaint
+# passes; job 2353 spent 823s of 863s inside five. Raising the ceiling alone
+# would only have made the user wait longer for the same wall, so it moves
+# together with the two things that actually caused it: previews now render
+# at the proof budget (PREVIEW_MAX_LONG_EDGE, ~4x less encode) and a tool
+# whose measured cost cannot fit in what remains is refused BEFORE it starts
+# (AGENT_TURN_RESERVE_S) instead of running into the guillotine.
+AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "900"))
+
+# What must still be on the clock when a slow tool is asked for. The turn owes
+# the user a rendered proof and a written reply; a turn that spends its last
+# second inside an inpaint hands over a wall of activity rows and no video.
+# Guards only the tools that can plausibly exceed a minute — see
+# agent_loop.SLOW_TOOL_COST_S. Set to 0 to disable the pre-flight refusal.
+AGENT_TURN_RESERVE_S = float(os.getenv("AGENT_TURN_RESERVE_S", "150"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # Transcript tools get a far larger budget: silently dropping the tail of a
@@ -979,6 +995,36 @@ MATTE_RVM_MODEL = os.getenv(
 MATTE_RVM_BUDGET = int(os.getenv("MATTE_RVM_BUDGET", "500"))
 
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
+
+# ── The preview is a PROOF, not a deliverable (round 88) ────────────────
+#
+# A preview was rendered at the source's full frame and full rate: a phone
+# reel is 1080x1920 @ 60fps, so every "let me check that" re-encoded 124M
+# pixels a second through the whole filtergraph. Measured over 379 real
+# previews: 27.3s mean, of which ENCODE is 19.2s — and it scales with the
+# footage, not the edit (a 186s video: 144.6s; a 140s video: 205.5s). It is
+# the single largest consumer of wall time in the product — 435 calls,
+# 15,793 seconds, more than every other tool combined — and it is what
+# actually spends an agent's turn budget: the turn that timed out on
+# project 360 had made its edits in 95 seconds of model time.
+#
+# Nothing that reads a preview needs those pixels:
+#   - the studio plays it in a panel a few hundred pixels wide;
+#   - the AGENT reads it as contact-sheet tiles that sheets.py builds at
+#     480x270 — it has never once seen a preview pixel at full size;
+#   - look_at/look_at_asset sample the PROXY and the source assets, not the
+#     render, so aiming and verification are untouched.
+# The export is unchanged: FINAL renders stay at full frame and full rate.
+#
+# Capping the long edge at 1280 takes a 1080x1920 reel to 720x1280 (44% of
+# the pixels) and 60fps to 30 (half the frames) — ~4.4x less throughput for
+# a picture the reader cannot tell apart. W/H flow into the whole graph
+# (ASS PlayRes, watermark geometry, text sizes, zoom viewports), so every
+# element scales with the frame and the preview stays a true proof of the
+# edit. Set PREVIEW_MAX_LONG_EDGE=0 to render previews at source size.
+PREVIEW_MAX_LONG_EDGE = int(os.getenv("PREVIEW_MAX_LONG_EDGE", "1280"))
+PREVIEW_MAX_FPS = float(os.getenv("PREVIEW_MAX_FPS", "30"))
+
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /
 # screen content and several times faster than the old medium/CRF18.
 FINAL_PRESET = os.getenv("FINAL_PRESET", "veryfast")

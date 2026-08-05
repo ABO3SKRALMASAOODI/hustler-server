@@ -1533,6 +1533,80 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
 TIME_PRESSURE_MARKS = (0.55, 0.8)
 
 
+# Cold cost estimates, in seconds, for the tools that can eat a whole turn.
+# Measured across every production agent turn (video_jobs.result->'timings'):
+# erase_region 180s mean over 11 calls with a 425s worst case,
+# erase_burned_text 178s, add_screen_takeover 37s, add_text_behind 22s,
+# find_burned_text 20s. Only tools that can plausibly exceed a minute belong
+# here — a pre-flight guard on a fast tool is pure friction, and render_preview
+# is deliberately ABSENT: it is how a turn produces the thing the user asked
+# for, so it is what the reserve is being reserved FOR.
+#
+# The repaint family is deliberately estimated ABOVE its mean. Its cost is
+# not a constant: pass N redoes every rectangle passes 1..N-1 added, so on
+# project 360 the three passes went 120s -> 162s -> 425s. Guessing low costs
+# the user a dead turn at the wall; guessing high costs them one honest
+# "say continue and I'll do that next". Bias to the second.
+SLOW_TOOL_COST_S = {
+    # Every one of these re-derives the ENTIRE cleaned source from the
+    # untouched original — the pass is the cost, not the rectangle.
+    "erase_region": 240.0,
+    "erase_burned_text": 240.0,
+    "remove_erase": 240.0,
+    "enhance_video": 150.0,
+    "enhance_cursor": 150.0,
+    "record_website_demo": 200.0,
+    "record_website": 100.0,
+    "generate_video": 90.0,
+    "add_screen_takeover": 45.0,
+    "add_text_behind": 30.0,
+    "find_burned_text": 30.0,
+    "auto_reframe": 25.0,
+}
+
+
+def _too_slow_to_start(name, t_start, timings):
+    """Refusal text if `name` cannot finish inside what's left of the turn.
+
+    The turn deadline used to be checked ONLY between iterations, so a tool
+    could start with five minutes left and run for seven. That is exactly how
+    project 360 died (Aug 5 2026): a second erase_region began at t=413s of a
+    720s turn and returned at t=838s, past the wall, so the user got "that
+    took longer than I allow myself" over an edit whose every EDIT had been
+    made in the first ninety seconds. Refusing up front turns that into a
+    turn that finishes, renders, and says what is left to do.
+
+    The estimate prefers what THIS turn measured over the cold table: the
+    first repaint on this footage tells us what the second one will cost far
+    better than any constant can, because the cost is frames x pixels and we
+    have just paid it once.
+    """
+    if not config.AGENT_TURN_RESERVE_S:
+        return None
+    base = SLOW_TOOL_COST_S.get(name)
+    if base is None:
+        return None
+    seen = (timings.get("tools") or {}).get(name) or {}
+    if seen.get("n"):
+        # x1.6, not the flat mean: for the repaint family every later call
+        # carries the accumulated region set, so the calls this turn already
+        # paid for are a FLOOR on the next one, never a forecast of it.
+        base = max(base, 1.6 * seen["s"] / seen["n"])
+    left = config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start)
+    if left - config.AGENT_TURN_RESERVE_S >= base:
+        return None
+    return (
+        f"REFUSED — NOT ENOUGH TIME LEFT IN THIS TURN. {name} takes about "
+        f"{int(base)}s on this footage and only ~{max(0, int(left))}s remain, "
+        "which has to cover a preview render and your reply. Nothing was "
+        "changed by this call.\n\n"
+        "Do NOT retry it and do NOT try a cheaper-looking variant of the same "
+        "operation — the cost is the pass, not the arguments. Land what you "
+        "have: render_preview, then reply naming this specific step as the "
+        "one still to do, so the user can say 'continue' and you pick it up "
+        "with a full turn's budget.")
+
+
 def _time_pressure_note(result, t_start, warned):
     """Append a one-line budget warning to a tool result, once per mark. A
     render_preview still has to fit in what's left, so the last mark says to
@@ -2011,9 +2085,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     args = {}
             except json.JSONDecodeError:
                 args = None
+            no_time = (None if args is None else
+                       _too_slow_to_start(name, t_start, timings))
             if args is None:
                 result = ("REJECTED: arguments were not valid JSON. "
                           "Send a proper JSON object.")
+            elif no_time:
+                # Refused BEFORE the clock is started, so the refusal costs
+                # nothing and the turn keeps the budget it was protecting.
+                result = no_time
+                total_steps += 1
+                _activity(worker_db, session_id, name, args, result,
+                          edl_version=(ctx.versions_written[-1]
+                                       if ctx.versions_written
+                                       else start_version))
+                messages.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": result})
+                continue
             else:
                 t0 = time.monotonic()
                 try:

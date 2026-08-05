@@ -491,7 +491,20 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                 adapted = True
             if not adapted:
                 raise
-            resp = _concierge_llm().chat.completions.create(**create_kwargs)
+            try:
+                resp = _concierge_llm().chat.completions.create(**create_kwargs)
+            except TypeError:
+                # The RETRY itself was impossible: an installed SDK too old to
+                # know the parameter we just adapted TO. This is not a model
+                # saying no, it is our own client, and it used to kill the
+                # concierge outright — every pre-index reply in the product
+                # became the canned English template for two days (Aug 4-5
+                # 2026, 8/8 calls, openai==1.39.0 vs a reasoning model that
+                # rejects max_tokens). A token cap is a nicety; an answer in
+                # the user's own language is not. Drop the caps and ask again.
+                create_kwargs.pop("max_completion_tokens", None)
+                create_kwargs.pop("max_tokens", None)
+                resp = _concierge_llm().chat.completions.create(**create_kwargs)
         raw = (resp.choices[0].message.content or "").strip()
         usage = getattr(resp, "usage", None)
         rec = {"model": CONCIERGE_MODEL, "request": req,

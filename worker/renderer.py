@@ -460,6 +460,27 @@ def frame_dims(src_w, src_h, ratio):
     return _even(long_out), _even(short_out)
 
 
+def preview_geometry(W, H, fps):
+    """Shrink a PREVIEW's frame and rate to the proof-of-the-edit budget.
+
+    Returns (W, H, fps) unchanged for a final export, or scaled down for a
+    preview — see config.PREVIEW_MAX_LONG_EDGE for why this is the largest
+    single speed lever in the product.
+
+    The aspect ratio is preserved exactly (the long edge is capped, the short
+    edge derived and made even), so nothing in the graph has to know: text,
+    captions, watermark and zoom viewports are all expressed against W/H and
+    scale with them. NEVER up-scales — a 540p source stays 540p.
+    """
+    cap = config.PREVIEW_MAX_LONG_EDGE
+    if cap and max(W, H) > cap:
+        k = cap / float(max(W, H))
+        W, H = _even(W * k), _even(H * k)
+    if config.PREVIEW_MAX_FPS:
+        fps = min(fps, config.PREVIEW_MAX_FPS)
+    return W, H, fps
+
+
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
                      focus=None, seg_dur=None):
     """Append graph parts that bring in_label to exactly WxH @ fps, sar 1.
@@ -2408,6 +2429,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     canvas = edl["canvas"]
     W, H = int(canvas["width"]), int(canvas["height"])
     fps = max(1.0, min(float(canvas.get("fps") or 30.0), 60.0))
+    if preview:
+        W, H, fps = preview_geometry(W, H, fps)
 
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []
@@ -2587,6 +2610,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                    if frame and (frame.get("focus_x") is not None or
                                  frame.get("focus_y") is not None) else None)
     fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
+    if preview:
+        W, H, fps = preview_geometry(W, H, fps)
 
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []

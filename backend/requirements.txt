@@ -28,7 +28,13 @@ jiter==0.13.0
 MarkupSafe==2.1.4
 msgpack==1.1.2
 multidict==6.4.3
-openai==1.39.0
+# Must stay >= the worker's pin (worker/requirements.txt). 1.39.0's
+# Completions.create() has NO max_completion_tokens parameter, so the
+# concierge's dialect adaptation for reasoning models (routes/video.py)
+# raised TypeError on the retry and EVERY pre-index reply fell back to the
+# canned English template — 8 of 8 calls from Aug 4 06:22 onward. The user
+# typed a brief and got "tell me what to make"; nothing reached a model.
+openai==1.59.9
 packaging==23.2
 propcache==0.4.1
 psycopg2-binary==2.9.10
@@ -42,7 +48,9 @@ six==1.16.0
 sniffio==1.3.1
 stripe==14.4.1
 tqdm==4.67.1
-typing_extensions==4.9.0
+# >=4.11 is openai 1.59.9's floor (4.9.0 made the SDK bump unresolvable and
+# would have failed the Render build). Nothing else here needs more than 4.7.
+typing_extensions==4.12.2
 urllib3==2.1.0
 websockets==16.0
 Werkzeug==3.1.3

@@ -4284,6 +4284,36 @@ def _erase_rect_item(existing, x, y, w, h, start, end, fill):
             "fill": f, "kind": None}
 
 
+def _subsumed_by(old, new):
+    """True when `new` repaints everything `old` did, so keeping `old` only
+    costs time. The widen-and-retry loop is the normal way this happens: a
+    rectangle comes back STILL VISIBLE, the agent widens it, and the narrow
+    first attempt is now a strictly smaller box inside the bigger one.
+
+    It is not cosmetic. Every region is re-applied on EVERY future repaint of
+    this project — the pass always starts from the untouched original — so a
+    dead rectangle is a tax on each one forever. Project 360 (Aug 5 2026)
+    finished with er2 sitting entirely inside er3.
+
+    Conservative on purpose: only a rectangle that fully contains the old one,
+    over a window that fully contains its window, with a fill at least as
+    aggressive ('box' repaints the whole rectangle, 'text' only the strokes).
+    """
+    if old.get("fill") == "box" and new.get("fill") != "box":
+        return False
+    if not (new["x"] <= old["x"] + 1e-6
+            and new["y"] <= old["y"] + 1e-6
+            and new["x"] + new["w"] >= old["x"] + old["w"] - 1e-6
+            and new["y"] + new["h"] >= old["y"] + old["h"] - 1e-6):
+        return False
+    if new.get("start") is None:              # new covers the whole video
+        return True
+    if old.get("start") is None:              # old does, new does not
+        return False
+    return (new["start"] <= old["start"] + 1e-6
+            and new["end"] >= old["end"] - 1e-6)
+
+
 def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
                  fill="text", regions=None):
     """Repaint rectangle(s) out of the source pixels — several marks in ONE
@@ -4331,7 +4361,10 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
         if isinstance(item, str):
             return item
         new_items = [item]
-    all_regions = existing + new_items
+    dropped = [o["id"] for o in existing
+               if any(_subsumed_by(o, n) for n in new_items)]
+    kept = [o for o in existing if o["id"] not in dropped]
+    all_regions = kept + new_items
     descs = []
     for it in new_items:
         window = (f" {it['start']}-{it['end']}s" if it["start"] is not None
@@ -4342,6 +4375,10 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
     what = ("erased from the source pixels in one pass: " + "; ".join(descs)
             if len(new_items) > 1 else
             f"erased the {descs[0]} from the source pixels")
+    if dropped:
+        what += (f" (replacing {', '.join(dropped)}, now fully covered by it "
+                 "— every repaint redoes every region, so a superseded one "
+                 "would cost time on each future pass)")
     try:
         return _apply_clean(ctx, all_regions, what)
     except ValueError as e:
@@ -6917,6 +6954,23 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
     except (TypeError, ValueError):
         return ("REJECTED: start/end must be numbers (PROGRAM-timeline "
                 "seconds — where in the edited video the text shows).")
+    # SAY when the window did not land where it was asked for. Clamping used
+    # to be silent, and silence is what made it expensive: on project 363
+    # (Aug 5 2026) six captions were written for a 19s reel while the program
+    # was still the bare 1.6s clip, so all six collapsed into 1.3-1.6s, read
+    # back as ordinary successes, and were only discovered from a preview —
+    # after which the same turn spent 29 add_text and 17 remove_text calls
+    # putting them back. A clamp this large is not a rounding detail, it is
+    # the tool saying the program is not built yet.
+    clamped = ""
+    if abs(s - float(start)) > 0.05 or abs(e - float(end)) > 0.05:
+        clamped = (f"\n\nCLAMPED: you asked for {float(start):g}-{float(end):g}s "
+                   f"but the program is only {prog:g}s long, so this text sits "
+                   f"at {s}-{e}s. If you meant it to land later, the footage "
+                   "it belongs over does not exist yet — place the media "
+                   "first (insert_media / keep_segments), THEN write the text "
+                   "against the program those edits produce. Text does not "
+                   "move when the timeline grows underneath it.")
     if entrance is not None and entrance not in TEXT_ANIMS:
         return (f"REJECTED: entrance must be one of "
                 f"{', '.join(TEXT_ANIMS)}.")
@@ -6953,7 +7007,7 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
     edl["texts"] = texts
     return ctx.write_edl(
         edl, f"{tpl} text \"{t[:40]}\" at {s}-{e}s (program time) "
-             f"[{item['id']}]")
+             f"[{item['id']}]") + clamped
 
 
 # ── Typography choreography (round 82e) ─────────────────────────────────
