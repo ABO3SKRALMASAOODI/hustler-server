@@ -287,13 +287,24 @@ def test_the_paid_model_is_priced():
     assert "grok-4.5" in model_prices.MODEL_PRICES
 
 
-def test_reasoning_effort_defaults_low_and_rejection_is_survivable():
-    """Round 63: the default flips to "low" — an agent turn is round-trips x
-    13s and most output tokens were reasoning spent on tool dispatch. The flip
-    is only safe because a provider that rejects the field costs ONE call per
-    process (retry without, latch per model) — so this test pins the default
-    AND the machinery that makes it survivable, together."""
-    assert config.AGENT_REASONING_EFFORT == "low"
+def test_reasoning_effort_is_high_and_rejection_is_survivable():
+    """Round 63 flipped this to "low" — an agent turn is round-trips x 13s and
+    most output tokens were reasoning spent on tool dispatch.
+
+    ROUND 91b flips it to "high", because that saving was measured on the
+    wrong side of the bill. On gpt-5.6-luna (0.20 in / 1.20 out per 1M) job
+    2603's entire four-call turn spent 775 output tokens, 573 of them
+    reasoning — $0.0009 — while re-sending ~28,000 INPUT tokens per call, about
+    $0.022. Input outweighs all the thinking by ~25x. And the cost of thinking
+    too little is job 2599: the same request, 923 seconds, five inpaint passes,
+    timed out, nothing changed — answered correctly in 37s once reasoning came
+    back.
+
+    Either way the flip is only safe because a provider that rejects the field
+    costs ONE call per process (retry without, latch per model), so this pins
+    the value AND the machinery that makes it survivable, together.
+    """
+    assert config.AGENT_REASONING_EFFORT == "high"
     import llm
 
     class FakeErr(Exception):

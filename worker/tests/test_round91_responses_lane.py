@@ -205,4 +205,18 @@ check("...and the chat/completions call still runs when resp is None",
 check("the fallback is announced once per turn, not per step",
       "_responses_warned" in src)
 
+
+
+print("== the effort, and telling the truth about it ==")
+
+_src = inspect.getsource(agent_loop._run_loop)
+
+check("reasoning effort is HIGH", config.AGENT_REASONING_EFFORT == "high")
+check("...and the configured value is what the lane sends",
+      "effort=config.AGENT_REASONING_EFFORT" in _src)
+check("the recorded row says WHICH api answered",
+      '"api": "responses"' in _src and '"api": "chat.completions"' in _src)
+check("...and records the effort the lane actually sent, not the chat value",
+      "used_lane" in _src and '"reasoning_effort": used_lane' in _src)
+
 print(f"\n{PASS} checks passed")

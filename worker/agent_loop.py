@@ -1862,12 +1862,19 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # byte-for-byte what runs today. The lane can only add thinking;
             # it cannot take a turn away.
             resp = None
+            # What the request ACTUALLY carried, for the record below. Without
+            # this the row said reasoning_effort='none' (the chat path's value)
+            # on turns the lane had just asked to think hard — an audit trail
+            # that contradicts the reasoning_out beside it is worse than none,
+            # because it is the field you would check first.
+            used_lane = None
             if llm.responses_available(model, config.OPENAI_BASE_URL):
                 try:
                     resp = llm.responses_create(
                         config.OPENAI_BASE_URL, config.OPENAI_API_KEY, model,
                         messages, tools, max_tokens=max_tokens,
                         effort=config.AGENT_REASONING_EFFORT)
+                    used_lane = config.AGENT_REASONING_EFFORT
                 except Exception as e:
                     # A definite "not here" latches the lane off for the
                     # process so a doomed request is paid once, not once per
@@ -1961,8 +1968,18 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                    {"model": model, "messages": _messages_for_record(messages),
                     "tools": [t["function"]["name"] for t in tools],
                     "max_tokens": max_tokens,
-                    **({"reasoning_effort": extra["reasoning_effort"]}
-                       if extra else {})},
+                    # The effort the request CARRIED, and which endpoint
+                    # carried it — the lane's value when it answered, the chat
+                    # path's when it did not. Recording the chat value
+                    # unconditionally made every lane row read
+                    # reasoning_effort='none' next to a non-zero reasoning_out,
+                    # which is the one place anyone looks to check this works.
+                    **({"reasoning_effort": used_lane, "api": "responses"}
+                       if used_lane is not None
+                       else ({"reasoning_effort": extra["reasoning_effort"],
+                              "api": "chat.completions"} if extra
+                             else {"api": "chat.completions"})),
+                    },
                    {"content": msg.content,
                     "tool_calls": [{"name": tc.function.name,
                                     "arguments": tc.function.arguments}

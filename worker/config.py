@@ -251,15 +251,34 @@ FRONTIER_PLANS = {"ai_max"}
 #
 # So this applies from the SECOND iteration on, never the first.
 #
-# Round 63: defaults to "low". An agent turn is round-trips x 13 seconds
-# (measured flat across 385 turns), and 402 of the average call's 646 output
-# tokens are REASONING — mostly spent on iterations that are pure tool
-# dispatch. Round 58 made the field safe to send blind: a provider that
-# rejects it retries once without it and latches per model, matched narrowly
-# on the field name plus an unknown-parameter phrase, so DeepSeek either
-# honours it or costs one failed call per process, ever. Set
-# AGENT_REASONING_EFFORT="" on Render to send nothing again.
-AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "low").strip()
+# Round 63 set this to "low" to stop paying for deliberation on steps that
+# are pure tool dispatch: 402 of the average call's 646 output tokens were
+# reasoning, mostly on iterations that just fill in arguments.
+#
+# ROUND 91b RAISES IT TO "high", because that arithmetic turned out to be a
+# rounding error and the thing it was saving on is the product. Measured on
+# gpt-5.6-luna (0.20 in / 1.20 out per 1M, reasoning FOLDED into
+# completion_tokens): job 2603's whole four-call turn spent 775 output tokens,
+# 573 of them reasoning — $0.0009. The same turn re-sent ~28,000 INPUT tokens
+# per call, about $0.022. Input outweighs all the thinking by ~25x, so
+# throttling reasoning was optimising the wrong side of the bill.
+#
+# And the other side of the ledger is what it costs to think too little: the
+# same request that a non-reasoning turn spent 923 seconds and five inpaint
+# passes failing at (job 2599) was answered correctly in 37 seconds once
+# reasoning came back (job 2603). Deliberation is cheaper than the work it
+# prevents.
+#
+# It does cost WALL CLOCK — a high-effort call thinks for longer — so if turns
+# start feeling slow again, this is the first knob to turn back down, not the
+# last. AGENT_REASONING_EFFORT=low (or medium) on Render, no deploy needed;
+# "" sends no field at all and restores each provider's own default.
+#
+# Round 58 made the field safe to send blind: a provider that rejects it
+# retries once without it and latches per model, matched narrowly on the field
+# name plus an unknown-parameter phrase, so a provider that has never heard of
+# it costs one failed call per process, ever.
+AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "high").strip()
 # Ask /v1/responses when — and only when — the model has already refused to
 # reason alongside function tools on /v1/chat/completions. That refusal is why
 # the agent ran 875 straight calls with ZERO reasoning tokens from Jul 31 2026
