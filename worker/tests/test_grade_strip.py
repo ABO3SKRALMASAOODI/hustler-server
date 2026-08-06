@@ -168,6 +168,11 @@ else:
               agent_tools._grade_strip_shortcut(ctx, ctx._row) is None)
 
         ctx = StripCtx(d, proxy, BASE, new)
+        ctx.autorendering = True
+        check("the turn-end auto-render is never answered with a strip",
+              agent_tools._grade_strip_shortcut(ctx, ctx._row) is None)
+        ctx.autorendering = False
+
         out = agent_tools._grade_strip_shortcut(ctx, ctx._row)
         check("strip delivered for a color-only change", out is not None)
         check("strip says the full preview is NOT rendered yet",

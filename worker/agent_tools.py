@@ -164,8 +164,12 @@ class ToolContext:
         # instead of full renders. last_strip_chain is the grade chain the
         # most recent strip showed — asking to render the SAME colors again
         # means the model has settled, so THAT call gets the real render.
+        # autorendering marks the turn-end honesty render, which must always
+        # be real: its result is for the USER, and a strip's pending image
+        # would have no next step to be seen in.
         self.last_strip_chain = None
         self.strip_count = 0
+        self.autorendering = False
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
         self.sfx_generated = []       # sounds created by generate_sfx
@@ -9880,6 +9884,8 @@ def _grade_strip_shortcut(ctx, row):
     (settled — same chain twice means "show me the real thing"), or the
     turn-end auto-render covers it. Never raises."""
     try:
+        if getattr(ctx, "autorendering", False):
+            return None      # the turn-end render is FOR THE USER — always real
         if not (getattr(ctx, "sight_out", False)
                 or (getattr(ctx, "direct_sight", False)
                     and llm.agent_sees(ctx.agent_model))):

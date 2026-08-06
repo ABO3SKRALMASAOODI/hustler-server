@@ -912,7 +912,14 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings):
               f"render_preview after writing v{latest['version']} — "
               "auto-rendering", flush=True)
         t0 = time.monotonic()
-        result = agent_tools.render_preview(ctx)
+        # The grade-strip shortcut must not answer THIS call: a strip's
+        # pending image has no next step to be seen in, and the whole point
+        # here is that the USER gets a real preview of what was written.
+        ctx.autorendering = True
+        try:
+            result = agent_tools.render_preview(ctx)
+        finally:
+            ctx.autorendering = False
         timings["auto_render_s"] = round(time.monotonic() - t0, 2)
         _activity(worker_db, session_id, "render_preview",
                   {"auto": "model skipped it"}, result,
