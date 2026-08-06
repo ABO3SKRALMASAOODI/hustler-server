@@ -1895,12 +1895,29 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                               flush=True)
                     resp = None
             _adapt_tries = 0
+            _rl_waits = 0
             while resp is None:
                 try:
                     resp = client.chat.completions.create(
                         model=model, messages=messages, tools=tools, **kw)
                     break
                 except Exception as e:
+                    # Rate limits get their own budget-aware waits, BEFORE
+                    # the dialect adapters — see llm.rate_limit_wait for the
+                    # reasoning and bounds (round 91).
+                    wait = llm.rate_limit_wait(
+                        e, _rl_waits + 1,
+                        config.AGENT_TURN_TIMEOUT_S
+                        - (time.monotonic() - t_start),
+                        shutting_down=SHUTDOWN.is_set())
+                    if wait is not None:
+                        _rl_waits += 1
+                        print(f"[agent {job['id']}] rate-limited by the "
+                              f"model ({_rl_waits}/4) — waiting {wait:.0f}s "
+                              "and retrying instead of failing the turn",
+                              flush=True)
+                        time.sleep(wait)
+                        continue
                     _adapt_tries += 1
                     if _adapt_tries > 3:
                         raise

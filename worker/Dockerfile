@@ -19,7 +19,27 @@ FROM python:3.11-slim-bookworm
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ffmpeg fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
+       xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# OPT-IN ffmpeg 8.x (round 91): bookworm's apt ffmpeg is 5.1, the version the
+# renderer carries explicit workarounds for (the seg_dur trim in
+# _normalize_video) and NOT the version anything is developed or tested
+# against — every dev machine and itest runs 8.1.x. The BtbN static GPL build
+# (includes libass + x264, reads system fontconfig) aligns prod with the
+# tested line. Deliberately OFF by default: caption font fallback (Arabic/
+# CJK) is core product and must be verified on a CANARY REVISION before the
+# default flips — see DEPLOY_EXECUTOR.md "ffmpeg canary". Build with
+#   --build-arg FFMPEG_STATIC=1
+ARG FFMPEG_STATIC=0
+RUN if [ "$FFMPEG_STATIC" = "1" ]; then \
+      python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz', '/tmp/ff.tar.xz')" \
+      && tar -xJf /tmp/ff.tar.xz -C /tmp \
+      && install -m755 /tmp/ffmpeg-*/bin/ffmpeg /usr/local/bin/ffmpeg \
+      && install -m755 /tmp/ffmpeg-*/bin/ffprobe /usr/local/bin/ffprobe \
+      && rm -rf /tmp/ff.tar.xz /tmp/ffmpeg-* \
+      && ffmpeg -version | head -1; \
+    fi
 
 WORKDIR /app
 

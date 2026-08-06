@@ -236,6 +236,33 @@ that fails, so it lands in the admin job list next to the failure it explains.
 
 ---
 
+## 3c. ffmpeg canary (round 91 — OPT-IN, default still apt 5.1)
+
+The image can carry the BtbN static ffmpeg 8.1 (`--build-arg FFMPEG_STATIC=1`)
+— the line every dev machine and itest already runs, and the one whose filter
+timings the round-91 speed work was measured on. It is NOT the default because
+caption font fallback (Arabic/CJK via system fontconfig) is core product and
+must be seen once on a canary before traffic moves:
+
+```bash
+# build a canary revision with the static ffmpeg, NO traffic
+gcloud run deploy valmera-executor --source worker/ --region us-central1 \
+  --build-arg FFMPEG_STATIC=1 --no-traffic --tag ffcanary
+# render one caption-heavy project against the tagged URL (set
+# REMOTE_EXECUTOR_URL to the ffcanary tag URL on a dev dispatcher), check:
+#   - Arabic + CJK captions show real glyphs, not tofu
+#   - export length verification passes
+#   - preview timings in video_jobs.result drop vs the previous revision
+# then move traffic, or delete the tagged revision and nothing changed:
+gcloud run services update-traffic valmera-executor --region us-central1 \
+  --to-latest
+```
+
+`gcloud run deploy` has no `--build-arg` on older SDKs — if yours lacks it,
+build with Cloud Build directly or update the SDK.
+
+---
+
 ## 4. Hardening (optional, later)
 
 The bearer secret over HTTPS guards compute/cost; the body is only a job id +
