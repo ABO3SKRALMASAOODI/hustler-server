@@ -3273,15 +3273,17 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
             prev_local = _fetch_into(workdir, prev_asset["storage_key"],
                                      "prevpv")
         file_dur = media.duration_of(prev_local)
-        # Caption events are deliberately NOT forbidden zones: shift_ass
-        # clamps a static event mid-display (identical glyphs) and refuses
-        # animated straddlers itself. Dense captions put an event on nearly
-        # every keyframe, and forbidding them left the snapper nowhere to
-        # stand — the second prod attempt gave up exactly there.
+        # STATIC caption events are deliberately NOT forbidden zones —
+        # shift_ass clamps them mid-display with identical glyphs, and on a
+        # densely-captioned project they cover nearly every keyframe (the
+        # second prod attempt gave up exactly there). ANIMATED events are:
+        # karaoke/transform/fade straddlers cannot be clamped (the third
+        # attempt refused on one), so boundaries route around them.
         kfs = stitch.keyframe_times(prev_local)
         snapped = stitch.snap_windows(
             expanded, kfs, file_dur,
-            forbidden=item_spans + junction_zones)
+            forbidden=item_spans + junction_zones
+            + stitch.ass_events(full_cap, animated_only=True))
         if snapped is None:
             print(f"[render {job_id}] stitch: full render (keyframe snap "
                   "gave up)", flush=True)

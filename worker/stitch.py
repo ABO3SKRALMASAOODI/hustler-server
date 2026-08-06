@@ -306,13 +306,21 @@ def _ass_fmt(t):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def ass_events(path):
-    """[(start, end)] of every Dialogue event, for the expansion step."""
+def ass_events(path, animated_only=False):
+    """[(start, end)] of Dialogue events. With animated_only, just the events
+    a window boundary must never land inside — karaoke/transform/move/fade
+    straddlers cannot be clamped (see shift_ass), so the keyframe snap has
+    to route boundaries around exactly these and no more. Static events are
+    NOT included: on a densely-captioned project they cover nearly every
+    keyframe, and clamping handles them."""
     if not path or not os.path.exists(path):
         return []
     out = []
     for line in open(path, encoding="utf-8-sig"):
         if not line.startswith("Dialogue:"):
+            continue
+        if animated_only and not (_ANIM_TAG.search(line)
+                                  or _LEAD_FAD.search(line)):
             continue
         m = _TS.findall(line)
         if len(m) >= 2:
