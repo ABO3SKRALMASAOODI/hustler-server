@@ -236,30 +236,25 @@ that fails, so it lands in the admin job list next to the failure it explains.
 
 ---
 
-## 3c. ffmpeg canary (round 91 — OPT-IN, default still apt 5.1)
+## 3c. ffmpeg 8.1 static — DEFAULT since Aug 6 2026 (round 91)
 
-The image can carry the BtbN static ffmpeg 8.1 (`--build-arg FFMPEG_STATIC=1`)
-— the line every dev machine and itest already runs, and the one whose filter
-timings the round-91 speed work was measured on. It is NOT the default because
-caption font fallback (Arabic/CJK via system fontconfig) is core product and
-must be seen once on a canary before traffic moves:
+The image carries the BtbN static ffmpeg 8.1 (Dockerfile `ARG
+FFMPEG_STATIC=1`) — the line every dev machine and itest runs. Verified on a
+no-traffic canary (revision 00090, tag ffcanary) before the default flipped:
 
-```bash
-# build a canary revision with the static ffmpeg, NO traffic
-gcloud run deploy valmera-executor --source worker/ --region us-central1 \
-  --build-arg FFMPEG_STATIC=1 --no-traffic --tag ffcanary
-# render one caption-heavy project against the tagged URL (set
-# REMOTE_EXECUTOR_URL to the ffcanary tag URL on a dev dispatcher), check:
-#   - Arabic + CJK captions show real glyphs, not tofu
-#   - export length verification passes
-#   - preview timings in video_jobs.result drop vs the previous revision
-# then move traffic, or delete the tagged revision and nothing changed:
-gcloud run services update-traffic valmera-executor --region us-central1 \
-  --to-latest
-```
+- speed: the same 59s graded program (project 110 v192) encoded in **20.6s**
+  on 8.1 vs **~29s** on 5.1 — four warm samples within 0.07s of each other,
+  measured through the real /run path with real storage;
+- captions: the result sheet showed dynamic emphasized words, title cards
+  and styled text pixel-correct — the static build reads system fontconfig
+  (DejaVu + Noto) exactly like the apt build did.
 
-`gcloud run deploy` has no `--build-arg` on older SDKs — if yours lacks it,
-build with Cloud Build directly or update the SDK.
+To unwind a future ffmpeg surprise: build once with `FFMPEG_STATIC=0` (edit
+the ARG default — `gcloud run deploy` has no `--build-arg`), or route
+traffic back to a pre-flip revision. The canary recipe, for the next
+upgrade: deploy `--no-traffic --tag ffcanary`, POST forced preview jobs for
+a caption-heavy project at the tag URL, LOOK at the result sheet, compare
+`encode_s`, then `gcloud run services update-traffic … --to-latest`.
 
 ---
 

@@ -22,16 +22,18 @@ RUN apt-get update \
        xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# OPT-IN ffmpeg 8.x (round 91): bookworm's apt ffmpeg is 5.1, the version the
+# ffmpeg 8.1 static (round 91): bookworm's apt ffmpeg is 5.1, the version the
 # renderer carries explicit workarounds for (the seg_dur trim in
 # _normalize_video) and NOT the version anything is developed or tested
 # against — every dev machine and itest runs 8.1.x. The BtbN static GPL build
 # (includes libass + x264, reads system fontconfig) aligns prod with the
-# tested line. Deliberately OFF by default: caption font fallback (Arabic/
-# CJK) is core product and must be verified on a CANARY REVISION before the
-# default flips — see DEPLOY_EXECUTOR.md "ffmpeg canary". Build with
-#   --build-arg FFMPEG_STATIC=1
-ARG FFMPEG_STATIC=0
+# tested line. DEFAULT ON since the Aug 6 2026 canary (revision 00090):
+# same 59s graded program encoded in 20.6s vs 29s on 5.1 (four warm samples
+# within 0.07s), and the caption sheet — dynamic emphasized words, title
+# cards, styled text — rendered pixel-correct through system fontconfig.
+# FFMPEG_STATIC=0 falls back to the apt build if a future ffmpeg surprise
+# needs unwinding.
+ARG FFMPEG_STATIC=1
 RUN if [ "$FFMPEG_STATIC" = "1" ]; then \
       python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz', '/tmp/ff.tar.xz')" \
       && tar -xJf /tmp/ff.tar.xz -C /tmp \
