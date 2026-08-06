@@ -3236,7 +3236,6 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         full_cap = caplib.build_ass(new_edl, index, tl_new,
                                     os.path.join(workdir, "stitch_cap.ass"),
                                     play_res=(W, H))
-        events = stitch.ass_events(full_cap)
         fx = new_edl.get("effects") or {}
         junction_zones = []
         tr = fx.get("transition") or None
@@ -3274,10 +3273,15 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
             prev_local = _fetch_into(workdir, prev_asset["storage_key"],
                                      "prevpv")
         file_dur = media.duration_of(prev_local)
+        # Caption events are deliberately NOT forbidden zones: shift_ass
+        # clamps a static event mid-display (identical glyphs) and refuses
+        # animated straddlers itself. Dense captions put an event on nearly
+        # every keyframe, and forbidding them left the snapper nowhere to
+        # stand — the second prod attempt gave up exactly there.
         kfs = stitch.keyframe_times(prev_local)
         snapped = stitch.snap_windows(
             expanded, kfs, file_dur,
-            forbidden=item_spans + events + junction_zones)
+            forbidden=item_spans + junction_zones)
         if snapped is None:
             print(f"[render {job_id}] stitch: full render (keyframe snap "
                   "gave up)", flush=True)

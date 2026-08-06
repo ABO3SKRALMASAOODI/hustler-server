@@ -320,11 +320,27 @@ def ass_events(path):
     return out
 
 
+_ANIM_TAG = re.compile(r"\\(k[fo]?|K|t\(|move\()")
+_LEAD_FAD = re.compile(r"\\fad\(\s*(\d+)\s*,\s*(\d+)\s*\)")
+
+
 def shift_ass(src_path, dst_path, w0, w1):
-    """Copy an ASS keeping only events fully inside [w0, w1], shifted by -w0.
-    Returns False (caller falls back) if any event STRADDLES a boundary —
-    expand() should have prevented that, so this is a belt-and-braces check:
-    a clamped karaoke event would burn with wrong word timing."""
+    """Copy an ASS keeping events that touch [w0, w1], shifted by -w0.
+
+    An event STRADDLING a boundary is one already mid-display where a copied
+    piece meets a re-encoded one, and it must keep rendering identically:
+
+      * static text clamps to the boundary — the glyphs of an event in
+        progress don't depend on when it started;
+      * a leading \\fad whose fade-in already finished before the boundary
+        is STRIPPED from the clamped copy (an in-progress fade shows full
+        opacity — re-playing it would blink at the seam); a fade still in
+        flight refuses;
+      * karaoke (\\k…), transforms (\\t) and \\move time themselves from the
+        event's start, so a clamped copy would animate wrongly — refuse,
+        and the caller runs the full render.
+
+    Returns False on any refusal."""
     if not src_path or not os.path.exists(src_path):
         return True                            # nothing to burn is fine
     out = []
@@ -338,10 +354,18 @@ def shift_ass(src_path, dst_path, w0, w1):
         a, b = _ass_t(m[0]), _ass_t(m[1])
         if a >= w1 - 0.001 or b <= w0 + 0.001:
             continue
-        if a < w0 - 0.011 or b > w1 + 0.011:
-            return False
-        line = _TS.sub(lambda mm, _c=iter((_ass_fmt(a - w0),
-                                           _ass_fmt(b - w0))):
+        na, nb = a - w0, b - w0
+        if na < -0.011 or nb > (w1 - w0) + 0.011:      # straddles a boundary
+            if _ANIM_TAG.search(line):
+                return False
+            fad = _LEAD_FAD.search(line)
+            if fad:
+                if na < 0 and abs(na) * 1000.0 < float(fad.group(1)) + 60:
+                    return False               # fade-in still in flight
+                line = _LEAD_FAD.sub("", line, count=1)
+            na = max(0.0, na)
+            nb = min(w1 - w0, nb)
+        line = _TS.sub(lambda mm, _c=iter((_ass_fmt(na), _ass_fmt(nb))):
                        next(_c), line, count=2)
         out.append(line)
     with open(dst_path, "w", encoding="utf-8") as f:

@@ -110,8 +110,24 @@ open(ass, "w").write(
 out_ass = os.path.join(d, "b.ass")
 check("whole events shift", stitch.shift_ass(ass, out_ass, 11.0, 15.0)
       and "0:00:01.00,0:00:02.50" in open(out_ass).read())
-check("a straddling event refuses",
-      stitch.shift_ass(ass, out_ass, 12.5, 15.0) is False)
+check("a STATIC straddling event clamps to the boundary",
+      stitch.shift_ass(ass, out_ass, 12.5, 15.0) is True
+      and "0:00:00.00,0:00:01.00" in open(out_ass).read())
+kara = os.path.join(d, "k.ass")
+open(kara, "w").write(
+    "[Events]\nFormat: Layer, Start, End, Style, Text\n"
+    "Dialogue: 0,0:00:12.00,0:00:13.50,D,{\\k50}wo{\\k100}rd\n")
+check("a KARAOKE straddling event refuses",
+      stitch.shift_ass(kara, out_ass, 12.5, 15.0) is False)
+fad = os.path.join(d, "f.ass")
+open(fad, "w").write(
+    "[Events]\nFormat: Layer, Start, End, Style, Text\n"
+    "Dialogue: 0,0:00:12.00,0:00:13.50,D,{\\fad(120,80)}hi\n")
+check("a finished fade-in is stripped from the clamped copy",
+      stitch.shift_ass(fad, out_ass, 12.5, 15.0) is True
+      and "\\fad" not in open(out_ass).read())
+check("a fade-in still in flight refuses",
+      stitch.shift_ass(fad, out_ass, 12.05, 15.0) is False)
 
 kfs = [0.0, 1.6, 3.2, 4.8, 6.4, 8.0, 9.6, 11.2, 12.8, 14.4]
 snapped = stitch.snap_windows([(5.0, 7.0)], kfs, 16.0)
