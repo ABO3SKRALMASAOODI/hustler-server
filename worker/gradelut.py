@@ -41,6 +41,7 @@ windowed stylize effects (flash, vhs, …) carry enable= clauses and stay on
 their per-frame filters — a table cannot be time-conditional.
 """
 
+import os
 import subprocess
 import threading
 
@@ -205,7 +206,13 @@ def _fast_run(kind, subchain):
 
 def fast_chain(chain):
     """The fast exact equivalent of a global-grade filter chain, or `chain`
-    unchanged when it contains anything unrecognized or a bake fails."""
+    unchanged when it contains anything unrecognized or a bake fails.
+
+    GRADELUT_DISABLE=1 turns the whole translation off — an env flip on the
+    executor (new revision, no rebuild), so a filter-performance surprise on
+    a particular ffmpeg build never needs a code deploy to unwind."""
+    if os.getenv("GRADELUT_DISABLE", "").strip() == "1":
+        return chain
     try:
         items = _parse_chain(chain)
         if not items:
