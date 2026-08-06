@@ -310,89 +310,152 @@ def run_index_job(worker_db, job):
         # worse.
         warnings = list(warnings_pre)
 
-        # 3. Proxy (VFR -> CFR here) + 16k mono wav
-        if from_client_proxy:
-            # Already have it: the browser encoded it and adopt_client_proxy
-            # normalized it.
-            proxy_local = src
-        else:
-            proxy_local = os.path.join(workdir, "proxy.mp4")
-            media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
-                             info["has_audio"], duration=info["duration"],
-                             progress_cb=_stage_progress(worker_db, job_id,
-                                                         12, 30))
-            # Probed here, not at upload time: tile extraction needs the
-            # proxy's REAL duration to keep frame seeks inside it.
-            proxy_info = media.probe(proxy_local)
-        # The index is about to describe this video to the agent, the player
-        # and every cut. If the proxy still doesn't cover the recording, say so
-        # rather than shipping a description of footage that isn't there.
-        proxy_have = proxy_info["video_duration"] or proxy_info["duration"]
-        if info["duration"] - proxy_have > max(
-                media.PROXY_SHORT_MIN_S,
-                media.PROXY_SHORT_FRAC * info["duration"]):
-            warnings.append(
-                f"only the first {proxy_have:.1f}s of this "
-                f"{info['duration']:.1f}s video has picture — the rest has "
-                "sound but no frames")
-        worker_db.run(dbx.set_progress, job_id, 30)
-        _mark("proxy_s")
+        # 3-8. TWO LANES, NOT A LADDER (round 91). The pipeline was strictly
+        # serial — proxy, wav, whisper, silences, shots, tiles, uploads, one
+        # after another — for stages whose dependency graph is actually two
+        # independent chains: everything on the PICTURE side needs the proxy,
+        # everything on the SOUND side needs the wav, and neither needs the
+        # other. On the 8-vCPU executor that serialization was most of the
+        # p50: 22s proxy + 10s whisper + 7s shots + 8s tiles + 18s uploads,
+        # each waiting on all the others (measured, 240 prod jobs). The two
+        # chains now run side by side and the uploads ride inside them, so
+        # the wall time is max(picture, sound), not the sum.
+        #
+        # THE DB STAYS ON THIS THREAD. Db is one-connection-per-thread by
+        # contract (db.py), so the lanes touch files and storage only; every
+        # set_progress / insert_asset below runs here. Progress during the
+        # lanes is a coarse main-thread ticker — the bar the user watches
+        # keeps moving, and no lane ever holds a psycopg cursor.
+        audio_key = None
+        state = {"proxy_info": proxy_info if from_client_proxy else None}
 
-        wav_local = None
-        if info["has_audio"]:
-            wav_local = os.path.join(workdir, "audio.wav")
-            media.extract_wav(src, wav_local)
-        worker_db.run(dbx.set_progress, job_id, 35)
-        _mark("wav_s")
+        def _picture_lane():
+            if from_client_proxy:
+                proxy_local = src        # browser encoded it; adopted above
+            else:
+                proxy_local = os.path.join(workdir, "proxy.mp4")
+                media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
+                                 info["has_audio"],
+                                 duration=info["duration"])
+                # Probed here, not at upload time: tile extraction needs the
+                # proxy's REAL duration to keep frame seeks inside it.
+                state["proxy_info"] = media.probe(proxy_local)
+            state["proxy_local"] = proxy_local
+            p_info = state["proxy_info"]
+            # The index is about to describe this video to the agent, the
+            # player and every cut. If the proxy still doesn't cover the
+            # recording, say so rather than shipping a description of footage
+            # that isn't there.
+            proxy_have = p_info["video_duration"] or p_info["duration"]
+            if info["duration"] - proxy_have > max(
+                    media.PROXY_SHORT_MIN_S,
+                    media.PROXY_SHORT_FRAC * info["duration"]):
+                warnings.append(
+                    f"only the first {proxy_have:.1f}s of this "
+                    f"{info['duration']:.1f}s video has picture — the rest "
+                    "has sound but no frames")
+            state["proxy_done_at"] = time.monotonic()
+            # Shots, tiles and the proxy upload all read the finished proxy
+            # and nothing else — side by side.
+            proxy_dur = p_info["duration"]
+            ceil = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
+            with futures.ThreadPoolExecutor(max_workers=3) as sub:
+                f_shots = sub.submit(scenes.detect_shots, proxy_local,
+                                     info["duration"], warnings)
+                f_tiles = sub.submit(
+                    _build_and_upload_tiles, job_id, project_id, sha,
+                    proxy_local, info["duration"], workdir, warnings,
+                    seek_ceiling=ceil)
+                f_up = sub.submit(storage.upload_file, proxy_local,
+                                  proxy_key, "video/mp4")
+                state["shots"] = f_shots.result()
+                state["tile_keys"], state["tile_step"] = f_tiles.result()
+                try:
+                    f_up.result()
+                except Exception:
+                    print(f"[index {job_id}] proxy upload failed", flush=True)
+                    raise
 
-        # 4. Transcription
-        words, sentences, language = _transcribe_wav(
-            job_id, wav_local, info["duration"], warnings)
-        worker_db.run(dbx.set_progress, job_id, 60)
-        _mark("whisper_s")
+        def _sound_lane():
+            wav_local = None
+            if info["has_audio"]:
+                wav_local = os.path.join(workdir, "audio.wav")
+                media.extract_wav(src, wav_local)
+            state["wav_local"] = wav_local
+            state["wav_done_at"] = time.monotonic()
+            up = None
+            if wav_local:
+                with futures.ThreadPoolExecutor(max_workers=1) as sub:
+                    up = sub.submit(storage.upload_file, wav_local,
+                                    f"audio/{project_id}/{sha}.wav",
+                                    "audio/wav")
+                    state["words"], state["sentences"], state["language"] = \
+                        _transcribe_wav(job_id, wav_local, info["duration"],
+                                        warnings)
+                    state["silences"] = _detect_silences(
+                        job_id, wav_local, info["duration"], warnings)
+                    # Perception sidecar (round 35): beat grid / energy /
+                    # speech stress from the wav that already exists.
+                    # Non-fatal by the same contract as tiles: perception
+                    # feeds DECISIONS, never renders.
+                    try:
+                        import perception as perception_mod
+                        state["perception"] = perception_mod.analyze_audio(
+                            wav_local)
+                    except Exception as e:
+                        warnings.append(
+                            f"audio perception failed ({str(e)[:120]}) — "
+                            "beat-synced and emphasis-driven edits will "
+                            "analyze on first use")
+                    try:
+                        up.result()
+                    except Exception:
+                        print(f"[index {job_id}] audio upload failed",
+                              flush=True)
+                        raise
+            else:
+                state["words"], state["sentences"], state["language"] = \
+                    _transcribe_wav(job_id, None, info["duration"], warnings)
+                state["silences"] = _detect_silences(
+                    job_id, None, info["duration"], warnings)
 
-        # 5. Silences (degrade with a recorded warning, never silently to [])
-        silences = _detect_silences(job_id, wav_local, info["duration"],
-                                    warnings)
-        worker_db.run(dbx.set_progress, job_id, 65)
-        _mark("silences_s")
+        with futures.ThreadPoolExecutor(max_workers=2) as lanes:
+            f_pic = lanes.submit(_picture_lane)
+            f_snd = lanes.submit(_sound_lane)
+            # Coarse liveness ticker while the lanes work: 12 -> 90, a step
+            # every 2s, from THIS thread. set_progress also refreshes the
+            # job heartbeat, which is what keeps a long index claimable-safe.
+            pct = 12
+            while True:
+                done, _pending = futures.wait((f_pic, f_snd), timeout=2.0)
+                if len(done) == 2:
+                    break
+                pct = min(90, pct + 3)
+                worker_db.run(dbx.set_progress, job_id, pct)
+            f_pic.result()                 # re-raise lane failures in order
+            f_snd.result()
 
-        # 6. Shots — scene changes only. Transitions and the program map
-        # depend on these boundaries; nothing describes them any more.
-        shots = scenes.detect_shots(proxy_local, info["duration"], warnings)
-        worker_db.run(dbx.set_progress, job_id, 70)
-        _mark("shots_s")
-
-        # 7. FILMSTRIP TILES — the visual index. Built from the proxy
-        # (already 540p, fast to seek) and uploaded concurrently.
-        proxy_dur = proxy_info["duration"]
-        seek_ceiling = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
-        tile_keys, tile_step = _build_and_upload_tiles(
-            job_id, project_id, sha, proxy_local, info["duration"], workdir,
-            warnings, seek_ceiling=seek_ceiling)
+        proxy_info = state["proxy_info"]
+        proxy_local = state["proxy_local"]
+        wav_local = state.get("wav_local")
+        shots = state["shots"]
+        tile_keys, tile_step = state["tile_keys"], state["tile_step"]
+        words, sentences = state["words"], state["sentences"]
+        language, silences = state["language"], state["silences"]
+        perception_sidecar = state.get("perception")
+        # Lane timings for the admin views: the two lanes overlap, so the
+        # old per-stage ladder is now picture/sound walls plus their split.
+        t_lanes = time.monotonic() - _t
+        timings["proxy_s"] = round(
+            (state.get("proxy_done_at") or _t) - _t, 2)
+        timings["wav_s"] = round((state.get("wav_done_at") or _t) - _t, 2)
+        timings["lanes_s"] = round(t_lanes, 2)
+        _t = time.monotonic()
         print(f"[index {job_id}] filmstrip: {len(tile_keys)} tile(s), "
               f"step {tile_step}s, {len(shots)} shot(s)", flush=True)
-        worker_db.run(dbx.set_progress, job_id, 85)
-        _mark("tiles_s")
-
-        # 8. Upload the load-bearing artifacts (proxy + wav) — concurrent.
-        audio_key = f"audio/{project_id}/{sha}.wav" if wav_local else None
-        with futures.ThreadPoolExecutor(
-                max_workers=config.UPLOAD_PARALLELISM) as pool:
-            required = {pool.submit(storage.upload_file, proxy_local,
-                                    proxy_key, "video/mp4"): "proxy"}
-            if audio_key:
-                required[pool.submit(storage.upload_file, wav_local,
-                                     audio_key, "audio/wav")] = "audio"
-            for fut, what in required.items():
-                try:
-                    fut.result()
-                except Exception:
-                    print(f"[index {job_id}] {what} upload failed",
-                          flush=True)
-                    raise
         worker_db.run(dbx.set_progress, job_id, 92)
 
+        audio_key = f"audio/{project_id}/{sha}.wav" if wav_local else None
         worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,
                       bytes_=os.path.getsize(proxy_local),
                       duration_s=proxy_info["duration"],
@@ -402,19 +465,6 @@ def run_index_job(worker_db, job):
             worker_db.run(dbx.insert_asset, project_id, "audio", audio_key,
                           bytes_=os.path.getsize(wav_local),
                           duration_s=info["duration"], sha256=sha)
-
-        # 8.5 Perception sidecar (round 35): beat grid / energy / speech
-        # stress from the wav that already exists. Non-fatal by the same
-        # contract as tiles: perception feeds DECISIONS, never renders.
-        perception_sidecar = None
-        if wav_local:
-            try:
-                import perception as perception_mod
-                perception_sidecar = perception_mod.analyze_audio(wav_local)
-            except Exception as e:
-                warnings.append(
-                    f"audio perception failed ({str(e)[:120]}) — beat-synced "
-                    "and emphasis-driven edits will analyze on first use")
         worker_db.run(dbx.set_progress, job_id, 94)
 
         # 9. Assemble + persist the index
