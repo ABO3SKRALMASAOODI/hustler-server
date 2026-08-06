@@ -33,7 +33,9 @@ import music_library
 import sfx_library
 import screenframe
 import sheets
+import stitch
 import storage
+import timeline as timeline_mod
 import travel
 from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
                      is_canvas_program, quad_bbox, speed_pieces, validate_edl)
@@ -2674,7 +2676,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                progress_cb=None, want_wm=False, cancelled_cb=None,
-               patch_locals=None):
+               patch_locals=None, cap_ass_override=None,
+               suppress_outro=False):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -2708,9 +2711,16 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []
     tl = Timeline(edl["keep"], inserts, edl.get("speed"))
-    ass_path = caplib.build_ass(edl, index, tl,
-                                os.path.join(workdir, "captions.ass"),
-                                play_res=(W, H))
+    # A stitched-preview PIECE (round 93) burns captions from the FULL
+    # program's ASS, time-shifted by the stitcher — the piece's own windowed
+    # timeline would regroup caption lines at its edges. "" means the caller
+    # decided nothing burns here.
+    if cap_ass_override is not None:
+        ass_path = cap_ass_override or None
+    else:
+        ass_path = caplib.build_ass(edl, index, tl,
+                                    os.path.join(workdir, "captions.ass"),
+                                    play_res=(W, H))
     # TWO text layers, not one. A behind-subject text is burned early (under the
     # subject); everything else is burned last (over everything). Splitting the
     # LIST rather than teaching graphics.py about depth keeps the ASS builder
@@ -2861,7 +2871,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # The end card is its own ffmpeg input — no filter conjures a bundled PNG
     # out of nothing. -loop 1 -t gives it a real duration and framerate so the
     # overlay does not depend on eof_action to hold a single frame.
-    outro_s = outro_seconds(preview)
+    # A stitched-preview piece suppresses it: the card belongs to the end of
+    # the PROGRAM, and the tail that carries it is stream-copied from the
+    # previous preview.
+    outro_s = 0.0 if suppress_outro else outro_seconds(preview)
     card_idx = None
     if outro_s > 0.0:
         extra_inputs += ["-loop", "1", "-t", f"{outro_s:.3f}",
@@ -3174,6 +3187,122 @@ def _fetch_into(workdir, key, tag):
     return local
 
 
+def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
+                      src_local, workdir, patch_locals, out_path):
+    """Try to build this preview by re-encoding only the changed windows and
+    stream-copying the rest from the previous preview (round 93 — see
+    worker/stitch.py). Returns the output duration, or None for ANY reason
+    at all — the caller then runs the ordinary full render, which is always
+    correct. Never raises."""
+    try:
+        new_edl = new_row["json"]
+        prev_edl = prev_row["json"]
+        tl_new = Timeline(new_edl["keep"], new_edl.get("inserts") or [],
+                          new_edl.get("speed") or [])
+        tl_prev = Timeline(prev_edl["keep"], prev_edl.get("inserts") or [],
+                           prev_edl.get("speed") or [])
+        duration = float((index.get("video") or {}).get("duration") or 0.0)
+        windows, why = stitch.plan(prev_edl, new_edl, tl_prev, tl_new,
+                                   duration, tl_new.out_duration)
+        if windows is None:
+            print(f"[render {job_id}] stitch: full render ({why})",
+                  flush=True)
+            return None
+
+        info = media.probe(src_local)
+        W, H = frame_dims(info["width"], info["height"],
+                          (new_edl.get("frame") or {}).get("ratio"))
+        fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
+        W, H, fps = preview_geometry(W, H, fps)
+
+        # Zones a window boundary must never land in: every item span (old
+        # and new), every caption event, every junction's transition zone,
+        # and the program's fade ends (those refuse stitching outright).
+        item_spans = [(a, b) for a, b, _k in
+                      stitch._item_windows(prev_edl, tl_prev, duration)
+                      + stitch._item_windows(new_edl, tl_new, duration)]
+        full_cap = caplib.build_ass(new_edl, index, tl_new,
+                                    os.path.join(workdir, "stitch_cap.ass"),
+                                    play_res=(W, H))
+        events = stitch.ass_events(full_cap)
+        fx = new_edl.get("effects") or {}
+        junction_zones = []
+        tr = fx.get("transition") or None
+        if tr:
+            blocks = timeline_mod.program_blocks(new_edl)
+            juncs = transition_junctions(new_edl, index,
+                                         n_blocks=len(blocks))
+            d = float(tr.get("duration_s") or 0.5) + 0.2
+            for k in juncs:
+                if 0 <= k < len(blocks) - 1:
+                    t = blocks[k]["out_end"]
+                    junction_zones.append((t - d, t + d))
+        fades = []
+        fi = float(fx.get("fade_in_s") or 0.0)
+        fo = float(fx.get("fade_out_s") or 0.0)
+        if fi > 0:
+            fades.append((0.0, fi + 0.3))
+        if fo > 0:
+            fades.append((tl_new.out_duration - fo - 0.3,
+                          tl_new.out_duration))
+        expanded = stitch.expand(windows, item_spans, events, junction_zones,
+                                 fades, tl_new.out_duration)
+        if expanded is None:
+            print(f"[render {job_id}] stitch: full render (windows would "
+                  "not settle)", flush=True)
+            return None
+
+        prev_local = _cached_source(prev_asset["storage_key"])
+        if not prev_local:
+            prev_local = _fetch_into(workdir, prev_asset["storage_key"],
+                                     "prevpv")
+        file_dur = media.duration_of(prev_local)
+        kfs = stitch.keyframe_times(prev_local)
+        snapped = stitch.snap_windows(
+            expanded, kfs, file_dur,
+            forbidden=item_spans + events + junction_zones)
+        if snapped is None:
+            print(f"[render {job_id}] stitch: full render (keyframe snap "
+                  "gave up)", flush=True)
+            return None
+
+        pieces = []
+        for i, (a, b) in enumerate(snapped):
+            wedl = stitch.window_edl(new_edl, tl_new, a, b)
+            cap_piece = ""
+            if full_cap:
+                cap_piece = os.path.join(workdir, f"stitch_cap_{i}.ass")
+                if not stitch.shift_ass(full_cap, cap_piece, a, b):
+                    print(f"[render {job_id}] stitch: full render (a "
+                          "caption event straddles a boundary)", flush=True)
+                    return None
+            piece = os.path.join(workdir, f"stitch_piece_{i}.mp4")
+            pdur = render_edl(wedl, index, src_local, piece, workdir,
+                              preview=True, want_wm=False,
+                              patch_locals=patch_locals,
+                              cap_ass_override=cap_piece,
+                              suppress_outro=True)
+            if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
+                print(f"[render {job_id}] stitch: full render (piece {i} "
+                      f"came out {pdur:.3f}s for a {b - a:.3f}s window)",
+                      flush=True)
+                return None
+            pieces.append(piece)
+
+        out_dur = stitch.assemble(prev_local, pieces, snapped, file_dur,
+                                  workdir, out_path)
+        total_re = sum(b - a for a, b in snapped)
+        print(f"[render {job_id}] STITCHED preview: re-encoded "
+              f"{total_re:.1f}s of {file_dur:.1f}s across "
+              f"{len(snapped)} window(s), rest stream-copied from "
+              f"v{prev_row['version']}", flush=True)
+        return out_dur
+    except Exception as e:
+        print(f"[render {job_id}] stitch failed ({str(e)[:200]}) — running "
+              "the full render", flush=True)
+        return None
+
+
 def _render_stamp(job_id):
     """Name fragment for a render object. Unique PER RENDER, and carrying no
     word a client-side content blocker can pattern-match. Both properties are
@@ -3422,11 +3551,62 @@ def run_render_job(worker_db, job):
             print(f"[render {job_id}] BRAND CARD MISSING at {ENDCARD_PATH} — "
                   "exporting WITHOUT the Valmera end card", flush=True)
 
-        out_dur = render_edl(edl_row["json"], index, src_local, out_local,
-                             workdir, preview=(variant == "preview"),
-                             progress_cb=_prog, want_wm=want_wm,
-                             cancelled_cb=lambda: _abandoned[0],
-                             patch_locals=patch_locals)
+        # STITCHED PREVIEW (round 93): when only video-local layers changed
+        # since the last rendered preview, re-encode those windows and
+        # stream-copy the rest. Gated hard: never for finals (they render
+        # from the original at full fidelity), never on force (that path
+        # exists to produce genuinely fresh bytes), never for the
+        # watermarked free tier (pieces would need the mark reproduced
+        # seam-exactly), and only from a previous render that every cache
+        # guard agrees is still a true render of its EDL.
+        out_dur = None
+        stitched_from = None
+        if variant == "preview" and not force and not want_wm \
+                and not is_canvas:
+            try:
+                prev_asset = worker_db.run(dbx.latest_render_asset,
+                                           project_id, "preview")
+                pm = (prev_asset or {}).get("meta") or {}
+                prev_v = pm.get("edl_version")
+                if prev_asset and prev_v is not None \
+                        and int(prev_v) != version \
+                        and pm.get("src_sha256") == src_sha \
+                        and storage.exists(prev_asset["storage_key"]):
+                    prev_row = worker_db.run(dbx.get_edl_version, project_id,
+                                             int(prev_v))
+                    _pout = Timeline(
+                        prev_row["json"].get("keep") or [],
+                        prev_row["json"].get("inserts") or [],
+                        prev_row["json"].get("speed")).out_duration \
+                        if prev_row else 0.0
+                    fp_now = _caption_index_fp(prev_row["json"], index) \
+                        if prev_row else None
+                    if prev_row \
+                            and outro_current(pm, "preview") \
+                            and shaping_current(pm, prev_row["json"]) \
+                            and transitions_current(pm, prev_row["json"]) \
+                            and music_tail_current(pm, prev_row["json"],
+                                                   _pout) \
+                            and watermark_current(pm, "preview", is_paid,
+                                                  wm_settings) \
+                            and (fp_now is None
+                                 or pm.get("caption_fp") == fp_now):
+                        out_dur = _stitched_preview(
+                            job_id, edl_row, prev_row, prev_asset, index,
+                            src_local, workdir, patch_locals, out_local)
+                        if out_dur is not None:
+                            stitched_from = int(prev_v)
+            except Exception as se:
+                print(f"[render {job_id}] stitch eligibility failed "
+                      f"({str(se)[:160]}) — full render", flush=True)
+                out_dur = None
+        if out_dur is None:
+            out_dur = render_edl(edl_row["json"], index, src_local,
+                                 out_local, workdir,
+                                 preview=(variant == "preview"),
+                                 progress_cb=_prog, want_wm=want_wm,
+                                 cancelled_cb=lambda: _abandoned[0],
+                                 patch_locals=patch_locals)
         _mark("encode_s")
 
         # Render verification: the output must be the expected length and must
@@ -3494,6 +3674,8 @@ def run_render_job(worker_db, job):
             meta={"variant": variant, "edl_version": version,
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
                   "src_sha256": src_sha,
+                  **({"stitched_from": stitched_from}
+                     if stitched_from is not None else {}),
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
                   "outro_v": (config.OUTRO_VERSION
                               if outro_seconds(variant == "preview") else 0),

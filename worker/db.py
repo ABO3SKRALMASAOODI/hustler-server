@@ -500,6 +500,18 @@ def latest_render_version(conn, project_id, variant):
         return row["v"] if row else None
 
 
+def latest_render_asset(conn, project_id, variant):
+    """The newest render of this variant regardless of version — the stitch
+    base (round 93): a preview built by re-encoding only what changed is
+    spliced into whatever the user most recently watched."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = %s
+                       ORDER BY id DESC LIMIT 1""", (project_id, variant))
+        return cur.fetchone()
+
+
 def find_render_asset(conn, project_id, variant, edl_version):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
