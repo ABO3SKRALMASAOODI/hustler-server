@@ -3257,7 +3257,12 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         if fo > 0:
             fades.append((tl_new.out_duration - fo - 0.3,
                           tl_new.out_duration))
-        expanded = stitch.expand(windows, item_spans, events, junction_zones,
+        # Items must be CONTAINED (they are carried whole into the windowed
+        # EDL); caption events and junction zones only need window BOUNDARIES
+        # kept out of them, which the keyframe snap enforces below — feeding
+        # them to the expansion made densely-captioned projects (a caption
+        # event every second) balloon past the coverage cap and never stitch.
+        expanded = stitch.expand(windows, item_spans, [], [],
                                  fades, tl_new.out_duration)
         if expanded is None:
             print(f"[render {job_id}] stitch: full render (windows would "
