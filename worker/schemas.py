@@ -1173,6 +1173,20 @@ class Master(BaseModel):
 CLEAN_FILLS = ("text", "box")
 
 
+def patch_fingerprint(src_sha, regions, window):
+    """Identity of one repainted WINDOW (round 92): which video, which
+    rectangles, which span. Content-addresses the patch clips so re-erasing
+    the same thing is a storage hit, the export can find (or rebuild) the
+    full-res twin deterministically, and a replaced upload is detected the
+    same way clean_fingerprint detects it for a whole cleaned source."""
+    payload = json.dumps(
+        {"w": [round(float(window[0]), 2), round(float(window[1]), 2)],
+         "r": [{k: r.get(k) for k in
+                ("x", "y", "w", "h", "start", "end", "fill")}
+               for r in (regions or [])]}, sort_keys=True)
+    return hashlib.sha1(f"{src_sha}|patch|{payload}".encode()).hexdigest()
+
+
 def clean_fingerprint(src_sha, regions, cursor=None):
     """Identity of a repainted source: (which video, which rectangles).
 
@@ -1196,6 +1210,29 @@ def clean_fingerprint(src_sha, regions, cursor=None):
                                ("scale", "smoothing", "click_highlight",
                                 "click_times")}, sort_keys=True)
     return hashlib.sha1(((src_sha or "") + payload).encode()).hexdigest()
+
+
+class PatchItem(BaseModel):
+    """One repainted WINDOW of the source, stored as a short patch clip the
+    renderer overlays on the source clock (round 92).
+
+    asset_key is the PROXY-resolution patch — built inside the erase call in
+    seconds, and what previews composite. full_key is its full-resolution
+    twin for exports; usually absent at write time and materialized by the
+    final render (content-addressed via fp, so the export can derive the key
+    and build it exactly once). regions ride along so the export can rebuild
+    the same repaint at full res, remove_erase can list/undo by id, and fp —
+    patch_fingerprint(src sha, regions, window) — ties the clips to the
+    upload they repaint: a replaced video renders as itself, never under a
+    stale patch.
+    """
+    id: str
+    asset_key: str
+    full_key: Optional[str] = None
+    fp: str
+    src_start: float
+    src_end: float
+    regions: List["CleanRegion"] = Field(default_factory=list)
 
 
 class CleanRegion(BaseModel):
@@ -1308,6 +1345,12 @@ class EDL(BaseModel):
     # None on every EDL written before it existed, and edl_signature drops
     # None, so historical signatures and their cached renders are untouched.
     source_clean: Optional[SourceClean] = None
+    # round 92 — repainted WINDOWS overlaid on the source clock, replacing
+    # the whole-file clean pass for new erases: cost scales with the erased
+    # span, not the video (job 2685 spent 965s of a 1057s turn re-deriving a
+    # 39s file seven times, then timed out). Empty list, so edl_signature
+    # drops it and every earlier EDL keeps its signature and cached renders.
+    patches: List[PatchItem] = Field(default_factory=list)
 
 
 def default_edl(duration):
@@ -2239,6 +2282,27 @@ def validate_edl(data, duration=None):
                 "the field instead of pointing at a derivation that says "
                 "nothing was done.")
 
+    seen_p = set()
+    for i, pt in enumerate(edl.patches or []):
+        if not pt.id or pt.id in seen_p:
+            raise EDLValidationError(
+                f"patches[{i}].id must be non-empty and unique.")
+        seen_p.add(pt.id)
+        if not pt.asset_key or not pt.fp:
+            raise EDLValidationError(
+                f"patches[{i}] needs asset_key and fp — a patch without its "
+                "clip and fingerprint would overlay whatever file happened "
+                "to be there.")
+        pt.src_start, pt.src_end = _r(max(0.0, float(pt.src_start))), \
+            _r(float(pt.src_end))
+        if pt.src_end <= pt.src_start:
+            raise EDLValidationError(
+                f"patches[{i}]: src_end must be after src_start.")
+        if not pt.regions:
+            raise EDLValidationError(
+                f"patches[{i}] carries no regions — the export could never "
+                "rebuild its full-res twin. Remove the patch instead.")
+
     return edl
 
 
@@ -2446,6 +2510,14 @@ def describe_edl(edl_dict, duration=None):
         erased = ", ".join(
             f"{(r.kind or 'region')} [{r.id}]" for r in edl.source_clean.regions)
         parts.append(f"erased from the source: {erased}")
+    if edl.patches:
+        # Round 92 window patches — same honesty rule as above: the pixels
+        # ARE repainted wherever these windows play.
+        pat = ", ".join(
+            f"{(r.kind or 'region')} [{r.id}]"
+            + (f" @{p.src_start:g}-{p.src_end:g}s")
+            for p in edl.patches for r in p.regions)
+        parts.append(f"erased from the source (windowed): {pat}")
     return ", ".join(parts)
 
 

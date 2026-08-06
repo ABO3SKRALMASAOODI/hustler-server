@@ -49,6 +49,7 @@ import visual
 import webrecord
 from captions import KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
+                     patch_fingerprint,
                      EDLValidationError, Frame,
                      HEX_COLOR,
                      canvas_edl, clip_anim, default_edl, describe_edl,
@@ -4003,16 +4004,17 @@ def _edl_cursor(edl):
     return ((edl.get("source_clean") or {}).get("cursor")) or None
 
 
-def _apply_clean(ctx, regions, what, cursor=_KEEP_CURSOR):
+def _apply_clean(ctx, regions, what, cursor=_KEEP_CURSOR, base_edl=None):
     """Re-derive the source for `regions` (+ the cursor pass) and write the EDL.
 
     `regions` is the COMPLETE list for this project (not a delta), because the
     derived file is one artifact: every erase re-derives it from the untouched
     original. `cursor` defaults to whatever the EDL already carries, so an
     erase never silently drops a cursor pass the user asked for two turns ago
-    — and vice versa.
+    — and vice versa. `base_edl` lets a caller thread its own other changes
+    (remove_erase clears the round-92 patch list in the same write).
     """
-    edl = dict(ctx.latest_edl()["json"])
+    edl = dict(base_edl if base_edl is not None else ctx.latest_edl()["json"])
     if cursor is _KEEP_CURSOR:
         cursor = _edl_cursor(edl)
     if not regions and not cursor:
@@ -4207,6 +4209,158 @@ def find_burned_text(ctx, scope="all", start=None, end=None):
             "one pass.")
 
 
+_PATCH_PAD_S = 0.75            # window padding: plate sampling needs frames
+
+
+def _patch_groups(items, duration):
+    """Group erase items into patch windows: items whose (padded) windows
+    overlap share one patch clip — one decode, one repaint pass, one overlay.
+    Returns [(window, [items])] in time order."""
+    def win(it):
+        s = it.get("start")
+        e = it.get("end")
+        s = 0.0 if s is None else max(0.0, float(s) - _PATCH_PAD_S)
+        e = duration if e is None else min(duration,
+                                           float(e) + _PATCH_PAD_S)
+        return (round(s, 2), round(max(e, s + 0.2), 2))
+
+    order = sorted(items, key=lambda it: win(it)[0])
+    groups = []
+    for it in order:
+        s, e = win(it)
+        if groups and s <= groups[-1][0][1] + 0.01:
+            (gs, ge), members = groups[-1]
+            groups[-1] = ((gs, max(ge, e)), members + [it])
+        else:
+            groups.append(((s, e), [it]))
+    return groups
+
+
+def _run_patch(ctx, window, group_regions):
+    """Build (or find) ONE proxy-res patch clip for `window`. Returns
+    (asset_key, fp, stats) — stats carries before/after ink when the clip
+    was freshly built, {} when it already existed (it measured clean when it
+    was first made; that is why it is cached).
+
+    Round 92: this replaces the whole-file clean pass for erases. The clip
+    repaints only [window] of the PREVIEW SOURCE — the cleaned proxy when a
+    cursor pass or legacy erase exists, else the plain proxy — so what the
+    patch covers is exactly what the preview shows under it. Cost scales
+    with the window: job 2685's five erases re-derived a 39s file seven
+    times (965s, then the turn timed out); the same erases as patches are a
+    few seconds each.
+    """
+    row = _original_row(ctx)
+    sha = row.get("sha256") or ""
+    ctx._orig_sha = sha
+    edl = ctx.latest_edl()["json"]
+    fp = patch_fingerprint(sha, group_regions, window)
+    key = f"patches/{ctx.project_id}/{fp[:16]}.mp4"
+    if storage.exists(key):
+        return key, fp, {}
+    # The export rebuilds this patch at FULL resolution from the original —
+    # refuse at erase time anything that could not finish there, so an
+    # accepted erase is always an exportable one.
+    v = (getattr(ctx, "index", None) or {}).get("video") or {}
+    w_len = float(window[1]) - float(window[0])
+    mpx_s = (float(v.get("width") or 1920) * float(v.get("height") or 1080)
+             / 1e6) * w_len
+    if w_len > config.CLEAN_MAX_SOURCE_S or \
+            mpx_s > config.CLEAN_MAX_MPX_SECONDS:
+        raise ValueError(
+            f"that erase spans {w_len / 60:.1f} min of footage — repainting "
+            "works frame by frame and a span this long cannot finish. Erase "
+            "with start/end around the moments the mark is actually visible, "
+            "or cover it with blur_region / crop it out with set_frame.")
+    src_key = renderer.clean_source_key(edl, "preview", sha)
+    if not src_key:
+        proxy = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
+        src_key = proxy["storage_key"] if proxy else row["storage_key"]
+    if remote.clean_available():
+        stats = remote.run_clean_remote(
+            ctx.project_id,
+            {"mode": "patch", "src_key": src_key, "out_key": key,
+             "regions": group_regions, "window": list(window),
+             "measure": True},
+            user_id=ctx.job.get("user_id"))
+    else:
+        local_src = ctx.proxy_path()
+        out = os.path.join(ctx.workdir, f"patch_{fp[:8]}.mp4")
+        mids = [max(window[0], min(window[1] - 0.05,
+                                   float(r.get("start")
+                                         if r.get("start") is not None
+                                         else window[0]))) + 0.4
+                for r in group_regions]
+        before = [inpaint.text_energy(local_src,
+                                      (r["x"], r["y"], r["w"], r["h"]),
+                                      at=t, samples=3)
+                  for r, t in zip(group_regions, mids)]
+        stats = inpaint.build_patch(local_src, group_regions, window, out)
+        stats["before"] = before
+        stats["after"] = [
+            inpaint.text_energy(out, (r["x"], r["y"], r["w"], r["h"]),
+                                at=max(0.05, t - stats["src_start"]),
+                                samples=3)
+            for r, t in zip(group_regions, mids)]
+        storage.upload_file(out, key, "video/mp4")
+    try:
+        ctx.db.run(dbx.insert_asset, ctx.project_id, "patch", key,
+                   duration_s=round(float(window[1]) - float(window[0]), 2),
+                   meta={"filename": "repaint-patch.mp4", "patch_fp": fp,
+                         "generated": True,
+                         "regions": len(group_regions)})
+    except Exception as e:
+        print(f"[erase] patch asset row not recorded ({str(e)[:120]}) — "
+              "the clip itself is in storage and the EDL points at it",
+              flush=True)
+    return key, fp, stats or {}
+
+
+def _apply_patches(ctx, new_items, what):
+    """Build patch clips for `new_items` and append them to the EDL.
+
+    Existing patches are never rebuilt or re-derived — each erase call pays
+    for its own windows only. Returns the write result plus the same
+    measured-ink honesty lines _apply_clean produces."""
+    edl = dict(ctx.latest_edl()["json"])
+    existing = [dict(p) for p in (edl.get("patches") or [])]
+    groups = _patch_groups(new_items, ctx.duration)
+    entries, lines = [], []
+    for window, members in groups:
+        key, fp, stats = _run_patch(ctx, window, members)
+        pid = _next_item_id(
+            existing + entries, "pa")
+        entries.append({"id": pid, "asset_key": key, "fp": fp,
+                        "src_start": window[0], "src_end": window[1],
+                        "regions": members})
+        before = stats.get("before") or []
+        after = stats.get("after") or []
+        for r, b, a in zip(members, before, after):
+            gone = (b <= 0.5) or (a <= max(1.5, b * 0.35))
+            lines.append(f"[{r['id']}] ink {b:g} -> {a:g} "
+                         + ("— gone" if gone else "— STILL VISIBLE"))
+        if any(p.get("escalated") for p in (stats.get("plates") or [])):
+            lines.append(f"[{pid}] the text sat on a solid bar, so the "
+                         "whole bar was repainted, not just the letters")
+    edl["patches"] = existing + entries
+    result = ctx.write_edl(edl, what)
+    if not result.startswith("EDL v"):
+        return result
+    if lines:
+        result += "\nMeasured on the repainted window: " + "; ".join(lines)
+        if any("STILL" in ln for ln in lines):
+            result += ("\nOne rectangle still shows ink. Widen it (outlines "
+                       "and shadows sit outside the letters), or pass "
+                       "fill='box' to repaint the whole rectangle. Do NOT "
+                       "tell the user it was removed until this measures "
+                       "clean.")
+        else:
+            result += ("\nThe pixels are genuinely repainted — say REMOVED, "
+                       "not covered. The repaint applies instantly to every "
+                       "render; cuts, captions and timestamps are unchanged.")
+    return result
+
+
 def erase_burned_text(ctx, scope="captions", start=None, end=None):
     """Detect and repaint out every burned-in region of one kind, one pass."""
     if not ctx.has_main_video:
@@ -4236,21 +4390,48 @@ def erase_burned_text(ctx, scope="captions", start=None, end=None):
                 "Ask them where they see it and use erase_region with that "
                 "rectangle.")
     edl = ctx.latest_edl()["json"]
-    regions = [dict(r) for r in
-               ((edl.get("source_clean") or {}).get("regions") or [])]
+    # Existing ids across BOTH mechanisms (legacy whole-file regions and
+    # patch regions), so a new er-id never collides.
+    prior = [dict(r) for r in
+             ((edl.get("source_clean") or {}).get("regions") or [])]
+    for p in (edl.get("patches") or []):
+        prior += [dict(r) for r in (p.get("regions") or [])]
     added = []
     for r in found:
-        item = {"id": _next_item_id(regions, "er"),
+        # Round 92: window each region to when the detector actually SAW it
+        # (first_s/last_s ride every detection), padded by the sampling gap —
+        # a watermark visible for 8s repaints 8s of frames, not the video.
+        # The same rectangle already erased (same spot, overlapping window)
+        # is skipped instead of re-added: job 2685 wrote the identical
+        # caption region twice because the batch never checked itself.
+        w0, w1 = r.get("first_s"), r.get("last_s")
+        if w0 is not None and w1 is not None:
+            w0 = max(0.0, float(w0) - _PATCH_PAD_S * 2)
+            w1 = min(ctx.duration, float(w1) + _PATCH_PAD_S * 2)
+            if w1 - w0 >= ctx.duration - 2.0:
+                w0 = w1 = None            # seen throughout: whole video
+        dup = any(abs(q.get("x", 9) - r["x"]) < 0.02
+                  and abs(q.get("y", 9) - r["y"]) < 0.02
+                  and abs(q.get("w", 9) - r["w"]) < 0.04
+                  and abs(q.get("h", 9) - r["h"]) < 0.04
+                  for q in prior + added)
+        if dup:
+            continue
+        item = {"id": _next_item_id(prior + added, "er"),
                 "x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"],
-                "start": None, "end": None, "fill": "text",
-                "kind": r["kind"]}
-        regions.append(item)
+                "start": None if w0 is None else round(w0, 2),
+                "end": None if w1 is None else round(w1, 2),
+                "fill": "text", "kind": r["kind"]}
         added.append(item)
+    if not added:
+        return ("NO CHANGE: every detected region is already erased — the "
+                "repaint is in place. If the user still sees text, it is a "
+                "DIFFERENT mark: ask where, and erase_region that rectangle.")
     what = ("erased " + ", ".join(f"{a['kind']} at y={a['y']:g} [{a['id']}]"
                                   for a in added)
             + " from the source pixels")
     try:
-        return _apply_clean(ctx, regions, what)
+        return _apply_patches(ctx, added, what)
     except ValueError as e:
         return f"REJECTED: {e}"
     except Exception as e:
@@ -4346,6 +4527,8 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
     edl = ctx.latest_edl()["json"]
     existing = [dict(r) for r in
                 ((edl.get("source_clean") or {}).get("regions") or [])]
+    for p in (edl.get("patches") or []):
+        existing += [dict(r) for r in (p.get("regions") or [])]
     if regions:
         if len(regions) > 8:
             return ("REJECTED: at most 8 regions per call — erase the "
@@ -4372,10 +4555,6 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
         if isinstance(item, str):
             return item
         new_items = [item]
-    dropped = [o["id"] for o in existing
-               if any(_subsumed_by(o, n) for n in new_items)]
-    kept = [o for o in existing if o["id"] not in dropped]
-    all_regions = kept + new_items
     descs = []
     for it in new_items:
         window = (f" {it['start']}-{it['end']}s" if it["start"] is not None
@@ -4383,15 +4562,15 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
         descs.append(f"{'object' if it['fill'] == 'box' else 'text'} at "
                      f"x={it['x']},y={it['y']} size {it['w']}x{it['h']}"
                      f"{window} [{it['id']}]")
-    what = ("erased from the source pixels in one pass: " + "; ".join(descs)
+    what = ("erased from the source pixels: " + "; ".join(descs)
             if len(new_items) > 1 else
             f"erased the {descs[0]} from the source pixels")
-    if dropped:
-        what += (f" (replacing {', '.join(dropped)}, now fully covered by it "
-                 "— every repaint redoes every region, so a superseded one "
-                 "would cost time on each future pass)")
+    # Round 92: new erases become window PATCHES — each call repaints only
+    # its own span, so nothing here ever re-derives earlier work and the
+    # old subsume bookkeeping (whose entire point was per-pass cost) is
+    # gone with the per-pass cost itself.
     try:
-        return _apply_clean(ctx, all_regions, what)
+        return _apply_patches(ctx, new_items, what)
     except ValueError as e:
         return f"REJECTED: {e}"
     except Exception as e:
@@ -4434,28 +4613,56 @@ def reset_edit(ctx):
 
 
 def remove_erase(ctx, id=None):
-    """Undo one erase (or all), re-cleaning from the untouched original."""
-    edl = ctx.latest_edl()["json"]
+    """Undo one erase (or all). A patch erase (round 92) is undone by simply
+    dropping its overlay — instant, nothing re-derives; a legacy whole-file
+    erase re-cleans from the untouched original as it always did."""
+    edl = dict(ctx.latest_edl()["json"])
     regions = [dict(r) for r in
                ((edl.get("source_clean") or {}).get("regions") or [])]
-    if not regions:
+    patches = [dict(p) for p in (edl.get("patches") or [])]
+    if not regions and not patches:
         return ("NO CHANGE: nothing has been erased from this video's pixels. "
                 "Do NOT tell the user you restored anything.")
     if id:
+        # A patch id ('pa*') or any region id INSIDE a patch drops that
+        # patch; a legacy region id re-cleans without it.
+        hit_patch = next(
+            (p for p in patches
+             if p.get("id") == id
+             or any(r.get("id") == id for r in (p.get("regions") or []))),
+            None)
+        if hit_patch is not None:
+            edl["patches"] = [p for p in patches
+                              if p["id"] != hit_patch["id"]]
+            return ctx.write_edl(
+                edl, f"put back the pixels erased by {id} — the repaint "
+                     "overlay is gone and the window shows the source again")
         hit = next((r for r in regions if r.get("id") == id), None)
         if not hit:
-            have = ", ".join(r.get("id", "?") for r in regions)
+            have = ([r.get("id", "?") for r in regions]
+                    + [p.get("id", "?") for p in patches])
             return (f"REJECTED: no erased region with id '{id}'. Existing: "
-                    f"{have}. Call get_edl to see them, or omit id to restore "
-                    "the whole original picture.")
+                    f"{', '.join(have)}. Call get_edl to see them, or omit "
+                    "id to restore the whole original picture.")
         regions = [r for r in regions if r.get("id") != id]
-        what = f"put back the pixels erased by {id}"
-    else:
-        regions, what = [], f"put back all {len(regions)} erased region(s)"
-    try:
-        return _apply_clean(ctx, regions, what)
-    except Exception as e:
-        return f"Could not rebuild the video ({str(e)[:180]}). Nothing changed."
+        try:
+            return _apply_clean(ctx, regions,
+                                f"put back the pixels erased by {id}")
+        except Exception as e:
+            return (f"Could not rebuild the video ({str(e)[:180]}). "
+                    "Nothing changed.")
+    total = len(regions) + len(patches)
+    what = f"put back all {total} erased region(s)"
+    edl["patches"] = []
+    if regions:
+        # The legacy clean clears (or re-derives cursor-only) through
+        # _apply_clean, and the same write carries the emptied patch list.
+        try:
+            return _apply_clean(ctx, [], what, base_edl=edl)
+        except Exception as e:
+            return (f"Could not rebuild the video ({str(e)[:180]}). "
+                    "Nothing changed.")
+    return ctx.write_edl(edl, what)
 
 
 # ── The pointer pass (round 51) ─────────────────────────────────────────────
@@ -12251,10 +12458,12 @@ TOOLS = {
                      "on screen, or any object the user wants taken out. "
                      "SEVERAL marks (a watermark AND a handle AND a caption "
                      "bar) go in ONE call as regions=[{x,y,w,h,fill?,start?,"
-                     "end?}, ...] — every call repaints the whole source, so "
-                     "one call with 3 rectangles is ~3x faster than 3 calls "
-                     "and leaves time for the rest of the request. "
-                     "x,y = TOP-LEFT corner, w,h = size, all FRACTIONS (0-1) "
+                     "end?}, ...]. The repaint costs time proportional to "
+                     "the WINDOW you erase, not the video — so pass "
+                     "start/end around when the mark is actually visible and "
+                     "the erase lands in seconds; earlier erases are never "
+                     "redone. x,y = TOP-LEFT corner, w,h = size, all "
+                     "FRACTIONS (0-1) "
                      "of the SOURCE frame — get them from find_burned_text "
                      "rather than estimating. fill: 'text' (default — "
                      "repaints only the letter strokes and keeps the picture "
@@ -12292,7 +12501,8 @@ TOOLS = {
                    "and effect, so say so before and after.", {}),
     "remove_erase": (remove_erase, "Undo an erase: put the original pixels "
                      "back for one erased region by its id (see get_edl), or "
-                     "for ALL of them when id is omitted. Always rebuilds "
+                     "for ALL of them when id is omitted. Instant for "
+                     "window-patch erases; legacy whole-file erases rebuild "
                      "from the untouched original.",
                      {"id": {"type": "string"}}),
     "add_voiceover": (add_voiceover, "Lay an uploaded audio file OVER the "

@@ -283,12 +283,14 @@ class _EraseCtx:
 
 
 def test_erase_region_batches_into_one_clean_pass(monkeypatch):
-    """THE FOURTEEN-MINUTE TURN. Three rectangles in one call must reach
-    _apply_clean exactly once, with fresh sequential ids after the existing
-    ones."""
+    """THE FOURTEEN-MINUTE TURN (updated for round 92). Three rectangles in
+    one call reach _apply_patches exactly once — as NEW items only, ids
+    continuing after every existing region across both erase mechanisms —
+    and existing work is never re-derived (that per-pass tax is what patches
+    removed)."""
     passes = []
-    monkeypatch.setattr(agent_tools, "_apply_clean",
-                        lambda ctx, regions, what: passes.append(regions)
+    monkeypatch.setattr(agent_tools, "_apply_patches",
+                        lambda ctx, items, what: passes.append(items)
                         or f"EDL v3 -> v4: {what}")
     r = agent_tools.erase_region(_EraseCtx(), regions=[
         {"x": 0.0, "y": 0.75, "w": 0.53, "h": 0.15},
@@ -297,24 +299,24 @@ def test_erase_region_batches_into_one_clean_pass(monkeypatch):
          "end": 13.2},
     ])
     assert r.startswith("EDL v")
-    assert len(passes) == 1, "one call, one repaint pass"
+    assert len(passes) == 1, "one call, one patch application"
     regs = passes[0]
-    assert len(regs) == 4                      # 1 existing + 3 new
-    assert [x["id"] for x in regs[1:]] == ["er2", "er3", "er4"]
-    assert regs[2]["fill"] == "box"
-    assert regs[3]["start"] == 0.5
+    assert len(regs) == 3                      # the NEW items only
+    assert [x["id"] for x in regs] == ["er2", "er3", "er4"]
+    assert regs[1]["fill"] == "box"
+    assert regs[2]["start"] == 0.5
 
 
 def test_erase_region_single_rect_form_still_works(monkeypatch):
-    monkeypatch.setattr(agent_tools, "_apply_clean",
-                        lambda ctx, regions, what: f"EDL v3 -> v4: {what}")
+    monkeypatch.setattr(agent_tools, "_apply_patches",
+                        lambda ctx, items, what: f"EDL v3 -> v4: {what}")
     r = agent_tools.erase_region(_EraseCtx(), x=0.1, y=0.1, w=0.2, h=0.2)
     assert r.startswith("EDL v")
 
 
 def test_erase_region_rejects_mixed_and_oversized_batches(monkeypatch):
-    monkeypatch.setattr(agent_tools, "_apply_clean",
-                        lambda ctx, regions, what: f"EDL v3 -> v4: {what}")
+    monkeypatch.setattr(agent_tools, "_apply_patches",
+                        lambda ctx, items, what: f"EDL v3 -> v4: {what}")
     r = agent_tools.erase_region(
         _EraseCtx(), x=0.1, y=0.1, w=0.2, h=0.2,
         regions=[{"x": 0, "y": 0, "w": 0.1, "h": 0.1}])

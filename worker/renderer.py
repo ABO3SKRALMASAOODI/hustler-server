@@ -35,7 +35,7 @@ import screenframe
 import sheets
 import storage
 import travel
-from schemas import (clean_fingerprint, EDLValidationError,
+from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
                      is_canvas_program, quad_bbox, speed_pieces, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
@@ -1214,7 +1214,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       src_sar=1.0, src_fps=None,
                       overlay_inputs=None, gfx_ass_path=None,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
-                      plate_idx=None, plate_box=None, behind_inputs=None):
+                      plate_idx=None, plate_box=None, behind_inputs=None,
+                      patch_inputs=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -1418,6 +1419,23 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[0:v]tpad=stop_mode=clone:"
                          f"stop_duration={src_pad:.3f}[vpad]")
             vsrc = "vpad"
+        # Repainted windows (round 92): each patch clip replaces its span of
+        # the SOURCE stream, before any trim, speed, zoom or grade — so every
+        # downstream stage reads the repainted pixels, exactly as it read a
+        # cleaned source. setpts shifts the clip onto the source clock;
+        # scale2ref pins it to the main stream's exact frame size (whatever
+        # SAR/rotation the decoder produced); enable bounds the replacement
+        # to the patch's own window and eof_action=pass hands the stream
+        # back to the untouched source after the last patch frame.
+        for pj, (pidx, pit) in enumerate(patch_inputs or []):
+            pps = float(pit["src_start"])
+            ppe = float(pit["src_end"])
+            parts.append(f"[{pidx}:v]setpts=PTS+{pps:.3f}/TB[ptc{pj}]")
+            parts.append(f"[ptc{pj}][{vsrc}]scale2ref[pts{pj}][pref{pj}]")
+            parts.append(f"[pref{pj}][pts{pj}]overlay=eof_action=pass"
+                         f":enable='between(t,{pps:.3f},{ppe:.3f})'"
+                         f"[vptc{pj}]")
+            vsrc = f"vptc{pj}"
     if speed and n >= 1:
         # Speed path: every segment needs its own video AND audio tap.
         if n == 1:
@@ -2655,8 +2673,17 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
 
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
-               progress_cb=None, want_wm=False, cancelled_cb=None):
-    """Render an EDL against a source file. Returns output duration (s)."""
+               progress_cb=None, want_wm=False, cancelled_cb=None,
+               patch_locals=None):
+    """Render an EDL against a source file. Returns output duration (s).
+
+    patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
+    repainted windows the graph overlays on the source clock before anything
+    else touches the frames. Resolved by run_render_job (which picks the
+    proxy-res clip for previews and materializes the full-res twin for
+    finals); a patch with no local file is skipped with a log line rather
+    than failing the render — the un-patched source is the honest fallback.
+    """
     if is_canvas_program(edl_dict):
         # No main video: the program is built on the canvas from inserts alone.
         return _render_canvas_edl(edl_dict, out_path, workdir, preview,
@@ -2710,6 +2737,20 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
     extra_inputs = []
     next_idx = 1
+
+    # Repainted windows (round 92) — one short clip per patch, overlaid on
+    # the source clock BEFORE segments/speed/zoom/grade, so every later
+    # stage sees the repainted pixels exactly as it would a cleaned source.
+    patch_inputs = []
+    for item in edl.get("patches") or []:
+        local = (patch_locals or {}).get(item["id"])
+        if not local or not os.path.exists(local):
+            print(f"[render] patch {item['id']} has no local clip — "
+                  "rendering that window un-repainted", flush=True)
+            continue
+        extra_inputs += ["-i", local]
+        patch_inputs.append((next_idx, item))
+        next_idx += 1
 
     # one shared anullsrc covers a silent main track AND silent insert blocks
     needs_silence = (not info["has_audio"]) or any(
@@ -2904,7 +2945,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               frame_focus=frame_focus, robot_idx=robot_idx,
                               wm_ass_path=wm_ass_path,
                               plate_idx=plate_idx, plate_box=plate_box,
-                              behind_inputs=behind_inputs)
+                              behind_inputs=behind_inputs,
+                              patch_inputs=patch_inputs)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).
@@ -3123,6 +3165,15 @@ def _cached_source(storage_key):
         return None
 
 
+def _fetch_into(workdir, key, tag):
+    """Plain download into the job workdir — the fallback when the sha cache
+    is unavailable. Raises on failure; callers decide how loud to be."""
+    local = os.path.join(workdir, f"fetch_{tag}"
+                         + os.path.splitext(key)[1].lower())
+    storage.download_to(key, local)
+    return local
+
+
 def _render_stamp(job_id):
     """Name fragment for a render object. Unique PER RENDER, and carrying no
     word a client-side content blocker can pattern-match. Both properties are
@@ -3306,6 +3357,51 @@ def run_render_job(worker_db, job):
 
         out_local = os.path.join(workdir, f"{variant}_v{version}.mp4")
 
+        # Repainted windows (round 92). Previews composite the proxy-res
+        # patch clips as stored; a FINAL needs each patch's full-resolution
+        # twin, materialized here (window-sized work on the already-download-
+        # ed original) exactly once — the key is content-addressed by the
+        # patch fingerprint, so every later export finds it. A patch whose
+        # fingerprint no longer matches this upload is a repaint of a
+        # REPLACED video and is dropped, same rule as clean_source_key.
+        patch_locals = {}
+        for pt in (edl_row["json"].get("patches") or []):
+            if src_sha != "canvas" and pt.get("fp") != patch_fingerprint(
+                    src_sha, pt.get("regions") or [],
+                    (pt.get("src_start"), pt.get("src_end"))):
+                print(f"[render {job_id}] ignoring patch {pt['id']}: it "
+                      "repaints a different upload (the video was replaced)",
+                      flush=True)
+                continue
+            try:
+                if variant == "preview":
+                    patch_locals[pt["id"]] = _cached_source(pt["asset_key"]) \
+                        or _fetch_into(workdir, pt["asset_key"], pt["id"])
+                else:
+                    fkey = pt.get("full_key") \
+                        or f"patches/{project_id}/{pt['fp'][:16]}_full.mp4"
+                    if not storage.exists(fkey):
+                        import inpaint as _inp
+                        flocal = os.path.join(workdir,
+                                              f"patch_{pt['id']}_full.mp4")
+                        _inp.build_patch(
+                            src_local,
+                            [dict(r) for r in pt.get("regions") or []],
+                            (float(pt["src_start"]), float(pt["src_end"])),
+                            flocal, crf=18)
+                        storage.upload_file(flocal, fkey, "video/mp4")
+                        patch_locals[pt["id"]] = flocal
+                    else:
+                        patch_locals[pt["id"]] = _cached_source(fkey) \
+                            or _fetch_into(workdir, fkey, pt["id"])
+            except Exception as pe_:
+                # A missing patch must not kill an export — but it must be
+                # LOUD: the window renders un-repainted, which the verify
+                # sheet and the user can both see.
+                print(f"[render {job_id}] patch {pt['id']} unavailable "
+                      f"({str(pe_)[:160]}) — that window renders "
+                      "un-repainted", flush=True)
+
         # Throttled: ffmpeg emits -progress a couple of times a second, and
         # unthrottled that was ~2 UPDATE/s against the shared DB for the
         # whole encode (a long final = ~1700 writes). set_progress also
@@ -3329,7 +3425,8 @@ def run_render_job(worker_db, job):
         out_dur = render_edl(edl_row["json"], index, src_local, out_local,
                              workdir, preview=(variant == "preview"),
                              progress_cb=_prog, want_wm=want_wm,
-                             cancelled_cb=lambda: _abandoned[0])
+                             cancelled_cb=lambda: _abandoned[0],
+                             patch_locals=patch_locals)
         _mark("encode_s")
 
         # Render verification: the output must be the expected length and must

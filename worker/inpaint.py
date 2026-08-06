@@ -38,6 +38,7 @@ output keeps the source's duration, frame rate and audio, so every timestamp
 the index, transcript and EDL already hold stays valid: the cleaned file is a
 drop-in replacement for the source, which is exactly how the renderer uses it.
 """
+import math
 import os
 import subprocess
 import warnings
@@ -775,6 +776,126 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
                         "escalated": r.escalated} for r in regs]}
 
 
+def build_patch(src, regions, window, out_path, *, crf=23, preset="veryfast",
+                progress_cb=None):
+    """Repaint `regions` inside ONE window of `src` and write a short,
+    video-only PATCH CLIP covering exactly that window — round 92.
+
+    This is the shape that made erase stop costing the whole video. The old
+    contract (clean_video) re-derives a full-length replacement source every
+    call: measured on job 2685 that was 965s of a 1057s turn — five erases,
+    each decoding, piping and re-encoding every frame of the original to
+    repaint a rectangle present in a fraction of them, and then the turn
+    timed out. A patch decodes only [ps, pe], repaints, and encodes only
+    those frames; the renderer overlays it on the source clock, so every
+    later effect (zoom, grade, captions) applies to the repainted pixels
+    exactly as it would have to a cleaned source. Cost scales with the
+    window, not the video.
+
+    The window snaps OUTWARD to the frame grid so patch frame k is source
+    frame floor(ps*fps)+k exactly — the overlay replaces frames one-for-one,
+    never blends phase-shifted neighbours. Frames with no active region pass
+    through untouched (same bytes), which keeps a patch honest padding and
+    all: it IS the source there.
+
+    Returns clean_video's stats shape plus the snapped window.
+    """
+    info = media.probe(src)
+    W, H = int(info["width"]), int(info["height"])
+    fps = max(1.0, min(float(info["fps"]) or 30.0, 120.0))
+    dur = float(info["duration"])
+    sar = float(info.get("sar") or 1.0)
+    if abs(sar - 1.0) > 0.001:
+        W = max(2, int(round(W * sar / 2)) * 2)
+    ps, pe = float(window[0]), float(window[1])
+    ps = max(0.0, math.floor(ps * fps) / fps)
+    pe = min(dur, math.ceil(pe * fps) / fps)
+    if pe - ps < 1.0 / fps:
+        raise ValueError(f"patch window {ps:.2f}-{pe:.2f} holds no frames")
+    regs = []
+    for r in regions:
+        rr = dict(r)
+        # The samplers (_build_plate, _has_backing_bar, _grow_to_bar) read
+        # the region's own start/end — clamp them into the window so every
+        # sample comes from frames this patch actually covers.
+        rr["start"] = max(ps, float(rr.get("start") if rr.get("start")
+                                    is not None else ps))
+        rr["end"] = min(pe, float(rr.get("end") if rr.get("end")
+                                  is not None else pe))
+        regs.append(_Region(rr, W, H))
+    if not regs:
+        raise ValueError("no regions to patch")
+    for r in regs:
+        if r.fill == "text" and _has_backing_bar(src, r, W, H, dur):
+            _grow_to_bar(src, r, W, H, dur)
+            r.fill = "box"
+            r.escalated = True
+        _build_plate(src, r, W, H, dur)
+
+    frame_bytes = W * H * 3
+    expected = max(1, int(round((pe - ps) * fps)))
+    dec = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-ss", f"{ps:.6f}", "-i", src,
+         "-t", f"{pe - ps:.6f}",
+         "-vf", f"scale={W}:{H},fps={fps:.5f}",
+         "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        bufsize=min(frame_bytes * 4, 8 << 20))
+    x264p = f"rc-lookahead={config.CLEAN_X264_LOOKAHEAD}:sync-lookahead=0"
+    enc = subprocess.Popen(
+        ["ffmpeg", "-y", "-v", "error",
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
+         "-r", f"{fps:.5f}", "-i", "pipe:0",
+         "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+         "-threads", str(config.CLEAN_X264_THREADS),
+         "-x264-params", x264p, "-pix_fmt", "yuv420p",
+         "-movflags", "+faststart", out_path],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE)
+    touched = 0
+    i = 0
+    try:
+        while True:
+            buf = dec.stdout.read(frame_bytes)
+            if not buf or len(buf) < frame_bytes:
+                break
+            t = ps + i / fps
+            active = [r for r in regs if r.active(t)]
+            if active:
+                frame = np.frombuffer(buf, np.uint8).reshape(H, W, 3).copy()
+                for r in active:
+                    band = r.crop(frame)
+                    mask = r.mask_for(band)
+                    if mask.any():
+                        frame[r.y0:r.y1, r.x0:r.x1] = _repaint(band, mask, r)
+                        touched += 1
+                out = (frame.tobytes() if frame.flags["C_CONTIGUOUS"]
+                       else np.ascontiguousarray(frame).tobytes())
+            else:
+                out = buf
+            enc.stdin.write(out)
+            i += 1
+            if progress_cb and i % 30 == 0:
+                progress_cb(min(0.99, i / float(expected)))
+    finally:
+        try:
+            enc.stdin.close()
+        except Exception:
+            pass
+        dec.stdout.close()
+        dec.wait(timeout=30)
+        err = enc.stderr.read().decode("utf-8", "replace")[-800:]
+        rc = enc.wait(timeout=config.FFMPEG_TIMEOUT_S)
+    if rc != 0 or not os.path.exists(out_path) or i == 0:
+        raise media.MediaError(f"patch encode failed: {err or 'no frames'}")
+    return {"frames": i, "frames_touched": touched,
+            "width": W, "height": H, "fps": round(fps, 3),
+            "src_start": round(ps, 3), "src_end": round(ps + i / fps, 3),
+            "plates": [{"static": r.static, "plate": r.plate is not None,
+                        "fill": r.fill, "escalated": r.escalated}
+                       for r in regs]}
+
+
 def snap_box_to_ink(path, box, *, start=None, end=None, samples=12,
                     pad_frac=0.02):
     """Tighten a ROUGH rectangle onto the ink that is actually inside it.
@@ -898,6 +1019,41 @@ def run_clean_job(worker_db, job):
     proxy_key = payload.get("proxy_key")
     regions = payload.get("regions") or []
     cursor_cfg = payload.get("cursor") or None
+    if payload.get("mode") == "patch":
+        # Round 92 — the windowed shape. Decode only [ps, pe] of src_key,
+        # repaint, upload ONE short video-only patch clip to out_key. The
+        # before/after ink measurement runs here on the window midframes,
+        # same honesty contract as the full pass.
+        window = payload.get("window") or []
+        if not src_key or not out_key or not regions or len(window) != 2:
+            raise ValueError("patch job needs src_key, out_key, regions, "
+                             "window=[start, end]")
+        workdir = os.path.join(config.TMP_DIR, f"pat_{_uuid.uuid4().hex[:8]}")
+        os.makedirs(workdir, exist_ok=True)
+        try:
+            src = os.path.join(workdir, "src" + os.path.splitext(src_key)[1])
+            storage.download_to(src_key, src)
+            mids = [(max(float(window[0]),
+                         min(float(window[1]) - 0.05,
+                             float(r.get("start") if r.get("start") is not None
+                                   else window[0])))
+                     + 0.4) for r in regions]
+            before = [text_energy(src, (r["x"], r["y"], r["w"], r["h"]),
+                                  at=t, samples=3)
+                      for r, t in zip(regions, mids)]
+            out = os.path.join(workdir, "patch.mp4")
+            stats = build_patch(src, regions, (window[0], window[1]), out,
+                                crf=int(payload.get("crf") or 23))
+            after = [text_energy(out, (r["x"], r["y"], r["w"], r["h"]),
+                                 at=max(0.05, t - stats["src_start"]),
+                                 samples=3)
+                     for r, t in zip(regions, mids)]
+            storage.upload_file(out, out_key, "video/mp4")
+            stats.update({"before": before, "after": after,
+                          "out_bytes": os.path.getsize(out)})
+            return stats
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
     if not src_key or not out_key or not proxy_key:
         raise ValueError("clean job needs src_key, out_key, proxy_key")
     if not regions and not cursor_cfg:
