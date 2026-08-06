@@ -1217,7 +1217,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       overlay_inputs=None, gfx_ass_path=None,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
-                      patch_inputs=None):
+                      patch_inputs=None, cap_burn_offset=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -2186,8 +2186,25 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # fontsdir points libass at the premium fonts bundled with the
         # worker (worker/fonts) — system fontconfig still supplies DejaVu
         # and the Noto fallbacks for scripts the bundled fonts lack.
-        parts.append(f"[{vlabel}]subtitles=filename='{ass_path}'"
-                     f":fontsdir='{caplib.FONTS_DIR}'[vsub]")
+        #
+        # cap_burn_offset (round 93): a stitched-preview PIECE burns its
+        # captions from the FULL program's ASS at full-program TIMESTAMPS —
+        # the frames time-travel to output clock w0 for the burn, then come
+        # back. libass picks the frame's events statelessly, so an event
+        # already mid-display at the piece boundary renders exactly as the
+        # full render would — karaoke, transforms and fades included. This
+        # is what freed stitch boundaries from caption timing entirely (a
+        # dynamic-caption project tiles the whole program with animated
+        # events; no boundary could avoid them).
+        if cap_burn_offset:
+            parts.append(
+                f"[{vlabel}]setpts=PTS+{cap_burn_offset:.4f}/TB,"
+                f"subtitles=filename='{ass_path}'"
+                f":fontsdir='{caplib.FONTS_DIR}',"
+                f"setpts=PTS-STARTPTS[vsub]")
+        else:
+            parts.append(f"[{vlabel}]subtitles=filename='{ass_path}'"
+                         f":fontsdir='{caplib.FONTS_DIR}'[vsub]")
         vlabel = "vsub"
     if gfx_ass_path:
         # The motion-graphics layer burns on its own pass ABOVE captions —
@@ -2677,7 +2694,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                progress_cb=None, want_wm=False, cancelled_cb=None,
                patch_locals=None, cap_ass_override=None,
-               suppress_outro=False):
+               suppress_outro=False, cap_burn_offset=None):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -2959,7 +2976,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               wm_ass_path=wm_ass_path,
                               plate_idx=plate_idx, plate_box=plate_box,
                               behind_inputs=behind_inputs,
-                              patch_inputs=patch_inputs)
+                              patch_inputs=patch_inputs,
+                              cap_burn_offset=cap_burn_offset)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).
@@ -3233,6 +3251,10 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         item_spans = [(a, b) for a, b, _k in
                       stitch._item_windows(prev_edl, tl_prev, duration)
                       + stitch._item_windows(new_edl, tl_new, duration)]
+        # Inserted clips are containment zones too: a window boundary inside
+        # one would make the piece re-play the insert from its start.
+        item_spans += list(timeline_mod.insert_windows(
+            new_edl.get("inserts") or [], tl_new).values())
         full_cap = caplib.build_ass(new_edl, index, tl_new,
                                     os.path.join(workdir, "stitch_cap.ass"),
                                     play_res=(W, H))
@@ -3273,17 +3295,17 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
             prev_local = _fetch_into(workdir, prev_asset["storage_key"],
                                      "prevpv")
         file_dur = media.duration_of(prev_local)
-        # STATIC caption events are deliberately NOT forbidden zones —
-        # shift_ass clamps them mid-display with identical glyphs, and on a
-        # densely-captioned project they cover nearly every keyframe (the
-        # second prod attempt gave up exactly there). ANIMATED events are:
-        # karaoke/transform/fade straddlers cannot be clamped (the third
-        # attempt refused on one), so boundaries route around them.
+        # Caption events impose NO boundary constraint at all: pieces burn
+        # from the full-program ASS at full-program timestamps (see
+        # cap_burn_offset in build_filtergraph), so an event mid-display at
+        # a boundary renders exactly as the full render would — animation
+        # and karaoke included. Attempts 2-4 on a dynamic-caption project
+        # proved no boundary policy can dodge events that tile the whole
+        # program; timestamp-true burning removes the problem instead.
         kfs = stitch.keyframe_times(prev_local)
         snapped = stitch.snap_windows(
             expanded, kfs, file_dur,
-            forbidden=item_spans + junction_zones
-            + stitch.ass_events(full_cap, animated_only=True))
+            forbidden=item_spans + junction_zones)
         if snapped is None:
             print(f"[render {job_id}] stitch: full render (keyframe snap "
                   "gave up)", flush=True)
@@ -3292,18 +3314,12 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         pieces = []
         for i, (a, b) in enumerate(snapped):
             wedl = stitch.window_edl(new_edl, tl_new, a, b)
-            cap_piece = ""
-            if full_cap:
-                cap_piece = os.path.join(workdir, f"stitch_cap_{i}.ass")
-                if not stitch.shift_ass(full_cap, cap_piece, a, b):
-                    print(f"[render {job_id}] stitch: full render (a "
-                          "caption event straddles a boundary)", flush=True)
-                    return None
             piece = os.path.join(workdir, f"stitch_piece_{i}.mp4")
             pdur = render_edl(wedl, index, src_local, piece, workdir,
                               preview=True, want_wm=False,
                               patch_locals=patch_locals,
-                              cap_ass_override=cap_piece,
+                              cap_ass_override=(full_cap or ""),
+                              cap_burn_offset=(a if full_cap else None),
                               suppress_outro=True)
             if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
                 print(f"[render {job_id}] stitch: full render (piece {i} "

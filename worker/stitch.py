@@ -272,6 +272,17 @@ def window_edl(edl, tl, w0, w1):
     e["patches"] = [p for p in (e.get("patches") or [])
                     if any(s0 < p["src_end"] and s1 > p["src_start"]
                            for s0, s1 in keep)]
+    # Inserts are carried only when FULLY inside the window (their output
+    # spans are containment zones in the planner, exactly like items — the
+    # first prod attempt with inserts carried a program's every insert into
+    # a 7.7s window and rendered 14.3s). Their at_src anchors sit on kept
+    # source boundaries, so the windowed Timeline re-places them correctly.
+    from timeline import insert_windows as _iw
+    iw = _iw(e.get("inserts") or [], tl)
+    e["inserts"] = [i for i in (e.get("inserts") or [])
+                    if i.get("id") in iw
+                    and iw[i["id"]][0] >= w0 - 0.011
+                    and iw[i["id"]][1] <= w1 + 0.011]
     # captions/graphics burn from the SHIFTED full-program ASS (see
     # shift_ass) — the windowed EDL itself must not rebuild them.
     e["captions"] = None
