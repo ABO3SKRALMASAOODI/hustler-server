@@ -3195,8 +3195,20 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
     at all — the caller then runs the ordinary full render, which is always
     correct. Never raises."""
     try:
-        new_edl = new_row["json"]
-        prev_edl = prev_row["json"]
+        # Both EDLs go through TODAY'S validator first: a version stored
+        # before a schema field existed lacks keys a fresh dump carries with
+        # defaults, and that read as a "structural change" on the very first
+        # prod attempt (v192, stored in July, vs v193). Validation is what
+        # the renderer does to both anyway.
+        duration0 = float((index.get("video") or {}).get("duration") or 0.0)
+        new_edl = validate_edl(
+            new_row["json"],
+            max(duration0, max(e for _, e in new_row["json"]["keep"]))
+        ).model_dump()
+        prev_edl = validate_edl(
+            prev_row["json"],
+            max(duration0, max(e for _, e in prev_row["json"]["keep"]))
+        ).model_dump()
         tl_new = Timeline(new_edl["keep"], new_edl.get("inserts") or [],
                           new_edl.get("speed") or [])
         tl_prev = Timeline(prev_edl["keep"], prev_edl.get("inserts") or [],

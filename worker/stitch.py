@@ -47,6 +47,20 @@ _MAX_WINDOWS = 4
 _MAX_COVER = 0.65          # beyond this share of the program, full render wins
 
 
+def _canon(v):
+    """Drop None/empty values recursively, so an EDL stored before a field
+    existed compares equal to a fresh dump carrying the field's empty
+    default — the same rule edl_signature uses for no-op detection. Callers
+    are expected to have run BOTH dumps through the CURRENT validate_edl
+    first, which materializes today's defaults on old EDLs."""
+    if isinstance(v, dict):
+        return {k: _canon(x) for k, x in v.items()
+                if x not in (None, [], {}, "")}
+    if isinstance(v, list):
+        return [_canon(x) for x in v]
+    return v
+
+
 def _strip(edl):
     """(structural-dump, changeable-dump) for comparison."""
     e = json.loads(json.dumps(edl or {}))
@@ -55,7 +69,7 @@ def _strip(edl):
     for k in _CHANGEABLE_FX:
         changeable[k] = fx.pop(k, None) if isinstance(fx, dict) else None
     e["effects"] = fx
-    return e, changeable
+    return _canon(e), changeable
 
 
 def _item_windows(edl, tl, duration):
