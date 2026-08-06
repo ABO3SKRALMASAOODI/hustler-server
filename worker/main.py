@@ -34,13 +34,22 @@ import renderer
 import version
 
 # A filmstrip is a few seconds of ffmpeg on an already-small proxy, and the
-# studio asks for one every time a project is opened. It rides the MEDIA lane
-# rather than getting its own slot budget: it is the same shape of work as a
+# studio asks for one every time a project is opened. On the single-box
+# deployment it rides the MEDIA lane: it is the same shape of work as a
 # render, and giving it its own concurrency on a box whose CPU is the ceiling
 # would let a hundred project-opens starve the previews people are waiting on.
+# With a REMOTE executor (round 91) the media lane is pure HTTP waiting and
+# runs several slots — but filmstrips still encode LOCALLY on this small box,
+# so they get their own single lane instead: media slots never stack local
+# ffmpeg here, and a filmstrip never occupies a render slot.
 # A failed one is deliberately absent from FAIL_NOTES/REAPER_NOTES — a missing
 # strip is a cosmetic degradation, not something to put in a user's chat.
-MEDIA_TYPES = ("preview", "final", "filmstrip")
+if config.REMOTE_EXECUTOR_URL:
+    MEDIA_TYPES = ("preview", "final")
+    FILMSTRIP_TYPES = ("filmstrip",)
+else:
+    MEDIA_TYPES = ("preview", "final", "filmstrip")
+    FILMSTRIP_TYPES = ()
 INDEX_TYPES = ("index",)
 AGENT_TYPES = ("agent_turn",)
 MCP_TYPES = ("mcp_tool",)
@@ -414,12 +423,19 @@ def main():
     for i in range(config.MEDIA_SLOTS):
         threads.append(threading.Thread(
             target=lane, args=(f"media{i}", MEDIA_TYPES,
-                               config.MAX_ATTEMPTS_MEDIA),
+                               config.MAX_ATTEMPTS_MEDIA,
+                               config.MEDIA_POLL_INTERVAL_S),
             daemon=True, name=f"media{i}"))
+    if FILMSTRIP_TYPES:
+        threads.append(threading.Thread(
+            target=lane, args=("filmstrip", FILMSTRIP_TYPES,
+                               config.MAX_ATTEMPTS_MEDIA),
+            daemon=True, name="filmstrip"))
     for i in range(config.INDEX_SLOTS):
         threads.append(threading.Thread(
             target=lane, args=(f"index{i}", INDEX_TYPES,
-                               config.MAX_ATTEMPTS_MEDIA),
+                               config.MAX_ATTEMPTS_MEDIA,
+                               config.MEDIA_POLL_INTERVAL_S),
             daemon=True, name=f"index{i}"))
     for i in range(config.AGENT_SLOTS):
         threads.append(threading.Thread(

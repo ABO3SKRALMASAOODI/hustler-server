@@ -26,6 +26,7 @@ import audit
 import captions as caplib
 import config
 import db as dbx
+import gradelut
 import graphics
 import media
 import music_library
@@ -53,6 +54,59 @@ GRADE_FILTERS = {
     "cinematic": ("colorbalance=bs=.05:rs=-.03,"
                   "eq=contrast=1.12:saturation=1.12:brightness=-0.02"),
 }
+
+
+def grade_custom_chain(gc):
+    """The grade_custom filter chain, as build_filtergraph emits it — shared
+    with the agent's grade contact strip (round 91), which must show EXACTLY
+    the chain the render will run. Returns "" when nothing is set.
+
+    Continuous color controls, applied AFTER the preset so "cinematic but
+    warmer" composes. exposure maps to eq brightness (+-0.35 full scale);
+    temperature/tint to colorbalance shadows+midtones — the portable
+    approximation (colortemperature exists but its neutral point drifts
+    across ffmpeg majors; colorbalance does not).
+    """
+    eq_bits = []
+    if gc.get("exposure") is not None:
+        eq_bits.append(f"brightness={0.35 * float(gc['exposure']):.3f}")
+    if gc.get("contrast") is not None:
+        eq_bits.append(f"contrast={float(gc['contrast']):.3f}")
+    if gc.get("saturation") is not None:
+        eq_bits.append(f"saturation={float(gc['saturation']):.3f}")
+    cb_bits = []
+    temp = float(gc.get("temperature") or 0.0)
+    tint = float(gc.get("tint") or 0.0)
+    rs = 0.10 * temp + 0.03 * tint
+    bs = -0.12 * temp + 0.05 * tint
+    gs = -0.08 * tint
+    if abs(rs) > 1e-4:
+        cb_bits.append(f"rs={rs:.3f}:rm={rs * 0.6:.3f}")
+    if abs(gs) > 1e-4:
+        cb_bits.append(f"gs={gs:.3f}:gm={gs * 0.6:.3f}")
+    if abs(bs) > 1e-4:
+        cb_bits.append(f"bs={bs:.3f}:bm={bs * 0.6:.3f}")
+    chain = []
+    if eq_bits:
+        chain.append("eq=" + ":".join(eq_bits))
+    if cb_bits:
+        chain.append("colorbalance=" + ":".join(cb_bits))
+    # shadows/highlights are TONAL-REGION controls, so they are a master
+    # curve, not eq: a fixed midpoint (0.5) and a moved quarter-point is
+    # what makes "lift the shadows" brighten the dark corners without
+    # washing the whole image the way eq brightness does. The clamps keep
+    # the five points strictly monotone for any in-range value, which is
+    # all ffmpeg's curves requires.
+    sh = float(gc.get("shadows") or 0.0)
+    hl = float(gc.get("highlights") or 0.0)
+    if abs(sh) > 1e-4 or abs(hl) > 1e-4:
+        y0 = min(max(0.12 * sh, 0.0), 0.35)
+        y1 = min(max(0.25 + 0.14 * sh, 0.02), 0.48)
+        y2 = min(max(0.75 + 0.14 * hl, 0.52), 0.98)
+        y3 = min(1.0, max(1.0 + 0.10 * hl, y2 + 0.01))
+        chain.append(f"curves=master='0/{y0:.3f} 0.25/{y1:.3f} 0.5/0.5 "
+                     f"0.75/{y2:.3f} 1/{y3:.3f}'")
+    return ",".join(chain)
 
 
 def _enable_expr(spans):
@@ -1701,56 +1755,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # punches) and BELOW both text layers (words always win).
     grade = fx.get("grade")
     if grade and grade in GRADE_FILTERS:
-        parts.append(f"[{vlabel}]{GRADE_FILTERS[grade]}[vgrade]")
+        # gradelut turns the per-pixel grade math into baked table filters —
+        # same values, several times cheaper — or returns the chain untouched
+        # when it can't (see worker/gradelut.py).
+        parts.append(f"[{vlabel}]{gradelut.fast_chain(GRADE_FILTERS[grade])}"
+                     "[vgrade]")
         vlabel = "vgrade"
     if grade_custom:
-        # Continuous color controls, applied AFTER the preset so "cinematic
-        # but warmer" composes. exposure maps to eq brightness (+-0.35 full
-        # scale); temperature/tint to colorbalance shadows+midtones — the
-        # portable approximation (colortemperature exists but its neutral
-        # point drifts across ffmpeg majors; colorbalance does not).
-        gc = grade_custom
-        eq_bits = []
-        if gc.get("exposure") is not None:
-            eq_bits.append(f"brightness={0.35 * float(gc['exposure']):.3f}")
-        if gc.get("contrast") is not None:
-            eq_bits.append(f"contrast={float(gc['contrast']):.3f}")
-        if gc.get("saturation") is not None:
-            eq_bits.append(f"saturation={float(gc['saturation']):.3f}")
-        cb_bits = []
-        temp = float(gc.get("temperature") or 0.0)
-        tint = float(gc.get("tint") or 0.0)
-        rs = 0.10 * temp + 0.03 * tint
-        bs = -0.12 * temp + 0.05 * tint
-        gs = -0.08 * tint
-        if abs(rs) > 1e-4:
-            cb_bits.append(f"rs={rs:.3f}:rm={rs * 0.6:.3f}")
-        if abs(gs) > 1e-4:
-            cb_bits.append(f"gs={gs:.3f}:gm={gs * 0.6:.3f}")
-        if abs(bs) > 1e-4:
-            cb_bits.append(f"bs={bs:.3f}:bm={bs * 0.6:.3f}")
-        chain = []
-        if eq_bits:
-            chain.append("eq=" + ":".join(eq_bits))
-        if cb_bits:
-            chain.append("colorbalance=" + ":".join(cb_bits))
-        # shadows/highlights are TONAL-REGION controls, so they are a master
-        # curve, not eq: a fixed midpoint (0.5) and a moved quarter-point is
-        # what makes "lift the shadows" brighten the dark corners without
-        # washing the whole image the way eq brightness does. The clamps keep
-        # the five points strictly monotone for any in-range value, which is
-        # all ffmpeg's curves requires.
-        sh = float(gc.get("shadows") or 0.0)
-        hl = float(gc.get("highlights") or 0.0)
-        if abs(sh) > 1e-4 or abs(hl) > 1e-4:
-            y0 = min(max(0.12 * sh, 0.0), 0.35)
-            y1 = min(max(0.25 + 0.14 * sh, 0.02), 0.48)
-            y2 = min(max(0.75 + 0.14 * hl, 0.52), 0.98)
-            y3 = min(1.0, max(1.0 + 0.10 * hl, y2 + 0.01))
-            chain.append(f"curves=master='0/{y0:.3f} 0.25/{y1:.3f} 0.5/0.5 "
-                         f"0.75/{y2:.3f} 1/{y3:.3f}'")
+        chain = grade_custom_chain(grade_custom)
         if chain:
-            parts.append(f"[{vlabel}]{','.join(chain)}[vgcust]")
+            parts.append(f"[{vlabel}]{gradelut.fast_chain(chain)}[vgcust]")
             vlabel = "vgcust"
     for si, styl in enumerate(stylize):
         kind = styl.get("kind")

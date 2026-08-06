@@ -435,3 +435,28 @@ def _verify_plan(prev, new, max_tiles):
         step = len(merged) / float(max_tiles)
         merged = [merged[int(i * step)] for i in range(max_tiles)]
     return merged
+
+
+def color_only_change(prev, new):
+    """True when the ONLY difference between two EDLs is the global color —
+    effects.grade and/or effects.grade_custom — and at least one of the two
+    actually changed. Round 91: this is what lets the agent iterate a grade
+    against a ~2s contact strip instead of a full program render per try
+    (a real turn burned 409s on five renders of the same 80s program to tune
+    a look). Anything else differing — cuts, zooms, texts, captions, music,
+    stylize, transitions, master, volume, speed, frame, inserts — returns
+    False, because those need the real render to be seen. Never raises."""
+    try:
+        def strip(edl):
+            e = dict(edl or {})
+            fx = dict(e.get("effects") or {})
+            color = {"grade": fx.pop("grade", None),
+                     "grade_custom": fx.pop("grade_custom", None) or None}
+            e["effects"] = fx
+            return e, color
+
+        rest_p, color_p = strip(prev)
+        rest_n, color_n = strip(new)
+        return rest_p == rest_n and color_p != color_n
+    except Exception:
+        return False

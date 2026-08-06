@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import uuid
 
@@ -159,6 +160,12 @@ class ToolContext:
         self._states_seen = {}
         self.rendered_versions = set()  # versions with a successful preview
         self.autorendered = False     # loop set: model skipped render_preview
+        # Round 91 grade contact strips: iterating a color against ~2s strips
+        # instead of full renders. last_strip_chain is the grade chain the
+        # most recent strip showed — asking to render the SAME colors again
+        # means the model has settled, so THAT call gets the real render.
+        self.last_strip_chain = None
+        self.strip_count = 0
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
         self.sfx_generated = []       # sounds created by generate_sfx
@@ -9840,6 +9847,115 @@ def get_edl(ctx):
                 + json.dumps(row["json"], indent=1)[:20000], budget=22000)
 
 
+def _grade_chain_of(edl_json):
+    """The global color chain this EDL renders with, as one filter string —
+    "" when it has none. Preset first, then custom, matching the graph."""
+    fx = edl_json.get("effects") or {}
+    parts = []
+    g = fx.get("grade")
+    if g and g in renderer.GRADE_FILTERS:
+        parts.append(renderer.GRADE_FILTERS[g])
+    gc = fx.get("grade_custom") or {}
+    if gc:
+        c = renderer.grade_custom_chain(gc)
+        if c:
+            parts.append(c)
+    return ",".join(parts)
+
+
+def _grade_strip_shortcut(ctx, row):
+    """A ~2s grade contact strip instead of a full render, when the ONLY
+    change since the last render is the global color — round 91.
+
+    A real turn spent 409s running FIVE full preview renders of the same
+    80s program to tune a look (job 2647): every iteration re-encoded every
+    frame to change a per-pixel color map, then the agent read six tiles off
+    the result. This pulls the same six program frames straight from the
+    proxy, applies the NEW color chain to the stills, and hands them to the
+    agent's eyes — the judgement is identical, the cost is two seconds.
+
+    Returns the tool-result string when the strip was delivered, None to fall
+    through to the real render. The full preview still happens exactly once:
+    either the model calls render_preview again without touching the color
+    (settled — same chain twice means "show me the real thing"), or the
+    turn-end auto-render covers it. Never raises."""
+    try:
+        if not (getattr(ctx, "sight_out", False)
+                or (getattr(ctx, "direct_sight", False)
+                    and llm.agent_sees(ctx.agent_model))):
+            return None                      # a blind agent needs real renders
+        if ctx.strip_count >= 8:
+            return None
+        prev_v = (ctx.last_preview or {}).get("edl_version")
+        if prev_v is None:
+            prev_v = ctx.db.run(dbx.latest_render_version, ctx.project_id,
+                                "preview")
+        if prev_v is None:
+            return None
+        prev = ctx.db.run(dbx.get_edl_version, ctx.project_id, int(prev_v))
+        if not prev or not edl_diff.color_only_change(prev["json"],
+                                                      row["json"]):
+            return None
+        chain = _grade_chain_of(row["json"])
+        if chain == ctx.last_strip_chain:
+            return None                      # settled: give them the render
+        edl = row["json"]
+        keep = edl.get("keep") or []
+        if not keep:
+            return None                      # canvas program: renders only
+        tl = Timeline(keep, edl.get("inserts") or [], edl.get("speed") or [])
+        if tl.out_duration <= 0.2:
+            return None
+        proxy = ctx.proxy_path()
+        n = 6
+        picks = []                           # (out_t, src_t)
+        for i in range(n):
+            t = tl.out_duration * (i + 0.5) / n
+            s = tl.out_to_src(t)
+            if s is not None:                # None = inside a spliced insert
+                picks.append((t, s))
+        if len(picks) < 3:
+            return None                      # mostly inserts: renders only
+        frames, labels = [], []
+        for i, (t, s) in enumerate(picks):
+            raw = os.path.join(ctx.workdir, f"gstrip_raw_{i}.jpg")
+            out = os.path.join(ctx.workdir,
+                               f"gstrip_{ctx.strip_count}_{i}.jpg")
+            try:
+                media.frame_at(proxy, s, raw)
+                if chain:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-v", "error", "-i", raw,
+                         "-vf", chain, "-frames:v", "1", out],
+                        check=True, capture_output=True, timeout=20)
+                else:
+                    out = raw                # colors removed: show it clean
+            except Exception:
+                continue
+            frames.append(out)
+            labels.append(f"@out {t:.1f}s")
+        if len(frames) < 3:
+            return None
+        delivered = _deliver_frames(
+            ctx, frames, labels, "",
+            "GRADE CONTACT STRIP — program frames with the NEW color applied")
+        ctx.last_strip_chain = chain
+        ctx.strip_count += 1
+        return (
+            "GRADE CONTACT STRIP (~2s) instead of a full render: only the "
+            "color changed since the last render, so these are the same "
+            "program moments with the NEW grade applied. Judge and adjust "
+            "the color from the tiles — every adjustment gets a fresh strip "
+            "in seconds, where a full render takes minutes. The full "
+            "preview is NOT rendered yet: when the color is right, just "
+            "reply to the user and the full preview renders automatically "
+            "at the end of your turn (or call render_preview again without "
+            "changing the color to render it now). " + delivered)
+    except Exception as e:
+        print(f"[gradestrip] fell back to a full render: {e}", flush=True)
+        return None
+
+
 def render_preview(ctx):
     row = ctx.latest_edl()
     version = row["version"]
@@ -9847,6 +9963,9 @@ def render_preview(ctx):
             (ctx.last_preview or {}).get("edl_version") == version:
         return (f"Preview v{version} is already rendered and attached — "
                 "no need to render again.")
+    strip = _grade_strip_shortcut(ctx, row)
+    if strip:
+        return strip
     # Round 81: name the output seconds this edit changed, so the render job
     # can pull a frame at each and the self-check can review the CLAIM
     # ("this should read X, behind the person") instead of nine even samples
@@ -12752,7 +12871,12 @@ TOOLS = {
     "render_preview": (render_preview, "Render the current EDL as a fast "
                        "480p preview from the proxy, attach it to chat, and "
                        "get a visual self-check. ALWAYS call this before "
-                       "your final summary.", {}),
+                       "your final summary. When only the COLOR changed "
+                       "since the last render, this returns a ~2s grade "
+                       "contact strip instead of re-encoding the program — "
+                       "iterate the look against the strip, then call again "
+                       "without changing the color to render for real (turn "
+                       "end auto-renders anyway).", {}),
     "ask_user": (ask_user, "Ask the user ONE specific question and wait for "
                  "their reply (ends this turn). Only for taste calls tools "
                  "cannot answer.", {"question": {"type": "string"}}),

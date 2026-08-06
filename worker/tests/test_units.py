@@ -1241,8 +1241,13 @@ fx_tl = Timeline(fx_edl["keep"], [])
 g_fx = build_filtergraph(fx_edl, 60.0, True, fx_tl, None, [], index,
                          preview=False, W=720, H=1280, fps=30.0,
                          frame_mode=None)
-check("grade filter lands before captions",
-      "eq=saturation=1.35:contrast=1.08" in g_fx)
+# Round 91: the vibrant grade is emitted as a baked lutyuv table (gradelut),
+# not the literal eq chain — same values per 8-bit input, several times
+# cheaper. The graph carries a [vgrade] link either way; on a machine with no
+# ffmpeg the bake falls back to the legacy eq string, so accept both forms.
+check("grade filter lands in the graph as a table (or legacy fallback)",
+      "[vgrade]" in g_fx and
+      ("lutyuv=" in g_fx or "eq=saturation=1.35:contrast=1.08" in g_fx))
 check("zoom becomes a zoompan window in program time",
       "zoompan=z='1+0.30*between(on/30.000,2.000,4.000)'" in g_fx)
 check("zooms force per-segment normalization to exact frames",

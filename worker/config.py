@@ -555,10 +555,25 @@ POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
 # The media lane runs preview + final encodes. Indexing gets its OWN lane
 # (INDEX_SLOTS) so a multi-minute whisper index can never wedge interactive
 # previews behind it — that starvation was the #1 cause of "I chatted and
-# nothing happened" churn. Raise MEDIA_SLOTS to also stop a long final export
-# from blocking previews (needs the vCPUs for concurrent ffmpeg).
-MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "1"))
-INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "1"))
+# nothing happened" churn.
+#
+# Round 91: with a REMOTE executor the slots are pure HTTP waits — the ffmpeg
+# runs on Cloud Run, one instance per job, and the executor scales to
+# max-instances on its own. One media slot therefore serialized every render
+# on the PLATFORM behind a queue the compute never needed: two users editing
+# at once meant the second stared at a spinner for the whole of the first
+# user's render (preview queue_wait p50 was fine and the tail was 250s+).
+# Defaults: 3 media + 2 index remote (executor max-instances is 5, and the
+# in-turn synchronous calls — frames/clean/track/capture — share that
+# ceiling, so media+index must not be able to occupy all of it), 1 + 1 local
+# where the encodes genuinely contend for this box's own CPU. The media/index
+# lanes also poll faster remotely — a claim is one indexed SKIP LOCKED query,
+# and 2s of claim latency was pure dead time on every render.
+_REMOTE_EXEC = bool(os.getenv("REMOTE_EXECUTOR_URL", "").strip())
+MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "3" if _REMOTE_EXEC else "1"))
+INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "2" if _REMOTE_EXEC else "1"))
+MEDIA_POLL_INTERVAL_S = float(os.getenv(
+    "WORKER_MEDIA_POLL_INTERVAL_S", "0.5" if _REMOTE_EXEC else "2.0"))
 AGENT_SLOTS = int(os.getenv("WORKER_AGENT_SLOTS", "2"))
 HEARTBEAT_EVERY_S = 20
 
