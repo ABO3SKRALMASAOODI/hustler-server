@@ -78,6 +78,11 @@ def fake_exists(key):
     return key == "orig/key.mp4"
 
 
+# Patched globally for the run below and RESTORED in the finally — pytest
+# imports every test file into one process, so a leaked patch here poisons
+# whatever collects after this file (test_units' transcribe checks did).
+_orig = (storage.download_to, storage.upload_file, storage.exists,
+         transcribe.transcribe, indexer._finish_setup, config.TMP_DIR)
 storage.download_to = fake_download_to
 storage.upload_file = fake_upload_file
 storage.exists = fake_exists
@@ -142,26 +147,30 @@ job = {"id": 42, "project_id": 1, "user_id": 3,
        "payload": {"asset_id": 7}}
 
 print("== run_index_job, two lanes ==")
-result = indexer.run_index_job(db, job)
+try:
+    result = indexer.run_index_job(db, job)
 
-check("job completed uncached", result["cached"] is False)
-check("transcript came through the sound lane",
-      result["words"] == 1 and result["language"] == "en")
-check("index json persisted with words + video block",
-      db.index_json and len(db.index_json["words"]) == 1
-      and db.index_json["video"]["duration"] > 3.5)
-check("filmstrip tiles built and recorded",
-      result["tiles"] >= 1 and db.index_json.get("tile_keys"))
-check("proxy uploaded", any(k.startswith("proxies/") for k in uploads))
-check("wav uploaded", any(k.startswith("audio/") for k in uploads))
-check("proxy asset row inserted", ("proxy", ) ==
-      tuple(k for k, _ in db.assets if k == "proxy")[:1])
-check("audio asset row inserted", any(k == "audio" for k, _ in db.assets))
-check("progress stayed monotone on the job thread",
-      db.progress == sorted(db.progress))
-check("lane timings recorded",
-      "lanes_s" in result["timings"] and "proxy_s" in result["timings"])
-check("finish_setup ran once", len(db.finish_calls) == 1)
+    check("job completed uncached", result["cached"] is False)
+    check("transcript came through the sound lane",
+          result["words"] == 1 and result["language"] == "en")
+    check("index json persisted with words + video block",
+          db.index_json and len(db.index_json["words"]) == 1
+          and db.index_json["video"]["duration"] > 3.5)
+    check("filmstrip tiles built and recorded",
+          result["tiles"] >= 1 and db.index_json.get("tile_keys"))
+    check("proxy uploaded", any(k.startswith("proxies/") for k in uploads))
+    check("wav uploaded", any(k.startswith("audio/") for k in uploads))
+    check("proxy asset row inserted", ("proxy", ) ==
+          tuple(k for k, _ in db.assets if k == "proxy")[:1])
+    check("audio asset row inserted", any(k == "audio" for k, _ in db.assets))
+    check("progress stayed monotone on the job thread",
+          db.progress == sorted(db.progress))
+    check("lane timings recorded",
+          "lanes_s" in result["timings"] and "proxy_s" in result["timings"])
+    check("finish_setup ran once", len(db.finish_calls) == 1)
+finally:
+    (storage.download_to, storage.upload_file, storage.exists,
+     transcribe.transcribe, indexer._finish_setup, config.TMP_DIR) = _orig
+    shutil.rmtree(d, ignore_errors=True)
 
-shutil.rmtree(d, ignore_errors=True)
 print(f"\nALL {PASS} CHECKS PASSED")

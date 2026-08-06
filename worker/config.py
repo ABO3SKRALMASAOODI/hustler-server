@@ -575,6 +575,10 @@ INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "2" if _REMOTE_EXEC else "1"))
 MEDIA_POLL_INTERVAL_S = float(os.getenv(
     "WORKER_MEDIA_POLL_INTERVAL_S", "0.5" if _REMOTE_EXEC else "2.0"))
 AGENT_SLOTS = int(os.getenv("WORKER_AGENT_SLOTS", "2"))
+# The agent lane's claim poll is the gap between "user hit send" and "the
+# turn starts" — the first latency anyone feels, on every single message.
+# 0.5s, like the MCP lane: the claim is one indexed SKIP LOCKED query.
+AGENT_POLL_INTERVAL_S = float(os.getenv("WORKER_AGENT_POLL_INTERVAL_S", "0.5"))
 HEARTBEAT_EVERY_S = 20
 
 # ── MCP lane (round 49) ──────────────────────────────────────────────────────

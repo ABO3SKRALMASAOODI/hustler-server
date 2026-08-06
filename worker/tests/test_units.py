@@ -2764,7 +2764,7 @@ check("a filmstrip failure degrades to a warning",
 # ...and the load-bearing ones are NOT best-effort: a proxy that never reached
 # storage is an index that cannot be previewed or looked at, so it must raise.
 check("the proxy upload still fails the job",
-      "required" in _idx_src and "raise" in _idx_src)
+      "proxy upload failed" in _idx_src and "raise" in _idx_src)
 # Tiles are addressed positionally (time order), so a mid-strip upload
 # failure truncates the strip rather than mislabeling later tiles.
 check("tile keys stay in time order and stop at the first hole",

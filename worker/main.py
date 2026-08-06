@@ -440,7 +440,8 @@ def main():
     for i in range(config.AGENT_SLOTS):
         threads.append(threading.Thread(
             target=lane, args=(f"agent{i}", AGENT_TYPES,
-                               config.MAX_ATTEMPTS_AGENT),
+                               config.MAX_ATTEMPTS_AGENT,
+                               config.AGENT_POLL_INTERVAL_S),
             daemon=True, name=f"agent{i}"))
     for i in range(config.MCP_SLOTS):
         threads.append(threading.Thread(
