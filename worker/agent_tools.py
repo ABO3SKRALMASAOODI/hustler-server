@@ -1139,11 +1139,15 @@ def look_at(ctx, times=None, question="", start=None, end=None,
     agent's own context. start/end still work as a range and sample evenly.
     Round 71: `output_times` samples the ASSEMBLED PROGRAM instead — output
     seconds of the current edit, inserts included."""
-    if output_times is not None:
+    # An empty array is "not asked", not a request: the model fills every
+    # schema field, and `times=[2, 6], output_times=[]` burned nine straight
+    # rejections in one session (project 382, 2026-08-07) under the old
+    # `is not None` — with the valid source times discarded each time.
+    if output_times:
         return _look_at_output(ctx, output_times, question)
-    if times is not None:
-        if not isinstance(times, (list, tuple)) or not times:
-            return ("REJECTED: times must be a non-empty array of source "
+    if times:
+        if not isinstance(times, (list, tuple)):
+            return ("REJECTED: times must be an array of source "
                     "seconds, e.g. times=[3.2, 17.8].")
         try:
             times = [ctx.clamp(t) for t in times][:8]
@@ -1164,7 +1168,9 @@ def look_at(ctx, times=None, question="", start=None, end=None,
         times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
     else:
         return ("REJECTED: pass times=[...] (exact source seconds to look "
-                "at) or a start/end range.")
+                "at), a start/end range, or output_times=[...] (OUTPUT "
+                "seconds of the assembled program). An empty array counts "
+                "as not passed.")
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
@@ -4194,19 +4200,55 @@ def find_burned_text(ctx, scope="all", start=None, end=None):
                 "frames turned any up. If the user insists there is some, ask "
                 "WHERE it appears (corner? bottom? at which second?) and pass "
                 "that rectangle to erase_region directly — do not invent one.")
+    # The scan reads the RAW source, so a mark the EDL already repaints or
+    # censors keeps listing here forever. Unsaid, that listing reads as
+    # "your erase failed" and invites erasing the same band again — project
+    # 382 (2026-08-07) looped erase/un-erase for 23 minutes on exactly that
+    # misreading while the real problem was repaint QUALITY.
+    edl = ctx.latest_edl()["json"]
+    erases = [dict(q) for q in
+              ((edl.get("source_clean") or {}).get("regions") or [])]
+    for p in (edl.get("patches") or []):
+        erases += [dict(q) for q in (p.get("regions") or [])]
+    censors = [dict(q) for q in
+               ((edl.get("effects") or {}).get("regions") or [])]
+    covered = 0
     lines = []
     for i, r in enumerate(regions, start=1):
+        cover = next(
+            (f"repainted by [{q.get('id')}]" for q in erases
+             if _rect_cover(q, r) >= 0.5
+             and _windows_overlap(q.get("start"), q.get("end"),
+                                  r.get("first_s"), r.get("last_s"),
+                                  ctx.duration)),
+            None) or next(
+            (f"censored by [{q.get('id')}]" for q in censors
+             if _rect_cover(q, r) >= 0.5), None)
+        if cover:
+            covered += 1
         lines.append(
             f"{i}. {r['kind']}: x={r['x']} y={r['y']} w={r['w']} h={r['h']} "
             f"— visible {r['first_s']}-{r['last_s']}s, in "
             f"{int(r['coverage'] * 100)}% of sampled frames"
             + (", content changes between frames"
-               if r["changes"] > 6 else ", identical in every frame"))
-    return ("Measured from the frames (not estimated — these rectangles are "
-            "exact):\n" + "\n".join(lines)
-            + "\nPass one of these rectangles to erase_region to repaint it "
-            "out, or call erase_burned_text to erase every caption band in "
-            "one pass.")
+               if r["changes"] > 6 else ", identical in every frame")
+            + (f" — ALREADY {cover}" if cover else ""))
+    out = ("Measured from the frames (not estimated — these rectangles are "
+           "exact):\n" + "\n".join(lines))
+    if covered < len(regions):
+        out += ("\nPass one of these rectangles to erase_region to repaint "
+                "it out, or call erase_burned_text to erase every caption "
+                "band in one pass.")
+    if covered:
+        out += ("\nNOTE: this scan reads the RAW source pixels, so an "
+                "erased mark keeps listing here — its listing does NOT mean "
+                "the erase failed. If the user still sees a covered mark in "
+                "the preview, the repaint QUALITY is failing on it, and "
+                "re-erasing the same band cannot fix that: switch class — "
+                "fill='box' replaces the repaint, blur_region covers it, "
+                "set_frame crops it away — and look_at(output_times=[...]) "
+                "inside the window to judge with your own eyes.")
+    return out
 
 
 _PATCH_PAD_S = 0.75            # window padding: plate sampling needs frames
@@ -4316,20 +4358,70 @@ def _run_patch(ctx, window, group_regions):
     return key, fp, stats or {}
 
 
-def _apply_patches(ctx, new_items, what):
+def _rect_cover(a, b):
+    """Fraction of rectangle b's area that rectangle a covers (both are
+    frame-fraction dicts with x, y, w, h)."""
+    ix = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+    iy = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+    if ix <= 0 or iy <= 0:
+        return 0.0
+    area = float(b["w"]) * float(b["h"])
+    return (ix * iy) / area if area > 0 else 0.0
+
+
+def _windows_overlap(a_start, a_end, b_start, b_end, duration):
+    """Do two source-clock windows overlap? None means the whole video."""
+    a0 = 0.0 if a_start is None else float(a_start)
+    a1 = duration if a_end is None else float(a_end)
+    b0 = 0.0 if b_start is None else float(b_start)
+    b1 = duration if b_end is None else float(b_end)
+    return a0 <= b1 and b0 <= a1
+
+
+def _superseded_patches(edl, new_items, duration):
+    """Patches the new erase re-covers — the agent repainting a band AGAIN.
+
+    Stacked repaints are how project 382 (2026-08-07) got its "corrupt
+    screen": a text-fill and a 70%x30% box-fill both live over one caption
+    band, and the wider slab's edges stay visible around the narrower one.
+    When the agent re-erases a band its intent is REPLACE, so treat it as
+    replace: a patch is superseded when every region in it is >=50%
+    mutually covered by some new item over an overlapping window. Dropping
+    a patch is instant (its overlay simply stops rendering) and the new
+    patch repaints from the untouched source, so nothing is lost."""
+    out = []
+    for p in (edl.get("patches") or []):
+        regs = p.get("regions") or []
+        if regs and all(
+                any((_rect_cover(n, o) >= 0.5 or _rect_cover(o, n) >= 0.5)
+                    and _windows_overlap(n.get("start"), n.get("end"),
+                                         o.get("start"), o.get("end"),
+                                         duration)
+                    for n in new_items)
+                for o in regs):
+            out.append(p)
+    return out
+
+
+def _apply_patches(ctx, new_items, what, drop=None):
     """Build patch clips for `new_items` and append them to the EDL.
 
     Existing patches are never rebuilt or re-derived — each erase call pays
-    for its own windows only. Returns the write result plus the same
-    measured-ink honesty lines _apply_clean produces."""
+    for its own windows only. `drop` lists superseded patches (the same band
+    re-erased) removed in the SAME write — replace, never stack. Returns the
+    write result plus the same measured-ink honesty lines _apply_clean
+    produces."""
     edl = dict(ctx.latest_edl()["json"])
-    existing = [dict(p) for p in (edl.get("patches") or [])]
+    all_patches = [dict(p) for p in (edl.get("patches") or [])]
+    dropped = {p["id"] for p in (drop or [])}
+    existing = [p for p in all_patches if p["id"] not in dropped]
     groups = _patch_groups(new_items, ctx.duration)
     entries, lines = [], []
     for window, members in groups:
         key, fp, stats = _run_patch(ctx, window, members)
-        pid = _next_item_id(
-            existing + entries, "pa")
+        # ids count the DROPPED patches too — "replaced pa1" must never
+        # name the same id as the patch that replaced it.
+        pid = _next_item_id(all_patches + entries, "pa")
         entries.append({"id": pid, "asset_key": key, "fp": fp,
                         "src_start": window[0], "src_end": window[1],
                         "regions": members})
@@ -4346,6 +4438,11 @@ def _apply_patches(ctx, new_items, what):
     result = ctx.write_edl(edl, what)
     if not result.startswith("EDL v"):
         return result
+    if dropped:
+        result += ("\nReplaced overlapping repaint(s) "
+                   + ", ".join(sorted(dropped))
+                   + " — re-erasing a band supersedes the earlier attempt; "
+                   "stacked repaints are what show slabs and seams.")
     if lines:
         result += "\nMeasured on the repainted window: " + "; ".join(lines)
         if any("STILL" in ln for ln in lines):
@@ -4357,7 +4454,15 @@ def _apply_patches(ctx, new_items, what):
         else:
             result += ("\nThe pixels are genuinely repainted — say REMOVED, "
                        "not covered. The repaint applies instantly to every "
-                       "render; cuts, captions and timestamps are unchanged.")
+                       "render; cuts, captions and timestamps are unchanged. "
+                       "Ink is a stroke count, not a beauty check: over "
+                       "MOVING marks (animated caption boxes, stickers) a "
+                       "clean measurement can still ghost — look_at("
+                       "output_times=[...]) inside the erased window on the "
+                       "next preview before telling the user it is clean. If "
+                       "it ghosts, do NOT re-erase the same band: fill='box' "
+                       "replaces the repaint, blur_region covers it, "
+                       "set_frame crops it away.")
     return result
 
 
@@ -4425,13 +4530,21 @@ def erase_burned_text(ctx, scope="captions", start=None, end=None):
         added.append(item)
     if not added:
         return ("NO CHANGE: every detected region is already erased — the "
-                "repaint is in place. If the user still sees text, it is a "
-                "DIFFERENT mark: ask where, and erase_region that rectangle.")
+                "repaint is in place. If the user still sees text THERE, "
+                "the repaint QUALITY is failing on that band and repeating "
+                "the same erase cannot improve it: switch class instead — "
+                "erase_region the band with fill='box' (replaces the old "
+                "repaint), or cover it with blur_region, or crop it away "
+                "with set_frame — then look_at(output_times=[...]) inside "
+                "the window to judge. If they see text somewhere ELSE, ask "
+                "where and erase_region that rectangle.")
     what = ("erased " + ", ".join(f"{a['kind']} at y={a['y']:g} [{a['id']}]"
                                   for a in added)
             + " from the source pixels")
     try:
-        return _apply_patches(ctx, added, what)
+        return _apply_patches(
+            ctx, added, what,
+            drop=_superseded_patches(edl, added, ctx.duration))
     except ValueError as e:
         return f"REJECTED: {e}"
     except Exception as e:
@@ -4566,11 +4679,15 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
             if len(new_items) > 1 else
             f"erased the {descs[0]} from the source pixels")
     # Round 92: new erases become window PATCHES — each call repaints only
-    # its own span, so nothing here ever re-derives earlier work and the
-    # old subsume bookkeeping (whose entire point was per-pass cost) is
-    # gone with the per-pass cost itself.
+    # its own span, so nothing here ever re-derives earlier work. The old
+    # subsume bookkeeping (whose point was per-pass cost) stayed gone, but
+    # a re-erase of the same band now REPLACES the superseded patch — for
+    # seams, not cost: two repaints stacked over one band is what
+    # "corrupted" project 382's screen.
     try:
-        return _apply_patches(ctx, new_items, what)
+        return _apply_patches(
+            ctx, new_items, what,
+            drop=_superseded_patches(edl, new_items, ctx.duration))
     except ValueError as e:
         return f"REJECTED: {e}"
     except Exception as e:
