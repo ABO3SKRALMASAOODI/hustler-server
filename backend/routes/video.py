@@ -826,7 +826,33 @@ def _preview_plan(twin, defer):
     return "defer" if defer else "enqueue"
 
 
-def _should_heal_preview(edl, indexed, drafting, agent_turn_failed=False):
+def _agent_version_orphaned(turn_state, mcp_state, edl_aged):
+    """Is an agent-made newest version ORPHANED — nothing left that will ever
+    render it? (round 94)
+
+    Two owners can be responsible for rendering an agent-made version: the
+    agent turn that wrote it (renders inline, or the worker auto-renders at
+    turn end), and an MCP session (the outside model calls render_preview
+    itself, between tool calls that leave NO live job row). So:
+
+      * newest agent_turn FAILED — the round-67b case: killed mid-flight,
+        nothing to race, heal immediately;
+      * otherwise, only when NEITHER lane has a live job AND the version has
+        sat unrendered past a grace window (edl_aged) — an MCP model usually
+        renders within its next call, and healing at poll cadence would race
+        it; 45s of bar-then-heal is the worst case, where before this the
+        bar spun forever (a remove_erase written over MCP left project 372's
+        studio on "Updating your preview…" with zero jobs anywhere).
+    """
+    if turn_state == "failed":
+        return True
+    if "queued" in (turn_state, mcp_state) or \
+            "running" in (turn_state, mcp_state):
+        return False
+    return bool(edl_aged)
+
+
+def _should_heal_preview(edl, indexed, drafting, agent_orphaned=False):
     """Should this poll enqueue a preview for the newest EDL?
 
     The heal exists because the current edit must always have a render on the
@@ -841,20 +867,19 @@ def _should_heal_preview(edl, indexed, drafting, agent_turn_failed=False):
     moment a tab closes, navigates, or edits again it stops sending it and the
     net is back.
 
-    `agent_turn_failed` (round 67b): agent-made versions are normally the
-    turn's own responsibility — it renders its preview, or the worker
-    auto-renders one when it forgets. That contract has exactly one hole: a
-    turn KILLED mid-flight (a deploy restart, an OOM) leaves the versions it
-    already wrote with no preview, no job, and — before this flag — a safety
-    net that deliberately looked away. A real user watched "Updating your
-    preview…" forever over a stale video (project 298, job 1614, killed by
-    the round-67 worker deploy itself). When the project's newest agent turn
-    is FAILED there is no turn left to race and nothing speculative about
-    rendering the state it abandoned — so the net covers it.
+    `agent_orphaned` (rounds 67b + 94): agent-made versions are normally
+    their writer's responsibility — a turn renders its preview (or the
+    worker auto-renders), an MCP session calls render_preview itself. The
+    flag says NOTHING will ever render this one: the newest turn was killed
+    mid-flight (project 298, job 1614 — a user watched "Updating your
+    preview…" forever over a stale video), or the version was written
+    outside any turn (the MCP surface) and has sat unrendered with both
+    lanes idle past the grace window (project 372, round 94 — same
+    forever-bar, zero jobs anywhere). See _agent_version_orphaned.
     """
     if not edl or not indexed:
         return False
-    if edl["created_by"] != "user" and not agent_turn_failed:
+    if edl["created_by"] != "user" and not agent_orphaned:
         return False
     return drafting != edl["version"]
 
@@ -2405,20 +2430,30 @@ def project_state(user_id, project_id):
         # ...and EXCEPT while a client is drafting this exact version and will
         # ask for the render itself — see _should_heal_preview.
         drafting = request.args.get("drafting", type=int)
-        # Round 67b: a turn killed mid-flight (deploy restart, OOM) leaves its
-        # written versions unrendered and no job to wait on. Only when the
-        # newest agent_turn is terminally FAILED does the heal extend to
-        # agent-made versions — a live turn still owns its own render, and a
-        # completed one always left a preview behind.
-        agent_turn_failed = False
+        # Round 67b + round 94: agent-made versions normally belong to their
+        # writer — a live turn renders its own preview, an MCP session calls
+        # render_preview itself. The heal extends to them only when they are
+        # ORPHANED: the newest turn FAILED, or nothing is live in either lane
+        # and the version has sat unrendered past a grace window (an MCP
+        # write with no render left the studio's bar spinning forever —
+        # see _agent_version_orphaned).
+        agent_orphaned = False
         if edl and edl.get("created_by") != "user":
-            cur.execute("""SELECT state FROM video_jobs
-                           WHERE project_id = %s AND type = 'agent_turn'
-                           ORDER BY id DESC LIMIT 1""", (project_id,))
-            last_turn = cur.fetchone()
-            agent_turn_failed = bool(last_turn
-                                     and last_turn["state"] == "failed")
-        if _should_heal_preview(edl, indexed, drafting, agent_turn_failed):
+            cur.execute("""SELECT DISTINCT ON (type) type, state
+                           FROM video_jobs
+                           WHERE project_id = %s
+                             AND type IN ('agent_turn', 'mcp_tool')
+                           ORDER BY type, id DESC""", (project_id,))
+            lanes = {r["type"]: r["state"] for r in cur.fetchall()}
+            cur.execute("""SELECT created_at < NOW() - INTERVAL '45 seconds'
+                             AS aged
+                           FROM edls WHERE project_id = %s AND version = %s""",
+                        (project_id, edl["version"]))
+            aged_row = cur.fetchone()
+            agent_orphaned = _agent_version_orphaned(
+                lanes.get("agent_turn"), lanes.get("mcp_tool"),
+                bool(aged_row and aged_row["aged"]))
+        if _should_heal_preview(edl, indexed, drafting, agent_orphaned):
             cur.execute("""SELECT 1 FROM video_jobs
                            WHERE project_id = %s AND type = 'preview'
                              AND (payload->>'edl_version')::int = %s

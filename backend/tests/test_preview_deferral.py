@@ -90,12 +90,12 @@ def test_a_dead_turns_orphan_versions_are_healed():
     newest agent_turn is FAILED there is no turn left to race: the net covers
     agent versions too (drafting suppression still applies)."""
     assert video._should_heal_preview(edl_row(7, "agent"), True, None,
-                                      agent_turn_failed=True) is True
+                                      agent_orphaned=True) is True
     assert video._should_heal_preview(edl_row(7, "agent"), True, 7,
-                                      agent_turn_failed=True) is False
+                                      agent_orphaned=True) is False
     # ...and the flag never bypasses the index gate
     assert video._should_heal_preview(edl_row(7, "agent"), False, None,
-                                      agent_turn_failed=True) is False
+                                      agent_orphaned=True) is False
 
 
 def test_nothing_is_healed_before_the_video_is_indexed_or_without_an_edl():
@@ -108,3 +108,36 @@ def test_drafting_zero_is_not_confused_with_absent():
     behave like no claim, not like a match. (`if drafting:` would have been the
     bug; the comparison is against the version.)"""
     assert video._should_heal_preview(edl_row(1), True, 0) is True
+
+
+# ── round 94: versions written outside any turn (the MCP surface) ───────────
+#
+# A remove_erase written over MCP left project 372's studio on "Updating your
+# preview…" forever: created_by='agent', the newest agent_turn 'done' (from
+# hours earlier), no mcp_tool job live, and the old heal only extended to
+# FAILED turns. _agent_version_orphaned is the complete ownership answer.
+
+def test_a_failed_turn_orphans_immediately():
+    assert video._agent_version_orphaned("failed", None, False) is True
+    assert video._agent_version_orphaned("failed", "done", False) is True
+
+
+def test_a_live_turn_or_mcp_call_owns_its_render():
+    assert video._agent_version_orphaned("running", None, True) is False
+    assert video._agent_version_orphaned("queued", None, True) is False
+    assert video._agent_version_orphaned("done", "running", True) is False
+    assert video._agent_version_orphaned("done", "queued", True) is False
+
+
+def test_an_idle_mcp_written_version_orphans_after_the_grace_window():
+    """Both lanes terminal, version aged past 45s -> heal (the 372 case)."""
+    assert video._agent_version_orphaned("done", "done", True) is True
+    assert video._agent_version_orphaned(None, "done", True) is True
+
+
+def test_the_grace_window_protects_a_thinking_mcp_session():
+    """Between tool calls an MCP session has NO live job row — a fresh
+    version must not be healed out from under the model that is about to
+    render it."""
+    assert video._agent_version_orphaned("done", "done", False) is False
+    assert video._agent_version_orphaned(None, None, False) is False
