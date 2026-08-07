@@ -1,5 +1,28 @@
 # Request-based media/index executor (round 38)
 
+> **ROUND 97: DEPLOYS ARE AUTOMATIC.** `.github/workflows/deploy-executor.yml`
+> redeploys this service from every push to main that touches `worker/`, then
+> fails the run unless `/health` reports the pushed commit's own
+> `version.code_version()` — the manual step below is now the FALLBACK, not
+> the process. The workflow needs two one-time grants that must be run by a
+> human (they mint credentials):
+>
+> ```bash
+> # 1) let the deploy SA act as the executor's runtime service account
+> gcloud iam service-accounts add-iam-policy-binding \
+>   950454325677-compute@developer.gserviceaccount.com \
+>   --member serviceAccount:gh-executor-deploy@valmera.iam.gserviceaccount.com \
+>   --role roles/iam.serviceAccountUser --project valmera
+>
+> # 2) put the SA key into the repo secret (key file from
+> #    `gcloud iam service-accounts keys create key.json
+> #       --iam-account gh-executor-deploy@valmera.iam.gserviceaccount.com`)
+> gh secret set GCP_SA_KEY -R ABO3SKRALMASAOODI/hustler-server < key.json
+> ```
+>
+> Until the secret exists the workflow skips with a warning instead of
+> failing, and this file's manual command keeps working.
+
 Moves the CPU-heavy work — `index`, `preview`, `final` — off the always-on
 Render worker and onto a **scale-to-zero Google Cloud Run** service that spins
 up a fresh 8-vCPU instance per job and costs **$0 while idle**. The Render

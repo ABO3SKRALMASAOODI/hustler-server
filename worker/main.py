@@ -284,6 +284,32 @@ def reaper():
             for row in rows:
                 print(f"[reaper] failed exhausted job {row['id']} "
                       f"({row['type']})", flush=True)
+                # Round 97 (#1): an agent turn killed by a worker death gets
+                # ONE fresh pass over the same message instead of "I was
+                # interrupted — send the request again". The EDL writes it
+                # landed are already saved, so the resume behaves exactly
+                # like the user resending — which is what they were being
+                # asked to do by hand (job 2932: the one trial customer's
+                # flagship request died at 20:15 and he left). The
+                # death_resume marker bounds it: a request that kills the
+                # worker twice is a poison pill and stops with the honest
+                # note.
+                if row["type"] == "agent_turn" \
+                        and not (row.get("payload") or {}).get(
+                            "death_resume") \
+                        and row.get("user_id") is not None:
+                    try:
+                        nid = worker_db.run(
+                            dbx.enqueue_job, row["project_id"],
+                            row["user_id"], "agent_turn",
+                            dict(row.get("payload") or {}, death_resume=1))
+                        print(f"[reaper] agent turn {row['id']} died "
+                              f"mid-request — resuming as job {nid}",
+                              flush=True)
+                        continue
+                    except Exception as e:
+                        print(f"[reaper] could not resume agent turn "
+                              f"{row['id']}: {e}", flush=True)
                 note = REAPER_NOTES.get(row["type"])
                 # Same distinction as _notify_failure: a died forced re-render
                 # is a playback recovery, and the generic preview note would

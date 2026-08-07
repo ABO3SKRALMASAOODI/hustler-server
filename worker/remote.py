@@ -290,6 +290,33 @@ def run_clean_remote(project_id, payload, user_id=None):
                         "attempts": 0, "payload": payload})
 
 
+def stems_available():
+    """Is there a build that can separate stems? (round 97)
+
+    Unlike the pure "is the executor configured" gates above, the demucs
+    dependency exists only where it was baked into the image — so the honest
+    answer comes from /health's features (executor_supports), or from this
+    process's own import when there is no executor at all. None (executor
+    unreachable) follows the round-53 rule: unknown is not "no"."""
+    if not config.REMOTE_EXECUTOR_URL:
+        import stems
+        return stems.available()
+    return executor_supports("stems")
+
+
+def run_stems_remote(project_id, payload, user_id=None):
+    """Separate a stored source's audio into vocals/accompaniment on the
+    executor (or locally when none is configured). Returns
+    stems.run_stems_job's dict; both stems are already uploaded on ok.
+    Synchronous, no job row — the round-61 capture shape."""
+    job = {"id": None, "type": "stems", "project_id": project_id,
+           "user_id": user_id, "attempts": 0, "payload": payload}
+    if not config.REMOTE_EXECUTOR_URL:
+        import stems
+        return stems.run_stems_job(job)
+    return _run_remote(job)
+
+
 def run_render_remote(worker_db, job):      # signature matches run_render_job
     return _run_remote(job)
 

@@ -36,6 +36,7 @@ import inpaint
 import matte
 import renderer
 import screenmatch
+import stems
 import tracker
 import version
 import webrecord
@@ -75,6 +76,10 @@ RUNNERS = {
     # the last one that still ran on the dispatcher. Job 1557 (Jul 31 2026)
     # died minutes after a customer's erase ran there.
     "clean": inpaint.run_clean_job,
+    # Round 97: music/voice stem separation — a torch forward pass over the
+    # whole soundtrack. Model compute by definition; the dependency only
+    # exists in this image (see /health features and stems.available).
+    "stems": stems.run_stems_job,
 }
 
 

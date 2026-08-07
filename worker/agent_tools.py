@@ -9045,6 +9045,108 @@ def set_master_loudness(ctx, enabled):
     return res
 
 
+_STEMS_FEATURE_CACHE = {"at": 0.0, "ok": None}
+
+
+def _stems_supported():
+    """Same contract as the custom-filter gate (round 96): definite 'no'
+    refuses, unreachable stays permissive and is retried, and the answer is
+    cached briefly so a turn does not probe /health per call."""
+    now = time.time()
+    if _STEMS_FEATURE_CACHE["ok"] is not None and \
+            now - _STEMS_FEATURE_CACHE["at"] < 300:
+        return _STEMS_FEATURE_CACHE["ok"]
+    ok = remote.stems_available()
+    if ok is not None:
+        _STEMS_FEATURE_CACHE["at"] = now
+        _STEMS_FEATURE_CACHE["ok"] = ok
+    return ok
+
+
+def separate_music(ctx, music_gain_db=None, voice_gain_db=None):
+    """Round 97 (#7): rebalance the ORIGINAL footage's music vs its speech.
+
+    'Remove the background song but keep the talking' — the ask that was an
+    honest 'impossible' while the original audio was one mixed track. The
+    footage's soundtrack is separated ONCE per video (Demucs on the render
+    service, cached forever by source sha), and the EDL's stem_mix node then
+    plays the two sides at their own gains."""
+    if not ctx.has_main_video:
+        return ("This project has no main video — separation works on the "
+                "original footage's own soundtrack.")
+    if _stems_supported() is False:
+        return ("Music/voice separation isn't available on the render "
+                "service right now. I can still lower the WHOLE original "
+                "track with set_volume, or mute spans — but not split the "
+                "music from the speech.")
+    mg = 0.0 if music_gain_db is None else float(music_gain_db)
+    vg = 0.0 if voice_gain_db is None else float(voice_gain_db)
+    if not (-60.0 <= mg <= 6.0 and -60.0 <= vg <= 6.0):
+        return "Stem gains must be between -60 (mute) and +6 dB."
+    if ctx.duration > config.STEMS_MAX_SOURCE_S:
+        return (f"This video is {ctx.duration / 60:.0f} minutes long — "
+                f"music separation currently supports footage up to "
+                f"{config.STEMS_MAX_SOURCE_S / 60:.0f} minutes. Tell the "
+                "user that plainly; set_volume still works on the whole "
+                "track.")
+    row = _original_row(ctx)
+    sha = row.get("sha256") or ""
+    if not sha:
+        return ("The original file hasn't finished processing — try again "
+                "in a moment.")
+    vocals_key = f"stems/{sha}/vocals.m4a"
+    accomp_key = f"stems/{sha}/accomp.m4a"
+    if not (storage.exists(vocals_key) and storage.exists(accomp_key)):
+        # First separation for this footage. Prefer the proxy's bytes — the
+        # audio track is the same and the download is a fraction of a
+        # multi-GB original.
+        src_row = None
+        try:
+            src_row = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
+        except Exception:
+            src_row = None
+        src_key = (src_row or row)["storage_key"]
+        try:
+            res = remote.run_stems_remote(
+                ctx.project_id,
+                {"src_key": src_key, "vocals_key": vocals_key,
+                 "accomp_key": accomp_key},
+                user_id=ctx.job.get("user_id"))
+        except Exception as e:
+            return (f"Separating the music failed ({str(e)[:160]}) — the "
+                    "original audio is untouched. Tell the user honestly; "
+                    "set_volume on the whole track still works.")
+        if not (res or {}).get("ok"):
+            return (f"Separating the music failed ({str(res)[:120]}) — the "
+                    "original audio is untouched.")
+    edl = dict(ctx.latest_edl()["json"])
+    edl["stem_mix"] = {"vocals_key": vocals_key, "accomp_key": accomp_key,
+                       "voice_gain_db": vg, "music_gain_db": mg}
+    res = ctx.write_edl(
+        edl, f"stem mix: voice {vg:+.0f} dB, music/background {mg:+.0f} dB")
+    if res.startswith("EDL v"):
+        res += ("\nThe original soundtrack now plays as two separated "
+                "stems: speech/vocals at "
+                f"{vg:+.0f} dB and music/background at {mg:+.0f} dB. This "
+                "is an AUDIO-only change — the next preview is fast. "
+                "remove_stem_mix restores the untouched original mix. "
+                "Separation is strong but not surgical: on dense mixes a "
+                "trace of the muted side can remain — listen to the "
+                "preview before promising silence.")
+    return res
+
+
+def remove_stem_mix(ctx):
+    """Restore the original mixed soundtrack (drop the stem_mix node)."""
+    edl = dict(ctx.latest_edl()["json"])
+    if not edl.get("stem_mix"):
+        return ("No stem mix is set — the original soundtrack is already "
+                "playing untouched.")
+    edl["stem_mix"] = None
+    return ctx.write_edl(edl, "stem mix removed — original soundtrack "
+                              "restored")
+
+
 IMAGE_ASPECTS = ("16:9", "9:16", "1:1", "4:3", "3:4")
 
 
@@ -13325,6 +13427,24 @@ TOOLS = {
                           "tint": {"type": "number"},
                           "shadows": {"type": "number"},
                           "highlights": {"type": "number"}}),
+    "separate_music": (separate_music, "Rebalance the ORIGINAL footage's "
+                       "music vs its speech — the answer to 'remove the "
+                       "background music but keep the talking', 'the song "
+                       "is too loud under his voice', 'keep only the "
+                       "music'. The soundtrack is separated into "
+                       "speech/vocals + everything-else (once per video, "
+                       "then cached) and each side plays at its own gain: "
+                       "music_gain_db=-60 mutes the music, "
+                       "voice_gain_db=-60 mutes the speech, -12 ducks, 0 "
+                       "leaves untouched (range -60..+6). This changes "
+                       "ONLY the original footage's own audio — added "
+                       "music tracks are add_music/remove_music, NOT this. "
+                       "Not surgical on dense mixes — check the preview "
+                       "before promising total silence.",
+                       {"music_gain_db": {"type": "number"},
+                        "voice_gain_db": {"type": "number"}}),
+    "remove_stem_mix": (remove_stem_mix, "Restore the original mixed "
+                        "soundtrack (undo separate_music).", {}),
     "set_master_loudness": (set_master_loudness, "enabled=true normalizes "
                             "the FINAL MIX to -14 LUFS / -1.5 dBTP (the "
                             "social/streaming loudness target) on preview "
@@ -13567,6 +13687,7 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
                "set_caption_fixes",
                "remove_stylize",
                "set_grade_custom", "set_master_loudness",
+               "separate_music", "remove_stem_mix",
                "punch_in_on_emphasis", "sound_design_pass",
                "beat_align_cuts", "apply_look",
                "generate_image",
@@ -13589,6 +13710,12 @@ def _tool_disabled(name):
         return not webrecord.available()
     if name in ("search_stock", "add_stock_media"):
         return not stock.available()
+    # Stem separation exists only where the demucs image layer does; a
+    # definite "no" from the render service hides the tool entirely
+    # (round-53 honest-off), while "unreachable" keeps it visible — unknown
+    # is not "no", and the call itself refuses gracefully.
+    if name in ("separate_music", "remove_stem_mix"):
+        return _stems_supported() is False
     # Same rule for the music library: a deployment whose image shipped no
     # tracks must not advertise one, or the agent offers music it cannot
     # deliver and then has to walk it back.

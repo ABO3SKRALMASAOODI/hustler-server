@@ -170,7 +170,7 @@ def fail_ceilinged_jobs(conn):
               AND (state = 'queued'
                    OR (state = 'running'
                        AND heartbeat_at < NOW() - make_interval(secs => %s)))
-            RETURNING id, type, project_id, error, payload
+            RETURNING id, type, project_id, user_id, error, payload
         """, (config.MAX_CLAIMS_ABSOLUTE, config.STALE_AFTER_S))
         return cur.fetchall()
 
@@ -187,7 +187,7 @@ def fail_exhausted_jobs(conn):
               AND heartbeat_at < NOW() - make_interval(secs => %s)
               AND attempts >= CASE WHEN type IN ('agent_turn', 'mcp_tool')
                                    THEN %s ELSE %s END
-            RETURNING id, type, project_id, error, payload
+            RETURNING id, type, project_id, user_id, error, payload
         """, (config.STALE_AFTER_S, config.MAX_ATTEMPTS_AGENT,
               config.MAX_ATTEMPTS_MEDIA))
         return cur.fetchall()

@@ -795,10 +795,23 @@ REMOTE_EXECUTOR_TIMEOUT_S = int(os.getenv("REMOTE_EXECUTOR_TIMEOUT_S", "1500"))
 # primary defence they used to be.
 EXECUTOR_REQUEST_TIMEOUT_S = int(
     os.getenv("EXECUTOR_REQUEST_TIMEOUT_S", "3600"))
+# Music/voice stem separation (round 97, #7 — see worker/stems.py).
+# htdemucs is the quality default; the executor's 8 vCPU run it near
+# realtime, and the per-source cache means each video pays separation once,
+# ever. The source cap keeps one separation inside a turn's patience — a
+# longer video gets an honest "up to N minutes" refusal instead of a wall.
+STEMS_MODEL = os.getenv("STEMS_MODEL", "htdemucs").strip()
+STEMS_MAX_SOURCE_S = float(os.getenv("STEMS_MAX_SOURCE_S", "720"))
+STEMS_TIMEOUT_S = float(os.getenv("STEMS_TIMEOUT_S", "1380"))
+
 REMOTE_EXECUTOR_TIMEOUTS = {
     # A preview is deliberately the impatient one: it renders from the 540p
     # proxy and a user is watching a spinner while it runs.
     "preview": int(os.getenv("REMOTE_TIMEOUT_PREVIEW_S", "1500")),
+    # Stem separation (round 97): demucs on CPU runs near realtime, the
+    # source is capped at STEMS_MAX_SOURCE_S, and the result is cached per
+    # source forever — so this bounds ONE first-ever separation per video.
+    "stems": int(os.getenv("REMOTE_TIMEOUT_STEMS_S", "1500")),
     # A final renders the customer's ORIGINAL at source resolution — the one
     # job worth waiting an hour for, because the alternative is telling someone
     # their finished edit cannot be exported.
@@ -896,6 +909,16 @@ AGENT_MAX_ITERATIONS = 30
 # and still stops at the wall. 2 -> at most 90 iterations, inside the same
 # 900s / credit bounds that always applied.
 AGENT_AUTO_CONTINUES = int(os.getenv("AGENT_AUTO_CONTINUES", "2"))
+# Round 97 (#1): how many FRESH CLOCKS a turn that hits AGENT_TURN_TIMEOUT_S
+# mid-work may grant itself. The clock wall was the last ceiling still asking
+# the user to say "continue" — and when the one trial customer's 918s turn
+# hit it, he typed Continue, the resumed pass finished in 316s, and the whole
+# request took 21 minutes plus a round of his patience for OUR internal
+# limit. The extension only fires when the pass PROGRESSED since its last
+# checkpoint (a runaway that moved nothing still walls), never over the
+# spend cap, and never during a deploy drain. 1 keeps the worst case at
+# ~2x the turn ceiling on one shared agent slot — raise with care.
+AGENT_CLOCK_CONTINUES = int(os.getenv("AGENT_CLOCK_CONTINUES", "1"))
 AGENT_TEMPERATURE = 0.2
 # Completion ceiling for ONE agent step. 8000 (was a hardcoded 2000).
 #

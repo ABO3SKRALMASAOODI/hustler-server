@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import time
 import uuid
@@ -1213,6 +1214,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       insert_inputs=None, vo_inputs=None, silence_idx=None,
                       src_w=None, src_h=None, src_pad=0.0,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
+                      stem_inputs=None,
                       src_sar=1.0, src_fps=None,
                       overlay_inputs=None, gfx_ass_path=None,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
@@ -1250,7 +1252,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     parts = []
 
     if n > 0:
-        asrc = "0:a" if has_audio else f"{silence_idx}:a"
+        if stem_inputs:
+            # Round 97: the source audio IS the premixed stems. Everything
+            # downstream — volume automation, per-segment trims, ducking,
+            # music, loudnorm — reads [asrc] exactly as before, so the split
+            # changes the source of truth and nothing else.
+            svi, sai, vdb, mdb = stem_inputs
+            parts.append(f"[{svi}:a]volume={vdb}dB[stv]")
+            parts.append(f"[{sai}:a]volume={mdb}dB[stm]")
+            parts.append("[stv][stm]amix=inputs=2:duration=longest:"
+                         "normalize=0[stemsrc]")
+            asrc = "stemsrc"
+        else:
+            asrc = "0:a" if has_audio else f"{silence_idx}:a"
         # Source-time volume automation runs before trimming, so between(t,a,b)
         # windows are in source seconds — exactly what the agent wrote.
         vol_filters = "".join(
@@ -2721,10 +2735,112 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     return media.duration_of(out_path)
 
 
+def _prune_graph_to_audio(graph, target="aout"):
+    """The filter_complex with every chain the audio output does not need
+    removed — the whole video pipeline drops away, and with it its cost.
+
+    The audio chains and the video chains of our graphs never share a filter
+    node (they share INPUT FILES only), so backward reachability from the
+    audio output label yields a self-contained audio graph whose semantics
+    are byte-identical to the full render's audio — which is the entire
+    point: render_edl(audio_only=True) must produce EXACTLY the track the
+    full render would have muxed (round 97, timeline-stitched previews).
+
+    The one node our graphs genuinely share across domains is the segment
+    `concat=v=1:a=1`, which eats interleaved [v][a] pairs and produces both
+    a video and an audio output from one filter. When only its audio side
+    is needed, the node is REWRITTEN to `v=0` with just its audio inputs and
+    outputs — and the whole video decode/trim tree above it prunes away on
+    the second reachability pass, so the audio render never decodes a frame.
+
+    Raises when the pruned graph would still leave a dangling output — an
+    unexpected cross-domain filter — and the caller's fallback is the full
+    render: pruning failures cost speed, never correctness."""
+
+    def _parse(g):
+        out = []
+        for chain in g.split(";"):
+            s = chain.strip()
+            if not s:
+                continue
+            ins = []
+            while True:
+                m = re.match(r"^\[([^\]]+)\]", s)
+                if not m:
+                    break
+                ins.append(m.group(1))
+                s = s[m.end():]
+            outs = []
+            while True:
+                m = re.search(r"\[([^\]]+)\]$", s)
+                if not m:
+                    break
+                outs.append(m.group(1))
+                s = s[:m.start()].rstrip()
+            out.append((chain.strip(), ins, list(reversed(outs)), s))
+        return out
+
+    def _reach(parsed):
+        need = {target}
+        keep = [False] * len(parsed)
+        changed = True
+        while changed:
+            changed = False
+            for i, (_c, ins, outs, _f) in enumerate(parsed):
+                if not keep[i] and any(o in need for o in outs):
+                    keep[i] = True
+                    need.update(ins)
+                    changed = True
+        return keep, need
+
+    parsed = _parse(graph)
+    keep, need = _reach(parsed)
+
+    rewritten = []
+    for i, (chain, ins, outs, body) in enumerate(parsed):
+        if not keep[i]:
+            rewritten.append(chain)                 # dropped on second pass
+            continue
+        m = re.match(r"^concat(?:=(\S*))?$", body)
+        if m:
+            args = dict(kv.split("=", 1) for kv in (m.group(1) or "").split(
+                ":") if "=" in kv)
+            n = int(args.get("n", 2))
+            nv = int(args.get("v", 1))
+            na = int(args.get("a", 0))
+            v_outs, a_outs = outs[:nv], outs[nv:nv + na]
+            if na > 0 and nv > 0 and not any(o in need for o in v_outs):
+                a_ins = []
+                for seg in range(n):
+                    base = seg * (nv + na)
+                    a_ins += ins[base + nv:base + nv + na]
+                rewritten.append(
+                    "".join(f"[{x}]" for x in a_ins)
+                    + f"concat=n={n}:v=0:a={na}"
+                    + "".join(f"[{x}]" for x in a_outs))
+                continue
+        rewritten.append(chain)
+    parsed = _parse(";".join(rewritten))
+    keep, need = _reach(parsed)
+    kept = [p for i, p in enumerate(parsed) if keep[i]]
+    if not kept:
+        raise media.MediaError(f"audio-only prune found no [{target}]")
+    consumed = set()
+    for _c, ins, _outs, _f in kept:
+        consumed.update(ins)
+    for _c, _ins, outs, _f in kept:
+        for o in outs:
+            if o != target and o not in consumed:
+                raise media.MediaError(
+                    f"audio-only prune left [{o}] dangling")
+    return ";".join(c for c, _i, _o, _f in kept)
+
+
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                progress_cb=None, want_wm=False, cancelled_cb=None,
                patch_locals=None, cap_ass_override=None,
-               suppress_outro=False, cap_burn_offset=None):
+               suppress_outro=False, cap_burn_offset=None,
+               audio_only=False):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -2733,6 +2849,14 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     proxy-res clip for previews and materializes the full-res twin for
     finals); a patch with no local file is skipped with a log line rather
     than failing the render — the un-patched source is the honest fallback.
+
+    audio_only (round 97): build the IDENTICAL graph, prune it to the audio
+    output, and encode just the track (AAC in an mp4/m4a container). Used by
+    timeline-mode stitched previews, whose video is spliced from stream
+    copies and windowed re-encodes but whose audio must be rebuilt whole —
+    audio cannot be spliced (adaptive loudnorm, output-anchored music, no
+    clean AAC cut points). Same inputs, same filters, same order: the track
+    is the one the full render would have produced, by construction.
     """
     if is_canvas_program(edl_dict):
         # No main video: the program is built on the canvas from inserts alone.
@@ -2808,6 +2932,28 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         extra_inputs += ["-i", local]
         patch_inputs.append((next_idx, item))
         next_idx += 1
+
+    # Separated stems (round 97): when the EDL rebalances music vs voice,
+    # the two stem files become inputs and build_filtergraph premixes them
+    # in place of the original track. Any failure here DEGRADES to the
+    # original audio with a log line — a missing stem object must never
+    # fail a render the untouched track can honestly serve.
+    stem_inputs = None
+    sm = edl.get("stem_mix") or None
+    if sm:
+        try:
+            v_local = _fetch(sm["vocals_key"], "stemv", next_idx)
+            a_local = _fetch(sm["accomp_key"], "stema", next_idx + 1)
+            extra_inputs += ["-i", v_local, "-i", a_local]
+            stem_inputs = (next_idx, next_idx + 1,
+                           float(sm.get("voice_gain_db") or 0.0),
+                           float(sm.get("music_gain_db") or 0.0))
+            next_idx += 2
+        except Exception as e:
+            print(f"[render] stem_mix set but stems unavailable "
+                  f"({str(e)[:120]}) — rendering the original audio",
+                  flush=True)
+            stem_inputs = None
 
     # one shared anullsrc covers a silent main track AND silent insert blocks
     needs_silence = (not info["has_audio"]) or any(
@@ -2998,6 +3144,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               src_w=info["width"], src_h=info["height"],
                               src_pad=src_pad, sfx_inputs=sfx_inputs,
                               outro_s=outro_s, card_idx=card_idx,
+                              stem_inputs=stem_inputs,
                               src_sar=info.get("sar") or 1.0,
                               src_fps=float(info["fps"]) or fps,
                               overlay_inputs=overlay_inputs,
@@ -3008,6 +3155,23 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               behind_inputs=behind_inputs,
                               patch_inputs=patch_inputs,
                               cap_burn_offset=cap_burn_offset)
+
+    if audio_only:
+        # The same graph the full render would run, minus every chain the
+        # audio does not need. Unconsumed inputs are probed but never
+        # decoded, so the video pipeline's whole cost (the reason previews
+        # were slow) drops away and this finishes in seconds.
+        graph = _prune_graph_to_audio(graph)
+        cmd = ["ffmpeg", "-y", "-i", src_path, *extra_inputs,
+               "-filter_complex", graph, "-map", "[aout]",
+               "-c:a", "aac", "-b:a", "128k" if preview else "192k",
+               "-movflags", "+faststart",
+               "-progress", "pipe:1", "-nostats", out_path]
+        media.run(cmd, progress_cb=progress_cb,
+                  expected_out_s=tl.out_duration
+                  + music_tail_ext(edl, tl.out_duration) + outro_s,
+                  cancelled_cb=cancelled_cb)
+        return media.probe_audio_duration(out_path)
 
     if preview:
         # Dense keyframes so Safari scrubbing lands precisely (~1.6s GOP).
@@ -3235,6 +3399,139 @@ def _fetch_into(workdir, key, tag):
     return local
 
 
+def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
+                     src_local, workdir, patch_locals, out_path, prev_asset,
+                     duration):
+    """Timeline-mode stitch (round 97): the edit users make MOST — a trim, a
+    cut, a splice, a music change — used to force the full re-render every
+    time (round 96c: 134-206s per preview, 13 times in one real session).
+    Here the new program is matched span-by-span against the previous
+    preview (stitch.plan_timeline), matched spans stream-copy FROM THEIR OLD
+    POSITION, only genuinely-changed seconds re-encode, and the audio track
+    is rebuilt whole through the pruned render graph (audio cannot be
+    spliced; rebuilding it costs seconds). Returns the output duration or
+    None — the caller then runs the full render, which is always correct."""
+    dur_out = tl_new.out_duration
+    if outro_seconds(True) > 0:
+        return None                    # previews with an end card: rare, out
+    if music_tail_ext(new_edl, dur_out) > 0 or \
+            music_tail_ext(prev_edl, tl_prev.out_duration) > 0:
+        return None                    # music outliving the program moves art
+    if is_canvas_program(new_edl) or is_canvas_program(prev_edl):
+        return None
+
+    info = media.probe(src_local)
+    W, H = frame_dims(info["width"], info["height"],
+                      (new_edl.get("frame") or {}).get("ratio"))
+    fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
+    W, H, fps = preview_geometry(W, H, fps)
+
+    # Both programs' burned captions, with payloads: plan_timeline PAIRS the
+    # events modulo each run's shift and re-encodes any span where the two
+    # programs would not burn the same picture. Never assumed — checked.
+    cap_new = caplib.build_ass(new_edl, index, tl_new,
+                               os.path.join(workdir, "stitch_cap.ass"),
+                               play_res=(W, H))
+    cap_prev = caplib.build_ass(prev_edl, index, tl_prev,
+                                os.path.join(workdir, "stitch_cap_prev.ass"),
+                                play_res=(W, H))
+    ev_new = stitch.ass_events(cap_new, with_payload=True) if cap_new else []
+    ev_prev = stitch.ass_events(cap_prev, with_payload=True) \
+        if cap_prev else []
+
+    windows, runs, why = stitch.plan_timeline(
+        prev_edl, new_edl, tl_prev, tl_new, dur_out,
+        cap_events_prev=ev_prev, cap_events_new=ev_new)
+    if windows is None:
+        print(f"[render {job_id}] stitch(timeline): full render ({why})",
+              flush=True)
+        return None
+
+    item_spans = [(a, b) for a, b, _k in
+                  stitch._item_windows(new_edl, tl_new, duration)]
+    item_spans += list(timeline_mod.insert_windows(
+        new_edl.get("inserts") or [], tl_new).values())
+    fx = new_edl.get("effects") or {}
+    junction_zones = []
+    tr = fx.get("transition") or None
+    if tr:
+        blocks = timeline_mod.program_blocks(new_edl)
+        juncs = transition_junctions(new_edl, index, n_blocks=len(blocks))
+        zd = float(tr.get("duration_s") or 0.5) + 0.2
+        for k in juncs:
+            if 0 <= k < len(blocks) - 1:
+                t = blocks[k]["out_end"]
+                junction_zones.append((t - zd, t + zd))
+    fades = []
+    fi = float(fx.get("fade_in_s") or 0.0)
+    fo = float(fx.get("fade_out_s") or 0.0)
+    if fi > 0:
+        fades.append((0.0, fi + 0.3))
+    if fo > 0:
+        fades.append((dur_out - fo - 0.3, dur_out))
+
+    expanded = stitch.expand(windows, item_spans, [], [], fades, dur_out)
+    if expanded is None:
+        print(f"[render {job_id}] stitch(timeline): full render (windows "
+              "would not settle)", flush=True)
+        return None
+
+    prev_local = _cached_source(prev_asset["storage_key"])
+    if not prev_local:
+        prev_local = _fetch_into(workdir, prev_asset["storage_key"], "prevpv")
+    kfs = stitch.keyframe_times(prev_local)
+    runs = stitch.carve_runs(runs, [(a, b) for a, b in expanded])
+    parts = stitch.snap_parts(expanded, runs, kfs, dur_out,
+                              item_spans + junction_zones, [])
+    if parts is None:
+        print(f"[render {job_id}] stitch(timeline): full render (snap gave "
+              "up)", flush=True)
+        return None
+
+    pinfo = media.probe(prev_local)
+    pieces = []
+    for i, part in enumerate(parts):
+        if part[0] != "win":
+            continue
+        _k, a, b = part
+        wedl = stitch.window_edl(new_edl, tl_new, a, b)
+        piece = os.path.join(workdir, f"stitch_tp_{i}.mp4")
+        pdur = render_edl(wedl, index, src_local, piece, workdir,
+                          preview=True, want_wm=False,
+                          patch_locals=patch_locals,
+                          cap_ass_override=(cap_new or ""),
+                          cap_burn_offset=(a if cap_new else None),
+                          suppress_outro=True)
+        if abs(pdur - (b - a)) > max(0.15, 2.0 / fps):
+            print(f"[render {job_id}] stitch(timeline): full render (piece "
+                  f"{i} came out {pdur:.3f}s for a {b - a:.3f}s window)",
+                  flush=True)
+            return None
+        pi = media.probe(piece)
+        if (pi["width"], pi["height"]) != (pinfo["width"], pinfo["height"]):
+            print(f"[render {job_id}] stitch(timeline): full render (piece "
+                  f"is {pi['width']}x{pi['height']}, previous preview is "
+                  f"{pinfo['width']}x{pinfo['height']})", flush=True)
+            return None
+        pieces.append(piece)
+
+    audio_path = os.path.join(workdir, "stitch_audio.m4a")
+    render_edl(new_edl, index, src_local, audio_path, workdir,
+               preview=True, want_wm=False, patch_locals=patch_locals,
+               cap_ass_override="", suppress_outro=True, audio_only=True)
+
+    out_dur = stitch.assemble_offset(prev_local, parts, pieces, audio_path,
+                                     dur_out, workdir, out_path)
+    total_re = sum(b - a for _k, a, b in
+                   [p for p in parts if p[0] == "win"])
+    n_copy = sum(1 for p in parts if p[0] == "copy")
+    print(f"[render {job_id}] STITCHED preview (timeline): re-encoded "
+          f"{total_re:.1f}s of {dur_out:.1f}s across {len(pieces)} "
+          f"window(s), {n_copy} span(s) stream-copied at their old "
+          "positions, audio rebuilt", flush=True)
+    return out_dur
+
+
 def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                       src_local, workdir, patch_locals, out_path):
     """Try to build this preview by re-encoding only the changed windows and
@@ -3265,9 +3562,19 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
         windows, why = stitch.plan(prev_edl, new_edl, tl_prev, tl_new,
                                    duration, tl_new.out_duration)
         if windows is None:
-            print(f"[render {job_id}] stitch: full render ({why})",
-                  flush=True)
-            return None
+            # Round 97: the refusal that used to end here IS the churn case —
+            # a trim, a cut, a music change. Timeline mode handles those by
+            # matching content across the two programs and copying it from
+            # its old position; anything it cannot prove safe still falls
+            # through to the full render.
+            out2 = _timeline_stitch(job_id, prev_edl, new_edl, tl_prev,
+                                    tl_new, index, src_local, workdir,
+                                    patch_locals, out_path, prev_asset,
+                                    duration)
+            if out2 is None:
+                print(f"[render {job_id}] stitch: full render ({why})",
+                      flush=True)
+            return out2
 
         info = media.probe(src_local)
         W, H = frame_dims(info["width"], info["height"],
@@ -3686,8 +3993,31 @@ def run_render_job(worker_db, job):
             src_dur = media.duration_of(src_local) if src_local else None
         except Exception:
             src_dur = None
-        _verify_render(edl_row["json"], out_local, out_dur, job_id, variant,
-                       src_path=src_local, src_dur=src_dur)
+        try:
+            _verify_render(edl_row["json"], out_local, out_dur, job_id,
+                           variant, src_path=src_local, src_dur=src_dur)
+        except media.MediaError as ve:
+            # Round 97 (#3): a STITCHED preview that fails verification must
+            # never surface — the full render is the always-correct fallback
+            # and it belongs INSIDE this job. Before this, a bad stitch
+            # failed the job, the queue retried it onto the same bad path,
+            # and one user watched the same red error three times in a row.
+            # Only a stitch gets this second chance: a full render that
+            # verifies wrong is a real defect and must keep raising.
+            if stitched_from is None:
+                raise
+            print(f"[render {job_id}] stitched preview failed verification "
+                  f"({str(ve)[:160]}) — running the full render in-job",
+                  flush=True)
+            stitched_from = None
+            out_dur = render_edl(edl_row["json"], index, src_local,
+                                 out_local, workdir,
+                                 preview=(variant == "preview"),
+                                 progress_cb=_prog, want_wm=want_wm,
+                                 cancelled_cb=lambda: _abandoned[0],
+                                 patch_locals=patch_locals)
+            _verify_render(edl_row["json"], out_local, out_dur, job_id,
+                           variant, src_path=src_local, src_dur=src_dur)
         _mark("verify_s")
 
         sheet_local = os.path.join(workdir, "result_sheet.jpg")

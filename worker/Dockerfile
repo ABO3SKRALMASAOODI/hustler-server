@@ -92,6 +92,22 @@ RUN python -c "import urllib.request, os; \
     assert s > 10_000_000, f'model download truncated: {s} bytes'; \
     print('rvm_mobilenetv3_fp32.onnx', s, 'bytes')"
 
+# Music/voice stem separation (round 97 — worker/stems.py). Torch is CPU-only
+# (the +cpu wheel index keeps ~1.5GB of CUDA out of the image) and the
+# htdemucs weights are baked so a scale-to-zero cold start never downloads a
+# model. Keep the model name in sync with worker/config.py STEMS_MODEL.
+# stems.available() gates on the import, so dropping this layer turns the
+# capability off honestly (/health stops advertising "stems") — nothing else
+# breaks. STEMS=0 skips the layer for a slim build.
+ARG STEMS=1
+ENV TORCH_HOME=/opt/torch
+RUN if [ "$STEMS" = "1" ]; then \
+      pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+        torch torchaudio \
+      && pip install --no-cache-dir demucs==4.0.1 \
+      && python -c "from demucs.pretrained import get_model; get_model('htdemucs'); print('htdemucs weights baked')"; \
+    fi
+
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \

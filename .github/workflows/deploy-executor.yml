@@ -1,0 +1,85 @@
+# Executor auto-deploy (round 97, #4).
+#
+# The render executor on Cloud Run does NOT redeploy itself — the dispatcher
+# on Render does, on every push, and the halves drift. That skew has now
+# broken production FOUR separate times (rounds 53, 55, 96, 97: the last one
+# put three red "render is the wrong length" errors in front of one user in
+# two minutes). This workflow removes the whole failure class: any push to
+# main that touches worker/ rebuilds the executor from the same commit, then
+# REFUSES to call it done until /health reports the checked-out tree's own
+# code fingerprint.
+#
+# Setup (once): a GCP service account with run.admin +
+# cloudbuild.builds.editor + storage.admin project roles, serviceAccountUser
+# ON the runtime service account, and its JSON key in the GCP_SA_KEY repo
+# secret — the exact commands are in worker/DEPLOY_EXECUTOR.md. Until the
+# secret exists the deploy job SKIPS (visibly, not red) so the pipeline can
+# ship ahead of its credentials.
+
+name: deploy-executor
+
+on:
+  push:
+    branches: [main]
+    paths: ["worker/**"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-executor
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      have_key: ${{ steps.probe.outputs.have_key }}
+    steps:
+      - id: probe
+        env:
+          KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "have_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GCP_SA_KEY is not configured — executor NOT deployed. See worker/DEPLOY_EXECUTOR.md (CI section)."
+          fi
+
+  deploy:
+    needs: gate
+    if: needs.gate.outputs.have_key == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: valmera
+
+      - name: deploy executor from this commit
+        run: |
+          gcloud run deploy valmera-executor \
+            --source worker/ \
+            --region us-central1 \
+            --project valmera \
+            --quiet
+
+      - name: verify the skew is gone
+        run: |
+          want=$(cd worker && python3 -c "import version; print(version.code_version())")
+          got=$(curl -fsS --max-time 30 \
+            https://valmera-executor-950454325677.us-central1.run.app/health \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['code_version'])")
+          echo "checkout=$want deployed=$got"
+          if [ "$want" != "$got" ]; then
+            echo "::error::executor still reports $got, this commit is $want — the deploy did not take"
+            exit 1
+          fi
+          curl -fsS --max-time 30 \
+            https://valmera-executor-950454325677.us-central1.run.app/health \
+            | python3 -c "import json,sys; h=json.load(sys.stdin); print('features:', h.get('features'))"

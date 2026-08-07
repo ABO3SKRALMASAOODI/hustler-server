@@ -1035,6 +1035,15 @@ def run_agent_job(worker_db, job):
     llm.set_recorder(_llm_recorder)
     try:
         attachment_note = _attachment_context(worker_db, ctx, user_message)
+        if (job.get("payload") or {}).get("death_resume"):
+            # Round 97 (#1): this job is the reaper's resume of a turn the
+            # worker died under. Frame it so the model finishes instead of
+            # starting over — its earlier writes are already in the state.
+            attachment_note += (
+                "\n[system: your previous attempt at this request was cut "
+                "off mid-work on our side. Everything you already changed "
+                "is saved in the project state — do NOT redo it; finish "
+                "what remains of the request and reply.]")
         return _run_loop(ctx, worker_db, job, session_id, user_message,
                          attachment_note)
     except agent_tools.AskUser:
@@ -1878,7 +1887,7 @@ def _continue_decision(n_cont, progressed, seconds_left, over_budget):
 
 
 _CONTINUATION_NOTE = (
-    "[system: CONTINUATION — you hit the per-pass step ceiling on this SAME "
+    "[system: CONTINUATION — you hit the per-pass {why} on this SAME "
     "request and were resumed automatically. The user has NOT seen any reply "
     "and has NOT sent anything new; the message above is the request you "
     "were already working on. Everything you already changed is in the "
@@ -1911,7 +1920,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             for name, t in sorted(_cont["timings"]["tools"].items())) or \
             "nothing yet"
         messages.append({"role": "user",
-                         "content": _CONTINUATION_NOTE.format(done=done)})
+                         "content": _CONTINUATION_NOTE.format(
+                             done=done,
+                             why=_cont.get("why", "step ceiling"))})
     tools = agent_tools.openai_tools()
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
@@ -1962,6 +1973,36 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             return {"status": "shutdown", "steps": total_steps,
                     "timings": timings}
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
+            # Round 97 (#1): the clock ceiling stops asking the user to say
+            # "continue". A pass that has genuinely landed work gets ONE
+            # fresh clock (AGENT_CLOCK_CONTINUES) and resumes itself over
+            # the same message with a rebuilt small context — which is
+            # exactly what the user's manual "Continue" did (job 2797: 918s,
+            # wall, user typed Continue, 316s more, done — 21 minutes and a
+            # round of the user's patience for OUR internal ceiling). The
+            # runaway guard stays: a pass that moved nothing since the last
+            # checkpoint still walls, and the spend cap and shutdown drain
+            # are checked first.
+            n_clock = _cont.get("clock", 0)
+            _progressed = (len(ctx.versions_written) > _cont.get("writes0", 0)
+                           or len(ctx.rendered_versions)
+                           > _cont.get("renders0", 0))
+            if _progressed and n_clock < config.AGENT_CLOCK_CONTINUES \
+                    and not ctx.over_budget() and not SHUTDOWN.is_set():
+                print(f"[job {job['id']}] turn clock spent after "
+                      f"{total_steps} step(s) with work landing — resuming "
+                      f"on a fresh clock (extension {n_clock + 1}/"
+                      f"{config.AGENT_CLOCK_CONTINUES})", flush=True)
+                return _run_loop(
+                    ctx, worker_db, job, session_id, user_message,
+                    attachment_note,
+                    _cont={"n": _cont.get("n", 0), "clock": n_clock + 1,
+                           "why": "turn clock", "steps": total_steps,
+                           "t_start": time.monotonic(),
+                           "timings": timings, "honesty": honesty,
+                           "warned": None,
+                           "writes0": len(ctx.versions_written),
+                           "renders0": len(ctx.rendered_versions)})
             print(f"[job {job['id']}] turn timeout after "
                   f"{config.AGENT_TURN_TIMEOUT_S:.0f}s", flush=True)
             if ctx.versions_written:
@@ -2446,7 +2487,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
               f"(pass {n_cont + 2}, {seconds_left:.0f}s left)", flush=True)
         return _run_loop(
             ctx, worker_db, job, session_id, user_message, attachment_note,
-            _cont={"n": n_cont + 1, "steps": total_steps, "t_start": t_start,
+            _cont={"n": n_cont + 1, "clock": _cont.get("clock", 0),
+                   "why": "step ceiling",
+                   "steps": total_steps, "t_start": t_start,
                    "timings": timings, "honesty": honesty, "warned": warned,
                    "writes0": len(ctx.versions_written),
                    "renders0": len(ctx.rendered_versions)})

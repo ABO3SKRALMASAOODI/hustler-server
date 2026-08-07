@@ -1256,6 +1256,33 @@ class Master(BaseModel):
     loudness: Optional[Literal["social"]] = None
 
 
+class StemMix(BaseModel):
+    """Round 97 (#7): rebalance the ORIGINAL footage's music vs its speech.
+
+    The renderer swaps the source audio for the two separated stems (Demucs
+    two-stem: vocals / everything-else), each at its own gain, wherever the
+    graph would have read the original track. The keys are written by the
+    separate_music tool after materializing the stems (cached per source
+    sha, so a video is separated once, ever). Removing the node restores the
+    untouched original — separation artifacts are only ever in the signal
+    path while the user wants the split.
+
+    -60 dB is an effective mute; 0 dB is untouched. Small positive gains are
+    allowed (bring the voice up), bounded so a typo cannot ship a blowout.
+    """
+    vocals_key: str
+    accomp_key: str
+    voice_gain_db: float = 0.0
+    music_gain_db: float = 0.0
+
+    @field_validator("voice_gain_db", "music_gain_db")
+    @classmethod
+    def _bounded(cls, v):
+        if not (-60.0 <= v <= 6.0):
+            raise ValueError("stem gains must be between -60 and +6 dB")
+        return v
+
+
 CLEAN_FILLS = ("text", "box")
 
 
@@ -1417,6 +1444,9 @@ class EDL(BaseModel):
     texts: List[TextItem] = Field(default_factory=list)
     speed: List[SpeedSpan] = Field(default_factory=list)
     master: Optional[Master] = None
+    # Round 97: music/voice rebalance of the original audio via separated
+    # stems — see StemMix. Audio-only: a change here never re-encodes video.
+    stem_mix: Optional[StemMix] = None
     # round 37 — PROGRAM-time windows where burned captions are suppressed.
     # Captions were all-or-nothing before this: a full-frame effect or a title
     # treatment that covers the frame still had the spoken-word captions burned

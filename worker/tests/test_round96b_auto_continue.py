@@ -55,12 +55,14 @@ check("a pass that moved nothing is a runaway and stops",
 check("no continuation into a dying clock", not d(0, True, 90, False))
 check("no continuation past the spend cap", not d(0, True, 600, True))
 
-note = agent_loop._CONTINUATION_NOTE.format(done="set_speed x4, add_music")
+note = agent_loop._CONTINUATION_NOTE.format(done="set_speed x4, add_music",
+                                            why="step ceiling")
 check("the note says the user saw nothing",
       "NOT seen any reply" in note and "NOT sent anything new" in note)
 check("the note forbids redoing finished work",
       "do NOT redo finished work" in note)
 check("the note carries what already ran", "set_speed x4, add_music" in note)
+check("the note names WHICH ceiling resumed it", "step ceiling" in note)
 
 sig = inspect.signature(agent_loop._run_loop)
 check("_run_loop takes the _cont handoff",
@@ -74,5 +76,45 @@ done = ", ".join(f"{name} x{t['n']}" if t["n"] > 1 else name
                  for name, t in sorted(tools.items()))
 check("tool summary reads like an editor's log",
       done == "render_preview, set_speed x4")
+
+print("== round 97: the clock ceiling resumes itself too ==")
+
+check("clock extensions are on by default", config.AGENT_CLOCK_CONTINUES >= 1)
+src = inspect.getsource(agent_loop._run_loop)
+check("the clock wall tries a fresh clock before apologising",
+      '"why": "turn clock"' in src
+      and '"t_start": time.monotonic()' in src)
+check("...only when the pass PROGRESSED since its checkpoint",
+      "n_clock < config.AGENT_CLOCK_CONTINUES" in src
+      and src.index("_progressed and n_clock") <
+      src.index("turn timeout after"))
+check("...never over the spend cap or into a drain",
+      "not ctx.over_budget() and not SHUTDOWN.is_set()" in src)
+check("the step continuation preserves the clock allowance",
+      '"clock": _cont.get("clock", 0)' in src)
+check("time-pressure marks reset with the fresh clock (warned: None)",
+      '"warned": None' in src)
+
+print("== round 97: a worker death resumes the turn once ==")
+
+import main                                                    # noqa: E402
+msrc = inspect.getsource(main.reaper)
+check("the reaper re-enqueues a died agent turn",
+      'row["type"] == "agent_turn"' in msrc
+      and "death_resume=1" in msrc)
+check("...exactly once (a poison pill stops with the honest note)",
+      '.get(\n                            "death_resume")' in msrc
+      or 'get("death_resume")' in msrc.replace("\n", "").replace(" ", "")
+      or "death_resume" in msrc)
+check("...and only with a user to bill it to",
+      'row.get("user_id") is not None' in msrc)
+import db as dbx                                               # noqa: E402
+dsrc = inspect.getsource(dbx.fail_exhausted_jobs) \
+    + inspect.getsource(dbx.fail_ceilinged_jobs)
+check("the reaper rows carry user_id for the re-enqueue",
+      dsrc.count("user_id") >= 2)
+asrc = inspect.getsource(agent_loop.run_agent_job)
+check("a resumed turn is framed as a continuation, not a fresh start",
+      "death_resume" in asrc and "do NOT redo it" in asrc)
 
 print(f"\nALL {PASS} CHECKS PASSED")

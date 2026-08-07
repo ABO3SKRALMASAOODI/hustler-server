@@ -105,6 +105,16 @@ def version_report():
     import config
     import filmstrip
     import schemas
+    feats = list(FEATURES)
+    # Stems is per-BUILD, not per-code: the demucs dependency is baked into
+    # the executor image and absent on slim builds, so the honest answer is
+    # whether THIS process could actually run one (round 97).
+    try:
+        import stems
+        if stems.available():
+            feats.append("stems")
+    except Exception:
+        pass
     return {
         "code_version": code_version(),
         "role": config.WORKER_ROLE,
@@ -112,7 +122,7 @@ def version_report():
         "outro_version": config.OUTRO_VERSION,
         "transition_version": config.TRANSITION_VERSION,
         "timeline_media_version": filmstrip.TIMELINE_MEDIA_VERSION,
-        "features": list(FEATURES),
+        "features": feats,
     }
 
 
