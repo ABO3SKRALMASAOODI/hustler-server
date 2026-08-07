@@ -9,6 +9,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 
 import agent_tools
 import config
@@ -187,15 +188,20 @@ def _pending_clips(conn, project_id):
 
 
 def _image_assets(conn, project_id):
+    # Oldest first, so the user's own uploads outrank later generated
+    # cards when the attach cap bites. The LIMIT follows IMAGES_TURN_MAX
+    # so raising that env genuinely raises both this list and the attach.
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
                        WHERE project_id = %s AND kind = 'image_ref'
                          AND COALESCE(meta->>'staged', '') != 'true'
-                       ORDER BY id ASC LIMIT 20""", (project_id,))
+                       ORDER BY id ASC LIMIT %s""",
+                    (project_id, max(20, config.IMAGES_TURN_MAX)))
         return cur.fetchall()
 
 
-# ── Filmstrips: the agent's standing eyes on every video in the project ──
+# ── Filmstrips: the agent's standing eyes on every video and still image
+#    in the project ──
 
 def _tile_local(sha, key):
     """Local cache path for one tile — tiles are immutable per sha, so a
@@ -244,10 +250,57 @@ def _strip_for(worker_db, sha, max_tiles):
             if os.path.exists(local)], idx
 
 
+def _image_attach_local(asset):
+    """Local downscaled JPEG for one still image asset, built once per box.
+
+    Uploaded stills are phone-sized (a 12MP photo is ~4000px and megabytes
+    of JPEG); attaching originals would put that into every call of every
+    turn. One bounded copy — EXIF-rotated (phone portraits otherwise attach
+    sideways), alpha flattened dark like the tile canvas (a white-text card
+    stays readable), IMAGE_ATTACH_MAX_PX on the long side — costs about one
+    tile of context. Cached by asset id: asset rows are append-only and a
+    row's storage key never changes. Returns None when the image cannot be
+    attached (oversized, undecodable) — the caller skips it, never dies."""
+    if (asset.get("bytes") or 0) > 12 * 1024 * 1024:
+        return None
+    d = os.path.join(config.TMP_DIR, "tilecache", f"img{asset['id']}")
+    os.makedirs(d, exist_ok=True)
+    local = os.path.join(d, f"attach_{config.IMAGE_ATTACH_MAX_PX}.jpg")
+    if os.path.exists(local):
+        return local
+    from PIL import Image, ImageOps
+    ext = os.path.splitext(asset["storage_key"])[1] or ".img"
+    src = os.path.join(d, f"orig-{uuid.uuid4().hex[:8]}{ext}")
+    storage.download_to(asset["storage_key"], src)
+    try:
+        img = Image.open(src)
+        img = ImageOps.exif_transpose(img)
+        if img.mode in ("RGBA", "LA", "PA") or \
+                (img.mode == "P" and "transparency" in img.info):
+            rgba = img.convert("RGBA")
+            flat = Image.new("RGB", rgba.size, (16, 16, 16))
+            flat.paste(rgba, mask=rgba.getchannel("A"))
+            img = flat
+        else:
+            img = img.convert("RGB")
+        m = max(64, config.IMAGE_ATTACH_MAX_PX)
+        img.thumbnail((m, m))
+        tmp = f"{local}.tmp-{uuid.uuid4().hex[:6]}"
+        img.save(tmp, "JPEG", quality=82)
+        os.replace(tmp, local)
+    finally:
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+    return local
+
+
 def filmstrip_parts(ctx, worker_db):
-    """The per-turn filmstrip message content: labeled image parts for the
-    main footage and EVERY indexed uploaded clip — the agent's fresh eyes on
-    everything in the project, rebuilt each turn so nothing is ever stale.
+    """The per-turn senses message content: labeled image parts for the
+    main footage, EVERY indexed uploaded clip AND every still image the
+    project holds — the agent's fresh eyes on everything in the project,
+    rebuilt each turn so nothing is ever stale.
 
     Returns a content list ([{type: text}, {type: image_url}, ...]) or None
     when there is nothing visual to attach."""
@@ -293,17 +346,59 @@ def filmstrip_parts(ctx, worker_db):
             tiles))
         total += len(tiles)
 
+    # Every still image the project holds — uploads and generated cards —
+    # one downscaled frame each, same freshness as the strips. As text-only
+    # inventory lines the agent either spent a tool call per photo to learn
+    # what it showed (round 95, project 380: 8 photos, 8 look_at_asset
+    # calls) or placed it blind; and a CANVAS program built purely from
+    # stills started with no eyes at all. A failed image is skipped, never
+    # a dead turn.
+    try:
+        images = worker_db.run(
+            lambda conn: _image_assets(conn, ctx.project_id))
+    except Exception:
+        images = []
+    images = list(images or [])[:max(0, config.IMAGES_TURN_MAX)]
+    if images:
+        import concurrent.futures as _cf
+
+        def _prep(a):
+            try:
+                return a["id"], _image_attach_local(a)
+            except Exception as e:
+                print(f"[filmstrip] image attach skipped "
+                      f"({a['storage_key']}): {str(e)[:120]}", flush=True)
+                return a["id"], None
+
+        with _cf.ThreadPoolExecutor(
+                max_workers=min(8, len(images))) as pool:
+            ready = dict(pool.map(_prep, images))
+        for a in images:
+            local = ready.get(a["id"])
+            if not local:
+                continue
+            name = (a.get("meta") or {}).get("filename") or \
+                os.path.basename(a["storage_key"])
+            origin = ("GENERATED IMAGE"
+                      if a["storage_key"].startswith("generated/")
+                      else "UPLOADED IMAGE")
+            strips.append((
+                f'{origin} "{name}" — storage_key {a["storage_key"]}',
+                [(a["storage_key"], local)]))
+
     if not strips:
         return None
     content = [{"type": "text", "text":
-                "FILMSTRIPS — your eyes on every video in this project, "
-                "current as of THIS message. Each tile is a 2x2 grid of "
-                "frames with the timestamp printed under each frame. Read "
-                "the footage from these directly: what is on screen, who is "
-                "in frame, burned-in text or captions, UI content, framing, "
-                "where the action is. For a closer or exact look at any "
-                "moment, call look_at (main footage / program) or "
-                "look_at_asset (a clip) — look as often as you need."}]
+                "FILMSTRIPS & STILLS — your eyes on every video and image "
+                "in this project, current as of THIS message. Each video "
+                "tile is a 2x2 grid of frames with the timestamp printed "
+                "under each frame; each still image appears once, labeled "
+                "with its storage_key. Read the footage directly: what is "
+                "on screen, who is in frame, burned-in text or captions, "
+                "UI content, framing, where the action is. For a closer or "
+                "exact look at any moment, call look_at (main footage / "
+                "program) or look_at_asset (a clip or image) — look as "
+                "often as you need."}]
     for label, tiles in strips:
         content.append({"type": "text", "text": f"[{label}]"})
         for _key, local in tiles:
@@ -369,6 +464,15 @@ def _attachment_context(worker_db, ctx, user_message):
                 "footage. If their words could mean either, ask_user before "
                 "splicing.]")
         elif asset["kind"] == "image_ref":
+            if ctx.direct_sight and llm.agent_sees(ctx.agent_model):
+                # The pixels themselves ride in the FILMSTRIPS & STILLS
+                # block this turn (round 95) — no vision round trip, and
+                # never a false "you cannot see it".
+                notes.append(
+                    f'[User attached reference image "{name}" — its pixels '
+                    "are attached in the FILMSTRIPS & STILLS block, labeled "
+                    f'with storage_key {asset["storage_key"]}.]')
+                continue
             cap = m.get("caption")
             if not cap and llm.vision_available() and \
                     (asset.get("bytes") or 0) <= 12 * 1024 * 1024:

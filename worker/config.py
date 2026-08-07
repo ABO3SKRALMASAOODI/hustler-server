@@ -1135,6 +1135,17 @@ TILES_MAIN_MAX = int(os.getenv("TILES_MAIN_MAX", "36"))
 TILES_CLIP_MAX = int(os.getenv("TILES_CLIP_MAX", "10"))
 TILES_TURN_MAX = int(os.getenv("TILES_TURN_MAX", "60"))
 
+# Still images (uploads and generated cards) ride in the same senses block,
+# one downscaled frame each (round 95). Before this they were text-only
+# inventory lines: the agent either spent a tool call per photo to learn
+# what it showed (project 380: 8 photos, 8 look_at_asset calls before the
+# first edit) or placed it blind — and a CANVAS program built purely from
+# stills started with no eyes at all. Each attached image prices like
+# roughly one tile; the cap bounds a 40-photo dump. IMAGE_ATTACH_MAX_PX is
+# the long side of the attached copy (a tile is 960px wide — same order).
+IMAGES_TURN_MAX = int(os.getenv("IMAGES_TURN_MAX", "20"))
+IMAGE_ATTACH_MAX_PX = int(os.getenv("IMAGE_ATTACH_MAX_PX", "960"))
+
 # How often the index looks at the picture, in SOURCE seconds (round 69).
 #
 # The sampling unit used to be the SHOT, and 46% of real prod videos are a
