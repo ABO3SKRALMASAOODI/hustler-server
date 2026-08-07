@@ -99,11 +99,16 @@ RUN python -c "import urllib.request, os; \
 # stems.available() gates on the import, so dropping this layer turns the
 # capability off honestly (/health stops advertising "stems") — nothing else
 # breaks. STEMS=0 skips the layer for a slim build.
+# torch/torchaudio are PINNED to the pairing demucs 4.0.1 actually calls:
+# unpinned, the resolver took torchaudio's TorchCodec era, whose save()
+# raises "TorchCodec is required" — the first live separation ran the model
+# for 230s and died WRITING the wav (job at 23:15 Aug 7 2026). 2.4.1 is the
+# last classic-backend line and the standard demucs companion.
 ARG STEMS=1
 ENV TORCH_HOME=/opt/torch
 RUN if [ "$STEMS" = "1" ]; then \
       pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-        torch torchaudio \
+        torch==2.4.1 torchaudio==2.4.1 \
       && pip install --no-cache-dir demucs==4.0.1 \
       && python -c "from demucs.pretrained import get_model; get_model('htdemucs'); print('htdemucs weights baked')"; \
     fi

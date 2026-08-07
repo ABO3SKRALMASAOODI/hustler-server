@@ -201,6 +201,9 @@ df = open(os.path.join(os.path.dirname(__file__), "..",
                        "Dockerfile")).read()
 check("the demucs layer exists and is CPU-only",
       "demucs==" in df and "download.pytorch.org/whl/cpu" in df)
+check("torch/torchaudio are pinned to the classic-backend pairing "
+      "(unpinned = TorchCodec-era save() that demucs cannot call)",
+      "torch==2.4.1" in df and "torchaudio==2.4.1" in df)
 check("the baked weights match config.STEMS_MODEL",
       f"get_model('{config.STEMS_MODEL}')" in df)
 check("skills teach the tool where the old 'impossible' lived",
