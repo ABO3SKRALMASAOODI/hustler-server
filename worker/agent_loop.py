@@ -690,6 +690,68 @@ def _dominant_script(text, min_letters=6):
     return name if counts[name] > 0.6 * total else None
 
 
+# Function-word fingerprints for the same-script flips the script check is
+# blind to BY CONSTRUCTION (round 96c: an English "Cut the silences, add big
+# captions…" was answered in German — Latin to Latin, so round 85's guard
+# passed it; the pt/en walls have the same hole). Only words unique to ONE
+# list survive _disjoint_markers, so pt/es/fr cognates can never vote; the
+# flip additionally requires ZERO of the user's own markers in the reply, so
+# a quoted foreign word in an otherwise faithful reply never trips it. The
+# detector never NAMES a language to the user (round 85's worry) — the
+# rewrite asks for "the USER'S language", nothing more.
+_LANG_MARKERS_RAW = {
+    "en": ("the", "and", "is", "are", "was", "were", "this", "that", "with",
+           "your", "have", "from", "of", "it's", "i'll", "you're", "should"),
+    "de": ("der", "die", "das", "und", "ist", "nicht", "ein", "eine",
+           "wurde", "wurden", "werden", "auf", "für", "noch", "aber",
+           "auch", "dem", "den", "zum", "zur", "jetzt", "wieder"),
+    "pt": ("não", "você", "está", "são", "foi", "também", "já", "uma",
+           "com", "para", "mais", "isso", "como", "os", "dos", "mas"),
+    "es": ("el", "los", "las", "es", "una", "pero", "también", "está",
+           "para", "con", "como", "más", "muy", "esto", "ya"),
+    "fr": ("le", "les", "est", "une", "avec", "pour", "dans", "vous",
+           "cette", "mais", "été", "sur", "pas", "aussi", "déjà"),
+    "it": ("il", "gli", "è", "una", "con", "per", "anche", "questo",
+           "sono", "già", "più", "ma", "della", "delle"),
+}
+
+
+def _disjoint_markers(raw):
+    counts = {}
+    for ws in raw.values():
+        for w in ws:
+            counts[w] = counts.get(w, 0) + 1
+    return {lang: frozenset(w for w in ws if counts[w] == 1)
+            for lang, ws in raw.items()}
+
+
+_LANG_MARKERS = _disjoint_markers(_LANG_MARKERS_RAW)
+
+_MARKER_WORD_RE = re.compile(r"[a-zà-öø-ÿœß']+")
+
+
+def _marker_hits(text, lang):
+    ws = _LANG_MARKERS.get(lang) or frozenset()
+    return sum(1 for w in _MARKER_WORD_RE.findall((text or "").lower())
+               if w in ws)
+
+
+def _marker_lang(text):
+    """The language whose distinctive function words dominate `text`, or
+    None when nothing clears 3 hits with a 2:1 lead over the runner-up —
+    abstaining is always safe (None means "don't act"), same contract as
+    _dominant_script."""
+    words = _MARKER_WORD_RE.findall((text or "").lower())
+    if not words:
+        return None
+    scores = sorted(((sum(1 for w in words if w in ws), lang)
+                     for lang, ws in _LANG_MARKERS.items()), reverse=True)
+    (s1, lang1), (s2, _) = scores[0], scores[1]
+    if s1 >= 3 and s1 >= 2 * s2:
+        return lang1
+    return None
+
+
 def _reply_language_note(user_texts):
     """The anchor line appended to the user's message. It names the SCRIPT (a
     measurement), never a guessed language — 'their language' plus the script
@@ -1564,6 +1626,33 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     return FALLBACK_REPLY + (f"\n\n{hint}" if hint else "")
 
 
+def _language_flip(joined, user_text, final):
+    """(kind, user_side, reply_side) when `final` is written in a different
+    script OR language than the user's own messages, else None.
+
+    Script first (round 85's check, unchanged): fires only when the reply is
+    dominated by a script that appears NOWHERE in the user's conversation —
+    if the user has written in that script ANYWHERE it is their call, not a
+    flip; checking only the latest message here while deciding their script
+    from the history would rewrite a bilingual user's deliberate reply.
+
+    Then the same-script class the script check is blind to by construction
+    (round 96c: English "Cut the silences, add big captions…" answered in
+    German — Latin to Latin): function-word fingerprints on both sides, and
+    the reply must additionally contain ZERO of the user's own markers, so
+    a reply that quotes a foreign word or mixes languages is left alone."""
+    user_script = _dominant_script(user_text) or _dominant_script(joined)
+    reply_script = _dominant_script(final, min_letters=10)
+    if user_script and reply_script and reply_script != user_script \
+            and _script_counts(joined).get(reply_script, 0) == 0:
+        return ("script", user_script, reply_script)
+    u_lang, r_lang = _marker_lang(joined), _marker_lang(final)
+    if u_lang and r_lang and u_lang != r_lang \
+            and _marker_hits(final, u_lang) == 0:
+        return ("words", u_lang, r_lang)
+    return None
+
+
 def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
                             honesty):
     """Deterministic cross-script check of the drafted reply against the
@@ -1588,30 +1677,26 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
     history = " ".join(
         m["content"] for m in messages
         if m.get("role") == "user" and isinstance(m.get("content"), str))
-    user_script = (_dominant_script(user_text)
-                   or _dominant_script(" ".join(x for x in (history, user_text)
-                                                if x)))
-    reply_script = _dominant_script(final, min_letters=10)
-    if not user_script or not reply_script or reply_script == user_script:
+    joined = " ".join(x for x in (history, user_text) if x)
+    flip = _language_flip(joined, user_text, final)
+    if flip is None:
         return final
-    # Same evidence on both sides of the decision: if the user has written in
-    # that script ANYWHERE in this conversation it is their call, not a flip.
-    # Checking only the latest message here while deciding their script from
-    # the history would be the mirror of the bug above — a bilingual user's
-    # deliberate Russian reply rewritten into English because their last
-    # message happened to be "ok".
-    if _script_counts(" ".join(x for x in (history, user_text) if x)) \
-            .get(reply_script, 0) > 0:
-        return final
-    honesty["language_flip"] = f"{user_script}->{reply_script}"
-    print(f"[language] job {ctx.job['id']}: reply drafted in {reply_script} "
-          f"script for a {user_script}-script user — forcing one rewrite",
-          flush=True)
+    kind, u_side, r_side = flip
+    honesty["language_flip"] = f"{u_side}->{r_side}" + \
+        ("" if kind == "script" else " (words)")
+    print(f"[language] job {ctx.job['id']}: reply drafted in {r_side} "
+          f"({kind}) for a {u_side} user — forcing one rewrite", flush=True)
+    if kind == "script":
+        why = (f"Your reply above is written in {r_side} script, "
+               f"but the user's own messages are {u_side}-script. ")
+    else:
+        why = ("Your reply above reads as a DIFFERENT LANGUAGE than the "
+               "user's own messages (none of their function words appear "
+               "in it). ")
     msgs = messages + [
         {"role": "assistant", "content": final},
         {"role": "system",
-         "content": (f"Your reply above is written in {reply_script} script, "
-                     f"but the user's own messages are {user_script}-script. "
+         "content": (why +
                      "Rewrite the reply in the USER'S language — a faithful "
                      "translation with every fact, number and timing kept "
                      "identical, nothing added. Output only the rewritten "
@@ -1633,7 +1718,12 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
         print(f"[language] rewrite failed ({e}) — posting the draft as-is",
               flush=True)
         return final
-    if redraft and _dominant_script(redraft, min_letters=10) == user_script:
+    if kind == "script":
+        ok = redraft and _dominant_script(redraft, min_letters=10) == u_side
+    else:
+        ok = redraft and _marker_hits(redraft, u_side) >= 1 \
+            and _marker_lang(redraft) != r_side
+    if ok:
         honesty["language_fixed"] = True
         return redraft
     return final

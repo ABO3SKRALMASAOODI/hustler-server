@@ -1458,7 +1458,14 @@ def apply_mutes(events, mutes):
     (PROGRAM seconds). Events are DROPPED, never trimmed: premium/karaoke
     events carry inline \\k word timings measured from the event's own start,
     so moving a boundary would desync every word after it. Callers that want
-    partial coverage should mute the exact window instead."""
+    partial coverage should mute the exact window instead.
+
+    Kept for DICTATED caption items (captions as a list) only. Transcript
+    captions mute at the WORD level (_drop_muted_words) before grouping —
+    dropping whole built events made a mute overshoot by an entire block:
+    project 384's title mute covered 0-5.5s, the caption block straddling
+    5.5s vanished with it, and the viewer read the first speech with no
+    captions until seconds after the title was gone."""
     if not mutes or not events:
         return events
     kept = []
@@ -1469,6 +1476,44 @@ def apply_mutes(events, mutes):
         if not hidden:
             kept.append(ev)
     return kept
+
+
+def _drop_muted_words(words, mutes):
+    """Remove the words whose midpoint lies inside a caption_mutes window,
+    BEFORE grouping — the same stage that drops filler words, and for the
+    same reason: every preset family then inherits the decision and the
+    events build themselves around the gap. Captions resume with the first
+    unmuted word instead of at the next whole block, and karaoke timings
+    stay true because the groups are built from exactly the words shown."""
+    if not mutes or not words:
+        return words
+    spans = [(float(m0), float(m1)) for m0, m1 in mutes]
+    return [w for w in words
+            if not any(m0 <= (w["t0"] + w["t1"]) / 2.0 <= m1
+                       for m0, m1 in spans)]
+
+
+def _clamp_event_ends_to_mutes(events, mutes):
+    """Transcript events after word-level muting can still REACH into a mute
+    window with display padding (an event holds on screen until the next one
+    starts, and the next one now sits past the window). Pull those ends back
+    to the window edge. Only the END moves — every word in such an event
+    finished before the window (its inside words were dropped), so the
+    inline \\k timings, measured from the untouched start, are unaffected.
+    An event that spans the whole window with words on BOTH sides (a
+    sub-second mute inside one breath group) is left alone rather than
+    desynced."""
+    if not mutes or not events:
+        return events
+    spans = [(float(m0), float(m1)) for m0, m1 in mutes]
+    for ev in events:
+        s, e = float(ev["start"]), float(ev["end"])
+        for m0, m1 in spans:
+            if s < m0 < e <= m1 + MUTE_GRAZE_S:
+                ev["end"] = m0
+                break
+    return [ev for ev in events
+            if float(ev["end"]) - float(ev["start"]) > 0.04]
 
 
 def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
@@ -1495,6 +1540,10 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         # before any grouping, so every preset family inherits them and the
         # timings they were grouped by never move.
         out_words = apply_text_fixes(out_words, captions.get("text_fixes"))
+        # Mutes at the WORD level, same stage (round 96c): grouping then
+        # builds events around the gap, so captions resume at the window's
+        # edge instead of one whole block late.
+        out_words = _drop_muted_words(out_words, edl.get("caption_mutes"))
         global_style = captions.get("style")
         if _preset_of(_norm_style(global_style)):
             events = events_premium(
@@ -1519,7 +1568,12 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         # and a main-footage word doesn't belong burned over someone's title card.
         opens_on_insert = any(fs <= 0.01 and fs + d > 0.01
                               for fs, d in tl.insert_positions())
-        if events and not opens_on_insert \
+        # ...and never pull it into an opening mute window: with the title
+        # muted over 0-5.5s, dragging the first caption to 0.0 would burn it
+        # straight across the title it was muted to clear.
+        mute0 = any(float(m0) <= 0.05 for m0, _m1 in
+                    (edl.get("caption_mutes") or []))
+        if events and not opens_on_insert and not mute0 \
                 and 0.0 < events[0]["start"] <= FIRST_CAPTION_LEAD_IN_S:
             events[0]["start"] = 0.0
     elif isinstance(captions, list):
@@ -1528,7 +1582,13 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
     else:
         return None
     events = _clamp_events_to_inserts(events, tl)
-    events = apply_mutes(events, edl.get("caption_mutes"))
+    if isinstance(captions, dict) and \
+            captions.get("mode") == "from_transcript":
+        # Words inside mute windows are already gone (pre-grouping); only
+        # display padding can still reach into a window — pull it back.
+        events = _clamp_event_ends_to_mutes(events, edl.get("caption_mutes"))
+    else:
+        events = apply_mutes(events, edl.get("caption_mutes"))
     if not events:
         return None
     return write_ass(events, path, global_style, play_res)

@@ -251,8 +251,13 @@ def test_the_enforcement_reads_the_whole_conversation():
     assert 'm.get("role") == "user"' in src, "must scan the message history"
     # ...and BOTH halves of the decision must use that same evidence, or a
     # bilingual user's deliberate Cyrillic reply gets rewritten because their
-    # last message happened to be "ok".
-    assert src.count("history") >= 3
+    # last message happened to be "ok". Round 96c moved the decision into
+    # _language_flip; the whole-conversation `joined` text must feed every
+    # clause there — the user-script fallback, the wrote-that-script-anywhere
+    # veto, and the same-script marker measurement.
+    assert "joined" in src and "_language_flip(joined" in src
+    flip_src = inspect.getsource(agent_loop._language_flip)
+    assert flip_src.count("joined") >= 3
 
 
 def test_a_user_who_writes_cyrillic_is_still_left_alone():

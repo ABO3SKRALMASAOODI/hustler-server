@@ -7905,13 +7905,13 @@ def set_caption_mutes(ctx, spans=None):
         # burned text is hidden.
         result += ("\nNote: this hides the burned caption text over those "
                    "windows only — the audio and the cut are unchanged, and "
-                   "captions still show everywhere else. Caption lines are "
-                   "hidden WHOLE: a line that starts before a window and runs "
-                   "into it disappears entirely (its word timings are baked, "
-                   "so it cannot be cut in half). A line that merely grazes an "
-                   "edge — under 0.15s inside — is kept. If that costs words "
-                   "either side of the window, tighten the window to the "
-                   "effect itself rather than widening it.")
+                   "captions still show everywhere else. Transcript captions "
+                   "mute at the WORD level (round 96c): the words inside the "
+                   "window vanish, the words either side keep their "
+                   "captions, and a group that straddles an edge splits "
+                   "around it — so the window can be exactly the effect's "
+                   "span. Dictated caption items (captions passed as a "
+                   "list) are still hidden whole.")
     return result
 
 

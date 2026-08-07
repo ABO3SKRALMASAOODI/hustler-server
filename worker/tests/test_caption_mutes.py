@@ -123,16 +123,24 @@ def test_mute_applies_in_every_emission_mode():
             f"{style} still burns a caption inside the muted window"
 
 
-def test_a_straddling_line_is_hidden_whole():
-    """Documented cost of drop-don't-trim: premium and karaoke events carry
-    inline \\k word timings measured from the event start, so a line running
-    into a window cannot be cut short without desyncing every word after it.
-    It disappears instead — which is why set_caption_mutes tells the model to
-    tighten the window rather than widen it."""
+def test_a_straddling_group_splits_around_the_window():
+    """Round 96c: transcript mutes act on WORDS before grouping, so a long
+    group straddling the window no longer disappears whole (project 384's
+    title mute at 0-5.5s deleted the block that crossed 5.5 and the viewer
+    had no captions until seconds after the title was gone). The muted
+    words vanish; the words either side rebuild into their own events with
+    their own \\k baselines, and nothing is on screen inside the window."""
     e = _dump({"keep": [[0.0, 12.0]],
                "captions": {"mode": "from_transcript"},   # one long group
                "caption_mutes": [[4.0, 8.0]]})
-    assert _dialogue(e) == []
+    lines = _dialogue(e)
+    assert lines, "the words outside the window must keep their captions"
+    for ln in lines:
+        assert _end_s(ln) <= 4.15 or _start_s(ln) >= 7.85, \
+            f"caption inside the muted window: {ln}"
+    text = " ".join(ln.split(",,")[-1] for ln in lines)
+    assert "word0" in text and "word11" in text, \
+        "words on both sides of the window must survive"
 
 
 def test_manual_caption_items_are_muted_too():
