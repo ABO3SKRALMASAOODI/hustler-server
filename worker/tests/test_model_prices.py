@@ -303,8 +303,16 @@ def test_reasoning_effort_is_high_and_rejection_is_survivable():
     Either way the flip is only safe because a provider that rejects the field
     costs ONE call per process (retry without, latch per model), so this pins
     the value AND the machinery that makes it survivable, together.
+
+    Round 97 raises it again, high -> max: gpt-5.6 documents
+    none|low|medium|high|xhigh|max, and the Aug 6-8 cohort showed the spirals
+    (a 10x repeated no-op cut_range) living exactly on the steps that fell
+    back to effort='none'. The rails that make it survivable at max live in
+    test_round91_responses_lane.py: a thinking-sized lane timeout, the
+    incomplete-payload 'length' retry staying IN the lane, and effort-value
+    400s never latching the lane dead.
     """
-    assert config.AGENT_REASONING_EFFORT == "high"
+    assert config.AGENT_REASONING_EFFORT == "max"
     import llm
 
     class FakeErr(Exception):

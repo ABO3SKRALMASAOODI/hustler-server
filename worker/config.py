@@ -271,14 +271,43 @@ FRONTIER_PLANS = {"ai_max"}
 #
 # It does cost WALL CLOCK — a high-effort call thinks for longer — so if turns
 # start feeling slow again, this is the first knob to turn back down, not the
-# last. AGENT_REASONING_EFFORT=low (or medium) on Render, no deploy needed;
+# last. AGENT_REASONING_EFFORT=high (or medium) on Render, no deploy needed;
 # "" sends no field at all and restores each provider's own default.
 #
 # Round 58 made the field safe to send blind: a provider that rejects it
 # retries once without it and latches per model, matched narrowly on the field
 # name plus an unknown-parameter phrase, so a provider that has never heard of
 # it costs one failed call per process, ever.
-AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "high").strip()
+#
+# ROUND 97 RAISES IT TO "max". gpt-5.6 accepts none|low|medium|high|xhigh|max
+# on /v1/responses (OpenAI reasoning guide, checked Aug 8 2026; omitting the
+# field defaults to medium). The Aug 6-8 cohort showed what missing
+# deliberation costs: the steps that fell back to effort='none' are where the
+# spirals live (one turn repeated an identical no-op cut_range TEN times in a
+# row — pure dispatch, zero thought, ~2.5 min of a user's clock). Thinking
+# harder is cheap next to re-doing work: input tokens already outweigh
+# reasoning ~25x per step (round 91b), and reasoning output is billed only
+# when generated.
+#
+# Three rails make "max" safe where "high" was already fraying:
+#  - AGENT_LANE_TIMEOUT_S below — a max-effort call can think past the 90s
+#    LLM_TIMEOUT_S, and every timeout used to demote that step to the chat
+#    lane at effort='none' (the 'high,none' mixing on every long turn in
+#    llm_calls Aug 6-8).
+#  - llm._from_responses returns an empty 'length' completion when reasoning
+#    eats the whole token budget, so the loop's doubling retry runs IN the
+#    lane instead of falling back to no reasoning at all.
+#  - llm.looks_like_responses_unsupported no longer latches the lane dead on
+#    a 400 about the effort VALUE, so a provider trimming its enum degrades
+#    one step, not the process.
+AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "max").strip()
+# Wall-clock for ONE responses-lane call. LLM_TIMEOUT_S (90) is sized for
+# dispatch-grade calls; at effort max the model may THINK for minutes before
+# its first output token, and a timeout here does not fail the turn — it
+# silently reruns the step on chat/completions where this model answers with
+# effort='none'. So the lane gets its own, thinking-sized budget. Kept well
+# under AGENT_TURN_TIMEOUT_S (900) so one hung call cannot eat a turn.
+AGENT_LANE_TIMEOUT_S = float(os.getenv("AGENT_LANE_TIMEOUT_S", "240"))
 # Ask /v1/responses when — and only when — the model has already refused to
 # reason alongside function tools on /v1/chat/completions. That refusal is why
 # the agent ran 875 straight calls with ZERO reasoning tokens from Jul 31 2026
@@ -881,7 +910,11 @@ AGENT_TEMPERATURE = 0.2
 # nothing on a normal step — the turn budget and AGENT_MAX_ITERATIONS are what
 # bound spend. AGENT_MAX_TOKENS_CEILING is the retry's second, larger try.
 AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "8000"))
-AGENT_MAX_TOKENS_CEILING = int(os.getenv("AGENT_MAX_TOKENS_CEILING", "16000"))
+# 32000 (was 16000): reasoning tokens spend from the same budget, and at
+# effort=max a planning step can out-think 16k before reaching content. The
+# doubling retry ladder is 8k -> 16k -> 32k (two retries); tokens are billed
+# only when generated, so the ceiling costs nothing on a normal step.
+AGENT_MAX_TOKENS_CEILING = int(os.getenv("AGENT_MAX_TOKENS_CEILING", "32000"))
 # The honesty layer's redraft. Same trap: a reasoning model that burns the
 # budget thinking returns an empty redraft, which is then discarded in favour
 # of the canned fallback — the user reads a non-answer twice over.

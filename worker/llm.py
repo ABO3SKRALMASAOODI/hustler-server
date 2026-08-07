@@ -673,6 +673,19 @@ def _from_responses(payload):
         # the model thinking afresh on each step — which is already the entire
         # difference between this lane and reasoning_effort='none'.
     if not text_bits and not calls:
+        if payload.get("status") == "incomplete":
+            # The model spent the whole max_output_tokens budget REASONING and
+            # never reached content — routine at high/max effort, and exactly
+            # the shape the agent loop's truncation retry exists for. Raising
+            # here sent the step to chat/completions, where this model answers
+            # with effort='none' — the lane's whole point, lost on precisely
+            # the steps that think hardest (the 'high,none' mixing on every
+            # long Aug 6-8 turn in llm_calls). Hand back an empty 'length'
+            # completion instead, so the caller doubles the budget and retries
+            # IN the lane.
+            return _RespCompletion(
+                [_RespChoice(_RespMessage(None, None), "length")],
+                _RespUsage(payload.get("usage") or {}))
         raise ValueError("responses returned neither text nor a tool call")
     # 'length' is what the loop's truncation retry keys on, and an incomplete
     # response with nothing in it is exactly that case.
@@ -754,6 +767,13 @@ def looks_like_responses_unsupported(exc):
     timeout or a 500 must not cost the agent its thinking for the rest of
     the worker's life."""
     text = f"{exc}".lower()
+    # A 400 complaining about the reasoning EFFORT is a bad knob value, not
+    # the endpoint saying "not here". Latching the lane dead on it would turn
+    # one config typo (or a provider trimming its effort enum) into a
+    # process-wide reasoning blackout — the fallback answers with
+    # effort='none'. Fall back for this step only and try again next step.
+    if "http 400" in text and "reasoning" in text and "effort" in text:
+        return False
     return any(k in text for k in (
         "http 404", "http 400", "http 405", "not found", "unknown endpoint",
         "unsupported", "does not exist", "invalid_request_error",

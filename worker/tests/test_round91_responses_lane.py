@@ -182,6 +182,26 @@ check("an empty output raises (never a silent no-op step)",
 check("reasoning ALONE with no message or call raises",
       raises(llm._from_responses,
              {"output": [{"type": "reasoning", "id": "r"}], "usage": {}}))
+
+# ROUND 97: unless the payload says WHY it is empty — status 'incomplete'
+# means reasoning ate the whole max_output_tokens budget. That must come back
+# as a 'length' completion (the loop's doubling retry handles it in-lane),
+# never as a raise, because the raise reruns the step on chat/completions at
+# effort='none' — the lane's whole point, lost on the steps thinking hardest.
+_inc = llm._from_responses(
+    {"output": [{"type": "reasoning", "id": "r"}], "status": "incomplete",
+     "usage": {"output_tokens": 8000,
+               "output_tokens_details": {"reasoning_tokens": 8000}}})
+check("an INCOMPLETE empty payload is a 'length' completion, not a raise",
+      _inc.choices[0].finish_reason == "length"
+      and _inc.choices[0].message.content is None
+      and _inc.choices[0].message.tool_calls is None)
+check("...whose usage still carries the reasoning spend",
+      _inc.usage.reasoning_tokens == 8000)
+check("a 400 about the effort VALUE does not latch the lane dead",
+      llm.looks_like_responses_unsupported(
+          RuntimeError("responses HTTP 400: Invalid value for "
+                       "'reasoning.effort': 'xmax'")) is False)
 check("an unmapped content part raises rather than being dropped",
       raises(llm._to_responses_input,
              [{"role": "user", "content": [{"type": "video_url"}]}]))
@@ -211,9 +231,15 @@ print("== the effort, and telling the truth about it ==")
 
 _src = inspect.getsource(agent_loop._run_loop)
 
-check("reasoning effort is HIGH", config.AGENT_REASONING_EFFORT == "high")
+check("reasoning effort is MAX (gpt-5.6: none|low|medium|high|xhigh|max)",
+      config.AGENT_REASONING_EFFORT == "max")
 check("...and the configured value is what the lane sends",
       "effort=config.AGENT_REASONING_EFFORT" in _src)
+check("the lane call gets the thinking-sized timeout, not the 90s dispatch "
+      "one", "timeout=config.AGENT_LANE_TIMEOUT_S" in _src)
+check("...which exists, sits above LLM_TIMEOUT_S and under the turn ceiling",
+      config.LLM_TIMEOUT_S < config.AGENT_LANE_TIMEOUT_S
+      < config.AGENT_TURN_TIMEOUT_S)
 check("the recorded row says WHICH api answered",
       '"api": "responses"' in _src and '"api": "chat.completions"' in _src)
 check("...and records the effort the lane actually sent, not the chat value",

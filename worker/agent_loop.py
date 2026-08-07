@@ -2117,7 +2117,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     resp = llm.responses_create(
                         config.OPENAI_BASE_URL, config.OPENAI_API_KEY, model,
                         messages, tools, max_tokens=max_tokens,
-                        effort=config.AGENT_REASONING_EFFORT)
+                        effort=config.AGENT_REASONING_EFFORT,
+                        # Thinking-sized, not dispatch-sized: a max-effort
+                        # call reasons past LLM_TIMEOUT_S, and timing out
+                        # here silently reruns the step at effort='none'.
+                        timeout=config.AGENT_LANE_TIMEOUT_S)
                     used_lane = config.AGENT_REASONING_EFFORT
                 except Exception as e:
                     # A definite "not here" latches the lane off for the
