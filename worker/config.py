@@ -287,6 +287,23 @@ AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "high").strip()
 # to the chat/completions call that runs today, so off and broken are the same
 # behaviour, not different ones.
 AGENT_RESPONSES_LANE = os.getenv("AGENT_RESPONSES_LANE", "1") == "1"
+# OpenAI serving tier for the agent's calls (round 94). There is NO fast
+# MODEL variant of the gpt-5.6 family — luna/terra/sol differ by
+# intelligence-per-dollar, not speed — the "fast version" OpenAI sells is
+# PRIORITY PROCESSING: the same model served from a faster pool, requested
+# per call with service_tier='priority' at exactly 2x the standard price
+# (in/cached/out — pricing page, checked Aug 7 2026). Measured on our key,
+# /v1/responses, gpt-5.6-luna, 1400-token generations off-peak: median 113
+# -> 138 tok/s (+22%); the documented bigger win is queue/latency
+# CONSISTENCY at peak hours. Empty = default tier (off).
+#
+# FLIP THE PRICES WITH THE TIER or the credit charge silently halves the
+# LLM margin: setting OPENAI_SERVICE_TIER=priority on Render requires
+# LLM_PRICE_IN_PER_M=0.40, LLM_PRICE_CACHED_IN_PER_M=0.04,
+# LLM_PRICE_OUT_PER_M=2.40 beside it (worker AND any other service reading
+# them) — users then burn credits ~2x faster on the LLM share of a turn,
+# which is the honest cost of the faster pool.
+OPENAI_SERVICE_TIER = os.getenv("OPENAI_SERVICE_TIER", "").strip()
 # Vision (look_at) is the slowest thing the agent does, so it gets a MORE
 # generous per-call timeout than the text agent (grok multimodal latency is
 # spiky) — retries stay at the client default. The agent isn't capped on how

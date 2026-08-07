@@ -491,6 +491,12 @@ def completion_kwargs(model, max_tokens=None, temperature=None):
             kw["max_tokens"] = max_tokens
     if temperature is not None and model not in _no_temperature:
         kw["temperature"] = temperature
+    # Priority processing (round 94): OpenAI-only — another provider behind
+    # OPENAI_BASE_URL would 400 on the unknown parameter, so the tier is
+    # gated on the host, same rule responses_available uses.
+    if config.OPENAI_SERVICE_TIER and \
+            "api.openai.com" in (config.OPENAI_BASE_URL or ""):
+        kw["service_tier"] = config.OPENAI_SERVICE_TIER
     return kw
 
 
@@ -770,6 +776,8 @@ def responses_create(base_url, api_key, model, messages, tools,
         body["max_output_tokens"] = int(max_tokens)
     if effort:
         body["reasoning"] = {"effort": effort}
+    if config.OPENAI_SERVICE_TIER:
+        body["service_tier"] = config.OPENAI_SERVICE_TIER
     r = requests.post(url, json=body,
                       timeout=timeout or config.LLM_TIMEOUT_S,
                       headers={"Authorization": f"Bearer {api_key}",
