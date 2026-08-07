@@ -101,6 +101,12 @@ print("== 3. plumbing: health, runners, remote ==")
 
 check("the stems runner is routed", http_server.RUNNERS.get("stems")
       is stems.run_stems_job)
+import inspect                                                  # noqa: E402
+check("...with the (worker_db, job) signature EVERY runner is called with "
+      "(http_server dispatches runner(db, job); the first live call "
+      "TypeError'd on this)",
+      list(inspect.signature(stems.run_stems_job).parameters)
+      == ["worker_db", "job"])
 _real_avail = stems.available
 try:
     stems.available = lambda: True

@@ -313,7 +313,7 @@ def run_stems_remote(project_id, payload, user_id=None):
            "user_id": user_id, "attempts": 0, "payload": payload}
     if not config.REMOTE_EXECUTOR_URL:
         import stems
-        return stems.run_stems_job(job)
+        return stems.run_stems_job(None, job)
     return _run_remote(job)
 
 

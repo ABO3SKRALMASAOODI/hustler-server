@@ -69,10 +69,16 @@ def _run_demucs(wav_path, outdir):
     return vocals, accomp
 
 
-def run_stems_job(job):
+def run_stems_job(worker_db, job):
     """Separate a stored source's audio into vocals/accompaniment and upload
     both. payload: {src_key, vocals_key, accomp_key}. Returns
     {ok, vocals_key, accomp_key, seconds}.
+
+    (worker_db, job) — every RUNNERS entry is called that way by the
+    executor's dispatch (http_server: `runner(db, job)`), signature-pinned
+    in tests since the first live call arrived as `run_stems_job(job)` and
+    TypeError'd on the executor. The db handle is unused here: separation
+    reads storage and writes storage, nothing else.
 
     Idempotent by construction: the destination keys embed the source sha
     (the caller builds them), so a re-run overwrites identical content and
