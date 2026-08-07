@@ -112,4 +112,15 @@ def version_report():
         "outro_version": config.OUTRO_VERSION,
         "transition_version": config.TRANSITION_VERSION,
         "timeline_media_version": filmstrip.TIMELINE_MEDIA_VERSION,
+        "features": list(FEATURES),
     }
+
+
+# Capabilities this build can RENDER, advertised through /health so the
+# dispatcher can gate a WRITE that the executor could not draw (round 96).
+# The fingerprint above answers "same bytes?"; this answers "can it do X?" —
+# which is the question a feature gate actually has, because the dispatcher
+# auto-deploys on every push and the executor does not: exact-version
+# equality would switch features off after every unrelated worker deploy.
+# Append-only: removing a name re-enables the round-53 failure shape.
+FEATURES = ("custom_filter",)

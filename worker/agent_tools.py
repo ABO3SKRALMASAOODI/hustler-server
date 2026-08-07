@@ -49,7 +49,7 @@ import visual
 import webrecord
 from captions import KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
-                     patch_fingerprint,
+                     custom_chain_error, patch_fingerprint,
                      EDLValidationError, Frame,
                      HEX_COLOR,
                      canvas_edl, clip_anim, default_edl, describe_edl,
@@ -8774,6 +8774,203 @@ def remove_stylize(ctx, id):
     return ctx.write_edl(edl, f"removed stylize {hit['kind']} ({id})")
 
 
+# ── Custom filter chains (round 96) ─────────────────────────────────────────
+# The open-ended stylize: the agent WRITES the ffmpeg chain instead of picking
+# a kind from a menu, so a look nobody hand-built stops requiring a new tool
+# and a deploy. Three nets stand where the menu used to:
+#   1. custom_chain_error — structural: one chain, no graph syntax, no file
+#      access (shared with validate_edl, so both services agree forever).
+#   2. the DRY RUN below — semantic: the chain runs on the real preview
+#      source before anything is stored, so "ffmpeg rejected it" arrives as
+#      ffmpeg's own words in seconds, and its COST is measured, not guessed.
+#   3. the agent's eyes — aesthetic: a chain that parses can still look
+#      wrong, and no validator can see that; the result text sends the agent
+#      to look_at the window on the next preview.
+
+_CUSTOM_FEATURE_CACHE = {"at": 0.0, "ok": None}
+
+
+def _executor_can_custom():
+    """Does the render service know effects.custom? Cached 5 minutes.
+
+    The dispatcher auto-deploys on push and the executor does not, so right
+    after a deploy THIS code can validate a field the render service cannot
+    draw. Storing it anyway would render previews with the effect silently
+    missing — the worst failure shape we know (round 53/55). Definite "no"
+    refuses the WRITE only; unreachable stays permissive (round-53 rule) and
+    is retried on the next call rather than cached."""
+    now = time.time()
+    if _CUSTOM_FEATURE_CACHE["ok"] is not None and \
+            now - _CUSTOM_FEATURE_CACHE["at"] < 300:
+        return _CUSTOM_FEATURE_CACHE["ok"]
+    ok = remote.executor_supports("custom_filter")
+    if ok is not None:
+        _CUSTOM_FEATURE_CACHE["at"] = now
+        _CUSTOM_FEATURE_CACHE["ok"] = ok
+    return ok
+
+
+def _probe_custom_chain(ctx, chain):
+    """Dry-run `chain` on the real preview source. Returns (error, ratio):
+    error is an agent-actionable string (None when the chain is fine) and
+    ratio the measured cost against a plain encode of the same span."""
+    probe = config.CUSTOM_FILTER_PROBE_S
+    if ctx.has_main_video:
+        try:
+            path = ctx.proxy_path()
+        except Exception:
+            try:
+                path = _original_local(ctx)
+            except Exception as e:
+                return (f"could not stage footage for the dry run "
+                        f"({str(e)[:140]}) — nothing was written", None)
+        ss = max(0.0, min(ctx.duration / 2.0,
+                          max(ctx.duration - probe, 0.0)))
+        src = ["-ss", f"{ss:.2f}", "-t", f"{probe:.2f}", "-i", path]
+    else:
+        cv = (ctx.latest_edl()["json"].get("canvas") or {})
+        w = int(cv.get("width") or 1280)
+        h = int(cv.get("height") or 720)
+        src = ["-f", "lavfi", "-i",
+               f"color=c=0x336699:size={w}x{h}:rate=30:duration={probe:.2f}"]
+
+    def _enc(vf, tag):
+        out = os.path.join(ctx.workdir, f"cfprobe_{tag}.mp4")
+        cmd = (["ffmpeg", "-y", "-v", "error"] + src
+               + (["-vf", vf] if vf else [])
+               + ["-an", "-c:v", "libx264", "-preset", "ultrafast",
+                  "-crf", "30", out])
+        t0 = time.time()
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=config.CUSTOM_FILTER_PROBE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return None, None, "TIMEOUT"
+        if r.returncode != 0:
+            return None, None, (r.stderr or "ffmpeg failed").strip()[-400:]
+        return out, time.time() - t0, None
+
+    def _shape(path):
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height,avg_frame_rate",
+                 "-of", "csv=p=0", path],
+                capture_output=True, text=True, timeout=20)
+            wd, ht, rate = (r.stdout or "").strip().split(",")[:3]
+            num, _, den = rate.partition("/")
+            return int(wd), int(ht), float(num) / float(den or 1)
+        except Exception:
+            return None
+
+    ctrl, t_ctrl, err = _enc(None, "ctrl")
+    if err:
+        return (f"the footage itself failed a plain probe encode "
+                f"({err[:200]}) — the problem is not your chain; try again "
+                "or tell the user the preview source is unreadable", None)
+    piece, t_chain, err = _enc(chain, "chain")
+    if err == "TIMEOUT":
+        return (f"the chain stalled: {probe:g}s of footage did not finish "
+                f"encoding within {config.CUSTOM_FILTER_PROBE_TIMEOUT_S:g}s. "
+                "A render with it would hang. Drop the heaviest filter "
+                "(frame interpolation, huge blurs and palette ops are the "
+                "usual causes) and try a simpler chain", None)
+    if err:
+        return ("ffmpeg rejected the chain on real footage: " + err
+                + "\nThe error names the filter or option at fault — fix "
+                "the chain and call again. Do NOT retry the identical "
+                "string.", None)
+    a, b = _shape(ctrl), _shape(piece)
+    if a and b:
+        if (a[0], a[1]) != (b[0], b[1]):
+            return (f"the chain changes the frame geometry "
+                    f"({a[0]}x{a[1]} -> {b[0]}x{b[1]}). Chains must return "
+                    "the frame they receive: reframing is set_frame's job, "
+                    "and the zoom/caption stages after this one assume the "
+                    "program's geometry. End the chain by scaling back, or "
+                    "drop the scaling filter.", None)
+        if abs(a[2] - b[2]) > 0.6:
+            return (f"the chain changes the frame RATE ({a[2]:g} -> "
+                    f"{b[2]:g} fps). Time belongs to set_speed and the "
+                    "renderer's clock — drop the fps/interpolation filter.",
+                    None)
+    ratio = (t_chain or 0.0) / max(t_ctrl or 0.0, 0.05)
+    if ratio > config.CUSTOM_FILTER_MAX_COST:
+        return (f"the chain costs {ratio:.1f}x a plain encode at preview "
+                f"resolution (the cap is "
+                f"{config.CUSTOM_FILTER_MAX_COST:g}x) — a render with it "
+                "would crawl. Drop the heaviest filter or narrow the look "
+                "to a shorter window.", None)
+    return None, ratio
+
+
+def add_custom_filter(ctx, chain, start=None, end=None, label=None):
+    """Write-your-own-effect: one validated, dry-run ffmpeg chain."""
+    err = custom_chain_error(chain)
+    if err:
+        return "REJECTED: " + err
+    if (start is None) != (end is None):
+        return ("REJECTED: pass both start and end (program seconds), or "
+                "neither for the whole video.")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    s = e = None
+    if start is not None:
+        try:
+            s = round(min(max(float(start), 0.0), max(0.0, prog - 0.1)), 2)
+            e = round(min(max(float(end), s + 0.1), prog), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: start/end must be numbers (program seconds)."
+    if _executor_can_custom() is False:
+        return ("REJECTED: the render service is running a build that "
+                "predates custom filter chains — storing this would make "
+                "every preview render WITHOUT the effect. Compose the "
+                "closest look from apply_look / add_stylize / "
+                "set_grade_custom / enhance_video instead, and tell the "
+                "user this exact effect needs a service update. (Operator: "
+                "deploy the executor — worker/DEPLOY_EXECUTOR.md.)")
+    perr, ratio = _probe_custom_chain(ctx, chain.strip())
+    if perr:
+        return "REJECTED: " + perr
+    fx = dict(edl.get("effects") or {})
+    cfs = [dict(c) for c in (fx.get("custom") or [])]
+    item = {"id": _next_item_id(cfs, "cf"), "chain": chain.strip(),
+            "start": s, "end": e,
+            "label": ((label or "").strip()[:60] or None)}
+    cfs.append(item)
+    fx["custom"] = cfs
+    edl["effects"] = fx
+    name = item["label"] or item["chain"][:40]
+    window = (f" on {s}-{e}s (program time)" if s is not None
+              else " on the whole video")
+    res = ctx.write_edl(
+        edl, f"custom filter '{name}'{window} [{item['id']}]")
+    if res.startswith("EDL v"):
+        res += (f"\nThe chain passed its dry run on real footage, at "
+                f"~{ratio:.1f}x the cost of a plain encode. A chain that "
+                "parses can still look wrong — render_preview and LOOK at "
+                "output frames inside the window before describing the "
+                "effect to the user; if the look is not what you meant, "
+                f"remove_custom_filter('{item['id']}') and write a better "
+                "chain.")
+    return res
+
+
+def remove_custom_filter(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    cfs = [dict(c) for c in (fx.get("custom") or [])]
+    hit = next((c for c in cfs if c.get("id") == id), None)
+    if not hit:
+        have = ", ".join(c.get("id") or "?" for c in cfs) or "none"
+        return (f"REJECTED: no custom filter with id '{id}'. Existing: "
+                f"{have}. Call get_edl to see them.")
+    fx["custom"] = [c for c in cfs if c.get("id") != id]
+    edl["effects"] = fx
+    name = hit.get("label") or (hit.get("chain") or "")[:40]
+    return ctx.write_edl(edl, f"removed custom filter '{name}' ({id})")
+
+
 # (lo, hi, neutral) per custom-grade axis — the neutral value IS the absence
 # of the control, so passing it clears the axis (schema normalizes the same).
 _GRADE_AXES = {"exposure": (-1.0, 1.0, 0.0), "contrast": (0.5, 1.6, 1.0),
@@ -13075,6 +13272,37 @@ TOOLS = {
                        "end": {"type": "number"}}),
     "remove_stylize": (remove_stylize, "Remove one stylize effect by its id "
                        "(see get_edl).", {"id": {"type": "string"}}),
+    "add_custom_filter": (add_custom_filter, "WRITE YOUR OWN ffmpeg video "
+                          "filter chain and apply it to the program picture "
+                          "— for the look no preset makes. Presets FIRST: "
+                          "apply_look / add_stylize / set_color_grade / "
+                          "enhance_video cover the common asks; reach here "
+                          "when the user wants something none of them says "
+                          "(a CRT phosphor look, posterize, a slow hue "
+                          "drift, selective channel work). Rules: ONE chain "
+                          "on the single video stream — filters separated "
+                          "by commas, NO ';' or '[labels]', no file access "
+                          "— and it must keep the frame's size and rate. "
+                          "The chain is DRY-RUN on the real footage before "
+                          "it stores: a broken chain returns ffmpeg's own "
+                          "error (fix it, never retry the identical "
+                          "string); an over-heavy one returns its measured "
+                          "cost. start/end are PROGRAM seconds (omit both "
+                          "= whole video; windowed moments follow their "
+                          "footage through later cuts). label = short "
+                          "human name for the look ('CRT green') shown in "
+                          "diffs. Example chain: \"hue=s=0.3,"
+                          "curves=green='0/0 0.5/0.6 1/1',"
+                          "noise=alls=8:allf=t\". After it lands, LOOK at "
+                          "the window on the next preview — a chain that "
+                          "parses can still look wrong.",
+                          {"chain": {"type": "string"},
+                           "start": {"type": "number"},
+                           "end": {"type": "number"},
+                           "label": {"type": "string"}}),
+    "remove_custom_filter": (remove_custom_filter, "Remove one custom "
+                             "filter chain by its id (see get_edl).",
+                             {"id": {"type": "string"}}),
     "set_grade_custom": (set_grade_custom, "Continuous color controls on "
                          "all footage, applied AFTER the preset grade (the "
                          "two compose — 'cinematic but warmer' = preset "
@@ -13281,6 +13509,8 @@ REQUIRED_ARGS = {
     "add_corrupt_screen": ["at_output_s"],
     "set_caption_mutes": ["spans"],
     "add_stylize": ["kind"],
+    "add_custom_filter": ["chain"],
+    "remove_custom_filter": ["id"],
     "add_freeze_frame": ["at_output_s"],
     "set_caption_fixes": [],
     "enhance_video": [],

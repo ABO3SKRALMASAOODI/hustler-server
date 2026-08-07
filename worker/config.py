@@ -1023,6 +1023,22 @@ CLEAN_X264_LOOKAHEAD = int(os.getenv("CLEAN_X264_LOOKAHEAD", "10"))
 # is only on screen for part of the video without making the scan noticeable.
 CLEAN_DETECT_SAMPLES = int(os.getenv("CLEAN_DETECT_SAMPLES", "28"))
 
+# ── Custom filter chains (round 96) ─────────────────────────────────────────
+# The dry run encodes this many seconds of the real proxy twice — once plain
+# as the control, once through the agent's chain — so a chain is validated
+# against the actual footage and its COST is a measured ratio, not a guess.
+CUSTOM_FILTER_PROBE_S = float(os.getenv("CUSTOM_FILTER_PROBE_S", "0.6"))
+# Reject a chain whose probe costs more than this many times the control
+# encode. The whole preset stylize stack runs ~3-5x; 8x admits every look a
+# reasonable chain produces while refusing the minterpolate-class graphs
+# that would turn a 30s preview into minutes.
+CUSTOM_FILTER_MAX_COST = float(os.getenv("CUSTOM_FILTER_MAX_COST", "8.0"))
+# Hard wall-clock cap on each probe run — a chain that stalls its own 0.6s
+# probe would stall a render for minutes; kill it and reject with the tail
+# of ffmpeg's own stderr.
+CUSTOM_FILTER_PROBE_TIMEOUT_S = float(
+    os.getenv("CUSTOM_FILTER_PROBE_TIMEOUT_S", "45"))
+
 # ── The inpaint runs at the scale of the HOLE, not of the frame (round 88) ──
 #
 # cv2.inpaint(TELEA) reconstructs a hole by diffusing inward from its boundary.

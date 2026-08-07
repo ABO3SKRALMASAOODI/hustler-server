@@ -40,7 +40,7 @@ import media
 
 # Video-local layers a stitch may differ in. Everything else must be equal.
 _CHANGEABLE_TOP = ("texts", "patches", "overlays")
-_CHANGEABLE_FX = ("zooms", "regions")
+_CHANGEABLE_FX = ("zooms", "regions", "custom")
 
 _PAD_S = 0.5
 _MAX_WINDOWS = 4
@@ -69,6 +69,12 @@ def _strip(edl):
     for k in _CHANGEABLE_FX:
         changeable[k] = fx.pop(k, None) if isinstance(fx, dict) else None
     e["effects"] = fx
+    # _canon's drop test reads values PRE-recursion, so effects that is a
+    # dict of Nones survives as {} while an absent effects drops — and the
+    # two sides then read as a structural change when the only real delta
+    # was a changeable item. Normalize the shell away on both sides.
+    if not _canon(fx):
+        e.pop("effects", None)
     return _canon(e), changeable
 
 
@@ -94,6 +100,9 @@ def _item_windows(edl, tl, duration):
         pieces = tl.span_to_out(float(p["src_start"]), float(p["src_end"]))
         for a, b in pieces:
             out.append((a, b, "patch"))
+    for c in (fx.get("custom") or []):
+        if c.get("start") is not None:
+            out.append((float(c["start"]), float(c["end"]), "custom"))
     return out
 
 
@@ -105,7 +114,8 @@ def _canon_items(edl):
                          ("patches", edl.get("patches")),
                          ("overlays", edl.get("overlays")),
                          ("zooms", fx.get("zooms")),
-                         ("regions", fx.get("regions"))):
+                         ("regions", fx.get("regions")),
+                         ("custom", fx.get("custom"))):
         d = {}
         for i, it in enumerate(items or []):
             d[it.get("id") or f"#{i}"] = json.dumps(it, sort_keys=True)
@@ -133,6 +143,11 @@ def plan(prev_edl, new_edl, tl_prev, tl_new, duration, out_duration):
             ((prev_edl.get("effects") or {}).get("regions") or []):
         if r.get("start") is None:
             return None, "whole-video censor region"
+    # so does an unwindowed custom filter chain
+    for c in ((new_edl.get("effects") or {}).get("custom") or []) + \
+            ((prev_edl.get("effects") or {}).get("custom") or []):
+        if c.get("start") is None:
+            return None, "whole-video custom filter"
 
     old_items, new_items = _canon_items(prev_edl), _canon_items(new_edl)
     changed = []
@@ -150,7 +165,8 @@ def plan(prev_edl, new_edl, tl_prev, tl_new, duration, out_duration):
             fx = edl.get("effects") or {}
             src = {"texts": edl.get("texts"), "patches": edl.get("patches"),
                    "overlays": edl.get("overlays"), "zooms": fx.get("zooms"),
-                   "regions": fx.get("regions")}[l] or []
+                   "regions": fx.get("regions"),
+                   "custom": fx.get("custom")}[l] or []
             for idx, it in enumerate(src):
                 if (it.get("id") or f"#{idx}") != i:
                     continue
@@ -263,6 +279,12 @@ def window_edl(edl, tl, w0, w1):
                            lambda r: (r["start"], r["end"]),
                            lambda r, a, b: {**r, "start": round(a, 3),
                                             "end": round(b, 3)})
+    # custom filter chains: windowed only under plan()'s gate (an unwindowed
+    # one refused the stitch), so start/end are always present here
+    fx["custom"] = _shift(fx.get("custom"),
+                          lambda c: (c["start"], c["end"]),
+                          lambda c, a, b: {**c, "start": round(a, 3),
+                                           "end": round(b, 3)})
     e["overlays"] = _shift(
         e.get("overlays"),
         lambda o: (o.get("start") or 0.0,

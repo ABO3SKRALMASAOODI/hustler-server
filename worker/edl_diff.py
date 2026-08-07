@@ -237,6 +237,21 @@ def _change_ranges(prev, new):
             if k not in n:
                 add(float(it.get("start", 0.0)), float(it.get("start", 0.0)))
 
+    # ── custom filter chains (output-anchored, inside effects) ────────────
+    p = _by_id(fx_p.get("custom"), "cf")
+    n = _by_id(fx_n.get("custom"), "cf")
+    if p != n:
+        for k, it in list(n.items()) + \
+                [(k, v) for k, v in p.items() if k not in n]:
+            if _canon(p.get(k)) == _canon(n.get(k)):
+                continue
+            if it.get("start") is None:
+                glob = True         # whole-video chain: no locality to flash
+            elif k in n:
+                add(float(it.get("start", 0.0)), float(it.get("end", 0.0)))
+            else:                   # removed: flash where it used to start
+                add(float(it.get("start", 0.0)), float(it.get("start", 0.0)))
+
     # ── volume: source-anchored spans ─────────────────────────────────────
     pv = {repr(v) for v in (prev.get("volume") or [])}
     nv = {repr(v) for v in (new.get("volume") or [])}
@@ -249,7 +264,7 @@ def _change_ranges(prev, new):
 
     # ── everything else is global by nature ───────────────────────────────
     def _fx_rest(fx):
-        return {k: v for k, v in fx.items() if k != "zooms"}
+        return {k: v for k, v in fx.items() if k not in ("zooms", "custom")}
     for field in ("captions", "frame", "master", "canvas", "caption_mutes",
                   "source_clean", "voiceover"):
         if (prev.get(field) or None) != (new.get(field) or None):
@@ -420,6 +435,23 @@ def _verify_plan(prev, new, max_tiles):
         claims.append((mid(it.get("start", 0.0), it.get("end")),
                        f'a deliberate {it.get("kind") or "stylize"} effect '
                        "is visibly applied to the picture"))
+
+    # windowed custom filter chains (round 96) — the agent WROTE this chain,
+    # so a parse that succeeded proves nothing about the look: the claim is
+    # that the described effect is actually visible there.
+    p = _by_id([c for c in (fx_p.get("custom") or [])
+                if c.get("start") is not None], "cf")
+    n = _by_id([c for c in (fx_n.get("custom") or [])
+                if c.get("start") is not None], "cf")
+    for k, it in n.items():
+        if k in p and _canon(p[k]) == _canon(it):
+            continue
+        claims.append((mid(it.get("start", 0.0), it.get("end")),
+                       f'the custom effect '
+                       f'\'{(it.get("label") or "filter chain")}\' is '
+                       "visibly applied to the picture and does not break it "
+                       "(no black frame, no smeared geometry, no crushed "
+                       "colors)"))
 
     claims.sort(key=lambda c: c[0])
     # Two claims about the same instant share one tile; then cap by thinning

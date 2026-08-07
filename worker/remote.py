@@ -84,6 +84,26 @@ def check_executor_version(quiet=False):
     return note
 
 
+def executor_supports(feature, timeout=8):
+    """Does the executor advertise `feature` in /health's `features` list?
+
+    True with no executor configured (renders run THIS process's code, which
+    by definition supports whatever it can validate). False when the executor
+    answers and the feature is missing — the one case a WRITE should refuse,
+    because the render service genuinely cannot draw what would be stored.
+    None when the executor cannot be reached: unknown is not "no" (the
+    round-53 rule — a diagnostic outage must never take a feature down), so
+    callers treat None as permission plus a louder failure elsewhere.
+    """
+    if not config.REMOTE_EXECUTOR_URL:
+        return True
+    try:
+        body = executor_health(timeout=timeout)
+    except Exception:
+        return None
+    return feature in (body.get("features") or [])
+
+
 def _job_payload(job):
     """A JSON-safe subset of the claimed job row. The runners read only these
     fields; created_at (a datetime) is used by the dispatcher's process_one for

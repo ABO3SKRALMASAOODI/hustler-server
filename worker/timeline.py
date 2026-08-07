@@ -924,6 +924,63 @@ def remap_program_items(edl, old_tl, new_tl):
         if st_changed:
             fx["stylize"] = kept_st
             fx_changed = True
+    if fx.get("custom"):
+        # Round 96 — agent-written chains, content-anchored exactly like the
+        # stylize they generalize: "make THAT moment look scanned" must
+        # follow the moment through later cuts.
+        kept_cf = []
+        cf_changed = False
+        for cf in fx["custom"]:
+            cf = dict(cf)
+            name = cf.get("label") or "custom filter"
+            if cf.get("start") is None:
+                kept_cf.append(cf)
+                continue
+            moved = remap_program_span(
+                old_tl, new_tl, float(cf["start"]), float(cf["end"]))
+            if moved is None:
+                if old_tl.out_to_src(float(cf["start"])) is None or \
+                        old_tl.out_to_src(float(cf["end"])) is None:
+                    if float(cf["start"]) > max(0.0, prog - 0.1):
+                        region_notes.append(
+                            f"note: custom filter {cf.get('id')} ('{name}') "
+                            "was removed — its window falls outside the "
+                            "shortened edit.")
+                        cf_changed = True
+                        continue
+                    if float(cf["end"]) > prog:
+                        cf["end"] = round(prog, 2)
+                        region_notes.append(
+                            f"note: custom filter {cf.get('id')} ('{name}') "
+                            f"now ends at {cf['end']}s to fit the shortened "
+                            "edit.")
+                        cf_changed = True
+                    kept_cf.append(cf)
+                    continue
+                region_notes.append(
+                    f"note: custom filter {cf.get('id')} ('{name}') was "
+                    "removed — the footage it was on is no longer in the "
+                    "edit.")
+                cf_changed = True
+                continue
+            ns, ne = moved
+            if ne - ns < 0.1:
+                region_notes.append(
+                    f"note: custom filter {cf.get('id')} ('{name}') was "
+                    "removed — almost none of the footage it was on "
+                    "survives the cut.")
+                cf_changed = True
+                continue
+            if (ns, ne) != (cf["start"], cf["end"]):
+                region_notes.append(
+                    f"note: custom filter {cf.get('id')} ('{name}') moved "
+                    f"to {ns}-{ne}s so it stays on the same footage.")
+                cf["start"], cf["end"] = ns, ne
+                cf_changed = True
+            kept_cf.append(cf)
+        if cf_changed:
+            fx["custom"] = kept_cf
+            fx_changed = True
     if fx.get("regions"):
         kept_regs = []
         rg_changed = False

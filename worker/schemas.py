@@ -790,6 +790,89 @@ class StylizeItem(BaseModel):
     intensity: Optional[float] = None      # None = the kind's default (0.5)
 
 
+# ── Custom filter chains (round 96) ─────────────────────────────────────────
+# The open-ended sibling of stylize: the agent WRITES the ffmpeg chain itself
+# instead of picking from a hand-built menu, so a look nobody anticipated
+# ("VHS but with a green phosphor trail") stops requiring a new tool, a new
+# enum and a deploy. The freedom is scoped to the PAYLOAD of one node — the
+# EDL still says where and when, so remove/undo/diff/stitch keep working.
+#
+# The chain is ONE filter chain on the single program stream: commas only.
+# Graph syntax (';', '[labels]') is rejected so a chain can never restructure
+# the surrounding filtergraph it gets spliced into, and file/device access is
+# rejected because a filter argument must never read or write the machine.
+# Everything else — whether it parses, what it costs, what it looks like —
+# is judged by the add tool's dry run on real pixels, not by this regex.
+CUSTOM_FILTER_MAX_CHARS = 700
+# Filter NAMES with reach beyond the frame: file/device/IPC access, external
+# libraries with their own loaders, or wall-clock stalls dressed as filters.
+_CUSTOM_DENY_NAMES = (
+    "movie", "amovie", "subtitles", "ass", "sendcmd", "asendcmd",
+    "zmq", "azmq", "frei0r", "frei0r_src", "ocv", "coreimage",
+    "removelogo", "signature", "vidstabdetect", "vidstabtransform",
+    "realtime", "arealtime", "loop", "aloop",
+)
+_CUSTOM_DENY_NAME_RE = re.compile(
+    r"(?:^|,)\s*(" + "|".join(_CUSTOM_DENY_NAMES) + r")\s*(?:=|,|$|@)",
+    re.IGNORECASE)
+# Any `...file=` / `...filename=` argument (textfile, fontfile, psfile,
+# stats_file, ...) is a path on the render machine. There is no legitimate
+# one: fonts come from fontconfig, LUTs from set_color_grade, text from
+# drawtext's inline arg.
+_CUSTOM_FILE_ARG_RE = re.compile(r"\w*file(?:name)?\s*=", re.IGNORECASE)
+
+
+def custom_chain_error(chain):
+    """Why this chain may not be stored, or None when it is acceptable.
+
+    Shared word for word by validate_edl (which the executor also runs) and
+    the add tool, so a chain can never validate on one service and reject on
+    the other."""
+    if not isinstance(chain, str) or not chain.strip():
+        return ("chain must be a non-empty ffmpeg video filter chain, e.g. "
+                "\"hue=s=0.4,noise=alls=10:allf=t\".")
+    c = chain.strip()
+    if len(c) > CUSTOM_FILTER_MAX_CHARS:
+        return (f"chain is {len(c)} chars — the cap is "
+                f"{CUSTOM_FILTER_MAX_CHARS}. A look this long should be two "
+                "filters, not twenty: simplify it.")
+    if "\n" in c or "\r" in c:
+        return "chain must be a single line."
+    if ";" in c or "[" in c or "]" in c:
+        return ("chain must be ONE filter chain on the single program "
+                "stream — filters separated by commas, no ';' and no "
+                "'[labels]'. To limit it in time pass start/end; to branch "
+                "and recombine, compose two separate custom filters instead.")
+    if c.count("'") % 2 == 1:
+        return ("chain has an unbalanced single quote — every ' must be "
+                "closed.")
+    if _CUSTOM_FILE_ARG_RE.search(c):
+        return ("chain may not reference files (textfile=, fontfile=, "
+                "psfile=, ...) — filter arguments must be inline. Fonts come "
+                "from the system, text goes in drawtext's text= arg.")
+    m = _CUSTOM_DENY_NAME_RE.search(c)
+    if m:
+        return (f"the filter '{m.group(1)}' is not allowed — it reaches "
+                "outside the frame (files, devices, IPC or wall-clock "
+                "stalls). Build the look from pixel filters only.")
+    return None
+
+
+class CustomFilterItem(BaseModel):
+    """One agent-written filter chain applied to the program picture.
+
+    start/end are FINAL-program seconds; both None = the whole program.
+    Content-anchored like stylize: the windowed moment follows its footage
+    through later cuts. label is the agent's short human name for the look
+    ("VHS green phosphor") — what diffs and the timeline show instead of the
+    raw chain."""
+    id: str
+    chain: str
+    start: Optional[float] = None
+    end: Optional[float] = None
+    label: Optional[str] = None
+
+
 class GradeCustom(BaseModel):
     """Continuous color controls applied to all footage AFTER the preset
     grade (captions/graphics are never graded). All optional; a value of
@@ -893,6 +976,9 @@ class Effects(BaseModel):
     # re-render the lot.
     screen_frame: Optional[ScreenFrame] = None
     frame_shifts: Optional[List[FrameShift]] = None
+    # Round 96 — agent-written filter chains (the open-ended stylize).
+    # Optional-None for the same signature reason as screen_frame above.
+    custom: Optional[List[CustomFilterItem]] = None
 
 
 # Canvas (round 34) — output geometry for a program that has NO main source
@@ -2121,6 +2207,29 @@ def validate_edl(data, duration=None):
             fx.stylize.sort(key=lambda s: (s.start or 0.0, s.id))
             if not fx.stylize:
                 fx.stylize = None
+        if fx.custom is not None:
+            seen_cf = set()
+            for i, cf in enumerate(fx.custom):
+                if not cf.id or cf.id in seen_cf:
+                    raise EDLValidationError(
+                        f"effects.custom[{i}].id must be non-empty and "
+                        "unique.")
+                seen_cf.add(cf.id)
+                err = custom_chain_error(cf.chain)
+                if err:
+                    raise EDLValidationError(f"effects.custom[{i}]: {err}")
+                cf.chain = cf.chain.strip()
+                if (cf.start is None) != (cf.end is None):
+                    raise EDLValidationError(
+                        f"effects.custom[{i}]: pass both start and end "
+                        "(program seconds), or neither for the whole video.")
+                if cf.start is not None:
+                    cf.start, cf.end = _r(cf.start), _r(cf.end)
+                    _check_span(f"effects.custom[{i}]", cf.start, cf.end,
+                                prog_dur)
+            fx.custom.sort(key=lambda c: (c.start or 0.0, c.id))
+            if not fx.custom:
+                fx.custom = None
         if fx.grade_custom is not None:
             gc = fx.grade_custom
             _GC_BOUNDS = {"exposure": (-1.0, 1.0), "contrast": (0.5, 1.6),
@@ -2221,7 +2330,7 @@ def validate_edl(data, duration=None):
                 and fx.fade_out_s is None and fx.transition is None \
                 and fx.regions is None and fx.stylize is None \
                 and fx.grade_custom is None and fx.screen_frame is None \
-                and fx.frame_shifts is None:
+                and fx.frame_shifts is None and fx.custom is None:
             edl.effects = None
 
     if edl.source_clean is not None:
@@ -2481,6 +2590,12 @@ def describe_edl(edl_dict, duration=None):
                                if s.start is not None else "")
                      for s in fx.stylize]
             bits.append("stylize " + "+".join(names))
+        if fx.custom:
+            names = [f"'{(c.label or c.chain[:24]).strip()}' [{c.id}]"
+                     + (f"@{c.start:g}-{c.end:g}s"
+                        if c.start is not None else "")
+                     for c in fx.custom]
+            bits.append("custom filter " + ", ".join(names))
         if fx.screen_frame:
             sf = fx.screen_frame
             bits.append(

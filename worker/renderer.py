@@ -1280,6 +1280,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     regions = fx.get("regions") or []
     speed = edl.get("speed") or []
     stylize = fx.get("stylize") or []
+    custom_filters = fx.get("custom") or []
     grade_custom = fx.get("grade_custom") or {}
     overlay_inputs = overlay_inputs or []
     # A screen takeover is an overlay that carries a ScreenLock. It leaves the
@@ -1872,6 +1873,35 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f":d=1:s={W}x{H}:fps={fps:.3f}[{out_lab}]")
         else:
             continue
+        vlabel = out_lab
+
+    # Round 96 — agent-written chains, spliced after the preset stylize so a
+    # custom look composes on top of the same picture a preset would get.
+    # The chain went through custom_chain_error at write time (no graph
+    # syntax, no file access), so it can never restructure this graph; the
+    # add tool's dry run pinned geometry/fps unchanged, so downstream stages
+    # (zoompan, overlays) see the CFR WxH they assume.
+    for ci, cf in enumerate(custom_filters):
+        chain = (cf.get("chain") or "").strip().strip(",")
+        if not chain:
+            continue
+        a = cf.get("start")
+        out_lab = f"vcusf{ci}"
+        if a is None:
+            parts.append(f"[{vlabel}]{chain}[{out_lab}]")
+        else:
+            a = max(0.0, float(a))
+            b = min(tl.out_duration, float(cf.get("end") or 0.0))
+            if b - a < 0.05:
+                continue
+            # The agent's chain may contain filters with no timeline
+            # support, so ':enable=' cannot be appended to it — process a
+            # split branch and composite it back only inside the window
+            # instead (the glow trick above, generalized).
+            parts.append(f"[{vlabel}]split[cusA{ci}][cusB{ci}]")
+            parts.append(f"[cusB{ci}]{chain}[cusP{ci}]")
+            parts.append(f"[cusA{ci}][cusP{ci}]overlay=eof_action=pass"
+                         f":enable='between(t,{a:.3f},{b:.3f})'[{out_lab}]")
         vlabel = out_lab
 
     # ---- words BEHIND the subject (round 60) -----------------------------
