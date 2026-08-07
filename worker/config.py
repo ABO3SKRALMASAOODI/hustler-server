@@ -857,6 +857,16 @@ MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resen
 MAX_CLAIMS_ABSOLUTE = int(os.getenv("MAX_CLAIMS_ABSOLUTE", "6"))
 
 AGENT_MAX_ITERATIONS = 30
+# How many times a turn that hits the iteration ceiling MID-WORK may resume
+# itself (round 96b, project 383: 30 productive calls in 7.5 min, then a
+# canned English "tell me to continue" at a Portuguese-speaking user with
+# half the 900s time budget unspent). Each continuation is a fresh pass —
+# rebuilt state, small context — over the SAME user message, sharing the
+# turn's wall clock and spend cap, and it only happens when the ending pass
+# actually landed edits or renders; a pass that moved nothing is a runaway
+# and still stops at the wall. 2 -> at most 90 iterations, inside the same
+# 900s / credit bounds that always applied.
+AGENT_AUTO_CONTINUES = int(os.getenv("AGENT_AUTO_CONTINUES", "2"))
 AGENT_TEMPERATURE = 0.2
 # Completion ceiling for ONE agent step. 8000 (was a hardcoded 2000).
 #

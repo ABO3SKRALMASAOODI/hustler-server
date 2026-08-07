@@ -1776,20 +1776,63 @@ def _strip_image_parts(messages):
     return changed
 
 
+def _continue_decision(n_cont, progressed, seconds_left, over_budget):
+    """May a pass that spent its iteration budget resume itself? Every gate
+    is one of the REAL walls: the continuation allowance, forward progress
+    (a pass that moved nothing is a runaway, not an unfinished edit), enough
+    wall clock for the next pass to land anything (a continuation that the
+    timeout kills 40s in only trades one apology for a later one), and the
+    spend cap."""
+    return (n_cont < config.AGENT_AUTO_CONTINUES and progressed
+            and seconds_left > 120 and not over_budget)
+
+
+_CONTINUATION_NOTE = (
+    "[system: CONTINUATION — you hit the per-pass step ceiling on this SAME "
+    "request and were resumed automatically. The user has NOT seen any reply "
+    "and has NOT sent anything new; the message above is the request you "
+    "were already working on. Everything you already changed is in the "
+    "PROJECT STATE and program map above — trust them: do NOT redo finished "
+    "work, do NOT re-read skills, do NOT re-verify what you already saw "
+    "land. Already ran this turn: {done}. Finish ONLY what remains of the "
+    "request, render once, and reply.]")
+
+
 def _run_loop(ctx, worker_db, job, session_id, user_message,
-              attachment_note=""):
+              attachment_note="", _cont=None):
+    """One tool-calling pass over the request. When the pass spends all its
+    iterations while still landing edits, it hands its clocks and counters to
+    a recursive continuation pass (_cont) instead of asking the user to say
+    "continue" — the wall clock (AGENT_TURN_TIMEOUT_S), the spend cap and
+    AGENT_AUTO_CONTINUES bound the whole chain, so the iteration ceiling is
+    back to being what it was meant to be: a runaway-loop breaker, not a
+    mid-edit stop sign (project 383: 30 productive calls in 7.5 min, then
+    'tell me to continue' in English at a Portuguese-speaking user with half
+    the time budget unspent)."""
     # Resolved from the user's plan in run_agent_job. _build_messages and the
     # tool schemas are model-agnostic and do not change with it.
     client = ctx.llm_client or llm.client()
     model = ctx.agent_model or config.AGENT_MODEL
     messages = _build_messages(ctx, worker_db, user_message, attachment_note)
+    _cont = _cont or {}
+    if _cont:
+        done = ", ".join(
+            f"{name} x{t['n']}" if t["n"] > 1 else name
+            for name, t in sorted(_cont["timings"]["tools"].items())) or \
+            "nothing yet"
+        messages.append({"role": "user",
+                         "content": _CONTINUATION_NOTE.format(done=done)})
     tools = agent_tools.openai_tools()
-    total_steps = 0
-    t_start = time.monotonic()
-    timings = {"llm_s": 0.0, "llm_calls": 0, "tools": {}}
-    honesty = {"false_claims": 0, "corrective_note": False}
+    total_steps = _cont.get("steps", 0)
+    t_start = _cont.get("t_start") or time.monotonic()
+    timings = _cont.get("timings") or \
+        {"llm_s": 0.0, "llm_calls": 0, "tools": {}}
+    honesty = _cont.get("honesty") or \
+        {"false_claims": 0, "corrective_note": False}
     start_version = ctx.latest_edl()["version"]
-    warned = set()                 # time-pressure marks already delivered
+    # time-pressure marks already delivered (carried across continuations —
+    # the clock they describe is the same one)
+    warned = _cont.get("warned") if _cont.get("warned") is not None else set()
     # Completion budget for this step, and how many times a truncated step has
     # already been retried with a bigger one. See _TRUNCATED_NUDGE.
     max_tokens = config.AGENT_MAX_TOKENS
@@ -2250,6 +2293,18 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                    else start_version),
                       change=chg)
             result = _time_pressure_note(result, t_start, warned)
+            # Step pressure, only once the continuation budget is spent —
+            # earlier passes are auto-resumed, so rushing them would only
+            # produce premature "done" replies. Same shape as the time
+            # marks: information, the model decides what to drop.
+            if _cont.get("n", 0) >= config.AGENT_AUTO_CONTINUES \
+                    and iteration >= config.AGENT_MAX_ITERATIONS - 5 \
+                    and "steps" not in warned:
+                warned.add("steps")
+                result += (
+                    "\n\n[system: only a few model calls remain for this "
+                    "request — stop exploring, land the essential remainder "
+                    "now, render_preview once, and write your reply.]")
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
 
@@ -2279,6 +2334,28 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                    "under the tiles):"})
                 messages.append({"role": "user", "content": content})
 
+    # The iteration ceiling. A pass that is still landing edits continues on
+    # its own — the user cannot tell step 30 from step 31, and "tell me to
+    # continue" spends their patience on OUR internal counter. The real
+    # resource walls stay exactly where they were: the shared wall clock
+    # (t_start rides through _cont), the spend cap (checked at the top of
+    # every iteration) and AGENT_AUTO_CONTINUES. A pass that moved NOTHING
+    # is the runaway the ceiling was built for — that one still stops.
+    n_cont = _cont.get("n", 0)
+    progressed = (len(ctx.versions_written) > _cont.get("writes0", 0)
+                  or len(ctx.rendered_versions) > _cont.get("renders0", 0))
+    seconds_left = config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start)
+    if _continue_decision(n_cont, progressed, seconds_left,
+                          ctx.over_budget()):
+        print(f"[job {job['id']}] iteration ceiling after {total_steps} "
+              f"step(s), work landing — auto-continuing "
+              f"(pass {n_cont + 2}, {seconds_left:.0f}s left)", flush=True)
+        return _run_loop(
+            ctx, worker_db, job, session_id, user_message, attachment_note,
+            _cont={"n": n_cont + 1, "steps": total_steps, "t_start": t_start,
+                   "timings": timings, "honesty": honesty, "warned": warned,
+                   "writes0": len(ctx.versions_written),
+                   "renders0": len(ctx.rendered_versions)})
     return _finalize(
         ctx, worker_db, session_id,
         "I hit my step limit for one request. The edits so far are saved — "
