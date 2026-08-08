@@ -9861,13 +9861,7 @@ def fetch_url(ctx, url, as_kind=None):
         shutil.rmtree(workdir, ignore_errors=True)
         return (f"Could not download that link — {e}. Tell the user that "
                 "plainly and suggest they upload the file instead. Do NOT "
-                "claim anything was added. Then DO NOT stop at the apology: "
-                "if the user wanted MUSIC, immediately search_music the "
-                "licensed pool for the closest match (same mood/tempo — for "
-                "a known song, describe its feel, e.g. 'epic emotional "
-                "cinematic organ' for Interstellar) and OFFER it or place "
-                "it ducked under speech, saying it is a licensed "
-                "sound-alike they can swap the exact file into later.")
+                "claim anything was added.")
     except Exception as e:
         shutil.rmtree(workdir, ignore_errors=True)
         return (f"Could not download that link ({str(e)[:200]}). Tell the "
