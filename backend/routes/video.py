@@ -2181,6 +2181,46 @@ def original_upload_ready(user_id, project_id):
             patch["duration_drift"] = drift
         cur.execute("""UPDATE assets SET bytes = %s, meta = meta || %s
                        WHERE id = %s""", (nbytes, Json(patch), asset_id))
+        # Shorts (round 99): generated clips share this object BY KEY, and a
+        # run that happened while the original was still uploading deferred
+        # its exports. The bytes are real now — flip the children's copies
+        # and fan the waiting finals out.
+        cur.execute("SELECT user_id, meta FROM projects WHERE id = %s",
+                    (project_id,))
+        prow = cur.fetchone()
+        shorts_meta = ((prow or {}).get("meta") or {}).get("shorts") or {}
+        if shorts_meta.get("finals_deferred"):
+            cur.execute("""UPDATE assets SET meta = meta || %s
+                           WHERE kind = 'original' AND storage_key = %s
+                             AND project_id IN (SELECT id FROM projects
+                                            WHERE parent_project_id = %s)""",
+                        (Json({"upload_state": "ready",
+                               "upload_progress": 1.0}), key, project_id))
+            released = 0
+            for c in shorts_meta.get("clips") or []:
+                cid, v = c.get("child_project_id"), c.get("edl_version")
+                if not cid or not v or not c.get("final_deferred"):
+                    continue
+                cur.execute("""SELECT 1 FROM video_jobs
+                               WHERE project_id = %s AND type = 'final'
+                               LIMIT 1""", (cid,))
+                if cur.fetchone():
+                    continue
+                _enqueue(cur, cid, prow["user_id"], "final",
+                         {"edl_version": v, "source": "shorts_deferred"})
+                c["final_deferred"] = False
+                released += 1
+            if released:
+                shorts_meta["finals_deferred"] = False
+                cur.execute("""UPDATE projects
+                               SET meta = COALESCE(meta, '{}'::jsonb)
+                                   || jsonb_build_object('shorts',
+                                                         %s::jsonb)
+                               WHERE id = %s""",
+                            (json.dumps(shorts_meta), project_id))
+                print(f"[uploads] project {project_id}: original landed — "
+                      f"released {released} deferred short export(s)",
+                      flush=True)
         if drift:
             # Re-index from the ORIGINAL. No client_proxy_key on the payload,
             # so the indexer takes the ordinary trusted path — which is the
@@ -4953,6 +4993,7 @@ def shorts_board(user_id, project_id):
                 "final": ({"state": fj["state"], "progress": fj["progress"],
                            "error": fj["error"]} if fj else None),
                 "final_asset_id": renders.get(cid),
+                "final_deferred": bool(c.get("final_deferred")),
             })
         status = meta.get("status")
         if j and j["state"] == "failed" and status not in ("ready", "gated"):

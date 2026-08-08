@@ -517,6 +517,12 @@ def run_shorts_plan(worker_db, job):
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     if not original or not original.get("sha256"):
         raise RuntimeError("the video is still being analyzed")
+    # Proxy-first uploads: the project is editable off the browser proxy while
+    # the full-resolution original is STILL UPLOADING. Finals read the
+    # original, so cutting proceeds now and the exports are deferred — the
+    # backend's original-ready hook fans them out the moment the bytes land.
+    original_pending = (original.get("meta") or {}) \
+        .get("upload_state") == "pending"
     idx_row = worker_db.run(dbx.get_index_by_sha, original["sha256"])
     if not idx_row:
         raise RuntimeError("the video is still being analyzed")
@@ -591,6 +597,7 @@ def run_shorts_plan(worker_db, job):
             "started_at": shorts_meta.get("started_at") or _now_iso(),
             "reference_asset_id": ref["id"] if ref else None,
             "style_profile": style,
+            "finals_deferred": bool(original_pending),
             "clips": clips,
         }
         worker_db.run(_save_shorts_meta, project_id, shorts_meta)
@@ -621,9 +628,13 @@ def run_shorts_plan(worker_db, job):
                     style, workdir)
                 clip["edl_version"] = version
                 clip["seed_notes"] = notes[-6:]
-                worker_db.run(dbx.enqueue_job, clip["child_project_id"],
-                              job["user_id"], "final",
-                              {"edl_version": version, "source": "shorts"})
+                if original_pending:
+                    clip["final_deferred"] = True
+                else:
+                    worker_db.run(dbx.enqueue_job, clip["child_project_id"],
+                                  job["user_id"], "final",
+                                  {"edl_version": version,
+                                   "source": "shorts"})
                 worker_db.run(_save_shorts_meta, project_id, shorts_meta)
             worker_db.run(dbx.set_progress, job_id,
                           35 + int(58 * (i + 1) / n))
@@ -646,14 +657,21 @@ def run_shorts_plan(worker_db, job):
                     bits.append("music matched to its tempo")
                 styled = (" I styled them after your reference — "
                           + ", ".join(bits) + ".")
+            tail = ("They're rendering on your Shorts board now — each one "
+                    "is its own project, so open any of them and tell me "
+                    "what to change.")
+            if original_pending:
+                tail = ("They're built and on your Shorts board — your "
+                        "full-resolution video is still uploading in the "
+                        "background, and each one exports automatically the "
+                        "moment it lands. Open any of them meanwhile and "
+                        "tell me what to change.")
             worker_db.run(
                 dbx.add_message, session_id, "assistant",
                 f"I watched all {mins:.0f} minutes and cut {n} short"
                 f"{'s' if n != 1 else ''} ({min(lens):.0f}-{max(lens):.0f}s "
                 "each), reframed to 9:16 with captions and emphasis "
-                f"punch-ins.{styled} They're rendering on your Shorts "
-                "board now — each one is its own project, so open any of "
-                "them and tell me what to change.",
+                f"punch-ins.{styled} {tail}",
                 {"kind": "shorts_ready", "clips": n})
 
         worker_db.run(dbx.set_progress, job_id, 97)
