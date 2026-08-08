@@ -1487,7 +1487,8 @@ ALTERNATIVE_HINTS = [
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
      "What I CAN do: score the edit with music on any time range — a "
-     "license-clean track I find online by genre/vibe, or the user's own "
+     "track I find online by genre/vibe, any link they paste (a song URL, "
+     "YouTube, SoundCloud...), or the user's own "
      "upload — loop it to fill the video, fade it in and out, start it "
      "partway in, swap one track for another, make it louder or quieter, "
      "or remove it. I can also lay an uploaded voiceover over the edit "
@@ -1530,9 +1531,9 @@ def _nearest_alternative(user_text):
                     and not config.URL_FETCH_ENABLED:
                 continue
             # A deployment with music search off must not offer to find
-            # tracks (round 98 — the bundled library is retired; found
-            # music replaced it).
-            if "license-clean track I find online" in hint \
+            # tracks (round 98 — found music replaced the deleted bundled
+            # library).
+            if "track I find online" in hint \
                     and not music_search.available():
                 return ("What I CAN do: mix music you upload under the edit "
                         "on any time range, loop it to fill the video, fade "

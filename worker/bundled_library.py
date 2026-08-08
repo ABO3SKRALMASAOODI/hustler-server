@@ -1,13 +1,16 @@
-"""Shared machinery for media BUNDLED IN THE WORKER IMAGE (music, sfx).
+"""Shared machinery for media BUNDLED IN THE WORKER IMAGE (today: sfx).
 
-Extracted when the sfx pack landed. The alternative was a second copy of the
-resolution logic, and the resolution logic is the security boundary: a fix
-applied to one copy and not the other is exactly how a whitelist quietly
-becomes a prefix match.
+Extracted when the sfx pack landed, originally shared with the music
+library — which is gone (2026-08-08: its tracks were copied to R2 under
+legacy-music/ and every EDL reference rewritten to those plain storage
+keys, so nothing resolves `library:` anymore). The class survives because
+the sfx pack still needs exactly this resolution logic, and the resolution
+logic is the security boundary: a fix applied to one copy and not another
+is exactly how a whitelist quietly becomes a prefix match.
 
-Two design decisions carried over from the music library:
+Two design decisions:
 
-1. Assets are BUNDLED (worker/music/, worker/sfx/), not stored in R2. The
+1. Assets are BUNDLED (worker/sfx/), not stored in R2. The
    Dockerfile's `COPY . .` ships them with the code, so a deployed worker can
    never be in the state "code knows about a track that isn't there". It also
    costs zero download per render.

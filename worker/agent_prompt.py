@@ -175,11 +175,15 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     import sfx_library
     if music_search.available():
         lines.append(
-            "Music: no bundled tracks — search_music finds LICENSE-CLEAN "
-            "tracks online by genre/vibe ('dark phonk', 'lofi chill "
-            "beat'), fetch_music downloads one ready for add_music. A "
-            "SPECIFIC or trending song only the user can provide (upload "
-            "or a clip carrying it).")
+            "Music: no bundled tracks — the web is the library. "
+            "search_music finds tracks online by genre/vibe ('dark phonk', "
+            "'lofi chill beat'), fetch_music downloads one ready for "
+            "add_music; every hit carries its license terms (public "
+            "domain, credit, or NON-COMMERCIAL-ONLY) — state them, the "
+            "user decides. Any LINK they paste (song URL, YouTube, "
+            "SoundCloud...) fetch_url ingests as music. A trending "
+            "platform sound only they can provide (upload or a clip "
+            "carrying it).")
     if sfx_library.CATALOG:
         cats = sorted({t["category"] for t in sfx_library.CATALOG})
         lines.append(

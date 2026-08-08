@@ -31,7 +31,6 @@ import db as dbx
 import gradelut
 import graphics
 import media
-import music_library
 import sfx_library
 import screenframe
 import sheets
@@ -1187,25 +1186,12 @@ def sfx_source(key, fetch):
 
 
 def music_source(key, fetch):
-    """Local path for a music item's audio.
+    """Local path for a music item's audio — every key is a bucket object.
 
-    Built-in library tracks ship inside the image, so there is nothing to
-    download — and handing "library:<slug>" to object storage as a key would
-    fail every render that used one. Everything else is a real bucket object.
-    Module-level (not a closure) so this branch is unit-testable: the wiring
-    is exactly what a filtergraph test cannot see."""
-    if music_library.is_library_ref(key):
-        local = music_library.local_path(key)
-        if not local or not os.path.exists(local):
-            # Only reachable if a track was withdrawn from the catalog while
-            # an older EDL still referenced it. Fail loudly — the alternative
-            # is rendering with the music silently missing, after the agent
-            # already told the user it added some.
-            raise media.MediaError(
-                f"Music track '{key}' is no longer in the built-in library, "
-                f"so this edit cannot be rendered as saved. Swap it for "
-                f"another track and re-render.")
-        return local
+    The bundled `library:` scheme is gone: its 24 tracks were copied to R2
+    under legacy-music/ and every EDL row in the database was rewritten to
+    those plain storage keys (2026-08-08), so the render path has exactly
+    one kind of music reference again."""
     return fetch(key)
 
 

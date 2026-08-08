@@ -15,9 +15,12 @@ retired from the music library, and the whole synthesized SFX pack is retired
 every EDL that already references the asset keeps rendering forever.
 """
 
+import importlib
 import os
 import sys
 import types
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -25,7 +28,7 @@ import agent_loop                                            # noqa: E402
 import agent_prompt                                          # noqa: E402
 import agent_tools                                           # noqa: E402
 import llm                                                   # noqa: E402
-import music_library                                         # noqa: E402
+import renderer                                              # noqa: E402
 import sfx_library                                           # noqa: E402
 
 
@@ -149,33 +152,29 @@ def test_a_rewrite_that_still_flips_is_discarded(monkeypatch):
     assert out == _RU_REPLY                    # original, not a second flip
 
 
-# ── the retired track: gone from the shop, alive in the archive ──────────
+# ── the music library: deleted, not retired ──────────────────────────────
 
-_BAD = "library:upbeat-50-over-the-speed-limit"
-
-
-def test_retired_track_is_not_offered_anywhere():
-    slugs = {t["slug"] for t in music_library.CATALOG}
-    assert "upbeat-50-over-the-speed-limit" not in slugs
-    assert all(not t.get("retired") for t in music_library.CATALOG)
-    assert not any(t["slug"] == "upbeat-50-over-the-speed-limit"
-                   for t in music_library.browse("upbeat"))
-
-
-def test_retired_track_still_resolves_for_the_renderer():
-    t = music_library.resolve(_BAD)
-    assert t and t.get("retired") is True
-    path = music_library.local_path(_BAD)
-    assert path and os.path.exists(path)       # old EDLs keep rendering
+def test_music_library_module_is_gone():
+    """2026-08-08: the bundled pack was deleted outright — its 24 tracks
+    were copied to R2 under legacy-music/ and every EDL row in the
+    database rewritten to those plain storage keys, so nothing needs to
+    resolve `library:` ever again."""
+    sys.modules.pop("music_library", None)
+    with pytest.raises(ImportError):
+        importlib.import_module("music_library")
+    assert not os.path.isdir(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "music"))
 
 
-def test_add_music_refuses_the_retired_track():
-    track, err = agent_tools._resolve_music(None, _BAD)
-    assert track is None and "retired" in err
-    # A living sibling still resolves normally.
-    ok, err2 = agent_tools._resolve_music(
-        None, "library:upbeat-a-small-town-on-pluto")
-    assert err2 is None and ok["library"] is True
+def test_renderer_treats_every_music_key_as_a_storage_object():
+    # The migrated legacy keys ride the ordinary fetch path — no scheme,
+    # no special case, exactly one kind of music reference.
+    seen = []
+    out = renderer.music_source("legacy-music/hiphop-abducted.mp3",
+                                lambda k: (seen.append(k), "/tmp/x.mp3")[1])
+    assert out == "/tmp/x.mp3"
+    assert seen == ["legacy-music/hiphop-abducted.mp3"]
 
 
 # ── the SFX pack: fully retired, nothing breaks ──────────────────────────

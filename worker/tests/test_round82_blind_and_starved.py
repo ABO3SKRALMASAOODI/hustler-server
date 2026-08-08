@@ -341,15 +341,15 @@ class _MusicCtx:
     job = {"user_id": 1}
 
 
-def test_music_listing_tells_the_agent_not_to_substitute_silently():
+def test_music_search_tells_the_agent_not_to_substitute_silently():
     """'i want techno hardcore' x3 -> hip-hop x3, undisclosed, user gone.
-    The listing itself now carries the honesty rule and the way out (the
-    user's own track via fetch_url or upload)."""
-    out = agent_tools.list_music_library(_MusicCtx(), mood="hiphop")
-    low = out.lower()
-    assert "do not silently substitute" in low
-    assert "fetch_url" in out
-    assert "there is no techno" in low
+    The bundled listing that carried the honesty rule is deleted; the rule
+    now rides the search_music tool description the model reads on every
+    turn: substitution must be said, and a specific song's way in is a
+    link (fetch_url) or the user's own file."""
+    desc = agent_tools.TOOLS["search_music"][1].lower()
+    assert "substituting silently" in desc
+    assert "fetch_url" in desc
 
 
 # ── 5. a blind index says so instead of letting the agent guess ─────────

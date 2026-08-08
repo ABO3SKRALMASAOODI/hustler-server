@@ -14,7 +14,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import captions as caplib                                    # noqa: E402
-import music_library                                         # noqa: E402
 import subject                                               # noqa: E402
 import taste                                                 # noqa: E402
 from schemas import STYLIZE_KINDS, validate_edl              # noqa: E402
@@ -232,13 +231,5 @@ check("two cards are too few to call a pattern",
 check("asking for the mix suppresses it",
       not fired(_crit(deck, ask="use a different template for each line"),
                 "slide deck"))
-
-print("== library tempo lookup ==")
-t = music_library.measured_tempo("library:hiphop-abducted")
-check("a shipped track has an offline tempo measurement", t is not None)
-check("...that clears the 0.5 sync gate the in-turn estimate missed",
-      t[1] >= 0.5 and 60 <= t[0] <= 200)
-check("an unknown reference measures nothing",
-      music_library.measured_tempo("library:not-a-track") is None)
 
 print(f"\n{PASS} checks passed")

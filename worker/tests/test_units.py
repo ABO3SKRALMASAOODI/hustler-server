@@ -3915,11 +3915,10 @@ check("stack: states never overlap (no stacked duplicate phrases)",
 check("composer: an explicit font overrides the preset's family",
       r"\fnPoppins Black" in _stack(font="Poppins Black")[0]["text"])
 
-print("== Round-25: music library + fitting ==")
+print("== Round-25: music fitting ==")
 import agent_prompt                                           # noqa: E402
-import music_library                                          # noqa: E402
 from agent_tools import (swap_music, set_music_fit,           # noqa: E402
-                         list_music_library, _resolve_music)
+                         _resolve_music)
 
 # --- the silent-drop guard (round-24's lesson, applied to music) ---
 # A fitting field declared in only SOME layers is dropped without a trace:
@@ -3983,33 +3982,11 @@ _d2 = schemas.describe_edl(schemas.validate_edl(_d2s, 30.0).model_dump(), 30.0)
 check("music: a fit-only change looks different in the diff line", _d1 != _d2)
 check("music: the diff line names the fit", "looped" in _d2)
 
-# --- library resolution is a WHITELIST, not a prefix match ---
-# renderer._fetch downloads whatever key it is handed with no project scoping,
-# so a loose test here would be a read primitive over the whole bucket.
-check("library: a non-library key is not a library ref",
-      not music_library.is_library_ref("music/1/a.mp3"))
-check("library: an unknown slug does not resolve",
-      music_library.resolve("library:no-such-track-xyz") is None)
-check("library: path traversal does not resolve",
-      music_library.resolve("library:../../../etc/passwd") is None
-      and music_library.local_path("library:../../etc/passwd") is None)
-check("library: a plain 'library'-prefixed key is not a ref",
-      music_library.resolve("library/music/../secret.mp4") is None)
-check("library: every catalogued track resolves to a file inside music/",
-      all(music_library.local_path(music_library.ref(t["slug"]))
-          .startswith(music_library.MUSIC_DIR)
-          for t in music_library.CATALOG))
-check("library: every catalogued track declares a CC0/public-domain licence",
-      all(str(t.get("license", "")).upper().replace("-", "").startswith(
-          ("CC0", "PUBLICDOMAIN", "PD")) for t in music_library.CATALOG))
-check("library: every catalogued mood is a known mood",
-      all(t.get("mood") in music_library.MOODS
-          for t in music_library.CATALOG))
-
-_bad_ref = _resolve_music(ToolCtx(json.loads(json.dumps(_old))),
-                          "library:definitely-not-real")
-check("library: add_music rejects an invented slug",
-      _bad_ref[0] is None and _bad_ref[1].startswith("REJECTED"))
+# (The bundled music library and its whitelist-resolution checks lived
+# here until 2026-08-08, when the pack was deleted outright — tracks
+# copied to R2 under legacy-music/, every EDL reference rewritten to
+# those plain storage keys. The sfx pack's copy of the same security
+# property is still pinned in the Round-26 section below.)
 
 # --- swap / refit behaviour the user asked for by name ---
 _sc = ToolCtx(json.loads(json.dumps(_old)))
@@ -4058,7 +4035,7 @@ check("add_music accepts an offset inside the track",
 # signature moves, a version IS written and a render DOES happen — and the
 # audio is byte-identical. Pin the filters themselves.
 _mf_edl = schemas.validate_edl({"keep": [[0.0, 30.0]]}, 30.0).model_dump()
-_mf_item = {"storage_key": "library:demo", "start": 0.0, "end": 30.0,
+_mf_item = {"storage_key": "legacy-music/demo.mp3", "start": 0.0, "end": 30.0,
             "gain_db": -18.0, "duck": False, "offset_s": 12.0,
             "fade_in_s": 1.0, "fade_out_s": 2.0, "loop": True}
 _gf = build_filtergraph(_mf_edl, 30.0, True, Timeline(_mf_edl["keep"]), None,
@@ -4086,22 +4063,19 @@ check("renderer: a pre-fitting music item gains no fades",
       "afade" not in _go and "atrim=start=0.000:end=15.000" in _go)
 
 # --- the WIRING a filtergraph test cannot see ---
-# A library ref must never be handed to object storage as a key: it is not an
-# object, and every render using one would fail. This is the branch that was
-# actually broken while every filtergraph assertion above still passed.
+# One kind of music reference: a storage key. The migrated legacy-music/
+# keys must ride exactly the same fetch as any other object — a special
+# case here is where the round-25 render-failure bug lived.
 from renderer import music_source                              # noqa: E402
 _fetched = []
 check("renderer: a normal music key is fetched from storage",
       music_source("music/1/a.mp3", lambda k: (_fetched.append(k), "/tmp/x")[1])
       == "/tmp/x" and _fetched == ["music/1/a.mp3"])
-_never = []
-try:
-    music_source("library:not-in-catalog", lambda k: _never.append(k))
-    _lib_raised = False
-except Exception:
-    _lib_raised = True
-check("renderer: a missing library track fails loudly, not silently",
-      _lib_raised and _never == [])
+_legacy = []
+check("renderer: a migrated legacy-music key is an ordinary storage fetch",
+      music_source("legacy-music/hiphop-abducted.mp3",
+                   lambda k: (_legacy.append(k), "/tmp/y")[1]) == "/tmp/y"
+      and _legacy == ["legacy-music/hiphop-abducted.mp3"])
 
 # --- honesty: the prompt must no longer send users to the paperclip ---
 check("prompt: music no longer requires an upload",
@@ -4113,11 +4087,10 @@ check("prompt: music no longer requires an upload",
 # advertise a library an image doesn't ship, in either direction.
 check("prompt: capability-neutral (no library claim baked in)",
       "list_music_library" not in agent_prompt.system_prompt())
-# Round 98: the bundled library is RETIRED from the agent's surface —
-# music is found online (search_music/fetch_music). The state block offers
-# search exactly when the capability is on, never the old library; the
-# resolver in music_library stays alive for old EDLs but is never
-# advertised.
+# Round 98: found music (search_music/fetch_music) replaced the bundled
+# library, and the library itself is now DELETED (2026-08-08; old EDLs
+# were migrated to plain legacy-music/ storage keys). The state block
+# offers search exactly when the capability is on, never the old library.
 import config as _cfg                                         # noqa: E402
 import music_search                                           # noqa: E402
 _sb_kwargs = dict(keep_line=None, captions_line=None, program_lines=None)
@@ -4244,15 +4217,12 @@ check("sfx library: path traversal does not resolve",
       and sfx_library.local_path("sfx:../../../etc/passwd") is None)
 check("sfx library: a bare bucket key is not a library ref",
       not sfx_library.is_library_ref("media/1/secret.mp4"))
-# The two packs share one resolver but must NOT share a namespace: an sfx is
-# not valid music (it would loop and duck) and vice versa.
-check("sfx library: music refs do not resolve as sfx",
+# The old music scheme must stay foreign to the sfx namespace: a stale
+# `library:` string from ancient history is nothing, not a sound.
+check("sfx library: old music refs do not resolve as sfx",
       sfx_library.resolve("library:hiphop-abducted") is None)
-check("music library: sfx refs do not resolve as music",
-      music_library.resolve("sfx:whoosh") is None)
-check("both packs resolve through the one shared whitelist",
-      isinstance(sfx_library._LIB, bundled_library.Library)
-      and isinstance(music_library._LIB, bundled_library.Library))
+check("the sfx pack resolves through the shared whitelist class",
+      isinstance(sfx_library._LIB, bundled_library.Library))
 for _t in sfx_library.CATALOG:
     assert str(_t.get("license", "")).upper().startswith("CC0"), _t.get("slug")
 check("sfx library: every shipped sound is CC0", True)
@@ -4261,10 +4231,8 @@ check("sfx library: every shipped sound has a real file",
           for t in sfx_library.CATALOG))
 check("sfx library: every category is one the agent can filter by",
       {t["category"] for t in sfx_library.CATALOG} <= set(sfx_library.CATEGORIES))
-check("_track_name resolves BOTH packs to a title, not a raw ref",
-      _track_name(None, "sfx:whoosh") == "Whoosh"
-      and not _track_name(None,
-                          "library:hiphop-abducted").startswith("library:"))
+check("_track_name resolves the sfx pack to a title, not a raw ref",
+      _track_name(None, "sfx:whoosh") == "Whoosh")
 
 # --- the WIRING a filtergraph test cannot see ------------------------------
 # The round-25 bug: music_library was imported into the renderer and never

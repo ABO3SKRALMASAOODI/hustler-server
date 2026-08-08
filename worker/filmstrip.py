@@ -317,18 +317,13 @@ def build_by_seek(src, out_path, duration_s, n_tiles, timeout=None):
 def _local_for_ref(ref, workdir, tag):
     """A readable local path for one timeline reference, or None.
 
-    Two kinds of reference reach the timeline and only one of them is a
-    storage object: a bundled `library:`/`sfx:` track already lives in this
-    image, so it is opened where it is rather than round-tripped through R2.
+    Almost every reference is a storage object; a bundled `sfx:` track is
+    the one exception — it ships in this image, so it is opened where it
+    is rather than round-tripped through R2. (Music's `library:` scheme is
+    gone: those keys were migrated to plain legacy-music/ objects.)
     """
     if not ref:
         return None
-    try:
-        import music_library
-        if music_library.is_library_ref(ref):
-            return music_library.local_path(ref)
-    except Exception:
-        pass
     try:
         import sfx_library
         if sfx_library.is_library_ref(ref):

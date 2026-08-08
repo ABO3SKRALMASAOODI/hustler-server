@@ -23,7 +23,6 @@ import matte
 import personseg
 import media
 import model_prices
-import music_library
 import music_search
 import perception
 # The takeover's geometry (how far the camera travels, where it aims) is
@@ -816,13 +815,15 @@ def list_assets(ctx, kind=None):
     if not rows:
         if sel == kinds["music"]:
             return ("No audio uploaded to this project — but you can FIND "
-                    "music yourself: search_music looks up license-clean "
-                    "tracks online (by vibe/genre) and fetch_music "
-                    "downloads one, ready for add_music; list_sfx_library() "
-                    "has one-shot sound effects. Only ask the user to "
-                    "attach a file (paperclip button in chat, mp3/wav/m4a) "
-                    "when they want a SPECIFIC song — e.g. a trending "
-                    "sound, which only they can legally provide.")
+                    "music yourself: search_music looks up tracks online "
+                    "(by vibe/genre) and fetch_music downloads one, ready "
+                    "for add_music; fetch_url ingests any music link the "
+                    "user pastes (song URL, YouTube, SoundCloud...); "
+                    "list_sfx_library() has one-shot sound effects. Only "
+                    "ask the user to attach a file (paperclip button in "
+                    "chat, mp3/wav/m4a) for a track the web cannot reach — "
+                    "e.g. a trending platform sound, which only they can "
+                    "provide.")
         return f"No {kind} assets in this project."
     lines = []
     for a in rows:
@@ -2195,27 +2196,13 @@ def _resolve_music(ctx, storage_key):
     the EDL must store — the caller must use it rather than what it was
     handed, because a VIDEO resolves to the audio extracted from it.
 
-    Three doors. A `library:` reference is looked up in the bundled CC0
-    catalog by EXACT membership and never touches the assets table; an
-    uploaded VIDEO resolves through _audio_from_clip; anything else falls
-    through to the project-asset guard below, which is unchanged — including
+    Two doors. An uploaded VIDEO resolves through _audio_from_clip;
+    anything else falls through to the project-asset guard below — including
     the check that catches the pipeline's own extracted speech track, the
-    cause of the original inaudible-music bug."""
-    if music_library.is_library_ref(storage_key):
-        # Legacy door (round 98): the bundled pack is retired from the
-        # agent's surface — these refs keep RESOLVING so every old EDL and
-        # old chat history still renders, but new music comes from
-        # search_music/fetch_music or the user's own uploads.
-        t = music_library.resolve(storage_key)
-        if not t or t.get("retired"):
-            return None, (
-                f"REJECTED: '{storage_key}' is not an addable bundled "
-                "track (the built-in library is retired). Use search_music "
-                "to find a license-clean track online, or "
-                "list_assets(kind='music') for the user's own uploads.")
-        return {"name": t["title"], "duration_s": t.get("duration_s"),
-                "library": True, "storage_key": storage_key}, None
-
+    cause of the original inaudible-music bug. (The bundled `library:`
+    scheme no longer exists: old EDLs were migrated to plain storage keys,
+    and a stale library: string from ancient chat history lands in the
+    honest not-a-music-asset rejection below.)"""
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
     if asset and asset["kind"] == "audio":
         return None, (
@@ -2238,8 +2225,9 @@ def _resolve_music(ctx, storage_key):
         hint = ("Available music storage_keys: " +
                 "; ".join(a["storage_key"] for a in avail)
                 if avail else "No music uploaded to this project — "
-                              "search_music finds license-clean tracks "
-                              "online, fetch_music downloads one.")
+                              "search_music finds tracks online, "
+                              "fetch_music downloads one, and fetch_url "
+                              "ingests any music link the user pastes.")
         return None, f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
     return {"name": os.path.basename(storage_key),
             "duration_s": asset.get("duration_s"), "library": False,
@@ -2247,9 +2235,9 @@ def _resolve_music(ctx, storage_key):
 
 
 def search_music(ctx, query, min_seconds=None, max_seconds=None):
-    """READ: find license-clean music online (round 98) — the replacement
-    for the retired bundled pack. Results carry license + author so the
-    obligation travels with the track instead of vanishing into an export."""
+    """READ: find music on the open web (round 98; the bundled pack is
+    deleted). Results carry license + author so the obligation travels
+    with the track instead of vanishing into an export."""
     if not music_search.available():
         return ("REJECTED: music search is disabled on this deployment — "
                 "use the user's uploads (list_assets(kind='music')) or "
@@ -2324,61 +2312,6 @@ def fetch_music(ctx, id):
             f"add_music(storage_key='{key}') — set_music_fit retimes it, "
             "get_audio_analysis(asset_key) measures its BPM/beats for "
             "beat_align_cuts.")
-
-
-def list_music_library(ctx, mood=None):
-    """Browse the built-in CC0 tracks. Every one is cleared for use in an
-    exported video, so no upload is needed to score an edit."""
-    if not music_library.CATALOG:
-        return ("The built-in music library is empty in this deployment. "
-                "Use list_assets(kind='music') for the user's own uploads, "
-                "or ask them to attach a file.")
-    m = (mood or "").strip().lower()
-    if m and m not in music_library.MOODS:
-        return (f"REJECTED: unknown mood '{mood}'. Available moods: "
-                + ", ".join(music_library.MOODS))
-    hits = music_library.browse(m or None)
-    if not hits:
-        return (f"No '{m}' tracks. Available moods: "
-                + ", ".join(sorted({t['mood'] for t in music_library.CATALOG})))
-    # What this user has already been given, in their OTHER projects. Nothing
-    # in a turn could see that before, so the same handful of tracks came back
-    # video after video until a customer wrote "do not use the exact background
-    # music as previous projects". Marked, not hidden: a repeat is fine when
-    # the track is genuinely right, and it is their call, not ours.
-    used = set()
-    try:
-        used = set(ctx.db.run(dbx.music_used_by_user, ctx.job["user_id"],
-                              ctx.project_id))
-    except Exception:
-        used = set()
-    head = (f"{len(hits)} built-in track(s)"
-            + (f" for mood '{m}'" if m else "") +
-            ". Pass the library: reference to add_music.\n"
-            # A real session asked for "techno hardcore" three times and got
-            # hip-hop three times, silently — the library has no electronic
-            # genre and the agent kept substituting without saying so. The
-            # user left. Substitution is fine; UNDISCLOSED substitution is
-            # what loses them.
-            "These moods are ALL the built-in music — there is no techno/"
-            "EDM/phonk/rock/metal category. If the user asked for a genre "
-            "outside this list, do NOT silently substitute: say the library "
-            "doesn't have that genre, offer the closest fit from below, and "
-            "offer the real thing — they can paste a LINK to a track "
-            "(fetch_url) or upload their own audio file, and you'll score "
-            "the edit with it.\n")
-    lines = []
-    for t in hits:
-        ref = f"library:{t['slug']}"
-        tag = "  [ALREADY USED in this user's earlier projects]" \
-            if ref in used else ""
-        lines.append(f"  {ref} — {music_library.describe(t)}{tag}")
-    if used & {f"library:{t['slug']}" for t in hits}:
-        head += ("Tracks marked ALREADY USED were scored onto this user's "
-                 "other videos — prefer a fresh one unless they asked for "
-                 "that specific track, so their videos do not all sound the "
-                 "same.\n")
-    return head + "\n".join(lines)
 
 
 def _speech_overlap_s(ctx, edl, start_out, end_out):
@@ -2557,21 +2490,16 @@ def _upload_name(ctx, key):
 
 
 def _music_name(ctx, key):
-    """Display name for a music reference. Library refs aren't paths, so
-    basename() would print the raw 'library:slug' at the user."""
-    t = music_library.resolve(key)
-    if t:
-        return t["title"]
+    """Display name for a music reference — the upload/fetch filename."""
     return _upload_name(ctx, key)
 
 
 def _track_name(ctx, key):
-    """Display name for ANY audio reference — music, sfx or upload. Both
-    bundled schemes resolve to a real title; everything else is an upload."""
-    for lib in (music_library, sfx_library):
-        t = lib.resolve(key)
-        if t:
-            return t["title"]
+    """Display name for ANY audio reference — sfx or upload. A bundled
+    `sfx:` ref resolves to a real title; everything else is an upload."""
+    t = sfx_library.resolve(key)
+    if t:
+        return t["title"]
     return _upload_name(ctx, key)
 
 
@@ -11240,49 +11168,32 @@ def _flatline_note(p):
 
 
 def _asset_audio_analysis(ctx, asset_key):
-    """Tempo/beats/energy for a music reference — a project upload (cached
-    on the asset's meta) or a bundled library track (cached per turn)."""
-    if music_library.is_library_ref(asset_key):
-        t = music_library.resolve(asset_key)
-        if not t:
-            return (f"REJECTED: '{asset_key}' is not a bundled track (the "
-                    "built-in library is retired) — analyze an uploaded or "
-                    "fetched music asset by its storage_key instead.")
-        p = ctx._asset_perception.get(asset_key)
-        if p is None:
-            try:
-                p = perception.analyze_audio(
-                    music_library.local_path(asset_key))
-            except Exception as e:
-                return (f"Audio analysis failed for that track "
-                        f"({str(e)[:160]}).")
-            ctx._asset_perception[asset_key] = p
-        name = t["title"]
-    else:
-        asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
-        # A VIDEO the user wants the song from is analyzed like any other
-        # track — beat-aligning cuts to it is the whole point of asking.
-        if asset and asset["kind"] == "video_clip":
-            asset, _note, err = _audio_from_clip(ctx, asset)
-            if err:
-                return err
-            asset_key = asset["storage_key"]
-        if not asset or asset["kind"] != "music":
-            return (f"REJECTED: '{asset_key}' is not a music asset in this "
-                    "project. Analyze uploads from list_assets(kind='music') "
-                    "or a library: reference.")
-        p = ctx._asset_perception.get(asset_key)
-        if p is None:
-            try:
-                local = _asset_local_path(ctx, asset)
-                p = perception.get_or_compute_for_asset(ctx.db, dbx, asset,
-                                                        local)
-            except Exception as e:
-                return (f"Audio analysis failed for that file "
-                        f"({str(e)[:160]}).")
-            ctx._asset_perception[asset_key] = p
-        name = (asset.get("meta") or {}).get("filename") or \
-            os.path.basename(asset_key)
+    """Tempo/beats/energy for a music reference — a project upload or
+    fetched track (cached on the asset's meta)."""
+    asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+    # A VIDEO the user wants the song from is analyzed like any other
+    # track — beat-aligning cuts to it is the whole point of asking.
+    if asset and asset["kind"] == "video_clip":
+        asset, _note, err = _audio_from_clip(ctx, asset)
+        if err:
+            return err
+        asset_key = asset["storage_key"]
+    if not asset or asset["kind"] != "music":
+        return (f"REJECTED: '{asset_key}' is not a music asset in this "
+                "project. Analyze uploads from list_assets(kind='music') "
+                "or a fetched track's storage_key.")
+    p = ctx._asset_perception.get(asset_key)
+    if p is None:
+        try:
+            local = _asset_local_path(ctx, asset)
+            p = perception.get_or_compute_for_asset(ctx.db, dbx, asset,
+                                                    local)
+        except Exception as e:
+            return (f"Audio analysis failed for that file "
+                    f"({str(e)[:160]}).")
+        ctx._asset_perception[asset_key] = p
+    name = (asset.get("meta") or {}).get("filename") or \
+        os.path.basename(asset_key)
     out = (f"Audio analysis of '{name}' (times are seconds INTO THE "
            "TRACK — e.g. an add_music offset_s to start on the drop):\n"
            "- " + "\n- ".join([_describe_tempo(p), _describe_beats(p),
@@ -11467,7 +11378,7 @@ def get_audio_analysis(ctx, asset_key=None):
     if not ctx.has_main_video:
         return ("REJECTED: there is no main video to analyze on this "
                 "image/clip-only program. Pass asset_key to analyze an "
-                "uploaded music file or a library: track instead.")
+                "uploaded or fetched music file instead.")
     try:
         p = _get_perception(ctx)
     except Exception as e:
@@ -11765,18 +11676,15 @@ def _music_program_beats(ctx, edl, bpm=None, every_s=None, key=None):
     p = ctx._asset_perception.get(item["storage_key"])
     if p is None:
         try:
-            if music_library.is_library_ref(item["storage_key"]):
-                p = perception.analyze_audio(
-                    music_library.local_path(item["storage_key"]))
-            else:
-                asset = ctx.db.run(dbx.asset_by_key, ctx.project_id,
-                                   item["storage_key"])
-                if not asset:
-                    return None, None, (
-                        "Could not analyze the music in this edit — its file "
-                        "is not a project asset any more.")
-                p = perception.get_or_compute_for_asset(
-                    ctx.db, dbx, asset, _asset_local_path(ctx, asset))
+            asset = ctx.db.run(dbx.asset_by_key, ctx.project_id,
+                               item["storage_key"])
+            if not asset:
+                return None, None, (
+                    "Could not analyze the music in this edit — its file "
+                    "is not a project asset any more. Fetch or upload a "
+                    "fresh track and swap_music to it first.")
+            p = perception.get_or_compute_for_asset(
+                ctx.db, dbx, asset, _asset_local_path(ctx, asset))
         except Exception as e:
             return None, None, (f"Could not analyze the music in this edit "
                                 f"({str(e)[:160]}).")
@@ -11784,25 +11692,6 @@ def _music_program_beats(ctx, edl, bpm=None, every_s=None, key=None):
     conf = float(p.get("bpm_conf") or 0.0)
     track_beats = p.get("beats") or []
     if not track_beats or conf < 0.5:
-        # A LIBRARY track was measured once, offline, over its whole length,
-        # by a stronger estimator than anything an agent turn can afford. Look
-        # that up before refusing: "Abducted" scored 0.44 here and 0.62 there,
-        # and a real montage was told its own soundtrack had no beat.
-        lib = (music_library.measured_tempo(item["storage_key"])
-               if item and music_library.is_library_ref(item["storage_key"])
-               else None)
-        if lib and lib[1] >= 0.5:
-            period = 60.0 / lib[0]
-            n = int((hi - lo) / period) + 1
-            beats = [round(lo + k * period, 3) for k in range(n)
-                     if lo + k * period <= hi + 1e-6]
-            if beats:
-                return beats, (f"{lib[0]:g} BPM, measured for this library "
-                               f"track offline (confidence {lib[1]:.2f}) — "
-                               "the in-turn estimate on the streamed audio "
-                               f"was weaker ({conf:.2f}), so the catalogue "
-                               "measurement is used. Phase starts where the "
-                               "music starts."), None
         return None, None, (
             f"REJECTED: the music's own pulse is not clear enough to cut to "
             f"(bpm {p.get('bpm') or 'none'}, confidence {conf:.2f}; needs "
@@ -11814,8 +11703,7 @@ def _music_program_beats(ctx, edl, bpm=None, every_s=None, key=None):
     # at track time t is heard at start - offset + t + k*track_length.
     off = float(item.get("offset_s") or 0.0)
     # Length of the analyzed audio, straight from the envelope it produced —
-    # the perception sidecar carries no duration of its own, and the asset
-    # row's can be absent on a library track.
+    # the perception sidecar carries no duration of its own.
     dur = (len(p.get("energy") or []) * float(p.get("energy_bin_s") or 0.5)
            or track_beats[-1] + 1.0)
     beats, cycle = [], 0
@@ -12542,16 +12430,18 @@ TOOLS = {
                                          "items": {"type": "string"}},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
-    "search_music": (search_music, "Search real online catalogs for "
-                     "LICENSE-CLEAN music (commercial use, safe inside the "
-                     "user's export) by genre/vibe words — 'dark phonk', "
-                     "'lofi chill beat', 'cinematic piano', 'upbeat funk'. "
-                     "Search by what the video IS, not a generic mood. "
-                     "Results carry title, artist, duration and the exact "
-                     "license obligation. min_seconds/max_seconds filter "
-                     "length. For a SPECIFIC or TRENDING song only the "
-                     "user can provide the file (upload or a clip carrying "
-                     "it) — say so instead of substituting silently.",
+    "search_music": (search_music, "Search the web's music catalogs by "
+                     "genre/vibe words — 'dark phonk', 'lofi chill beat', "
+                     "'cinematic piano', 'upbeat funk'. Search by what the "
+                     "video IS, not a generic mood. Results carry title, "
+                     "artist, duration and the exact license terms (public "
+                     "domain, credit required, or NON-COMMERCIAL-ONLY) — "
+                     "relay the terms, the user decides. "
+                     "min_seconds/max_seconds filter length. For a "
+                     "SPECIFIC song, a pasted LINK is fetch_url's job; a "
+                     "TRENDING platform sound only the user can provide "
+                     "(upload or a clip carrying it) — say so instead of "
+                     "substituting silently.",
                      {"query": {"type": "string"},
                       "min_seconds": {"type": "number"},
                       "max_seconds": {"type": "number"}}),
@@ -12560,7 +12450,8 @@ TOOLS = {
                     "returns the storage_key for add_music. Listen to it "
                     "(listen_to) before committing it under the program, "
                     "and repeat the license line to the user when it "
-                    "carries a credit obligation.",
+                    "carries an obligation (credit, or "
+                    "non-commercial-only).",
                     {"id": {"type": "string"}}),
     "add_music": (add_music, "Mix music into the edit. The defaults are "
                   "CONTEXT-AWARE: under speech the track sits low as a bed "
@@ -13868,7 +13759,7 @@ TOOLS = {
                            "seconds. Call before beat_align_cuts / "
                            "punch_in_on_emphasis / sound_design_pass, or "
                            "to answer 'what's the tempo'. Pass asset_key "
-                           "(an uploaded music file or library: track) to "
+                           "(an uploaded or fetched music file) to "
                            "analyze that instead — e.g. to find the drop "
                            "for add_music offset_s.",
                            {"asset_key": {"type": "string"}}),

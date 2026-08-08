@@ -1,29 +1,30 @@
-"""Live music search: license-clean tracks found online, on demand.
+"""Live music search: tracks found on the open web, on demand.
 
-Round 98. The bundled 24-track CC0 pack is retired from the agent's surface
-("the same two dozen files for every customer" is why edits sounded like
-stock footage) — the resolver in music_library stays alive so EVERY old EDL
-keeps rendering, but the agent now finds music at request time. Two
-providers, the stock.py idiom exactly:
+Round 98 replaced the bundled 24-track pack with this; the pack itself is
+now fully deleted (its files were copied to R2 under legacy-music/ and
+every EDL in the database rewritten to those plain storage keys,
+2026-08-08). The agent finds music at request time. Two providers, the
+stock.py idiom exactly:
 
   Jamendo   (JAMENDO_CLIENT_ID) — a real music catalog with search and
             per-track Creative Commons licensing; ordered by THIS MONTH'S
-            popularity so results skew current, filtered to
-            commercial-use licenses only. Tried first when configured.
+            popularity so results skew current. Tried first when
+            configured.
   Openverse (keyless)           — the CC audio aggregator (Jamendo, FMA,
-            Wikimedia...) as the always-available fallback, queried with
-            license_type=commercial.
+            Wikimedia...) as the always-available fallback.
 
-LICENSING IS PART OF THE RESULT, not an afterthought: every hit carries its
-license and author, and a track whose license requires attribution SAYS SO
-in the line the agent reads, so the obligation is passed to the user rather
-than silently baked into their export. What this deliberately is NOT: a
-downloader for commercial/trending copyrighted songs — those cannot legally
-ship inside a customer's export at all (platforms license them only inside
-their own apps). The honest trending-sound route stays: the user uploads
-the sound (or the clip carrying it), the edit is CUT TO its grid, and the
-platform adds the licensed audio in-app. The music skill teaches exactly
-that flow.
+LICENSING IS INFORMATION, NOT A WALL. Every hit carries its license and
+author, and the line the agent reads states the obligation outright —
+public domain, credit-required, or NON-COMMERCIAL-ONLY — so the choice is
+made in the conversation, by the person whose video it is, instead of by a
+filter they cannot see. The one family still excluded is no-derivatives
+(ND): syncing music in timed relation with picture is itself an adaptation,
+so an ND track cannot be used in ANY edit, monetized or not — offering one
+would only manufacture a violation. For a SPECIFIC copyrighted song the
+path is the user's own file or link: fetch_url ingests anything a URL can
+reach, and the trending-sound flow (cut to the grid, platform adds the
+licensed audio in-app) stays the honest route for sounds the platforms
+license only inside their own apps.
 
 Downloads go through net_fetch (SSRF policy, byte cap, wall clock) and land
 as ordinary project assets (kind 'music'), so add_music, swap_music,
@@ -60,18 +61,29 @@ def providers():
     return out
 
 
-# License handling: only these ship in a customer's (often monetized)
-# export. NC/ND never pass the filters; a BY obligation is stated, not
-# hidden.
-_OK_LICENSE = re.compile(r"(cc0|pdm|publicdomain|zero|/by/|/by-sa/|^by$|"
-                         r"^by-sa$)", re.I)
+# License handling: the terms are STATED per hit, never silently filtered.
+# The one exclusion is the no-derivatives family — syncing music under
+# picture is itself an adaptation, so an ND track is unusable in any edit.
+_CC_LICENSE = re.compile(r"(cc0|pdm|publicdomain|zero|creativecommons|"
+                         r"^by|/by)", re.I)
 
 
 def _license_note(license_id, author):
     lid = (license_id or "").lower()
-    if "0" in lid or "pdm" in lid or "publicdomain" in lid or "zero" in lid:
+    # "cc0", never a bare "0": version suffixes ("by-4.0", ".../by/3.0/")
+    # contain zeros too, and matching them stamped "public domain — no
+    # obligations" onto BY tracks, suppressing the very credit line this
+    # function exists to deliver.
+    if any(x in lid for x in ("cc0", "pdm", "publicdomain", "zero")):
         return "public domain — no obligations"
     who = author or "the artist"
+    if "nc" in lid:
+        # Checked before by-sa: "by-nc-sa" is NC first — the commercial
+        # restriction is the fact that changes what the user may do.
+        return (f"CC {lid.upper() if len(lid) <= 12 else 'BY-NC'} — "
+                "NON-COMMERCIAL USE ONLY: fine for a personal video, NOT "
+                f"for monetized/business content; credit {who} in the "
+                "caption/description")
     if "by-sa" in lid:
         return (f"CC BY-SA — free for commercial use; credit {who} in the "
                 "caption/description")
@@ -80,12 +92,13 @@ def _license_note(license_id, author):
 
 
 def _license_ok(text):
-    """False for the non-commercial / no-derivatives families — those must
-    never ship inside a customer's (often monetized) export."""
+    """False only for the no-derivatives family — an ND track cannot be
+    synced under a video AT ALL, so offering one would just manufacture a
+    license violation. Everything else is allowed and labeled."""
     t = (text or "").lower()
     if not t:
         return False
-    return not any(x in t for x in ("-nc", "/nc/", "nc-", "-nd", "/nd/"))
+    return not any(x in t for x in ("-nd", "/nd/", "nd-"))
 
 
 def _jamendo_search(query, min_s, max_s, count):
@@ -105,7 +118,7 @@ def _jamendo_search(query, min_s, max_s, count):
     out = []
     for t in (data.get("results") or []):
         lic = t.get("license_ccurl") or ""
-        if not (_OK_LICENSE.search(lic) and _license_ok(lic)):
+        if not (_CC_LICENSE.search(lic) and _license_ok(lic)):
             continue
         url = t.get("audiodownload") or t.get("audio")
         if not url:
@@ -122,9 +135,10 @@ def _jamendo_search(query, min_s, max_s, count):
 
 
 def _openverse_search(query, min_s, max_s, count):
-    # commercial AND modification: syncing music under a video is a
-    # derivative work, so ND licenses must never even be requested.
-    params = {"q": query, "license_type": "commercial,modification",
+    # modification only: syncing music under a video is a derivative work,
+    # so ND licenses must never even be requested. NC results are welcome —
+    # their restriction is stated per hit, not filtered.
+    params = {"q": query, "license_type": "modification",
               "category": "music", "page_size": count}
     data = net_fetch.get_json(OPENVERSE_API, params=params,
                               timeout_s=API_TIMEOUT_S,
