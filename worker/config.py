@@ -307,19 +307,15 @@ FRONTIER_PLANS = {"ai_max"}
 #    a 400 about the effort VALUE, so a provider trimming its enum degrades
 #    one step, not the process.
 AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "max").strip()
-# ROUND 100 SPLITS THE EFFORT BY STEP KIND. "max" everywhere bought back
-# deliberation and then spent it on steps that need none: iteration 0 is the
-# read-the-project-and-plan step — the thinking round 97's history justifies —
-# but every step after is "call the next tool, read its result", and at max
-# effort those dispatch steps THINK FOR MINUTES each. Job 3211 (Aug 8): 21
-# calls, 49k reasoning tokens, 14+ minutes of wall clock — while another
-# user's queued turn starved behind it the whole time. Planning keeps
-# AGENT_REASONING_EFFORT; dispatch runs at this. 'low' rather than 'none'
-# deliberately: the round-97 no-op spirals lived at zero deliberation, and
-# 'low' keeps enough thought to notice a tool result contradicting the plan.
-# "" falls back to AGENT_REASONING_EFFORT on every step (the old behaviour).
+# OPT-IN lever, OFF by default — the owner wants max thinking on EVERY step
+# (round 100 briefly defaulted dispatch steps to 'low' and was told to put it
+# back). "" means every step runs AGENT_REASONING_EFFORT exactly as round 97
+# shipped it. Set to 'low'/'medium' from Render — no deploy — if turn wall
+# clock ever needs trading against depth: it downgrades only the
+# call-the-next-tool steps after iteration 0 (job 3211 spent 49k reasoning
+# tokens/14min mostly on those), never the planning step.
 AGENT_REASONING_EFFORT_DISPATCH = os.getenv(
-    "AGENT_REASONING_EFFORT_DISPATCH", "low").strip()
+    "AGENT_REASONING_EFFORT_DISPATCH", "").strip()
 # Wall-clock for ONE responses-lane call. LLM_TIMEOUT_S (90) is sized for
 # dispatch-grade calls; at effort max the model may THINK for minutes before
 # its first output token, and a timeout here does not fail the turn — it

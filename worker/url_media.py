@@ -248,6 +248,33 @@ def _ytdlp_available():
         return False
 
 
+def _copy_cookies_normalized(src, dst):
+    """Copy the cookie jar, restoring TABS between fields.
+
+    The Netscape format is strictly tab-separated, and the jar reaches
+    production by being pasted through editors and dashboard text fields
+    that quietly flatten tabs to spaces — after which yt-dlp ignores every
+    line WITHOUT A WORD, and a fresh, valid, logged-in jar behaves exactly
+    like no jar at all (Aug 8: the wall survived a same-day cookie refresh,
+    and the pasted file showed four-space runs where the tabs had been). A
+    line that already has tabs is kept verbatim; a tabless line that splits
+    into the 7+ whitespace-separated fields of a cookie row is re-joined
+    with tabs, everything after field 7 staying glued as the value.
+    """
+    with open(src, encoding="utf-8", errors="replace") as f, \
+            open(dst, "w", encoding="utf-8") as out:
+        for line in f:
+            raw = line.rstrip("\n")
+            if not raw.strip() or raw.lstrip().startswith("#") \
+                    or "\t" in raw:
+                out.write(raw + "\n")
+                continue
+            fields = raw.split()
+            if len(fields) >= 7:
+                raw = "\t".join(fields[:6]) + "\t" + " ".join(fields[6:])
+            out.write(raw + "\n")
+
+
 def _bot_walled(detail):
     """YouTube's datacenter-IP bot check — the one extractor failure that a
     different player client often gets past, so it is worth exactly one
@@ -320,7 +347,7 @@ def _extract(url, workdir, prefer=None, client_override=None):
     if cookies and os.path.isfile(cookies):
         run_cookies = os.path.join(workdir, "cookies_run.txt")
         try:
-            shutil.copyfile(cookies, run_cookies)
+            _copy_cookies_normalized(cookies, run_cookies)
             cmd += ["--cookies", run_cookies]
         except OSError:
             pass                    # degrade to anonymous, never crash
