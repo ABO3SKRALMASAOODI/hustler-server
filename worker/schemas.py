@@ -228,6 +228,9 @@ class CaptionStyle(BaseModel):
         # tight/overlapping leading, layered text effects
         "stacked", "iridescent", "chrome", "editorial", "fashion", "luxe",
         "impact",
+        # round 99b: the mixed-face lyric edit — lowercase Poppins phrases
+        # centred mid-frame, stressed word huge in white italic serif
+        "lyric",
         "classic"]] = None
     # Force upper/lower case in premium presets; None = the preset's default.
     uppercase: Optional[bool] = None
@@ -271,7 +274,8 @@ class CaptionStyle(BaseModel):
     # Which treatment emphasis words receive. "big" is size-only — the
     # reference look, where one white word is twice its white neighbours.
     emphasis: Optional[Literal["big", "huge", "accent", "pop", "box", "serif",
-                               "chrome", "glow", "chroma", "none"]] = None
+                               "script", "chrome", "glow", "chroma",
+                               "none"]] = None
     # How much larger an emphasised word renders, 1.0-3.0.
     emphasis_scale: Optional[float] = None
 

@@ -276,8 +276,11 @@ def test_spotlight_is_one_word_per_event_with_glow(tmp_path):
 
 def test_multiword_presets_default_to_the_bottom():
     import captions
+    # Two sanctioned centre-holders: 'spotlight' (one word at a time) and
+    # 'lyric' (round 99b — the mixed-face lyric edit, where owning the middle
+    # of the frame IS the look). taste.py names the same two.
     for name, p in captions.PRESETS.items():
-        if name == "spotlight":
+        if name in ("spotlight", "lyric"):
             assert p["position"] == "middle"
         else:
             assert p["position"] == "bottom", (

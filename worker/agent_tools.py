@@ -119,6 +119,7 @@ class ToolContext:
         self._perception = None       # main video's audio analysis, cached
         self._asset_perception = {}   # asset/library key -> audio analysis
         self._music_hits = {}         # search_music results this turn, by id
+        self._sfx_hits = {}           # search_sfx results this turn, by id
         self.last_preview = None      # set by render_preview
         # Frames a look tool captured for whoever is DOING THE EDITING this
         # step (round 67): [(label, jpeg_path)].
@@ -2255,14 +2256,16 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None):
                 "genre query, or use an uploaded file "
                 "(list_assets(kind='music')).")
     if not hits:
-        return (f"No commercial-use tracks matched '{query}'. Search with "
+        return (f"No tracks matched '{query}'. Search with "
                 "broader GENRE words ('dark phonk', 'lofi chill beat', "
-                "'cinematic piano', 'upbeat funk') — and for a SPECIFIC or "
-                "TRENDING song, only the user can provide it (upload or a "
-                "clip that carries it); platforms license trend audio "
-                "inside their own apps only.")
+                "'cinematic piano', 'upbeat funk') — for a SPECIFIC song "
+                "find_song looks up its link, and a TRENDING platform "
+                "sound only the user can provide (upload or a clip that "
+                "carries it); platforms license trend audio inside their "
+                "own apps only.")
     ctx._music_hits = {h["id"]: h for h in hits}
-    return ("License-clean tracks found (commercial use OK):\n- "
+    return ("Tracks found (each line carries its license terms — relay "
+            "them):\n- "
             + "\n- ".join(music_search.describe(h) for h in hits)
             + "\nfetch_music(id) downloads one into the project. Then "
               "listen_to(asset_key=...) to HEAR it before committing, "
@@ -2544,44 +2547,26 @@ def _track_name(ctx, key):
 def _resolve_sfx(ctx, storage_key):
     """(sound, error) for an sfx reference.
 
-    A structural twin of _resolve_music, and deliberately just as strict. Two
-    disjoint doors: an `sfx:` reference is EXACT-membership lookup in the
-    bundled pack and never touches the assets table; anything else must be a
-    project-owned audio asset. There is no third door, and no prefix matching:
-    the renderer downloads whatever key it is handed with no project scoping,
-    so a loose check here is a read primitive over the whole bucket.
+    A structural twin of _resolve_music, and deliberately just as strict:
+    every reference must be a project-owned asset — no schemes, no prefix
+    matching (the renderer downloads whatever key it is handed with no
+    project scoping, so a loose check here is a read primitive over the
+    whole bucket; the old bundled `sfx:` scheme is gone, migrated to plain
+    legacy-sfx/ storage keys).
 
-    Uploaded sounds arrive as kind 'music' — an uploaded audio file is just an
-    audio file, and whether it is a bed or a one-shot is an EDL decision, not
-    an asset kind. So there is no separate 'sfx' upload kind to keep in sync.
-    An uploaded VIDEO is the third door (round 47): it resolves to the audio
-    extracted from it, because "use the sound off this clip" is a thing users
-    ask for and the picture is simply never used.
+    Fetched and uploaded sounds arrive as kind 'music' — an audio file is
+    just an audio file, and whether it is a bed or a one-shot is an EDL
+    decision, not an asset kind. An uploaded VIDEO is the second door
+    (round 47): it resolves to the audio extracted from it, because "use
+    the sound off this clip" is a thing users ask for and the picture is
+    simply never used.
     """
-    if sfx_library.is_library_ref(storage_key):
-        s = sfx_library.resolve(storage_key)
-        if not s:
-            have = ", ".join(x["slug"] for x in sfx_library.CATALOG[:12])
-            return None, (
-                f"REJECTED: '{storage_key}' is not a sound in the built-in "
-                f"pack. Call list_sfx_library() and use a slug it returns — "
-                f"never invent one. Known slugs: {have or 'none'}.")
-        if s.get("retired"):
-            # Renders forever in old EDLs; never placed in a new edit.
-            return None, (
-                f"REJECTED: '{s['title']}' was retired from the built-in "
-                "pack and can't be added to new edits. Generate the exact "
-                "sound you need with generate_sfx, or place a file the "
-                "user uploaded.")
-        return {"name": s["title"], "duration_s": s.get("duration_s"),
-                "library": True, "storage_key": storage_key}, None
-
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)
     if asset and asset["kind"] == "audio":
         return None, (
             "REJECTED: that file is the video's OWN extracted audio track "
             "(a transcription artifact), not a sound effect. Use "
-            "list_sfx_library() for a built-in sound, or "
+            "search_sfx to find the real sound online, or "
             "list_assets(kind='music') for the user's own uploads.")
     if asset and asset["kind"] == "video_clip":
         got, note, err = _audio_from_clip(ctx, asset)
@@ -2593,36 +2578,12 @@ def _resolve_sfx(ctx, storage_key):
     if not asset or asset["kind"] != "music":
         return None, (
             f"REJECTED: '{storage_key}' is not an audio asset in this "
-            "project. Call list_sfx_library() for the built-in pack, or "
-            "list_assets(kind='music') for the user's uploads.")
+            "project. search_sfx finds real sounds online (fetch_sfx "
+            "downloads one), or list_assets(kind='music') for the user's "
+            "uploads.")
     return {"name": os.path.basename(storage_key),
             "duration_s": asset.get("duration_s"), "library": False,
             "storage_key": storage_key}, None
-
-
-def list_sfx_library(ctx, category=None):
-    """Browse the built-in sound-effects pack — the clicks, whooshes, impacts
-    and risers that carry short-form video. Every one is ours outright, so no
-    upload is needed."""
-    if not sfx_library.CATALOG:
-        gen = (" Generate the exact sound you need from a text description "
-               "with generate_sfx." if eleven.sound_gen_available() else "")
-        return ("The built-in sound-effects pack is empty in this "
-                "deployment." + gen + " Uploaded sounds still work — "
-                "list_assets(kind='music') for the user's own files.")
-    c = (category or "").strip().lower()
-    if c and c not in sfx_library.CATEGORIES:
-        return (f"REJECTED: unknown category '{category}'. Available: "
-                + ", ".join(sfx_library.CATEGORIES))
-    hits = sfx_library.browse(c or None)
-    if not hits:
-        return (f"No '{c}' sounds. Available categories: "
-                + ", ".join(sorted({t["category"] for t in sfx_library.CATALOG})))
-    head = (f"{len(hits)} built-in sound(s)"
-            + (f" in category '{c}'" if c else "") +
-            ". Pass the sfx: reference to add_sfx.\n")
-    return head + "\n".join(
-        f"  sfx:{t['slug']} — {sfx_library.describe(t)}" for t in hits)
 
 
 def add_sfx(ctx, storage_key, at, gain_db=-6.0):
@@ -9427,80 +9388,6 @@ def _gen_budget_reject(ctx, projected_usd, what):
     return None
 
 
-def generate_sfx(ctx, prompt, at, duration_s=None, gain_db=-6.0):
-    """Generate a one-shot sound effect from a text description and place it at
-    a moment in the program (program-time seconds)."""
-    if not eleven.sound_gen_available():
-        alt = (" You can still drop a sound from the built-in pack with "
-               "add_sfx / list_sfx_library." if sfx_library.CATALOG else
-               " Ask the user to upload the sound they want and place it "
-               "with add_sfx.")
-        return ("Sound generation is unavailable (no sound provider "
-                "configured)." + alt + " Tell the user honestly.")
-    p = (prompt or "").strip()
-    if not p:
-        return "REJECTED: prompt is empty — describe the sound to create."
-    if len(ctx.sfx_generated) >= config.MAX_GENERATED_SFX_PER_TURN:
-        return (f"REJECTED: already generated {config.MAX_GENERATED_SFX_PER_TURN} "
-                "sounds this turn (the per-turn limit). Place what you have.")
-    try:
-        at = float(at)
-    except (TypeError, ValueError):
-        return f"REJECTED: at must be a number of seconds, got {at!r}."
-    try:
-        gain_db = float(gain_db)
-    except (TypeError, ValueError):
-        return f"REJECTED: gain_db must be a number, got {gain_db!r}."
-    edl = dict(ctx.latest_edl()["json"])
-    prog = program_duration(edl)
-    # Nothing to place a sound onto yet — reject BEFORE spending money at the
-    # provider (validate_edl would reject the write afterwards, orphaning a
-    # paid-for sound and charging the user for it).
-    if prog <= 0:
-        return ("REJECTED: there's no program yet to place a sound on. Add or "
-                "generate a clip or image first, then add the sound.")
-    if at < 0 or at > max(0.0, prog - 0.05):
-        return (f"REJECTED: at={at}s is outside the program (0 to "
-                f"{round(prog, 2)}s). Sounds are placed in program time — the "
-                "edited timeline.")
-    over = _gen_budget_reject(ctx, config.SFX_PRICE_USD, "generate a sound")
-    if over:
-        return over
-    n = len(ctx.sfx_generated) + 1
-    out_path = os.path.join(ctx.workdir, f"gensfx_{n}.mp3")
-    ok, err = eleven.generate_sfx(p, out_path, duration_s=duration_s)
-    if not ok:
-        return (f"Sound generation FAILED: {err}. Reword the prompt or tell the "
-                "user it didn't work — do NOT claim a sound was created.")
-    key = f"generated_sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
-    try:
-        storage.upload_file(out_path, key, "audio/mpeg")
-    except Exception as e:
-        return (f"The sound was generated but could not be saved to storage "
-                f"({str(e)[:140]}). Try again.")
-    items = [dict(s) for s in (edl.get("sfx") or [])]
-    taken = {s.get("id") for s in items}
-    k = 1
-    while f"sx{k}" in taken:
-        k += 1
-    sid = f"sx{k}"
-    items.append({"id": sid, "storage_key": key, "at": round(at, 2),
-                  "gain_db": gain_db})
-    edl["sfx"] = items
-    result = ctx.write_edl(
-        edl, f"generated + placed AI sound '{p[:40]}' at {round(at, 2)}s "
-             f"({gain_db:+g}dB) as {sid}")
-    # Only bill once the sound is actually in the edit. Tie the in-turn cap and
-    # the final charge to the SAME success boundary so they never diverge.
-    if result.startswith("EDL v"):
-        ctx.sfx_generated.append({"storage_key": key, "prompt": p[:200]})
-        if _log_generation(ctx, "sfx_gen",
-                           config.ELEVEN_SFX_MODEL or "elevenlabs-sfx",
-                           p, key, config.SFX_PRICE_USD):
-            ctx.gen_extra_cost_usd += config.SFX_PRICE_USD
-    return result
-
-
 def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
     """Generate a video clip with AI (text-to-video, or animate an existing
     image via from_image_asset_key). Saved as a project clip the model then
@@ -11541,176 +11428,6 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
 # re-running the pass on the same edit asks the provider for the same
 # sounds, which is as close to determinism as generation gets (the MOMENTS
 # stay fully deterministic either way).
-_PASS_SOUNDS = {
-    "whoosh": ("a soft airy cinematic whoosh transition, quick and smooth, "
-               "no tail, no melody", 1.0),
-    "impact": ("a deep soft cinematic sub-bass impact hit with a tight low "
-               "end and a crisp attack, no melody", 1.0),
-    "riser": ("a smooth airy cinematic riser building tension and resolving "
-              "cleanly, no melody", 2.0),
-}
-
-
-def sound_design_pass(ctx, intensity="medium"):
-    """Deterministic sound design in ONE version: whooshes on cut junctions,
-    one impact on the strongest stressed word, one riser resolving into the
-    biggest energy rise — every sound GENERATED for this edit (the bundled
-    pack is gone), every placement disclosed."""
-    if not eleven.sound_gen_available():
-        return ("REJECTED: sound generation is not configured on this "
-                "deployment, so the pass has nothing to place. Sounds the "
-                "user uploads can still be placed by hand with add_sfx.")
-    if not ctx.has_main_video:
-        return ("REJECTED: the sound-design pass reads the main video's cut "
-                "junctions and audio analysis — on an image/clip-only "
-                "program place sounds by hand with add_sfx.")
-    budgets = {"light": 2, "medium": 4, "strong": 6}
-    level = (intensity or "medium").strip().lower()
-    if level not in budgets:
-        return ("REJECTED: intensity must be light (2 placements), medium "
-                "(4) or strong (6).")
-    budget = budgets[level]
-    # The pass spends the same per-turn generation allowance as generate_sfx
-    # — hitting the cap shrinks the pass instead of silently exceeding it.
-    room = config.MAX_GENERATED_SFX_PER_TURN - len(ctx.sfx_generated)
-    if room <= 0:
-        return (f"REJECTED: already generated "
-                f"{config.MAX_GENERATED_SFX_PER_TURN} sounds this turn (the "
-                "per-turn limit). Place what you have.")
-    budget = min(budget, room)
-    edl = dict(ctx.latest_edl()["json"])
-    tl = Timeline(edl["keep"], edl.get("inserts") or [],
-                  edl.get("speed") or [])
-    prog = round(tl.out_duration, 2)
-    if prog < 3.0:
-        return "REJECTED: the program is too short for a sound-design pass."
-    existing = [float(sx["at"]) for sx in (edl.get("sfx") or [])]
-    placements = []      # (sound, at, why)
-
-    def _clear(at):
-        # never stack within 1.5s of an existing sound or another placement
-        return (all(abs(at - x) >= 1.5 for x in existing)
-                and all(abs(at - q[1]) >= 1.5 for q in placements))
-
-    p = None
-    try:
-        p = _get_perception(ctx)
-    except Exception:
-        pass                # junction whooshes still work without analysis
-
-    # ONE impact on THE strongest stressed surviving word — if that exact
-    # moment already carries a sound there is no impact this pass. Walking
-    # down the list instead would make every re-run invent a new hit on a
-    # progressively weaker word, which is a reshuffle, not idempotence.
-    words = ctx.index.get("words") or []
-    if p is not None and words and len(placements) < budget:
-        scores = perception.word_stress(p, words)
-        for i in sorted(range(len(words)), key=lambda k: -scores[k]):
-            w = words[i]
-            if len((w["w"] or "").strip("\"'.,!?;:")) < 3:
-                continue
-            pt = tl.src_to_out(float(w["t0"]))
-            if pt is None or pt > prog - 0.2:
-                continue
-            if _clear(round(pt, 2)):
-                placements.append(
-                    ("impact", round(pt, 2),
-                     f"impact on the stressed word '{w['w']}'"))
-            break
-    # One riser ending exactly INTO the largest energy rise.
-    if p is not None and len(placements) < budget:
-        rise = _largest_energy_rise(p)
-        if rise:
-            rt = tl.src_to_out(rise[0])
-            rdur = _PASS_SOUNDS["riser"][1]
-            # The riser must FIT before the rise (rt >= its length), or the
-            # start clamps to 0 and the sound resolves at rdur — later than
-            # the rise the disclosure line claims. When it doesn't fit,
-            # place nothing rather than describe a moment that isn't real.
-            if rt is not None and rt >= rdur:
-                at = round(rt - rdur, 2)
-                if _clear(at):
-                    placements.append(
-                        ("riser", at, f"riser resolving into the "
-                                      f"+{rise[1]:g}dB rise at "
-                                      f"{round(rt, 2)}s"))
-    # Whooshes on internal cut junctions with the remaining budget. The 5s
-    # cadence counts EXISTING sounds too — otherwise a re-run would fill the
-    # very junctions the first run's spacing deliberately skipped.
-    for j in tl.offsets[1:]:         # segment joins in final program time
-        if len(placements) >= budget:
-            break
-        at = round(j, 2)
-        if at < 0.5 or at > prog - 0.5:
-            continue                 # skip the junction at t=0 / the end
-        if any(abs(at - x) < 5.0 for x in existing) or \
-                any(abs(at - q[1]) < 5.0 for q in placements):
-            continue                 # spaced >= 5s from every other accent
-        placements.append(("whoosh", at, "whoosh on the cut junction"))
-    if not placements:
-        return ("NO CHANGE: nothing to place — every candidate moment is "
-                "within 1.5s of an existing sound, or there are no cut "
-                "junctions/analysis to work from. Place sounds by hand with "
-                "add_sfx if you still want them. Do NOT tell the user sound "
-                "design was added.")
-    # Money guard for the WHOLE batch before the first provider call — a
-    # pass that would blow the budget refuses up front instead of stopping
-    # half-placed.
-    over = _gen_budget_reject(ctx, len(placements) * config.SFX_PRICE_USD,
-                              "run a sound-design pass")
-    if over:
-        return over
-    made, fails = [], []
-    for kind, at, why in sorted(placements, key=lambda q: q[1]):
-        prompt, dur = _PASS_SOUNDS[kind]
-        n = len(ctx.sfx_generated) + len(made) + 1
-        out_path = os.path.join(ctx.workdir, f"gensfx_{n}.mp3")
-        ok, err = eleven.generate_sfx(prompt, out_path, duration_s=dur)
-        if not ok:
-            fails.append(f"{kind} @ {at}s ({str(err)[:80]})")
-            continue
-        key = f"generated_sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
-        try:
-            storage.upload_file(out_path, key, "audio/mpeg")
-        except Exception as e:
-            fails.append(f"{kind} @ {at}s (save failed: {str(e)[:80]})")
-            continue
-        made.append((kind, at, why, key, prompt))
-    if not made:
-        return ("Sound generation FAILED for every placement ("
-                + "; ".join(fails[:3]) + "). Tell the user the pass didn't "
-                "work — do NOT claim sound design was added.")
-    items = [dict(sx) for sx in (edl.get("sfx") or [])]
-    detail = []
-    for kind, at, why, key, prompt in made:
-        taken = {sx.get("id") for sx in items}
-        k = 1
-        while f"sx{k}" in taken:
-            k += 1
-        items.append({"id": f"sx{k}", "storage_key": key,
-                      "at": at, "gain_db": -6.0})
-        detail.append(f"  sx{k}: generated {kind} @ {at}s — {why}")
-    edl["sfx"] = items
-    res = ctx.write_edl(
-        edl, f"sound-design pass ({level}): {len(detail)} generated "
-             "placement(s)")
-    if res.startswith("EDL v"):
-        # The generate_sfx billing contract exactly: only sounds that are
-        # actually IN the edit are billed, at the same success boundary.
-        for kind, at, why, key, prompt in made:
-            ctx.sfx_generated.append({"storage_key": key,
-                                      "prompt": prompt[:200]})
-            if _log_generation(ctx, "sfx_gen",
-                               config.ELEVEN_SFX_MODEL or "elevenlabs-sfx",
-                               prompt, key, config.SFX_PRICE_USD):
-                ctx.gen_extra_cost_usd += config.SFX_PRICE_USD
-        res += "\nPlacements (program time):\n" + "\n".join(detail)
-        if fails:
-            res += ("\nNot placed (generation failed): "
-                    + "; ".join(fails))
-    return res
-
-
 def _music_program_beats(ctx, edl, bpm=None, every_s=None, key=None):
     """(beats in PROGRAM seconds, label, error) for the SONG the viewer hears.
 
@@ -12197,7 +11914,7 @@ def _seg_schema():
 # schemas.CaptionStyle and _parse_partial_style's allowlist.
 CAPTION_PRESETS = ["podcast", "beast", "karaoke", "elegant", "spotlight",
                    "stacked", "iridescent", "chrome", "editorial",
-                   "fashion", "luxe", "impact", "classic"]
+                   "fashion", "luxe", "impact", "lyric", "classic"]
 def make_shorts(ctx, count=None, style_note=None):
     """Kick off the shorts pipeline for THIS project — the chat-path twin of
     the studio's Make shorts button. The heavy work runs as its own
@@ -12261,7 +11978,7 @@ _STYLE_PROPS = {
     "leading": {"type": "number"},
     "emphasis": {"type": "string",
                  "enum": ["big", "huge", "accent", "pop", "box", "serif",
-                          "chrome", "glow", "chroma", "none"]},
+                          "script", "chrome", "glow", "chroma", "none"]},
     "emphasis_scale": {"type": "number"},
 }
 

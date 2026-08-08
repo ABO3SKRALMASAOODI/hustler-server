@@ -130,6 +130,12 @@ TREATMENTS = {
     "box":    {"box": True},
     "serif":  {"scale": "emph", "color": "accent", "font": SERIF_FONT,
                "italic": True, "serif_bump": True},
+    # The lyric-edit hero word: a big WHITE italic display serif — same
+    # skeleton as "serif" but keeping the caption colour, because in the
+    # reference reels the script word is white like its neighbours and the
+    # contrast is pure form ("we gotta be / excited").
+    "script": {"scale": "emph", "font": "Playfair Display Black",
+               "italic": True, "serif_bump": True},
     "chrome": {"scale": "emph", "effect": "chrome"},
     "glow":   {"scale": "emph", "color": "accent", "effect": "glow"},
     "chroma": {"scale": "emph", "effect": "chroma"},
@@ -322,6 +328,26 @@ PRESETS = {
         "treatments": ("accent",), "emphasis": "accent",
         "active": "accent", "position": "bottom",
         "layout": "stack", "leading": 0.9, "stagger": 0.0,
+        "word_anim": "punch",
+    },
+    "lyric": {
+        # The mixed-face LYRIC EDIT (round 99b, built from the owner's "he
+        # won" reference reel): heavy lowercase Poppins phrases dead centre,
+        # words landing as spoken, and the stressed word blown up ~2x on its
+        # own line in a white Playfair Black Italic ("we gotta be /
+        # excited"). Mostly white; the gold DEFAULT_HIGHLIGHT is what the
+        # 'accent' treatment tints whole phrases with ("do you wanna").
+        # Middle placement is the look's SIGNATURE — the text deliberately
+        # owns the frame between beats — so this is the second sanctioned
+        # exception to the placement law (taste.py knows it by name, like
+        # spotlight). style.position still overrides.
+        "font": "Poppins Black", "char_w": 0.62, "base_size": 44,
+        "mode": "reveal", "align": "center", "uppercase": False,
+        "max_words": 4, "wpl": 3, "outline": 0.0, "shadow": 2.2,
+        "emph_scale": 1.95, "num_scale": 2.15,
+        "treatments": ("script", "big", "accent"), "emphasis": "script",
+        "active": "pop", "position": "middle",
+        "layout": "stack", "leading": 0.96, "stagger": 0.0,
         "word_anim": "punch",
     },
 }

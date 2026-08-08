@@ -427,7 +427,10 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
     # now, so this only fires when position='middle' was explicitly written.
     if isinstance(caps, dict) and caps.get("mode") == "from_transcript":
         cstyle = caps.get("style") or {}
-        multi = (cstyle.get("preset") or "") != "spotlight" \
+        # 'lyric' (round 99b) is the second sanctioned centre-holder: the
+        # mixed-face lyric edit deliberately owns the middle of the frame —
+        # that placement IS the look, exactly like spotlight's single word.
+        multi = (cstyle.get("preset") or "") not in ("spotlight", "lyric") \
             and int(caps.get("max_words_per_caption") or 99) > 1
         if multi and cstyle.get("position") == "middle" \
                 and "middle" not in ask and "center" not in ask \

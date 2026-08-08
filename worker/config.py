@@ -533,6 +533,11 @@ URL_FETCH_EXTRACTOR = os.getenv("URL_FETCH_EXTRACTOR", "1") == "1"
 # hands links to is off.
 FIND_SONG_ENABLED = os.getenv("FIND_SONG_ENABLED", "1") == "1"
 FIND_SONG_USER_IDS = os.getenv("FIND_SONG_USER_IDS", "").strip()
+# Live sound-effect search (worker/sfx_search.py): real recorded sounds
+# from the open web (Openverse fronting Freesound), replacing BOTH the
+# deleted bundled pack and AI sound generation.
+SFX_SEARCH_ENABLED = os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
+SFX_FETCH_MAX_MB = int(os.getenv("SFX_FETCH_MAX_MB", "20"))
 # Download ceiling before we know what the file is — we cannot apply a
 # per-kind limit until ffprobe has seen the bytes, so this is the largest of
 # them and the real ceilings are enforced after classification.
@@ -1323,7 +1328,9 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK changes. It is stored on every render asset
 # and busts the render cache, so an existing export re-encodes with the new
 # card instead of serving pre-outro bytes forever.
-OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
+OUTRO_VERSION = 3      # v3: "THIS VIDEO WAS EDITED BY AN AI AGENT" over the
+                       # big gray-red robot (the billing page's Pro mark) and
+                       # the Valmera.io wordmark — see tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
 # One shorts_plan job cuts a long video into at most this many child clips.

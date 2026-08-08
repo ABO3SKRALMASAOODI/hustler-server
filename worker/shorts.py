@@ -147,6 +147,9 @@ def _pick_caption_preset(vis):
     caption presets the renderer actually has."""
     words = ((vis or {}).get("captions") or {}).get("style_words") or ""
     words = (words + " " + str((vis or {}).get("notes") or "")).lower()
+    if any(k in words for k in ("script", "italic serif", "cursive",
+                                "lyric", "handwritten")):
+        return "lyric"
     if any(k in words for k in ("karaoke", "one word", "word-by-word",
                                 "word at a time")):
         return "karaoke"

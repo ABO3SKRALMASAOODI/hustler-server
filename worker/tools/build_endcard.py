@@ -1,37 +1,48 @@
 """Build the Valmera end card PNG that every export ends on.
 
-The mark is the SITE's robot — the full-body white robot in the landing-page
-navbar (`frontend-next/public/hustler-robot95.riv`). It is not redrawn here:
-`worker/brand/robot.png` is that Rive artboard rendered to a transparent PNG at
-2400px, so the end card and the site show the same character, pixel for pixel.
-See brand/README.md for the one-line Chrome command that regenerates it.
+Round 99b: the card the owner spec'd, top to bottom —
 
-Only one correction is applied, and it is deliberate: the artwork is drawn for a
-LIGHT background, so its black parts (visor, arm and leg detail, the antenna
-stalk) are meant to read as ink. On the black end card every one of them still
-reads — they sit inside white shapes and become negative space — EXCEPT the
-antenna stalk, which has white on neither side and simply vanishes, leaving the
-red ball floating unattached. `_fix_antenna` repaints exactly those rows white.
+    THIS VIDEO WAS EDITED
+        BY AN AI AGENT
+         [the robot]
+         Valmera.io
 
-Layout is set in INK boxes, never text boxes: a text box carries the font's full
-ascent/descent, so a nominal gap measures nearly double in real whitespace.
+The mark is the GRAY-RED robot — the Pro plan's card robot on the billing
+page (`frontend-next/public/hustler-robot112.riv`), rendered to
+`worker/brand/robot112.png` at 2400px via the headless-Chrome recipe in
+brand/README.md, so the card and the site show the same character.
+
+Two corrections, both deliberate:
+
+* BLACK-FLOOR LIFT. The artwork is drawn for a light card, so its pure-black
+  parts (antenna stalk, neck, visor plate, chest port, upper legs) are meant
+  to read as ink. On the black end card every one of them would dissolve into
+  the background — a floating red antenna ball, a head hovering off its body.
+  `_lift_blacks` raises just those near-black pixels to a dark charcoal that
+  still reads darker than the body grays but no longer vanishes.
+
+* SILHOUETTE GLOW. A dark robot on a black card needs an edge: a soft
+  radial wash, barely above black and slightly red, sits behind the mark so
+  the silhouette separates without reading as a "spotlight effect".
+
+Layout is set in INK boxes, never text boxes: a text box carries the font's
+full ascent/descent, so a nominal gap measures nearly double in whitespace.
 """
 import os
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 WHITE = (255, 255, 255, 255)
-
-# Type colours. The tagline is deliberately NOT mid-grey — a solid #9E9E9E line
-# under a pure-white wordmark is the exact "cheap web ad" tell. Muted white sits
-# back into the black without reading as a second, greyer brand. 59% is as low
-# as it goes and still survives the render chain: the card is scaled to ~0.6x
-# frame width and re-encoded at CRF 20+, and anything under ~50% at this size
-# came back from ffmpeg as a grey smudge.
-TAGLINE = (255, 255, 255, 150)
-RULE = (255, 255, 255, 80)
+# The robot's own red (sampled from the antenna ball) — the ".io" and nothing
+# else. One accent, used once, is what keeps the card premium instead of ad.
+RED = (250, 5, 5, 255)
 
 ROBOT_PNG = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "brand", "robot.png")
+    os.path.abspath(__file__))), "brand", "robot112.png")
+
+# Near-black pixels lift to this — visibly darker than the body's ~#2E3237
+# grays, visibly lighter than the void.
+FLOOR = (36, 38, 43)
+FLOOR_MAX = 24          # max(r,g,b) at or under this counts as "vanishes"
 
 
 def _ink(img):
@@ -39,45 +50,49 @@ def _ink(img):
     return img.crop(b) if b else img
 
 
-def _fix_antenna(img):
-    """Repaint the antenna stalk white so it survives on black.
-
-    The stalk is found structurally, not by hard-coded coordinates: scan down
-    from the top and take the rows whose only opaque pixels are near-black AND
-    span less than 12% of the width — that is the thin bar between the red ball
-    and the head, and nothing else in the artboard is both that narrow and that
-    dark. Stop at the first row that fails (the head's crown), so no black
-    inside the head or body is ever touched.
-    """
+def _lift_blacks(img):
+    """Raise pure-black ink to FLOOR so it survives on a black card.
+    Returns (img, n_lifted); a zero count means the asset changed and the
+    lift no longer matches it — refuse to ship a dissolving robot."""
     img = img.convert("RGBA")
     px = img.load()
     W, H = img.size
-    hit = 0
+    n = 0
     for y in range(H):
-        xs = [x for x in range(W) if px[x, y][3] > 128]
-        if not xs:
-            continue
-        dark = [x for x in xs if max(px[x, y][:3]) < 60]
-        if not dark:
-            continue                      # ball rows / clean rows: keep going
-        if len(xs) > 0.12 * W:
-            break                         # reached the head — stop, keep ink
-        for x in dark:
-            px[x, y] = WHITE
-        hit += len(dark)
-    return img, hit
+        for x in range(W):
+            r, g, b, a = px[x, y]
+            if a > 40 and max(r, g, b) <= FLOOR_MAX:
+                px[x, y] = (FLOOR[0], FLOOR[1], FLOOR[2], a)
+                n += 1
+    return img, n
 
 
 def robot(height_px):
-    """The site's robot, RGBA, transparent, ready for a black card."""
+    """The billing page's gray-red robot, lifted for black, glow attached."""
     src = Image.open(ROBOT_PNG).convert("RGBA")
-    src, n = _fix_antenna(src)
+    src, n = _lift_blacks(src)
     if not n:
-        raise SystemExit("antenna stalk not found — did brand/robot.png "
-                         "change? Re-check _fix_antenna before shipping a "
-                         "card with a floating antenna ball.")
+        raise SystemExit("no near-black ink found — did brand/robot112.png "
+                         "change? Re-check _lift_blacks before shipping a "
+                         "card whose robot dissolves into the background.")
+    # Lift the body grays a touch: at reel scale, ~#2E3237 on black reads
+    # as mud. 1.22x keeps the charcoal identity while the silhouette reads.
+    from PIL import ImageEnhance
+    src = ImageEnhance.Brightness(src).enhance(1.22)
     w = max(1, round(src.width * height_px / src.height))
-    return _ink(src.resize((w, height_px), Image.LANCZOS))
+    mark = _ink(src.resize((w, height_px), Image.LANCZOS))
+
+    # The glow: a blurred ellipse, barely above black with a red lean, on a
+    # canvas padded enough that the blur never clips to a visible square.
+    pad = int(height_px * 0.22)
+    gw, gh = mark.width + 2 * pad, mark.height + 2 * pad
+    glow = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(glow)
+    d.ellipse([pad * 0.4, pad * 0.4, gw - pad * 0.4, gh - pad * 0.4],
+              fill=(74, 30, 30, 118))
+    glow = glow.filter(ImageFilter.GaussianBlur(pad * 0.62))
+    glow.paste(mark, (pad, pad), mark)
+    return glow
 
 
 def _text(text, font, fill, tracking):
@@ -96,54 +111,69 @@ def _text(text, font, fill, tracking):
     return _ink(layer)
 
 
+def _wordmark(word_f, io_f):
+    """Valmera.io as one ink layer — the site's wordmark plus its domain,
+    baseline-aligned, the ".io" in the robot's red."""
+    name = _text("Valmera", word_f, WHITE, -0.030 * word_f.size)
+    io = _text(".io", io_f, RED, -0.020 * io_f.size)
+    gap = int(word_f.size * 0.045)
+    W = name.width + gap + io.width
+    H = max(name.height, io.height)
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    # Baseline alignment by bottom edge: both crops end at their baseline-ish
+    # ink bottom ("Valmera" has no descenders; neither does ".io" beyond the
+    # dot sitting ON the baseline), so bottom-aligning IS baseline-aligning.
+    layer.paste(name, (0, H - name.height), name)
+    layer.paste(io, (name.width + gap, H - io.height), io)
+    return layer
+
+
 def build(out_path, pjs_path):
     """Compose the card.
 
-    Proportions are the point. The old card set a 300px wordmark under a 720px
-    robot with a 74px grey line — three competing weights, all near the same
-    size, which is what read as an ad. Here one element leads (the mark), the
-    wordmark is secondary, and the attribution is a hairline-quiet tracked
-    caption. Nothing repeats: the wordmark says the name once, the caption says
-    what happened, so "Valmera" is not printed twice on the same card.
+    One reading order, three registers: the STATEMENT (two big tracked lines
+    — what happened), the CHARACTER (the robot, largest element — who did
+    it), the NAME (Valmera.io — where). The robot leads the hierarchy per
+    the owner's spec ("the agent is big"); the headline is the widest
+    element and therefore sizes the card; the wordmark sits just under the
+    robot so character and name read as one unit.
     """
-    ROBOT_H = 660
-    WORD_SIZE, WORD_TRACK = 232, -0.030    # -0.03em — the site's wordmark
-    # Caption width is what sizes the whole card: the renderer fits the card
-    # inside a box, so the WIDEST element decides how big everything else
-    # lands. A long, heavily-tracked caption silently shrank the mark to 13%
-    # of frame height. Short line, moderate tracking, and the robot leads.
-    CAP_SIZE, CAP_TRACK = 52, 0.30
-    GAP_MARK = 104                         # robot -> wordmark (ink gap)
-    GAP_RULE = 52                          # wordmark -> hairline
-    GAP_CAP = 46                           # hairline -> caption
-    RULE_H = 3
+    HEAD_SIZE = 148
+    HEAD_TRACK = 0.045                     # airy, deliberate, not shouty
+    HEAD_LEAD = 58                         # between the two headline lines
+    ROBOT_H = 1620                         # "the agent is big" — it LEADS
+    WORD_SIZE = 252
+    IO_SIZE = 178
+    GAP_HEAD = 40                          # headline -> robot (glow pads add air)
+    GAP_WORD = 10                          # robot -> wordmark (ditto)
 
+    head_f = ImageFont.truetype(pjs_path, HEAD_SIZE)
+    head_f.set_variation_by_axes([800])
     word_f = ImageFont.truetype(pjs_path, WORD_SIZE)
     word_f.set_variation_by_axes([800])
-    cap_f = ImageFont.truetype(pjs_path, CAP_SIZE)
-    cap_f.set_variation_by_axes([600])
+    io_f = ImageFont.truetype(pjs_path, IO_SIZE)
+    io_f.set_variation_by_axes([800])
 
+    line1 = _text("THIS VIDEO WAS EDITED", head_f, WHITE,
+                  HEAD_TRACK * HEAD_SIZE)
+    line2 = _text("BY AN AI AGENT", head_f, WHITE, HEAD_TRACK * HEAD_SIZE)
     mark = robot(ROBOT_H)
-    word = _text("Valmera", word_f, WHITE, WORD_TRACK * WORD_SIZE)
-    cap = _text("EDITED WITH VALMERA", cap_f, TAGLINE, CAP_TRACK * CAP_SIZE)
+    word = _wordmark(word_f, io_f)
 
-    rule_w = int(cap.width * 0.30)
-    rule = Image.new("RGBA", (rule_w, RULE_H), RULE)
-
-    W = max(mark.width, word.width, cap.width)
-    H = (mark.height + GAP_MARK + word.height + GAP_RULE + RULE_H
-         + GAP_CAP + cap.height)
+    W = max(line1.width, line2.width, mark.width, word.width)
+    H = (line1.height + HEAD_LEAD + line2.height + GAP_HEAD
+         + mark.height + GAP_WORD + word.height)
     card = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     y = 0
-    for part, gap in ((mark, GAP_MARK), (word, GAP_RULE), (rule, GAP_CAP),
-                      (cap, 0)):
+    for part, gap in ((line1, HEAD_LEAD), (line2, GAP_HEAD),
+                      (mark, GAP_WORD), (word, 0)):
         card.paste(part, ((W - part.width) // 2, y), part)
         y += part.height + gap
 
     card.save(out_path)
     print(f"card {card.size[0]}x{card.size[1]}  aspect "
           f"{card.size[0] / card.size[1]:.3f}  robot {mark.size}  "
-          f"word {word.size}  caption {cap.size}  "
+          f"headline {line1.size}/{line2.size}  wordmark {word.size}  "
           f"({os.path.getsize(out_path) / 1024:.0f} KB)")
     return card
 

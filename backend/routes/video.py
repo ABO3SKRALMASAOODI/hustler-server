@@ -4226,7 +4226,9 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
+OUTRO_VERSION = 3      # v3: "edited by an AI agent" + the gray-red robot
+                       # (keep in step with worker/config.py OUTRO_VERSION —
+                       # test_units checks the two match)
 
 
 def _final_is_current(meta):

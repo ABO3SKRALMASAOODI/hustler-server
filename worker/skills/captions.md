@@ -6,19 +6,20 @@ BASICS
 - Manual caption items are only for text the user dictates.
 
 PRESET FAMILIES — default to a premium preset whenever the user asks for captions without specifying a plain look. Choose by the video:
-- Fast, punchy, hype, motivational → 'spotlight': ONE glowing word at a time, big caps, dead centre — the modern single-word look. The ONLY preset that may sit mid-frame.
+- Fast, punchy, hype, motivational → 'spotlight': ONE glowing word at a time, big caps, dead centre — the modern single-word look.
+- Music/lyric edits, montage reels, "lyrics on screen", motivational quote-over-footage → 'lyric': heavy lowercase phrases dead CENTRE, words landing as spoken, and the stressed word ~2x in a white ITALIC SERIF on its own line ("we gotta be / excited"). Gold accent tints occasional whole phrases. Mid-frame is this look's signature (it and 'spotlight' are the only two allowed there).
 - Talking-head reels, podcasts, interviews, education → a DYNAMIC multi-word preset at the BOTTOM: 'podcast' (bold white words land as spoken, keywords glow/box/serif-italic, numbers HUGE — the safe default for reels), 'beast' (loud ALL-CAPS Anton impact — hype), 'karaoke' (accent box tracks each word — clean), 'elegant' (calm serif lower third — interviews, luxury, education).
 - Luxury/fashion/editorial footage → 'luxe' (Playfair serif, gold accents), 'editorial' (light Instrument Serif, airy), 'fashion' (wide Archivo caps).
 - STACK presets compose the phrase across independently-placed lines whose SIZES differ hard (small connector above a huge hero word): 'stacked' (flagship, all-white, emphasis is pure SIZE), 'iridescent' (RGB fringe), 'chrome' (liquid metal), 'impact' (Bebas caps, sports/hype).
 - 'classic' = plain legacy look, only when asked for simple/plain.
 
-PLACEMENT LAW: multi-word captions sit in the BOTTOM area, never across the face (presets default there — do not pass position='middle' for them). Only a single-word-at-a-time caption ('spotlight', or max_words_per_caption=1) may hold the centre.
+PLACEMENT LAW: multi-word captions sit in the BOTTOM area, never across the face (presets default there — do not pass position='middle' for them). Only 'spotlight' (one word at a time), 'lyric' (the mixed-face lyric edit — centre IS the look), or max_words_per_caption=1 may hold the centre.
 
 EMPHASIS: when enabling ANY preset, ALSO pass emphasis_words — read the transcript and pick 10-25 impact words VERBATIM as spoken (numbers, money, outcomes, superlatives, emotional peaks, names — roughly 1-2 per sentence). Words containing digits are emphasized automatically.
 
 COMPOSITION — every preset is a starting point you can override per field:
 - font: exact bundled family name (Inter Display Black/ExtraBold/Bold, Anton, Bebas Neue, Archivo Black, Poppins Black, Syne ExtraBold, Playfair Display Black, Instrument Serif, DM Serif Display, Montserrat). Honour a specific font request instead of deflecting.
-- emphasis: 'big' (size only — the reference look), 'accent'/'pop' (colour too), 'box' (marker highlight), 'serif' (serif-italic), 'chrome'/'glow'/'chroma' (layered effects). emphasis_scale 1.0-3.0 (2.0+ is the dramatic reel look).
+- emphasis: 'big' (size only — the reference look), 'accent'/'pop' (colour too), 'box' (marker highlight), 'serif' (accented serif-italic), 'script' (WHITE italic display serif — the lyric-edit hero word), 'chrome'/'glow'/'chroma' (layered effects). emphasis_scale 1.0-3.0 (2.0+ is the dramatic reel look).
 - layout 'stack' turns ANY preset into the per-line composer; leading below 1.0 makes lines deliberately OVERLAP (0.85-0.95 is the interlock sweet spot).
 - animation (entrance): fade, pop, punch, blur_in, whip, flash, rise, drop. highlight_color sets the accent. uppercase and position override preset defaults.
 - Non-preset styling: color (#RRGGBB), size (s/m/l/xl), size_scale (0.5-3.0), position (bottom/top/middle), dynamic (legacy karaoke), max_words_per_caption (1-16).
