@@ -204,6 +204,7 @@ def _yt_candidates(query, count, what="a search query"):
                          "").strip() or None,
             "duration_s": dur,
             "url": f"https://www.youtube.com/watch?v={vid}",
+            "_thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
         })
     if not out and proc.returncode != 0:
         detail = (proc.stderr or "").strip().splitlines()

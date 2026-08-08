@@ -160,3 +160,52 @@ def test_find_footage_gates_like_find_song(monkeypatch):
     monkeypatch.setattr(song_find, "footage_available", lambda: True)
     out = agent_tools.find_footage(_Ctx(), "x")   # user 7, not listed
     assert out.startswith("REJECTED") and "fetch_url" in out
+
+
+# ── sighted picks: candidates arrive as PICTURES, not just titles ────────
+
+class _SightedCtx(_Ctx):
+    direct_sight = True
+    agent_model = "m"
+    workdir = "/tmp"
+
+    def __init__(self):
+        self.pending_images = []
+
+
+def test_footage_candidates_reach_the_agents_eyes(monkeypatch, tmp_path):
+    import llm
+    monkeypatch.setattr(song_find, "footage_available", lambda: True)
+    monkeypatch.setattr(config, "FIND_FOOTAGE_USER_IDS", "")
+    monkeypatch.setattr(llm, "agent_sees", lambda m: True)
+    hit = dict(_c("Starship's Second Flight Test", uploader="SpaceX",
+                  dur=115), _thumb="https://i.ytimg.com/vi/x/hqdefault.jpg")
+    monkeypatch.setattr(song_find, "search_footage",
+                        lambda q, count=6: [hit])
+    monkeypatch.setattr(agent_tools.net_fetch, "download",
+                        lambda url, path, **kw: open(path, "wb").write(b"j"))
+    ctx = _SightedCtx()
+    ctx.workdir = str(tmp_path)
+    out = agent_tools.find_footage(ctx, "spacex starship launch")
+    assert "LOOKING" in out
+    assert len(ctx.pending_images) == 1
+    label, path = ctx.pending_images[0]
+    assert label == hit["url"] or label == hit.get("id", label)
+    assert os.path.exists(path)
+
+
+def test_blind_deployment_degrades_to_text_only(monkeypatch, tmp_path):
+    import llm
+    monkeypatch.setattr(song_find, "footage_available", lambda: True)
+    monkeypatch.setattr(config, "FIND_FOOTAGE_USER_IDS", "")
+    monkeypatch.setattr(llm, "agent_sees", lambda m: False)
+
+    def never(*a, **k):
+        raise AssertionError("a blind agent must not download thumbnails")
+    monkeypatch.setattr(agent_tools.net_fetch, "download", never)
+    ctx = _SightedCtx()
+    ctx.workdir = str(tmp_path)
+    monkeypatch.setattr(song_find, "search_footage", lambda q, count=6: [
+        dict(_c("clip"), _thumb="https://t/x.jpg")])
+    out = agent_tools.find_footage(ctx, "topic")
+    assert "LOOKING" not in out and ctx.pending_images == []

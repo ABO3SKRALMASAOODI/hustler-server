@@ -110,6 +110,7 @@ def _openverse_search(query, kind, orientation, count):
             "license_note": _license_note(lic, creator),
             "page_url": p.get("foreign_landing_url"),
             "_url": url,
+            "_thumb": p.get("thumbnail") or url,
         })
     return out
 
@@ -191,6 +192,7 @@ def _pexels_search(query, kind, orientation, count):
                 "credit": ((v.get("user") or {}).get("name") or "").strip() or None,
                 "page_url": v.get("url"),
                 "_files": v.get("video_files") or [],
+                "_thumb": v.get("image"),
             })
     else:
         for p in (data.get("photos") or []):
@@ -204,6 +206,7 @@ def _pexels_search(query, kind, orientation, count):
                 "credit": (p.get("photographer") or "").strip() or None,
                 "page_url": p.get("url"),
                 "_url": src.get("large2x") or src.get("original") or src.get("large"),
+                "_thumb": src.get("medium") or src.get("small"),
             })
     return out
 
@@ -255,6 +258,7 @@ def _pixabay_search(query, kind, orientation, count):
                 "width": h.get("imageWidth"), "height": h.get("imageHeight"),
                 "duration_s": None, "description": tags, "credit": credit,
                 "page_url": h.get("pageURL"), "_url": link,
+                "_thumb": h.get("webformatURL") or h.get("previewURL"),
             })
     return out
 

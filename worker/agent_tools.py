@@ -23,6 +23,7 @@ import personseg
 import media
 import model_prices
 import music_search
+import net_fetch
 import perception
 # The takeover's geometry (how far the camera travels, where it aims) is
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
@@ -2353,6 +2354,40 @@ def find_song(ctx, query):
             "they can correct the pick.")
 
 
+def _queue_candidate_thumbs(ctx, hits, limit=5):
+    """Put the candidates' own pictures in front of the agent's eyes.
+
+    A title is not a shot: "Elon Musk at TED" could be a podium wide, a
+    blurry crowd phone-cam, or a meme edit. Each hit's thumbnail is
+    downloaded small and queued on ctx.pending_images labeled with the
+    hit's id, so the model picks b-roll the way an editor does — by
+    LOOKING at the results grid, not reading it. Best-effort: any failed
+    thumbnail just misses the sheet, and a blind deployment skips the
+    downloads entirely (the text lines remain the whole story there).
+    Returns how many pictures were queued."""
+    can_see = (getattr(ctx, "direct_sight", False)
+               and llm.agent_sees(getattr(ctx, "agent_model", None)))
+    if not can_see:
+        return 0
+    queued = 0
+    for h in hits[:limit]:
+        turl = h.get("_thumb")
+        if not turl:
+            continue
+        local = os.path.join(ctx.workdir,
+                             f"cand_{uuid.uuid4().hex[:8]}.jpg")
+        try:
+            net_fetch.download(turl, local, max_bytes=3 * 1024 * 1024,
+                               timeout_s=15)
+            # Stock hits are addressed by id; footage hits by their URL —
+            # the label must be the exact string the model passes onward.
+            ctx.pending_images.append((h.get("id") or h.get("url"), local))
+            queued += 1
+        except Exception:
+            continue
+    return queued
+
+
 def find_footage(ctx, query):
     """READ: candidate web links for real footage of a NAMED topic. The
     pick is downloaded by fetch_url, so this tool moves no bytes itself."""
@@ -2381,9 +2416,14 @@ def find_footage(ctx, query):
                 "shown on screen, or fall back to search_stock / a "
                 "generated image.")
     lines = "\n- ".join(song_find.describe(h) for h in hits[:5])
+    seen = _queue_candidate_thumbs(ctx, hits)
+    eye = ("\nTheir thumbnails are attached below, labeled by link — pick "
+           "by LOOKING at them: real footage of the subject, not a "
+           "talking head, a graphic or a meme frame. "
+           if seen else "\n")
     return (f"{min(len(hits), 5)} candidate link(s) for \"{q}\", best "
-            "guess first:\n- " + lines +
-            "\nPick REAL footage OF the subject — prefer the "
+            "guess first:\n- " + lines + eye +
+            "Pick REAL footage OF the subject — prefer the "
             "subject's own channel and short clips (a few minutes; long "
             "videos get refused for size); avoid reaction/commentary "
             "versions. Then fetch_url(url=<pick>, as_kind='clip') "
@@ -9818,12 +9858,18 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
     # rather than whatever a second identical query happens to return.
     for h in hits:
         ctx.stock_results[h["id"]] = h
+    seen = _queue_candidate_thumbs(ctx, hits)
+    eye = ("\n\nTheir thumbnails are attached below, labeled by id — pick "
+           "by LOOKING at them, the way an editor scans a results grid: "
+           "the frame that actually shows the subject, in light and color "
+           "that can sit inside this edit."
+           if seen else "")
     return (f"{len(hits)} stock {kind}(s) for \"{q}\" ({orientation}):\n"
-            + stock.summarize(hits)
+            + stock.summarize(hits) + eye
             + "\n\nNothing is downloaded or in the video yet. Pick the ONE "
               "that best matches what the user asked for and call "
-              "add_stock_media(id=...). Prefer a clip whose description "
-              "actually depicts the subject over one that merely shares a "
+              "add_stock_media(id=...). Prefer a candidate that actually "
+              "depicts the subject over one that merely shares a "
               "keyword.")
 
 
