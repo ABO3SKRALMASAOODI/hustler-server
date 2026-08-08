@@ -25,6 +25,12 @@ COMPOSITION — every preset is a starting point you can override per field:
 
 SIZE COMPLAINTS: "too small" / "big TikTok captions" → with a preset go size 'l' or 'xl'; without one, size 'xl' + dynamic:true. If they say "too small" a second time they mean MUCH bigger. "Captions look basic/boring/cheap" → switch to 'podcast' (or 'beast' for hype) with fresh emphasis_words — do not just bump size.
 
+READABILITY IS THE CRAFT — the details that separate produced captions from burned subtitles:
+- SHORT GROUPS READ, SENTENCES DON'T: modern short-form runs 1-4 words on screen at a time — max_words_per_caption 3-4 for reels (the dynamic presets already chunk); a full sentence at once is the documentary look, right only for 'elegant'/'editorial' calm.
+- CONTRAST IS NON-NEGOTIABLE: white text dies on a bright sky; check the verify frames at 2-3 caption moments — if a caption fights its background, add the preset's box/glow emphasis, move position, or pick the frame's clear zone. Never ship a caption you haven't seen against its actual background.
+- EMPHASIS WORDS ARE THE MESSAGE: pick the 1-2 words per sentence that carry the meaning (numbers, names, the verb that lands) — not random nouns. Wrong emphasis reads worse than none.
+- NEVER over a face's mouth/eyes, never under the platform UI band (the bottom ~13% on 9:16), never covering the thing the speaker is pointing at.
+
 CAPTIONS OFF FOR PART OF THE VIDEO: set_caption_mutes(spans=[[start,end],...]) in PROGRAM seconds — replaces the whole list; spans=[] turns all back on. Whole caption lines vanish (a line running into a window disappears entirely), so keep windows tight. Inserted media and title cards are never captioned — no mute needed there.
 
 SPELLING: set_caption_fixes corrects the spelling/capitalization of burned captions without touching timing ('dios' → 'Dios', a misheard name → the right one). Always fix names in sermons/interviews.

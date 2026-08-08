@@ -332,6 +332,21 @@ def enqueue_job(conn, project_id, user_id, jtype, payload):
         return cur.fetchone()["id"]
 
 
+def pending_preview_job(conn, project_id, edl_version):
+    """The id of a queued/running preview of THIS project at THIS EDL
+    version, or None. How render_preview adopts the loop's speculative
+    encode (round 98) instead of paying for the same render twice."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'preview'
+                         AND state IN ('queued', 'running')
+                         AND payload->>'edl_version' = %s
+                       ORDER BY id DESC LIMIT 1""",
+                    (project_id, str(edl_version)))
+        row = cur.fetchone()
+        return row["id"] if row else None
+
+
 def publish_mcp_catalog(conn, catalog):
     """Publish the tool catalog the MCP surface serves (see mcp_exec.catalog).
 

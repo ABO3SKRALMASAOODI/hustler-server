@@ -14,6 +14,7 @@ we POST is only what the runner needs to identify the work — never asset bytes
 """
 
 import threading
+import time
 
 import requests
 
@@ -42,6 +43,37 @@ def executor_health(timeout=20):
     resp = requests.get(f"{config.REMOTE_EXECUTOR_URL}/health", timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+
+
+# Pre-warm throttle: one boot per cooldown window is all a session needs
+# (Cloud Run keeps an idle instance around well past this), and an active
+# chat must not turn every agent turn into a health request.
+_WARM_COOLDOWN_S = 300.0
+_warm_last = 0.0
+_warm_lock = threading.Lock()
+
+
+def warm_executor():
+    """Fire-and-forget executor boot ahead of the first render (round 98).
+
+    min-instances stays 0 — the $600/mo always-warm instance stays not
+    bought (see DEPLOY_EXECUTOR.md). This instead boots an instance ONLY
+    when a user is actively editing: the agent loop calls it at turn start,
+    the boot overlaps the model's own planning seconds, and by the time
+    render_preview enqueues, the cold start is already paid. Every failure
+    is swallowed: the worst case is exactly the old behavior."""
+    global _warm_last
+    if not config.REMOTE_EXECUTOR_URL:
+        return
+    now = time.monotonic()
+    with _warm_lock:
+        if now - _warm_last < _WARM_COOLDOWN_S:
+            return
+        _warm_last = now
+    try:
+        executor_health(timeout=45)
+    except Exception:
+        pass
 
 
 def check_executor_version(quiet=False):

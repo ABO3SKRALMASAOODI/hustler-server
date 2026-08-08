@@ -424,6 +424,18 @@ def extract_wav(src, dst):
          "-c:a", "pcm_s16le", dst])
 
 
+def extract_audio_clip(src, t0, t1, dst):
+    """A short mono mp3 of src's sound between t0 and t1 — the carrier for
+    the agent's ears (llm.audio_part). 22.05k/48kbps mono keeps a 6s clip
+    around ~40KB: cheap to upload, cheap to tokenize, and entirely enough
+    to judge a mix, a level, or an sfx landing."""
+    t0 = max(0.0, float(t0))
+    run(["ffmpeg", "-y", "-ss", f"{t0:.2f}",
+         "-t", f"{max(0.1, float(t1) - t0):.2f}", "-i", src, "-vn",
+         "-ac", "1", "-ar", "22050", "-c:a", "libmp3lame", "-b:a", "48k",
+         dst])
+
+
 # Codecs an .m4a container carries unchanged, so the extraction is a remux
 # (a second or two on a long clip) instead of a full decode+encode.
 AUDIO_COPY_CODECS = ("aac", "alac")

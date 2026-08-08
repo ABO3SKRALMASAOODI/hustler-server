@@ -331,21 +331,23 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
 
     # ── sound ────────────────────────────────────────────────────────────
     sfx = sorted((edl.get("sfx") or []), key=lambda s: _num(s.get("at")))
-    # SFX ARE OPT-IN (round 55). Five whooshes and booms went onto a montage
-    # nobody had asked for sound effects on, and the user's instruction was
-    # unambiguous: "it is adding sound effects badly, it has no taste at all,
-    # it should not add them unless requested explicitly." The rule that
-    # follows is therefore about CONSENT, not about count — and like every
-    # rule here it is suppressed the moment the user does ask.
+    # SFX WITHOUT A REQUEST DEMAND JUSTIFICATION, not removal (round 98).
+    # Round 55 made them strictly opt-in after five mistimed whooshes — a
+    # consent rule standing in for a placement problem. With event-bound
+    # placement, the listen check and the audio QC, the rule returns to
+    # what a pro would say: an unrequested sound is fine EXACTLY when it
+    # lands on a moment the viewer can see and the format calls for it —
+    # and the burden of proof sits on the editor, per sound.
     if sfx and not any(h in ask for h in SFX_REQUEST_HINTS):
         add(f"{len(sfx)} sound effect{'s' if len(sfx) != 1 else ''} "
-            "were added and the user did not ask for any. Sound effects are "
-            "the loudest uninvited thing an edit can do and the first thing "
-            "people notice when they are wrong — they belong on a moment the "
-            "viewer can SEE, at the user's request, not sprinkled through a "
-            "cut. Remove them (remove_sfx) unless a specific one is landing "
-            "on a real hit you can point at, and offer them instead of "
-            "adding them.")
+            "placed without the user asking. That is allowed ONLY when the "
+            "format calls for sound design (hype/montage/gaming/promo — "
+            "never podcast/interview/calm) AND every single one lands on a "
+            "moment the viewer can SEE (a cut, a reveal, a punch-in, a "
+            "drop). Verify each against the preview (listen when you can); "
+            "remove_sfx any that are not on a nameable moment, and NAME "
+            "the ones you keep in your reply so the user can strip them "
+            "with one word.")
     if out_dur > 0 and len(sfx) > max(3, int(out_dur / SFX_PER_S)):
         add(f"{len(sfx)} sound effects in {out_dur:.0f}s — accents stop being "
             "accents when they are constant. 3-6 placed on the real moments "

@@ -23,6 +23,7 @@ import shutil
 import time
 import uuid
 
+import audio_qc
 import audit
 import captions as caplib
 import config
@@ -4065,6 +4066,31 @@ def run_render_job(worker_db, job):
         _mark("upload_s")
 
         out_info = media.probe(out_local)
+        # Round 98 — the render reviews its own SOUND. One ffmpeg pass
+        # measures the mix (LUFS / true peak / dead air -> plain findings the
+        # agent must act on, exactly like the taste audit), and the changed
+        # seconds are cut as tiny mono mp3s the agent LISTENS to when its
+        # model has ears (llm.agent_hears). Both best-effort: a preview never
+        # fails over its own review, and an executor that predates the fields
+        # simply returns neither.
+        audio_qc_res = None
+        listen_keys = []
+        if variant == "preview":
+            try:
+                audio_qc_res = audio_qc.measure(out_local, duration_s=out_dur)
+            except Exception:
+                audio_qc_res = None
+            try:
+                for i, (ls, le) in enumerate(
+                        audio_qc.listen_windows(vtimes, out_dur)):
+                    lp = os.path.join(workdir, f"listen_{i}.mp3")
+                    media.extract_audio_clip(out_local, ls, le, lp)
+                    lk = f"media/{project_id}/{stamp}_l{i}.mp3"
+                    storage.upload_file(lp, lk, "audio/mpeg")
+                    listen_keys.append({"key": lk, "t0": round(ls, 2),
+                                        "t1": round(le, 2)})
+            except Exception:
+                listen_keys = []
         asset_id = worker_db.run(
             dbx.insert_asset, project_id, "render", render_key,
             bytes_=os.path.getsize(out_local), duration_s=out_dur,
@@ -4072,6 +4098,7 @@ def run_render_job(worker_db, job):
             fps=out_info["fps"],
             meta={"variant": variant, "edl_version": version,
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
+                  "listen_keys": [k["key"] for k in listen_keys],
                   "src_sha256": src_sha,
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),
@@ -4097,6 +4124,8 @@ def run_render_job(worker_db, job):
                     keys.append(a["storage_key"])
                     keys.append((a.get("meta") or {}).get("sheet_key"))
                     keys.append((a.get("meta") or {}).get("verify_sheet_key"))
+                    keys.extend((a.get("meta") or {}).get("listen_keys")
+                                or [])
                 storage.delete_keys(keys)
                 worker_db.run(dbx.delete_assets, [a["id"] for a in old])
                 print(f"[render {job_id}] pruned {len(old)} superseded "
@@ -4117,6 +4146,7 @@ def run_render_job(worker_db, job):
                 "verify_sheet_key": verify_sheet_key,
                 "duration_s": out_dur, "edl_version": version,
                 "variant": variant, "timings": timings,
-                "midword_audit": mw}
+                "midword_audit": mw,
+                "audio_qc": audio_qc_res, "listen_keys": listen_keys}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

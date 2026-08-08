@@ -4113,28 +4113,39 @@ check("prompt: music no longer requires an upload",
 # advertise a library an image doesn't ship, in either direction.
 check("prompt: capability-neutral (no library claim baked in)",
       "list_music_library" not in agent_prompt.system_prompt())
+# Round 98: the bundled library is RETIRED from the agent's surface —
+# music is found online (search_music/fetch_music). The state block offers
+# search exactly when the capability is on, never the old library; the
+# resolver in music_library stays alive for old EDLs but is never
+# advertised.
+import config as _cfg                                         # noqa: E402
+import music_search                                           # noqa: E402
 _sb_kwargs = dict(keep_line=None, captions_line=None, program_lines=None)
 _sb_on = agent_prompt.project_state_block("v", "i", "e", [], [], **_sb_kwargs)
-_saved_catalog = music_library.CATALOG
+_saved_ms = _cfg.MUSIC_SEARCH_ENABLED
 try:
-    music_library.CATALOG = []
+    _cfg.MUSIC_SEARCH_ENABLED = False
     _sb_off = agent_prompt.project_state_block("v", "i", "e", [], [],
                                                **_sb_kwargs)
 finally:
-    music_library.CATALOG = _saved_catalog
-check("state: the library is offered exactly when tracks shipped",
-      ("list_music_library" in _sb_on) == bool(music_library.CATALOG)
-      and "list_music_library" not in _sb_off
+    _cfg.MUSIC_SEARCH_ENABLED = _saved_ms
+check("state: music search offered exactly when enabled, library never",
+      ("search_music" in _sb_on) == bool(music_search.available())
+      and "list_music_library" not in _sb_on
+      and "search_music" not in _sb_off
       and "royalty-free" not in _sb_off)
-# The hint must track what this deployment can ACTUALLY do: offer the library
-# when tracks shipped, and say nothing about one when they didn't. An empty
-# image promising a music library is the exact shape of a round-22 lie.
+# The hint must track what this deployment can ACTUALLY do: offer found
+# music when search is on, uploads-only when it is off.
 _hint = _nearest_alternative("add some background music")
-check("audio hint matches whether the library actually shipped",
-      ("library" in _hint.lower()) == bool(music_library.CATALOG))
-check("library tool is hidden when no tracks shipped",
-      agent_tools._tool_disabled("list_music_library")
-      == (not music_library.CATALOG))
+check("audio hint matches whether music search is on",
+      ("find online" in _hint.lower()) == bool(music_search.available()))
+check("the retired library tool is no longer registered",
+      "list_music_library" not in agent_tools.TOOLS)
+check("music search tools hide exactly when the capability is off",
+      agent_tools._tool_disabled("search_music")
+      == (not music_search.available())
+      and agent_tools._tool_disabled("fetch_music")
+      == (not music_search.available()))
 
 print("== Round-26: sound effects + the branded end card ==")
 import sfx_library                                            # noqa: E402

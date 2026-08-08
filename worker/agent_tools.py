@@ -12,6 +12,7 @@ import subprocess
 import time
 import uuid
 
+import audio_qc
 import audit
 import config
 import db as dbx
@@ -23,6 +24,7 @@ import personseg
 import media
 import model_prices
 import music_library
+import music_search
 import perception
 # The takeover's geometry (how far the camera travels, where it aims) is
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
@@ -116,6 +118,7 @@ class ToolContext:
         self._asset_locals = {}       # asset id -> downloaded local path
         self._perception = None       # main video's audio analysis, cached
         self._asset_perception = {}   # asset/library key -> audio analysis
+        self._music_hits = {}         # search_music results this turn, by id
         self.last_preview = None      # set by render_preview
         # Frames a look tool captured for whoever is DOING THE EDITING this
         # step (round 67): [(label, jpeg_path)].
@@ -132,6 +135,22 @@ class ToolContext:
         self.pending_images = []
         self.direct_sight = False
         self.sight_out = False
+        # The edit plan the agent recorded for THIS turn (set_edit_plan,
+        # round 98): {"brief": str|None, "steps": [str]}. Working memory,
+        # not EDL state — it rides continuation passes so a resumed turn
+        # finishes what was planned instead of re-deciding it, and the
+        # activity feed shows the user what the editor intends to do.
+        self.edit_plan = None
+        # Sound clips a listen tool (or render_preview) captured for the
+        # agent's own EARS this step (round 98): [(label, mp3_path)]. The
+        # loop injects them as input_audio parts right after the tool
+        # results, exactly like pending_images — and only when the agent
+        # model actually hears (llm.agent_hears).
+        self.pending_audio = []
+        # EDL versions this turn already enqueued a SPECULATIVE preview for
+        # (round 98) — the loop's fire-ahead encode. Bounds repeats and lets
+        # render_preview adopt instead of re-enqueueing.
+        self.spec_enqueued = set()
         self.last_selfcheck = None    # vision one-liner from the last preview
         # Craft findings from the most recent REAL preview render, and the EDL
         # version they were measured on. The loop reads these to stop a turn
@@ -796,12 +815,14 @@ def list_assets(ctx, kind=None):
     rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, sel)
     if not rows:
         if sel == kinds["music"]:
-            return ("No audio uploaded to this project — but the built-in "
-                    "libraries are always available: list_music_library() "
-                    "for background tracks, list_sfx_library() for one-shot "
-                    "sound effects. Only ask the user to attach a file "
-                    "(paperclip button in chat, mp3/wav/m4a) if they want a "
-                    "specific sound the libraries do not have.")
+            return ("No audio uploaded to this project — but you can FIND "
+                    "music yourself: search_music looks up license-clean "
+                    "tracks online (by vibe/genre) and fetch_music "
+                    "downloads one, ready for add_music; list_sfx_library() "
+                    "has one-shot sound effects. Only ask the user to "
+                    "attach a file (paperclip button in chat, mp3/wav/m4a) "
+                    "when they want a SPECIFIC song — e.g. a trending "
+                    "sound, which only they can legally provide.")
         return f"No {kind} assets in this project."
     lines = []
     for a in rows:
@@ -2090,8 +2111,8 @@ def _audio_from_clip(ctx, asset):
             return None, None, (
                 f"REJECTED: '{name}' has no sound in it at all — it is a "
                 "silent video, so there is no audio to take from it. Tell "
-                "the user that plainly and ask for the song itself, or offer "
-                "a built-in track (list_music_library).")
+                "the user that plainly and ask for the song itself, or "
+                "offer to find one (search_music).")
         return None, None, (
             f"Could not take the audio out of '{name}' ({str(e)[:140]}). Do "
             "NOT claim the sound was added.")
@@ -2181,20 +2202,17 @@ def _resolve_music(ctx, storage_key):
     the check that catches the pipeline's own extracted speech track, the
     cause of the original inaudible-music bug."""
     if music_library.is_library_ref(storage_key):
+        # Legacy door (round 98): the bundled pack is retired from the
+        # agent's surface — these refs keep RESOLVING so every old EDL and
+        # old chat history still renders, but new music comes from
+        # search_music/fetch_music or the user's own uploads.
         t = music_library.resolve(storage_key)
-        if not t:
-            have = ", ".join(x["slug"] for x in music_library.CATALOG[:10])
+        if not t or t.get("retired"):
             return None, (
-                f"REJECTED: '{storage_key}' is not a track in the built-in "
-                f"library. Call list_music_library() and use a slug it "
-                f"returns — never invent one. Known slugs: {have or 'none'}.")
-        if t.get("retired"):
-            # Still renders in old EDLs; never offered or re-added. The slug
-            # can reach here from chat history of a project that used it.
-            return None, (
-                f"REJECTED: '{t['title']}' was retired from the built-in "
-                "library and can't be added to new edits. Call "
-                "list_music_library() and pick a current track.")
+                f"REJECTED: '{storage_key}' is not an addable bundled "
+                "track (the built-in library is retired). Use search_music "
+                "to find a license-clean track online, or "
+                "list_assets(kind='music') for the user's own uploads.")
         return {"name": t["title"], "duration_s": t.get("duration_s"),
                 "library": True, "storage_key": storage_key}, None
 
@@ -2205,7 +2223,7 @@ def _resolve_music(ctx, storage_key):
             "track (a transcription artifact), not background music — "
             "mixing it in would only double the speaker's voice under "
             "itself, near-inaudibly. Use a real music file instead: "
-            "list_music_library() for a built-in track, or "
+            "search_music to find one online, or "
             "list_assets(kind='music') for the user's own uploads.")
     if asset and asset["kind"] == "video_clip":
         got, note, err = _audio_from_clip(ctx, asset)
@@ -2219,12 +2237,93 @@ def _resolve_music(ctx, storage_key):
             lambda conn: _music_assets(conn, ctx.project_id))
         hint = ("Available music storage_keys: " +
                 "; ".join(a["storage_key"] for a in avail)
-                if avail else "No music uploaded to this project — call "
-                              "list_music_library() for built-in tracks.")
+                if avail else "No music uploaded to this project — "
+                              "search_music finds license-clean tracks "
+                              "online, fetch_music downloads one.")
         return None, f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
     return {"name": os.path.basename(storage_key),
             "duration_s": asset.get("duration_s"), "library": False,
             "storage_key": storage_key}, None
+
+
+def search_music(ctx, query, min_seconds=None, max_seconds=None):
+    """READ: find license-clean music online (round 98) — the replacement
+    for the retired bundled pack. Results carry license + author so the
+    obligation travels with the track instead of vanishing into an export."""
+    if not music_search.available():
+        return ("REJECTED: music search is disabled on this deployment — "
+                "use the user's uploads (list_assets(kind='music')) or "
+                "ask_user for a file.")
+    try:
+        mn = float(min_seconds) if min_seconds is not None else None
+        mx = float(max_seconds) if max_seconds is not None else None
+    except (TypeError, ValueError):
+        return "REJECTED: min_seconds/max_seconds must be numbers."
+    try:
+        hits = music_search.search(query, min_s=mn, max_s=mx)
+    except music_search.MusicSearchError as e:
+        return (f"Music search failed ({str(e)[:180]}). Try a simpler "
+                "genre query, or use an uploaded file "
+                "(list_assets(kind='music')).")
+    if not hits:
+        return (f"No commercial-use tracks matched '{query}'. Search with "
+                "broader GENRE words ('dark phonk', 'lofi chill beat', "
+                "'cinematic piano', 'upbeat funk') — and for a SPECIFIC or "
+                "TRENDING song, only the user can provide it (upload or a "
+                "clip that carries it); platforms license trend audio "
+                "inside their own apps only.")
+    ctx._music_hits = {h["id"]: h for h in hits}
+    return ("License-clean tracks found (commercial use OK):\n- "
+            + "\n- ".join(music_search.describe(h) for h in hits)
+            + "\nfetch_music(id) downloads one into the project. Then "
+              "listen_to(asset_key=...) to HEAR it before committing, "
+              "add_music to lay it in — and tell the user which track you "
+              "chose and its license line (a CC BY credit is theirs to "
+              "carry in the caption).")
+
+
+def fetch_music(ctx, id):
+    """WRITE (to the project's assets): download a search_music hit and
+    register it as a normal music asset, ready for add_music."""
+    hit = (getattr(ctx, "_music_hits", None) or {}).get(str(id or "").strip())
+    if not hit:
+        return ("REJECTED: that id is not from THIS turn's search_music "
+                "results — call search_music first and fetch one of the "
+                "ids it returned.")
+    lp = os.path.join(ctx.workdir, f"musicfetch_{uuid.uuid4().hex[:8]}.mp3")
+    try:
+        music_search.download(hit, lp)
+    except Exception as e:
+        return (f"Could not download that track ({str(e)[:160]}). Try "
+                "another result. Do NOT claim music was added.")
+    dur = music_search.probe_duration_s(lp)
+    if dur < 3.0:
+        return ("REJECTED: the downloaded file is not playable audio "
+                "(or under 3s) — try another result. Do NOT claim music "
+                "was added.")
+    key = f"music/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
+    try:
+        storage.upload_file(lp, key, "audio/mpeg")
+    except Exception as e:
+        return (f"Downloaded but could not save it ({str(e)[:140]}) — try "
+                "again. Do NOT claim music was added.")
+    title = (hit.get("title") or "track").strip()
+    artist = hit.get("artist")
+    fname = ((f"{title} — {artist}" if artist else title)[:80]) + ".mp3"
+    note = music_search.license_note(hit)
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
+               bytes_=os.path.getsize(lp), duration_s=dur,
+               meta={"filename": fname, "source": hit.get("provider"),
+                     "source_url": hit.get("page_url") or hit.get("_url"),
+                     "license": hit.get("license"), "license_note": note,
+                     "author": artist,
+                     "caption": "found online by search_music"})
+    return (f"Fetched \"{title}\"{' by ' + artist if artist else ''} — "
+            f"{dur:.0f}s, saved as storage_key={key}. License: {note}. "
+            f"Next: listen_to(asset_key='{key}') to hear it, then "
+            f"add_music(storage_key='{key}') — set_music_fit retimes it, "
+            "get_audio_analysis(asset_key) measures its BPM/beats for "
+            "beat_align_cuts.")
 
 
 def list_music_library(ctx, mood=None):
@@ -10585,6 +10684,45 @@ def _grade_strip_shortcut(ctx, row):
         return None
 
 
+GRADE_ONLY_TOOLS = ("set_color_grade", "apply_look", "set_grade_custom")
+
+
+def speculative_preview(ctx):
+    """Start the encode of the newest EDL version NOW, before the model asks
+    (round 98). Called by the agent loop after a step that landed writes:
+    the render runs DURING the next ~13s model call instead of after it,
+    and render_preview adopts the queued/running job for the same version
+    (dbx.pending_preview_job) rather than encoding twice.
+
+    Best-effort by contract — every skip is silent and every failure is the
+    caller's `except: pass`, because the worst case must be exactly the old
+    timeline (the render starts when asked). Grade-only steps are skipped:
+    the contact-strip shortcut serves those cheaper than any render."""
+    if not config.SPECULATIVE_PREVIEWS:
+        return
+    if ctx.write_calls and ctx.write_calls[-1] in GRADE_ONLY_TOOLS:
+        return
+    row = ctx.latest_edl()
+    version = row["version"]
+    if version in ctx.rendered_versions or version in ctx.spec_enqueued:
+        return
+    if len(ctx.spec_enqueued) >= config.SPECULATIVE_PREVIEWS_MAX:
+        return
+    if ctx.db.run(dbx.pending_preview_job, ctx.project_id, version):
+        ctx.spec_enqueued.add(version)
+        return
+    payload = {"edl_version": version}
+    try:
+        plan = _verify_plan_for(ctx, row)
+        if plan:
+            payload["verify_times"] = [t for t, _ in plan]
+    except Exception:
+        pass
+    ctx.db.run(dbx.enqueue_job, ctx.project_id, ctx.job["user_id"],
+               "preview", payload)
+    ctx.spec_enqueued.add(version)
+
+
 def render_preview(ctx):
     row = ctx.latest_edl()
     version = row["version"]
@@ -10600,11 +10738,16 @@ def render_preview(ctx):
     # ("this should read X, behind the person") instead of nine even samples
     # of the whole programme that the edit may not even appear in.
     plan = _verify_plan_for(ctx, row)
-    payload = {"edl_version": version}
-    if plan:
-        payload["verify_times"] = [t for t, _ in plan]
-    job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id, ctx.job["user_id"],
-                        "preview", payload)
+    # Adopt the speculative encode of this exact version when one is already
+    # queued/running (round 98) — same payload shape, same verify plan,
+    # half the wait and none of the double cost.
+    job_id = ctx.db.run(dbx.pending_preview_job, ctx.project_id, version)
+    if not job_id:
+        payload = {"edl_version": version}
+        if plan:
+            payload["verify_times"] = [t for t, _ in plan]
+        job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id,
+                            ctx.job["user_id"], "preview", payload)
     deadline = time.time() + config.PREVIEW_WAIT_TIMEOUT_S
     while time.time() < deadline:
         time.sleep(1)
@@ -10730,6 +10873,37 @@ def render_preview(ctx):
                 note += taste.audit_line(findings)
             except Exception:
                 pass
+            # Round 98 — the SOUND side of the self-check. Deterministic mix
+            # measurements from the render job (audio_qc): findings are WORK,
+            # exactly like the taste audit. And when the agent model has
+            # ears, the changed seconds' actual audio rides along so the
+            # editor HEARS what it shipped instead of trusting gain numbers.
+            aq = result.get("audio_qc") or {}
+            aqf = aq.get("findings") or []
+            if aqf:
+                note += (" AUDIO CHECK: " + "; ".join(aqf[:4])
+                         + " — fix these, or keep one deliberately and say "
+                           "why in one clause.")
+            note += audio_qc.summary_line(aq)
+            lkeys = result.get("listen_keys") or []
+            if lkeys and _hearing_on(ctx):
+                got = []
+                for i, lk in enumerate(lkeys[:2]):
+                    try:
+                        lp = os.path.join(ctx.workdir,
+                                          f"listen_v{version}_{i}.mp3")
+                        storage.download_to(lk["key"], lp)
+                        got.append((f"PROGRAM sound {lk.get('t0', 0):.1f}-"
+                                    f"{lk.get('t1', 0):.1f}s (output clock)",
+                                    lp))
+                    except Exception:
+                        continue
+                if got:
+                    ctx.pending_audio.extend(got)
+                    note += (" The changed seconds' SOUND follows this "
+                             "message — LISTEN before replying: music level "
+                             "under the speech, every sfx ON its moment, no "
+                             "click or dead air at the cuts.")
             return note
         if j["state"] == "failed":
             return (f"Preview render FAILED: {j.get('error')}. "
@@ -11071,9 +11245,9 @@ def _asset_audio_analysis(ctx, asset_key):
     if music_library.is_library_ref(asset_key):
         t = music_library.resolve(asset_key)
         if not t:
-            return (f"REJECTED: '{asset_key}' is not a track in the built-in "
-                    "library. Call list_music_library() and use a slug it "
-                    "returns.")
+            return (f"REJECTED: '{asset_key}' is not a bundled track (the "
+                    "built-in library is retired) — analyze an uploaded or "
+                    "fetched music asset by its storage_key instead.")
         p = ctx._asset_perception.get(asset_key)
         if p is None:
             try:
@@ -11131,6 +11305,158 @@ def _asset_audio_analysis(ctx, asset_key):
                       "add_sfx or add_zoom; beat_align_cuts snaps existing "
                       "cuts to them for you.")
     return _cap(out)
+
+
+def set_edit_plan(ctx, steps, brief=None):
+    """Record the turn's edit plan — working memory, not an EDL write.
+
+    Round 98. The prompt has always demanded 'plan the edit before you touch
+    it', and the plan lived nowhere: a pass that hit the step ceiling or the
+    clock resumed knowing WHAT it already ran but not what it had DECIDED,
+    and re-derived the edit mid-flight (sometimes differently). This makes
+    the plan a first-class object: recorded once, echoed into every
+    continuation pass, and shown to the user in the activity feed — the
+    editor saying 'here is what I'm going to do' before doing it."""
+    if not isinstance(steps, (list, tuple)) or not steps:
+        return ("REJECTED: steps must be a non-empty array of short "
+                "strings, one per planned move, in execution order.")
+    clean = []
+    for s in list(steps)[:12]:
+        s = str(s or "").strip()
+        if s:
+            clean.append(s[:140])
+    if not clean:
+        return "REJECTED: every step was empty."
+    ctx.edit_plan = {"brief": (str(brief or "").strip()[:200] or None),
+                     "steps": clean}
+    head = (f" Brief: {ctx.edit_plan['brief']}."
+            if ctx.edit_plan["brief"] else "")
+    return (f"Plan recorded ({len(clean)} steps).{head} "
+            + " ".join(f"{i + 1}) {s}" for i, s in enumerate(clean))
+            + " — now execute it in big batched steps. If the edit has to "
+              "change course, record the new plan the same way.")
+
+
+def _hearing_on(ctx):
+    """Can THIS surface put real sound in the model's context? Only the
+    agent loop drains pending_audio (MCP results are text+image), and only
+    a model that takes input_audio parts can receive it."""
+    model = getattr(ctx, "agent_model", None) or config.AGENT_MODEL
+    return bool(getattr(ctx, "direct_sight", False)) and llm.agent_hears(model)
+
+
+_HEARING_OFF_NOTE = (
+    "REJECTED: this model lane cannot take audio in its context, so "
+    "listening is unavailable here. Use get_audio_analysis for measured "
+    "tempo/beats/energy/stress, and the AUDIO CHECK measurements on every "
+    "preview — decisions stay grounded, just via numbers instead of ears.")
+
+
+def listen_to(ctx, times=None, output_times=None, asset_key=None,
+              span_s=4.0):
+    """READ: the agent's own EARS — short clips of ACTUAL sound delivered
+    into its context, mirroring look_at's contract for pictures."""
+    if not _hearing_on(ctx):
+        return _HEARING_OFF_NOTE
+    try:
+        span = min(max(float(span_s or 4.0), 2.0), 10.0)
+    except (TypeError, ValueError):
+        return "REJECTED: span_s must be a number of seconds (2-10)."
+
+    def _windows(ts, dur, clock):
+        try:
+            ts = sorted(round(float(t), 2) for t in ts)[:4]
+        except (TypeError, ValueError):
+            return None, f"REJECTED: {clock} must be numbers of seconds."
+        out = []
+        for t in ts:
+            s = max(0.0, min(t - span / 2.0, max(0.0, dur - 0.5)))
+            e = min(dur, s + span)
+            if e - s >= 0.5:
+                out.append((round(s, 2), round(e, 2)))
+        if not out:
+            return None, (f"REJECTED: none of those {clock} fall inside "
+                          f"the {dur:.1f}s duration.")
+        return out, None
+
+    made = []          # (label, local_path)
+
+    def _cut(local_src, wins, label_fmt):
+        for i, (s, e) in enumerate(wins):
+            lp = os.path.join(ctx.workdir,
+                              f"listen_{len(made)}_{i}_{int(s * 10)}.mp3")
+            media.extract_audio_clip(local_src, s, e, lp)
+            made.append((label_fmt.format(s=s, e=e), lp))
+
+    try:
+        if output_times is not None:
+            row = ctx.latest_edl()
+            lp = ctx.last_preview or {}
+            if lp.get("edl_version") != row["version"] \
+                    or not lp.get("render_asset_id"):
+                return ("REJECTED: the program's sound exists only once "
+                        "rendered — render_preview this version first, "
+                        "then listen with output_times (or just read the "
+                        "sound clips the render itself attaches).")
+            asset = ctx.db.run(dbx.get_asset, lp["render_asset_id"])
+            if not asset:
+                return "REJECTED: the last preview's file is gone — render_preview again."
+            dur = float(lp.get("duration_s") or
+                        asset.get("duration_s") or 0.0)
+            wins, err = _windows(output_times, dur, "output_times")
+            if err:
+                return err
+            _cut(_asset_local_path(ctx, asset), wins,
+                 "PROGRAM sound {s:.1f}-{e:.1f}s (output clock)")
+        elif asset_key:
+            asset, err = _resolve_media_asset(
+                ctx, asset_key, ("music", "render", "audio", "video_clip"))
+            if err:
+                return err
+            big = (asset.get("bytes") or 0) > 80 * 1024 * 1024
+            if asset["kind"] == "video_clip" and big \
+                    and asset["id"] not in ctx._asset_locals:
+                return ("REJECTED: that clip is too large to fetch just for "
+                        "its sound. get_audio_analysis(asset_key) gives its "
+                        "measured tempo/energy instead.")
+            dur = float(asset.get("duration_s") or
+                        _asset_media_duration(ctx, asset) or 0.0)
+            wins, err = _windows(times if times is not None else [dur / 2.0],
+                                 max(dur, 1.0), "times")
+            if err:
+                return err
+            name = ((asset.get("meta") or {}).get("filename")
+                    or os.path.basename(asset["storage_key"]))[:40]
+            _cut(_asset_local_path(ctx, asset), wins,
+                 "ASSET '" + name + "' {s:.1f}-{e:.1f}s")
+        elif times is not None:
+            if not ctx.has_main_video:
+                return ("REJECTED: no main video — pass asset_key to listen "
+                        "to an uploaded file instead.")
+            wav = ctx.db.run(dbx.latest_asset, ctx.project_id, "audio")
+            if not wav:
+                return ("REJECTED: this video has no stored audio track to "
+                        "listen to (it may be silent, or predate audio "
+                        "indexing). get_audio_analysis still works.")
+            wins, err = _windows(times, ctx.duration, "times")
+            if err:
+                return err
+            _cut(_asset_local_path(ctx, wav), wins,
+                 "SOURCE sound {s:.1f}-{e:.1f}s (source clock)")
+        else:
+            return ("REJECTED: pass times=[...] (source seconds), "
+                    "output_times=[...] (program seconds, after a render), "
+                    "or asset_key (+ optional times).")
+    except Exception as e:
+        return f"Listening failed ({str(e)[:160]}) — decide from get_audio_analysis instead."
+    if not made:
+        return "REJECTED: nothing listenable in that range."
+    ctx.pending_audio.extend(made)
+    return ("Listening delivered: "
+            + "; ".join(label for label, _ in made)
+            + ". The SOUND follows this message — judge it with your own "
+              "ears (levels, vibe, timing, room tone), then act on what "
+              "you actually heard.")
 
 
 def get_audio_analysis(ctx, asset_key=None):
@@ -11966,6 +12292,20 @@ TOOLS = {
                    "matching skill before your first edit of that kind — "
                    "batch it with your other reading calls.",
                    {"name": {"type": "string"}}),
+    "set_edit_plan": (set_edit_plan, "Record YOUR edit plan for this "
+                      "request before executing it — one short line per "
+                      "move, in order (steps=[...], optional brief= one "
+                      "line naming the format and direction). Call it in "
+                      "the same batch as your reads on any multi-step "
+                      "edit: the plan survives auto-continuations (a "
+                      "resumed pass finishes what was PLANNED instead of "
+                      "re-deciding), and the user sees it as your "
+                      "statement of intent. Re-call to replace when the "
+                      "edit legitimately changes course. Not an EDL "
+                      "write.",
+                      {"steps": {"type": "array",
+                                 "items": {"type": "string"}},
+                       "brief": {"type": "string"}}),
     "find_silences": (find_silences, "Silences of at least min_seconds, with "
                       "midpoints and surrounding words — cut points should "
                       "snap to these midpoints or word boundaries.",
@@ -12031,6 +12371,23 @@ TOOLS = {
                        "question": {"type": "string"},
                        "start": {"type": "number"},
                        "end": {"type": "number"}}),
+    "listen_to": (listen_to, "YOUR OWN EARS. times=[...] hears the SOURCE "
+                  "footage's actual sound at those moments; "
+                  "output_times=[...] the ASSEMBLED program's mix (works "
+                  "after render_preview — the program's sound exists once "
+                  "rendered); asset_key an uploaded song/clip/render (+ "
+                  "optional times, clip seconds). Short clips (span_s, "
+                  "default 4s) arrive in your context as REAL AUDIO you "
+                  "judge yourself — room tone, delivery, music vibe, mix "
+                  "balance, sfx landing. Choosing or judging sound without "
+                  "listening is guessing: listen before you claim. Batch "
+                  "the moments into ONE call. If this lane cannot take "
+                  "audio the tool says so — use get_audio_analysis then.",
+                  {"times": {"type": "array", "items": {"type": "number"}},
+                   "output_times": {"type": "array",
+                                    "items": {"type": "number"}},
+                   "asset_key": {"type": "string"},
+                   "span_s": {"type": "number"}}),
     "keep_segments": (keep_segments, "REPLACE the whole keep list: the parts "
                       "of the SOURCE video that survive, [[start,end],...] "
                       "in seconds. Everything else is cut. Use only for "
@@ -12144,29 +12501,35 @@ TOOLS = {
                                          "items": {"type": "string"}},
                       "items": {"type": "array",
                                 "items": {"type": "object"}}}),
-    "list_music_library": (list_music_library, "Browse the BUILT-IN "
-                           "royalty-free music library — tracks that are "
-                           "always available with nothing uploaded. Returns "
-                           "'library:<slug>' references to pass to "
-                           "add_music. Optionally filter by mood: "
-                           + ", ".join(music_library.MOODS) + ". These "
-                           "moods are the WHOLE library — if the user wants "
-                           "a genre outside them (techno, phonk, rock, "
-                           "jazz...), tell them so instead of silently "
-                           "substituting, offer the closest mood, and offer "
-                           "to use a track THEY provide (a link via "
-                           "fetch_url, or an uploaded file).",
-                           {"mood": {"type": "string",
-                                     "enum": list(music_library.MOODS)}}),
+    "search_music": (search_music, "Search real online catalogs for "
+                     "LICENSE-CLEAN music (commercial use, safe inside the "
+                     "user's export) by genre/vibe words — 'dark phonk', "
+                     "'lofi chill beat', 'cinematic piano', 'upbeat funk'. "
+                     "Search by what the video IS, not a generic mood. "
+                     "Results carry title, artist, duration and the exact "
+                     "license obligation. min_seconds/max_seconds filter "
+                     "length. For a SPECIFIC or TRENDING song only the "
+                     "user can provide the file (upload or a clip carrying "
+                     "it) — say so instead of substituting silently.",
+                     {"query": {"type": "string"},
+                      "min_seconds": {"type": "number"},
+                      "max_seconds": {"type": "number"}}),
+    "fetch_music": (fetch_music, "Download ONE search_music result (by its "
+                    "id) into the project as a normal music asset — "
+                    "returns the storage_key for add_music. Listen to it "
+                    "(listen_to) before committing it under the program, "
+                    "and repeat the license line to the user when it "
+                    "carries a credit obligation.",
+                    {"id": {"type": "string"}}),
     "add_music": (add_music, "Mix music into the edit. The defaults are "
                   "CONTEXT-AWARE: under speech the track sits low as a bed "
                   "(-18dB, ducked); when NO speech survives under the window "
                   "the music is the LEAD audio (-4dB, no ducking) so the "
                   "user actually hears it. Pass gain_db/duck only to "
-                  "override that. storage_key is either a 'library:<slug>' "
-                  "from list_music_library() or an exact key from "
-                  "list_assets(kind='music') (the user's own uploads) — "
-                  "never invent one. start/end are OUTPUT-timeline seconds "
+                  "override that. storage_key is an exact key from "
+                  "list_assets(kind='music') — the user's own uploads or a "
+                  "track fetch_music just downloaded — never invent one. "
+                  "start/end are OUTPUT-timeline seconds "
                   "and DEFAULT TO THE WHOLE VIDEO, so omit them for 'add "
                   "some music'. Fades in/out by default. loop=true (the "
                   "default) repeats a short track to fill the span; "
@@ -13575,7 +13938,10 @@ REQUIRED_ARGS = {
     # start/end default to the whole program, so "add some music" needs only
     # a track.
     "add_music": ["storage_key"],
-    "list_music_library": [],
+    "search_music": ["query"],
+    "fetch_music": ["id"],
+    "listen_to": [],
+    "set_edit_plan": ["steps"],
     "list_sfx_library": [],
     "extract_audio": ["asset_key"],
     "add_sfx": ["storage_key", "at"],
@@ -13716,11 +14082,9 @@ def _tool_disabled(name):
     # is not "no", and the call itself refuses gracefully.
     if name in ("separate_music", "remove_stem_mix"):
         return _stems_supported() is False
-    # Same rule for the music library: a deployment whose image shipped no
-    # tracks must not advertise one, or the agent offers music it cannot
-    # deliver and then has to walk it back.
-    if name == "list_music_library":
-        return not music_library.CATALOG
+    # Live music search (round 98) — the bundled library's replacement.
+    if name in ("search_music", "fetch_music"):
+        return not music_search.available()
     if name == "list_sfx_library":
         return not sfx_library.CATALOG
     # The director pass places bundled sounds — with no pack shipped it can

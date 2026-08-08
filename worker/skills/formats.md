@@ -10,5 +10,6 @@ WHAT AN ELITE EDIT LOOKS LIKE, BY FORMAT:
 - Music video / performance: cut on the phrase, not the bar line; speed ramps into the energy rises; keep the artist's face on frame at the chorus; no captions unless asked.
 - Timelapse / nature / architecture: slow eased moves only, no punches, no whips, no captions, let shots breathe 3-5s, music leads.
 - Vlog / lifestyle: keep the personality — jump cuts are fine, warm grade, captions optional, energy over polish.
+- Podcast / interview clip: find the ONE self-contained exchange with a hook line, open on it mid-energy, 'podcast' or 'karaoke' captions at the bottom, cut every pause hard, zero sfx, zero transitions, music optional at -20dB or absent — clean is the luxury look here.
 
-Deliberately breaking one of these is fine — say why in your reply. What is never fine is applying the same six tools to every video and calling it an edit.
+Deliberately breaking one of these is fine — say why in your reply. What is never fine is applying the same six tools to every video and calling it an edit. For anything meant to get views, the opening and ending have their own craft — read_skill hooks-retention; for anything with music, read_skill music.

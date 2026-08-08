@@ -56,7 +56,7 @@ check("no continuation into a dying clock", not d(0, True, 90, False))
 check("no continuation past the spend cap", not d(0, True, 600, True))
 
 note = agent_loop._CONTINUATION_NOTE.format(done="set_speed x4, add_music",
-                                            why="step ceiling")
+                                            why="step ceiling", plan="")
 check("the note says the user saw nothing",
       "NOT seen any reply" in note and "NOT sent anything new" in note)
 check("the note forbids redoing finished work",

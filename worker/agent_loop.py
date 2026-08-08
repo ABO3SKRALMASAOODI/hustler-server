@@ -17,7 +17,8 @@ import db as dbx
 import eleven
 import grammar
 import llm
-import music_library
+import music_search
+import remote
 import sfx_library
 import storage
 import timeline
@@ -771,12 +772,19 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     # system_prompt(), not the raw constant: it drops the built-in-library
     # claims when this image shipped no tracks.
     msgs = [{"role": "system", "content": system_prompt()},
-            {"role": "system", "content": capabilities_block()},
-            {"role": "system", "content": state_block(ctx, worker_db)}]
+            {"role": "system", "content": capabilities_block()}]
     # THE FILMSTRIPS — rebuilt fresh every turn for every video in the
     # project, so the agent's picture of the footage can never go stale. A
     # blind provider strips these on first rejection (_strip_image_parts)
     # and the turn continues on text + look_at's vision fallback.
+    #
+    # BEFORE the state block, deliberately (round 98): the strips are the
+    # LARGEST and most STABLE part of the prompt — identical bytes turn
+    # after turn — while the state block changes with every EDL write. With
+    # the state first, every turn's strip re-tokenized as a cache MISS;
+    # with the strips first they ride the provider's cached prefix and only
+    # the (small, text) state re-processes. Same content, same senses,
+    # meaningfully faster first token and a cheaper turn.
     if ctx.direct_sight and llm.agent_sees(ctx.agent_model):
         try:
             parts = filmstrip_parts(ctx, worker_db)
@@ -784,6 +792,7 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
                 msgs.append({"role": "user", "content": parts})
         except Exception as e:
             print(f"[filmstrip] skipped ({e})", flush=True)
+    msgs.append({"role": "system", "content": state_block(ctx, worker_db)})
     # The last few messages, not the last twenty (round 71f). Twenty was up
     # to 40k chars of stale conversation re-read on EVERY call of EVERY
     # turn, and it actively misled: superseded requests ("make the title
@@ -936,6 +945,12 @@ def run_agent_job(worker_db, job):
     # with direct sight off; the loop that can honour it turns it on.
     ctx.direct_sight = True
     ctx.user_message = (user_message.get("content") or "")[:4000]
+    # Wake the executor NOW, while the model is still reading and planning
+    # (round 98): the first render of an idle session otherwise pays the
+    # Cloud Run cold start ON TOP of the encode. Fire-and-forget — a failed
+    # ping costs nothing and the render path keeps its own error handling.
+    if config.REMOTE_EXECUTOR_URL:
+        threading.Thread(target=remote.warm_executor, daemon=True).start()
     # A turn spends what the user can PAY FOR — balance + a small grace — and
     # nothing else bounds it.
     #
@@ -1471,12 +1486,12 @@ ALTERNATIVE_HINTS = [
      "size, position, keyword emphasis words, karaoke mode and entrance "
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
-     "What I CAN do: score the edit with music on any time range — a track "
-     "from the built-in royalty-free library or the user's own upload — "
-     "loop it to fill the video, fade it in and out, start it partway in, "
-     "swap one track for another, make it louder or quieter, or remove it. "
-     "I can also lay an uploaded voiceover over the edit (other audio ducks "
-     "while it speaks)."),
+     "What I CAN do: score the edit with music on any time range — a "
+     "license-clean track I find online by genre/vibe, or the user's own "
+     "upload — loop it to fill the video, fade it in and out, start it "
+     "partway in, swap one track for another, make it louder or quieter, "
+     "or remove it. I can also lay an uploaded voiceover over the edit "
+     "(other audio ducks while it speaks)."),
     (re.compile(r"(?i)insert|splice|b.?roll|logo|image|photo|clip|overlay|"
                 r"generat|create|draw|ai.?(?:image|art)|hair|face|character"),
      "What I CAN do: splice an uploaded video clip or image in at ANY "
@@ -1514,9 +1529,11 @@ def _nearest_alternative(user_text):
             if "What I CAN do with a link" in hint \
                     and not config.URL_FETCH_ENABLED:
                 continue
-            # A deployment that shipped no tracks must not offer a library.
-            if "built-in royalty-free library" in hint \
-                    and not music_library.CATALOG:
+            # A deployment with music search off must not offer to find
+            # tracks (round 98 — the bundled library is retired; found
+            # music replaced it).
+            if "license-clean track I find online" in hint \
+                    and not music_search.available():
                 return ("What I CAN do: mix music you upload under the edit "
                         "on any time range, loop it to fill the video, fade "
                         "it in and out, make it louder or quieter, or remove "
@@ -1845,10 +1862,16 @@ def _messages_for_record(messages):
         if not isinstance(content, list):
             out.append(m)
             continue
-        parts = [p if not (isinstance(p, dict)
-                           and p.get("type") == "image_url")
-                 else {"type": "text", "text": "[image attached]"}
-                 for p in content]
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "image_url":
+                parts.append({"type": "text", "text": "[image attached]"})
+            elif isinstance(p, dict) and p.get("type") == "input_audio":
+                # Same rule as frames: base64 sound in the recorded request
+                # would put megabytes into llm_calls per listening turn.
+                parts.append({"type": "text", "text": "[audio attached]"})
+            else:
+                parts.append(p)
         out.append({**m, "content": parts})
     return out
 
@@ -1875,6 +1898,30 @@ def _strip_image_parts(messages):
     return changed
 
 
+def _strip_audio_parts(messages):
+    """Remove every input_audio content part in place — the deaf-provider
+    twin of _strip_image_parts (round 98). Returns True when anything was
+    removed, so the caller can tell 'this model has no ears' apart from an
+    unrelated 400 that merely mentioned audio."""
+    changed = False
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        kept = [p for p in content
+                if not (isinstance(p, dict)
+                        and p.get("type") == "input_audio")]
+        if len(kept) != len(content):
+            changed = True
+            kept.append({"type": "text", "text":
+                         "(the sound clips could not be played to you — "
+                         "this model does not take audio; decide from "
+                         "get_audio_analysis and the AUDIO CHECK "
+                         "measurements instead)"})
+            m["content"] = kept
+    return changed
+
+
 def _continue_decision(n_cont, progressed, seconds_left, over_budget):
     """May a pass that spent its iteration budget resume itself? Every gate
     is one of the REAL walls: the continuation allowance, forward progress
@@ -1893,8 +1940,8 @@ _CONTINUATION_NOTE = (
     "were already working on. Everything you already changed is in the "
     "PROJECT STATE and program map above — trust them: do NOT redo finished "
     "work, do NOT re-read skills, do NOT re-verify what you already saw "
-    "land. Already ran this turn: {done}. Finish ONLY what remains of the "
-    "request, render once, and reply.]")
+    "land. Already ran this turn: {done}.{plan} Finish ONLY what remains of "
+    "the request, render once, and reply.]")
 
 
 def _run_loop(ctx, worker_db, job, session_id, user_message,
@@ -1919,9 +1966,20 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             f"{name} x{t['n']}" if t["n"] > 1 else name
             for name, t in sorted(_cont["timings"]["tools"].items())) or \
             "nothing yet"
+        # The plan the earlier pass RECORDED (set_edit_plan) — what was
+        # decided, not merely what ran. A resumed pass finishes the plan
+        # instead of re-deriving the edit mid-flight (round 98).
+        plan_note = ""
+        ep = getattr(ctx, "edit_plan", None)
+        if ep and ep.get("steps"):
+            plan_note = (" YOUR RECORDED PLAN: "
+                         + (f"[{ep['brief']}] " if ep.get("brief") else "")
+                         + " ".join(f"{i + 1}) {s}"
+                                    for i, s in enumerate(ep["steps"]))
+                         + " — finish its unfinished steps.")
         messages.append({"role": "user",
                          "content": _CONTINUATION_NOTE.format(
-                             done=done,
+                             done=done, plan=plan_note,
                              why=_cont.get("why", "step ceiling"))})
     tools = agent_tools.openai_tools()
     total_steps = _cont.get("steps", 0)
@@ -2242,6 +2300,18 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     if adapted is not None:
                         kw = adapted
                         continue
+                    # Checked BEFORE the blind branch: 'input_audio' in the
+                    # error is the audio part's own field name, so a deaf
+                    # rejection must never latch the EYES off.
+                    if llm.looks_like_deaf_model(e) \
+                            and _strip_audio_parts(messages):
+                        llm.mark_agent_deaf(model)
+                        print(f"[agent {job['id']}] {model} rejected an "
+                              "audio part — agent hearing DISABLED for "
+                              "this process; listening degrades to "
+                              "get_audio_analysis + the audio QC",
+                              flush=True)
+                        continue
                     if llm.looks_like_blind_model(e) \
                             and _strip_image_parts(messages):
                         llm.mark_agent_blind(model)
@@ -2468,6 +2538,45 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                    "is labeled; timestamps are printed "
                                    "under the tiles):"})
                 messages.append({"role": "user", "content": content})
+
+        # Round 98 — direct HEARING, the exact pending_images contract for
+        # sound: a listen tool (or render_preview) queued short clips this
+        # step; deliver them as input_audio parts in a user message. Only
+        # when the model has ears — a deaf lane's clips are dropped here
+        # (the tools already answered honestly in text).
+        if getattr(ctx, "pending_audio", None):
+            clips, model_hears = ctx.pending_audio, llm.agent_hears(model)
+            ctx.pending_audio = []
+            if model_hears:
+                content = []
+                for label, path in clips:
+                    try:
+                        part = llm.audio_part(path)
+                    except Exception as ex:
+                        print(f"[job {job['id']}] could not attach sound "
+                              f"clip ({ex})", flush=True)
+                        continue
+                    content.append({"type": "text", "text": f"[{label}]"})
+                    content.append(part)
+                if content:
+                    content.insert(0, {"type": "text", "text":
+                                       "Sound for your own ears (each clip "
+                                       "is labeled with its clock and "
+                                       "span):"})
+                    messages.append({"role": "user", "content": content})
+
+        # Round 98: speculative preview. A step that landed writes is almost
+        # always followed by render_preview one model call (~13s) later —
+        # start the encode NOW so it runs DURING that call instead of after
+        # it. render_preview adopts the queued/running job for the same
+        # version (dbx.pending_preview_job) rather than encoding twice, and
+        # the helper itself skips grade-only writes (the contact-strip
+        # shortcut is cheaper than any render). Best-effort by contract.
+        if ctx.versions_written and not SHUTDOWN.is_set():
+            try:
+                agent_tools.speculative_preview(ctx)
+            except Exception:
+                pass
 
     # The iteration ceiling. A pass that is still landing edits continues on
     # its own — the user cannot tell step 30 from step 31, and "tell me to

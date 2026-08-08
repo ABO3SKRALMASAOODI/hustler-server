@@ -12,7 +12,9 @@ snap every cut to these word boundaries.
 
 import gc
 import inspect
+import os
 import re
+import subprocess
 import time
 
 import requests
@@ -128,6 +130,37 @@ def _parse_deepgram(payload):
     return words, str(lang)
 
 
+def _upload_payload(wav_path):
+    """(bytes, content_type) for the Deepgram request.
+
+    The index wav is 16k mono PCM; FLAC is lossless and roughly halves the
+    bytes on the wire, so transcription of a long video starts seconds
+    sooner. Only the ENCODED payload changes — the sparse check and every
+    duration read still use the wav on disk. Any failure (no ffmpeg, a
+    conversion error, a flac that somehow came out bigger) falls back to the
+    wav bytes, never to a dead index."""
+    if config.DEEPGRAM_UPLOAD == "flac":
+        flac_path = wav_path + ".flac"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-i", wav_path,
+                 "-c:a", "flac", "-compression_level", "5", flac_path],
+                check=True, capture_output=True, timeout=120)
+            if 0 < os.path.getsize(flac_path) < os.path.getsize(wav_path):
+                with open(flac_path, "rb") as f:
+                    return f.read(), "audio/flac"
+        except Exception as e:
+            print(f"[transcribe] flac conversion skipped "
+                  f"({str(e)[:120]}) — sending wav", flush=True)
+        finally:
+            try:
+                os.unlink(flac_path)
+            except OSError:
+                pass
+    with open(wav_path, "rb") as f:
+        return f.read(), "audio/wav"
+
+
 def _transcribe_deepgram(wav_path):
     params = {
         "model": config.DEEPGRAM_MODEL,
@@ -157,15 +190,14 @@ def _transcribe_deepgram(wav_path):
     terms = _hotword_terms()
     if terms:
         params["keyterm"] = terms      # requests repeats the key per term
-    with open(wav_path, "rb") as f:
-        audio = f.read()
+    audio, content_type = _upload_payload(wav_path)
     last = None
     for attempt in range(DEEPGRAM_RETRIES + 1):
         try:
             r = requests.post(
                 DEEPGRAM_URL, params=params, data=audio,
                 headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}",
-                         "Content-Type": "audio/wav"},
+                         "Content-Type": content_type},
                 timeout=config.DEEPGRAM_TIMEOUT_S)
         except requests.RequestException as e:
             last = e

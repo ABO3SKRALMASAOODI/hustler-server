@@ -197,11 +197,16 @@ def test_add_sfx_refuses_retired_sounds_and_points_at_generation():
 def test_empty_pack_disables_its_tools_and_its_advert():
     assert agent_tools._tool_disabled("list_sfx_library")
     assert agent_tools._tool_disabled("sound_design_pass")
-    assert not agent_tools._tool_disabled("list_music_library")
+    # Round 98: the bundled music library is retired from the surface —
+    # its tool is unregistered and the state advertises live search
+    # instead (present exactly when the capability is on).
+    assert "list_music_library" not in agent_tools.TOOLS
+    assert not agent_tools._tool_disabled("search_music")
     state = agent_prompt.project_state_block(
         "v", "idx", "edl", [], [])
     assert "sound-effects pack" not in state
-    assert "music library" in state             # music still advertised
+    assert "search_music" in state              # found music advertised
+    assert "music library" not in state
     assert agent_tools.sound_design_pass(None).startswith("REJECTED")
     assert "empty" in agent_tools.list_sfx_library(None)
 

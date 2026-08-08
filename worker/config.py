@@ -38,6 +38,12 @@ AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
 # editing agent — its own eyes — instead of asking the separate VISION_*
 # provider to describe them second-hand.
 AGENT_MULTIMODAL = os.getenv("AGENT_MULTIMODAL", "1") == "1"
+# Whether AGENT_MODEL accepts input_audio content parts — the agent's EARS
+# (round 98): listen_to and render_preview hand it short clips of the actual
+# sound. Same honest-off contract as images: default on, and a provider that
+# rejects the part latches itself deaf for the process (llm._agent_deaf)
+# while the turn continues on text + the deterministic audio QC.
+AGENT_AUDIO = os.getenv("AGENT_AUDIO", "1") == "1"
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 
 # THE NUMBER THAT TURNS A FIVE-SECOND WAIT INTO A DEAD TURN (round 80).
@@ -403,6 +409,21 @@ TRANSCRIBER = os.getenv(
     "TRANSCRIBER", "deepgram" if DEEPGRAM_API_KEY else "whisper").strip().lower()
 DEEPGRAM_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3")
 DEEPGRAM_TIMEOUT_S = int(os.getenv("DEEPGRAM_TIMEOUT_S", "300"))
+# Upload codec for the transcription request. The index wav is 16k mono PCM
+# (~1.9 MB per minute); FLAC is lossless and roughly halves the bytes on the
+# wire, so a long video starts transcribing seconds sooner. Deepgram decodes
+# FLAC natively at no accuracy cost. 'wav' turns the conversion off; any
+# conversion failure silently falls back to sending the wav itself.
+DEEPGRAM_UPLOAD = os.getenv("DEEPGRAM_UPLOAD", "flac").strip().lower()
+
+# ── Live music search (round 98) ─────────────────────────────────────────────
+# The bundled CC0 pack is retired from the agent's surface; search_music /
+# fetch_music find commercial-use tracks online at request time instead
+# (music_search.py). Openverse needs no key; a JAMENDO_CLIENT_ID upgrades
+# results to a real music catalog ordered by this month's popularity.
+MUSIC_SEARCH_ENABLED = os.getenv("MUSIC_SEARCH_ENABLED", "1") == "1"
+JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
+MUSIC_FETCH_MAX_MB = int(os.getenv("MUSIC_FETCH_MAX_MB", "30"))
 
 # Round 69 — TWO FLAGS THAT WERE ALWAYS FREE AND ALWAYS OFF.
 #
@@ -1182,6 +1203,15 @@ PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
 # element scales with the frame and the preview stays a true proof of the
 # edit. Set PREVIEW_MAX_LONG_EDGE=0 to render previews at source size.
 PREVIEW_MAX_LONG_EDGE = int(os.getenv("PREVIEW_MAX_LONG_EDGE", "1280"))
+
+# Round 98: speculative previews. After a step that landed writes the loop
+# starts the encode immediately so it overlaps the next model call; the
+# agent's own render_preview then ADOPTS the running job (see
+# db.pending_preview_job) instead of enqueueing a second encode. MAX bounds
+# wasted encodes on a turn that keeps writing version after version —
+# stitching keeps each one cheap, but not free.
+SPECULATIVE_PREVIEWS = os.getenv("SPECULATIVE_PREVIEWS", "1") == "1"
+SPECULATIVE_PREVIEWS_MAX = int(os.getenv("SPECULATIVE_PREVIEWS_MAX", "3"))
 # The height a preview is actually WRITTEN at. This number is not new — the
 # graph has always ended with `scale=-2:min(480,...)` — but it lived as a
 # literal at the end of the filter chain, which meant every filter before it

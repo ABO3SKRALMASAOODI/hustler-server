@@ -12,10 +12,11 @@ EVERY video gets the same treatment: the main footage and every uploaded
 clip run through this same job (clips skip the proxy encode, the EDL seeding
 and the chat greeting — they are perception-only).
 
-Steps (main video): probe -> proxy + wav -> whisper words/sentences ->
-silences -> shots -> filmstrip tiles -> assemble VideoIndex -> seed EDL +
-greet. Steps (clip): probe -> wav -> whisper -> silences -> shots -> tiles
--> assemble VideoIndex -> stamp the asset indexed.
+Steps (main video): probe, then TWO LANES side by side — picture (proxy
+encode -> shots + tiles + proxy upload) and sound (wav -> transcription ->
+silences -> perception, with the wav upload overlapped) — then assemble
+VideoIndex -> seed EDL + greet. Steps (clip): the same lanes minus the
+proxy encode/EDL/greeting — clips are perception-only.
 """
 
 import os

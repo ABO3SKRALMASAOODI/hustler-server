@@ -270,6 +270,8 @@ def test_schema_clamps_and_canonicalizes_the_new_axes():
 class _EraseCtx:
     def __init__(self):
         self.has_main_video = True
+        # Round 97's _superseded_patches reads the master clock off ctx.
+        self.duration = 13.6
         self._edl = {"version": 3, "json": {
             "keep": [[0.0, 13.6]],
             "source_clean": {"asset_key": "k", "proxy_key": "p", "fp": "f",
@@ -290,7 +292,7 @@ def test_erase_region_batches_into_one_clean_pass(monkeypatch):
     removed)."""
     passes = []
     monkeypatch.setattr(agent_tools, "_apply_patches",
-                        lambda ctx, items, what: passes.append(items)
+                        lambda ctx, items, what, drop=None: passes.append(items)
                         or f"EDL v3 -> v4: {what}")
     r = agent_tools.erase_region(_EraseCtx(), regions=[
         {"x": 0.0, "y": 0.75, "w": 0.53, "h": 0.15},
@@ -309,14 +311,14 @@ def test_erase_region_batches_into_one_clean_pass(monkeypatch):
 
 def test_erase_region_single_rect_form_still_works(monkeypatch):
     monkeypatch.setattr(agent_tools, "_apply_patches",
-                        lambda ctx, items, what: f"EDL v3 -> v4: {what}")
+                        lambda ctx, items, what, drop=None: f"EDL v3 -> v4: {what}")
     r = agent_tools.erase_region(_EraseCtx(), x=0.1, y=0.1, w=0.2, h=0.2)
     assert r.startswith("EDL v")
 
 
 def test_erase_region_rejects_mixed_and_oversized_batches(monkeypatch):
     monkeypatch.setattr(agent_tools, "_apply_patches",
-                        lambda ctx, items, what: f"EDL v3 -> v4: {what}")
+                        lambda ctx, items, what, drop=None: f"EDL v3 -> v4: {what}")
     r = agent_tools.erase_region(
         _EraseCtx(), x=0.1, y=0.1, w=0.2, h=0.2,
         regions=[{"x": 0, "y": 0, "w": 0.1, "h": 0.1}])

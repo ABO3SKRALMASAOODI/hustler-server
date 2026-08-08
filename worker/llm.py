@@ -415,6 +415,51 @@ def looks_like_blind_model(exc):
     return any(m in msg for m in _BLIND_MARKERS)
 
 
+# Audio parts (round 98): the agent's EARS. listen_to and render_preview
+# attach short clips of the actual sound — the source, the assembled mix,
+# a candidate track — as input_audio content parts, so the model that is
+# EDITING is the model that hears. A provider that cannot take audio 400s
+# on the part itself and would 400 identically forever, so one rejection
+# latches per model (the _agent_blind contract exactly) and the loop strips
+# the parts and continues on text + the deterministic audio QC.
+_agent_deaf = set()
+
+_DEAF_MARKERS = ("input_audio", "does not support audio",
+                 "audio input is not supported", "audio is not supported",
+                 "unknown variant `input_audio`",
+                 "unknown variant 'input_audio'")
+
+
+def agent_hears(model):
+    """Can THIS agent model take input_audio parts in its own context?"""
+    return bool(config.AGENT_AUDIO) and model not in _agent_deaf
+
+
+def mark_agent_deaf(model):
+    _agent_deaf.add(model)
+
+
+def looks_like_deaf_model(exc):
+    """Is `exc` the provider refusing the AUDIO PART itself? Matched more
+    narrowly than the blind markers: 'input_audio' is the field name, and
+    the generic phrases all name audio explicitly — a vision rejection must
+    never latch the ears off."""
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    return any(m in msg for m in _DEAF_MARKERS)
+
+
+def audio_part(path, fmt=None):
+    """An OpenAI-style input_audio content part from a local wav/mp3 file.
+    The caller keeps clips SHORT (a few seconds, mono, low bitrate) — audio
+    tokens are real money and a mix is judged in seconds, not minutes."""
+    if fmt is None:
+        fmt = "mp3" if str(path).lower().endswith(".mp3") else "wav"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    return {"type": "input_audio",
+            "input_audio": {"data": b64, "format": fmt}}
+
+
 def looks_like_bad_parameter(exc, field):
     """Is `exc` the provider refusing a request FIELD, rather than failing?
 
