@@ -2388,12 +2388,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         ofps = fps if (do_norm or not src_fps) else float(src_fps)
         parts.append(f"[{vlabel}]scale={oW}:{H},setsar=1,"
                      f"format=yuv420p[vprog]")
-        cw, ch = _even(oW * 0.72), _even(H * 0.62)
+        # v6: the card is a full 9:16 sheet that carries its own margins,
+        # so it fills the frame rather than being inset a second time.
+        cw, ch = _even(oW * 0.98), _even(H * 0.98)
         parts.append(f"color=c=black:s={oW}x{H}:r={ofps:.3f}:d={outro_s:.3f},"
                      f"format=rgba[obg]")
-        # One square-ish card fits every aspect ratio: scaled to fit inside a
-        # box that is a fraction of BOTH dimensions, it lands proportionate on
-        # 9:16, 16:9, 1:1 and 4:5 without a per-ratio asset.
+        # One 9:16 card fits every aspect ratio: scaled to FIT (never crop)
+        # inside a box that is a fraction of BOTH dimensions, it lands
+        # proportionate on 9:16, 16:9, 1:1 and 4:5 without a per-ratio asset —
+        # height-bound on the wide ratios, edge-to-edge on vertical.
         parts.append(f"[{card_idx}:v]scale={cw}:{ch}:"
                      f"force_original_aspect_ratio=decrease,format=rgba[ocard]")
         parts.append("[obg][ocard]overlay=(W-w)/2:(H-h)/2:shortest=0[ocomp]")

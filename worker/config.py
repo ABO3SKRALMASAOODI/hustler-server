@@ -1349,11 +1349,10 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK changes. It is stored on every render asset
 # and busts the render cache, so an existing export re-encodes with the new
 # card instead of serving pre-outro bytes forever.
-OUTRO_VERSION = 5      # v5: the conversion page — Anton hook ("EDITED BY AN /
-                       # AI AGENT" in red), the TRUE-color robot floating on
-                       # an organic red glow (no panel — v4's plate read as
-                       # "a background behind it"), wordmark + a filled TRY
-                       # IT FREE pill. See tools/build_endcard.py
+OUTRO_VERSION = 6      # v6: pure 9:16, the WHITE robot untouched on nothing
+                       # at all (no glow, no panel, no recolour), the
+                       # sentence UNDER it, the wordmark as the only large
+                       # type. See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
 # One shorts_plan job cuts a long video into at most this many child clips.
