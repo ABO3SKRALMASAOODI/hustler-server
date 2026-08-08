@@ -2767,6 +2767,11 @@ def project_state(user_id, project_id):
                                if shorts_meta else None),
                     "clip": (p.get("meta") or {}).get("clip"),
                     "reference": ({"asset_id": reference["id"],
+                                   # The board's reference CARD pulls its
+                                   # frame from the per-asset sprite sheet,
+                                   # which is keyed by storage key.
+                                   "storage_key": reference["storage_key"],
+                                   "duration_s": reference.get("duration_s"),
                                    "filename": (reference.get("meta") or {})
                                    .get("filename"),
                                    "indexed": bool((reference.get("meta")
