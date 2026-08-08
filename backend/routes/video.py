@@ -4294,7 +4294,7 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 4      # v4: true plan-card colors on the elevated panel
+OUTRO_VERSION = 5      # v5: the Anton conversion page, glow not panel
                        # (keep in step with worker/config.py OUTRO_VERSION —
                        # test_units checks the two match)
 

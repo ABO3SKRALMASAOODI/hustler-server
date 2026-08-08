@@ -1,29 +1,26 @@
 """Build the Valmera end card PNG that every export ends on.
 
-Round 99b: the card the owner spec'd, top to bottom —
+Round 100b — v5, the CONVERSION page. Three versions taught three lessons:
+v3 recolored the robot to survive bare black and the owner read it as the
+wrong robot; v4 kept the true colors by seating it on an elevated panel and
+the owner read the panel as "a background behind it"; and Plus Jakarta's
+tracked caps read as UI chrome, not a hook. So v5, top to bottom:
 
-    THIS VIDEO WAS EDITED
-        BY AN AI AGENT
-         [the robot]
-         Valmera.io
+    THIS VIDEO WAS            (quiet tracked eyebrow)
+    EDITED BY AN              (Anton — the shorts-native display face)
+    AI AGENT                  (Anton, red — the line that stops the scroll)
+        [the robot]           (TRUE plan-card colors, floating on an
+                               ORGANIC red glow — light, not furniture:
+                               no rectangle, no edge, nothing that reads
+                               as a plate)
+    Valmera.io                (the destination)
+    [ TRY IT FREE ]           (a filled red pill — the card is a PAGE with
+                               a call to action, not a watermark)
 
-The mark is the GRAY-RED robot — the Pro plan's card robot on the billing
-page (`frontend-next/public/hustler-robot112.riv`), rendered to
-`worker/brand/robot112.png` at 2400px via the headless-Chrome recipe in
-brand/README.md, so the card and the site show the same character.
-
-Two corrections, both deliberate:
-
-* BLACK-FLOOR LIFT. The artwork is drawn for a light card, so its pure-black
-  parts (antenna stalk, neck, visor plate, chest port, upper legs) are meant
-  to read as ink. On the black end card every one of them would dissolve into
-  the background — a floating red antenna ball, a head hovering off its body.
-  `_lift_blacks` raises just those near-black pixels to a dark charcoal that
-  still reads darker than the body grays but no longer vanishes.
-
-* SILHOUETTE GLOW. A dark robot on a black card needs an edge: a soft
-  radial wash, barely above black and slightly red, sits behind the mark so
-  the silhouette separates without reading as a "spotlight effect".
+The glow is what lets the robot's pure-black ink (antenna stalk, visor,
+joints) read against a black frame without repainting a single pixel: two
+stacked radial washes, the inner one warm and bright enough to silhouette
+the head and torso, both Gaussian-blurred until no boundary survives.
 
 Layout is set in INK boxes, never text boxes: a text box carries the font's
 full ascent/descent, so a nominal gap measures nearly double in whitespace.
@@ -32,17 +29,19 @@ import os
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 WHITE = (255, 255, 255, 255)
-# The robot's own red (sampled from the antenna ball) — the ".io" and nothing
-# else. One accent, used once, is what keeps the card premium instead of ad.
+SOFT = (233, 234, 238, 255)      # the eyebrow — white would fight the hero
+# The robot's own red (sampled from the antenna ball): the hero line, the
+# ".io" and the CTA fill. One red, three jobs, zero other colors.
 RED = (250, 5, 5, 255)
 
-ROBOT_PNG = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "brand", "robot112.png")
-
-# Near-black pixels lift to this — visibly darker than the body's ~#2E3237
-# grays, visibly lighter than the void.
-FLOOR = (36, 38, 43)
-FLOOR_MAX = 24          # max(r,g,b) at or under this counts as "vanishes"
+_BRAND = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "brand")
+_FONTS = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "fonts")
+ROBOT_PNG = os.path.join(_BRAND, "robot112.png")
+ANTON = os.path.join(_FONTS, "Anton-Regular.ttf")
+INTER_XB = os.path.join(_FONTS, "InterDisplay-ExtraBold.ttf")
+INTER_BLACK = os.path.join(_FONTS, "InterDisplay-Black.ttf")
 
 
 def _ink(img):
@@ -50,66 +49,39 @@ def _ink(img):
     return img.crop(b) if b else img
 
 
-def _lift_blacks(img):
-    """Raise pure-black ink to FLOOR so it survives on a black card.
-    Returns (img, n_lifted); a zero count means the asset changed and the
-    lift no longer matches it — refuse to ship a dissolving robot."""
-    img = img.convert("RGBA")
-    px = img.load()
-    W, H = img.size
-    n = 0
-    for y in range(H):
-        for x in range(W):
-            r, g, b, a = px[x, y]
-            if a > 40 and max(r, g, b) <= FLOOR_MAX:
-                px[x, y] = (FLOOR[0], FLOOR[1], FLOOR[2], a)
-                n += 1
-    return img, n
-
-
-PANEL = (23, 24, 28, 255)         # elevated card surface — the plan card's
-PANEL_EDGE = (255, 255, 255, 22)  # hairline that separates it from the void
-
-
 def robot(height_px):
-    """The billing page's gray-red robot — TRUE colors, on the plan card.
+    """The billing page's gray-red robot — TRUE colors, floating on light.
 
-    Round 100. The v3 card recolored the robot to survive a bare black
-    background (black-floor lift + 1.22x brightness), and the owner read the
-    result as the WRONG robot: "the colours are different from the middle
-    plan's". The honest fix is the one the billing page itself uses — don't
-    repaint the character, give it its card: an elevated rounded panel a
-    step above the void, so the pure-black ink (antenna, visor, joints)
-    reads against the panel and every fill ships exactly as drawn. A soft
-    red under-glow floats the panel off the black.
+    No panel, no plate, no recolor. The two radial washes behind it are the
+    whole trick: the inner one is bright enough that the pure-black ink
+    (antenna, visor, joints) reads as silhouette, and both are blurred past
+    the point where any edge could read as a shape.
     """
     src = Image.open(ROBOT_PNG).convert("RGBA")
     w = max(1, round(src.width * height_px / src.height))
     mark = _ink(src.resize((w, height_px), Image.LANCZOS))
 
-    pad_x = int(height_px * 0.11)
-    pad_y = int(height_px * 0.075)
-    pw, ph = mark.width + 2 * pad_x, mark.height + 2 * pad_y
-    radius = int(height_px * 0.075)
-
-    halo = int(height_px * 0.14)
-    gw, gh = pw + 2 * halo, ph + 2 * halo
+    pad = int(height_px * 0.30)
+    gw, gh = mark.width + 2 * pad, mark.height + 2 * pad
     out = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
 
     glow = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
     d = ImageDraw.Draw(glow)
-    d.rounded_rectangle([halo * 0.55, halo * 0.55,
-                         gw - halo * 0.55, gh - halo * 0.55],
-                        radius=radius * 1.6, fill=(120, 26, 26, 132))
-    glow = glow.filter(ImageFilter.GaussianBlur(halo * 0.55))
+    # Outer wash: deep red, wide, barely-there at the rim.
+    d.ellipse([pad * 0.15, pad * 0.15, gw - pad * 0.15, gh - pad * 0.15],
+              fill=(122, 20, 20, 120))
+    glow = glow.filter(ImageFilter.GaussianBlur(pad * 0.60))
     out.alpha_composite(glow)
+    # Inner wash: warmer and brighter, sitting behind head + torso, so the
+    # black ink there has something to be dark AGAINST.
+    core = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(core)
+    d.ellipse([gw * 0.17, gh * 0.12, gw * 0.83, gh * 0.74],
+              fill=(208, 52, 44, 158))
+    core = core.filter(ImageFilter.GaussianBlur(pad * 0.55))
+    out.alpha_composite(core)
 
-    panel = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
-    d = ImageDraw.Draw(panel)
-    d.rounded_rectangle([halo, halo, halo + pw, halo + ph], radius=radius,
-                        fill=PANEL, outline=PANEL_EDGE, width=3)
-    out.alpha_composite(panel)
-    out.paste(mark, (halo + pad_x, halo + pad_y), mark)
+    out.paste(mark, (pad, pad), mark)
     return out
 
 
@@ -146,76 +118,91 @@ def _wordmark(word_f, io_f):
     return layer
 
 
-def build(out_path, pjs_path):
-    """Compose the card.
+def _cta(label_f, text="TRY IT FREE"):
+    """The filled red pill. A page that wants the viewer to GO somewhere
+    carries a button, and a button is a shape — the one deliberate shape on
+    the card, which is exactly why the glow behind the robot must not be one."""
+    label = _text(text, label_f, WHITE, 0.14 * label_f.size)
+    pad_x = int(label_f.size * 1.05)
+    pad_y = int(label_f.size * 0.58)
+    W, H = label.width + 2 * pad_x, label.height + 2 * pad_y
+    pill = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(pill)
+    d.rounded_rectangle([0, 0, W - 1, H - 1], radius=H // 2, fill=RED)
+    pill.paste(label, (pad_x, pad_y), label)
+    # A soft red bloom under the pill so it sits IN the scene's light
+    # rather than stickered onto it.
+    bloomp = int(H * 0.55)
+    out = Image.new("RGBA", (W + 2 * bloomp, H + 2 * bloomp), (0, 0, 0, 0))
+    bloom = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(bloom)
+    d.rounded_rectangle([bloomp * 0.6, bloomp * 0.6, out.width - bloomp * 0.6,
+                         out.height - bloomp * 0.6],
+                        radius=H, fill=(210, 30, 30, 110))
+    bloom = bloom.filter(ImageFilter.GaussianBlur(bloomp * 0.55))
+    out.alpha_composite(bloom)
+    out.paste(pill, (bloomp, bloomp), pill)
+    return out
 
-    One reading order, three registers: the STATEMENT (two big tracked lines
-    — what happened), the CHARACTER (the robot, largest element — who did
-    it), the NAME (Valmera.io — where). The robot leads the hierarchy per
-    the owner's spec ("the agent is big"); the headline is the widest
-    element and therefore sizes the card; the wordmark sits just under the
-    robot so character and name read as one unit.
+
+def build(out_path):
+    """Compose the page.
+
+    One reading order, four registers: the QUIET SETUP ("this video was"),
+    the HOOK (Anton, with AI AGENT as the red payoff line), the CHARACTER
+    (the robot, largest element), and the DESTINATION (wordmark + CTA pill).
+    Anton for the hook because this card plays at the end of vertical
+    SHORTS — it is the native display voice of that format; Inter Display
+    carries the small lines so the hook stays the only shout.
     """
-    HEAD_SIZE = 158
-    HEAD_TRACK = 0.045                     # airy, deliberate, not shouty
-    HEAD_LEAD = 56                         # between the two headline lines
-    ROBOT_H = 2150                         # "the agent is big" — it LEADS
-    WORD_SIZE = 300
-    IO_SIZE = 212
-    GAP_HEAD = 56                          # headline -> panel (halo adds air)
-    GAP_WORD = 18                          # panel -> wordmark (ditto)
+    EYEBROW_SIZE = 92
+    HERO_SIZE = 252
+    HERO2_SIZE = 322
+    ROBOT_H = 2050
+    WORD_SIZE = 290
+    IO_SIZE = 205
+    CTA_SIZE = 96
 
-    head_f = ImageFont.truetype(pjs_path, HEAD_SIZE)
-    head_f.set_variation_by_axes([800])
-    word_f = ImageFont.truetype(pjs_path, WORD_SIZE)
-    word_f.set_variation_by_axes([800])
-    io_f = ImageFont.truetype(pjs_path, IO_SIZE)
-    io_f.set_variation_by_axes([800])
+    eyebrow_f = ImageFont.truetype(INTER_XB, EYEBROW_SIZE)
+    hero_f = ImageFont.truetype(ANTON, HERO_SIZE)
+    hero2_f = ImageFont.truetype(ANTON, HERO2_SIZE)
+    word_f = ImageFont.truetype(INTER_BLACK, WORD_SIZE)
+    io_f = ImageFont.truetype(INTER_BLACK, IO_SIZE)
+    cta_f = ImageFont.truetype(INTER_XB, CTA_SIZE)
 
-    line1 = _text("THIS VIDEO WAS EDITED", head_f, WHITE,
-                  HEAD_TRACK * HEAD_SIZE)
-    line2 = _text("BY AN AI AGENT", head_f, WHITE, HEAD_TRACK * HEAD_SIZE)
+    eyebrow = _text("THIS VIDEO WAS", eyebrow_f, SOFT,
+                    0.34 * EYEBROW_SIZE)
+    hero1 = _text("EDITED BY AN", hero_f, WHITE, 0.012 * HERO_SIZE)
+    hero2 = _text("AI AGENT", hero2_f, RED, 0.012 * HERO2_SIZE)
     mark = robot(ROBOT_H)
     word = _wordmark(word_f, io_f)
+    cta = _cta(cta_f)
 
-    W = max(line1.width, line2.width, mark.width, word.width)
-    H = (line1.height + HEAD_LEAD + line2.height + GAP_HEAD
-         + mark.height + GAP_WORD + word.height)
+    GAP_EYEBROW = 74
+    GAP_HERO = 40
+    GAP_HERO2 = -110       # the glow's padding supplies the real air
+    GAP_ROBOT = -150
+    GAP_WORD = 46
+
+    W = max(eyebrow.width, hero1.width, hero2.width, mark.width,
+            word.width, cta.width)
+    parts = ((eyebrow, GAP_EYEBROW), (hero1, GAP_HERO), (hero2, GAP_HERO2),
+             (mark, GAP_ROBOT), (word, GAP_WORD), (cta, 0))
+    H = sum(p.height for p, _ in parts) + sum(g for _, g in parts[:-1])
     card = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     y = 0
-    for part, gap in ((line1, HEAD_LEAD), (line2, GAP_HEAD),
-                      (mark, GAP_WORD), (word, 0)):
+    for part, gap in parts:
         card.paste(part, ((W - part.width) // 2, y), part)
         y += part.height + gap
 
     card.save(out_path)
     print(f"card {card.size[0]}x{card.size[1]}  aspect "
           f"{card.size[0] / card.size[1]:.3f}  robot {mark.size}  "
-          f"headline {line1.size}/{line2.size}  wordmark {word.size}  "
-          f"({os.path.getsize(out_path) / 1024:.0f} KB)")
+          f"hero {hero1.size}/{hero2.size}  wordmark {word.size}  "
+          f"cta {cta.size}  ({os.path.getsize(out_path) / 1024:.0f} KB)")
     return card
 
 
-PJS_URL = ("https://raw.githubusercontent.com/google/fonts/main/ofl/"
-           "plusjakartasans/PlusJakartaSans%5Bwght%5D.ttf")
-
-
-def _font(cache):
-    """Plus Jakarta Sans (SIL OFL 1.1), the site's wordmark face.
-
-    Fetched rather than vendored: only the RENDERED PIXELS ship in the image,
-    and the OFL restricts distributing font software, not images made with it.
-    """
-    if not os.path.exists(cache):
-        import urllib.request
-        print(f"fetching Plus Jakarta Sans -> {cache}")
-        urllib.request.urlretrieve(PJS_URL, cache)
-    return cache
-
-
 if __name__ == "__main__":
-    here = os.path.dirname(os.path.abspath(__file__))
-    brand = os.path.join(os.path.dirname(here), "brand")
-    os.makedirs(brand, exist_ok=True)
-    build(os.path.join(brand, "endcard.png"),
-          _font(os.path.join(here, "PJS.ttf")))
+    os.makedirs(_BRAND, exist_ok=True)
+    build(os.path.join(_BRAND, "endcard.png"))
