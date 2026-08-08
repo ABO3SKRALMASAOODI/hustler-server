@@ -26,8 +26,10 @@ is hidden entirely when the extractor path itself is off.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import config
 
@@ -40,7 +42,8 @@ SEARCH_TIMEOUT_S = 60
 _JUNK = ("lyric", "sped up", "slowed", "reverb", "8d", "nightcore",
          "bass boosted", "1 hour", "one hour", "10 hour", "loop",
          "live", "cover", "remix", "karaoke", "instrumental", "reaction",
-         "tutorial")
+         "tutorial", "full album", "full soundtrack", "full ost",
+         "complete soundtrack", "expanded", "deluxe", "playlist")
 
 
 class SongFindError(Exception):
@@ -104,6 +107,12 @@ def _score(cand, query):
     d = cand.get("duration_s") or 0
     if d and (d < 45 or d > 720):
         s -= 3          # a 30s short or an hour loop is not "the song"
+    if d > 1800:
+        # A 2.3-hour "Full Album" outranked the 4-minute main theme once
+        # (the agent read "official channel" and reached for it); at this
+        # length it is never ONE song, and the fetch byte cap would refuse
+        # it anyway — after minutes of download.
+        s -= 8
     return s
 
 
@@ -171,9 +180,20 @@ def _yt_candidates(query, count, what="a search query"):
            "--socket-timeout", "20",
            "--flat-playlist", "--dump-json",
            f"ytsearch{int(count)}:{query}"]
+    # A writable COPY of the cookie jar, never the mounted secret — yt-dlp
+    # writes rotated cookies back on every run and /etc/secrets is
+    # read-only (url_media documents the crash this caused).
+    run_cookies = None
     cookies = config.YTDLP_COOKIES_FILE
     if cookies and os.path.isfile(cookies):
-        cmd += ["--cookies", cookies]
+        try:
+            fd, run_cookies = tempfile.mkstemp(prefix="ytck_",
+                                               suffix=".txt")
+            os.close(fd)
+            shutil.copyfile(cookies, run_cookies)
+            cmd += ["--cookies", run_cookies]
+        except OSError:
+            run_cookies = None      # degrade to anonymous, never crash
     if config.YTDLP_PROXY:
         cmd += ["--proxy", config.YTDLP_PROXY]
     if config.YTDLP_REMOTE_COMPONENTS:
@@ -184,6 +204,12 @@ def _yt_candidates(query, count, what="a search query"):
     except subprocess.TimeoutExpired:
         raise SongFindError("the web search timed out — try again, or ask "
                             "the user for a link")
+    finally:
+        if run_cookies:
+            try:
+                os.unlink(run_cookies)
+            except OSError:
+                pass
     out = []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()

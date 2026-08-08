@@ -231,6 +231,48 @@ def test_search_carries_cookies_and_proxy_when_configured(monkeypatch,
         return R()
     monkeypatch.setattr(song_find.subprocess, "run", fake_run)
     song_find.search("song")
-    assert "--cookies" in seen["cmd"] and str(ck) in seen["cmd"]
+    # Cookies ride as a writable COPY (see the read-only-secret test below).
+    assert "--cookies" in seen["cmd"]
     assert "--proxy" in seen["cmd"]
     assert "http://u:p@proxy:8080" in seen["cmd"]
+
+
+def test_a_full_album_never_outranks_the_single_track():
+    """Production, Aug 8: "Interstellar official audio" ranked the 2.3-hour
+    WaterTower Full Album above the 4-minute main theme, and the agent —
+    reading "official channel" — reached for it. At that length it is
+    never ONE song, and the byte cap would refuse it after minutes."""
+    ranked = song_find.rank([
+        _c("Interstellar Official Soundtrack | Full Album", dur=8363,
+           uploader="WaterTower Music"),
+        _c("Interstellar Main Theme - Hans Zimmer", dur=244),
+    ], "interstellar soundtrack hans zimmer official audio")
+    assert ranked[0]["title"].startswith("Interstellar Main Theme")
+
+
+def test_cookie_jar_is_copied_never_the_mounted_secret(monkeypatch,
+                                                       tmp_path):
+    """yt-dlp writes rotated cookies back to the jar on every run; Render's
+    /etc/secrets is read-only — passing the secret directly crashed every
+    cookie-mode call with [Errno 30]. Only a writable copy may reach argv,
+    and it is cleaned up after the run."""
+    secret = tmp_path / "yt-cookies.txt"
+    secret.write_text("# Netscape HTTP Cookie File\n")
+    monkeypatch.setattr(config, "YTDLP_COOKIES_FILE", str(secret))
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = list(cmd)
+
+        class R:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+        return R()
+    monkeypatch.setattr(song_find.subprocess, "run", fake_run)
+    song_find.search("song")
+    assert str(secret) not in seen["cmd"]
+    i = seen["cmd"].index("--cookies")
+    copy_path = seen["cmd"][i + 1]
+    assert copy_path != str(secret)
+    assert not os.path.exists(copy_path)      # cleaned after the run

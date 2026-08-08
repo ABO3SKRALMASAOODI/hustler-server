@@ -41,6 +41,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -310,9 +311,19 @@ def _extract(url, workdir, prefer=None, client_override=None):
     # Operator-supplied cookies (see config.YTDLP_COOKIES_FILE). Checked for
     # existence every call rather than at import: a missing secret file must
     # degrade to the normal anonymous attempt, not crash every fetch.
+    # ALWAYS A WRITABLE COPY, never the mounted file: yt-dlp saves rotated
+    # cookies back to the jar it was handed on every run, and the secret
+    # mount (/etc/secrets on Render) is read-only — passing it directly
+    # crashed every cookie-mode fetch with "[Errno 30] Read-only file
+    # system". The copy also keeps the master secret pristine across runs.
     cookies = config.YTDLP_COOKIES_FILE
     if cookies and os.path.isfile(cookies):
-        cmd += ["--cookies", cookies]
+        run_cookies = os.path.join(workdir, "cookies_run.txt")
+        try:
+            shutil.copyfile(cookies, run_cookies)
+            cmd += ["--cookies", run_cookies]
+        except OSError:
+            pass                    # degrade to anonymous, never crash
     # Operator-supplied proxy (config.YTDLP_PROXY): the no-account route
     # past the bot wall — the extractor egresses from a residential address
     # instead of the datacenter IP YouTube challenges.
