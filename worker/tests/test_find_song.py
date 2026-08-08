@@ -209,3 +209,28 @@ def test_blind_deployment_degrades_to_text_only(monkeypatch, tmp_path):
         dict(_c("clip"), _thumb="https://t/x.jpg")])
     out = agent_tools.find_footage(ctx, "topic")
     assert "LOOKING" not in out and ctx.pending_images == []
+
+
+# ── the bot wall's two escape hatches ride every yt-dlp call ─────────────
+
+def test_search_carries_cookies_and_proxy_when_configured(monkeypatch,
+                                                          tmp_path):
+    ck = tmp_path / "yt.txt"
+    ck.write_text("# Netscape HTTP Cookie File\n")
+    monkeypatch.setattr(config, "YTDLP_COOKIES_FILE", str(ck))
+    monkeypatch.setattr(config, "YTDLP_PROXY", "http://u:p@proxy:8080")
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+
+        class R:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+        return R()
+    monkeypatch.setattr(song_find.subprocess, "run", fake_run)
+    song_find.search("song")
+    assert "--cookies" in seen["cmd"] and str(ck) in seen["cmd"]
+    assert "--proxy" in seen["cmd"]
+    assert "http://u:p@proxy:8080" in seen["cmd"]

@@ -313,6 +313,11 @@ def _extract(url, workdir, prefer=None, client_override=None):
     cookies = config.YTDLP_COOKIES_FILE
     if cookies and os.path.isfile(cookies):
         cmd += ["--cookies", cookies]
+    # Operator-supplied proxy (config.YTDLP_PROXY): the no-account route
+    # past the bot wall — the extractor egresses from a residential address
+    # instead of the datacenter IP YouTube challenges.
+    if config.YTDLP_PROXY:
+        cmd += ["--proxy", config.YTDLP_PROXY]
     if prefer == KIND_AUDIO:
         # The user asked for a song. Pulling the video track and throwing it
         # away wastes the bulk of the download.

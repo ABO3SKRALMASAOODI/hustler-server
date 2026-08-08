@@ -174,6 +174,8 @@ def _yt_candidates(query, count, what="a search query"):
     cookies = config.YTDLP_COOKIES_FILE
     if cookies and os.path.isfile(cookies):
         cmd += ["--cookies", cookies]
+    if config.YTDLP_PROXY:
+        cmd += ["--proxy", config.YTDLP_PROXY]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=SEARCH_TIMEOUT_S)

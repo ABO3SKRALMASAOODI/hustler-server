@@ -564,6 +564,12 @@ FETCH_TIMEOUT_S = float(os.getenv("FETCH_TIMEOUT_S", "180"))
 # public page a browser loads — but it should be switched on knowingly.
 # Point it at a file on the worker's disk (e.g. a Render secret file).
 YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+# The other way past the bot wall: route ONLY the extractor through a proxy
+# whose exit is a residential/mobile address (any scheme yt-dlp accepts,
+# e.g. http://user:pass@host:port). No account involved, so nothing can be
+# banned — the trade is a paid proxy vendor instead. Empty = direct. When
+# both this and cookies are set, both apply (cookies ride the proxy).
+YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 # Alternate player clients tried, in order, after a bot-wall failure. These
 # fail FAST (the challenge comes back during extraction, long before any
 # bytes are downloaded), so walking a few costs seconds, not minutes — but
