@@ -525,6 +525,14 @@ MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
 # this off and direct links keep working while pages are refused honestly.
 URL_FETCH_ENABLED = os.getenv("URL_FETCH_ENABLED", "1") == "1"
 URL_FETCH_EXTRACTOR = os.getenv("URL_FETCH_EXTRACTOR", "1") == "1"
+# Finding a link for a NAMED song (worker/song_find.py): yt-dlp web search
+# feeding fetch_url. FIND_SONG_ENABLED is the deployment switch;
+# FIND_SONG_USER_IDS narrows it to a CSV of account ids ("" = every user) —
+# set it to just the admin id to keep the capability personal without a
+# redeploy. The tool also vanishes whenever the fetch/extractor path it
+# hands links to is off.
+FIND_SONG_ENABLED = os.getenv("FIND_SONG_ENABLED", "1") == "1"
+FIND_SONG_USER_IDS = os.getenv("FIND_SONG_USER_IDS", "").strip()
 # Download ceiling before we know what the file is — we cannot apply a
 # per-kind limit until ffprobe has seen the bytes, so this is the largest of
 # them and the real ceilings are enforced after classification.

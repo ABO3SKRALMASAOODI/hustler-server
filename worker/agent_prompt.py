@@ -173,17 +173,21 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     # retired — music is FOUND online at request time.)
     import music_search
     import sfx_library
+    import song_find
     if music_search.available():
+        named = ("A SPECIFIC song they NAME: find_song searches the web "
+                 "for its link, fetch_url downloads the pick. "
+                 if song_find.available() else "")
         lines.append(
             "Music: no bundled tracks — the web is the library. "
             "search_music finds tracks online by genre/vibe ('dark phonk', "
             "'lofi chill beat'), fetch_music downloads one ready for "
             "add_music; every hit carries its license terms (public "
             "domain, credit, or NON-COMMERCIAL-ONLY) — state them, the "
-            "user decides. Any LINK they paste (song URL, YouTube, "
-            "SoundCloud...) fetch_url ingests as music. A trending "
-            "platform sound only they can provide (upload or a clip "
-            "carrying it).")
+            "user decides. " + named + "Any LINK they paste (song URL, "
+            "YouTube, SoundCloud...) fetch_url ingests as music. A "
+            "trending platform sound only they can provide (upload or a "
+            "clip carrying it).")
     if sfx_library.CATALOG:
         cats = sorted({t["category"] for t in sfx_library.CATALOG})
         lines.append(

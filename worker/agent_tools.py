@@ -31,6 +31,7 @@ import perception
 import renderer
 import sfx_library
 import sheets
+import song_find
 import stock
 import storage
 import subject
@@ -2312,6 +2313,43 @@ def fetch_music(ctx, id):
             f"add_music(storage_key='{key}') — set_music_fit retimes it, "
             "get_audio_analysis(asset_key) measures its BPM/beats for "
             "beat_align_cuts.")
+
+
+def find_song(ctx, query):
+    """READ: candidate web links for a song the user named. The pick is
+    downloaded by fetch_url, so this tool moves no bytes itself."""
+    if not song_find.available():
+        return ("REJECTED: song-link search is disabled on this "
+                "deployment. Ask the user to paste a link to the track "
+                "(fetch_url downloads it) or upload the file.")
+    if not song_find.allowed_for((getattr(ctx, "job", None) or
+                                  {}).get("user_id")):
+        return ("REJECTED: song-link search is not enabled for this "
+                "account. Ask the user to paste a link to the track "
+                "(fetch_url downloads it) or upload the file.")
+    q = (query or "").strip()
+    if not q:
+        return "REJECTED: find_song needs the song name (artist helps)."
+    try:
+        hits = song_find.search(q)
+    except song_find.SongFindError as e:
+        return (f"Song search failed ({e}). Tell the user plainly and ask "
+                "them to paste a link instead — do NOT claim anything was "
+                "found or added.")
+    if not hits:
+        return (f"No results for \"{q}\". Check the spelling with the "
+                "user, or ask them to paste a link to the track "
+                "(fetch_url downloads it).")
+    lines = "\n- ".join(song_find.describe(h) for h in hits[:5])
+    return (f"{min(len(hits), 5)} candidate link(s) for \"{q}\", best "
+            "guess first:\n- " + lines +
+            "\nPick the one that IS the song the user named — prefer the "
+            "artist's own/'- Topic' channel or 'Official Audio'; avoid "
+            "lyric/sped-up/loop/cover versions UNLESS their words asked "
+            "for one. Then fetch_url(url=<pick>, as_kind='music') "
+            "downloads it ready for add_music. In your reply, tell the "
+            "user exactly which version you grabbed (title + channel) so "
+            "they can correct the pick.")
 
 
 def _speech_overlap_s(ctx, edl, start_out, end_out):
@@ -12453,6 +12491,19 @@ TOOLS = {
                     "carries an obligation (credit, or "
                     "non-commercial-only).",
                     {"id": {"type": "string"}}),
+    "find_song": (find_song, "Find web links for a SPECIFIC song the user "
+                  "NAMED ('add Blinding Lights by The Weeknd') — the case "
+                  "search_music cannot serve, because named commercial "
+                  "tracks are not in the open catalogs. Returns candidate "
+                  "links best-guess first; pick the real thing (artist's "
+                  "own/'- Topic' channel or 'Official Audio'; no "
+                  "lyric/sped-up/loop/cover versions unless asked), then "
+                  "fetch_url(url, as_kind='music') downloads the pick. "
+                  "Always tell the user which version you grabbed. For a "
+                  "genre/vibe request use search_music instead; for a "
+                  "trending platform sound only the user can provide the "
+                  "file.",
+                  {"query": {"type": "string"}}),
     "add_music": (add_music, "Mix music into the edit. The defaults are "
                   "CONTEXT-AWARE: under speech the track sits low as a bed "
                   "(-18dB, ducked); when NO speech survives under the window "
@@ -13882,6 +13933,7 @@ REQUIRED_ARGS = {
     # a track.
     "add_music": ["storage_key"],
     "search_music": ["query"],
+    "find_song": ["query"],
     "fetch_music": ["id"],
     "listen_to": [],
     "set_edit_plan": ["steps"],
@@ -14029,6 +14081,10 @@ def _tool_disabled(name):
     # Live music search (round 98) — the bundled library's replacement.
     if name in ("search_music", "fetch_music"):
         return not music_search.available()
+    # Named-song link finding rides the fetch/extractor path; per-ACCOUNT
+    # narrowing happens inside the tool (schemas are per-deployment).
+    if name == "find_song":
+        return not song_find.available()
     if name == "list_sfx_library":
         return not sfx_library.CATALOG
     # The director pass places bundled sounds — with no pack shipped it can

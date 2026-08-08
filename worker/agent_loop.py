@@ -20,6 +20,7 @@ import llm
 import music_search
 import remote
 import sfx_library
+import song_find
 import storage
 import timeline
 from agent_prompt import project_state_block, system_prompt
@@ -1487,7 +1488,8 @@ ALTERNATIVE_HINTS = [
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
      "What I CAN do: score the edit with music on any time range — a "
-     "track I find online by genre/vibe, any link they paste (a song URL, "
+     "track I find online by genre/vibe, a specific song found by NAME "
+     "(find_song), any link they paste (a song URL, "
      "YouTube, SoundCloud...), or the user's own "
      "upload — loop it to fill the video, fade it in and out, start it "
      "partway in, swap one track for another, make it louder or quieter, "
@@ -1540,6 +1542,11 @@ def _nearest_alternative(user_text):
                         "it in and out, make it louder or quieter, or remove "
                         "it. I can also lay an uploaded voiceover over the "
                         "edit (other audio ducks while it speaks).")
+            # Same honesty for named-song link finding, which gates
+            # separately (it rides the fetch/extractor path).
+            if "find_song" in hint and not song_find.available():
+                hint = hint.replace(
+                    "a specific song found by NAME (find_song), ", "")
             if "built-in sound pack" in hint and not sfx_library.CATALOG:
                 if eleven.sound_gen_available():
                     return ("What I CAN do: generate the exact sound effect "
