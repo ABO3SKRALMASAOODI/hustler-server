@@ -1317,6 +1317,14 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # card instead of serving pre-outro bytes forever.
 OUTRO_VERSION = 2      # v2: the site's white robot + premium wordmark card
 
+# ── Shorts mode (round 99) ───────────────────────────────────────────────
+# One shorts_plan job cuts a long video into at most this many child clips.
+# ~1 clip per 5 minutes of source is the planner's target below the cap.
+SHORTS_MAX_CLIPS = int(os.getenv("SHORTS_MAX_CLIPS", "8"))
+# Flat credits per finished clip, charged on top of the run's model cost —
+# a shorts run fans out N final renders that a plain chat turn never does.
+SHORTS_CLIP_CREDITS = float(os.getenv("SHORTS_CLIP_CREDITS", "2.0"))
+
 # ── Complex-script text rendering (round 44) ─────────────────────────────
 # Stamped as `gfx_shape_v` on every render and compared ONLY for EDLs whose
 # text actually contains a shaping-sensitive script (Arabic/Hebrew/Indic/

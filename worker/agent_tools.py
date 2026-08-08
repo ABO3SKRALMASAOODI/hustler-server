@@ -12227,6 +12227,47 @@ def _seg_schema():
 CAPTION_PRESETS = ["podcast", "beast", "karaoke", "elegant", "spotlight",
                    "stacked", "iridescent", "chrome", "editorial",
                    "fashion", "luxe", "impact", "classic"]
+def make_shorts(ctx, count=None, style_note=None):
+    """Kick off the shorts pipeline for THIS project — the chat-path twin of
+    the studio's Make shorts button. The heavy work runs as its own
+    shorts_plan job so this turn can answer immediately; the board on the
+    project shows the clips as they land."""
+    if not ctx.has_main_video:
+        return ("REJECTED: shorts are cut from the MAIN video and this "
+                "project has none yet — ask the user to upload their long "
+                "video first.")
+    if ctx.duration < 60.0:
+        return (f"REJECTED: the video is only {ctx.duration:.0f}s — shorts "
+                "are cut FROM long videos. Offer to reframe/tighten this "
+                "one instead (auto_reframe, keep_segments).")
+    if not (ctx.index.get("words") or []):
+        return ("REJECTED: this video has no transcribed speech, and the "
+                "shorts planner picks moments from the transcript. Tell the "
+                "user honestly that shorts need a talking video for now.")
+    if ctx.db.run(dbx.has_active_job, ctx.project_id, "shorts_plan"):
+        return ("A shorts run is ALREADY working on this project — tell the "
+                "user their clips are on the way on the Shorts board; do "
+                "not start another.")
+    payload = {"source": "agent"}
+    try:
+        if count:
+            payload["count"] = max(1, min(int(count),
+                                          config.SHORTS_MAX_CLIPS))
+    except (TypeError, ValueError):
+        pass
+    if style_note:
+        payload["style_note"] = str(style_note)[:400]
+    ctx.db.run(dbx.enqueue_job, ctx.project_id, ctx.job["user_id"],
+               "shorts_plan", payload)
+    return ("Shorts run started. It reads the whole transcript, picks the "
+            "strongest self-contained moments, and builds each one as its "
+            "own project — reframed to 9:16, captioned, with emphasis "
+            "punch-ins — then renders them. The user watches it happen on "
+            "this project's Shorts board (top of the video pane). Tell "
+            "them it's underway and where to look; do NOT wait for it in "
+            "this turn.")
+
+
 CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
                  "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
                  "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
@@ -13924,6 +13965,17 @@ TOOLS = {
     "ask_user": (ask_user, "Ask the user ONE specific question and wait for "
                  "their reply (ends this turn). Only for taste calls tools "
                  "cannot answer.", {"question": {"type": "string"}}),
+    "make_shorts": (make_shorts, "Cut this LONG video into multiple "
+                    "finished vertical shorts — a background run that picks "
+                    "the strongest self-contained moments from the "
+                    "transcript, builds each as its own project (9:16, "
+                    "captions, punch-ins), and renders them onto the "
+                    "project's Shorts board. THE tool for 'make me shorts/"
+                    "clips/reels from this'. It runs after your reply — "
+                    "never wait for it. count caps how many; style_note "
+                    "forwards the user's styling words to the planner.",
+                    {"count": {"type": "integer"},
+                     "style_note": {"type": "string"}}),
 }
 
 REQUIRED_ARGS = {
@@ -14015,6 +14067,7 @@ REQUIRED_ARGS = {
     "fetch_url": ["url"],
     "ask_user": ["question"],
     "read_skill": ["name"],
+    "make_shorts": [],
 }
 
 # The loop uses this to build TURN FACTS: a write "succeeded" when its result

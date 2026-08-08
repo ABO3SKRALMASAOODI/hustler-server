@@ -31,6 +31,7 @@ import indexer
 import mcp_exec
 import remote
 import renderer
+import shorts
 import version
 
 # A filmstrip is a few seconds of ffmpeg on an already-small proxy, and the
@@ -51,7 +52,10 @@ else:
     MEDIA_TYPES = ("preview", "final", "filmstrip")
     FILMSTRIP_TYPES = ()
 INDEX_TYPES = ("index",)
-AGENT_TYPES = ("agent_turn",)
+# shorts_plan rides the agent lane: it is the same shape of work as a turn —
+# LLM waiting plus light per-child tool calls — and must never steal a media
+# slot from the renders it fans out.
+AGENT_TYPES = ("agent_turn", "shorts_plan")
 MCP_TYPES = ("mcp_tool",)
 
 
@@ -66,6 +70,7 @@ def _build_runners():
             "preview": remote.run_render_remote,
             "final": remote.run_render_remote,
             "agent_turn": agent_loop.run_agent_job,
+            "shorts_plan": shorts.run_shorts_plan,
             "mcp_tool": mcp_exec.run_mcp_job,
             # Local even with a remote executor: it reads the proxy, runs one
             # ffmpeg and uploads a JPEG. Shipping that to an 8-vCPU box costs
@@ -77,6 +82,7 @@ def _build_runners():
         "preview": renderer.run_render_job,
         "final": renderer.run_render_job,
         "agent_turn": agent_loop.run_agent_job,
+        "shorts_plan": shorts.run_shorts_plan,
         # An MCP tool call runs where an agent turn runs — same process, same
         # ToolContext, same tools. That is the whole point: the outside model
         # gets the in-house editor, not a copy of it.
@@ -105,11 +111,18 @@ def process_one(worker_db, job):
             timings = result.setdefault("timings", {})
             timings["queue_wait_s"] = queue_wait
             timings["total_s"] = total
-        if job["type"] == "agent_turn" and isinstance(result, dict) \
+        if job["type"] in ("agent_turn", "shorts_plan") \
+                and isinstance(result, dict) \
                 and result.get("billable", True):
             try:
+                # A shorts run pays the model cost like a turn PLUS a flat
+                # fee per finished clip — a plain turn never fans out N
+                # final renders.
+                extra = (config.SHORTS_CLIP_CREDITS
+                         * int(result.get("clips") or 0)
+                         if job["type"] == "shorts_plan" else 0.0)
                 charged = worker_db.run(dbx.charge_turn_credits,
-                                        job["user_id"], job_id)
+                                        job["user_id"], job_id, extra)
                 result["credits_charged"] = charged
             except Exception as ce:
                 # Billing must never fail a finished edit.
@@ -154,6 +167,8 @@ FAIL_NOTES = {
               "Press Download to try again."),
     "index": ("I couldn't analyze that video ({err}). Try uploading it "
               "again, or a different format like mp4."),
+    "shorts_plan": ("I couldn't cut shorts from this video ({err}). "
+                    "Press Make shorts to try again."),
 }
 
 # A preview enqueued by a USER edit (not by the agent — the agent reacts to a
@@ -233,6 +248,9 @@ REAPER_NOTES = {
     # preview died. A reaper-failed one left them on 'Rendering…' forever.
     "preview": ("I couldn't finish rendering the preview for that edit — your "
                 "change is saved. Hit retry, or make another edit."),
+    "shorts_plan": ("Cutting your shorts was interrupted on our side. Any "
+                    "clips already on the Shorts board are safe — press "
+                    "Make shorts to finish the rest."),
 }
 
 

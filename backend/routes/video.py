@@ -953,19 +953,24 @@ def create_project(user_id):
 def list_projects(user_id):
     with vdb() as conn:
         cur = conn.cursor()
+        # Children (kind='short') never clutter the list — they live on their
+        # parent's Shorts board; the parent row carries their count instead.
         cur.execute("""
-            SELECT p.id, p.title, p.created_at,
+            SELECT p.id, p.title, p.created_at, p.kind,
                    EXISTS (SELECT 1 FROM assets a
                            WHERE a.project_id = p.id AND a.kind = 'original')
-                       AS has_video
+                       AS has_video,
+                   (SELECT COUNT(*) FROM projects c
+                    WHERE c.parent_project_id = p.id) AS shorts_count
             FROM projects p
-            WHERE p.user_id = %s
+            WHERE p.user_id = %s AND p.parent_project_id IS NULL
             ORDER BY p.id DESC
             LIMIT 100
         """, (int(user_id),))
         rows = cur.fetchall()
     return jsonify({"projects": [
         {"id": r["id"], "title": r["title"], "has_video": r["has_video"],
+         "kind": r["kind"], "shorts_count": r["shorts_count"],
          "created_at": r["created_at"].isoformat()} for r in rows
     ]})
 
@@ -1086,21 +1091,34 @@ def delete_project(user_id, project_id):
         p = _project_for_user(cur, project_id, user_id)
         if not p:
             return jsonify({"error": "Project not found"}), 404
+        # Generated shorts are CHILD projects: their rows die with the parent
+        # (FK CASCADE), but storage deletion is prefix-per-project, so their
+        # ids must be collected BEFORE the rows vanish or their renders would
+        # be orphaned objects forever.
+        cur.execute("SELECT id, chat_session_id FROM projects "
+                    "WHERE parent_project_id = %s", (project_id,))
+        children = cur.fetchall()
+        family_ids = [project_id] + [c["id"] for c in children]
         # A running index/render would re-create R2 objects after the wipe,
-        # leaving orphaned copies of the user's (now 'deleted') media.
-        cur.execute("""SELECT 1 FROM video_jobs WHERE project_id = %s
+        # leaving orphaned copies of the user's (now 'deleted') media — and a
+        # child's render is exactly that kind of job, so the whole family
+        # counts.
+        cur.execute("""SELECT 1 FROM video_jobs WHERE project_id = ANY(%s)
                        AND state IN ('queued','running') LIMIT 1""",
-                    (project_id,))
+                    (family_ids,))
         if cur.fetchone():
             return jsonify({"error": "This project has an operation in "
                                      "progress — try deleting it in a moment.",
                             "code": "busy"}), 409
+        for c in children:
+            _delete_project_rows(cur, c["id"], c["chat_session_id"])
         _delete_project_rows(cur, project_id, p["chat_session_id"])
     # DB deletion has committed. Now wipe storage (best-effort; orphans moppable).
     objects_deleted = 0
     try:
         if storage.is_configured():
-            objects_deleted = storage.delete_project_objects(project_id)
+            for pid in family_ids:
+                objects_deleted += storage.delete_project_objects(pid)
     except Exception as e:
         print(f"[delete_project] object delete failed for {project_id}: {e}")
     return jsonify({"ok": True, "objects_deleted": objects_deleted})
@@ -1705,6 +1723,18 @@ def complete_upload_core(user_id, project_id, data):
             meta["staged"] = True
             if tray_pos is not None:
                 meta["tray_pos"] = tray_pos
+        # A shorts STYLE REFERENCE (round 99) is a clip that never joins the
+        # timeline: it skips the tray, is filtered out of every picker, and
+        # gets its perception pass (transcript + tiles + audio analysis)
+        # immediately — the style profile is read off that index.
+        is_reference = (kind == "clip" and not staged
+                        and (data.get("role") or "") == "shorts_reference")
+        if is_reference:
+            if duration_s and duration_s > 300:
+                return {"error": "A style reference should be a short — "
+                                 "under 5 minutes. Trim it to the part "
+                                 "whose style you want copied."}, 400
+            meta["role"] = "shorts_reference"
         cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
                                            bytes, duration_s, meta)
                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
@@ -1714,6 +1744,9 @@ def complete_upload_core(user_id, project_id, data):
         asset_id = cur.fetchone()["id"]
         job_id = None
         if kind == "original" and not staged:
+            job_id = _enqueue(cur, project_id, user_id, "index",
+                              {"asset_id": asset_id})
+        elif is_reference:
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": asset_id})
 
@@ -2645,8 +2678,26 @@ def project_state(user_id, project_id):
     proxy = next((a for a in proxies
                   if original and a["sha256"] == original["sha256"]), None)
 
+    shorts_meta = (p.get("meta") or {}).get("shorts") or {}
+    reference = next((a for a in extra if a["kind"] == "video_clip"
+                      and (a.get("meta") or {}).get("role")
+                      == "shorts_reference"), None)
     return jsonify({
-        "project": {"id": p["id"], "title": p["title"]},
+        "project": {"id": p["id"], "title": p["title"],
+                    "kind": p.get("kind") or "edit",
+                    "parent_project_id": p.get("parent_project_id"),
+                    # Enough for the studio to draw the tab + badge without a
+                    # second request; the full board comes from GET /shorts.
+                    "shorts": ({"status": shorts_meta.get("status"),
+                                "count": len(shorts_meta.get("clips") or [])}
+                               if shorts_meta else None),
+                    "clip": (p.get("meta") or {}).get("clip"),
+                    "reference": ({"asset_id": reference["id"],
+                                   "filename": (reference.get("meta") or {})
+                                   .get("filename"),
+                                   "indexed": bool((reference.get("meta")
+                                                    or {}).get("indexed"))}
+                                  if reference else None)},
         "video": _asset_out(original) if original else None,
         "proxy_asset_id": proxy["id"] if proxy else None,
         "indexed": indexed,
@@ -2693,7 +2744,10 @@ def project_state(user_id, project_id):
              "indexed": bool((a.get("meta") or {}).get("indexed")),
              "duration_s": a["duration_s"]}
             for a in extra if a["kind"] in ("video_clip", "image_ref")
-            and not _is_staged(a)],
+            and not _is_staged(a)
+            # The shorts style reference is analysis input, not b-roll — it
+            # must never appear as something to splice into the timeline.
+            and (a.get("meta") or {}).get("role") != "shorts_reference"],
         # The staging tray (round 84): uploads waiting for Submit. The studio
         # renders these as the temporary timeline above the chat and on the
         # timeline panel.
@@ -4773,6 +4827,171 @@ def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
         print(f"[client_event] dropped ({kind}): {exc}", flush=True)
         return False
     return True
+
+
+# ------------------------------------------------------------------ #
+#  Shorts mode (round 99)                                              #
+# ------------------------------------------------------------------ #
+# A shorts run is one worker job (shorts_plan) that spawns child projects —
+# one per clip — and fans out their final renders. These routes are the gate
+# and the board; every heavy step lives in worker/shorts.py.
+
+@video_bp.route("/projects/<int:project_id>/shorts", methods=["POST"])
+@token_required
+def start_shorts(user_id, project_id):
+    data = request.get_json() or {}
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        if (p.get("kind") or "edit") == "short":
+            return jsonify({"error": "This already is a short — open the "
+                                     "project it was cut from to make "
+                                     "more."}), 400
+        original = _active_original(cur, project_id)
+        indexed = bool(original and _index_row(cur, original["sha256"]))
+        if not indexed:
+            return jsonify({"error": "The video is still being analyzed — "
+                                     "shorts start the moment that "
+                                     "finishes.",
+                            "code": "not_indexed"}), 409
+        # Same two walls as sending a message: a shorts run is model time
+        # plus a fan of renders, so it needs the same credit standing.
+        if plan_gate.needs_plan(conn, user_id):
+            return plan_gate.gate_response(jsonify)
+        if not check_and_reserve(conn, user_id, min_credits=1.0):
+            info = get_balance(conn, user_id)
+            if info.get("payment_failed"):
+                msg = (f"{info.get('payment_failed_message')} Your credits "
+                       "are on hold until it clears.")
+            elif info.get("trial_cap_reached"):
+                msg = ("That's the credits included with your free trial — "
+                       "keep your plan and the full pool unlocks right "
+                       "away.")
+            else:
+                msg = "You're out of credits for now."
+            return jsonify({"error": msg, "code": "out_of_credits"}), 402
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'shorts_plan'
+                         AND state IN ('queued','running')""", (project_id,))
+        if cur.fetchone():
+            return jsonify({"error": "Shorts are already being cut for "
+                                     "this project.",
+                            "code": "shorts_running"}), 409
+        if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
+            return jsonify({"error": "Too many jobs running. "
+                                     "Wait for one to finish."}), 429
+        payload = {"source": "user"}
+        try:
+            if data.get("count"):
+                payload["count"] = max(1, min(int(data["count"]), 12))
+        except (TypeError, ValueError):
+            pass
+        note = str(data.get("style_note") or "").strip()
+        if note:
+            payload["style_note"] = note[:400]
+        job_id = _enqueue(cur, project_id, user_id, "shorts_plan", payload)
+    return jsonify({"job_id": job_id})
+
+
+@video_bp.route("/projects/<int:project_id>/shorts", methods=["GET"])
+@token_required
+def shorts_board(user_id, project_id):
+    """Everything the Shorts board draws in one response: run status, the
+    plan's clips, and each child's final-render state + asset."""
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        meta = (p.get("meta") or {}).get("shorts") or {}
+        cur.execute("""SELECT id, state, progress, error FROM video_jobs
+                       WHERE project_id = %s AND type = 'shorts_plan'
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        j = cur.fetchone()
+        job = ({"id": j["id"], "state": j["state"],
+                "progress": j["progress"], "error": j["error"]}
+               if j else None)
+
+        clips = list(meta.get("clips") or [])
+        child_ids = [c["child_project_id"] for c in clips
+                     if c.get("child_project_id")]
+        finals, renders, alive = {}, {}, {}
+        if child_ids:
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id, state, progress, error
+                           FROM video_jobs
+                           WHERE project_id = ANY(%s) AND type = 'final'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            finals = {r["project_id"]: r for r in cur.fetchall()}
+            cur.execute("""SELECT DISTINCT ON (project_id) project_id, id
+                           FROM assets
+                           WHERE project_id = ANY(%s) AND kind = 'render'
+                             AND meta->>'variant' = 'final'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            renders = {r["project_id"]: r["id"] for r in cur.fetchall()}
+            cur.execute("SELECT id, title FROM projects WHERE id = ANY(%s)",
+                        (child_ids,))
+            alive = {r["id"]: r["title"] for r in cur.fetchall()}
+
+        out = []
+        for c in clips:
+            cid = c.get("child_project_id")
+            if cid and cid not in alive:
+                continue        # the user deleted that clip's project
+            fj = finals.get(cid)
+            out.append({
+                "order": c.get("order"),
+                # The child's live title wins — the user may have renamed it.
+                "title": alive.get(cid) or c.get("title"),
+                "hook": c.get("hook"), "score": c.get("score"),
+                "start": c.get("start"), "end": c.get("end"),
+                "duration_s": round((c.get("end") or 0)
+                                    - (c.get("start") or 0), 1),
+                "child_project_id": cid,
+                "final": ({"state": fj["state"], "progress": fj["progress"],
+                           "error": fj["error"]} if fj else None),
+                "final_asset_id": renders.get(cid),
+            })
+        status = meta.get("status")
+        if j and j["state"] == "failed" and status not in ("ready", "gated"):
+            status = "failed"
+        style = meta.get("style_profile") or None
+        return jsonify({
+            "status": status, "job": job, "clips": out,
+            "reference_asset_id": meta.get("reference_asset_id"),
+            "style_notes": ((style or {}).get("vision_notes")
+                            or (style or {}).get("note")),
+            "started_at": meta.get("started_at"),
+            "finished_at": meta.get("finished_at"),
+        })
+
+
+@video_bp.route("/projects/<int:project_id>/mode", methods=["PATCH"])
+@token_required
+def set_project_mode(user_id, project_id):
+    """The upload screen's FULL EDIT | SHORTS switch. Only meaningful before
+    the pipeline has run; mid-run flips are refused rather than half-obeyed."""
+    kind = ((request.get_json() or {}).get("kind") or "").strip()
+    if kind not in ("edit", "shorts"):
+        return jsonify({"error": "kind must be 'edit' or 'shorts'"}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        if (p.get("kind") or "edit") == "short":
+            return jsonify({"error": "A generated short keeps its kind"}), 400
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE project_id = %s AND type = 'shorts_plan'
+                         AND state IN ('queued','running')""", (project_id,))
+        if cur.fetchone():
+            return jsonify({"error": "Shorts are being cut right now — the "
+                                     "mode can't change mid-run."}), 409
+        cur.execute("UPDATE projects SET kind = %s WHERE id = %s",
+                    (kind, project_id))
+    return jsonify({"ok": True, "kind": kind})
 
 
 def _event_request_args(data):

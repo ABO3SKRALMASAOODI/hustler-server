@@ -880,6 +880,26 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     except Exception as e:
         print(f"[index] tray placement failed: {e}", flush=True)
 
+    # SHORTS MODE (round 99): the user chose "Shorts" before uploading, so
+    # analysis flowing straight into the clip plan IS the product — no greet
+    # here (the plan job writes its own opener, or the credit wall), no
+    # waiting for a first message.
+    try:
+        project_row = worker_db.run(dbx.get_project, project_id)
+        if (project_row or {}).get("kind") == "shorts" and not reindex \
+                and user_id:
+            if worker_db.run(dbx.has_active_job, project_id, "shorts_plan"):
+                print(f"[index] project {project_id}: shorts_plan already "
+                      "live — not enqueuing another", flush=True)
+            else:
+                worker_db.run(dbx.enqueue_job, project_id, user_id,
+                              "shorts_plan", {"source": "auto"})
+                print(f"[index] project {project_id}: shorts mode — "
+                      "enqueued shorts_plan", flush=True)
+            return
+    except Exception as e:
+        print(f"[index] shorts auto-start failed: {e}", flush=True)
+
     pending, out_of_credits = None, False
     if session_id and user_id and config.OPENAI_API_KEY:
         try:

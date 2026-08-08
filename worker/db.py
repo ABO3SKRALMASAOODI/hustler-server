@@ -442,6 +442,7 @@ def indexed_clips(conn, project_id, limit=12):
                        WHERE project_id = %s AND kind = 'video_clip'
                          AND sha256 IS NOT NULL
                          AND COALESCE(meta->>'indexed', '') = 'true'
+                         AND COALESCE(meta->>'role', '') <> 'shorts_reference'
                        ORDER BY id ASC LIMIT %s""", (project_id, limit))
         return cur.fetchall()
 
@@ -1000,10 +1001,16 @@ def user_is_paid(conn, user_id):
     return bool(row["is_subscribed"]) or plan not in ("", "free")
 
 
-def charge_turn_credits(conn, user_id, job_id):
+def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
     """Deduct this turn's model cost from the user's credit pools.
     Returns the credits charged (float). Never raises the balance below 0
-    and never fails the turn — callers swallow exceptions."""
+    and never fails the turn — callers swallow exceptions.
+
+    extra_credits (round 99): a flat surcharge on top of the model cost —
+    the shorts pipeline adds SHORTS_CLIP_CREDITS per finished clip for the
+    render compute a plain chat turn never spends. Applied only when the
+    job had real model usage, so a run that produced nothing still charges
+    nothing."""
     with conn.cursor() as cur:
         # Token cost is summed PER ROW at that row's own model price (see
         # model_prices.row_cost_sql). Summing tokens first and multiplying once
@@ -1047,6 +1054,7 @@ def charge_turn_credits(conn, user_id, job_id):
         cost += float(row["gen_cost"] or 0)
         credits = max(MIN_TURN_CREDITS,
                       model_prices.usd_to_credits(cost, ndigits=1))
+        credits = round(credits + max(0.0, float(extra_credits or 0.0)), 1)
         cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
                        FROM users WHERE id = %s FOR UPDATE""", (user_id,))
         u = cur.fetchone()
