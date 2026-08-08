@@ -5035,12 +5035,13 @@ def shorts_board(user_id, project_id):
                            WHERE project_id = ANY(%s) AND type = 'final'
                            ORDER BY project_id, id DESC""", (child_ids,))
             finals = {r["project_id"]: r for r in cur.fetchall()}
-            cur.execute("""SELECT DISTINCT ON (project_id) project_id, id
+            cur.execute("""SELECT DISTINCT ON (project_id) project_id, id,
+                                  meta->>'sheet_key' AS sheet_key
                            FROM assets
                            WHERE project_id = ANY(%s) AND kind = 'render'
                              AND meta->>'variant' = 'final'
                            ORDER BY project_id, id DESC""", (child_ids,))
-            renders = {r["project_id"]: r["id"] for r in cur.fetchall()}
+            renders = {r["project_id"]: r for r in cur.fetchall()}
             cur.execute("SELECT id, title FROM projects WHERE id = ANY(%s)",
                         (child_ids,))
             alive = {r["id"]: r["title"] for r in cur.fetchall()}
@@ -5051,6 +5052,16 @@ def shorts_board(user_id, project_id):
             if cid and cid not in alive:
                 continue        # the user deleted that clip's project
             fj = finals.get(cid)
+            rend = renders.get(cid) or {}
+            # The final's result sheet is a grid of REAL frames of the
+            # rendered short — exactly the artwork a board card should wear
+            # instead of a gray rectangle.
+            sheet_url = None
+            if rend.get("sheet_key"):
+                try:
+                    sheet_url = storage.presign_get(rend["sheet_key"])
+                except Exception:
+                    sheet_url = None
             out.append({
                 "order": c.get("order"),
                 # The child's live title wins — the user may have renamed it.
@@ -5062,21 +5073,59 @@ def shorts_board(user_id, project_id):
                 "child_project_id": cid,
                 "final": ({"state": fj["state"], "progress": fj["progress"],
                            "error": fj["error"]} if fj else None),
-                "final_asset_id": renders.get(cid),
+                "final_asset_id": rend.get("id"),
+                "sheet_url": sheet_url,
                 "final_deferred": bool(c.get("final_deferred")),
             })
         status = meta.get("status")
         if j and j["state"] == "failed" and status not in ("ready", "gated"):
             status = "failed"
         style = meta.get("style_profile") or None
+        # The source video rides the SAME rail as the shorts (round 100 —
+        # "don't show the original as a separate thing"): one card, clearly
+        # badged Original, playable from the parent's newest preview render.
+        original = None
+        orig_asset = _active_original(cur, project_id)
+        if orig_asset:
+            cur.execute("""SELECT id FROM assets
+                           WHERE project_id = %s AND kind = 'render'
+                             AND meta->>'variant' = 'preview'
+                           ORDER BY id DESC LIMIT 1""", (project_id,))
+            prev = cur.fetchone()
+            original = {
+                "title": p.get("title"),
+                "duration_s": (float(orig_asset.get("duration_s"))
+                               if orig_asset.get("duration_s") else None),
+                "preview_asset_id": prev["id"] if prev else None,
+            }
         return jsonify({
             "status": status, "job": job, "clips": out,
+            "original": original,
             "reference_asset_id": meta.get("reference_asset_id"),
             "style_notes": ((style or {}).get("vision_notes")
                             or (style or {}).get("note")),
             "started_at": meta.get("started_at"),
             "finished_at": meta.get("finished_at"),
         })
+
+
+@video_bp.route("/projects/<int:project_id>/shorts/reference",
+                methods=["DELETE"])
+@token_required
+def remove_shorts_reference(user_id, project_id):
+    """The × on the reference chip. Removes the style reference so the next
+    run cuts with defaults; the bytes are cleaned up with the project."""
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        cur.execute("""DELETE FROM assets
+                       WHERE project_id = %s AND kind = 'video_clip'
+                         AND meta->>'role' = 'shorts_reference'
+                       RETURNING id""", (project_id,))
+        gone = [r["id"] for r in cur.fetchall()]
+        return jsonify({"removed": gone})
 
 
 @video_bp.route("/projects/<int:project_id>/mode", methods=["PATCH"])
