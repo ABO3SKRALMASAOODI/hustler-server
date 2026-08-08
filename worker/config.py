@@ -570,6 +570,12 @@ YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 # banned — the trade is a paid proxy vendor instead. Empty = direct. When
 # both this and cookies are set, both apply (cookies ride the proxy).
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
+# yt-dlp remote components for the EJS challenge solver ("" disables).
+# "ejs:github" fetches yt-dlp's own solver script; the Dockerfile ships
+# deno to run it. Required for cookie-mode fetches (see YTDLP_COOKIES_FILE
+# above) — the logged-in client path gates formats behind a JS challenge.
+YTDLP_REMOTE_COMPONENTS = os.getenv("YTDLP_REMOTE_COMPONENTS",
+                                    "ejs:github").strip()
 # Alternate player clients tried, in order, after a bot-wall failure. These
 # fail FAST (the challenge comes back during extraction, long before any
 # bytes are downloaded), so walking a few costs seconds, not minutes — but

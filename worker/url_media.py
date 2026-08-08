@@ -318,6 +318,10 @@ def _extract(url, workdir, prefer=None, client_override=None):
     # instead of the datacenter IP YouTube challenges.
     if config.YTDLP_PROXY:
         cmd += ["--proxy", config.YTDLP_PROXY]
+    # The EJS challenge solver (see config.YTDLP_REMOTE_COMPONENTS): without
+    # it, the cookie-mode client path resolves NO formats.
+    if config.YTDLP_REMOTE_COMPONENTS:
+        cmd += ["--remote-components", config.YTDLP_REMOTE_COMPONENTS]
     if prefer == KIND_AUDIO:
         # The user asked for a song. Pulling the video track and throwing it
         # away wastes the bulk of the download.

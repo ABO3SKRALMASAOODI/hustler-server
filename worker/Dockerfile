@@ -43,6 +43,17 @@ RUN if [ "$FFMPEG_STATIC" = "1" ]; then \
       && ffmpeg -version | head -1; \
     fi
 
+# deno: the JS runtime for yt-dlp's EJS challenge solver. YouTube gates
+# format resolution behind a JS "n" challenge on the logged-in (cookie)
+# client path — without a runtime + the solver components, cookie-mode
+# fetches see "Requested format is not available" while anonymous ones
+# still work. Single static binary, same install idiom as ffmpeg above.
+RUN python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip', '/tmp/deno.zip')" \
+    && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/tmp/deno-bin')" \
+    && install -m755 /tmp/deno-bin/deno /usr/local/bin/deno \
+    && rm -rf /tmp/deno.zip /tmp/deno-bin \
+    && deno --version | head -1
+
 WORKDIR /app
 
 COPY requirements.txt .

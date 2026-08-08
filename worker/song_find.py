@@ -176,6 +176,8 @@ def _yt_candidates(query, count, what="a search query"):
         cmd += ["--cookies", cookies]
     if config.YTDLP_PROXY:
         cmd += ["--proxy", config.YTDLP_PROXY]
+    if config.YTDLP_REMOTE_COMPONENTS:
+        cmd += ["--remote-components", config.YTDLP_REMOTE_COMPONENTS]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=SEARCH_TIMEOUT_S)
