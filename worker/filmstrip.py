@@ -71,6 +71,10 @@ MAX_TILES = 200
 # terminally failed): sampled by seek, and capped well under the proxy plan —
 # each seek decodes a full-resolution GOP in its own single-threaded process.
 ORIGINAL_SEEK_TILES = 60
+# Above this, the main sheet is sampled by SEEK instead of a linear fps=
+# decode: one pass over an 85-minute proxy costs 1000s+ of this box's CPU,
+# while ~200 seeks into the same small proxy cost well under a minute.
+LINEAR_BUILD_MAX_S = float(os.getenv("FILMSTRIP_LINEAR_MAX_S", "480"))
 # Never denser than this. A tile every 0.25s of a 20-minute video is 4800
 # thumbnails; the cap is what bounds both the ffmpeg pass and the sheet size,
 # and the interval is reported so the client can address tiles by time.
@@ -499,6 +503,23 @@ def run_filmstrip_job(worker_db, job):
         return {"available": False, "reason": "the video has no duration"}
     n, interval, cols, rows = plan(dur)
     key = storage_key(project_id, src_row.get("sha256"), n)
+    # A SHORTS CHILD shares the parent's proxy by storage key, so its sheet is
+    # pixel-identical to the parent's — yet each child used to rebuild it from
+    # scratch, and on the Aug 8 session that was four separate LINEAR decodes
+    # of the same 85-minute proxy on this small box (785-1224s each, back to
+    # back, starving every other filmstrip). If the parent's sheet exists,
+    # serve it. Same cross-project-by-key sharing the proxy itself already
+    # rides; a deleted parent costs the child its timeline artwork, exactly
+    # as it already costs it the proxy.
+    try:
+        parent_id = (worker_db.run(dbx.get_project, project_id)
+                     or {}).get("parent_project_id")
+    except Exception:
+        parent_id = None
+    if parent_id:
+        pkey = storage_key(parent_id, src_row.get("sha256"), n)
+        if storage.exists(pkey):
+            key = pkey
     meta = {"tiles": n, "interval_s": round(interval, 4), "cols": cols,
             "rows": rows, "tile_w": TILE_W,
             # tile_h is not stored anywhere, and it does not need to be: the
@@ -546,6 +567,14 @@ def run_filmstrip_job(worker_db, job):
                 # because every seek decodes a full-res GOP.
                 built = build_by_seek(local, out, dur,
                                       min(n, ORIGINAL_SEEK_TILES))
+            elif dur > LINEAR_BUILD_MAX_S:
+                # fps= sampling decodes EVERY frame of the proxy to keep one
+                # per interval — right for clips, catastrophic for long footage:
+                # an 85-minute proxy took 1000-1224s of this box's single CPU
+                # per sheet on Aug 8, and everything behind the filmstrip
+                # lane starved. Past a few minutes of footage, N seeks into a
+                # small proxy win outright.
+                built = build_by_seek(local, out, dur, n)
             else:
                 built = build(local, out, dur)
             storage.upload_file(out, key, "image/jpeg")

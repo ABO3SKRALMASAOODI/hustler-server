@@ -337,7 +337,12 @@ def test_reasoning_effort_never_applies_to_the_first_iteration():
     import inspect
     import agent_loop
     src = inspect.getsource(agent_loop._run_loop)
-    assert "AGENT_REASONING_EFFORT and iteration > 0" in src
+    # Round 100 tiering: the chat path still sends effort only from the
+    # second iteration on, and the value it sends is the per-step tier
+    # (configured effort on the planning step, dispatch effort after).
+    assert "step_effort and iteration > 0" in src
+    assert "config.AGENT_REASONING_EFFORT if iteration == 0" in src
+    assert "config.AGENT_REASONING_EFFORT_DISPATCH" in src
 
 
 # ── the burn rate and what the plans are priced against ─────────────────────

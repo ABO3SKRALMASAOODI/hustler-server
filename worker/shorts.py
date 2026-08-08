@@ -33,7 +33,9 @@ import math
 import os
 import re
 import shutil
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import agent_tools
@@ -150,16 +152,25 @@ def _pick_caption_preset(vis):
     if any(k in words for k in ("script", "italic serif", "cursive",
                                 "lyric", "handwritten")):
         return "lyric"
-    if any(k in words for k in ("karaoke", "one word", "word-by-word",
-                                "word at a time")):
+    # A reference NAMED as karaoke wins over the generic one-word phrases:
+    # karaoke is a visible phrase whose SPOKEN word lights up, and vision
+    # often describes it as "word-by-word karaoke".
+    if "karaoke" in words:
         return "karaoke"
+    # One word OWNING the frame, no phrase around it — 'spotlight'.
+    if any(k in words for k in ("one word", "word-by-word",
+                                "word at a time", "single word")):
+        return "spotlight"
+    if any(k in words for k in ("stacked", "interlock", "different size",
+                                "mixed size", "huge word")):
+        return "stacked"
     if any(k in words for k in ("bold", "heavy", "thick", "yellow", "hype",
                                 "beast", "impact")):
         return "beast"
     if any(k in words for k in ("serif", "elegant", "minimal", "thin",
                                 "classy")):
         return "elegant"
-    return "podcast"
+    return "karaoke"
 
 
 def _pick_grade(vis):
@@ -417,7 +428,8 @@ def _share_asset(conn, child_id, src_asset, note):
         fps=src_asset.get("fps"), sha256=src_asset.get("sha256"), meta=meta)
 
 
-def _seed_child(worker_db, job, child_id, index, clip, style, workdir):
+def _seed_child(worker_db, job, child_id, index, clip, style, workdir,
+                proxy_local=None):
     """Build the child's EDL through the agent's own tools. Returns
     (edl_version, notes). Tool REJECTions degrade the styling, never fail
     the clip — a short without a grade is still a short."""
@@ -425,6 +437,11 @@ def _seed_child(worker_db, job, child_id, index, clip, style, workdir):
     wd = os.path.join(workdir, f"child_{child_id}")
     os.makedirs(wd, exist_ok=True)
     ctx = agent_tools.ToolContext(worker_db, job, child, index, wd)
+    if proxy_local and os.path.exists(proxy_local):
+        # Every child shares the parent's proxy by key — download it once
+        # for the whole run, not once per child (the reframe sampler reads
+        # frames from it in every seed).
+        ctx._proxy_local = proxy_local
     notes = []
 
     def call(tool, **args):
@@ -448,8 +465,11 @@ def _seed_child(worker_db, job, child_id, index, clip, style, workdir):
               <= (float(w["t0"]) + float(w["t1"])) / 2
               <= clip["end"] + 0.05]
     if len(spoken) >= 4:
+        # size 'l': a vertical reel is watched on a phone with the sound
+        # often off — captions are the read, not a garnish. 'm' (the Aug 8
+        # run) read like a broadcast subtitle; modern reels set them big.
         cap_style = {"preset": (style or {}).get("captions_preset")
-                     or "podcast"}
+                     or "karaoke", "size": "l"}
         if (style or {}).get("uppercase"):
             cap_style["uppercase"] = True
         if (style or {}).get("captions", True):
@@ -464,8 +484,14 @@ def _seed_child(worker_db, job, child_id, index, clip, style, workdir):
         call("set_color_grade", preset=grade)
 
     music = (style or {}).get("music") or {}
-    want_music = bool(music.get("prominent")) or \
-        (clip.get("music") and len(spoken) < 4)
+    # THE USER'S WORD BEATS EVERY HEURISTIC. The Aug 8 run: the user typed
+    # "add music" into the shorts direction and got silence on all 8 clips,
+    # because music only fired when the REFERENCE was music-prominent or the
+    # clip had almost no speech. An explicit ask forces it everywhere; the
+    # planner's per-clip music=true now also counts under speech — that is
+    # what ducking is FOR (duck=True sits the bed under the voice).
+    want_music = bool((style or {}).get("music_requested")) \
+        or bool(music.get("prominent")) or bool(clip.get("music"))
     if want_music:
         try:
             _add_music(ctx, call, worker_db, child_id, clip, music)
@@ -583,6 +609,15 @@ def run_shorts_plan(worker_db, job):
         style = None
         if ref:
             style = _reference_profile(worker_db, job, ref, workdir)
+        # The user's typed direction outranks anything measured off a
+        # reference: "add music" in the note means every clip gets a bed
+        # (ducked under speech), full stop — the Aug 8 run ignored exactly
+        # this and shipped 8 silent clips against an explicit ask.
+        note_l = (payload.get("style_note") or "").lower()
+        if re.search(r"\b(music|soundtrack|song|beat|bgm|track)\b", note_l):
+            style = style or {}
+            style["music_requested"] = True
+            style.setdefault("music", {})
         worker_db.run(dbx.set_progress, job_id, 22)
 
         clips = list(shorts_meta.get("clips") or []) \
@@ -607,7 +642,9 @@ def run_shorts_plan(worker_db, job):
 
         proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
         n = len(clips)
-        for i, clip in enumerate(clips):
+        # Phase 1 — children EXIST first: cheap ordered INSERTs, so the board
+        # can draw every card before a single frame is cut.
+        for clip in clips:
             if not clip.get("child_project_id"):
                 child_id, child_session = worker_db.run(
                     _create_child, job["user_id"], project, clip)
@@ -625,22 +662,59 @@ def run_shorts_plan(worker_db, job):
                     {"kind": "short_intro"})
                 clip["child_project_id"] = child_id
                 worker_db.run(_save_shorts_meta, project_id, shorts_meta)
-            if not clip.get("edl_version"):
+
+        # Phase 2 — seed the EDLs IN PARALLEL, each on its own DB connection
+        # (Db is one-per-thread by contract). The Aug 8 session seeded 8
+        # children one after another and the user watched ~22 minutes of
+        # upload-to-done; seeding is tool calls + a few frame samples, so
+        # four at once is bounded by IO, not CPU. Each finished child fans
+        # its final out IMMEDIATELY — renders overlap the remaining seeds.
+        meta_lock = threading.Lock()
+        done = [0]
+        shared_proxy = None
+        if proxy:
+            shared_proxy = os.path.join(workdir, "shared_proxy.mp4")
+            try:
+                storage.download_to(proxy["storage_key"], shared_proxy)
+            except Exception:
+                shared_proxy = None
+
+        def _seed_one(clip):
+            db_local = dbx.Db()
+            try:
                 version, notes = _seed_child(
-                    worker_db, job, clip["child_project_id"], index, clip,
-                    style, workdir)
-                clip["edl_version"] = version
-                clip["seed_notes"] = notes[-6:]
-                if original_pending:
-                    clip["final_deferred"] = True
-                else:
-                    worker_db.run(dbx.enqueue_job, clip["child_project_id"],
-                                  job["user_id"], "final",
-                                  {"edl_version": version,
-                                   "source": "shorts"})
-                worker_db.run(_save_shorts_meta, project_id, shorts_meta)
-            worker_db.run(dbx.set_progress, job_id,
-                          35 + int(58 * (i + 1) / n))
+                    db_local, job, clip["child_project_id"], index, clip,
+                    style, workdir, proxy_local=shared_proxy)
+                with meta_lock:
+                    clip["edl_version"] = version
+                    clip["seed_notes"] = notes[-6:]
+                    if original_pending:
+                        clip["final_deferred"] = True
+                if not original_pending:
+                    db_local.run(dbx.enqueue_job, clip["child_project_id"],
+                                 job["user_id"], "final",
+                                 {"edl_version": version,
+                                  "source": "shorts"})
+                with meta_lock:
+                    done[0] += 1
+                    db_local.run(_save_shorts_meta, project_id, shorts_meta)
+                    db_local.run(dbx.set_progress, job_id,
+                                 35 + int(58 * done[0] / n))
+            except Exception as e:
+                with meta_lock:
+                    clip["seed_error"] = str(e)[:200]
+                print(f"[shorts {job_id}] child "
+                      f"{clip.get('child_project_id')} seed failed: {e}",
+                      flush=True)
+            finally:
+                db_local.reset()
+
+        todo = [c for c in clips if not c.get("edl_version")]
+        if todo:
+            with ThreadPoolExecutor(
+                    max_workers=min(4, max(1, len(todo)))) as pool:
+                list(pool.map(_seed_one, todo))
+        worker_db.run(_save_shorts_meta, project_id, shorts_meta)
 
         shorts_meta["status"] = "ready"
         shorts_meta["finished_at"] = _now_iso()

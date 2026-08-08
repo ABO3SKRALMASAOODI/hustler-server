@@ -475,6 +475,31 @@ class VolumeItem(BaseModel):
 FRAME_RATIOS = ("source", "16:9", "9:16", "1:1", "4:5")
 
 
+class FocusSpan(BaseModel):
+    """One window of the SOURCE clock where the crop aims at (x, y).
+
+    Round 100 — the wall bug. auto_reframe measured the subject as ONE median
+    point for the whole video, and on a two-person podcast (speakers left and
+    right of frame, shots alternating) the median lands BETWEEN them: every
+    Aug 8 shorts child cropped to x≈0.58 — the wall. A crop that follows the
+    footage has to be allowed to move at cuts, so the frame carries a track
+    of source-time spans, each with its own aim. The renderer resolves each
+    kept segment's crop from the span covering that segment's midpoint (the
+    seeder splits keep segments at shot boundaries so a span change lands
+    exactly on a cut, where a reframe reads as an edit instead of a slide)."""
+    t0: float
+    t1: float
+    x: Optional[float] = None
+    y: Optional[float] = None
+
+    @field_validator("x", "y")
+    @classmethod
+    def _clamp_xy(cls, v):
+        if v is None:
+            return None
+        return round(min(max(float(v), 0.0), 1.0), 3)
+
+
 class Frame(BaseModel):
     """Output frame. ratio 'source' keeps the original dimensions; anything
     else is achieved by crop (center-crop + scale), pad (fit + black bars) or
@@ -486,11 +511,18 @@ class Frame(BaseModel):
     the frame middle, which is what makes a 16:9 -> 9:16 conversion follow an
     off-center speaker instead of chopping them in half. None = 0.5 (the
     legacy center crop) and is dropped from signatures, so every stored EDL
-    renders byte-identically. Only meaningful for mode 'crop'."""
+    renders byte-identically. Only meaningful for mode 'crop'.
+
+    focus_track (round 100): per-source-window aims that OVERRIDE focus_x/y
+    for kept segments whose midpoint falls inside a span — the moving-subject
+    answer a single point cannot give (see FocusSpan). None/[] keeps the
+    single-point behaviour byte-identically, and _sig_canon drops the None so
+    every stored EDL's signature is unchanged."""
     ratio: Literal["source", "16:9", "9:16", "1:1", "4:5"] = "source"
     mode: Literal["crop", "pad", "pad_blur"] = "crop"
     focus_x: Optional[float] = None
     focus_y: Optional[float] = None
+    focus_track: Optional[List[FocusSpan]] = None
 
     @field_validator("focus_x", "focus_y")
     @classmethod

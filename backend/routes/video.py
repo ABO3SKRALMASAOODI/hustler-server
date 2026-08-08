@@ -558,8 +558,16 @@ def _project_for_user(cur, project_id, user_id):
 
 
 def _running_jobs_count(cur, user_id):
+    # Only the LLM-spend jobs count toward the message cap. This used to
+    # count EVERY queued/running job, so a shorts run — 8 child finals plus
+    # their filmstrips, all legitimate paid renders — pushed the count past
+    # the cap and 429'd the user's next chat message for as long as the
+    # renders drained (Aug 8: minutes of "requests are enqueued" right after
+    # the product's flagship feature ran). Renders never race a turn; the cap
+    # exists to bound model spend, so it counts the jobs that spend model.
     cur.execute("""SELECT COUNT(*) AS n FROM video_jobs
-                   WHERE user_id = %s AND state IN ('queued','running')""",
+                   WHERE user_id = %s AND state IN ('queued','running')
+                     AND type IN ('agent_turn', 'shorts_plan', 'mcp_tool')""",
                 (int(user_id),))
     return cur.fetchone()["n"]
 
@@ -2545,6 +2553,31 @@ def project_state(user_id, project_id):
                                  AND (meta->>'edl_version')::int = %s
                                LIMIT 1""", (project_id, edl["version"]))
                 covered = cur.fetchone() is not None
+            if not covered and p.get("kind") == "short":
+                # Round 100 — a shorts child already rendered a FINAL of this
+                # exact version (finals fan out first there). Re-encoding a
+                # preview of the same programme was a second full render per
+                # short — 8 extra Cloud Run encodes per shorts run, all to
+                # show pixels the final already has. Adopt the final as the
+                # preview instead: same storage key, zero encode, playable
+                # the moment the board is opened. Scoped to 'short' projects
+                # only — a final carries the outro tail, and the main studio
+                # timeline's time base must not absorb it.
+                cur.execute("""SELECT id FROM assets
+                               WHERE project_id = %s AND kind = 'render'
+                                 AND meta->>'variant' = 'final'
+                                 AND meta->>'edl_version' ~ '^[0-9]+$'
+                                 AND (meta->>'edl_version')::int = %s
+                               ORDER BY id DESC LIMIT 1""",
+                            (project_id, edl["version"]))
+                fin = cur.fetchone()
+                if fin:
+                    _adopt_preview(cur, project_id, fin["id"],
+                                   edl["version"])
+                    covered = True
+                    print(f"[state] short {project_id}: EDL "
+                          f"v{edl['version']} preview adopted from its "
+                          "final — no re-encode", flush=True)
             if not covered:
                 print(f"[state] project {project_id}: EDL v{edl['version']} "
                       f"had no preview job — enqueuing one", flush=True)
@@ -2884,18 +2917,31 @@ def post_message(user_id, project_id):
         # includes an outside model driving this project over MCP (round 49):
         # it holds the timeline for the length of one tool call, and the MCP
         # side refuses symmetrically while an agent turn is live.
-        cur.execute("""SELECT type FROM video_jobs
+        #
+        # Round 100: a live AGENT turn no longer 409s. The serialization the
+        # 409 protected moved into the worker's claim_job (one live agent job
+        # per project, oldest first), so a message sent mid-turn is simply
+        # ACCEPTED and stacked: if a turn is still queued, it is re-aimed at
+        # this newest message (one turn answers the whole stack — the chat
+        # history carries every message); if one is running, a follow-up turn
+        # is enqueued and starts the moment the running one ends. The red
+        # "still working on your previous request" banner — which locked a
+        # real user out of chat for 14 minutes on Aug 8 while their queued
+        # turn starved — is gone. Only MCP keeps the refusal: that editor is
+        # an outside model we cannot stack work onto.
+        cur.execute("""SELECT id, type, state FROM video_jobs
                        WHERE project_id = %s
                          AND type IN ('agent_turn', 'mcp_tool')
                          AND state IN ('queued','running')
                        ORDER BY id DESC LIMIT 1""", (project_id,))
         busy = cur.fetchone()
-        if busy:
+        if busy and busy["type"] == "mcp_tool":
             return jsonify({"error": (
                 "Another editing session is working on this project right "
-                "now — give it a moment." if busy["type"] == "mcp_tool"
-                else "The editor is still working on your previous request."
-            )}), 409
+                "now — give it a moment.")}), 409
+        stack_on_job = (busy["id"] if busy and busy["state"] == "queued"
+                        else None)
+        stacked = bool(busy)
 
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
@@ -2968,8 +3014,9 @@ def post_message(user_id, project_id):
         # message left it committed with no agent_turn ever enqueued — an
         # orphaned "unserved" message the user had to resend. Checked here so a
         # capacity 429 never persists the message; the client can auto-retry.
-        if indexed and (_running_jobs_count(cur, user_id)
-                        >= MAX_CONCURRENT_JOBS_PER_USER):
+        if indexed and stack_on_job is None \
+                and (_running_jobs_count(cur, user_id)
+                     >= MAX_CONCURRENT_JOBS_PER_USER):
             return jsonify({
                 "error": "You have a few edits still processing — I'll take "
                          "this one as soon as one finishes.",
@@ -3104,11 +3151,14 @@ def post_message(user_id, project_id):
                             (p["chat_session_id"],))
                 return jsonify({"queued": False, "message_id": message_id})
 
-            if branch_base is not None:
+            if branch_base is not None and not stacked:
                 # Branch BEFORE the turn is queued, in the same transaction
                 # as the message: the worker's latest_edl() then already IS
                 # the state the user was looking at, and the studio's poll
                 # sees the branch (with its adopted preview) immediately.
+                # (Never while a turn is live — branching under an editor
+                # mid-write would fork the state it is writing to; a stacked
+                # message continues from wherever that turn lands instead.)
                 new_v = _branch_edl(cur, p["chat_session_id"], project_id,
                                     branch_base)
                 # Re-stamp with the branched copy — the state this turn
@@ -3118,8 +3168,25 @@ def post_message(user_id, project_id):
                 meta["edl_version"] = new_v
                 cur.execute("UPDATE chat_messages SET meta = %s WHERE id = %s",
                             (Json(meta), message_id))
-            job_id = _enqueue(cur, project_id, user_id, "agent_turn",
-                              {"message_id": message_id})
+            job_id = None
+            if stack_on_job is not None:
+                # Re-aim the still-queued turn at the newest message. Guarded
+                # on state='queued' so a worker claiming it mid-request makes
+                # this a no-op — RETURNING tells us, and we fall through to a
+                # fresh enqueue instead (claim-side serialization runs it
+                # after the claimed one finishes).
+                cur.execute("""UPDATE video_jobs
+                               SET payload = payload
+                                   || jsonb_build_object('message_id', %s)
+                               WHERE id = %s AND state = 'queued'
+                               RETURNING id""",
+                            (message_id, stack_on_job))
+                row = cur.fetchone()
+                if row:
+                    job_id = row["id"]
+            if job_id is None:
+                job_id = _enqueue(cur, project_id, user_id, "agent_turn",
+                                  {"message_id": message_id})
 
     if concierge is not None:
         # The model call runs in a thread with its own DB connection — the
@@ -3135,7 +3202,7 @@ def post_message(user_id, project_id):
                         "message_id": message_id})
 
     return jsonify({"queued": True, "message_id": message_id,
-                    "job_id": job_id})
+                    "job_id": job_id, "stacked": stacked})
 
 
 def _concierge_respond(db_url, project_id, ctx, attachments):
@@ -4227,7 +4294,7 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 3      # v3: "edited by an AI agent" + the gray-red robot
+OUTRO_VERSION = 4      # v4: true plan-card colors on the elevated panel
                        # (keep in step with worker/config.py OUTRO_VERSION —
                        # test_units checks the two match)
 

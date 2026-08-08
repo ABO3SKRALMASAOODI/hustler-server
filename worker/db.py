@@ -119,13 +119,50 @@ def claim_job(conn, types, max_attempts):
     # we have physically spent running this job and is NEVER given back. Job
     # 836 ran five 50-minute finals against a cap of three because only the
     # first counter existed. See config.MAX_CLAIMS_ABSOLUTE.
+    #
+    # Round 100 — ONE EDITOR PER PROJECT MOVES HERE. It used to live in the
+    # backend as a 409 ("The editor is still working on your previous
+    # request"), which turned a busy timeline into a user-facing error and,
+    # combined with a starved lane, locked a real user out of chat for 14
+    # minutes on Aug 8. Enforced at claim time instead: an agent-lane job
+    # whose project already has a LIVE agent-lane job (running with a fresh
+    # heartbeat) is simply skipped and picked up when the running one ends.
+    # The backend can now accept and stack messages instead of refusing them.
+    # Media/index/filmstrip claims are untouched — renders of one project
+    # were always allowed to overlap.
     has_claims = claims_column_ready(conn)
     claims_set = ", total_claims = COALESCE(total_claims, 0) + 1" if has_claims else ""
     claims_where = "AND COALESCE(total_claims, 0) < %s" if has_claims else ""
+    serialize = any(t in ("agent_turn", "shorts_plan", "mcp_tool")
+                    for t in types)
+    serial_where = ""
     params = [list(types), max_attempts]
     if has_claims:
         params.append(config.MAX_CLAIMS_ABSOLUTE)
     params.append(config.STALE_AFTER_S)
+    if serialize:
+        # A sibling blocks this row when it is RUNNING with a fresh heartbeat
+        # (the live editor), or QUEUED with a lower id and attempts left (the
+        # row every lane would claim first — making the OLDEST live job the
+        # only claimable one is what closes the READ COMMITTED window where
+        # two lanes could each claim one of two queued turns of the same
+        # project). A stale-running or spent sibling blocks nothing: those
+        # are the reaper's to bury, and a dead row must never wedge its
+        # project's queue behind it.
+        serial_where = """
+                  AND NOT EXISTS (
+                      SELECT 1 FROM video_jobs live
+                      WHERE live.project_id = video_jobs.project_id
+                        AND live.id <> video_jobs.id
+                        AND live.type IN ('agent_turn', 'shorts_plan',
+                                          'mcp_tool')
+                        AND ((live.state = 'running'
+                              AND live.heartbeat_at >= NOW()
+                                  - make_interval(secs => %s))
+                             OR (live.state = 'queued'
+                                 AND live.id < video_jobs.id
+                                 AND live.attempts < %s)))"""
+        params.extend([config.STALE_AFTER_S, max_attempts])
     with conn.cursor() as cur:
         cur.execute(f"""
             UPDATE video_jobs
@@ -139,6 +176,7 @@ def claim_job(conn, types, max_attempts):
                   AND (state = 'queued'
                        OR (state = 'running'
                            AND heartbeat_at < NOW() - make_interval(secs => %s)))
+                  {serial_where}
                 ORDER BY CASE type WHEN 'preview' THEN 0
                                    WHEN 'final' THEN 1 ELSE 2 END, id
                 FOR UPDATE SKIP LOCKED

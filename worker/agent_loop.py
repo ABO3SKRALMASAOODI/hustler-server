@@ -1521,6 +1521,12 @@ _TRUNCATED_NUDGE = (
     "them, reply in two short sentences saying exactly what. Do not restate "
     "the plan, do not re-read state you already have.")
 
+_CUTOFF_NUDGE = (
+    "Your reply was CUT OFF mid-sentence by the token limit — the user must "
+    "never see a message that stops in the middle of a word. Send the "
+    "complete reply again, substantially shorter: lead with what you did, "
+    "drop the play-by-play.")
+
 
 def _nearest_alternative(user_text):
     for rx, hint in ALTERNATIVE_HINTS:
@@ -2169,16 +2175,24 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         worker_db.run(dbx.set_progress, job["id"],
                       int(100 * iteration / config.AGENT_MAX_ITERATIONS))
         t0 = time.monotonic()
-        # reasoning_effort, from the SECOND iteration on. Iteration 0 is where
-        # the model reads the project state and plans the edit — that is the
-        # thinking worth paying for. Everything after is tool dispatch, which
-        # the providers themselves put under "low". Empty config sends no field
-        # at all, so a provider that would reject an unknown parameter is
-        # untouched until someone opts in.
+        # TIERED reasoning (round 100). Iteration 0 is where the model reads
+        # the project state and plans the edit — that is the thinking worth
+        # paying for, and it runs at AGENT_REASONING_EFFORT. Every iteration
+        # after is tool dispatch: the plan exists, the step is "call the next
+        # tool and read its result", and running THAT at 'max' is what made
+        # one turn burn 49k reasoning tokens over 21 calls and hold another
+        # user's queued message hostage for 14 minutes (job 3211). Dispatch
+        # steps run at AGENT_REASONING_EFFORT_DISPATCH ('low' by default) —
+        # on both the responses lane and the chat path. Empty config sends no
+        # field at all, so a provider that would reject an unknown parameter
+        # is untouched until someone opts in.
+        step_effort = (config.AGENT_REASONING_EFFORT if iteration == 0
+                       else (config.AGENT_REASONING_EFFORT_DISPATCH
+                             or config.AGENT_REASONING_EFFORT))
         extra = {}
-        if config.AGENT_REASONING_EFFORT and iteration > 0 \
+        if step_effort and iteration > 0 \
                 and not llm.reasoning_effort_rejected(model):
-            extra["reasoning_effort"] = config.AGENT_REASONING_EFFORT
+            extra["reasoning_effort"] = step_effort
         if llm.tools_need_effort_none(model):
             # This model refuses tools + reasoning on chat/completions
             # outright (Luna); the only accepted spelling is an explicit
@@ -2219,12 +2233,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     resp = llm.responses_create(
                         config.OPENAI_BASE_URL, config.OPENAI_API_KEY, model,
                         messages, tools, max_tokens=max_tokens,
-                        effort=config.AGENT_REASONING_EFFORT,
+                        effort=step_effort,
                         # Thinking-sized, not dispatch-sized: a max-effort
                         # call reasons past LLM_TIMEOUT_S, and timing out
                         # here silently reruns the step at effort='none'.
                         timeout=config.AGENT_LANE_TIMEOUT_S)
-                    used_lane = config.AGENT_REASONING_EFFORT
+                    used_lane = step_effort
                 except Exception as e:
                     # A definite "not here" latches the lane off for the
                     # process so a doomed request is paid once, not once per
@@ -2276,8 +2290,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # default reasoning is what conflicts with tools), so
                     # stripping fixes nothing — the dialect is to SEND
                     # reasoning_effort='none' explicitly, always.
-                    if not llm.tools_need_effort_none(model) and \
-                            llm.looks_like_tools_reasoning_conflict(e):
+                    # NOT gated on "not already latched" (round 100): the
+                    # latch is process-global and another thread could set it
+                    # between this step building kw and its 400 arriving —
+                    # at which point every branch here used to step aside and
+                    # the raw 400 killed the turn (jobs 3123/3156/3201, three
+                    # real users on 2026-08-08). The recovery is idempotent;
+                    # the only unrecoverable shape is a conflict 400 on a
+                    # request that ALREADY carried 'none'.
+                    if llm.looks_like_tools_reasoning_conflict(e) and \
+                            kw.get("reasoning_effort") != "none":
                         llm.mark_tools_need_effort_none(model)
                         print(f"[agent {job['id']}] {model} takes function "
                               "tools only with reasoning_effort='none' on "
@@ -2389,6 +2411,29 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             truncated_out = True
 
         if not msg.tool_calls:
+            body = (msg.content or "").strip()
+            # A reply the token ceiling cut off MID-SENTENCE is not a reply
+            # (round 100 — users watched turns "end mid-word"). Only the
+            # empty case retried before; a partial one shipped as-is. Retry
+            # shorter; out of retries, trim back to the last finished
+            # sentence rather than ever posting a fragment.
+            if finish == "length" and body:
+                if truncated_retries < 2:
+                    truncated_retries += 1
+                    max_tokens = min(max_tokens * 2,
+                                     config.AGENT_MAX_TOKENS_CEILING)
+                    print(f"[job {job['id']}] reply cut off at the token "
+                          f"ceiling — retrying with max_tokens={max_tokens}",
+                          flush=True)
+                    messages.append({"role": "assistant", "content": body})
+                    messages.append({"role": "system",
+                                     "content": _CUTOFF_NUDGE})
+                    continue
+                if body[-1] not in ".!?…\"'”)":
+                    cut = max(body.rfind("."), body.rfind("!"),
+                              body.rfind("?"))
+                    if cut > 40:
+                        body = body[:cut + 1]
             # Before anything else: if the preview this turn rendered came
             # back with craft findings, the turn is not finished. Send them
             # back once as work rather than as commentary.
@@ -2397,14 +2442,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 print(f"[job {job['id']}] taste audit outstanding "
                       f"({len(ctx.last_taste)} finding(s)) — pushing back "
                       "before the reply", flush=True)
-                if (msg.content or "").strip():
+                if body:
                     messages.append({"role": "assistant",
                                      "content": msg.content})
                 continue
             # Auto-render first so the turn facts include the real preview.
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings)
-            draft = (msg.content or "").strip()
+            draft = body
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
                     draft = "Done — check the preview on the right."

@@ -67,32 +67,50 @@ def _lift_blacks(img):
     return img, n
 
 
+PANEL = (23, 24, 28, 255)         # elevated card surface — the plan card's
+PANEL_EDGE = (255, 255, 255, 22)  # hairline that separates it from the void
+
+
 def robot(height_px):
-    """The billing page's gray-red robot, lifted for black, glow attached."""
+    """The billing page's gray-red robot — TRUE colors, on the plan card.
+
+    Round 100. The v3 card recolored the robot to survive a bare black
+    background (black-floor lift + 1.22x brightness), and the owner read the
+    result as the WRONG robot: "the colours are different from the middle
+    plan's". The honest fix is the one the billing page itself uses — don't
+    repaint the character, give it its card: an elevated rounded panel a
+    step above the void, so the pure-black ink (antenna, visor, joints)
+    reads against the panel and every fill ships exactly as drawn. A soft
+    red under-glow floats the panel off the black.
+    """
     src = Image.open(ROBOT_PNG).convert("RGBA")
-    src, n = _lift_blacks(src)
-    if not n:
-        raise SystemExit("no near-black ink found — did brand/robot112.png "
-                         "change? Re-check _lift_blacks before shipping a "
-                         "card whose robot dissolves into the background.")
-    # Lift the body grays a touch: at reel scale, ~#2E3237 on black reads
-    # as mud. 1.22x keeps the charcoal identity while the silhouette reads.
-    from PIL import ImageEnhance
-    src = ImageEnhance.Brightness(src).enhance(1.22)
     w = max(1, round(src.width * height_px / src.height))
     mark = _ink(src.resize((w, height_px), Image.LANCZOS))
 
-    # The glow: a blurred ellipse, barely above black with a red lean, on a
-    # canvas padded enough that the blur never clips to a visible square.
-    pad = int(height_px * 0.22)
-    gw, gh = mark.width + 2 * pad, mark.height + 2 * pad
+    pad_x = int(height_px * 0.11)
+    pad_y = int(height_px * 0.075)
+    pw, ph = mark.width + 2 * pad_x, mark.height + 2 * pad_y
+    radius = int(height_px * 0.075)
+
+    halo = int(height_px * 0.14)
+    gw, gh = pw + 2 * halo, ph + 2 * halo
+    out = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
+
     glow = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
     d = ImageDraw.Draw(glow)
-    d.ellipse([pad * 0.4, pad * 0.4, gw - pad * 0.4, gh - pad * 0.4],
-              fill=(74, 30, 30, 118))
-    glow = glow.filter(ImageFilter.GaussianBlur(pad * 0.62))
-    glow.paste(mark, (pad, pad), mark)
-    return glow
+    d.rounded_rectangle([halo * 0.55, halo * 0.55,
+                         gw - halo * 0.55, gh - halo * 0.55],
+                        radius=radius * 1.6, fill=(120, 26, 26, 132))
+    glow = glow.filter(ImageFilter.GaussianBlur(halo * 0.55))
+    out.alpha_composite(glow)
+
+    panel = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(panel)
+    d.rounded_rectangle([halo, halo, halo + pw, halo + ph], radius=radius,
+                        fill=PANEL, outline=PANEL_EDGE, width=3)
+    out.alpha_composite(panel)
+    out.paste(mark, (halo + pad_x, halo + pad_y), mark)
+    return out
 
 
 def _text(text, font, fill, tracking):
@@ -138,14 +156,14 @@ def build(out_path, pjs_path):
     element and therefore sizes the card; the wordmark sits just under the
     robot so character and name read as one unit.
     """
-    HEAD_SIZE = 148
+    HEAD_SIZE = 158
     HEAD_TRACK = 0.045                     # airy, deliberate, not shouty
-    HEAD_LEAD = 58                         # between the two headline lines
-    ROBOT_H = 1620                         # "the agent is big" — it LEADS
-    WORD_SIZE = 252
-    IO_SIZE = 178
-    GAP_HEAD = 40                          # headline -> robot (glow pads add air)
-    GAP_WORD = 10                          # robot -> wordmark (ditto)
+    HEAD_LEAD = 56                         # between the two headline lines
+    ROBOT_H = 2150                         # "the agent is big" — it LEADS
+    WORD_SIZE = 300
+    IO_SIZE = 212
+    GAP_HEAD = 56                          # headline -> panel (halo adds air)
+    GAP_WORD = 18                          # panel -> wordmark (ditto)
 
     head_f = ImageFont.truetype(pjs_path, HEAD_SIZE)
     head_f.set_variation_by_axes([800])

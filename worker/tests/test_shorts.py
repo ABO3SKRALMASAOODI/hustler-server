@@ -38,9 +38,15 @@ def test_caption_preset_mapping():
         == "beast"
     assert pick({"captions": {"style_words": "thin elegant serif"}}) \
         == "elegant"
+    # Round 100: the unrecognized/no-vision default is the modern karaoke
+    # reel look, not the left-stacked podcast layout — shorts are watched on
+    # phones with the sound off, and the Aug 8 feedback on the podcast-style
+    # default was "the captions were very bad".
     assert pick({"captions": {"style_words": "clean white phrases"}}) \
-        == "podcast"
-    assert pick(None) == "podcast"                  # no vision -> safe default
+        == "karaoke"
+    assert pick(None) == "karaoke"                  # no vision -> reel default
+    assert pick({"captions": {"style_words": "one word at a time, huge"}}) \
+        == "spotlight"
 
 
 def test_grade_mapping_only_returns_real_presets():

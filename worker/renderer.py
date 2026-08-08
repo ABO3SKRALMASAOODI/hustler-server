@@ -1459,12 +1459,38 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          + (f",{AUDIO_NORM}" if do_norm else "")
                          + f"[a_seg{i}]")
     if do_norm:
+        # focus_track (round 100): a kept segment whose midpoint falls inside
+        # a span crops on that span's own aim — how the crop FOLLOWS a subject
+        # that sits in different places in different shots (the seeder splits
+        # keep segments at shot cuts, so an aim change lands on a cut). No
+        # track, or no covering span, keeps the single frame_focus exactly.
+        _ftrack = ((edl.get("frame") or {}).get("focus_track")
+                   if isinstance(edl.get("frame"), dict) else None) or []
+
+        def _focus_for(s, e):
+            if not _ftrack:
+                return frame_focus
+            m = (s + e) / 2.0
+            for sp in _ftrack:
+                try:
+                    if float(sp.get("t0", 0)) <= m <= float(sp.get("t1", 0)):
+                        fx, fy = sp.get("x"), sp.get("y")
+                        if fx is None and fy is None:
+                            return frame_focus
+                        return (fx if fx is not None else
+                                (frame_focus[0] if frame_focus else None),
+                                fy if fy is not None else
+                                (frame_focus[1] if frame_focus else None))
+                except (TypeError, ValueError):
+                    continue
+            return frame_focus
+
         for i in range(n):
             # frame_focus reaches ONLY the main footage: the focus point was
             # measured on the source video, so inserts (below) keep the
             # center crop.
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
-                             mode, f"s{i}", focus=frame_focus,
+                             mode, f"s{i}", focus=_focus_for(*keep[i]),
                              seg_dur=seg_out_len[i])
 
     # insert blocks: trim to their window (source_start_s picks where in

@@ -9,6 +9,7 @@ Three consumers:
 
 Everything here is pure functions over plain data — no DB, no network.
 """
+import bisect
 
 EPS = 0.011   # times are rounded to 0.01s; boundaries must be STRICTLY inside
 
@@ -120,13 +121,63 @@ def midword_audit(keep, words, duration=None):
 def snap_keep_to_words(keep, words, duration):
     """Move any keep boundary that lands inside a word OUTWARD to the word
     edge (span start -> word start, span end -> word end), so whole words
-    survive. Returns a new merged, sorted keep list."""
+    survive. Returns a new merged, sorted keep list.
+
+    Round 100 — BREATH PADDING on the snapped edges. Whisper's word t1 runs
+    consistently early (the model marks the end of the voiced core, not the
+    release of the final consonant), so cutting exactly AT t1 audibly clips
+    the word's tail — the "ends mid-word" complaint from the Aug 8 shorts,
+    where every clip boundary was a snapped word edge. The end edge now
+    carries +0.12s of breath and the start edge -0.05s of lead-in, each
+    clamped so the pad can never swallow a neighbouring word."""
+    starts = sorted(float(w["t0"]) for w in words) if words else []
+    ends = sorted(float(w["t1"]) for w in words) if words else []
+
+    def _next_start_after(t):
+        i = bisect.bisect_right(starts, t + 1e-6)
+        return starts[i] if i < len(starts) else None
+
+    def _prev_end_before(t):
+        i = bisect.bisect_left(ends, t - 1e-6)
+        return ends[i - 1] if i > 0 else None
+
     snapped = []
     for s, e in keep:
         hs = word_at_boundary(words, s)
         he = word_at_boundary(words, e)
         ns = round(hs["t0"], 2) if hs else s
         ne = round(he["t1"], 2) if he else e
+        if he:
+            pad_to = float(he["t1"]) + 0.12
+            nxt = _next_start_after(float(he["t1"]))
+            if nxt is not None:
+                pad_to = min(pad_to, nxt - 0.01)
+            ne = round(max(ne, pad_to), 2)
+        elif words:
+            # Boundary sitting AT a word edge (the sentence-timestamp case —
+            # every shorts clip) still ends at whisper's early t1; give the
+            # same breath whenever the edge rides a word's tail.
+            prv = _prev_end_before(e + 0.02)
+            if prv is not None and e - prv <= 0.15:
+                pad_to = prv + 0.12
+                nxt = _next_start_after(prv)
+                if nxt is not None:
+                    pad_to = min(pad_to, nxt - 0.01)
+                ne = round(max(ne, pad_to), 2)
+        if hs:
+            pad_to = float(hs["t0"]) - 0.05
+            prv = _prev_end_before(float(hs["t0"]))
+            if prv is not None:
+                pad_to = max(pad_to, prv + 0.01)
+            ns = round(min(ns, pad_to), 2)
+        elif words:
+            nxt = _next_start_after(s - 0.02)
+            if nxt is not None and 0 <= nxt - s <= 0.15:
+                pad_to = nxt - 0.05
+                prv = _prev_end_before(nxt)
+                if prv is not None:
+                    pad_to = max(pad_to, prv + 0.01)
+                ns = round(min(ns, pad_to), 2)
         ns = max(0.0, ns)
         if duration is not None:
             ne = min(float(duration), ne)

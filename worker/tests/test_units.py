@@ -413,12 +413,16 @@ check("warning names the word and both edges",
       and "29.21 (word end)" in warn[0])
 check("warning offers the silence midpoint", "27.15" in warn[0])
 
-check("snap: keep end moves outward to word end",
+# Round 100: snapped edges carry breath padding — whisper's word t1 runs
+# early, so ending exactly AT it audibly clips the final consonant. End =
+# word end + 0.12 (clamped to the next word), start = word start - 0.05
+# (clamped to the previous word's end).
+check("snap: keep end moves outward past the word end with breath",
       audit.snap_keep_to_words([[0.0, 28.81]], words_r3, 60.0) ==
-      [[0.0, 29.21]])
-check("snap: keep start moves outward to word start",
+      [[0.0, 29.33]])
+check("snap: keep start moves outward with lead-in, clamped off 'is'",
       audit.snap_keep_to_words([[28.81, 40.0]], words_r3, 60.0) ==
-      [[28.33, 40.0]])
+      [[28.28, 40.0]])
 check("snap merges spans that now overlap",
       audit.snap_keep_to_words([[0.0, 28.81], [28.9, 40.0]], words_r3, 60.0)
       == [[0.0, 40.0]])

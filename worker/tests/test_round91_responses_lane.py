@@ -233,8 +233,16 @@ _src = inspect.getsource(agent_loop._run_loop)
 
 check("reasoning effort is MAX (gpt-5.6: none|low|medium|high|xhigh|max)",
       config.AGENT_REASONING_EFFORT == "max")
-check("...and the configured value is what the lane sends",
-      "effort=config.AGENT_REASONING_EFFORT" in _src)
+# Round 100: the lane sends TIERED effort — the configured value on the
+# planning step (iteration 0), the dispatch value after. A dispatch step at
+# 'max' thinks for minutes about "call the next tool" (job 3211: 49k
+# reasoning tokens, 14 minutes, another user starved behind it).
+check("...and the tiered step effort is what the lane sends",
+      "effort=step_effort" in _src)
+check("...planning keeps the configured effort",
+      "config.AGENT_REASONING_EFFORT if iteration == 0" in _src)
+check("...dispatch runs at the dispatch effort, which is set and lighter",
+      config.AGENT_REASONING_EFFORT_DISPATCH in ("low", "medium"))
 check("the lane call gets the thinking-sized timeout, not the 90s dispatch "
       "one", "timeout=config.AGENT_LANE_TIMEOUT_S" in _src)
 check("...which exists, sits above LLM_TIMEOUT_S and under the turn ceiling",

@@ -307,6 +307,19 @@ FRONTIER_PLANS = {"ai_max"}
 #    a 400 about the effort VALUE, so a provider trimming its enum degrades
 #    one step, not the process.
 AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "max").strip()
+# ROUND 100 SPLITS THE EFFORT BY STEP KIND. "max" everywhere bought back
+# deliberation and then spent it on steps that need none: iteration 0 is the
+# read-the-project-and-plan step — the thinking round 97's history justifies —
+# but every step after is "call the next tool, read its result", and at max
+# effort those dispatch steps THINK FOR MINUTES each. Job 3211 (Aug 8): 21
+# calls, 49k reasoning tokens, 14+ minutes of wall clock — while another
+# user's queued turn starved behind it the whole time. Planning keeps
+# AGENT_REASONING_EFFORT; dispatch runs at this. 'low' rather than 'none'
+# deliberately: the round-97 no-op spirals lived at zero deliberation, and
+# 'low' keeps enough thought to notice a tool result contradicting the plan.
+# "" falls back to AGENT_REASONING_EFFORT on every step (the old behaviour).
+AGENT_REASONING_EFFORT_DISPATCH = os.getenv(
+    "AGENT_REASONING_EFFORT_DISPATCH", "low").strip()
 # Wall-clock for ONE responses-lane call. LLM_TIMEOUT_S (90) is sized for
 # dispatch-grade calls; at effort max the model may THINK for minutes before
 # its first output token, and a timeout here does not fail the turn — it
@@ -663,7 +676,13 @@ MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "3" if _REMOTE_EXEC else "1"))
 INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "2" if _REMOTE_EXEC else "1"))
 MEDIA_POLL_INTERVAL_S = float(os.getenv(
     "WORKER_MEDIA_POLL_INTERVAL_S", "0.5" if _REMOTE_EXEC else "2.0"))
-AGENT_SLOTS = int(os.getenv("WORKER_AGENT_SLOTS", "2"))
+# Round 100: 4, up from 2, and claim_job now serializes agent work PER
+# PROJECT (db.claim_job) so extra slots can never race two turns onto one
+# timeline. An agent turn is network waiting — the slots are nearly free —
+# and on Aug 8 a real user's queued message sat 14 minutes behind another
+# user's long turn while the box did nothing. If Render's env pins
+# WORKER_AGENT_SLOTS lower, RAISE THAT TOO — the env overrides this default.
+AGENT_SLOTS = int(os.getenv("WORKER_AGENT_SLOTS", "4"))
 # The agent lane's claim poll is the gap between "user hit send" and "the
 # turn starts" — the first latency anyone feels, on every single message.
 # 0.5s, like the MCP lane: the claim is one indexed SKIP LOCKED query.
@@ -1334,9 +1353,11 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK changes. It is stored on every render asset
 # and busts the render cache, so an existing export re-encodes with the new
 # card instead of serving pre-outro bytes forever.
-OUTRO_VERSION = 3      # v3: "THIS VIDEO WAS EDITED BY AN AI AGENT" over the
-                       # big gray-red robot (the billing page's Pro mark) and
-                       # the Valmera.io wordmark — see tools/build_endcard.py
+OUTRO_VERSION = 4      # v4: the robot in its TRUE plan-card colors on an
+                       # elevated rounded panel (the billing page's own card),
+                       # red under-glow, bigger mark and wordmark — the v3
+                       # black-floor recolor read as "the wrong robot". See
+                       # tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
 # One shorts_plan job cuts a long video into at most this many child clips.

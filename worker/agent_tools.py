@@ -3069,6 +3069,117 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None):
 CROP_DETAIL_KEEP_MIN = 0.55
 
 
+def _reframe_with_track(ctx, ratio, global_pt):
+    """A crop that FOLLOWS the subject across shot changes, or None when a
+    single point serves (one shot, one position, or anything unmeasurable).
+
+    Round 100 — the wall bug. On a two-person podcast the subject sits left
+    in some shots and right in others; the median of five samples lands
+    BETWEEN them, and every Aug 8 shorts child cropped to the wall at
+    x≈0.58. One point cannot frame footage whose subject moves at cuts, so:
+    measure a face PER SHOT inside the kept footage, split the keep spans at
+    the shot boundaries where the aim genuinely changes (a reframe on a cut
+    reads as an edit; mid-shot it reads as a slide), and write the aims as
+    frame.focus_track. Never with a transition style set — those fire on
+    scene junctions, which is exactly where this splits.
+    """
+    shots = (ctx.index or {}).get("shots") or []
+    if len(shots) < 2:
+        return None
+    edl = dict(ctx.latest_edl()["json"])
+    if ((edl.get("effects") or {}).get("transition")):
+        return None
+    keep = [(float(s), float(e)) for s, e in (edl.get("keep") or [])]
+    if not keep:
+        return None
+    try:
+        proxy = ctx.proxy_path()
+    except Exception:
+        return None
+
+    # Kept span ∩ shot windows -> measurement windows (skip blink-length ones)
+    wins = []
+    for ks, ke in keep:
+        for sh in shots:
+            s = max(ks, float(sh.get("start", 0.0)))
+            e = min(ke, float(sh.get("end", 0.0)))
+            if e - s >= 0.4:
+                wins.append([s, e])
+    if len(wins) < 2 or len(wins) > 60:
+        return None
+
+    measured = []
+    for w in wins:
+        fp = os.path.join(ctx.workdir, f"track_{len(measured)}.jpg")
+        pt = None
+        try:
+            media.frame_at(proxy, (w[0] + w[1]) / 2.0, fp)
+            pts, method = subject.points_from_frames([fp])
+            if method == "faces" and pts:
+                pt = pts[0]
+        except Exception:
+            pt = None
+        measured.append([w[0], w[1], pt])
+    have = [m for m in measured if m[2]]
+    if len(have) < 2:
+        return None
+    # Windows with no face inherit the nearest measured aim, then adjacent
+    # windows whose aims agree merge — the track only changes where the
+    # picture actually does.
+    for i, m in enumerate(measured):
+        if m[2] is None:
+            prev = next((measured[j][2] for j in range(i - 1, -1, -1)
+                         if measured[j][2]), None)
+            nxt = next((measured[j][2] for j in range(i + 1, len(measured))
+                        if measured[j][2]), None)
+            m[2] = prev or nxt or global_pt
+    spans = []
+    for s, e, pt in measured:
+        if spans and abs(spans[-1]["x"] - pt[0]) < 0.06 \
+                and abs(spans[-1]["y"] - pt[1]) < 0.10 \
+                and abs(spans[-1]["t1"] - s) < 0.05:
+            spans[-1]["t1"] = e
+            continue
+        spans.append({"t0": round(s, 3), "t1": round(e, 3),
+                      "x": round(pt[0], 3), "y": round(pt[1], 3)})
+    if len(spans) < 2:
+        return None                      # one aim — the single point serves
+    if len(spans) > 24:
+        # Bound the filtergraph: keep the 24 longest, re-merge the rest into
+        # neighbours by extending the previous span.
+        spans.sort(key=lambda sp: sp["t0"])
+        while len(spans) > 24:
+            shortest = min(range(1, len(spans)),
+                           key=lambda i: spans[i]["t1"] - spans[i]["t0"])
+            spans[shortest - 1]["t1"] = spans[shortest]["t1"]
+            spans.pop(shortest)
+
+    # Split the keep list on span boundaries so every segment has ONE aim.
+    cuts = sorted({sp["t0"] for sp in spans} | {sp["t1"] for sp in spans})
+    new_keep = []
+    for ks, ke in keep:
+        edges = [ks] + [c for c in cuts if ks + 0.05 < c < ke - 0.05] + [ke]
+        for a, b in zip(edges, edges[1:]):
+            new_keep.append([round(a, 3), round(b, 3)])
+    med = subject.median_point([(sp["x"], sp["y"]) for sp in spans])
+    edl["keep"] = new_keep
+    edl["frame"] = {"ratio": str(ratio), "mode": "crop",
+                    "focus_x": med[0], "focus_y": med[1],
+                    "focus_track": spans}
+    res = ctx.write_edl(
+        edl, f"output frame set to {ratio} (crop) — the crop FOLLOWS the "
+             f"subject across {len(spans)} camera positions, re-aiming at "
+             "shot cuts")
+    if not res.startswith("EDL v"):
+        return None                      # validation refused — fall back
+    res += (f"\nMeasured per shot: the subject sits in different places in "
+            f"different shots (e.g. two speakers), so ONE fixed crop would "
+            f"frame the wall between them. The crop re-aims at {len(spans)} "
+            "shot boundaries instead — each cut lands on the person "
+            "speaking's side of the frame.")
+    return res
+
+
 def auto_reframe(ctx, ratio="9:16", mode="auto"):
     """Convert the output frame to `ratio` and choose HOW honestly.
 
@@ -3182,6 +3293,14 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
     if method == "faces":
         pt = subject.median_point(pts)
         drift = subject.spread(pts)
+        if drift > 0.15:
+            # The subject sits in DIFFERENT places across the samples — a
+            # multi-camera conversation, a walking subject. One fixed point
+            # would median between the positions (the Aug 8 wall crops), so
+            # measure per shot and let the crop re-aim at cuts.
+            track_res = _reframe_with_track(ctx, ratio, pt)
+            if track_res is not None:
+                return track_res
         res = set_frame(ctx, ratio, "crop", focus_x=pt[0], focus_y=pt[1])
         if res.startswith("EDL v"):
             res += (f"\nMeasured from the pixels: a face was detected in "
@@ -9742,7 +9861,13 @@ def fetch_url(ctx, url, as_kind=None):
         shutil.rmtree(workdir, ignore_errors=True)
         return (f"Could not download that link — {e}. Tell the user that "
                 "plainly and suggest they upload the file instead. Do NOT "
-                "claim anything was added.")
+                "claim anything was added. Then DO NOT stop at the apology: "
+                "if the user wanted MUSIC, immediately search_music the "
+                "licensed pool for the closest match (same mood/tempo — for "
+                "a known song, describe its feel, e.g. 'epic emotional "
+                "cinematic organ' for Interstellar) and OFFER it or place "
+                "it ducked under speech, saying it is a licensed "
+                "sound-alike they can swap the exact file into later.")
     except Exception as e:
         shutil.rmtree(workdir, ignore_errors=True)
         return (f"Could not download that link ({str(e)[:200]}). Tell the "

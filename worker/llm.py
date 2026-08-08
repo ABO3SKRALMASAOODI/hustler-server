@@ -532,6 +532,34 @@ _use_max_completion_tokens = set()
 _no_temperature = set()
 
 
+def _seed_known_dialects():
+    """Pre-latch the dialects OpenAI's reasoning family has already proven.
+
+    The latches are process-local, so every fresh worker used to re-learn
+    them the expensive way: the first Luna agent call burned up to three 400s
+    (max_tokens -> max_completion_tokens, temperature, tools+reasoning) before
+    a step could succeed — and the adapt budget those retries share is also
+    the budget real transient failures need. Worse, the tools+reasoning
+    conflict could latch on thread A between thread B building its kwargs and
+    B's own 400 arriving, at which point every recovery branch (all guarded by
+    "not latched yet") stepped aside and B's turn died on the raw 400 — jobs
+    3123/3156/3201, three real users' first sessions, all on 2026-08-08.
+
+    Seeding costs nothing when wrong (the adapters still latch live) and
+    saves the whole class when right. Matched narrowly: OpenAI host, gpt-5+
+    reasoning family — xAI/DeepSeek keep their own measured dialects."""
+    if "api.openai.com" not in (config.OPENAI_BASE_URL or ""):
+        return
+    for m in {config.AGENT_MODEL, config.FIRST_TURN_AGENT_MODEL}:
+        if m and re.match(r"gpt-[5-9]", m):
+            _use_max_completion_tokens.add(m)
+            _no_temperature.add(m)
+            _tools_effort_none.add(m)
+
+
+_seed_known_dialects()
+
+
 def completion_kwargs(model, max_tokens=None, temperature=None):
     """The token-limit and temperature kwargs in the dialect this model has
     proven to accept."""
@@ -898,12 +926,18 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
             attempts += 1
             if attempts > 3:
                 raise
-            if "tools" in kw and not tools_need_effort_none(model) \
-                    and looks_like_tools_reasoning_conflict(e):
+            if "tools" in kw and looks_like_tools_reasoning_conflict(e) \
+                    and kw.get("reasoning_effort") != "none":
                 # The honesty regen passes the tool schemas for context
                 # (tool_choice='none'), which is still a tools call to the
                 # provider — Luna refuses it with default reasoning exactly
                 # as it refuses the agent loop's.
+                # Deliberately NOT gated on "not already latched": another
+                # thread latching between this call's kwargs being built and
+                # its 400 arriving used to make every branch here step aside,
+                # and the raw 400 killed the request. The recovery is
+                # idempotent — set 'none' and retry — so run it whenever the
+                # request that failed wasn't already carrying 'none'.
                 mark_tools_need_effort_none(model)
                 kw["reasoning_effort"] = "none"
                 continue
