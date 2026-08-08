@@ -193,8 +193,16 @@ def test_add_sfx_refuses_retired_sounds_and_points_at_generation():
     assert sound is None and "retired" in err and "generate_sfx" in err
 
 
-def test_empty_pack_disables_its_tools_and_its_advert():
+def test_empty_pack_disables_its_tools_and_its_advert(monkeypatch):
     assert agent_tools._tool_disabled("list_sfx_library")
+    # The director pass GENERATES its sounds now: it gates on the sound
+    # provider, not the (empty) pack — on in a configured deployment even
+    # with no bundled sounds, hidden and honestly rejecting without one.
+    monkeypatch.setattr(agent_tools.eleven, "sound_gen_available",
+                        lambda: True)
+    assert not agent_tools._tool_disabled("sound_design_pass")
+    monkeypatch.setattr(agent_tools.eleven, "sound_gen_available",
+                        lambda: False)
     assert agent_tools._tool_disabled("sound_design_pass")
     # Round 98: the bundled music library is retired from the surface —
     # its tool is unregistered and the state advertises live search

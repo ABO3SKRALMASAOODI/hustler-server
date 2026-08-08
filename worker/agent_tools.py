@@ -11536,27 +11536,30 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
     return res
 
 
-def _pick_sfx(category, tag=None):
-    """Deterministic pick from the bundled pack: the alphabetically-first
-    sound in the category (tag matches first when a tag is given) — the same
-    inputs always place the same sound, so re-running a pass is a NO CHANGE,
-    not a reshuffle."""
-    hits = [t for t in sfx_library.CATALOG if t.get("category") == category]
-    if tag:
-        tagged = [t for t in hits if tag in (t.get("tags") or ())]
-        hits = tagged or hits
-    hits = sorted(hits, key=lambda t: t["slug"])
-    return hits[0] if hits else None
+# The pass's palette: one fixed, tasteful prompt per accent kind, matching
+# the audio skill's soft/airy/sub preference. Fixed strings on purpose —
+# re-running the pass on the same edit asks the provider for the same
+# sounds, which is as close to determinism as generation gets (the MOMENTS
+# stay fully deterministic either way).
+_PASS_SOUNDS = {
+    "whoosh": ("a soft airy cinematic whoosh transition, quick and smooth, "
+               "no tail, no melody", 1.0),
+    "impact": ("a deep soft cinematic sub-bass impact hit with a tight low "
+               "end and a crisp attack, no melody", 1.0),
+    "riser": ("a smooth airy cinematic riser building tension and resolving "
+              "cleanly, no melody", 2.0),
+}
 
 
 def sound_design_pass(ctx, intensity="medium"):
     """Deterministic sound design in ONE version: whooshes on cut junctions,
     one impact on the strongest stressed word, one riser resolving into the
-    biggest energy rise — all from the built-in pack, all disclosed."""
-    if not sfx_library.CATALOG:
-        return ("REJECTED: this deployment ships no built-in sound pack, so "
-                "there is nothing to place. Sounds the user uploads can "
-                "still be placed by hand with add_sfx.")
+    biggest energy rise — every sound GENERATED for this edit (the bundled
+    pack is gone), every placement disclosed."""
+    if not eleven.sound_gen_available():
+        return ("REJECTED: sound generation is not configured on this "
+                "deployment, so the pass has nothing to place. Sounds the "
+                "user uploads can still be placed by hand with add_sfx.")
     if not ctx.has_main_video:
         return ("REJECTED: the sound-design pass reads the main video's cut "
                 "junctions and audio analysis — on an image/clip-only "
@@ -11567,6 +11570,14 @@ def sound_design_pass(ctx, intensity="medium"):
         return ("REJECTED: intensity must be light (2 placements), medium "
                 "(4) or strong (6).")
     budget = budgets[level]
+    # The pass spends the same per-turn generation allowance as generate_sfx
+    # — hitting the cap shrinks the pass instead of silently exceeding it.
+    room = config.MAX_GENERATED_SFX_PER_TURN - len(ctx.sfx_generated)
+    if room <= 0:
+        return (f"REJECTED: already generated "
+                f"{config.MAX_GENERATED_SFX_PER_TURN} sounds this turn (the "
+                "per-turn limit). Place what you have.")
+    budget = min(budget, room)
     edl = dict(ctx.latest_edl()["json"])
     tl = Timeline(edl["keep"], edl.get("inserts") or [],
                   edl.get("speed") or [])
@@ -11592,8 +11603,7 @@ def sound_design_pass(ctx, intensity="medium"):
     # down the list instead would make every re-run invent a new hit on a
     # progressively weaker word, which is a reshuffle, not idempotence.
     words = ctx.index.get("words") or []
-    impact = _pick_sfx("impact")
-    if p is not None and words and impact and len(placements) < budget:
+    if p is not None and words and len(placements) < budget:
         scores = perception.word_stress(p, words)
         for i in sorted(range(len(words)), key=lambda k: -scores[k]):
             w = words[i]
@@ -11604,16 +11614,15 @@ def sound_design_pass(ctx, intensity="medium"):
                 continue
             if _clear(round(pt, 2)):
                 placements.append(
-                    (impact, round(pt, 2),
+                    ("impact", round(pt, 2),
                      f"impact on the stressed word '{w['w']}'"))
             break
     # One riser ending exactly INTO the largest energy rise.
-    riser = _pick_sfx("riser")
-    if p is not None and riser and len(placements) < budget:
+    if p is not None and len(placements) < budget:
         rise = _largest_energy_rise(p)
         if rise:
             rt = tl.src_to_out(rise[0])
-            rdur = float(riser.get("duration_s") or 2.0)
+            rdur = _PASS_SOUNDS["riser"][1]
             # The riser must FIT before the rise (rt >= its length), or the
             # start clamps to 0 and the sound resolves at rdur — later than
             # the rise the disclosure line claims. When it doesn't fit,
@@ -11622,47 +11631,83 @@ def sound_design_pass(ctx, intensity="medium"):
                 at = round(rt - rdur, 2)
                 if _clear(at):
                     placements.append(
-                        (riser, at, f"riser resolving into the "
-                                    f"+{rise[1]:g}dB rise at "
-                                    f"{round(rt, 2)}s"))
+                        ("riser", at, f"riser resolving into the "
+                                      f"+{rise[1]:g}dB rise at "
+                                      f"{round(rt, 2)}s"))
     # Whooshes on internal cut junctions with the remaining budget. The 5s
     # cadence counts EXISTING sounds too — otherwise a re-run would fill the
     # very junctions the first run's spacing deliberately skipped.
-    whoosh = _pick_sfx("transition", tag="whoosh")
-    if whoosh:
-        for j in tl.offsets[1:]:     # segment joins in final program time
-            if len(placements) >= budget:
-                break
-            at = round(j, 2)
-            if at < 0.5 or at > prog - 0.5:
-                continue             # skip the junction at t=0 / the end
-            if any(abs(at - x) < 5.0 for x in existing) or \
-                    any(abs(at - q[1]) < 5.0 for q in placements):
-                continue             # spaced >= 5s from every other accent
-            placements.append((whoosh, at, "whoosh on the cut junction"))
+    for j in tl.offsets[1:]:         # segment joins in final program time
+        if len(placements) >= budget:
+            break
+        at = round(j, 2)
+        if at < 0.5 or at > prog - 0.5:
+            continue                 # skip the junction at t=0 / the end
+        if any(abs(at - x) < 5.0 for x in existing) or \
+                any(abs(at - q[1]) < 5.0 for q in placements):
+            continue                 # spaced >= 5s from every other accent
+        placements.append(("whoosh", at, "whoosh on the cut junction"))
     if not placements:
         return ("NO CHANGE: nothing to place — every candidate moment is "
                 "within 1.5s of an existing sound, or there are no cut "
                 "junctions/analysis to work from. Place sounds by hand with "
                 "add_sfx if you still want them. Do NOT tell the user sound "
                 "design was added.")
+    # Money guard for the WHOLE batch before the first provider call — a
+    # pass that would blow the budget refuses up front instead of stopping
+    # half-placed.
+    over = _gen_budget_reject(ctx, len(placements) * config.SFX_PRICE_USD,
+                              "run a sound-design pass")
+    if over:
+        return over
+    made, fails = [], []
+    for kind, at, why in sorted(placements, key=lambda q: q[1]):
+        prompt, dur = _PASS_SOUNDS[kind]
+        n = len(ctx.sfx_generated) + len(made) + 1
+        out_path = os.path.join(ctx.workdir, f"gensfx_{n}.mp3")
+        ok, err = eleven.generate_sfx(prompt, out_path, duration_s=dur)
+        if not ok:
+            fails.append(f"{kind} @ {at}s ({str(err)[:80]})")
+            continue
+        key = f"generated_sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
+        try:
+            storage.upload_file(out_path, key, "audio/mpeg")
+        except Exception as e:
+            fails.append(f"{kind} @ {at}s (save failed: {str(e)[:80]})")
+            continue
+        made.append((kind, at, why, key, prompt))
+    if not made:
+        return ("Sound generation FAILED for every placement ("
+                + "; ".join(fails[:3]) + "). Tell the user the pass didn't "
+                "work — do NOT claim sound design was added.")
     items = [dict(sx) for sx in (edl.get("sfx") or [])]
     detail = []
-    for sound, at, why in sorted(placements, key=lambda q: q[1]):
+    for kind, at, why, key, prompt in made:
         taken = {sx.get("id") for sx in items}
         k = 1
         while f"sx{k}" in taken:
             k += 1
-        items.append({"id": f"sx{k}",
-                      "storage_key": sfx_library.ref(sound["slug"]),
+        items.append({"id": f"sx{k}", "storage_key": key,
                       "at": at, "gain_db": -6.0})
-        detail.append(f"  sx{k}: '{sound['title']}' @ {at}s — {why}")
+        detail.append(f"  sx{k}: generated {kind} @ {at}s — {why}")
     edl["sfx"] = items
     res = ctx.write_edl(
-        edl, f"sound-design pass ({level}): {len(detail)} placement(s) "
-             "from the built-in pack")
+        edl, f"sound-design pass ({level}): {len(detail)} generated "
+             "placement(s)")
     if res.startswith("EDL v"):
+        # The generate_sfx billing contract exactly: only sounds that are
+        # actually IN the edit are billed, at the same success boundary.
+        for kind, at, why, key, prompt in made:
+            ctx.sfx_generated.append({"storage_key": key,
+                                      "prompt": prompt[:200]})
+            if _log_generation(ctx, "sfx_gen",
+                               config.ELEVEN_SFX_MODEL or "elevenlabs-sfx",
+                               prompt, key, config.SFX_PRICE_USD):
+                ctx.gen_extra_cost_usd += config.SFX_PRICE_USD
         res += "\nPlacements (program time):\n" + "\n".join(detail)
+        if fails:
+            res += ("\nNot placed (generation failed): "
+                    + "; ".join(fails))
     return res
 
 
@@ -12113,10 +12158,10 @@ def apply_look(ctx, name):
     if res.startswith("EDL v"):
         if notes:
             res += "\n" + "\n".join("Note: " + x for x in notes)
-        # sound_design_pass places BUNDLED sounds — on a deployment that
-        # ships no pack the tool is hidden, so suggesting it here would
+        # sound_design_pass GENERATES its sounds — where no sound provider
+        # is configured the tool is hidden, so suggesting it here would
         # advertise a capability that can only reject.
-        if not sfx_library.CATALOG:
+        if not eleven.sound_gen_available():
             res += "\napply_look never touches cuts, music or sfx."
         elif look.get("sound_design"):
             res += ("\nSound design is a separate call — run "
@@ -13833,8 +13878,8 @@ TOOLS = {
     "sound_design_pass": (sound_design_pass, "ONLY when the user explicitly "
                           "asked for sound effects / sound design — never as "
                           "part of a generic 'make it engaging' pass. "
-                          "ONE-CALL sound design from "
-                          "the built-in pack, in one version: a whoosh on "
+                          "ONE-CALL sound design with GENERATED sounds, in "
+                          "one version: a whoosh on "
                           "cut junctions (spaced >=5s), one impact on the "
                           "strongest stressed word, one riser resolving "
                           "INTO the biggest energy rise. intensity: "
@@ -14087,10 +14132,10 @@ def _tool_disabled(name):
         return not song_find.available()
     if name == "list_sfx_library":
         return not sfx_library.CATALOG
-    # The director pass places bundled sounds — with no pack shipped it can
-    # only reject, so it must not be advertised (same rule as the libraries).
+    # The director pass GENERATES its sounds now — it lives and dies with
+    # the sound provider, not the (gone) bundled pack.
     if name == "sound_design_pass":
-        return not sfx_library.CATALOG
+        return not eleven.sound_gen_available()
     return False
 
 
@@ -14128,7 +14173,7 @@ def openai_tools():
         # Cross-references to a HIDDEN tool must vanish with it, or the
         # model is pointed at a capability that no longer exists this
         # deployment (apply_look's description names sound_design_pass).
-        if not sfx_library.CATALOG:
+        if _tool_disabled("sound_design_pass"):
             desc = desc.replace(
                 "Never touches cuts, music or sfx — offer sound_design_pass "
                 "separately for audio accents. ",

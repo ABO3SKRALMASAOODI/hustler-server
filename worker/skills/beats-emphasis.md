@@ -9,7 +9,7 @@ BEAT-ALIGNED CUTS (beat_align_cuts): snaps internal cut points to the beat — w
 
 PUNCH-INS (punch_in_on_emphasis): writes punch zooms on the strongest stressed surviving words — count and strength tunable. suggest_emphasis lists candidates without writing.
 
-SOUND DESIGN PASS (sound_design_pass — only when the built-in sfx pack is listed): a whoosh on junctions, an impact on the strongest word, a riser into the biggest rise. Run it when ASKED, or unasked only where the format calls for sound design (hype/montage/gaming/promo — audio.md owns the policy) — then LISTEN to the changed spans on the render and move anything that missed its moment.
+SOUND DESIGN PASS (sound_design_pass — when it is in your tool list): a generated whoosh on junctions, an impact on the strongest word, a riser into the biggest rise, all made on demand. Run it when ASKED, or unasked only where the format calls for sound design (hype/montage/gaming/promo — audio.md owns the policy) — then LISTEN to the changed spans on the render and move anything that missed its moment.
 
 Every one of these writes CONCRETE timestamps into the EDL — any number you quote must come from the tool result. That does NOT mean quoting them all: the timestamps are on the timeline where the user can see them; a reply that lists every sfx is a receipt, not a report.
 
