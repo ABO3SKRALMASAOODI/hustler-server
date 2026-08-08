@@ -168,12 +168,12 @@ def _image_edit_enabled():
     return "dashscope" in _image_base_url()
 
 
-def _sound_gen_enabled():
-    """Mirrors the worker's generate_sfx availability (worker/eleven.
-    sound_gen_available) — a dedicated ElevenLabs key, independent of the LLM
-    stack. Empty key: the concierge must not offer AI sound generation (the
-    built-in pack still works once a video/program exists)."""
-    return bool(os.getenv("ELEVENLABS_API_KEY", ""))
+def _sfx_search_enabled():
+    """Mirrors the worker's search_sfx availability (worker/sfx_search) —
+    keyless web search for real recorded sounds, on unless the deployment
+    switches it off. AI sound generation is gone (2026-08-08): synthesized
+    one-shots read as uncanny under real footage."""
+    return os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
 
 
 def _web_record_enabled():
@@ -244,8 +244,9 @@ def _concierge_reply(stage, history, attachments, index_error=None,
     if _video_gen_enabled():
         gen_now.append("generate short video clips from a description, or "
                        "animate a still image into a moving clip")
-    if _sound_gen_enabled():
-        gen_now.append("generate custom sound effects from a description")
+    if _sfx_search_enabled():
+        gen_now.append("find real recorded sound effects on the web — "
+                       "whooshes, camera shutters, clicks — and place them")
     if _web_record_enabled():
         gen_now.append("record a LIVE WEBSITE straight into the edit from "
                        "nothing but its address — either a scrolling pan of "
@@ -364,9 +365,9 @@ def _concierge_reply(stage, history, attachments, index_error=None,
             "the edit, so they never have to convert it to an audio file "
             "themselves, drop one-shot "
             "sound effects (whooshes, impacts, risers, clicks, dings) on "
-            "exact moments from a built-in pack"
-            + (", or generate custom sound effects to order from a text "
-               "description" if _sound_gen_enabled() else "")
+            "exact moments"
+            + (" — real recorded sounds found on the web on demand"
+               if _sfx_search_enabled() else " from the user's uploads")
             + ", change playback speed on chosen parts of the video (speed "
             "ramps, timelapse, slow motion — slow motion repeats frames, so "
             "below about 0.6x it visibly steps rather than staying fluid), "

@@ -172,7 +172,7 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     # advertise music it cannot deliver. (Round 98: the bundled pack is
     # retired — music is FOUND online at request time.)
     import music_search
-    import sfx_library
+    import sfx_search
     import song_find
     if music_search.available():
         named = ("A SPECIFIC song they NAME: find_song searches the web "
@@ -188,10 +188,10 @@ def project_state_block(video, index_summary, edl_line, history_lines,
             "YouTube, SoundCloud...) fetch_url ingests as music. A "
             "trending platform sound only they can provide (upload or a "
             "clip carrying it).")
-    if sfx_library.CATALOG:
-        cats = sorted({t["category"] for t in sfx_library.CATALOG})
+    if sfx_search.available():
         lines.append(
-            f"Built-in sound-effects pack: {len(sfx_library.CATALOG)} "
-            f"one-shots, no upload needed (categories: {', '.join(cats)}). "
-            f"Call list_sfx_library() for the sfx:<slug> references.")
+            "Sound effects: REAL recorded one-shots found online — "
+            "search_sfx by the sound's physical name ('whoosh', 'camera "
+            "shutter', 'keyboard click'), fetch_sfx downloads the pick "
+            "for add_sfx. License terms ride each hit — relay them.")
     return "\n".join(lines)

@@ -1136,28 +1136,8 @@ expect_reject("canvas rejects set_frame (aspect fixed by the canvas)",
                             "at_output_s": 0, "duration_s": 3.0}],
                "frame": {"ratio": "9:16", "mode": "crop"}}, None)
 
-# Fix: generate_sfx must refuse an empty program BEFORE spending at the provider
-# (validate_edl would reject the write afterwards, orphaning a paid-for sound).
-agent_tools.config.ELEVENLABS_API_KEY = "test-key"
-
-
-class EmptyCanvasCtx(ToolCtx):
-    def __init__(self):
-        super().__init__({"keep": [], "canvas": {"width": 1080, "height": 1080,
-                          "fps": 30.0, "bg_color": "#000000"}})
-        self.has_main_video = False
-        self.sfx_generated = []
-        self.gen_extra_cost_usd = 0.0
-        self.credit_budget = None
-        self.workdir = "/tmp"
-
-
-ecc = EmptyCanvasCtx()
-r_sfx = agent_tools.generate_sfx(ecc, "whoosh", 0)
-check("generate_sfx refuses an empty program before spending",
-      r_sfx.startswith("REJECTED") and ecc.written is None
-      and ecc.gen_extra_cost_usd == 0.0)
-agent_tools.config.ELEVENLABS_API_KEY = ""
+# (AI sound generation is deleted, 2026-08-08 — real sounds are fetched
+# from the web instead: search_sfx/fetch_sfx, gated on SFX_SEARCH_ENABLED.)
 
 check("validate strips source_start_s from images and zero offsets",
       schemas.validate_edl(
@@ -1947,21 +1927,20 @@ check("openai_tools hides generate_image when disabled",
           for t in at.openai_tools()))
 cfg.IMAGE_GEN_MODEL = "qwen-image-plus"
 
-# generate_sfx / generate_video: hidden entirely unless their provider key is
-# set, so the agent never advertises a capability that would only 'unavailable'.
-import eleven as _eleven                                       # noqa: E402
+# search_sfx / generate_video: hidden when their capability is off, so the
+# agent never advertises something that would only answer 'unavailable'.
 import videogen as _videogen                                   # noqa: E402
-check("generate_sfx hidden without an ElevenLabs key",
-      not _eleven.sound_gen_available()
-      and "generate_sfx" not in at.capabilities_digest()
-      and all(t["function"]["name"] != "generate_sfx"
+_saved_sfx_search = cfg.SFX_SEARCH_ENABLED
+cfg.SFX_SEARCH_ENABLED = False
+check("search_sfx hidden when sfx search is off",
+      all(t["function"]["name"] not in ("search_sfx", "fetch_sfx")
+          for t in at.openai_tools()))
+cfg.SFX_SEARCH_ENABLED = True
+check("search_sfx appears when the capability is on",
+      any(t["function"]["name"] == "search_sfx" for t in at.openai_tools())
+      and any(t["function"]["name"] == "fetch_sfx"
               for t in at.openai_tools()))
-cfg.ELEVENLABS_API_KEY = "test-key"
-check("generate_sfx appears once the sound provider is configured",
-      "generate_sfx" in at.capabilities_digest()
-      and any(t["function"]["name"] == "generate_sfx"
-              for t in at.openai_tools()))
-cfg.ELEVENLABS_API_KEY = ""
+cfg.SFX_SEARCH_ENABLED = _saved_sfx_search
 
 check("generate_video hidden without a fal key",
       not _videogen.video_gen_available()
@@ -4121,10 +4100,9 @@ check("music search tools hide exactly when the capability is off",
       == (not music_search.available()))
 
 print("== Round-26: sound effects + the branded end card ==")
-import sfx_library                                            # noqa: E402
-import bundled_library                                        # noqa: E402
+
 from agent_tools import (add_sfx, move_sfx, remove_sfx,       # noqa: E402
-                         list_sfx_library, _resolve_sfx, _track_name)
+                         _resolve_sfx, _track_name)
 
 # --- the silent-drop guard, applied to sfx ---------------------------------
 # Same lesson as FIT_FIELDS above: a field declared in only SOME layers is
@@ -4208,50 +4186,22 @@ _d2 = describe_edl(validate_edl({**_base, "sfx": [
 check("sfx: moving a sound changes the summary the agent reads", _d1 != _d2)
 check("sfx: the summary names the sound, not just a count", "whoosh" in _d1)
 
-# --- library security: identical shape to the music catalog ---------------
-check("sfx library: a real slug resolves", bool(sfx_library.resolve("sfx:whoosh")))
-check("sfx library: an unknown slug does not resolve",
-      sfx_library.resolve("sfx:not-a-real-sound") is None)
-check("sfx library: path traversal does not resolve",
-      sfx_library.resolve("sfx:../../../etc/passwd") is None
-      and sfx_library.local_path("sfx:../../../etc/passwd") is None)
-check("sfx library: a bare bucket key is not a library ref",
-      not sfx_library.is_library_ref("media/1/secret.mp4"))
-# The old music scheme must stay foreign to the sfx namespace: a stale
-# `library:` string from ancient history is nothing, not a sound.
-check("sfx library: old music refs do not resolve as sfx",
-      sfx_library.resolve("library:hiphop-abducted") is None)
-check("the sfx pack resolves through the shared whitelist class",
-      isinstance(sfx_library._LIB, bundled_library.Library))
-for _t in sfx_library.CATALOG:
-    assert str(_t.get("license", "")).upper().startswith("CC0"), _t.get("slug")
-check("sfx library: every shipped sound is CC0", True)
-check("sfx library: every shipped sound has a real file",
-      all(os.path.exists(sfx_library.local_path("sfx:" + t["slug"]))
-          for t in sfx_library.CATALOG))
-check("sfx library: every category is one the agent can filter by",
-      {t["category"] for t in sfx_library.CATALOG} <= set(sfx_library.CATEGORIES))
-check("_track_name resolves the sfx pack to a title, not a raw ref",
-      _track_name(None, "sfx:whoosh") == "Whoosh")
+# (The bundled sfx pack and its whitelist checks lived here until
+# 2026-08-08, when the pack was deleted — sounds copied to R2 under
+# legacy-sfx/, every EDL reference rewritten to those plain keys. Sounds
+# are FETCHED from the web now: search_sfx/fetch_sfx.)
+check("_track_name is the plain upload/fetch filename (no packs left)",
+      _track_name(None, "sfx/7/abc.mp3") == "abc.mp3")
 
 # --- the WIRING a filtergraph test cannot see ------------------------------
-# The round-25 bug: music_library was imported into the renderer and never
-# called, so every library ref went to S3 and failed EVERY render, after the
-# tool had already reported success. Pin the branch itself.
+# One kind of sfx reference: a storage key (the migrated legacy-sfx/
+# objects included) — same one-door wiring as music_source.
 from renderer import sfx_source                               # noqa: E402
-_fetched = []
-check("renderer: an sfx library ref resolves from the bundle, NOT storage",
-      sfx_source("sfx:whoosh",
-                 lambda k: _fetched.append(k)).endswith("whoosh.wav")
-      and not _fetched)
 check("renderer: a normal storage key IS fetched",
       sfx_source("media/1/boom.wav", lambda k: f"/tmp/{k}") == "/tmp/media/1/boom.wav")
-try:
-    sfx_source("sfx:not-in-this-image", lambda k: "/tmp/x")
-    check("renderer: an unknown sfx ref fails honestly", False)
-except media.MediaError as e:
-    check("renderer: an unknown sfx ref fails honestly",
-          "built-in pack" in str(e))
+check("renderer: a migrated legacy-sfx key is an ordinary storage fetch",
+      sfx_source("legacy-sfx/whoosh.wav",
+                 lambda k: f"/tmp/{k}") == "/tmp/legacy-sfx/whoosh.wav")
 
 print("== Round-26: sfx in the filtergraph ==")
 _tl_sfx = Timeline([[0.0, 20.0]], [])
@@ -4450,59 +4400,44 @@ check("outro: the agent is told NOT to cut footage to remove it",
 # --- capability gating, both directions (v10: the gated claim lives in the
 # STATE BLOCK; the prompt itself is capability-neutral) ---------------------
 check("sfx: the prompt is capability-neutral",
-      "list_sfx_library" not in _sp)
-_sb_on2 = agent_prompt.project_state_block("v", "i", "e", [], [])
-check("sfx pack is claimed in state when it shipped",
-      ("list_sfx_library" in _sb_on2) == bool(sfx_library.CATALOG))
-_saved_sfx = list(sfx_library.CATALOG)
+      "list_sfx_library" not in _sp and "search_sfx" not in _sp)
+# The gated claim lives in the state block: found sounds advertised exactly
+# when sfx search is on (the pack and its browse tool are deleted).
+_saved_sfx_state = cfg.SFX_SEARCH_ENABLED
 try:
-    sfx_library.CATALOG.clear()
+    cfg.SFX_SEARCH_ENABLED = True
+    _sb_on2 = agent_prompt.project_state_block("v", "i", "e", [], [])
+    check("sfx: found sounds claimed in state when search is on",
+          "search_sfx" in _sb_on2)
+    cfg.SFX_SEARCH_ENABLED = False
     _sb0 = agent_prompt.project_state_block("v", "i", "e", [], [])
-    check("sfx: no pack shipped -> no state claim",
-          "list_sfx_library" not in _sb0
-          and "sound-effects pack" not in _sb0)
-    check("sfx: the browse tool is hidden when no pack shipped",
-          agent_tools._tool_disabled("list_sfx_library"))
-    check("sfx: the fallback hint stops offering a pack that isn't there",
-          "built-in sound pack" not in
+    check("sfx: search off -> no state claim",
+          "search_sfx" not in _sb0 and "sound-effects pack" not in _sb0)
+    check("sfx: the search tools hide when the capability is off",
+          agent_tools._tool_disabled("search_sfx")
+          and agent_tools._tool_disabled("fetch_sfx"))
+    check("sfx: the fallback hint stops offering found sounds",
+          "find on the web" not in
           agent_loop._nearest_alternative("add a whoosh please"))
 finally:
-    sfx_library.CATALOG.extend(_saved_sfx)
-# Round 85: every shipped sound is RETIRED — still resolvable so old EDLs
-# keep rendering, never offered again. The gate now reads "no live sounds"
-# off the real catalog; the ON direction is proved with an injected entry.
-check("sfx: the browse tool is hidden while every shipped sound is retired",
-      agent_tools._tool_disabled("list_sfx_library")
-      == (not sfx_library.CATALOG))
-sfx_library.CATALOG.append({"slug": "_live", "title": "Live",
-                            "category": "ui", "file": "click.wav"})
-try:
-    check("sfx: the browse tool is offered when live sounds exist",
-          not agent_tools._tool_disabled("list_sfx_library"))
-finally:
-    sfx_library.CATALOG[:] = [t for t in sfx_library.CATALOG
-                              if t.get("slug") != "_live"]
+    cfg.SFX_SEARCH_ENABLED = _saved_sfx_state
 print("== Round-26: sfx through the real tool path ==")
 # The layer the schema tests do not reach: tools -> _write_keep -> validate_edl.
-# Round 85 retired the shipped pack, so the three sounds these checks ride on
-# are un-retired for the block's duration — the ADD->EDL machinery is what is
-# under test here; the retirement contract has its own checks.
+# The resolver is stubbed (its own rejections have their own checks); the
+# ADD->EDL machinery is what is under test here.
 _sctx = EdlStubCtx({"video": {"duration": 60.0}, "words": [], "silences": [],
                     "sentences": []}, 60.0,
                    {"keep": [[0.0, 40.0]], "captions": None})
-check("add_sfx refuses a retired pack sound (and names the way forward)",
-      agent_tools.add_sfx(_sctx, storage_key="sfx:whoosh",
-                          at=10.0).startswith("REJECTED"))
-_unretired = [sfx_library.resolve(f"sfx:{s}")
-              for s in ("whoosh", "boom", "pop")]
-for _t in _unretired:
-    _t.pop("retired", None)
+_saved_rsfx = agent_tools._resolve_sfx
+agent_tools._resolve_sfx = lambda ctx, key: (
+    {"name": os.path.basename(key), "duration_s": 1.0, "library": False,
+     "storage_key": key}, None)
 try:
-    _r = agent_tools.add_sfx(_sctx, storage_key="sfx:whoosh", at=10.0)
+    _r = agent_tools.add_sfx(_sctx, storage_key="sfx/1/whoosh.mp3", at=10.0)
     check("add_sfx writes a version", _r.startswith("EDL v"))
     check("add_sfx stored the sound",
           _sctx.latest_edl()["json"]["sfx"][0]["at"] == 10.0)
-    _r2 = agent_tools.add_sfx(_sctx, storage_key="sfx:boom", at=25.0)
+    _r2 = agent_tools.add_sfx(_sctx, storage_key="sfx/1/boom.mp3", at=25.0)
     _ids = [x["id"] for x in _sctx.latest_edl()["json"]["sfx"]]
     check("add_sfx mints unique ids", len(set(_ids)) == 2, )
     check("move_sfx retimes it",
@@ -4515,11 +4450,8 @@ try:
           and len(_sctx.latest_edl()["json"]["sfx"]) == 1)
     check("remove_sfx on an unknown id is REJECTED, not a silent no-op",
           agent_tools.remove_sfx(_sctx, id="nope").startswith("REJECTED"))
-    check("add_sfx refuses an invented library slug",
-          agent_tools.add_sfx(_sctx, storage_key="sfx:airhorn",
-                              at=1.0).startswith("REJECTED"))
     check("add_sfx refuses a position past the program",
-          agent_tools.add_sfx(_sctx, storage_key="sfx:pop",
+          agent_tools.add_sfx(_sctx, storage_key="sfx/1/pop.mp3",
                               at=999.0).startswith("REJECTED"))
     # A cut that shortens the program must DROP orphaned sounds, not reject
     # the cut.
@@ -4529,8 +4461,7 @@ try:
           _cut.startswith("EDL v") and "sound effect" in _cut.lower()
           and len(_sctx.latest_edl()["json"]["sfx"]) < _before)
 finally:
-    for _t in _unretired:
-        _t["retired"] = True
+    agent_tools._resolve_sfx = _saved_rsfx
 
 print("== Round-26 review fixes ==")
 # (1) HIGH: sfx is CONTENT-anchored. The prompt tells the agent to land a

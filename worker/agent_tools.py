@@ -16,7 +16,6 @@ import audio_qc
 import audit
 import config
 import db as dbx
-import eleven
 import inpaint
 import llm
 import matte
@@ -29,7 +28,7 @@ import perception
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
 # will use — importing the resolver is the only way those two cannot drift.
 import renderer
-import sfx_library
+import sfx_search
 import sheets
 import song_find
 import stock
@@ -193,7 +192,6 @@ class ToolContext:
         self.autorendering = False
         self.write_calls = []         # successful write tool names this turn
         self.images_generated = []    # assets created by generate_image
-        self.sfx_generated = []       # sounds created by generate_sfx
         self.videos_generated = []    # clips created by generate_video
         self.urls_fetched = []        # assets created by fetch_url
         self.web_recordings = []      # assets created by record_website
@@ -821,7 +819,7 @@ def list_assets(ctx, kind=None):
                     "(by vibe/genre) and fetch_music downloads one, ready "
                     "for add_music; fetch_url ingests any music link the "
                     "user pastes (song URL, YouTube, SoundCloud...); "
-                    "list_sfx_library() has one-shot sound effects. Only "
+                    "search_sfx finds one-shot sound effects. Only "
                     "ask the user to attach a file (paperclip button in "
                     "chat, mp3/wav/m4a) for a track the web cannot reach — "
                     "e.g. a trending platform sound, which only they can "
@@ -2355,6 +2353,78 @@ def find_song(ctx, query):
             "they can correct the pick.")
 
 
+def search_sfx(ctx, query, max_seconds=None):
+    """READ: find a real recorded sound effect on the open web — the
+    editor's whoosh/shutter/click, not a synthesized guess."""
+    if not sfx_search.available():
+        return ("REJECTED: sound-effect search is disabled on this "
+                "deployment — place a file the user uploads (add_sfx), or "
+                "take the sound off a clip they sent.")
+    try:
+        mx = float(max_seconds) if max_seconds is not None else None
+    except (TypeError, ValueError):
+        return "REJECTED: max_seconds must be a number."
+    try:
+        hits = sfx_search.search(query, max_s=mx)
+    except sfx_search.SfxSearchError as e:
+        return (f"Sound search failed ({str(e)[:180]}). Try a simpler "
+                "query ('whoosh', 'camera shutter', 'pop').")
+    except Exception as e:
+        return (f"Sound search failed ({str(e)[:180]}). Try again or use "
+                "an uploaded file.")
+    if not hits:
+        return (f"No sounds matched '{query}'. Use the PHYSICAL name of "
+                "the sound ('whoosh', 'camera shutter', 'keyboard click', "
+                "'pop', 'riser') rather than a mood word.")
+    ctx._sfx_hits = {h["id"]: h for h in hits}
+    return ("Sounds found (each line carries its license terms — relay "
+            "them):\n- "
+            + "\n- ".join(sfx_search.describe(h) for h in hits)
+            + "\nfetch_sfx(id) downloads one into the project. Then "
+              "listen_to(asset_key=...) to HEAR it before committing, and "
+              "add_sfx to place it on its moment.")
+
+
+def fetch_sfx(ctx, id):
+    """WRITE (to the project's assets): download a search_sfx hit and
+    register it as a normal audio asset, ready for add_sfx."""
+    hit = (getattr(ctx, "_sfx_hits", None) or {}).get(str(id or "").strip())
+    if not hit:
+        return ("REJECTED: that id is not from THIS turn's search_sfx "
+                "results — call search_sfx first and fetch one of the "
+                "ids it returned.")
+    lp = os.path.join(ctx.workdir, f"sfxfetch_{uuid.uuid4().hex[:8]}.mp3")
+    try:
+        sfx_search.download(hit, lp)
+    except Exception as e:
+        return (f"Could not download that sound ({str(e)[:160]}). Try "
+                "another result. Do NOT claim a sound was added.")
+    dur = music_search.probe_duration_s(lp)
+    if dur <= 0.05:
+        return ("REJECTED: the downloaded file is not playable audio — "
+                "try another result. Do NOT claim a sound was added.")
+    key = f"sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
+    try:
+        storage.upload_file(lp, key, "audio/mpeg")
+    except Exception as e:
+        return (f"Downloaded but could not save it ({str(e)[:140]}) — try "
+                "again. Do NOT claim a sound was added.")
+    title = (hit.get("title") or "sound").strip()
+    fname = title[:80] + ".mp3"
+    note = sfx_search.license_note(hit)
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
+               bytes_=os.path.getsize(lp), duration_s=dur,
+               meta={"filename": fname, "source": hit.get("provider"),
+                     "source_url": hit.get("page_url") or hit.get("_url"),
+                     "license": hit.get("license"), "license_note": note,
+                     "author": hit.get("author"),
+                     "caption": "found online by search_sfx"})
+    return (f"Fetched \"{title}\" — {dur:g}s, saved as storage_key={key}. "
+            f"License: {note}. Next: listen_to(asset_key='{key}') to hear "
+            f"it, then add_sfx(storage_key='{key}', at=<moment>) — every "
+            "sound lands ON a nameable visible moment.")
+
+
 def _speech_overlap_s(ctx, edl, start_out, end_out):
     """Seconds of SURVIVING speech inside an OUTPUT window — the fact that
     decides whether music is a bed under a voice or the lead audio.
@@ -2536,11 +2606,8 @@ def _music_name(ctx, key):
 
 
 def _track_name(ctx, key):
-    """Display name for ANY audio reference — sfx or upload. A bundled
-    `sfx:` ref resolves to a real title; everything else is an upload."""
-    t = sfx_library.resolve(key)
-    if t:
-        return t["title"]
+    """Display name for ANY audio reference — the upload/fetch filename
+    (both bundled schemes are gone; every key is a storage object)."""
     return _upload_name(ctx, key)
 
 
@@ -10358,18 +10425,18 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
                 notes.append(f"stopped at {DEMO_MAX_SFX} sounds")
                 break
             kind = ev.get("kind")
+            # Literal UI feedback on the demo's own interaction events —
+            # fixed known-good R2 objects (the migrated legacy-sfx files),
+            # not project assets, and the user turns them off with
+            # click_sounds=false.
             if kind == "click":
-                slug, gain = "click", -13.0
+                key, gain = "legacy-sfx/click.wav", -13.0
             elif kind == "nav":
-                slug, gain = "pop", -16.0
+                key, gain = "legacy-sfx/pop.wav", -16.0
             elif kind == "scroll":
-                slug, gain = "swipe", -20.0
+                key, gain = "legacy-sfx/swipe.wav", -20.0
             else:
                 continue
-            key = sfx_library.ref(slug)
-            sound, serr = _resolve_sfx(ctx, key)
-            if serr:
-                continue           # a pack without this sound: skip silently
             t = prog_t(ev["t"])
             if t > max(0.0, prog - 0.05):
                 continue
@@ -10390,9 +10457,9 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
              f"zoom(s) onto the clicks and {made_sfx} synced sound(s) across "
              f"{base}-{demo_end}s")
     if not written.startswith("EDL v"):
-        # Placed but nothing synced (every event fell outside the window, or
-        # the sound pack is missing). Say so rather than returning a no-op
-        # diff the agent would read as success.
+        # Placed but nothing synced (every event fell outside the window).
+        # Say so rather than returning a no-op diff the agent would read as
+        # success.
         return (placed + "\nThe clip is placed, but no zoom or sound was "
                 "actually added"
                 + (" — " + "; ".join(notes) if notes else "")
@@ -11875,19 +11942,7 @@ def apply_look(ctx, name):
     if res.startswith("EDL v"):
         if notes:
             res += "\n" + "\n".join("Note: " + x for x in notes)
-        # sound_design_pass GENERATES its sounds — where no sound provider
-        # is configured the tool is hidden, so suggesting it here would
-        # advertise a capability that can only reject.
-        if not eleven.sound_gen_available():
-            res += "\napply_look never touches cuts, music or sfx."
-        elif look.get("sound_design"):
-            res += ("\nSound design is a separate call — run "
-                    f"sound_design_pass('{look['sound_design']}') for the "
-                    "audio accents this look pairs with (apply_look never "
-                    "touches cuts, music or sfx).")
-        else:
-            res += ("\napply_look never touches cuts, music or sfx — sound "
-                    "design is a separate call (sound_design_pass).")
+        res += "\napply_look never touches cuts, music or sfx."
         if look.get("smooth_duck") and edl.get("music"):
             res += ("\nNote: existing music items were NOT touched — for "
                     "the smooth speech duck this look pairs with, call "
@@ -12307,14 +12362,22 @@ TOOLS = {
                       "its beats). If the clip is silent it says so — never "
                       "claim a sound was added.",
                       {"asset_key": {"type": "string"}}),
-    "list_sfx_library": (list_sfx_library, "Browse the BUILT-IN sound-effects "
-                        "pack — clicks, whooshes, impacts, risers, stings. "
-                        "Always available with nothing uploaded. Returns "
-                        "'sfx:<slug>' references to pass to add_sfx. "
-                        "Optionally filter by category: "
-                        + ", ".join(sfx_library.CATEGORIES) + ".",
-                        {"category": {"type": "string",
-                                      "enum": list(sfx_library.CATEGORIES)}}),
+    "search_sfx": (search_sfx, "Search the web for a REAL recorded sound "
+                   "effect — the editor's whoosh, camera shutter, UI "
+                   "click, pop, riser. Query by the sound's PHYSICAL name "
+                   "('whoosh', 'camera shutter', 'keyboard click'), not a "
+                   "mood. Results carry duration and license terms "
+                   "(public domain, credit, or NON-COMMERCIAL-ONLY) — "
+                   "relay the terms. max_seconds caps length (default "
+                   "15s; one-shots are seconds long).",
+                   {"query": {"type": "string"},
+                    "max_seconds": {"type": "number"}}),
+    "fetch_sfx": (fetch_sfx, "Download ONE search_sfx result (by its id) "
+                  "into the project — returns the storage_key for "
+                  "add_sfx. Listen to it (listen_to) before placing it, "
+                  "and repeat the license line to the user when it "
+                  "carries an obligation.",
+                  {"id": {"type": "string"}}),
     "add_sfx": (add_sfx, "Punctuate a MOMENT with a one-shot sound effect — a "
                 "whoosh on a cut, a click on a beat, an impact on a reveal. "
                 "SOUND EFFECTS ARE STRICTLY OPT-IN: call this ONLY when the "
@@ -12322,8 +12385,7 @@ TOOLS = {
                 "clearly: 'add a whoosh', 'sound effects please'). 'Make it "
                 "viral/punchy/engaging' is NOT a request for sfx — offer "
                 "them in your reply instead. "
-                "storage_key is either an 'sfx:<slug>' from "
-                "list_sfx_library() or an exact key from "
+                "storage_key is an exact key from fetch_sfx or "
                 "list_assets(kind='music') — never invent one. `at` is an "
                 "OUTPUT-timeline second (the edited program, not source "
                 "time). This is NOT background music: it plays once, for as "
@@ -12564,19 +12626,6 @@ TOOLS = {
                         "aspect": {"type": "string",
                                    "enum": ["16:9", "9:16", "1:1",
                                             "4:3", "3:4"]}}),
-    "generate_sfx": (generate_sfx, "Create a one-shot sound effect with AI "
-                     "from a text description ('a deep cinematic whoosh', 'an "
-                     "old camera shutter', 'glass shattering') and place it at "
-                     "a MOMENT in the program. Use this when the built-in pack "
-                     "(list_sfx_library) has nothing close — otherwise prefer "
-                     "the pack, it's instant and free. `at` is an OUTPUT-"
-                     "timeline second. duration_s is optional (0.5-22s; omit "
-                     "to let it pick a natural length). Costs credits per "
-                     "sound. Default -6dB.",
-                     {"prompt": {"type": "string"},
-                      "at": {"type": "number"},
-                      "duration_s": {"type": "number"},
-                      "gain_db": {"type": "number"}}),
     "generate_video": (generate_video, "Generate a VIDEO clip with AI — real "
                        "moving footage — from a text prompt, or animate an "
                        "existing image by passing from_image_asset_key (a "
@@ -13570,7 +13619,7 @@ TOOLS = {
                            "energy rise sit, and the most vocally STRESSED "
                            "words with timestamps. Times are SOURCE "
                            "seconds. Call before beat_align_cuts / "
-                           "punch_in_on_emphasis / sound_design_pass, or "
+                           "punch_in_on_emphasis, or "
                            "to answer 'what's the tempo'. Pass asset_key "
                            "(an uploaded or fetched music file) to "
                            "analyze that instead — e.g. to find the drop "
@@ -13592,22 +13641,6 @@ TOOLS = {
                              "important moments'.",
                              {"count": {"type": "integer"},
                               "strength": {"type": "number"}}),
-    "sound_design_pass": (sound_design_pass, "ONLY when the user explicitly "
-                          "asked for sound effects / sound design — never as "
-                          "part of a generic 'make it engaging' pass. "
-                          "ONE-CALL sound design with GENERATED sounds, in "
-                          "one version: a whoosh on "
-                          "cut junctions (spaced >=5s), one impact on the "
-                          "strongest stressed word, one riser resolving "
-                          "INTO the biggest energy rise. intensity: "
-                          "'light' (2 placements), 'medium' (4), 'strong' "
-                          "(6). Never stacks within 1.5s of an existing "
-                          "sound. The result lists every placement (sound "
-                          "@ time) — report them. For hand-placed accents "
-                          "use add_sfx; for custom sounds generate_sfx.",
-                          {"intensity": {"type": "string",
-                                         "enum": ["light", "medium",
-                                                  "strong"]}}),
     "beat_align_cuts": (beat_align_cuts, "THE tool for 'cut to the beat'. "
                         "Slides each INTERNAL cut (never the program's first "
                         "start / last end) onto the nearest beat within "
@@ -13651,8 +13684,8 @@ TOOLS = {
                    "'meme' (impact xl captions, flash cuts, grain). "
                    "Preserves existing emphasis_words, else picks them "
                    "from the transcript. Never touches cuts, music or sfx "
-                   "— offer sound_design_pass separately for audio "
-                   "accents. Every component can be adjusted afterwards "
+                   "— place accents with add_sfx. "
+                   "Every component can be adjusted afterwards "
                    "with its own tool.",
                    {"name": {"type": "string",
                              "enum": sorted(LOOKS)}}),
@@ -13699,7 +13732,6 @@ REQUIRED_ARGS = {
     "fetch_music": ["id"],
     "listen_to": [],
     "set_edit_plan": ["steps"],
-    "list_sfx_library": [],
     "extract_audio": ["asset_key"],
     "add_sfx": ["storage_key", "at"],
     "move_sfx": ["id", "at"],
@@ -13762,12 +13794,12 @@ REQUIRED_ARGS = {
     "set_master_loudness": ["enabled"],
     "get_audio_analysis": [],
     "punch_in_on_emphasis": [],
-    "sound_design_pass": [],
+    "search_sfx": ["query"],
+    "fetch_sfx": ["id"],
     "beat_align_cuts": [],
     "suggest_emphasis": [],
     "apply_look": ["name"],
     "generate_image": ["prompt"],
-    "generate_sfx": ["prompt", "at"],
     "generate_video": ["prompt"],
     "fetch_url": ["url"],
     "ask_user": ["question"],
@@ -13812,10 +13844,10 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
                "remove_stylize",
                "set_grade_custom", "set_master_loudness",
                "separate_music", "remove_stem_mix",
-               "punch_in_on_emphasis", "sound_design_pass",
+               "punch_in_on_emphasis", "fetch_sfx",
                "beat_align_cuts", "apply_look",
                "generate_image",
-               "generate_sfx", "generate_video", "fetch_url"}
+               "generate_video", "fetch_url"}
 
 
 def _tool_disabled(name):
@@ -13824,8 +13856,6 @@ def _tool_disabled(name):
     return 'unavailable'."""
     if name == "generate_image":
         return not llm.image_available()
-    if name == "generate_sfx":
-        return not eleven.sound_gen_available()
     if name == "generate_video":
         return not videogen.video_gen_available()
     if name == "fetch_url":
@@ -13847,12 +13877,8 @@ def _tool_disabled(name):
     # narrowing happens inside the tool (schemas are per-deployment).
     if name == "find_song":
         return not song_find.available()
-    if name == "list_sfx_library":
-        return not sfx_library.CATALOG
-    # The director pass GENERATES its sounds now — it lives and dies with
-    # the sound provider, not the (gone) bundled pack.
-    if name == "sound_design_pass":
-        return not eleven.sound_gen_available()
+    if name in ("search_sfx", "fetch_sfx"):
+        return not sfx_search.available()
     return False
 
 
@@ -13887,17 +13913,6 @@ def openai_tools():
     for name, (_fn, desc, props) in TOOLS.items():
         if _tool_disabled(name):
             continue
-        # Cross-references to a HIDDEN tool must vanish with it, or the
-        # model is pointed at a capability that no longer exists this
-        # deployment (apply_look's description names sound_design_pass).
-        if _tool_disabled("sound_design_pass"):
-            desc = desc.replace(
-                "Never touches cuts, music or sfx — offer sound_design_pass "
-                "separately for audio accents. ",
-                "Never touches cuts, music or sfx. ").replace(
-                "Call before beat_align_cuts / punch_in_on_emphasis / "
-                "sound_design_pass, or ",
-                "Call before beat_align_cuts / punch_in_on_emphasis, or ")
         out.append({
             "type": "function",
             "function": {

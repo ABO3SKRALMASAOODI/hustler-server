@@ -14,12 +14,11 @@ import uuid
 import agent_tools
 import config
 import db as dbx
-import eleven
 import grammar
 import llm
 import music_search
 import remote
-import sfx_library
+import sfx_search
 import song_find
 import storage
 import timeline
@@ -1437,8 +1436,8 @@ ALTERNATIVE_HINTS = [
      "What I CAN do: drop one-shot sound effects on exact moments — "
      "whooshes and swipes on cuts, impacts, booms and sub-drops on reveals, "
      "risers into a transition, plus clicks, pops, glitches, zaps, dings and "
-     "camera shutters — from the built-in sound pack, at any volume, and I "
-     "can move or remove them afterwards."),
+     "camera shutters — real recorded sounds I find on the web, at any "
+     "volume, and I can move or remove them afterwards."),
     # speed BEFORE effects: "slow motion" contains 'motion', which the
     # effects regex matches, and the most specific hint must win the scan
     (re.compile(r"(?i)slow.?mo(?:tion)?\b|\bspeed\b|speed.?up|sped|"
@@ -1547,13 +1546,9 @@ def _nearest_alternative(user_text):
             if "find_song" in hint and not song_find.available():
                 hint = hint.replace(
                     "a specific song found by NAME (find_song), ", "")
-            if "built-in sound pack" in hint and not sfx_library.CATALOG:
-                if eleven.sound_gen_available():
-                    return ("What I CAN do: generate the exact sound effect "
-                            "you describe (a whoosh, a click, an impact...) "
-                            "and place it at any moment in the edit — or "
-                            "place a sound file you upload, set how loud it "
-                            "is, and move or remove it afterwards.")
+            # A deployment with sfx search off must not offer found sounds.
+            if "sounds I find on the web" in hint \
+                    and not sfx_search.available():
                 return ("What I CAN do: place a sound file you upload at an "
                         "exact moment in the edit, set how loud it is, and "
                         "move or remove it afterwards.")

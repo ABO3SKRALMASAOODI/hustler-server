@@ -317,19 +317,12 @@ def build_by_seek(src, out_path, duration_s, n_tiles, timeout=None):
 def _local_for_ref(ref, workdir, tag):
     """A readable local path for one timeline reference, or None.
 
-    Almost every reference is a storage object; a bundled `sfx:` track is
-    the one exception — it ships in this image, so it is opened where it
-    is rather than round-tripped through R2. (Music's `library:` scheme is
-    gone: those keys were migrated to plain legacy-music/ objects.)
+    Every reference is a storage object (both bundled schemes are gone —
+    library:/sfx: keys were migrated to plain legacy-music//legacy-sfx/
+    objects, 2026-08-08).
     """
     if not ref:
         return None
-    try:
-        import sfx_library
-        if sfx_library.is_library_ref(ref):
-            return sfx_library.local_path(ref)
-    except Exception:
-        pass
     ext = os.path.splitext(ref)[1].lower()[:6] or ".bin"
     local = os.path.join(workdir, f"{tag}{ext}")
     try:

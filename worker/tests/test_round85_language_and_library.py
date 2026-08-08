@@ -29,7 +29,7 @@ import agent_prompt                                          # noqa: E402
 import agent_tools                                           # noqa: E402
 import llm                                                   # noqa: E402
 import renderer                                              # noqa: E402
-import sfx_library                                           # noqa: E402
+
 
 
 # ── script detection: measurements, not guesses ─────────────────────────
@@ -177,45 +177,48 @@ def test_renderer_treats_every_music_key_as_a_storage_object():
     assert seen == ["legacy-music/hiphop-abducted.mp3"]
 
 
-# ── the SFX pack: fully retired, nothing breaks ──────────────────────────
+# ── the SFX pack and AI sound generation: both deleted ───────────────────
 
-def test_sfx_catalog_is_empty_but_every_sound_still_resolves():
-    assert sfx_library.CATALOG == []
-    assert len(sfx_library._LIB.entries) >= 18   # shipped files still known
-    s = sfx_library.resolve("sfx:whoosh")
-    assert s and s.get("retired") is True
-    path = sfx_library.local_path("sfx:whoosh")
-    assert path and os.path.exists(path)
+def test_sfx_pack_and_generation_modules_are_gone():
+    """2026-08-08: the bundled pack's 18 sounds were copied to R2 under
+    legacy-sfx/ and every EDL reference rewritten to those plain keys;
+    AI sound generation (eleven) went with it — synthesized one-shots
+    read as uncanny under real footage. Real sounds are FETCHED now."""
+    for mod in ("sfx_library", "bundled_library", "eleven"):
+        sys.modules.pop(mod, None)
+        with pytest.raises(ImportError):
+            importlib.import_module(mod)
+    assert not os.path.isdir(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "sfx"))
 
 
-def test_add_sfx_refuses_retired_sounds_and_points_at_generation():
-    sound, err = agent_tools._resolve_sfx(None, "sfx:whoosh")
-    assert sound is None and "retired" in err and "generate_sfx" in err
+def test_stale_sfx_scheme_gets_the_honest_web_first_rejection():
+    class _Db:
+        def run(self, *a, **k):
+            return None
+
+    class _Ctx:
+        db = _Db()
+        project_id = 1
+    sound, err = agent_tools._resolve_sfx(_Ctx(), "sfx:whoosh")
+    assert sound is None and "search_sfx" in err
 
 
-def test_empty_pack_disables_its_tools_and_its_advert(monkeypatch):
-    assert agent_tools._tool_disabled("list_sfx_library")
-    # The director pass GENERATES its sounds now: it gates on the sound
-    # provider, not the (empty) pack — on in a configured deployment even
-    # with no bundled sounds, hidden and honestly rejecting without one.
-    monkeypatch.setattr(agent_tools.eleven, "sound_gen_available",
-                        lambda: True)
-    assert not agent_tools._tool_disabled("sound_design_pass")
-    monkeypatch.setattr(agent_tools.eleven, "sound_gen_available",
-                        lambda: False)
-    assert agent_tools._tool_disabled("sound_design_pass")
-    # Round 98: the bundled music library is retired from the surface —
-    # its tool is unregistered and the state advertises live search
-    # instead (present exactly when the capability is on).
-    assert "list_music_library" not in agent_tools.TOOLS
+def test_deleted_tools_are_unregistered_and_search_advertised():
+    for gone in ("list_sfx_library", "sound_design_pass", "generate_sfx",
+                 "list_music_library"):
+        assert gone not in agent_tools.TOOLS
+    assert "search_sfx" in agent_tools.TOOLS
+    assert "fetch_sfx" in agent_tools.TOOLS
     assert not agent_tools._tool_disabled("search_music")
+    assert not agent_tools._tool_disabled("search_sfx")
     state = agent_prompt.project_state_block(
         "v", "idx", "edl", [], [])
     assert "sound-effects pack" not in state
     assert "search_music" in state              # found music advertised
+    assert "search_sfx" in state                # found sounds advertised
     assert "music library" not in state
-    assert agent_tools.sound_design_pass(None).startswith("REJECTED")
-    assert "empty" in agent_tools.list_sfx_library(None)
 
 
 # ── the fail-twice rule is gone ──────────────────────────────────────────

@@ -31,7 +31,6 @@ import db as dbx
 import gradelut
 import graphics
 import media
-import sfx_library
 import screenframe
 import sheets
 import stitch
@@ -1167,21 +1166,12 @@ def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H):
 
 
 def sfx_source(key, fetch):
-    """Resolve an sfx item's storage_key to a local file.
+    """Local path for an sfx item's audio — every key is a bucket object.
 
-    Module-level (not a closure) for the same reason as music_source: this
-    branch is exactly the wiring a filtergraph test cannot see. The music
-    version of this function was once imported and never called, so every
-    library reference went to S3 and failed EVERY render — after the tool had
-    reported success and minted a version.
-    """
-    if sfx_library.is_library_ref(key):
-        local = sfx_library.local_path(key)
-        if not local or not os.path.exists(local):
-            raise media.MediaError(
-                f"Sound effect '{key}' is no longer in the built-in pack, so "
-                "this render cannot be produced. Remove it and pick another.")
-        return local
+    The bundled `sfx:` scheme is gone: its 18 sounds were copied to R2
+    under legacy-sfx/ and every EDL row rewritten to those plain storage
+    keys (2026-08-08), so this is the same one-door wiring as
+    music_source."""
     return fetch(key)
 
 

@@ -351,20 +351,6 @@ VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "120"))
 MAX_GENERATED_IMAGES_PER_TURN = int(
     os.getenv("MAX_GENERATED_IMAGES_PER_TURN", "8"))
 
-# ── AI sound-effect generation (ElevenLabs) ──────────────────────────────────
-# A dedicated provider — xAI/OpenAI have no text-to-audio endpoint. Empty key
-# disables the generate_sfx tool everywhere gracefully (same contract as image
-# gen); the built-in CC0 pack (add_sfx) stays available regardless.
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVEN_SFX_URL = os.getenv(
-    "ELEVEN_SFX_URL", "https://api.elevenlabs.io/v1/sound-generation")
-ELEVEN_SFX_MODEL = os.getenv("ELEVEN_SFX_MODEL", "")  # "" = provider default
-SFX_MAX_DURATION_S = float(os.getenv("SFX_MAX_DURATION_S", "22"))
-SFX_TIMEOUT_S = float(os.getenv("SFX_TIMEOUT_S", "60"))
-# 10 (was 6): the credit budget is the real bound (each sound is priced
-# before the provider is called); this is a runaway-loop backstop only.
-MAX_GENERATED_SFX_PER_TURN = int(os.getenv("MAX_GENERATED_SFX_PER_TURN", "10"))
-
 # ── AI video generation (fal.ai aggregator) ──────────────────────────────────
 # NOT OpenAI-compatible — its own REST (queue.fal.run/{model}). One FAL_KEY,
 # model chosen entirely by env (swap tiers without a deploy, exactly like
@@ -1068,9 +1054,6 @@ PRICE_FALLBACK = {"in": LLM_PRICE_IN_PER_M,
 # (see IMAGE_GEN_MODEL); if you switch IMAGE_GEN_MODEL, set this to that tier's
 # real per-image price or credits drift from cost.
 IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.055"))
-# AI sound effect: ElevenLabs bills a flat cost per generation — keep this in
-# sync with your plan's per-sound-effect price (charged at 1 credit = $0.01).
-SFX_PRICE_USD = float(os.getenv("SFX_PRICE_USD", "0.08"))
 # AI video: fal bills PER SECOND (Kling 2.5 Turbo Pro ≈ $0.35 for the first 5s
 # then ~$0.07/s). cost = base + max(0, seconds - base_seconds) * per_sec. Keep
 # ALL THREE in sync with the fal model page for the id in VIDEO_GEN_MODEL, or

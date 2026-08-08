@@ -163,10 +163,10 @@ check("media.frame_at takes the timeout the caller needs (it was pinned at "
       "timeout=120" in _media and "run(cmd, timeout=timeout)" in _media)
 check("one unreadable clip cannot fail the job",
       "asset {ref} skipped" in _src)
-check("a bundled sfx is opened where it lives, never downloaded",
-      "sfx_library.local_path" in _src)
-check("a bundled sfx is never deleted by the cleanup that removes "
-      "downloaded copies",
+check("every timeline ref is a storage object now — no bundled-pack "
+      "resolution left in the local-path helper",
+      "sfx_library" not in _src and "music_library" not in _src)
+check("cleanup only ever deletes files it downloaded into the workdir",
       "local.startswith(workdir)" in _src)
 check("a still is sampled at t=0 — seeking 10% into a one-frame PNG finds "
       "nothing, and media.frame_at correctly raises, which silently dropped "
