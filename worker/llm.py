@@ -427,7 +427,14 @@ _agent_deaf = set()
 _DEAF_MARKERS = ("input_audio", "does not support audio",
                  "audio input is not supported", "audio is not supported",
                  "unknown variant `input_audio`",
-                 "unknown variant 'input_audio'")
+                 "unknown variant 'input_audio'",
+                 # xAI's rejection names the types it ACCEPTS instead of the
+                 # one it refused: "Invalid chat format. Content blocks are
+                 # expected to be either text or image_url type." Audio is
+                 # absent from that list, and the loop's strip-first gate
+                 # (_strip_audio_parts must remove something before the latch
+                 # sets) keeps this from ever latching on an image rejection.
+                 "expected to be either text or image_url")
 
 
 def agent_hears(model):
