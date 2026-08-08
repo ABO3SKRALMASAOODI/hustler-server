@@ -1,13 +1,13 @@
-"""Find a NAMED song on the open web — the link-finding half of "add
-Blinding Lights".
+"""Find NAMED things on the open web: a song, or real b-roll footage.
 
 search_music covers vibes and genres from the CC catalogs; this covers the
-song the user asked for BY NAME, which those catalogs do not carry. It runs
-yt-dlp in search mode (`ytsearchN:`) — the same tool, hardening idiom and
-cookies the fetch path already trusts — and returns candidate LINKS. It
-never downloads: the chosen URL goes through fetch_url, so every byte still
-moves under url_media's extractor bounds and cleanup. One new module, zero
-new network paths.
+thing the user (or the edit) asked for BY NAME — "Blinding Lights", or
+"SpaceX Starship launch" when the podcast mentions Elon Musk and the cut
+needs the rocket. It runs yt-dlp in search mode (`ytsearchN:`) — the same
+tool, hardening idiom and cookies the fetch path already trusts — and
+returns candidate LINKS. It never downloads: the chosen URL goes through
+fetch_url, so every byte still moves under url_media's extractor bounds
+and cleanup. One module, zero new network paths.
 
 RANKING IS A HINT, NOT A VERDICT. YouTube search for a song name is mostly
 right and reliably polluted — lyric videos, sped-up edits, hour loops,
@@ -56,14 +56,29 @@ def available():
     return url_media._ytdlp_available()
 
 
-def allowed_for(user_id):
-    """Per-account gate. Empty allowlist = every user; a CSV of ids
-    restricts the tool to those accounts (the planned admin-only mode)."""
-    ids = config.FIND_SONG_USER_IDS
+def footage_available():
+    """find_footage's own switch, on the same extractor chain."""
+    if not (config.FIND_FOOTAGE_ENABLED and config.URL_FETCH_ENABLED):
+        return False
+    import url_media
+    return url_media._ytdlp_available()
+
+
+def _in_allowlist(ids, user_id):
     if not ids:
         return True
     allowed = {x.strip() for x in ids.split(",") if x.strip()}
     return str(user_id) in allowed
+
+
+def allowed_for(user_id):
+    """Per-account gate. Empty allowlist = every user; a CSV of ids
+    restricts the tool to those accounts (the planned admin-only mode)."""
+    return _in_allowlist(config.FIND_SONG_USER_IDS, user_id)
+
+
+def footage_allowed_for(user_id):
+    return _in_allowlist(config.FIND_FOOTAGE_USER_IDS, user_id)
 
 
 def _score(cand, query):
@@ -96,11 +111,58 @@ def rank(candidates, query):
     return sorted(candidates, key=lambda c: _score(c, query), reverse=True)
 
 
+# Footage titles that usually mean "about the thing", not "footage OF the
+# thing" — forgiven when the query itself asks for one.
+_FOOTAGE_JUNK = ("reaction", "compilation", "full interview", "full podcast",
+                 "full episode", "explained", "review", "breakdown",
+                 "live stream", "livestream")
+
+
+def _score_footage(cand, query):
+    q = (query or "").lower()
+    title = (cand.get("title") or "").lower()
+    s = 0.0
+    d = cand.get("duration_s") or 0
+    # fetch_url's byte cap is the real wall: a 30-minute upload will be
+    # refused for size after a long download. Short real clips win.
+    if d:
+        if d <= 360:
+            s += 2
+        elif d <= 720:
+            s += 0
+        elif d <= 1800:
+            s -= 3
+        else:
+            s -= 6
+    if "4k" in title or re.search(r"\bhd\b", title):
+        s += 1
+    for w in _FOOTAGE_JUNK:
+        if w in title:
+            s += 2 if w in q else -2
+    return s
+
+
+def rank_footage(candidates, query):
+    return sorted(candidates, key=lambda c: _score_footage(c, query),
+                  reverse=True)
+
+
+def search_footage(query, count=SEARCH_COUNT):
+    """Candidate links for real b-roll of a named topic, best guess first."""
+    return rank_footage(_yt_candidates(query, count,
+                                       what="a topic to find footage of"),
+                        query)
+
+
 def search(query, count=SEARCH_COUNT):
     """Candidate links for a song name, best guess first."""
+    return rank(_yt_candidates(query, count, what="a song name"), query)
+
+
+def _yt_candidates(query, count, what="a search query"):
     query = (query or "").strip()
     if not query:
-        raise SongFindError("a song name is required")
+        raise SongFindError(f"{what} is required")
     cmd = [sys.executable, "-m", "yt_dlp",
            # Same no-on-disk-config rule as the extractor: nothing outside
            # this argv may inject flags into a process holding our env.
@@ -146,7 +208,7 @@ def search(query, count=SEARCH_COUNT):
     if not out and proc.returncode != 0:
         detail = (proc.stderr or "").strip().splitlines()
         raise SongFindError((detail[-1] if detail else "search failed")[:160])
-    return rank(out, query)
+    return out
 
 
 def describe(c):

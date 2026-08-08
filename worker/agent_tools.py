@@ -2353,6 +2353,47 @@ def find_song(ctx, query):
             "they can correct the pick.")
 
 
+def find_footage(ctx, query):
+    """READ: candidate web links for real footage of a NAMED topic. The
+    pick is downloaded by fetch_url, so this tool moves no bytes itself."""
+    if not song_find.footage_available():
+        return ("REJECTED: web footage search is disabled on this "
+                "deployment. Use search_stock for library b-roll, a link "
+                "the user pastes (fetch_url), or their uploads.")
+    if not song_find.footage_allowed_for((getattr(ctx, "job", None) or
+                                          {}).get("user_id")):
+        return ("REJECTED: web footage search is not enabled for this "
+                "account. Use search_stock for library b-roll, or ask the "
+                "user to paste a link (fetch_url downloads it).")
+    q = (query or "").strip()
+    if not q:
+        return ("REJECTED: find_footage needs the topic — name the THING "
+                "('spacex starship launch', 'tesla factory robots'), not "
+                "a mood.")
+    try:
+        hits = song_find.search_footage(q)
+    except song_find.SongFindError as e:
+        return (f"Footage search failed ({e}). Tell the user plainly — do "
+                "NOT claim footage was found. search_stock and their own "
+                "uploads still work.")
+    if not hits:
+        return (f"No footage found for \"{q}\". Name the concrete THING "
+                "shown on screen, or fall back to search_stock / a "
+                "generated image.")
+    lines = "\n- ".join(song_find.describe(h) for h in hits[:5])
+    return (f"{min(len(hits), 5)} candidate link(s) for \"{q}\", best "
+            "guess first:\n- " + lines +
+            "\nPick REAL footage OF the subject — prefer the "
+            "subject's own channel and short clips (a few minutes; long "
+            "videos get refused for size); avoid reaction/commentary "
+            "versions. Then fetch_url(url=<pick>, as_kind='clip') "
+            "downloads it as a project clip. Next: look_at_asset to find "
+            "the exact seconds worth showing, then a cutaway "
+            "(add_overlay fit='cover' over the words that mention it) or "
+            "insert_media. In your reply, tell the user what footage you "
+            "used and where it came from (title + channel).")
+
+
 def search_sfx(ctx, query, max_seconds=None):
     """READ: find a real recorded sound effect on the open web — the
     editor's whoosh/shutter/click, not a synthesized guess."""
@@ -9846,6 +9887,8 @@ def add_stock_media(ctx, id):
                      "provider": item.get("provider"),
                      "stock_id": sid,
                      "credit": item.get("credit"),
+                     "license": item.get("license"),
+                     "license_note": item.get("license_note"),
                      "page_url": item.get("page_url"),
                      "source_url": item.get("source_url"),
                      "description": item.get("description")})
@@ -12362,6 +12405,19 @@ TOOLS = {
                       "its beats). If the clip is silent it says so — never "
                       "claim a sound was added.",
                       {"asset_key": {"type": "string"}}),
+    "find_footage": (find_footage, "Find REAL footage of a NAMED topic on "
+                     "the web — the b-roll move: the speaker mentions Elon "
+                     "Musk, the cut shows his rocket. Query the concrete "
+                     "THING ('spacex starship launch', 'tesla factory'), "
+                     "not a mood — search_stock covers generic visuals "
+                     "('busy city'), THIS covers named people, companies, "
+                     "products, events. Returns candidate links best-guess "
+                     "first; pick real footage of the subject (short "
+                     "clips), then fetch_url(url, as_kind='clip'), "
+                     "look_at_asset for the right seconds, and a cutaway "
+                     "or insert at the mention. Tell the user what footage "
+                     "you used (title + channel).",
+                     {"query": {"type": "string"}}),
     "search_sfx": (search_sfx, "Search the web for a REAL recorded sound "
                    "effect — the editor's whoosh, camera shutter, UI "
                    "click, pop, riser. Query by the sound's PHYSICAL name "
@@ -12654,15 +12710,19 @@ TOOLS = {
                   {"url": {"type": "string"},
                    "as_kind": {"type": "string",
                                "enum": ["clip", "music", "image"]}}),
-    "search_stock": (search_stock, "SEARCH A STOCK LIBRARY for b-roll the "
-                     "user does not have — 'a shot of a busy city', 'ocean "
-                     "waves', 'someone typing'. Returns candidates ONLY: "
-                     "nothing is downloaded and nothing enters the video. "
-                     "kind 'video' (default) or 'photo'. orientation "
-                     "defaults to the project's output frame, so a 9:16 edit "
-                     "gets vertical footage. Use short, VISUAL queries — "
-                     "'city traffic at night' beats 'the pace of modern "
-                     "life'. Then call add_stock_media with the best id.",
+    "search_stock": (search_stock, "SEARCH for b-roll images/clips the "
+                     "user does not have. Two kinds of query work: generic "
+                     "visuals ('a busy city', 'ocean waves') AND — with "
+                     "kind='photo' — REAL topical subjects ('Elon Musk', "
+                     "'SpaceX Starship', a company, a product) from "
+                     "Wikimedia/Flickr's photo record; relay each photo's "
+                     "license line when it carries an obligation. For real "
+                     "topical VIDEO use find_footage instead. Returns "
+                     "candidates ONLY: nothing is downloaded and nothing "
+                     "enters the video. kind 'video' (default) or 'photo'. "
+                     "orientation defaults to the project's output frame, "
+                     "so a 9:16 edit gets vertical footage. Then call "
+                     "add_stock_media with the best id.",
                      {"query": {"type": "string"},
                       "kind": {"type": "string",
                                "enum": ["video", "photo"]},
@@ -13795,6 +13855,7 @@ REQUIRED_ARGS = {
     "get_audio_analysis": [],
     "punch_in_on_emphasis": [],
     "search_sfx": ["query"],
+    "find_footage": ["query"],
     "fetch_sfx": ["id"],
     "beat_align_cuts": [],
     "suggest_emphasis": [],
@@ -13877,6 +13938,8 @@ def _tool_disabled(name):
     # narrowing happens inside the tool (schemas are per-deployment).
     if name == "find_song":
         return not song_find.available()
+    if name == "find_footage":
+        return not song_find.footage_available()
     if name in ("search_sfx", "fetch_sfx"):
         return not sfx_search.available()
     return False

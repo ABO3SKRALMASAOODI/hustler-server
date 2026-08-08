@@ -88,12 +88,17 @@ PEXELS_VIDEO_PAYLOAD = {
 }
 
 
-def test_search_requires_a_provider(monkeypatch):
+def test_video_needs_a_keyed_library_but_photos_are_always_on(monkeypatch):
     monkeypatch.setattr(stock, "PEXELS_KEY", "")
     monkeypatch.setattr(stock, "PIXABAY_KEY", "")
-    assert not stock.available()
-    with pytest.raises(stock.StockError):
-        stock.search("city")
+    # Openverse's keyless photo lane keeps the capability alive with no
+    # keys at all — that lane is where REAL subjects (a named person, a
+    # company) come from, which pure stock libraries never carry.
+    assert stock.available()
+    assert not stock.video_available()
+    with pytest.raises(stock.StockError) as e:
+        stock.search("city")                       # kind defaults to video
+    assert "find_footage" in str(e.value)          # the honest way forward
 
 
 def test_search_normalises_pexels_results(monkeypatch):
@@ -169,3 +174,42 @@ def test_summarize_is_one_line_per_hit(monkeypatch):
     assert out.count("\n") == 0
     assert "pexels:video:123" in out
     assert "by Jane Doe" in out
+
+
+# ── the Openverse topical-photo lane (2026-08-08) ────────────────────────
+
+_OPENVERSE_PAGE = {
+    "results": [
+        {"id": "abc-123", "title": "Elon Musk at TED",
+         "creator": "Photog", "license": "by", "license_version": "2.0",
+         "url": "https://upload.wikimedia.org/musk.jpg",
+         "foreign_landing_url": "https://commons.wikimedia.org/x",
+         "width": 2000, "height": 3000, "source": "wikimedia"},
+        {"id": "nd-1", "title": "No derivatives", "creator": "X",
+         "license": "by-nc-nd", "url": "https://y/z.jpg",
+         "width": 100, "height": 100, "source": "flickr"},
+    ]
+}
+
+
+def test_openverse_photos_carry_their_license_line(monkeypatch):
+    monkeypatch.setattr(stock, "PEXELS_KEY", "")
+    monkeypatch.setattr(stock, "PIXABAY_KEY", "")
+    seen = {}
+
+    def fake(url, params=None, **kw):
+        seen.update(params or {})
+        return _OPENVERSE_PAGE
+    monkeypatch.setattr(stock, "net_fetch",
+                        type("N", (), {"get_json": staticmethod(fake)}))
+    hits = stock.search("elon musk", kind=stock.KIND_PHOTO,
+                        orientation="portrait")
+    # ND is unusable in an edit and filtered; the BY hit survives with the
+    # obligation stated in the line the agent reads.
+    assert [h["id"] for h in hits] == ["openverse:photo:abc-123"]
+    assert "credit Photog" in hits[0]["license_note"]
+    assert "credit Photog" in stock.summarize(hits)
+    assert "wikimedia" in hits[0]["description"]
+    # Orientation rode the request as Openverse's aspect_ratio vocabulary.
+    assert seen.get("aspect_ratio") == "tall"
+    assert seen.get("license_type") == "modification"

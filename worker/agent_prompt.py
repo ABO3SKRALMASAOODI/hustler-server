@@ -194,4 +194,22 @@ def project_state_block(video, index_summary, edl_line, history_lines,
             "search_sfx by the sound's physical name ('whoosh', 'camera "
             "shutter', 'keyboard click'), fetch_sfx downloads the pick "
             "for add_sfx. License terms ride each hit — relay them.")
+    import stock
+    _broll = []
+    if stock.available():
+        _broll.append("search_stock (kind='photo' reaches REAL subjects — "
+                      "a named person, company, rocket — from the web's "
+                      "photo record, license terms per hit"
+                      + ("; kind='video' searches the stock libraries)"
+                         if stock.video_available() else ")"))
+    if song_find.footage_available():
+        _broll.append("find_footage finds real VIDEO of a named topic, "
+                      "fetch_url downloads the pick as a clip")
+    if _broll:
+        lines.append(
+            "B-roll on mentions: when the speaker names a concrete "
+            "person/thing/event, you can SHOW it — "
+            + "; ".join(_broll) +
+            ". Place as a 2-6s cutaway ON the words that mention it "
+            "(add_overlay fit='cover') or insert_media.")
     return "\n".join(lines)

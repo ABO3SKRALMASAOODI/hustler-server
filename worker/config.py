@@ -524,6 +524,17 @@ FIND_SONG_USER_IDS = os.getenv("FIND_SONG_USER_IDS", "").strip()
 # deleted bundled pack and AI sound generation.
 SFX_SEARCH_ENABLED = os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
 SFX_FETCH_MAX_MB = int(os.getenv("SFX_FETCH_MAX_MB", "20"))
+# Stock/topical b-roll search (worker/stock.py): photos are keyless via
+# Openverse (Wikimedia/Flickr — real people, companies, events); video
+# stock needs PEXELS_API_KEY/PIXABAY_API_KEY. Topical web VIDEO is
+# find_footage (below).
+STOCK_SEARCH_ENABLED = os.getenv("STOCK_SEARCH_ENABLED", "1") == "1"
+# Finding real footage for a NAMED topic (worker/song_find.py,
+# search_footage): the web's video search feeding fetch_url as_kind='clip'
+# — the b-roll editors actually pull. Same allowlist semantics as
+# find_song ("" = every user).
+FIND_FOOTAGE_ENABLED = os.getenv("FIND_FOOTAGE_ENABLED", "1") == "1"
+FIND_FOOTAGE_USER_IDS = os.getenv("FIND_FOOTAGE_USER_IDS", "").strip()
 # Download ceiling before we know what the file is — we cannot apply a
 # per-kind limit until ffprobe has seen the bytes, so this is the largest of
 # them and the real ceilings are enforced after classification.

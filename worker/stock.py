@@ -4,10 +4,19 @@ The agent can already cut, caption and grade what the user uploaded. What it
 could not do is ADD footage the user does not have — "show a shot of a busy
 city" needed a clip from somewhere. This module is that somewhere.
 
-Two providers, tried in order, both free-to-use libraries:
+Three providers, tried in order:
 
-  Pexels  (PEXELS_API_KEY)  — video + photo, the better-curated of the two
-  Pixabay (PIXABAY_API_KEY) — video + photo, the fallback
+  Pexels    (PEXELS_API_KEY)  — video + photo, the better-curated library
+  Pixabay   (PIXABAY_API_KEY) — video + photo, the fallback library
+  Openverse (keyless)         — PHOTO ONLY, and a different kind of photo:
+            Wikimedia Commons / Flickr / museum collections, which is where
+            pictures of REAL subjects live — a named person, a company, a
+            rocket on its pad. Stock libraries answer "a busy city";
+            Openverse answers "Elon Musk". Licenses are labels, not walls
+            (the music_search rules): public domain / credit /
+            NON-COMMERCIAL-ONLY stated per hit, only no-derivatives
+            excluded. Real topical VIDEO is find_footage's job (the web's
+            video search), not a stock library's.
 
 Design notes that matter for quality, because "a stock clip appeared" and "the
 RIGHT stock clip appeared, at the right size" are very different products:
@@ -41,6 +50,7 @@ PEXELS_VIDEO_API = "https://api.pexels.com/videos/search"
 PEXELS_PHOTO_API = "https://api.pexels.com/v1/search"
 PIXABAY_API = "https://pixabay.com/api/"
 PIXABAY_VIDEO_API = "https://pixabay.com/api/videos/"
+OPENVERSE_IMAGE_API = "https://api.openverse.org/v1/images/"
 
 API_TIMEOUT_S = float(os.getenv("STOCK_API_TIMEOUT_S", "12"))
 DOWNLOAD_TIMEOUT_S = float(os.getenv("STOCK_DOWNLOAD_TIMEOUT_S", "90"))
@@ -60,14 +70,65 @@ class StockError(Exception):
     """Anything the user should be told about in a plain sentence."""
 
 
+def _openverse_search(query, kind, orientation, count):
+    """The keyless topical-photo lane. Videos are not Openverse's medium —
+    a video query returns [] here and the honest no-video-provider error
+    happens in search()."""
+    if kind != KIND_PHOTO:
+        return []
+    from music_search import _license_note, _license_ok
+    params = {"q": query, "license_type": "modification",
+              "page_size": max(3, count)}
+    aspect = {"portrait": "tall", "landscape": "wide",
+              "square": "square"}.get(orientation)
+    if aspect:
+        params["aspect_ratio"] = aspect
+    data = net_fetch.get_json(OPENVERSE_IMAGE_API, params=params,
+                              timeout_s=API_TIMEOUT_S,
+                              allowed_hosts=["api.openverse.org"])
+    out = []
+    for p in (data.get("results") or []):
+        if not _license_ok(p.get("license") or ""):
+            continue
+        url = p.get("url")
+        if not url:
+            continue
+        lic = "-".join(x for x in (p.get("license"),
+                                   p.get("license_version")) if x)
+        creator = (p.get("creator") or "").strip() or None
+        src = (p.get("source") or p.get("provider") or "").strip()
+        title = (p.get("title") or "").strip() or None
+        out.append({
+            "provider": "openverse", "kind": KIND_PHOTO,
+            "id": f"openverse:photo:{p.get('id')}",
+            "width": p.get("width"), "height": p.get("height"),
+            "duration_s": None,
+            "description": (f"{title} [{src}]" if title and src
+                            else title or src or None),
+            "credit": creator,
+            "license": lic,
+            "license_note": _license_note(lic, creator),
+            "page_url": p.get("foreign_landing_url"),
+            "_url": url,
+        })
+    return out
+
+
 def available():
-    """Is any provider configured? Mirrors webrecord.available() — the tool
-    turns itself OFF honestly rather than failing per call."""
-    return bool(PEXELS_KEY or PIXABAY_KEY)
+    """Photos are always available (Openverse is keyless); VIDEO stock still
+    needs a keyed library — search() says so honestly per call."""
+    return bool(config.STOCK_SEARCH_ENABLED)
+
+
+def video_available():
+    return available() and bool(PEXELS_KEY or PIXABAY_KEY)
 
 
 def providers():
-    return [n for n, k in (("pexels", PEXELS_KEY), ("pixabay", PIXABAY_KEY)) if k]
+    out = [n for n, k in (("pexels", PEXELS_KEY),
+                          ("pixabay", PIXABAY_KEY)) if k]
+    out.append("openverse")
+    return out
 
 
 def orientation_for(width, height):
@@ -208,19 +269,26 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
     curation read as noise, and the agent then picks worse.
     """
     if not available():
-        raise StockError("no stock provider is configured on this deployment")
+        raise StockError("stock search is disabled on this deployment")
     query = (query or "").strip()
     if not query:
         raise StockError("a search query is required")
     count = max(1, min(int(count or MAX_RESULTS), MAX_RESULTS))
     if kind not in (KIND_VIDEO, KIND_PHOTO):
         raise StockError(f"unknown stock kind '{kind}'")
+    if kind == KIND_VIDEO and not video_available():
+        raise StockError(
+            "no VIDEO stock library is configured — photos work "
+            "(kind='photo'), and for real topical footage find_footage "
+            "searches the web's video")
 
+    lanes = [(n, f) for n, f, key in
+             (("pexels", _pexels_search, PEXELS_KEY),
+              ("pixabay", _pixabay_search, PIXABAY_KEY)) if key]
+    if kind == KIND_PHOTO:
+        lanes.append(("openverse", _openverse_search))
     errors = []
-    for name, fn, key in (("pexels", _pexels_search, PEXELS_KEY),
-                          ("pixabay", _pixabay_search, PIXABAY_KEY)):
-        if not key:
-            continue
+    for name, fn in lanes:
         try:
             hits = fn(query, kind, orientation, count)
         except Exception as e:
@@ -229,7 +297,7 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
             continue
         if hits:
             return hits[:count]
-    if errors and len(errors) == len(providers()):
+    if errors and len(errors) == len(lanes):
         raise StockError("; ".join(errors))
     return []
 
@@ -268,6 +336,10 @@ def summarize(items):
             bits.append(f"{int(i['duration_s'])}s")
         if i.get("credit"):
             bits.append(f"by {i['credit']}")
+        # The Openverse lane carries a real license obligation per hit —
+        # the line the agent reads must say it (the music_search contract).
+        if i.get("license_note"):
+            bits.append(i["license_note"])
         desc = i.get("description") or "(no description)"
         lines.append(f"  {i['id']} — {desc[:90]} ({', '.join(bits)})")
     return "\n".join(lines)

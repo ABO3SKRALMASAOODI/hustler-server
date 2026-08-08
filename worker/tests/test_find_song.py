@@ -116,3 +116,47 @@ def test_search_failure_is_reported_plainly(monkeypatch):
     monkeypatch.setattr(song_find, "search", boom)
     out = agent_tools.find_song(_Ctx(), "song")
     assert "failed" in out and "do NOT claim" in out
+
+
+# ── find_footage: the same web search, pointed at b-roll (2026-08-08) ────
+
+def test_footage_ranking_prefers_short_real_clips():
+    ranked = song_find.rank_footage([
+        _c("Starship Launch FULL 3 HOUR LIVESTREAM", dur=10800),
+        _c("Starship's Second Flight Test", uploader="SpaceX", dur=115),
+        _c("Reacting to the Starship launch!!", dur=300),
+    ], "spacex starship launch")
+    assert ranked[0]["title"] == "Starship's Second Flight Test"
+    assert ranked[-1]["title"].startswith("Starship Launch FULL")
+
+
+def test_footage_junk_is_forgiven_when_asked_for():
+    ranked = song_find.rank_footage([
+        _c("Starship flight test", dur=120),
+        _c("Starship launch reaction", dur=120),
+    ], "starship launch reaction")
+    assert ranked[0]["title"] == "Starship launch reaction"
+
+
+def test_find_footage_hands_off_to_clip_fetch(monkeypatch):
+    monkeypatch.setattr(song_find, "footage_available", lambda: True)
+    monkeypatch.setattr(config, "FIND_FOOTAGE_USER_IDS", "")
+    monkeypatch.setattr(song_find, "search_footage", lambda q, count=6: [
+        _c("Starship's Second Flight Test", uploader="SpaceX", dur=115)])
+    out = agent_tools.find_footage(_Ctx(), "spacex starship launch")
+    assert "as_kind='clip'" in out and "look_at_asset" in out
+    assert "add_overlay" in out          # the cutaway is the point
+    assert "youtube.com/watch?v=x" in out
+
+
+def test_find_footage_gates_like_find_song(monkeypatch):
+    monkeypatch.setattr(config, "FIND_FOOTAGE_ENABLED", False)
+    assert not song_find.footage_available()
+    assert agent_tools._tool_disabled("find_footage")
+    out = agent_tools.find_footage(_Ctx(), "anything")
+    assert out.startswith("REJECTED") and "search_stock" in out
+    monkeypatch.setattr(config, "FIND_FOOTAGE_ENABLED", True)
+    monkeypatch.setattr(config, "FIND_FOOTAGE_USER_IDS", "99")
+    monkeypatch.setattr(song_find, "footage_available", lambda: True)
+    out = agent_tools.find_footage(_Ctx(), "x")   # user 7, not listed
+    assert out.startswith("REJECTED") and "fetch_url" in out
