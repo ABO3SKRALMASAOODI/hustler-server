@@ -514,8 +514,15 @@ def video_projects():
     search = (request.args.get("search") or "").strip()
     with adb() as conn:
         cur = conn.cursor()
+        # PARENTS ONLY. A shorts run creates 8+ child projects, each with a
+        # chat that opens on an assistant greeting and an EDL seeded by the
+        # pipeline — in this list they read as "a session with no upload
+        # that somehow holds a fully edited video" (the Aug 9 confusion).
+        # The child projects still exist; they surface as shorts_count here
+        # and as a children list in the project detail, where their real
+        # story (cut from the parent) is visible.
         cur.execute("""
-            SELECT p.id, p.title, p.created_at, u.email,
+            SELECT p.id, p.title, p.kind, p.created_at, u.email,
                    (SELECT COUNT(*) FROM chat_messages cm
                     WHERE cm.session_id = p.chat_session_id
                       AND cm.role='user') AS messages,
@@ -531,17 +538,30 @@ def video_projects():
                    (SELECT MAX(vf.updated_at) FROM video_jobs vf
                     WHERE vf.project_id = p.id AND vf.type='final'
                       AND vf.state='done') AS last_export,
+                   (SELECT COUNT(*) FROM projects c
+                    WHERE c.parent_project_id = p.id) AS shorts_count,
+                   -- User activity inside the children rolls up so a parent
+                   -- whose owner refined short #3 by chat doesn't read as
+                   -- untouched.
+                   (SELECT COUNT(*) FROM chat_messages cm2
+                    JOIN projects c2 ON c2.chat_session_id = cm2.session_id
+                    WHERE c2.parent_project_id = p.id
+                      AND cm2.role='user') AS shorts_messages,
                    """ + _TIMING_COLS + """
             FROM projects p JOIN users u ON u.id = p.user_id
             """ + _PROJECT_TIMINGS + """
-            WHERE u.email ILIKE %s OR p.title ILIKE %s
+            WHERE p.parent_project_id IS NULL
+              AND (u.email ILIKE %s OR p.title ILIKE %s)
             ORDER BY p.id DESC LIMIT 100
         """, (f"%{search}%", f"%{search}%"))
         rows = cur.fetchall()
     return jsonify({"projects": [
         {"id": r["id"], "title": r["title"], "email": r["email"],
+         "kind": r["kind"],
          "messages": r["messages"], "versions": r["versions"],
          "exports": r["exports"],
+         "shorts_count": r["shorts_count"],
+         "shorts_messages": r["shorts_messages"],
          "created_at": r["created_at"].isoformat(),
          "last_job": r["last_job"].isoformat() if r["last_job"] else None,
          "last_export": (r["last_export"].isoformat()
@@ -812,9 +832,40 @@ def video_project_detail(project_id):
                      (project_id, list(UPLOAD_EVENT_KINDS)))
         upload_events = [_upload_event_row(e) for e in cur2.fetchall()]
 
+    # Family: a shorts parent lists its children; a child names its parent.
+    # This is what turns "a session with no upload but a fully edited video"
+    # back into a story — the child was CUT from the parent by the shorts
+    # pipeline, and its chat starts at the greeting by design.
+    with adb() as conn3:
+        cur3 = conn3.cursor()
+        cur3.execute("""SELECT c.id, c.title, c.kind, c.created_at,
+                               (SELECT COUNT(*) FROM chat_messages cm
+                                WHERE cm.session_id = c.chat_session_id
+                                  AND cm.role='user') AS messages,
+                               (SELECT COUNT(*) FROM video_jobs vf
+                                WHERE vf.project_id = c.id
+                                  AND vf.type='final'
+                                  AND vf.state='done') AS exports
+                        FROM projects c WHERE c.parent_project_id = %s
+                        ORDER BY c.id""", (project_id,))
+        children = [{"id": c["id"], "title": c["title"], "kind": c["kind"],
+                     "messages": c["messages"], "exports": c["exports"],
+                     "created_at": c["created_at"].isoformat()}
+                    for c in cur3.fetchall()]
+        parent = None
+        if p.get("parent_project_id"):
+            cur3.execute("SELECT id, title FROM projects WHERE id = %s",
+                         (p["parent_project_id"],))
+            pr = cur3.fetchone()
+            if pr:
+                parent = {"id": pr["id"], "title": pr["title"]}
+
     return jsonify({
         "project": {"id": p["id"], "title": p["title"], "email": p["email"],
+                    "kind": p.get("kind"),
                     "created_at": p["created_at"].isoformat()},
+        "children": children,
+        "parent": parent,
         "exports": exports,
         "upload_events": upload_events,
         "upload_failures": len([e for e in upload_events

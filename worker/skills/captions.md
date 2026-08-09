@@ -26,6 +26,8 @@ COMPOSITION — every preset is a starting point you can override per field:
 
 SIZE COMPLAINTS: "too small" / "big TikTok captions" → with a preset go size 'l' or 'xl'; without one, size 'xl' + dynamic:true. If they say "too small" a second time they mean MUCH bigger. "Captions look basic/boring/cheap" → switch to 'podcast' (or 'beast' for hype) with fresh emphasis_words — do not just bump size.
 
+COLOR COMPLAINTS — the rule a real session burned (2026-08-09, "remove that cringe blue colour"): when the user rejects a caption color/accent, the answer is NO accent — pure white, emphasis 'big' (size-only), highlight_color/effect off. NEVER swap the rejected color for a different color (cyan→gold repeats the mistake in a new hue); they are telling you colored captions are wrong for this video, not that you picked the wrong shade. Same when they ask for "clean", "minimal", "aesthetic" or a premium/insta look on calm or cinematic footage: all-white captions, emphasis by SIZE alone, mixed case, no glow/box — restraint reads expensive; color reads loud. Reserve colored accents for hype content or an explicit ask.
+
 READABILITY IS THE CRAFT — the details that separate produced captions from burned subtitles:
 - SHORT GROUPS READ, SENTENCES DON'T: modern short-form runs 1-4 words on screen at a time — max_words_per_caption 3-4 for reels (the dynamic presets already chunk); a full sentence at once is the documentary look, right only for 'elegant'/'editorial' calm.
 - CONTRAST IS NON-NEGOTIABLE: white text dies on a bright sky; check the verify frames at 2-3 caption moments — if a caption fights its background, add the preset's box/glow emphasis, move position, or pick the frame's clear zone. Never ship a caption you haven't seen against its actual background.

@@ -703,9 +703,15 @@ MEDIA_POLL_INTERVAL_S = float(os.getenv(
 # user's long turn while the box did nothing.  The live Render service still
 # had the old WORKER_AGENT_SLOTS=2 override after this default changed, and a
 # production overlap audit proved it was therefore still capped at exactly
-# two.  Four is now a correctness floor; the env may raise it, not silently
-# undo the capacity fix.
-AGENT_SLOTS = max(4, int(os.getenv("WORKER_AGENT_SLOTS", "4")))
+# two.
+#
+# Round 101: the max(4, env) floor is GONE. 19 "Worker died and retries are
+# exhausted" turns in the 3 days after slots went to 4 — the box OOMs under
+# concurrent turns' native work (audio decode, tile assembly, yt-dlp), and a
+# floor that forbids the operator from trading latency for survival turns a
+# tuning knob into an outage. Default stays 4; the env now wins in BOTH
+# directions. (Heartbeats log RSS so the next death names its number.)
+AGENT_SLOTS = max(1, int(os.getenv("WORKER_AGENT_SLOTS", "4")))
 # The agent lane's claim poll is the gap between "user hit send" and "the
 # turn starts" — the first latency anyone feels, on every single message.
 # 0.5s, like the MCP lane: the claim is one indexed SKIP LOCKED query.

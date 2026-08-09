@@ -705,7 +705,12 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
               "their video is ready to edit. State the real stats you were "
               "given. You have NOT made any edits yet — never claim or "
               "imply you did, and never invent facts beyond what is "
-              "given.")
+              "given. WRITE THE MESSAGE IN ENGLISH — always. The user has "
+              "not spoken yet; the transcript's language is the FOOTAGE'S "
+              "language, never theirs (a real user got this greeting in "
+              "Portuguese because their video was). Quote the transcript "
+              "opening verbatim in its own language, but every word around "
+              "it is English.")
     user = (f"Real stats to state: {stats}.\n"
             f"Transcript opening (verbatim, may be empty): \"{snippet}\"\n"
             f"{branch}")
@@ -727,6 +732,19 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
         return None
     if _GREET_CLAIM.search(res["text"]):
         print("[index] greet draft claimed edits — using template",
+              flush=True)
+        return None
+    # Deterministic hold on the English rule above: an English ready-notice
+    # always carries one of these words outside the quoted snippet; a greet
+    # written in the FOOTAGE's language (2026-08-09: Portuguese, off a
+    # Portuguese transcript) carries none. The quoted transcript snippet is
+    # stripped first so ITS language can never fail an honest draft.
+    unquoted = res["text"]
+    if snippet:
+        unquoted = unquoted.replace(snippet, "")
+    low = unquoted.lower()
+    if not any(w in low for w in ("your", "ready", "video is", "edit")):
+        print("[index] greet draft not in English — using template",
               flush=True)
         return None
     return res["text"]

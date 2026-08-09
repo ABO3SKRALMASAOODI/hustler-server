@@ -522,6 +522,19 @@ def heartbeat_forever():
         if not ids:
             last_ok = time.time()
             continue
+        # RSS beside the job ids, every beat. 19 turns died as "Worker died
+        # and retries are exhausted" over 3 days (Aug 7-9) with no epitaph;
+        # if the killer is memory, the LAST logged beat now names the number
+        # the process died at. Linux-only read, never allowed to break beat.
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS"):
+                        print(f"[heartbeat] jobs={ids} rss="
+                              f"{line.split()[1]}kB", flush=True)
+                        break
+        except OSError:
+            pass
         try:
             def _beat(conn):
                 with conn.cursor() as cur:

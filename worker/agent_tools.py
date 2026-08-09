@@ -6296,6 +6296,26 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
         except (TypeError, ValueError):
             return "REJECTED: opacity must be a number (0.05-1.0)."
     overlays = [dict(o) for o in (edl.get("overlays") or [])]
+    # STACKED FULL-FRAME B-ROLL IS A BUG, NOT A LOOK (2026-08-09: two cover
+    # images at 0.8-6.0s and 2.6-5.6s — the second simply hid the first and
+    # the user saw "two b-rolls on top of each other"). A cover overlay OWNS
+    # the frame for its window; a second cover in the same seconds can only
+    # cover the first. Reject with the numbers so the fix is one call.
+    if fitv == "cover":
+        for o in overlays:
+            if (o.get("fit") or "") != "cover":
+                continue
+            o0 = float(o.get("start") or 0.0)
+            o1 = o0 + float(o.get("duration_s") or 0.0)
+            if min(s + dur, o1) - max(s, o0) > 0.05:
+                return (f"REJECTED: this full-frame b-roll ({s}-"
+                        f"{round(s + dur, 2)}s) overlaps cover overlay "
+                        f"{o.get('id')} ({o0:g}-{round(o1, 2)}s) — the later "
+                        "one would just hide the earlier one for those "
+                        "seconds. Sequence them instead: start this one at "
+                        f"{round(o1, 2)}s, shorten the window, or "
+                        f"remove_overlay(id='{o.get('id')}') first if this "
+                        "shot should replace it.")
     item = {"id": _next_item_id(overlays, "ov"), "asset_key": asset_key,
             "kind": kind, "start": s, "duration_s": dur, "x": xv, "y": yv,
             "scale": sc, "fit": fitv, "opacity": op,
@@ -12391,6 +12411,134 @@ def make_shorts(ctx, count=None, style_note=None):
             f"wait_for_job(job_id={job_id}) or shorts_status.")
 
 
+def _shorts_children(ctx):
+    """The parent board's clips carrying a live child project, in board
+    order. [] when this project is not a shorts board."""
+    meta = (ctx.project.get("meta") or {})
+    clips = ((meta.get("shorts") or {}).get("clips")) or []
+    return [c for c in clips if c.get("child_project_id")]
+
+
+def edit_shorts(ctx, instruction, shorts=None):
+    """Fan ONE instruction out to the child shorts on this project's board —
+    each child gets the instruction in its own chat and runs its own edit
+    turn on its own timeline. THE tool for "do X to all the shorts" asked on
+    the PARENT project (2026-08-09: 'add the interstellar music to all of
+    them' was answered by laying the track under the 85-minute ORIGINAL —
+    the parent agent had no way to reach its children)."""
+    kids = _shorts_children(ctx)
+    if not kids:
+        return ("REJECTED: this project has no shorts on its board. "
+                "make_shorts cuts them first; if the user wants THIS "
+                "video edited, use the normal editing tools.")
+    text = (instruction or "").strip()
+    if not text:
+        return ("REJECTED: instruction is empty — pass the edit you want "
+                "every short to apply, in plain words (as if the user "
+                "typed it into that short's chat).")
+    picks = kids
+    if shorts not in (None, "", "all", ["all"]):
+        if not isinstance(shorts, list):
+            shorts = [shorts]
+        want = set()
+        for x in shorts:
+            try:
+                want.add(int(x))
+            except (TypeError, ValueError):
+                return ("REJECTED: shorts must be 'all' or a list of card "
+                        "numbers as shown on the board (1-based).")
+        picks = [c for i, c in enumerate(kids, 1) if i in want]
+        if not picks:
+            return (f"REJECTED: no board cards match {sorted(want)} — the "
+                    f"board has {len(kids)} short(s), numbered 1-"
+                    f"{len(kids)}.")
+
+    # Children were seeded sharing only the original+proxy. Any music, clip
+    # or image that landed on the PARENT afterwards (a fetched track, an
+    # upload) rides along by storage key, so "use the song I added here"
+    # works inside every child without eight re-downloads.
+    def _carry_assets(conn):
+        with conn.cursor() as cur:
+            cur.execute("""SELECT * FROM assets
+                           WHERE project_id = %s
+                             AND kind IN ('music', 'video_clip', 'image_ref')
+                             AND COALESCE(meta->>'role', '') !=
+                                 'shorts_reference'
+                           ORDER BY id""", (ctx.project_id,))
+            parent_assets = cur.fetchall()
+        carried = 0
+        for c in picks:
+            child_id = c["child_project_id"]
+            with conn.cursor() as cur:
+                cur.execute("""SELECT storage_key FROM assets
+                               WHERE project_id = %s""", (child_id,))
+                have = {r["storage_key"] for r in cur.fetchall()}
+            for a in parent_assets:
+                if a["storage_key"] in have:
+                    continue
+                meta = dict(a.get("meta") or {})
+                meta.pop("staged", None)
+                meta.pop("tray_pos", None)
+                meta["shared_from_project"] = ctx.project_id
+                dbx.insert_asset(
+                    conn, child_id, a["kind"], a["storage_key"],
+                    bytes_=a.get("bytes"), duration_s=a.get("duration_s"),
+                    width=a.get("width"), height=a.get("height"),
+                    fps=a.get("fps"), sha256=a.get("sha256"), meta=meta)
+                carried += 1
+        return carried
+
+    def _dispatch(conn):
+        sent = []
+        for c in picks:
+            child_id = c["child_project_id"]
+            with conn.cursor() as cur:
+                cur.execute("""SELECT chat_session_id FROM projects
+                               WHERE id = %s""", (child_id,))
+                row = cur.fetchone()
+            if not row or not row["chat_session_id"]:
+                continue
+            mid = dbx.add_message(
+                conn, row["chat_session_id"], "user", text,
+                {"from_parent": ctx.project_id,
+                 "batch_tool": "edit_shorts"})
+            # Round-100 stacking: an already-QUEUED turn re-aims at the
+            # newest message on claim, so a second job row would only
+            # double-run the stack. A RUNNING turn needs the follow-up.
+            with conn.cursor() as cur:
+                cur.execute("""SELECT 1 FROM video_jobs
+                               WHERE project_id = %s AND type = 'agent_turn'
+                                 AND state = 'queued' LIMIT 1""",
+                            (child_id,))
+                queued = cur.fetchone() is not None
+            if not queued:
+                dbx.enqueue_job(conn, child_id, ctx.job["user_id"],
+                                "agent_turn", {"message_id": mid,
+                                               "from_parent":
+                                               ctx.project_id})
+            sent.append(c.get("title") or f"short {child_id}")
+        return sent
+
+    carried = ctx.db.run(_carry_assets)
+    sent = ctx.db.run(_dispatch)
+    if not sent:
+        return ("REJECTED: none of the selected shorts could take the "
+                "instruction (their projects are missing chats) — tell the "
+                "user to re-cut the board.")
+    names = "; ".join(f"“{t}”" for t in sent[:8])
+    return (f"Sent to {len(sent)} short(s): {names}. Each one is running "
+            "the instruction as its own edit turn on its own timeline and "
+            "re-renders when done — the board's cards update as they land. "
+            + (f"{carried} parent asset(s) (music/clips/images) were "
+               f"shared into the shorts first, so the instruction can use "
+               f"them by name. " if carried else "")
+            + "Each short's turn bills like a normal message. Tell the "
+            "user what was sent and that the shorts are updating on the "
+            "board — do NOT wait for them in this turn, and do NOT also "
+            "edit this parent timeline unless they asked for the original "
+            "video too.")
+
+
 CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
                  "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
                  "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
@@ -14119,6 +14267,23 @@ TOOLS = {
                     "planner.",
                     {"count": {"type": "integer"},
                      "style_note": {"type": "string"}}),
+    "edit_shorts": (edit_shorts, "Apply ONE instruction to the child "
+                    "shorts on this project's Shorts board — each selected "
+                    "short gets it as a message in its own chat and runs "
+                    "its own edit turn (billed like a message each). THE "
+                    "tool when the user asks for changes to 'the shorts' / "
+                    "'all of them' / 'short 3' from the shorts project: "
+                    "NEVER apply such a request to this parent timeline. "
+                    "Write the instruction as the user would type it "
+                    "('add <track> as a ducked music bed', 'make the "
+                    "captions one word at a time'); parent music/clip/"
+                    "image assets are shared into the shorts "
+                    "automatically so the instruction can name them. "
+                    "shorts: 'all' (default) or a list of board card "
+                    "numbers (1-based).",
+                    {"instruction": {"type": "string"},
+                     "shorts": {"type": "array",
+                                "items": {"type": ["integer", "string"]}}}),
 }
 
 REQUIRED_ARGS = {
@@ -14212,6 +14377,7 @@ REQUIRED_ARGS = {
     "ask_user": ["question"],
     "read_skill": ["name"],
     "make_shorts": [],
+    "edit_shorts": ["instruction"],
 }
 
 # The loop uses this to build TURN FACTS: a write "succeeded" when its result

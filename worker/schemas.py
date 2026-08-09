@@ -1587,16 +1587,32 @@ def program_duration(edl_dict):
     return round(dur, 2)
 
 
-def _check_span(name, s, e, max_end, min_len=MIN_SPAN_S):
+def _check_span(name, s, e, max_end, min_len=MIN_SPAN_S, clamp_slack=0.0):
+    """Validate a [s, e] span against max_end; returns the end to USE.
+
+    clamp_slack > 0 forgives a small overrun by clamping e to max_end
+    instead of raising. That exists for SOURCE-clock spans (keep, speed,
+    volume): the agent writes them against the INDEX's duration while the
+    render validates against the actual media file, and the two disagree by
+    a frame or two of rounding. A real user's every render failed on
+    "speed[0]: end 129.02 exceeds the limit 128.97s" — 50ms of drift, three
+    dead previews (2026-08-09). Genuinely wrong spans (past the slack) still
+    raise.
+    """
     if s < 0 or e < 0:
         raise EDLValidationError(f"{name}: negative time ({s}, {e}). "
                                  "Times are seconds from 0.")
+    if max_end is not None and e > max_end + 0.01:
+        if clamp_slack > 0 and e <= max_end + clamp_slack \
+                and max_end - s >= min_len:
+            e = _r(max_end)
+        else:
+            raise EDLValidationError(
+                f"{name}: end {e} exceeds the limit {round(max_end, 2)}s.")
     if e - s < min_len:
         raise EDLValidationError(
             f"{name}: span [{s}, {e}] is shorter than {min_len}s.")
-    if max_end is not None and e > max_end + 0.01:
-        raise EDLValidationError(
-            f"{name}: end {e} exceeds the limit {round(max_end, 2)}s.")
+    return e
 
 
 def quad_bbox(corners):
@@ -1788,7 +1804,7 @@ def validate_edl(data, duration=None):
                 raise EDLValidationError(
                     f"keep[{i}] must be [start, end], got {span}.")
             s, e = _r(span[0]), _r(span[1])
-            _check_span(f"keep[{i}]", s, e, duration)
+            e = _check_span(f"keep[{i}]", s, e, duration, clamp_slack=0.75)
             keep.append([s, e])
 
         keep.sort(key=lambda x: x[0])
@@ -1812,8 +1828,9 @@ def validate_edl(data, duration=None):
                         f"speed[{i}].id must be non-empty and unique.")
                 seen_sp.add(sp.id)
                 sp.start, sp.end = _r(sp.start), _r(sp.end)
-                _check_span(f"speed[{i}]", sp.start, sp.end, duration,
-                            min_len=0.2)
+                sp.end = _check_span(f"speed[{i}]", sp.start, sp.end,
+                                     duration, min_len=0.2,
+                                     clamp_slack=0.75)
                 sp.factor = round(min(max(float(sp.factor),
                                           SPEED_FACTOR_MIN),
                                       SPEED_FACTOR_MAX), 3)
@@ -2022,7 +2039,8 @@ def validate_edl(data, duration=None):
 
     for i, v in enumerate(edl.volume):
         v.start, v.end = _r(v.start), _r(v.end)
-        _check_span(f"volume[{i}]", v.start, v.end, duration)
+        v.end = _check_span(f"volume[{i}]", v.start, v.end, duration,
+                            clamp_slack=0.75)
         # BELOW THE FLOOR MEANS SILENCE, NOT AN ERROR (round 61).
         #
         # "remove the sound of the video" is close to the simplest request this

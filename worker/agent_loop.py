@@ -609,6 +609,37 @@ def state_block(ctx, worker_db):
                                 captions_line=captions_line,
                                 program_lines=program_lines,
                                 media_lines=media_lines)
+    # A SHORTS project's chat is the board's chat. Without this section the
+    # parent agent literally does not know its children exist — on
+    # 2026-08-09 "add the interstellar music to all of them" got the track
+    # laid under the 85-minute original and the reply "the project doesn't
+    # contain shorts". The board and the routing rule now ride every turn.
+    try:
+        board = agent_tools._shorts_children(ctx)
+    except Exception:
+        board = []
+    if board:
+        lines = ["", "THE SHORTS BOARD — this project's finished vertical "
+                     "shorts, each one its OWN project with its own "
+                     "timeline and chat:"]
+        for i, c in enumerate(board, 1):
+            dur = ""
+            try:
+                dur = f", {float(c['end']) - float(c['start']):.0f}s"
+            except (KeyError, TypeError, ValueError):
+                pass
+            lines.append(f"  {i}. “{c.get('title') or f'Short {i}'}”{dur}")
+        lines.append(
+            "When the user asks for a change to THE SHORTS — 'all of "
+            "them', 'the shorts', 'short 3', 'add music to them' — use "
+            "edit_shorts(instruction, shorts). That request is NEVER an "
+            "edit of this parent timeline (the original long video); "
+            "only edit here when they explicitly ask about the "
+            "original/full video. Prepare anything the instruction needs "
+            "first (e.g. fetch the track HERE with find_song/fetch_url), "
+            "then name it in the instruction — edit_shorts shares this "
+            "project's music/clips/images into every short.")
+        block += "\n" + "\n".join(lines)
     # Round 82e: the HOUSE STYLE — what this footage most wants to become
     # when the user gives no brief, measured from the exemplar corpus
     # (worker/grammars/). Context, not command: the block itself says the
@@ -714,8 +745,14 @@ _LANG_MARKERS_RAW = {
            "auch", "dem", "den", "zum", "zur", "jetzt", "wieder"),
     "pt": ("não", "você", "está", "são", "foi", "também", "já", "uma",
            "com", "para", "mais", "isso", "como", "os", "dos", "mas"),
+    # 2026-08-09: "Descargué y añadí…" went out to an English user carrying
+    # exactly 2 es hits — the original 15-word list was too thin for a short
+    # reply. Widened with function words Spanish doesn't share spelling-wise
+    # with pt/fr/it/ro ("hasta", "ahora", "hay", "qué", "sí", "aún", "según").
     "es": ("el", "los", "las", "es", "una", "pero", "también", "está",
-           "para", "con", "como", "más", "muy", "esto", "ya"),
+           "para", "con", "como", "más", "muy", "esto", "ya", "hay",
+           "hasta", "ahora", "qué", "sí", "aún", "según", "añadí",
+           "quedó"),
     "fr": ("le", "les", "est", "une", "avec", "pour", "dans", "vous",
            "cette", "mais", "été", "sur", "pas", "aussi", "déjà"),
     "it": ("il", "gli", "è", "una", "con", "per", "anche", "questo",
@@ -771,6 +808,38 @@ def _marker_lang(text):
     if s1 >= 3 and s1 >= 2 * s2:
         return lang1
     return None
+
+
+# Latin letters that plain English never uses. One real day (2026-08-09)
+# produced replies in Albanian, Turkish, Portuguese, Spanish and French to
+# users who wrote only English — every one of them same-script, and every one
+# of them under the 3-hit marker threshold (a 2-sentence reply simply doesn't
+# carry three distinctive function words). What those replies DO carry is
+# accent mass: ë/ş/ã/é/ó in quantity, where an English reply has none.
+_ACCENTED_LATIN_RE = re.compile(
+    "[À-ÿĀ-ſȘ-ț]")
+
+
+def _accented_flip(joined, final):
+    """True when the user writes plain-ASCII English and the reply is a
+    Latin-script text soaked in accented letters with ZERO English function
+    words — the same-script flip the marker vote is too coarse to catch.
+    Conservative on purpose: a reply that quotes one accented title ("Café
+    del Mar") keeps its English markers and never trips this."""
+    if not joined or not final:
+        return False
+    # The user side must be unambiguously English-shaped: ASCII-dominant
+    # AND carrying English function words of its own.
+    non_ascii_u = sum(1 for ch in joined if ord(ch) > 127)
+    if non_ascii_u > max(2, 0.01 * len(joined)):
+        return False
+    if _marker_hits(joined, "en") < 2:
+        return False
+    if _marker_hits(final, "en") > 0:
+        return False
+    accents = len(_ACCENTED_LATIN_RE.findall(final))
+    letters = sum(1 for ch in final if ch.isalpha())
+    return accents >= 3 and letters > 0 and accents / letters >= 0.01
 
 
 def _reply_language_note(user_texts):
@@ -1708,6 +1777,11 @@ def _language_flip(joined, user_text, final):
     if u_lang and r_lang and u_lang != r_lang \
             and _marker_hits(final, u_lang) == 0:
         return ("words", u_lang, r_lang)
+    # The accent-mass net under the marker vote: same-script flips into
+    # languages the marker table doesn't know (Albanian, Turkish) or knows
+    # too thinly for a two-sentence reply (es/pt/fr under 3 hits).
+    if _accented_flip(joined, final):
+        return ("words", "en", "a non-English Latin-script language")
     return None
 
 
@@ -2554,15 +2628,39 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 try:
                     result = agent_tools.execute(ctx, name, args)
                 except agent_tools.AskUser as q:
-                    _cur_v = (ctx.versions_written[-1]
-                              if ctx.versions_written else start_version)
-                    _activity(worker_db, session_id, name, args,
-                              f"asked: {q.question}", edl_version=_cur_v)
-                    worker_db.run(dbx.add_message, session_id, "assistant",
-                                  q.question,
-                                  {"ask_user": True, "edl_version": _cur_v})
-                    return {"status": "awaiting_user", "steps": total_steps,
-                            "timings": timings}
+                    # The question goes to the user VERBATIM, which makes it
+                    # a reply — and until 2026-08-09 it was the one reply
+                    # that skipped the language guard (a Russian ask_user
+                    # reached an English user that morning). Same
+                    # deterministic check, but as a tool REJECTION: the
+                    # model rephrases in-loop, no extra LLM call, no posted
+                    # wrong-language text.
+                    _u_joined = " ".join(
+                        [m["content"] for m in messages
+                         if m.get("role") == "user"
+                         and isinstance(m.get("content"), str)]
+                        + [user_message["content"] or ""])
+                    if _language_flip(_u_joined,
+                                      user_message["content"] or "",
+                                      q.question):
+                        result = ("REJECTED: that question is not in the "
+                                  "USER'S language (the language of the "
+                                  "messages they typed — never the "
+                                  "footage's). Ask it again in their "
+                                  "language.")
+                    else:
+                        _cur_v = (ctx.versions_written[-1]
+                                  if ctx.versions_written
+                                  else start_version)
+                        _activity(worker_db, session_id, name, args,
+                                  f"asked: {q.question}",
+                                  edl_version=_cur_v)
+                        worker_db.run(dbx.add_message, session_id,
+                                      "assistant", q.question,
+                                      {"ask_user": True,
+                                       "edl_version": _cur_v})
+                        return {"status": "awaiting_user",
+                                "steps": total_steps, "timings": timings}
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
                 tt["n"] += 1
                 tt["s"] = round(tt["s"] + time.monotonic() - t0, 2)

@@ -506,6 +506,10 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                 create_kwargs.pop("max_completion_tokens", None)
                 create_kwargs.pop("max_tokens", None)
                 resp = _concierge_llm().chat.completions.create(**create_kwargs)
+        if not (resp.choices[0].message.content or "").strip():
+            # One quiet retry on an empty completion — same class of
+            # transient as the except below.
+            resp = _concierge_llm().chat.completions.create(**create_kwargs)
         raw = (resp.choices[0].message.content or "").strip()
         usage = getattr(resp, "usage", None)
         rec = {"model": CONCIERGE_MODEL, "request": req,
@@ -530,6 +534,31 @@ def _concierge_reply(stage, history, attachments, index_error=None,
         rec["response"] = {"rejected": raw or "(empty completion)"}
         return fallback, {"kind": "canned", "stage": stage}, rec, False
     except Exception as e:
+        # ONE retry after a beat before surrendering to the canned line —
+        # on 2026-08-09 three real users asked real questions ("how many
+        # files did i share?") during transient provider blips and each got
+        # the same tone-deaf template. A second attempt is cheap; the
+        # canned line costs a user.
+        try:
+            time.sleep(1.5)
+            resp = _concierge_llm().chat.completions.create(**create_kwargs)
+            raw = (resp.choices[0].message.content or "").strip()
+            text, act = (raw, False)
+            if want_act:
+                text, act = _parse_act(raw)
+            rec = {"model": CONCIERGE_MODEL, "request": req,
+                   "response": {"reply": raw, "retried": True},
+                   "prompt_tokens": None, "completion_tokens": None}
+            if act:
+                if _CONCIERGE_CLAIM.search(text or ""):
+                    text = "On it — starting that now."
+                return text, {"kind": "concierge", "stage": stage,
+                              "act": True}, rec, True
+            if text and not _CONCIERGE_CLAIM.search(text):
+                return text, {"kind": "concierge", "stage": stage}, rec, \
+                    False
+        except Exception as e2:
+            e = e2
         print(f"[concierge] LLM call failed: {e}", flush=True)
         return fallback, {"kind": "canned", "stage": stage}, {
             "model": CONCIERGE_MODEL, "request": req,
@@ -555,6 +584,62 @@ def _project_for_user(cur, project_id, user_id):
     cur.execute("SELECT * FROM projects WHERE id = %s AND user_id = %s",
                 (project_id, int(user_id)))
     return cur.fetchone()
+
+
+def _trial_gate_applies(cur, user_id):
+    """Round 101's conversion wall: an unsubscribed account that has already
+    had one video actually edited (an agent turn that moved a timeline past
+    v1, or a finished shorts run) sends its NEXT prompt into the trial
+    cards. Subscribers (trialing counts), the admin account, and accounts
+    that haven't seen an edit yet all pass. Fails OPEN like plan_gate: a
+    lookup error must never eat a paying user's message."""
+    try:
+        cur.execute("SELECT is_subscribed, email FROM users WHERE id = %s",
+                    (int(user_id),))
+        u = cur.fetchone()
+        if not u or u["is_subscribed"]:
+            return False
+        from routes.admin import ADMIN_EMAIL
+        if (u["email"] or "").lower() == ADMIN_EMAIL.lower():
+            return False
+        cur.execute("""
+            SELECT 1 FROM video_jobs
+            WHERE user_id = %s AND state = 'done'
+              AND ((type = 'agent_turn' AND
+                    CASE WHEN result->>'edl_version' ~ '^[0-9]+$'
+                         THEN (result->>'edl_version')::int ELSE 1 END > 1)
+                   OR (type = 'shorts_plan' AND
+                       CASE WHEN result->>'clips' ~ '^[0-9]+$'
+                            THEN (result->>'clips')::int ELSE 0 END > 0))
+            LIMIT 1""", (int(user_id),))
+        return cur.fetchone() is not None
+    except Exception as e:                                  # pragma: no cover
+        print(f"[trial_gate] lookup failed for user {user_id}: {e}",
+              flush=True)
+        return False
+
+
+def _trial_offer_body():
+    """The 402 the trial gate answers with. Carries the three live plans
+    with server-quoted prices and credits so the studio's cards never
+    hardcode a number (the CLAUDE.md four-places rule)."""
+    import billing
+    from credits import PLAN_MONTHLY_LIMITS
+    names = {"ai": "Creator", "ai_pro": "Pro", "ai_max": "Frontier"}
+    plans = []
+    for pid in ("ai", "ai_pro", "ai_max"):
+        prices = billing.PLAN_PRICES_USD.get(pid) or {}
+        plans.append({
+            "id": pid, "name": names[pid],
+            "monthly": prices.get("monthly"),
+            "yearly": prices.get("yearly"),
+            "credits": PLAN_MONTHLY_LIMITS.get(pid)})
+    return {
+        "error": ("You've seen it edit — keep going with a free 3-day "
+                  "trial. $0 today; cancel inside the trial and you're "
+                  "never charged."),
+        "code": "trial_offer", "trial_offer": True,
+        "trial_days": 3, "plans": plans}
 
 
 def _running_jobs_count(cur, user_id):
@@ -2956,6 +3041,18 @@ def post_message(user_id, project_id):
 
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
+
+        # THE TRIAL GATE (round 101) — one free edited video, then the ask.
+        # The moment this account has SEEN the product work — any completed
+        # agent turn that actually changed a timeline, or a finished shorts
+        # run — every next prompt answers with the trial cards instead of
+        # running. The message is NOT persisted: closing the cards and
+        # resending shows them again, by design. Fires before the round-50
+        # credits gate because it is stricter (it doesn't wait for the 50 to
+        # drain), and never for a subscriber (a trialing user IS subscribed
+        # from day zero) or the admin account.
+        if _trial_gate_applies(cur, user_id):
+            return jsonify(_trial_offer_body()), 402
 
         # The plan gate — round 50: "this account has spent its 50 free
         # credits and holds no plan". It hangs off `indexed` for the SAME
