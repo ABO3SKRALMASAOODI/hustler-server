@@ -994,11 +994,6 @@ AGENT_MAX_MODEL_CALLS = min(
 # and still stops at the wall. 2 -> at most 90 iterations, inside the same
 # one shared model-call ceiling / credit bounds that always apply.
 AGENT_AUTO_CONTINUES = int(os.getenv("AGENT_AUTO_CONTINUES", "2"))
-# Clock extensions are deliberately off. They once made a productive turn
-# self-resume for another full clock, holding a project queue for 20+ minutes
-# while newer corrections waited. Work is saved at the single-clock boundary
-# and the next queued instruction starts from that current state.
-AGENT_CLOCK_CONTINUES = 0
 AGENT_TEMPERATURE = 0.2
 # Completion ceiling for ONE agent step. 8000 (was a hardcoded 2000).
 #
@@ -1022,10 +1017,12 @@ AGENT_MAX_TOKENS_CEILING = int(os.getenv("AGENT_MAX_TOKENS_CEILING", "32000"))
 # budget thinking returns an empty redraft, which is then discarded in favour
 # of the canned fallback — the user reads a non-answer twice over.
 AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
-# Wall-clock ceiling for one agent turn. On expiry the loop stops, saves what
-# landed and posts an honest message. Sixteen model calls plus a candidate and
-# repair proof fit this bound; the hard min prevents an old 900s production
-# env from restoring the long queue hostage seen in projects 480-484.
+# Stall window, not a total turn limit. When this much time passes with no EDL
+# write, successful preview or created media asset, the loop stops honestly.
+# Productive work refreshes the window as often as necessary, so a complex
+# edit is never cut off merely because its total wall time crossed ten minutes.
+# The hard max keeps a stale 900s production env from waiting fifteen minutes
+# before detecting an actually stuck turn.
 AGENT_TURN_TIMEOUT_S = min(
     600.0, float(os.getenv("AGENT_TURN_TIMEOUT_S", "600")))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))

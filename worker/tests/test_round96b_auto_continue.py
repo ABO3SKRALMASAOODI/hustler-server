@@ -77,12 +77,19 @@ done = ", ".join(f"{name} x{t['n']}" if t["n"] > 1 else name
 check("tool summary reads like an editor's log",
       done == "render_preview, set_speed x4")
 
-print("== round 101: one bounded clock and one model-call budget ==")
+print("== round 101: progress-aware clock and one model-call budget ==")
 
-check("clock extensions are off", config.AGENT_CLOCK_CONTINUES == 0)
 check("model calls have a hard practical ceiling",
       4 <= config.AGENT_MAX_MODEL_CALLS <= 16)
 src = inspect.getsource(agent_loop._run_loop)
+check("productive work refreshes the clock without a fixed allowance",
+      "if _progressed and not ctx.over_budget()" in src
+      and "refreshing it" in src
+      and "AGENT_CLOCK_CONTINUES" not in src)
+check("created media also counts as progress", '"assets0"' in src
+      and '"images_generated"' in src and '"videos_generated"' in src)
+check("only a no-progress window reaches the stall response",
+      "stalled with no editing/rendering" in src)
 check("the call wall is checked before another model request",
       'timings["llm_calls"] >= config.AGENT_MAX_MODEL_CALLS' in src
       and src.index('timings["llm_calls"] >= config.AGENT_MAX_MODEL_CALLS')

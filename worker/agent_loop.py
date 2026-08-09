@@ -2049,26 +2049,28 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             return {"status": "shutdown", "steps": total_steps,
                     "timings": timings}
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
-            # Round 97 (#1): the clock ceiling stops asking the user to say
-            # "continue". A pass that has genuinely landed work gets ONE
-            # fresh clock (AGENT_CLOCK_CONTINUES) and resumes itself over
-            # the same message with a rebuilt small context — which is
-            # exactly what the user's manual "Continue" did (job 2797: 918s,
-            # wall, user typed Continue, 316s more, done — 21 minutes and a
-            # round of the user's patience for OUR internal ceiling). The
-            # runaway guard stays: a pass that moved nothing since the last
-            # checkpoint still walls, and the spend cap and shutdown drain
-            # are checked first.
+            # This is an INACTIVITY wall, never a total-edit wall. A complex
+            # turn that is still landing EDL versions or successful previews
+            # gets another window with no fixed count. The model-call/spend
+            # guards still stop churn; the clock only catches a genuinely
+            # stalled turn. Tool calls are synchronous, so a long render is
+            # not interrupted mid-call either — its completed preview counts
+            # as progress when control returns here.
             n_clock = _cont.get("clock", 0)
+            progress_lists = (
+                "images_generated", "videos_generated", "urls_fetched",
+                "web_recordings", "audio_extracted", "stock_added")
+            asset_progress = sum(
+                len(getattr(ctx, name, None) or []) for name in progress_lists)
             _progressed = (len(ctx.versions_written) > _cont.get("writes0", 0)
                            or len(ctx.rendered_versions)
-                           > _cont.get("renders0", 0))
-            if _progressed and n_clock < config.AGENT_CLOCK_CONTINUES \
-                    and not ctx.over_budget() and not SHUTDOWN.is_set():
-                print(f"[job {job['id']}] turn clock spent after "
-                      f"{total_steps} step(s) with work landing — resuming "
-                      f"on a fresh clock (extension {n_clock + 1}/"
-                      f"{config.AGENT_CLOCK_CONTINUES})", flush=True)
+                           > _cont.get("renders0", 0)
+                           or asset_progress > _cont.get("assets0", 0))
+            if _progressed and not ctx.over_budget() \
+                    and not SHUTDOWN.is_set():
+                print(f"[job {job['id']}] progress window spent after "
+                      f"{total_steps} step(s), but work is still landing — "
+                      f"refreshing it (refresh {n_clock + 1})", flush=True)
                 return _run_loop(
                     ctx, worker_db, job, session_id, user_message,
                     attachment_note,
@@ -2078,9 +2080,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "timings": timings, "honesty": honesty,
                            "warned": None,
                            "writes0": len(ctx.versions_written),
-                           "renders0": len(ctx.rendered_versions)})
-            print(f"[job {job['id']}] turn timeout after "
-                  f"{config.AGENT_TURN_TIMEOUT_S:.0f}s", flush=True)
+                           "renders0": len(ctx.rendered_versions),
+                           "assets0": asset_progress})
+            print(f"[job {job['id']}] stalled with no editing/rendering "
+                  f"progress for {config.AGENT_TURN_TIMEOUT_S:.0f}s",
+                  flush=True)
             if ctx.versions_written:
                 # Name the half-done state plainly. The old copy ("the edits
                 # I completed are saved") read as DONE to a user who wasn't
@@ -2090,8 +2094,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 # finish, and left (Aug 3 2026, project 335).
                 return _finalize(
                     ctx, worker_db, session_id,
-                    "That took longer than I allow myself per request, so "
-                    "I'm stopping here — the edits I finished are saved "
+                    "This edit stopped making progress on my side, so I'm "
+                    "stopping the stalled run — the edits I finished are "
+                    "saved "
                     "and previewed below. If part of your request isn't in "
                     "them yet, it is NOT done — say \"continue\" and I'll "
                     "pick up where I stopped.",
@@ -2102,8 +2107,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # media is already sitting in their media picker.
             saved = _assets_made_note(ctx)
             worker_db.run(dbx.add_message, session_id, "assistant",
-                          "That request timed out before I could finish "
-                          "anything — the edit itself was not changed"
+                          "That request stopped making progress before I "
+                          "could finish anything — the edit itself was not changed"
                           f"{saved}. Please try again, or break the request "
                           "into smaller steps.",
                           {"error": "turn_timeout"})
