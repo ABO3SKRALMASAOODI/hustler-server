@@ -14283,7 +14283,7 @@ TOOLS = {
                     "numbers (1-based).",
                     {"instruction": {"type": "string"},
                      "shorts": {"type": "array",
-                                "items": {"type": ["integer", "string"]}}}),
+                                "items": {"type": "integer"}}}),
 }
 
 REQUIRED_ARGS = {
