@@ -221,14 +221,15 @@ def test_deleted_tools_are_unregistered_and_search_advertised():
     assert "music library" not in state
 
 
-# ── the fail-twice rule is gone ──────────────────────────────────────────
+# ── failed repairs are bounded without hiding incomplete work ───────────
 
-def test_the_prompt_no_longer_orders_a_stop_after_two_failures():
+def test_the_prompt_allows_one_repair_then_stops_churn_honestly():
     p = agent_prompt.system_prompt()
     assert "fails twice" not in p
     assert "stop retrying" not in p
-    # What replaced it: change the approach, keep going.
-    assert "different route" in p
+    assert "ONE focused repair batch" in p
+    assert "preserve the best valid version" in p
+    assert "say plainly what remains" in p
 
 
 # ── round 91b: a short reply must not disable the language check ─────────

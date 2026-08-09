@@ -307,15 +307,12 @@ FRONTIER_PLANS = {"ai_max"}
 #    a 400 about the effort VALUE, so a provider trimming its enum degrades
 #    one step, not the process.
 AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "max").strip()
-# OPT-IN lever, OFF by default — the owner wants max thinking on EVERY step
-# (round 100 briefly defaulted dispatch steps to 'low' and was told to put it
-# back). "" means every step runs AGENT_REASONING_EFFORT exactly as round 97
-# shipped it. Set to 'low'/'medium' from Render — no deploy — if turn wall
-# clock ever needs trading against depth: it downgrades only the
-# call-the-next-tool steps after iteration 0 (job 3211 spent 49k reasoning
-# tokens/14min mostly on those), never the planning step.
+# The first call plans at the model's full reasoning effort. Later calls only
+# dispatch that plan and default to medium: projects 480-484 spent most of
+# their time and reasoning tokens deciding the next already-obvious tool at
+# max effort. The env can still raise or lower dispatch effort independently.
 AGENT_REASONING_EFFORT_DISPATCH = os.getenv(
-    "AGENT_REASONING_EFFORT_DISPATCH", "").strip()
+    "AGENT_REASONING_EFFORT_DISPATCH", "medium").strip() or "medium"
 # Wall-clock for ONE responses-lane call. LLM_TIMEOUT_S (90) is sized for
 # dispatch-grade calls; at effort max the model may THINK for minutes before
 # its first output token, and a timeout here does not fail the turn — it
@@ -979,6 +976,14 @@ MAX_CLAIMS_ABSOLUTE = int(os.getenv("MAX_CLAIMS_ABSOLUTE", "6"))
 TRAY_RESCUE_AFTER_S = int(os.getenv("TRAY_RESCUE_AFTER_S", "300"))
 
 AGENT_MAX_ITERATIONS = 30
+# A model call is the expensive unit, not a Python loop iteration. Production
+# projects 480-484 made 29-72 calls each, resent 10.1M prompt tokens and held
+# same-project follow-ups for up to 23 minutes. Most useful corrective turns
+# in those sessions finished in 5-9 calls. Give a full build room to plan,
+# batch its writes, preview and repair once, then stop. The hard ceiling keeps
+# a stale Render env from silently restoring the old behaviour.
+AGENT_MAX_MODEL_CALLS = min(
+    16, max(4, int(os.getenv("AGENT_MAX_MODEL_CALLS", "16"))))
 # How many times a turn that hits the iteration ceiling MID-WORK may resume
 # itself (round 96b, project 383: 30 productive calls in 7.5 min, then a
 # canned English "tell me to continue" at a Portuguese-speaking user with
@@ -987,18 +992,13 @@ AGENT_MAX_ITERATIONS = 30
 # turn's wall clock and spend cap, and it only happens when the ending pass
 # actually landed edits or renders; a pass that moved nothing is a runaway
 # and still stops at the wall. 2 -> at most 90 iterations, inside the same
-# 900s / credit bounds that always applied.
+# one shared model-call ceiling / credit bounds that always apply.
 AGENT_AUTO_CONTINUES = int(os.getenv("AGENT_AUTO_CONTINUES", "2"))
-# Round 97 (#1): how many FRESH CLOCKS a turn that hits AGENT_TURN_TIMEOUT_S
-# mid-work may grant itself. The clock wall was the last ceiling still asking
-# the user to say "continue" — and when the one trial customer's 918s turn
-# hit it, he typed Continue, the resumed pass finished in 316s, and the whole
-# request took 21 minutes plus a round of his patience for OUR internal
-# limit. The extension only fires when the pass PROGRESSED since its last
-# checkpoint (a runaway that moved nothing still walls), never over the
-# spend cap, and never during a deploy drain. 1 keeps the worst case at
-# ~2x the turn ceiling on one shared agent slot — raise with care.
-AGENT_CLOCK_CONTINUES = int(os.getenv("AGENT_CLOCK_CONTINUES", "1"))
+# Clock extensions are deliberately off. They once made a productive turn
+# self-resume for another full clock, holding a project queue for 20+ minutes
+# while newer corrections waited. Work is saved at the single-clock boundary
+# and the next queued instruction starts from that current state.
+AGENT_CLOCK_CONTINUES = 0
 AGENT_TEMPERATURE = 0.2
 # Completion ceiling for ONE agent step. 8000 (was a hardcoded 2000).
 #
@@ -1022,33 +1022,12 @@ AGENT_MAX_TOKENS_CEILING = int(os.getenv("AGENT_MAX_TOKENS_CEILING", "32000"))
 # budget thinking returns an empty redraft, which is then discarded in favour
 # of the canned fallback — the user reads a non-answer twice over.
 AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
-# Wall-clock ceiling for one agent turn — a generous final backstop, not a
-# leash. On expiry the loop stops, saves whatever it finished, and posts an
-# honest message — never a silent "Editing…" forever.
-# 720 (was 450): a real edit that ends in a preview render was landing right at
-# the old ceiling — on the 1-vCPU box a preview alone is ~60-100s, so a turn
-# doing genuine work plus a render had almost no margin and got cut mid-finish
-# (prod job 456: 509s > 450). The efficiency fixes (add_title_card /
-# add_color_screen collapse ~30 build/teardown calls to a few) and the
-# in-turn time-pressure warnings at 0.55/0.8 do most of the work; this is the
-# headroom so a legitimately busy turn finishes instead of being guillotined.
-# The reaper does NOT fight this — a live turn's heartbeat thread keeps its
-# slot healthy, so the turn timeout is the true ceiling. VIDEO_POLL_TIMEOUT_S
-# (240) and FETCH_TIMEOUT_S (180) still sit safely under it. Cost of raising:
-# a genuinely stuck turn holds one shared agent slot longer, so do NOT push
-# this to many minutes on a 1-vCPU box.
-# 900 (was 720): three real turns died at 720 in a week (prod jobs 2353, 2491,
-# 2521) and in every one the MODEL was not the problem — job 2521 made its
-# edits in 95s of model time and spent 762s inside three sequential inpaint
-# passes; job 2353 spent 823s of 863s inside five. Raising the ceiling alone
-# would only have made the user wait longer for the same wall, so it moves
-# together with the two things that actually caused it: previews render at the
-# proof budget (PREVIEW_MAX_LONG_EDGE — ~4.5x less encode) and the repaint
-# diffuses at the scale of its hole (INPAINT_MAX_PX — 5.9x on the shape that
-# ate project 360). The work got faster; the agent was NOT given a shorter
-# leash. A version of this round refused expensive tools near the deadline and
-# it was removed — an agent that may not finish the job is not a fixed agent.
-AGENT_TURN_TIMEOUT_S = float(os.getenv("AGENT_TURN_TIMEOUT_S", "900"))
+# Wall-clock ceiling for one agent turn. On expiry the loop stops, saves what
+# landed and posts an honest message. Sixteen model calls plus a candidate and
+# repair proof fit this bound; the hard min prevents an old 900s production
+# env from restoring the long queue hostage seen in projects 480-484.
+AGENT_TURN_TIMEOUT_S = min(
+    600.0, float(os.getenv("AGENT_TURN_TIMEOUT_S", "600")))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # Transcript tools get a far larger budget: silently dropping the tail of a
@@ -1266,8 +1245,14 @@ PREVIEW_MAX_LONG_EDGE = int(os.getenv("PREVIEW_MAX_LONG_EDGE", "1280"))
 # db.pending_preview_job) instead of enqueueing a second encode. MAX bounds
 # wasted encodes on a turn that keeps writing version after version —
 # stitching keeps each one cheap, but not free.
-SPECULATIVE_PREVIEWS = os.getenv("SPECULATIVE_PREVIEWS", "1") == "1"
-SPECULATIVE_PREVIEWS_MAX = int(os.getenv("SPECULATIVE_PREVIEWS_MAX", "3"))
+# Intermediate speculative encodes produced 52 previews across five projects,
+# most obsolete before completion. Batch first; prove the candidate once and
+# allow one repair proof.
+SPECULATIVE_PREVIEWS = os.getenv("SPECULATIVE_PREVIEWS", "0") == "1"
+SPECULATIVE_PREVIEWS_MAX = min(
+    1, max(0, int(os.getenv("SPECULATIVE_PREVIEWS_MAX", "1"))))
+AGENT_MAX_PREVIEWS_PER_TURN = min(
+    2, max(1, int(os.getenv("AGENT_MAX_PREVIEWS_PER_TURN", "2"))))
 # The height a preview is actually WRITTEN at. This number is not new — the
 # graph has always ended with `scale=-2:min(480,...)` — but it lived as a
 # literal at the end of the filter chain, which meant every filter before it

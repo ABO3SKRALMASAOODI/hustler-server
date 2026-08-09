@@ -143,6 +143,18 @@ def test_make_shorts_is_an_agent_tool():
     assert "make_shorts" not in agent_tools.WRITE_TOOLS
 
 
+def test_sub_minute_shorts_route_to_direct_edit():
+    """A short source is a valid one-short project, not a failed extractor."""
+    from types import SimpleNamespace
+    import agent_tools
+
+    ctx = SimpleNamespace(has_main_video=True, duration=42.0)
+    result = agent_tools.make_shorts(ctx)
+    assert result.startswith("DIRECT SHORT:")
+    assert "do the edit now" in result
+    assert "REJECTED" not in result
+
+
 def test_flat_clip_charge_rides_the_turn_charge():
     """charge_turn_credits grew extra_credits — the shorts surcharge must be
     additive and never able to go negative."""

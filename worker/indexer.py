@@ -884,14 +884,48 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     except Exception as e:
         print(f"[index] tray placement failed: {e}", flush=True)
 
-    # SHORTS MODE (round 99): the user chose "Shorts" before uploading, so
-    # analysis flowing straight into the clip plan IS the product — no greet
-    # here (the plan job writes its own opener, or the credit wall), no
-    # waiting for a first message.
+    # SHORTS ROUTER: "make a short" and "extract several shorts from a long
+    # video" are not the same job. A sub-minute source already IS one short;
+    # route it into the normal editor and preserve any brief the user sent
+    # while uploading. Project 480 lost that brief, failed a shorts_plan at
+    # 59.97s, then made the user wait through an unrelated recovery edit.
+    # Long sources still flow straight into the multi-clip planner.
     try:
         project_row = worker_db.run(dbx.get_project, project_id)
         if (project_row or {}).get("kind") == "shorts" and not reindex \
                 and user_id:
+            if float(info.get("duration") or 0.0) < 60.0:
+                worker_db.run(dbx.set_project_kind, project_id, "edit")
+                found = (worker_db.run(dbx.pending_user_message,
+                                       project_id, session_id)
+                         if session_id else None)
+                active = worker_db.run(dbx.has_active_agent_turn, project_id)
+                if found and not active:
+                    if worker_db.run(dbx.user_credits_balance, user_id) >= 1.0:
+                        worker_db.run(
+                            dbx.enqueue_job, project_id, user_id, "agent_turn",
+                            {"message_id": found["id"], "auto_resumed": True,
+                             "direct_short": True})
+                        print(f"[index] project {project_id}: "
+                              f"{info['duration']:.1f}s direct short — "
+                              f"auto-resumed brief {found['id']}", flush=True)
+                    else:
+                        worker_db.run(
+                            dbx.add_message, session_id, "assistant",
+                            "This upload already fits one short, so I opened "
+                            "it in the Editor instead of failing the Shorts "
+                            "tool. Your brief is saved; add credits and send "
+                            "it again to edit this video directly.",
+                            {"kind": "direct_short", "credits_exhausted": True})
+                elif not active and session_id:
+                    worker_db.run(
+                        dbx.add_message, session_id, "assistant",
+                        f"This {info['duration']:.0f}-second upload already "
+                        "fits one short, so I opened it in the Editor. Tell "
+                        "me how you want this short tightened, reframed or "
+                        "styled and I'll edit it directly.",
+                        {"kind": "direct_short"})
+                return
             if worker_db.run(dbx.has_active_job, project_id, "shorts_plan"):
                 print(f"[index] project {project_id}: shorts_plan already "
                       "live — not enqueuing another", flush=True)

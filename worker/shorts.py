@@ -558,8 +558,27 @@ def run_shorts_plan(worker_db, job):
     index = idx_row["json"]
     duration = float((index.get("video") or {}).get("duration") or 0.0)
     if duration < 60.0:
-        raise RuntimeError(f"the video is only {duration:.0f}s — shorts "
-                          "need a longer source to cut from")
+        # Deploy skew or an already-queued job can still reach this runner
+        # after the API/indexer routing fix. Degrade into the direct editor;
+        # never resurrect the old user-facing failure.
+        worker_db.run(dbx.set_project_kind, project_id, "edit")
+        pending = (worker_db.run(dbx.pending_user_message,
+                                 project_id, session_id)
+                   if session_id else None)
+        if pending and worker_db.run(
+                dbx.user_credits_balance, job["user_id"]) >= 1.0:
+            worker_db.run(dbx.enqueue_job, project_id, job["user_id"],
+                          "agent_turn",
+                          {"message_id": pending["id"],
+                           "auto_resumed": True, "direct_short": True})
+        elif session_id:
+            worker_db.run(
+                dbx.add_message, session_id, "assistant",
+                f"This {duration:.0f}-second upload already fits one short, "
+                "so I opened it in the Editor. Tell me how you want this "
+                "short tightened, reframed or styled and I'll edit it "
+                "directly.", {"kind": "direct_short"})
+        return {"direct_edit": True, "billable": False}
 
     # The gate, mirrored from the message path: cutting shorts runs the model
     # and the render farm, so it needs the same credit standing as a turn.

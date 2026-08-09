@@ -18,6 +18,7 @@ import grammar
 import llm
 import music_search
 import remote
+import request_intent
 import sfx_search
 import song_find
 import storage
@@ -564,16 +565,21 @@ def state_block(ctx, worker_db):
         pending = worker_db.run(
             lambda conn: _pending_clips(conn, ctx.project_id))
         for c in list(all_clips.values()) + pending:
-            name = (c.get("meta") or {}).get("filename") or \
+            cmeta = c.get("meta") or {}
+            name = cmeta.get("filename") or \
                 os.path.basename(c["storage_key"])
             dur = c.get("duration_s")
-            state = ("indexed" if (c.get("meta") or {}).get("indexed")
+            state = ("indexed" if cmeta.get("indexed")
                      else "still analyzing — filmstrip/transcript arrive "
                           "shortly")
             where = ("placed in the program" if c["storage_key"] in
                      placed_keys else "NOT placed in the program")
+            role = ("STYLE REFERENCE ONLY — an example to inspect, never "
+                    "source footage to insert or edit"
+                    if cmeta.get("role") == "shorts_reference" else
+                    "source clip")
             media_lines.append(
-                f'  clip "{name}" ({float(dur or 0):.1f}s) — {state}, '
+                f'  clip "{name}" ({float(dur or 0):.1f}s) — {role}; {state}, '
                 f'{where}, storage_key {c["storage_key"]}')
         images = worker_db.run(
             lambda conn: _image_assets(conn, ctx.project_id))
@@ -812,6 +818,9 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
             if m["role"] == "user":
                 user_texts.append(content)
     user_texts.append(user_message["content"] or "")
+    msgs.append({"role": "system", "content":
+                 request_intent.request_contract(
+                     user_message["content"] or "")})
     msgs.append({"role": "user",
                  "content": user_message["content"][:4000] + attachment_note
                  + _reply_language_note(user_texts)})
@@ -2172,6 +2181,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             return {"status": "budget", "steps": total_steps,
                     "timings": timings}
 
+        if timings["llm_calls"] >= config.AGENT_MAX_MODEL_CALLS:
+            print(f"[job {job['id']}] model-call ceiling hit: "
+                  f"{timings['llm_calls']}", flush=True)
+            return _finalize(
+                ctx, worker_db, session_id,
+                "I stopped at the editing-pass limit instead of continuing "
+                "to churn on this video. The valid work completed so far is "
+                "saved and previewed; anything not visible there is not done.",
+                "model_call_limit", total_steps, timings, honesty)
+
         worker_db.run(dbx.set_progress, job["id"],
                       int(100 * iteration / config.AGENT_MAX_ITERATIONS))
         t0 = time.monotonic()
@@ -2546,6 +2565,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                    else start_version),
                       change=chg)
             result = _time_pressure_note(result, t_start, warned)
+            remaining_calls = (config.AGENT_MAX_MODEL_CALLS
+                               - timings["llm_calls"])
+            if remaining_calls <= 2:
+                result += (
+                    "\n\n[system: the request has "
+                    f"{max(0, remaining_calls)} model call(s) left. Stop "
+                    "exploring or adding polish. If the latest version is "
+                    "not proved, render it once; then reply with exactly "
+                    "what is complete.]"
+                )
             # Step pressure, only once the continuation budget is spent —
             # earlier passes are auto-resumed, so rushing them would only
             # produce premature "done" replies. Same shape as the time

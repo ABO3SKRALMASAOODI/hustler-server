@@ -77,23 +77,19 @@ done = ", ".join(f"{name} x{t['n']}" if t["n"] > 1 else name
 check("tool summary reads like an editor's log",
       done == "render_preview, set_speed x4")
 
-print("== round 97: the clock ceiling resumes itself too ==")
+print("== round 101: one bounded clock and one model-call budget ==")
 
-check("clock extensions are on by default", config.AGENT_CLOCK_CONTINUES >= 1)
+check("clock extensions are off", config.AGENT_CLOCK_CONTINUES == 0)
+check("model calls have a hard practical ceiling",
+      4 <= config.AGENT_MAX_MODEL_CALLS <= 16)
 src = inspect.getsource(agent_loop._run_loop)
-check("the clock wall tries a fresh clock before apologising",
-      '"why": "turn clock"' in src
-      and '"t_start": time.monotonic()' in src)
-check("...only when the pass PROGRESSED since its checkpoint",
-      "n_clock < config.AGENT_CLOCK_CONTINUES" in src
-      and src.index("_progressed and n_clock") <
-      src.index("turn timeout after"))
-check("...never over the spend cap or into a drain",
-      "not ctx.over_budget() and not SHUTDOWN.is_set()" in src)
-check("the step continuation preserves the clock allowance",
-      '"clock": _cont.get("clock", 0)' in src)
-check("time-pressure marks reset with the fresh clock (warned: None)",
-      '"warned": None' in src)
+check("the call wall is checked before another model request",
+      'timings["llm_calls"] >= config.AGENT_MAX_MODEL_CALLS' in src
+      and src.index('timings["llm_calls"] >= config.AGENT_MAX_MODEL_CALLS')
+      < src.index("worker_db.run(dbx.set_progress"))
+check("the model gets a final-call pressure warning",
+      "remaining_calls <= 2" in src
+      and 'f"{max(0, remaining_calls)} model call(s) left' in src)
 
 print("== round 97: a worker death resumes the turn once ==")
 

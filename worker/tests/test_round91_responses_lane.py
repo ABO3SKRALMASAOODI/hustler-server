@@ -233,16 +233,15 @@ _src = inspect.getsource(agent_loop._run_loop)
 
 check("reasoning effort is MAX (gpt-5.6: none|low|medium|high|xhigh|max)",
       config.AGENT_REASONING_EFFORT == "max")
-# Round 100: the lane sends the per-step effort, and by default that is the
-# CONFIGURED effort on every step — the owner wants max thinking everywhere.
-# AGENT_REASONING_EFFORT_DISPATCH is an opt-in Render lever (default "")
-# that would downgrade only the post-planning dispatch steps.
+# The lane sends the per-step effort. Planning keeps maximum effort; routine
+# post-plan dispatch defaults to medium so an obvious next tool does not spend
+# the time and reasoning budget of a fresh creative decision.
 check("...and the per-step effort is what the lane sends",
       "effort=step_effort" in _src)
 check("...planning keeps the configured effort",
       "config.AGENT_REASONING_EFFORT if iteration == 0" in _src)
-check("...and by default every step thinks at the configured effort",
-      config.AGENT_REASONING_EFFORT_DISPATCH == "")
+check("...and dispatch defaults below the planning effort",
+      config.AGENT_REASONING_EFFORT_DISPATCH == "medium")
 check("the lane call gets the thinking-sized timeout, not the 90s dispatch "
       "one", "timeout=config.AGENT_LANE_TIMEOUT_S" in _src)
 check("...which exists, sits above LLM_TIMEOUT_S and under the turn ceiling",

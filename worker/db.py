@@ -526,6 +526,15 @@ def get_project(conn, project_id):
         return cur.fetchone()
 
 
+def set_project_kind(conn, project_id, kind):
+    """Worker-side mode steering after the source duration is known."""
+    if kind not in ("edit", "shorts"):
+        raise ValueError("project kind must be edit or shorts")
+    with conn.cursor() as cur:
+        cur.execute("UPDATE projects SET kind = %s WHERE id = %s",
+                    (kind, project_id))
+
+
 def get_asset(conn, asset_id):
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM assets WHERE id = %s", (asset_id,))

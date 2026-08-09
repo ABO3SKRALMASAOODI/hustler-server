@@ -4981,16 +4981,38 @@ def start_shorts(user_id, project_id):
             ((index_row.get("json") or {}).get("video") or {})
             .get("duration") or original.get("duration_s") or 0.0)
         if source_duration < 60.0:
-            # This is deterministic, so do it before the credit gate and job
-            # enqueue.  The old path spent a queue slot, failed, then told the
-            # user to press the same impossible button again.
+            # "SHORTS" is a user goal, not an implementation detail. This
+            # source already fits one short, so steer it into the direct
+            # editor instead of returning a dead-end 400 or enqueueing the
+            # long-video multi-clip planner. The indexer performs the same
+            # routing automatically and replays a pending upload-time brief.
+            cur.execute("""UPDATE projects
+                           SET kind = 'edit',
+                               meta = COALESCE(meta, '{}'::jsonb)
+                                      || jsonb_build_object(
+                                           'direct_short_routed_at', NOW())
+                           WHERE id = %s""", (project_id,))
+            if p.get("chat_session_id"):
+                cur.execute("""INSERT INTO chat_messages
+                                      (session_id, role, content, meta)
+                               SELECT %s, 'assistant', %s, %s
+                               WHERE NOT EXISTS (
+                                   SELECT 1 FROM chat_messages
+                                   WHERE session_id = %s
+                                     AND meta->>'kind' = 'direct_short')""",
+                            (p["chat_session_id"],
+                             (f"This {source_duration:.0f}-second upload "
+                              "already fits one short, so I opened it in "
+                              "the Editor instead of failing. Tell me how "
+                              "you want this short tightened, reframed or "
+                              "styled and I'll edit it directly."),
+                             Json({"kind": "direct_short"}),
+                             p["chat_session_id"]))
             return jsonify({
-                "error": (f"This video is already {source_duration:.0f}s — "
-                          "it is short-form already. Edit it directly in "
-                          "chat instead of cutting shorts from it."),
-                "code": "source_already_short",
+                "direct_edit": True,
+                "kind": "edit",
                 "duration_s": round(source_duration, 1),
-            }), 400
+            })
         # Same two walls as sending a message: a shorts run is model time
         # plus a fan of renders, so it needs the same credit standing.
         if plan_gate.needs_plan(conn, user_id):

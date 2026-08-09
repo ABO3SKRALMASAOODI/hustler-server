@@ -47,6 +47,7 @@ import tracker
 import travel
 import url_media
 import remote
+import request_intent
 import visual
 import webrecord
 from captions import KARAOKE_HARD_MAX
@@ -180,6 +181,7 @@ class ToolContext:
         # See write_edl for why this is reported rather than blocked.
         self._states_seen = {}
         self.rendered_versions = set()  # versions with a successful preview
+        self.preview_requests = 0      # candidate proof + one repair proof
         self.autorendered = False     # loop set: model skipped render_preview
         # Round 91 grade contact strips: iterating a color against ~2s strips
         # instead of full renders. last_strip_chain is the grade chain the
@@ -10901,6 +10903,15 @@ def render_preview(ctx):
     strip = _grade_strip_shortcut(ctx, row)
     if strip:
         return strip
+    if not getattr(ctx, "autorendering", False):
+        if ctx.preview_requests >= config.AGENT_MAX_PREVIEWS_PER_TURN:
+            return (
+                "REJECTED: this turn already used its candidate preview and "
+                "repair preview. Do not render or keep polishing again. "
+                "Preserve the best valid version and reply honestly about "
+                "anything that remains."
+            )
+        ctx.preview_requests += 1
     # Round 81: name the output seconds this edit changed, so the render job
     # can pull a frame at each and the self-check can review the CLAIM
     # ("this should read X, behind the person") instead of nine even samples
@@ -12228,9 +12239,13 @@ def make_shorts(ctx, count=None, style_note=None):
                 "project has none yet — ask the user to upload their long "
                 "video first.")
     if ctx.duration < 60.0:
-        return (f"REJECTED: the video is only {ctx.duration:.0f}s — shorts "
-                "are cut FROM long videos. Offer to reframe/tighten this "
-                "one instead (auto_reframe, keep_segments).")
+        return (f"DIRECT SHORT: this {ctx.duration:.0f}s source already fits "
+                "one short, so do not start the multi-clip extractor. "
+                "Continue THIS turn and edit it directly from the user's "
+                "brief: use keep_segments only if tightening is requested, "
+                "auto_reframe for 9:16 when requested, then the normal "
+                "caption/effect/audio tools. This is a routing instruction, "
+                "not a failure — do the edit now.")
     if not (ctx.index.get("words") or []):
         return ("REJECTED: this video has no transcribed speech, and the "
                 "shorts planner picks moments from the transcript. Tell the "
@@ -14241,6 +14256,20 @@ def execute(ctx, name, args):
     if not entry:
         return (f"Unknown tool '{name}'. Available: "
                 + ", ".join(TOOLS))
+    # A latest-message correction such as "字幕なしに戻して" is not a taste
+    # decision. Project 481 asked for captions removed while its queued turn
+    # re-added them from an older brief. Block the contradiction at dispatch;
+    # add_captions(mode='off') remains the supported removal path.
+    if request_intent.no_captions(getattr(ctx, "user_message", "")):
+        adding_captions = (name == "set_caption_style" or
+                           (name == "add_captions" and
+                            str((args or {}).get("mode") or "") != "off"))
+        if adding_captions:
+            return (
+                "REJECTED: the latest user request explicitly requires no "
+                "captions/subtitles. Use add_captions(mode='off') if "
+                "captions currently exist; do not add or restyle them."
+            )
     fn = entry[0]
     try:
         return fn(ctx, **(args or {}))
