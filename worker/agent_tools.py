@@ -2238,7 +2238,8 @@ def _resolve_music(ctx, storage_key):
             "storage_key": storage_key}, None
 
 
-def search_music(ctx, query, min_seconds=None, max_seconds=None):
+def search_music(ctx, query, min_seconds=None, max_seconds=None,
+                 commercial_use=None):
     """READ: find music on the open web (round 98; the bundled pack is
     deleted). Results carry license + author so the obligation travels
     with the track instead of vanishing into an export."""
@@ -2251,8 +2252,16 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None):
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
         return "REJECTED: min_seconds/max_seconds must be numbers."
+    # A business/ad brief must never receive a non-commercial track merely
+    # because the model forgot a licensing adjective. The explicit flag can
+    # make an ambiguous personal brief stricter, but cannot weaken a clearly
+    # commercial request (projects 501 and 505 both received unusable NC beds).
+    commercial = (bool(commercial_use)
+                  or request_intent.commercial_use(
+                      getattr(ctx, "user_message", "")))
     try:
-        hits = music_search.search(query, min_s=mn, max_s=mx)
+        hits = music_search.search(query, min_s=mn, max_s=mx,
+                                   commercial_only=commercial)
     except music_search.MusicSearchError as e:
         return (f"Music search failed ({str(e)[:180]}). Try a simpler "
                 "genre query, or use an uploaded file "
@@ -2266,6 +2275,8 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None):
                 "carries it); platforms license trend audio inside their "
                 "own apps only.")
     ctx._music_hits = {h["id"]: h for h in hits}
+    gate = (" Commercial-use request detected: non-commercial tracks were "
+            "excluded." if commercial else "")
     return ("Tracks found (each line carries its license terms — relay "
             "them):\n- "
             + "\n- ".join(music_search.describe(h) for h in hits)
@@ -2273,7 +2284,7 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None):
               "listen_to(asset_key=...) to HEAR it before committing, "
               "add_music to lay it in — and tell the user which track you "
               "chose and its license line (a CC BY credit is theirs to "
-              "carry in the caption).")
+              "carry in the caption)." + gate)
 
 
 def fetch_music(ctx, id):
@@ -5047,6 +5058,34 @@ def reset_edit(ctx):
                 "is a canvas program built from clips and images — remove the "
                 "inserts you don't want instead.")
     prev = ctx.latest_edl()
+    # A reset is uniquely destructive: unlike every other EDL write it erases
+    # ALL prior work. Project 501's follow-up merely restated and refined its
+    # documentary brief; the model reset a good v26 anyway, then hit a guard
+    # while rebuilding and left a worse partial v49. Make the contract
+    # executable instead of trusting a distant prompt. Preservation requests
+    # are allowed because removing an abandoned prior edit is how the source
+    # can actually be preserved. An invalid saved EDL remains the unconditional
+    # escape hatch this tool was created for.
+    saved_invalid = False
+    try:
+        validate_edl(prev["json"], ctx.duration)
+    except EDLValidationError:
+        saved_invalid = True
+    asked = getattr(ctx, "user_message", "") or ""
+    # Over MCP, invoking reset_edit IS the explicit instruction: there is no
+    # in-house chat message on the cached ToolContext. Preserve parity for the
+    # founder's subscription-backed editor while keeping the autonomous agent
+    # behind the latest-message contract.
+    direct_mcp_call = ((getattr(ctx, "job", None) or {}).get("type")
+                       == "mcp_tool")
+    if not saved_invalid and not (
+            request_intent.reset_requested(asked)
+            or request_intent.preservation_requested(asked)
+            or direct_mcp_call):
+        return ("REJECTED: reset_edit would throw away every valid edit, but "
+                "the user's latest message did not ask to reset/start over or "
+                "restore the untouched source. Preserve the current EDL and "
+                "apply the requested refinement in place.")
     fresh = default_edl(ctx.duration)
     result = ctx.write_edl(
         fresh, "reset the edit — back to the full untouched video")
@@ -12583,7 +12622,9 @@ TOOLS = {
                      "video IS, not a generic mood. Results carry title, "
                      "artist, duration and the exact license terms (public "
                      "domain, credit required, or NON-COMMERCIAL-ONLY) — "
-                     "relay the terms, the user decides. "
+                     "relay the terms. Business/ad briefs automatically "
+                     "exclude non-commercial tracks; set commercial_use "
+                     "true when an ambiguous brief also needs that safety. "
                      "min_seconds/max_seconds filter length. For a "
                      "SPECIFIC song, a pasted LINK is fetch_url's job; a "
                      "TRENDING platform sound only the user can provide "
@@ -12591,7 +12632,8 @@ TOOLS = {
                      "substituting silently.",
                      {"query": {"type": "string"},
                       "min_seconds": {"type": "number"},
-                      "max_seconds": {"type": "number"}}),
+                      "max_seconds": {"type": "number"},
+                      "commercial_use": {"type": "boolean"}}),
     "fetch_music": (fetch_music, "Download ONE search_music result (by its "
                     "id) into the project as a normal music asset — "
                     "returns the storage_key for add_music. Listen to it "
@@ -13379,7 +13421,8 @@ TOOLS = {
                           "required": ["x", "y", "w", "h"]}}}),
     "reset_edit": (reset_edit, "Throw the whole edit away and start again "
                    "from the full untouched source video. Use it when the "
-                   "user asks to start over, and as the LAST RESORT when a "
+                   "LATEST user message explicitly asks to start over or "
+                   "restore the untouched source, and as the LAST RESORT when a "
                    "write tool keeps rejecting the EDL for a reason you "
                    "cannot fix from inside it (a span that no longer fits the "
                    "source). Destructive: it drops every cut, caption, track "

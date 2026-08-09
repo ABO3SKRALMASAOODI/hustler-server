@@ -993,14 +993,16 @@ MAX_CLAIMS_ABSOLUTE = int(os.getenv("MAX_CLAIMS_ABSOLUTE", "6"))
 TRAY_RESCUE_AFTER_S = int(os.getenv("TRAY_RESCUE_AFTER_S", "300"))
 
 AGENT_MAX_ITERATIONS = 30
-# A model call is the expensive unit, not a Python loop iteration. Production
-# projects 480-484 made 29-72 calls each, resent 10.1M prompt tokens and held
-# same-project follow-ups for up to 23 minutes. Most useful corrective turns
-# in those sessions finished in 5-9 calls. Give a full build room to plan,
-# batch its writes, preview and repair once, then stop. The hard ceiling keeps
-# a stale Render env from silently restoring the old behaviour.
+# A model-call ceiling is only an emergency runaway backstop. It must not be a
+# normal editing limit: project 501 reached the old 16-call wall while still
+# making valid documentary edits, auto-rendered a partial rebuild, and told the
+# user to ask again. Progress, the user's spend budget, the inactivity window,
+# cycle detection and the 3 x 30 iteration walls already bound real work. Keep
+# this at least as large as all three productive passes so a stale Render env
+# cannot silently restore the customer-visible 16-call cutoff; 180 is still a
+# hard poison-pill ceiling if every other guard fails.
 AGENT_MAX_MODEL_CALLS = min(
-    16, max(4, int(os.getenv("AGENT_MAX_MODEL_CALLS", "16"))))
+    180, max(90, int(os.getenv("AGENT_MAX_MODEL_CALLS", "90"))))
 # How many times a turn that hits the iteration ceiling MID-WORK may resume
 # itself (round 96b, project 383: 30 productive calls in 7.5 min, then a
 # canned English "tell me to continue" at a Portuguese-speaking user with

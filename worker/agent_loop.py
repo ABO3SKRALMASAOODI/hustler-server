@@ -720,6 +720,20 @@ _LANG_MARKERS_RAW = {
            "cette", "mais", "été", "sur", "pas", "aussi", "déjà"),
     "it": ("il", "gli", "è", "una", "con", "per", "anche", "questo",
            "sono", "già", "più", "ma", "della", "delle"),
+    # Project 501 (2026-08-09): an English documentary brief got a Romanian
+    # handoff. Latin-vs-Latin is invisible to the script guard, just like the
+    # earlier English->German incident. Diacritics and common function words
+    # give a conservative fingerprint without treating one borrowed word as a
+    # language change.
+    "ro": ("și", "sau", "este", "sunt", "fost", "are", "cu", "pentru", "din",
+           "care", "secunde", "subtitrări", "muzică", "eliminat",
+           "adăugat", "păstrat", "redus"),
+    # Project 505: the English user got a Romanized-Hindi/Hinglish delivery.
+    # These short particles only trigger in combination (>=3 hits, 2:1 lead)
+    # and only when the reply contains zero markers from the user's language.
+    "hi_latn": ("hai", "hain", "aur", "ka", "ki", "ke", "se", "mein",
+                "par", "gaya", "gayi", "kiya", "liye", "nahi", "karo",
+                "wala"),
 }
 
 

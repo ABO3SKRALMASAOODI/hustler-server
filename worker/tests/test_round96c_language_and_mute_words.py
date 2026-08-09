@@ -67,6 +67,20 @@ GERMAN = ("Die langen Pausen wurden gekürzt und die Captions auf große "
 check("project 384's English->German reply is caught",
       agent_loop._language_flip(USER, USER, GERMAN) == ("words", "en", "de"))
 
+ROMANIAN = ("Reel-ul final are 23,5 secunde, cu subtitrări sincronizate și "
+            "muzică discretă. Am eliminat zoom-urile aglomerate, am redus "
+            "suprapunerea textului și am păstrat povestea autentică.")
+check("project 501's English->Romanian reply is caught",
+      agent_loop._language_flip(USER, USER, ROMANIAN)
+      == ("words", "en", "ro"))
+
+HINGLISH = ("17,6 s ka vertical Instagram reel complete hai: opening "
+            "tightened, clean pacing aur music bed add kiya gaya. Audio "
+            "-15,5 LUFS integrated aur -1,2 dBTP par normalize hai.")
+check("project 505's English->Hinglish reply is caught",
+      agent_loop._language_flip(USER, USER, HINGLISH)
+      == ("words", "en", "hi_latn"))
+
 ENGLISH_OK = ("The long pauses were cut and the captions switched to big "
               "podcast captions. The punch zoom is set on the key line and "
               "the preview shows it landing correctly.")

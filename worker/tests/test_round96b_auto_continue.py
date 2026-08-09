@@ -79,8 +79,10 @@ check("tool summary reads like an editor's log",
 
 print("== round 101: progress-aware clock and one model-call budget ==")
 
-check("model calls have a hard practical ceiling",
-      4 <= config.AGENT_MAX_MODEL_CALLS <= 16)
+check("model calls use only an emergency ceiling after every productive pass",
+      config.AGENT_MAX_MODEL_CALLS
+      >= config.AGENT_MAX_ITERATIONS * (config.AGENT_AUTO_CONTINUES + 1)
+      and config.AGENT_MAX_MODEL_CALLS <= 180)
 src = inspect.getsource(agent_loop._run_loop)
 check("productive work refreshes the clock without a fixed allowance",
       "if _progressed and not ctx.over_budget()" in src

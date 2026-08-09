@@ -61,3 +61,22 @@ def test_openverse_is_not_commercial_gated(monkeypatch):
     music_search._openverse_search("lofi", None, None, 5)
     # modification (no ND) is required; commercial must NOT be.
     assert seen.get("license_type") == "modification"
+
+
+def test_commercial_search_filters_nc_without_hiding_it_from_personal_use(
+        monkeypatch):
+    page = {"results": [
+        {"id": "nc", "title": "Personal", "creator": "A",
+         "license": "by-nc-sa", "license_version": "3.0",
+         "url": "https://audio.example/nc.mp3", "duration": 30000},
+        {"id": "by", "title": "Commercial", "creator": "B",
+         "license": "by", "license_version": "4.0",
+         "url": "https://audio.example/by.mp3", "duration": 30000},
+    ]}
+    monkeypatch.setattr(music_search.net_fetch, "get_json",
+                        lambda *a, **k: page)
+    personal = music_search._openverse_search("tech", None, None, 5)
+    commercial = music_search._openverse_search(
+        "tech", None, None, 5, commercial_only=True)
+    assert [x["id"] for x in personal] == ["openverse:nc", "openverse:by"]
+    assert [x["id"] for x in commercial] == ["openverse:by"]

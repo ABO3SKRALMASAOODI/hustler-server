@@ -47,6 +47,15 @@ _SOURCE_CHECK = re.compile(
     r"\b(?:crear|hacer)\b.{0,35}\bdesde\s+cero\b"
     r")")
 
+_COMMERCIAL_USE = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:ad|advert|advertisement|promo|promotional|brand|branded|business|"
+    r"company|corporate|client|marketing|product|startup|moneti[sz]ed|"
+    r"sponsored|campaign|sales?)\b|"
+    r"\b(?:instagram|social|video)\s+ad\b|"
+    r"\bfor\s+(?:our|my|the)\s+(?:company|business|brand|client|product)\b"
+    r")")
+
 
 def no_captions(text):
     return bool(_NO_CAPTIONS.search(text or ""))
@@ -62,6 +71,16 @@ def reset_requested(text):
 
 def source_inventory_must_be_checked(text):
     return bool(_SOURCE_CHECK.search(text or ""))
+
+
+def commercial_use(text):
+    """True when the latest brief clearly describes business/monetized use.
+
+    This is a safety floor for catalog licensing, not a creative classifier:
+    false means unknown/personal, while true means an NC track must not be
+    silently baked into a file the user cannot lawfully publish as requested.
+    """
+    return bool(_COMMERCIAL_USE.search(text or ""))
 
 
 def request_contract(text):

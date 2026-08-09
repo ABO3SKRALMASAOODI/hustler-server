@@ -53,3 +53,14 @@ def test_preservation_reset_and_source_reference_contracts():
 def test_latest_message_always_has_priority():
     contract = request_intent.request_contract("make the text blue")
     assert "final user message has highest priority" in contract
+
+
+def test_business_briefs_are_commercial_music_contexts():
+    for text in (
+        "Turn this into a premium Instagram ad for our startup",
+        "Make a corporate documentary about the company",
+        "This is a branded product promo for a client",
+    ):
+        assert request_intent.commercial_use(text)
+    assert not request_intent.commercial_use(
+        "Make a cozy personal birthday montage for my family")

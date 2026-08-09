@@ -101,7 +101,7 @@ def _license_ok(text):
     return not any(x in t for x in ("-nd", "/nd/", "nd-"))
 
 
-def _jamendo_search(query, min_s, max_s, count):
+def _jamendo_search(query, min_s, max_s, count, commercial_only=False):
     params = {
         "client_id": config.JAMENDO_CLIENT_ID, "format": "json",
         "limit": count, "search": query, "audiodownload_allowed": "true",
@@ -120,6 +120,8 @@ def _jamendo_search(query, min_s, max_s, count):
         lic = t.get("license_ccurl") or ""
         if not (_CC_LICENSE.search(lic) and _license_ok(lic)):
             continue
+        if commercial_only and "nc" in lic.lower():
+            continue
         url = t.get("audiodownload") or t.get("audio")
         if not url:
             continue
@@ -134,12 +136,15 @@ def _jamendo_search(query, min_s, max_s, count):
     return out
 
 
-def _openverse_search(query, min_s, max_s, count):
+def _openverse_search(query, min_s, max_s, count, commercial_only=False):
     # modification only: syncing music under a video is a derivative work,
-    # so ND licenses must never even be requested. NC results are welcome —
-    # their restriction is stated per hit, not filtered.
+    # so ND licenses must never even be requested. NC results remain welcome
+    # for personal use and are filtered locally for commercial briefs.
     params = {"q": query, "license_type": "modification",
-              "category": "music", "page_size": count}
+              "category": "music",
+              # Pull enough candidates that filtering NC locally does not
+              # turn the first page into a false "no music" result.
+              "page_size": min(20, count * (3 if commercial_only else 1))}
     data = net_fetch.get_json(OPENVERSE_API, params=params,
                               timeout_s=API_TIMEOUT_S,
                               allowed_hosts=["api.openverse.org"])
@@ -148,6 +153,8 @@ def _openverse_search(query, min_s, max_s, count):
         lic = "-".join(x for x in (t.get("license"),
                                    t.get("license_version")) if x)
         if not _license_ok(t.get("license") or ""):
+            continue
+        if commercial_only and "nc" in lic.lower():
             continue
         url = t.get("url")
         if not url:
@@ -170,7 +177,8 @@ def _openverse_search(query, min_s, max_s, count):
     return out
 
 
-def search(query, min_s=None, max_s=None, count=MAX_RESULTS):
+def search(query, min_s=None, max_s=None, count=MAX_RESULTS,
+           commercial_only=False):
     """Search the configured providers, first-with-results wins (the
     stock.py rule: merged catalogs read as noise)."""
     if not available():
@@ -186,7 +194,7 @@ def search(query, min_s=None, max_s=None, count=MAX_RESULTS):
     lanes.append(("openverse", _openverse_search))
     for name, fn in lanes:
         try:
-            hits = fn(query, min_s, max_s, count)
+            hits = fn(query, min_s, max_s, count, commercial_only)
         except Exception as e:
             errors.append(f"{name}: {str(e)[:120]}")
             continue

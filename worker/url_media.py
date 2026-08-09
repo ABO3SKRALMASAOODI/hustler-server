@@ -459,7 +459,7 @@ def _extract_with_fallback(url, workdir, prefer=None):
         raise FetchMediaError(
             "YouTube blocked THIS upload from our server (\"sign in to "
             "confirm you're not a bot\") — a per-video check on our "
-            "datacenter IP, not a problem with the song. If this link came "
+            "datacenter IP, not a problem with the link. If this link came "
             "from find_song, fetch the NEXT candidate now (different "
             "uploads are challenged at different rates; official/popular "
             "ones usually pass). Only after the candidates are exhausted, "
