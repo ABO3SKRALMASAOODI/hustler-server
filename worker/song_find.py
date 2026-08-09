@@ -26,12 +26,11 @@ is hidden entirely when the extractor path itself is off.
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 
 import config
+import ytaccess
 
 SEARCH_COUNT = 6
 SEARCH_TIMEOUT_S = 60
@@ -180,24 +179,19 @@ def _yt_candidates(query, count, what="a search query"):
            "--socket-timeout", "20",
            "--flat-playlist", "--dump-json",
            f"ytsearch{int(count)}:{query}"]
-    # A writable COPY of the cookie jar, never the mounted secret — yt-dlp
-    # writes rotated cookies back on every run and /etc/secrets is
-    # read-only (url_media documents the crash this caused).
-    run_cookies = None
-    cookies = config.YTDLP_COOKIES_FILE
-    if cookies and os.path.isfile(cookies):
-        try:
-            fd, run_cookies = tempfile.mkstemp(prefix="ytck_",
-                                               suffix=".txt")
-            os.close(fd)
-            shutil.copyfile(cookies, run_cookies)
-            cmd += ["--cookies", run_cookies]
-        except OSError:
-            run_cookies = None      # degrade to anonymous, never crash
+    # Operator cookies via ytaccess: a writable, NORMALIZED per-run copy,
+    # never the mounted secret — yt-dlp writes rotated cookies back on
+    # every run and /etc/secrets is read-only (url_media documents the
+    # crash). The old raw copyfile here skipped the tab restoration the
+    # fetch path had, so a dashboard-pasted jar rode along unreadable.
+    run_cookies = ytaccess.prepare_run_jar()
+    if run_cookies:
+        cmd += ["--cookies", run_cookies]
     if config.YTDLP_PROXY:
         cmd += ["--proxy", config.YTDLP_PROXY]
     if config.YTDLP_REMOTE_COMPONENTS:
         cmd += ["--remote-components", config.YTDLP_REMOTE_COMPONENTS]
+    cmd += ytaccess.pot_args()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=SEARCH_TIMEOUT_S)

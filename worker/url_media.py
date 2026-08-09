@@ -41,7 +41,6 @@ import glob
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -52,6 +51,7 @@ from urllib.parse import urlparse, unquote
 import config
 import media
 import net_fetch
+import ytaccess
 
 
 class FetchMediaError(Exception):
@@ -248,40 +248,10 @@ def _ytdlp_available():
         return False
 
 
-def _copy_cookies_normalized(src, dst):
-    """Copy the cookie jar, restoring TABS between fields.
-
-    The Netscape format is strictly tab-separated, and the jar reaches
-    production by being pasted through editors and dashboard text fields
-    that quietly flatten tabs to spaces — after which yt-dlp ignores every
-    line WITHOUT A WORD, and a fresh, valid, logged-in jar behaves exactly
-    like no jar at all (Aug 8: the wall survived a same-day cookie refresh,
-    and the pasted file showed four-space runs where the tabs had been). A
-    line that already has tabs is kept verbatim; a tabless line that splits
-    into the 7+ whitespace-separated fields of a cookie row is re-joined
-    with tabs, everything after field 7 staying glued as the value.
-    """
-    with open(src, encoding="utf-8", errors="replace") as f, \
-            open(dst, "w", encoding="utf-8") as out:
-        for line in f:
-            raw = line.rstrip("\n")
-            if not raw.strip() or raw.lstrip().startswith("#") \
-                    or "\t" in raw:
-                out.write(raw + "\n")
-                continue
-            fields = raw.split()
-            if len(fields) >= 7:
-                raw = "\t".join(fields[:6]) + "\t" + " ".join(fields[6:])
-            out.write(raw + "\n")
-
-
-def _bot_walled(detail):
-    """YouTube's datacenter-IP bot check — the one extractor failure that a
-    different player client often gets past, so it is worth exactly one
-    retry. Matched on the phrases yt-dlp surfaces for it."""
-    d = (detail or "").lower()
-    return ("sign in to confirm" in d or "not a bot" in d
-            or "--cookies" in d)
+# The bot-wall vocabulary and the whole cookie story live in ytaccess now —
+# song_find and the boot probe speak them too, and three copies of "what
+# does YouTube's refusal look like" would drift.
+_bot_walled = ytaccess.bot_walled
 
 
 def _extract(url, workdir, prefer=None, client_override=None):
@@ -335,22 +305,12 @@ def _extract(url, workdir, prefer=None, client_override=None):
            "-o", os.path.join(workdir, "dl.%(ext)s")]
     if client_override:
         cmd += ["--extractor-args", f"youtube:player_client={client_override}"]
-    # Operator-supplied cookies (see config.YTDLP_COOKIES_FILE). Checked for
-    # existence every call rather than at import: a missing secret file must
-    # degrade to the normal anonymous attempt, not crash every fetch.
-    # ALWAYS A WRITABLE COPY, never the mounted file: yt-dlp saves rotated
-    # cookies back to the jar it was handed on every run, and the secret
-    # mount (/etc/secrets on Render) is read-only — passing it directly
-    # crashed every cookie-mode fetch with "[Errno 30] Read-only file
-    # system". The copy also keeps the master secret pristine across runs.
-    cookies = config.YTDLP_COOKIES_FILE
-    if cookies and os.path.isfile(cookies):
-        run_cookies = os.path.join(workdir, "cookies_run.txt")
-        try:
-            _copy_cookies_normalized(cookies, run_cookies)
-            cmd += ["--cookies", run_cookies]
-        except OSError:
-            pass                    # degrade to anonymous, never crash
+    # Operator cookies, resolved and normalized by ytaccess (five delivery
+    # doors, one normalizer) — always a WRITABLE per-run copy that dies
+    # with the workdir, never a mounted or shared file.
+    run_cookies = ytaccess.prepare_run_jar(workdir)
+    if run_cookies:
+        cmd += ["--cookies", run_cookies]
     # Operator-supplied proxy (config.YTDLP_PROXY): the no-account route
     # past the bot wall — the extractor egresses from a residential address
     # instead of the datacenter IP YouTube challenges.
@@ -360,6 +320,9 @@ def _extract(url, workdir, prefer=None, client_override=None):
     # it, the cookie-mode client path resolves NO formats.
     if config.YTDLP_REMOTE_COMPONENTS:
         cmd += ["--remote-components", config.YTDLP_REMOTE_COMPONENTS]
+    # PO tokens (ytaccess.pot_args): anonymous proof-of-origin from the
+    # baked bgutil script — the door past the wall that needs no account.
+    cmd += ytaccess.pot_args()
     if prefer == KIND_AUDIO:
         # The user asked for a song. Pulling the video track and throwing it
         # away wastes the bulk of the download.
@@ -413,6 +376,13 @@ def _extract(url, workdir, prefer=None, client_override=None):
         # can act on "Private video" and cannot act on a generic failure.
         detail = (err or out or "").strip().splitlines()
         tail = detail[-1][:200] if detail else "no media found at that link"
+        # A rotated-out cookie jar hides as a bot-wall failure (rejected
+        # cookies = anonymous = challenged). Name the real culprit so the
+        # operator refreshes the jar instead of re-plumbing the delivery —
+        # the Aug 8-9 wall chase was exactly this misread.
+        if ytaccess.stale_cookies(err):
+            tail = ("the operator cookie jar has been rotated out by "
+                    "Google and needs a fresh export — " + tail)
         raise FetchMediaError(_safe_detail(tail))
     # Largest file: when a merge is skipped we can be left with the separate
     # audio and video parts, and the video one is what was asked for.

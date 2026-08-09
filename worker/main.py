@@ -33,6 +33,7 @@ import remote
 import renderer
 import shorts
 import version
+import ytaccess
 
 # A filmstrip is a few seconds of ffmpeg on an already-small proxy, and the
 # studio asks for one every time a project is opened. On the single-box
@@ -459,6 +460,14 @@ def main():
     # never stop the worker from booting — and retried by the reaper until it
     # lands, so applying the migration after the deploy still ends up correct.
     publish_mcp_catalog(dbx.Db())
+
+    # Fetchability probe (ytaccess): one real --simulate extraction from
+    # THIS box, verdict to the log and app_kv. Threaded because it talks to
+    # YouTube; best-effort because a probe must never stop a boot. This is
+    # the only way an operator sees "does YouTube serve this IP" without
+    # the Render dashboard — the Aug 8-9 cookie chase was flown blind.
+    threading.Thread(target=ytaccess.boot_probe, daemon=True,
+                     name="ytdlp-probe").start()
 
     if config.REMOTE_EXECUTOR_URL and not config.REMOTE_EXECUTOR_SECRET:
         print("[dispatcher] WARNING: REMOTE_EXECUTOR_URL set but "

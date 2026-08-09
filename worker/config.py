@@ -554,22 +554,39 @@ FETCH_IMAGE_MAX_BYTES = int(os.getenv("FETCH_IMAGE_MAX_BYTES", str(10 << 20)))
 # link fails inside the turn with an honest message instead of eating the
 # whole turn and timing it out.
 FETCH_TIMEOUT_S = float(os.getenv("FETCH_TIMEOUT_S", "180"))
-# Path to a Netscape-format cookies.txt for the extractor, or "" for none.
+# Operator cookies for the extractor — see worker/ytaccess.py for the whole
+# story (why they exist, why they expire, and the five delivery doors).
 #
-# This is the ONLY thing that reliably gets past YouTube's "Sign in to
-# confirm you're not a bot" wall. That wall is an IP-reputation check:
-# Render's egress is a datacenter address, so the default web client is
-# challenged on essentially every request no matter how many player clients
-# we cycle through. The alternate-client chain below helps sometimes and
-# cannot be relied on.
-#
-# Deliberately unset by default, and deliberately an operator decision:
-# supplying cookies means the fetch runs as a logged-in YouTube account,
+# Supplying cookies means the fetch runs as a logged-in YouTube account,
 # which is a terms-of-service question (and puts that account at risk), not
 # a technical one. Nothing here bypasses payment or DRM — it is the same
 # public page a browser loads — but it should be switched on knowingly.
-# Point it at a file on the worker's disk (e.g. a Render secret file).
+#
+# YTDLP_COOKIES_FILE: a path (Render Secret File) — or, because that is
+# what actually happened, the jar CONTENT pasted where the path belongs;
+# ytaccess accepts both. YTDLP_COOKIES: content, no path pretense.
 YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+YTDLP_COOKIES = os.getenv("YTDLP_COOKIES", "")
+# Where Render mounts Secret Files; scanned for a jar-shaped file when the
+# path vars point nowhere. "" disables the scan.
+YTDLP_SECRETS_DIR = os.getenv("YTDLP_SECRETS_DIR", "/etc/secrets").strip()
+# app_kv key holding a jar delivered over psql ("" disables) — the door for
+# an operator with database hands but no dashboard.
+YTDLP_COOKIES_KV_KEY = os.getenv("YTDLP_COOKIES_KV_KEY",
+                                 "ytdlp_cookies").strip()
+# The bgutil PO-token script baked by the Dockerfile's POT layer. Tokens are
+# the anonymous, nothing-to-rotate way to look legitimate from a datacenter
+# IP; ytaccess only engages this when the directory really exists, so dev
+# machines and POT=0 builds stay silently anonymous. "" disables outright.
+YTDLP_POT_SERVER_HOME = os.getenv("YTDLP_POT_SERVER_HOME",
+                                  "/opt/bgutil-pot/server").strip()
+# Boot-time fetchability probe (worker/ytaccess.probe): one --simulate
+# extraction from this box, verdict to the log and the app_kv row
+# 'ytdlp_probe'. The only way to see "does YouTube serve THIS IP" without
+# dashboard access. "0" skips it.
+YTDLP_BOOT_PROBE = os.getenv("YTDLP_BOOT_PROBE", "1").strip()
+YTDLP_PROBE_URL = os.getenv(
+    "YTDLP_PROBE_URL", "https://www.youtube.com/watch?v=dQw4w9WgXcQ").strip()
 # The other way past the bot wall: route ONLY the extractor through a proxy
 # whose exit is a residential/mobile address (any scheme yt-dlp accepts,
 # e.g. http://user:pass@host:port). No account involved, so nothing can be

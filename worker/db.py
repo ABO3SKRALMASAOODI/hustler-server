@@ -433,6 +433,33 @@ def pending_preview_job(conn, project_id, edl_version):
         return row["id"] if row else None
 
 
+def kv_get(conn, key):
+    """One value from app_kv, or None — including when the table itself
+    does not exist yet (migration 016 may land after the code that wants
+    it; a worker must keep booting and fetching either way)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.app_kv') AS t")
+        if not (cur.fetchone() or {}).get("t"):
+            return None
+        cur.execute("SELECT value FROM app_kv WHERE key = %s", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+
+def kv_put(conn, key, value):
+    """Upsert one app_kv row; a no-op when the table is missing, for the
+    same must-not-hurt-a-boot reason as kv_get."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.app_kv') AS t")
+        if not (cur.fetchone() or {}).get("t"):
+            return
+        cur.execute("""INSERT INTO app_kv (key, value, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (key) DO UPDATE
+                       SET value = EXCLUDED.value, updated_at = NOW()""",
+                    (key, value))
+
+
 def publish_mcp_catalog(conn, catalog):
     """Publish the tool catalog the MCP surface serves (see mcp_exec.catalog).
 

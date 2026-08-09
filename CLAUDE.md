@@ -83,6 +83,29 @@ Retired but grandfathered: Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,
 - **`PADDLE_WEBHOOK_SECRET`** — the webhook fails OPEN without it (anyone could forge a subscription).
 - **`SECRET_KEY`** — falls back to a literal default if unset → forgeable JWTs.
 
+## YouTube fetch from the worker (bot wall)
+
+YouTube challenges Render's datacenter IP ("Sign in to confirm you're not a
+bot"). `worker/ytaccess.py` is the whole story; the operator-facing facts:
+
+- **PO tokens are the default fix** — baked into the worker image (Dockerfile
+  `POT=1` layer, bgutil provider). Anonymous, nothing to rotate, no env needed.
+- **Cookies are optional extra strength** and PERISHABLE: an export taken
+  from a running browser is rotated out by Google within ~a day (Aug 8-9:
+  two jars died this way while the plumbing got blamed). To make a jar that
+  lasts: **private/incognito window → log in to youtube.com → export cookies
+  from that window → close the window without logging out**, and prefer a
+  burner account. Deliver through ANY of: `YTDLP_COOKIES_FILE` (path or
+  pasted content), `YTDLP_COOKIES` (content), a Render Secret File (any
+  name — `/etc/secrets` is scanned), or over psql:
+  `INSERT INTO app_kv (key, value) VALUES ('ytdlp_cookies', <jar>) ON
+  CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();`
+  (picked up within 5 minutes, no restart).
+- **Verify from the worker's own network**: every boot writes the app_kv row
+  `ytdlp_probe` (JSON: `ok`, `why`, `cookie_source`, `stale_cookies`, `pot`,
+  `code`) — `SELECT value FROM app_kv WHERE key = 'ytdlp_probe';` answers
+  "is fetch working in prod" without the Render dashboard.
+
 ## Gotchas
 
 1. **CORS is manual** in `app.py` (`before_request`/`after_request`) — don't remove.

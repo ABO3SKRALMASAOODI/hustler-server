@@ -48,11 +48,40 @@ RUN if [ "$FFMPEG_STATIC" = "1" ]; then \
 # client path — without a runtime + the solver components, cookie-mode
 # fetches see "Requested format is not available" while anonymous ones
 # still work. Single static binary, same install idiom as ffmpeg above.
+# The POT layer below reuses this same runtime for its token script.
 RUN python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip', '/tmp/deno.zip')" \
     && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/tmp/deno-bin')" \
     && install -m755 /tmp/deno-bin/deno /usr/local/bin/deno \
     && rm -rf /tmp/deno.zip /tmp/deno-bin \
     && deno --version | head -1
+
+# PO tokens (round 102): the bgutil provider — yt-dlp's anonymous way past
+# YouTube's "Sign in to confirm you're not a bot" wall on datacenter IPs.
+# Cookies were tried first and are a treadmill: Google rotates the session
+# out from under any export taken from a still-running browser within about
+# a day (both Aug-8 jars died exactly that way). Tokens are minted locally
+# by BotGuard's own JS, no account involved, nothing to rotate.
+# Two halves, versions PINNED TOGETHER (plugin refuses a mismatched script):
+#   pip plugin  — hooks yt-dlp's PO Token Provider framework
+#   this layer  — the token script + its npm deps, run by deno (above) in
+#                 script mode: no server process to supervise, a few extra
+#                 seconds per fetch, and fetches are rare. Keep the path in
+#                 sync with worker/config.py YTDLP_POT_SERVER_HOME; ytaccess
+#                 only engages when the directory exists, so POT=0 builds
+#                 degrade to anonymous honestly.
+ARG POT=1
+ARG POT_VERSION=1.3.1
+RUN if [ "$POT" = "1" ]; then \
+      pip install --no-cache-dir bgutil-ytdlp-pot-provider==${POT_VERSION} \
+      && python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/${POT_VERSION}.tar.gz', '/tmp/bgutil.tgz')" \
+      && mkdir -p /opt/bgutil-pot \
+      && tar -xzf /tmp/bgutil.tgz -C /opt/bgutil-pot --strip-components=1 \
+      && rm /tmp/bgutil.tgz \
+      && cd /opt/bgutil-pot/server \
+      && deno install --allow-scripts=npm:canvas --frozen \
+      && test -f src/generate_once.ts \
+      && test -d node_modules; \
+    fi
 
 WORKDIR /app
 
