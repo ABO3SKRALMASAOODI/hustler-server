@@ -250,6 +250,34 @@ def test_a_full_album_never_outranks_the_single_track():
     assert ranked[0]["title"].startswith("Interstellar Main Theme")
 
 
+def test_a_walled_candidate_says_try_the_next_not_give_up(monkeypatch,
+                                                          tmp_path):
+    """Aug 9: the wall is per-UPLOAD (an official upload fetched fine while
+    two re-uploads of the same track were challenged). One unlucky pick
+    must roll to the next find_song candidate, so the failure text has to
+    order the retry — and must NOT carry the give-up coda that told the
+    model to stop and ask for an upload."""
+    class Ctx:
+        urls_fetched = []
+        workdir = str(tmp_path)
+    def walled(*a, **k):
+        raise agent_tools.url_media.FetchMediaError(
+            "YouTube blocked THIS upload from our server (\"sign in to "
+            "confirm you're not a bot\") — a per-video check")
+    monkeypatch.setattr(agent_tools.url_media, "fetch", walled)
+    out = agent_tools.fetch_url(Ctx(), "https://www.youtube.com/watch?v=x",
+                                as_kind="music")
+    assert "not a bot" in out
+    assert "suggest they upload" not in out     # no give-up script
+    # A REAL failure (private video) keeps the honest full stop.
+    def private(*a, **k):
+        raise agent_tools.url_media.FetchMediaError("Private video")
+    monkeypatch.setattr(agent_tools.url_media, "fetch", private)
+    out = agent_tools.fetch_url(Ctx(), "https://www.youtube.com/watch?v=x",
+                                as_kind="music")
+    assert "suggest they upload" in out and "Do NOT claim" in out
+
+
 def test_cookie_jar_is_copied_never_the_mounted_secret(monkeypatch,
                                                        tmp_path):
     """yt-dlp writes rotated cookies back to the jar on every run; Render's

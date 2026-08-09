@@ -449,13 +449,23 @@ def _extract_with_fallback(url, workdir, prefer=None):
                 if not _bot_walled(str(retry_err)):
                     raise
         _clear_partials(workdir)
+        # The wall is PER-UPLOAD, not per-song: Aug 9, the same box that
+        # fetched an official upload fine was challenged on two small
+        # re-upload channels of the same track. So a walled candidate from
+        # find_song is a reason to try the NEXT link, not to give up — the
+        # instruction the agent reads has to say so, or one unlucky pick
+        # ends the whole request (that is exactly how "add the Interstellar
+        # music" died on Aug 8).
         raise FetchMediaError(
-            "YouTube blocked the download from our server (\"sign in to "
-            "confirm you're not a bot\"). This is YouTube refusing our "
-            "datacenter IP, not a problem with the link — it usually still "
-            "plays fine in your own browser. Download the file yourself and "
-            "attach it with the paperclip in chat (mp3/wav/m4a for audio, "
-            "mp4/mov for video) and it will drop straight into the edit.")
+            "YouTube blocked THIS upload from our server (\"sign in to "
+            "confirm you're not a bot\") — a per-video check on our "
+            "datacenter IP, not a problem with the song. If this link came "
+            "from find_song, fetch the NEXT candidate now (different "
+            "uploads are challenged at different rates; official/popular "
+            "ones usually pass). Only after the candidates are exhausted, "
+            "tell the user: the link plays fine in a browser, so they can "
+            "download the file and attach it with the paperclip in chat "
+            "(mp3/wav/m4a for audio, mp4/mov for video).")
 
 
 def _download_direct(url, workdir):

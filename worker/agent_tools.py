@@ -48,6 +48,7 @@ import travel
 import url_media
 import remote
 import request_intent
+import ytaccess
 import visual
 import webrecord
 from captions import KARAOKE_HARD_MAX
@@ -2353,9 +2354,11 @@ def find_song(ctx, query):
             "for one, and NEVER a full album/mix — ONE track only (huge "
             "files are refused after minutes of download). Then "
             "fetch_url(url=<pick>, as_kind='music') "
-            "downloads it ready for add_music. In your reply, tell the "
-            "user exactly which version you grabbed (title + channel) so "
-            "they can correct the pick.")
+            "downloads it ready for add_music. If YouTube blocks a "
+            "candidate (\"not a bot\" wall), that is per-UPLOAD — move to "
+            "the next candidate, don't give up on the song. In your "
+            "reply, tell the user exactly which version you grabbed "
+            "(title + channel) so they can correct the pick.")
 
 
 def _queue_candidate_thumbs(ctx, hits, limit=5):
@@ -9899,6 +9902,14 @@ def fetch_url(ctx, url, as_kind=None):
         # where a stale fragment would then be a candidate for the
         # largest-file pick.
         shutil.rmtree(workdir, ignore_errors=True)
+        # A bot-walled candidate is the one failure that is NOT final: the
+        # wall is per-upload, so the error itself instructs the model to
+        # try the next find_song link. Bolting the generic "tell the user /
+        # suggest an upload" coda onto that would bury the retry in a
+        # give-up script — which is how one unlucky pick used to end the
+        # whole request.
+        if ytaccess.bot_walled(str(e)):
+            return f"Could not download that link — {e}"
         return (f"Could not download that link — {e}. Tell the user that "
                 "plainly and suggest they upload the file instead. Do NOT "
                 "claim anything was added.")
