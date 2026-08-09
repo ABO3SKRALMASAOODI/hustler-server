@@ -12263,15 +12263,17 @@ def make_shorts(ctx, count=None, style_note=None):
         pass
     if style_note:
         payload["style_note"] = str(style_note)[:400]
-    ctx.db.run(dbx.enqueue_job, ctx.project_id, ctx.job["user_id"],
-               "shorts_plan", payload)
-    return ("Shorts run started. It reads the whole transcript, picks the "
+    job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id,
+                        ctx.job["user_id"], "shorts_plan", payload)
+    return (f"Shorts run started as job {job_id}. It reads the whole "
+            "transcript, picks the "
             "strongest self-contained moments, and builds each one as its "
             "own project — reframed to 9:16, captioned, with emphasis "
             "punch-ins — then renders them. The user watches it happen on "
             "this project's Shorts board (top of the video pane). Tell "
             "them it's underway and where to look; do NOT wait for it in "
-            "this turn.")
+            "an in-house turn. An MCP caller can poll this exact run with "
+            f"wait_for_job(job_id={job_id}) or shorts_status.")
 
 
 CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
@@ -13991,9 +13993,11 @@ TOOLS = {
                     "transcript, builds each as its own project (9:16, "
                     "captions, punch-ins), and renders them onto the "
                     "project's Shorts board. THE tool for 'make me shorts/"
-                    "clips/reels from this'. It runs after your reply — "
-                    "never wait for it. count caps how many; style_note "
-                    "forwards the user's styling words to the planner.",
+                    "clips/reels from this'. It returns the background "
+                    "planner job ID; MCP callers can poll it with "
+                    "wait_for_job or shorts_status. count caps how many; "
+                    "style_note forwards the user's styling words to the "
+                    "planner.",
                     {"count": {"type": "integer"},
                      "style_note": {"type": "string"}}),
 }

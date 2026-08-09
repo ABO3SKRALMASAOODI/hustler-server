@@ -23,10 +23,10 @@ the same `ToolContext` an agent turn uses. There is nothing to keep in sync
 because there is no copy — `worker/tests/test_mcp_surface.py` fails if one
 ever appears.
 
-On top of that, eleven **session tools** the studio UI normally covers and a
+On top of that, twelve **session tools** the studio UI normally covers and a
 headless model cannot: `list_projects`, `open_project`, `create_project`,
 `project_state`, `upload_start`, `upload_finish`, `index_status`,
-`export_final`, `wait_for_job`, `download_url`, `watch_video`.
+`shorts_status`, `export_final`, `wait_for_job`, `download_url`, `watch_video`.
 
 ## Turning it on (once)
 
@@ -135,6 +135,27 @@ list_projects  →  open_project(3)  →  (the whole project state comes back)
 project id, they act on the connection's active project. That pointer is stored
 server-side (on the OAuth grant, or on the static token), so it survives a
 reconnect, a token refresh and a client restart.
+
+### Podcast to Shorts over MCP
+
+The batch workflow is first-class rather than something the connector has to
+approximate with individual cut calls:
+
+```
+create_project(title="My podcast", kind="shorts")
+  → upload_start / upload_finish
+  → index_status() until done
+  → shorts_status() until the child projects are ready
+  → open_project(child_id) → refine / render_preview / watch_video / export_final
+```
+
+The Shorts planner starts automatically after a `kind="shorts"` project's
+main video finishes analysis. On an existing normal long-video project,
+`make_shorts` starts the same pipeline and returns its job id; poll that with
+`wait_for_job` or use `shorts_status`. `list_projects` labels each generated
+short with its parent so a caller never has to guess which new project belongs
+to which podcast. A source under one minute is already a direct short and is
+edited normally rather than rejected by the multi-clip extractor.
 
 **Uploading a local file.** MCP arguments are JSON, so bytes never travel over
 the protocol. `upload_start` returns a presigned URL and the exact `curl` to

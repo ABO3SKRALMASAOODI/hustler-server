@@ -262,6 +262,7 @@ _READ_ONLY_PREFIXES = ("get_", "find_", "list_", "search_", "look_at")
 _READ_ONLY_EXACT = {
     "project_state", "index_status", "watch_video", "read_skill",
     "suggest_emphasis", "download_url", "wait_for_job", "get_edl",
+    "shorts_status",
 }
 # Reaches something outside this project's own files: a stock library, a URL,
 # a generation provider, a live web page.
@@ -286,6 +287,7 @@ _TITLE_OVERRIDES = {
     "reset_edit": "Discard the edit and start from the source",
     "read_skill": "Read an editing skill",
     "wait_for_job": "Wait for a running job",
+    "shorts_status": "Check podcast shorts progress",
 }
 
 
@@ -342,8 +344,9 @@ _NO_ARGS = {"type": "object", "properties": {}}
 SESSION_TOOLS = [
     {"name": "list_projects",
      "description": "List this account's video projects, newest first, with "
-                    "whether each has a video and whether it finished "
-                    "analyzing. Start here.",
+                    "whether each has a video, its project kind, its podcast-"
+                    "shorts status, and which parent generated a short. "
+                    "Start here.",
      "inputSchema": _NO_ARGS},
     {"name": "open_project",
      "description": "Make a project the active one — every editing tool acts "
@@ -356,9 +359,16 @@ SESSION_TOOLS = [
     {"name": "create_project",
      "description": "Create an empty project and make it active. Upload a "
                     "video into it with upload_start, or build a canvas "
-                    "program from generated/uploaded assets.",
+                    "program from generated/uploaded assets. kind='shorts' "
+                    "creates the Podcast to Shorts workflow: after its main "
+                    "video finishes analyzing, Valmera automatically selects "
+                    "and builds the vertical clips.",
      "inputSchema": {"type": "object", "properties": {
-         "title": {"type": "string"}}}},
+         "title": {"type": "string"},
+         "kind": {"type": "string", "enum": ["edit", "shorts"],
+                  "description": "Default 'edit'. Use 'shorts' for a long "
+                                 "podcast/video that should fan out into "
+                                 "multiple generated short projects."}}}},
     {"name": "project_state",
      "description": "Re-read the active project's state (video, transcript, "
                     "shots, current EDL, assets). Cheap — call it whenever "
@@ -400,6 +410,14 @@ SESSION_TOOLS = [
      "description": "Progress of the active project's video analysis. The "
                     "editing tools cannot read a transcript, shots or "
                     "silences until this reaches 'done'.",
+     "inputSchema": _NO_ARGS},
+    {"name": "shorts_status",
+     "description": "Read the active project's Podcast to Shorts progress, "
+                    "planner job, generated child project IDs, edit versions, "
+                    "and final-render states. Safe to poll while clips are "
+                    "being built. If the active project is a generated short, "
+                    "this reports its parent run and explains how to keep "
+                    "editing the active clip.",
      "inputSchema": _NO_ARGS},
     {"name": "export_final",
      "description": "Render the FINAL export of an EDL version — full "
@@ -494,6 +512,16 @@ Two things are different from a normal tool session, and both matter:
    description is someone else's judgement. look_at is still the better tool
    for reading exact positions off a frame — it burns a tenths grid onto what
    it captures, which is how zoom aims and text boxes get their coordinates.
+
+4. PODCAST TO SHORTS IS A PROJECT WORKFLOW. To start one from MCP, call
+   create_project(title, kind="shorts"), upload the long main video, and poll
+   index_status. The shorts planner starts automatically after analysis. Poll
+   shorts_status to get the parent run, every generated child project ID and
+   its render state. Open each ready child project and refine it with the same
+   editor tools, then render_preview, watch_video and export_final. On an
+   existing normal long-video project, make_shorts starts the same workflow
+   and returns a planner job ID. A source under one minute is already a direct
+   short: edit that project normally instead of trying to extract clips.
 
 Nothing is charged to their Valmera credits for the thinking you do — but a
 render, a look at the footage and a generated image are real work on real
@@ -622,7 +650,9 @@ def _t_list_projects(tok, args):
     with vdb() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT p.id, p.title, p.created_at,
+            SELECT p.id, p.title, p.created_at, p.kind,
+                   p.parent_project_id,
+                   p.meta->'shorts'->>'status' AS shorts_status,
                    (SELECT a.sha256 FROM assets a
                      WHERE a.project_id = p.id AND a.kind = 'original'
                      ORDER BY a.id DESC LIMIT 1) AS sha
@@ -638,7 +668,16 @@ def _t_list_projects(tok, args):
             else:
                 what = "no video (canvas project)"
             active = " [ACTIVE]" if r["id"] == tok["active_project_id"] else ""
-            lines.append(f"  [{r['id']}] {r['title']} — {what}"
+            kind = r.get("kind") or "edit"
+            if kind == "short":
+                kind_label = ("generated short from project "
+                              f"{r.get('parent_project_id')}")
+            elif kind == "shorts":
+                status = r.get("shorts_status") or "not started"
+                kind_label = f"podcast shorts ({status})"
+            else:
+                kind_label = "editor project"
+            lines.append(f"  [{r['id']}] {r['title']} — {kind_label} — {what}"
                          f" — created {r['created_at']:%Y-%m-%d}{active}")
     if not lines:
         return ("No projects yet. create_project(title) makes one, then "
@@ -664,18 +703,29 @@ def _t_open_project(tok, args):
 
 def _t_create_project(tok, args):
     title = (args.get("title") or "").strip() or "Untitled project"
+    kind = (args.get("kind") or "edit").strip().lower()
+    if kind not in ("edit", "shorts"):
+        return "kind must be 'edit' or 'shorts'."
     with vdb() as conn:
         cur = conn.cursor()
         cur.execute("""INSERT INTO chat_sessions (user_id, title)
                        VALUES (%s, %s) RETURNING id""",
                     (int(tok["user_id"]), title))
         session_id = cur.fetchone()["id"]
-        cur.execute("""INSERT INTO projects (user_id, title, chat_session_id)
-                       VALUES (%s, %s, %s) RETURNING id""",
-                    (int(tok["user_id"]), title, session_id))
+        cur.execute("""INSERT INTO projects (user_id, title, chat_session_id,
+                                              kind)
+                       VALUES (%s, %s, %s, %s) RETURNING id""",
+                    (int(tok["user_id"]), title, session_id, kind))
         pid = cur.fetchone()["id"]
     _set_active_project(tok, pid)
-    return (f"Created project {pid} (\"{title}\") and made it active. "
+    if kind == "shorts":
+        return (f"Created Podcast to Shorts project {pid} (\"{title}\") and "
+                "made it active. Upload the long main video with upload_start "
+                "and upload_finish. After index_status reaches done, the "
+                "shorts run starts automatically; poll shorts_status to see "
+                "each generated child project and open_project(child_id) to "
+                "refine it.")
+    return (f"Created editor project {pid} (\"{title}\") and made it active. "
             "Add a video with upload_start, or start placing generated / "
             "uploaded assets for a canvas program.")
 
@@ -793,6 +843,107 @@ def _t_index_status(tok, args):
     return (f"{job['state']} — {job['progress']}% (job {job['id']}). "
             "Transcript, shots and silences are unavailable until this "
             "reaches done.")
+
+
+def _t_shorts_status(tok, args):
+    """Return the Shorts board in words, including IDs an MCP model can open."""
+    project_id = tok["active_project_id"]
+    if not project_id:
+        return "No project is open — call list_projects and open_project."
+
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT id, title, kind, parent_project_id, meta
+                       FROM projects
+                       WHERE id = %s AND user_id = %s""",
+                    (project_id, int(tok["user_id"])))
+        active = cur.fetchone()
+        if not active:
+            return "The active project no longer exists."
+
+        parent_note = ""
+        parent = active
+        if active.get("parent_project_id"):
+            cur.execute("""SELECT id, title, kind, parent_project_id, meta
+                           FROM projects
+                           WHERE id = %s AND user_id = %s""",
+                        (active["parent_project_id"], int(tok["user_id"])))
+            parent = cur.fetchone() or active
+            parent_note = (
+                f"Active project {active['id']} is a generated short from "
+                f"parent {parent['id']}. Keep this project open to edit this "
+                "clip; open another child ID below to edit that clip instead.\n\n")
+
+        parent_id = parent["id"]
+        meta = parent.get("meta") or {}
+        shorts = meta.get("shorts") or {}
+        cur.execute("""SELECT id, state, progress, error, result
+                       FROM video_jobs
+                       WHERE project_id = %s AND type = 'shorts_plan'
+                       ORDER BY id DESC LIMIT 1""", (parent_id,))
+        job = cur.fetchone()
+
+        clips = sorted(shorts.get("clips") or [],
+                       key=lambda c: (c.get("order", 10 ** 6),
+                                      c.get("child_project_id") or 10 ** 12))
+        child_ids = [int(c["child_project_id"]) for c in clips
+                     if c.get("child_project_id")]
+        finals = {}
+        if child_ids:
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id, id, state, progress, error
+                           FROM video_jobs
+                           WHERE project_id = ANY(%s) AND type = 'final'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            finals = {r["project_id"]: r for r in cur.fetchall()}
+
+    status = shorts.get("status") or (job or {}).get("state") or "not started"
+    head = (f"Podcast shorts parent [{parent_id}] {parent['title']} — "
+            f"status: {status}.")
+    if job:
+        head += (f" Planner job {job['id']}: {job['state']}, "
+                 f"{job.get('progress') or 0}%.")
+        if job.get("error"):
+            head += f" Error: {str(job['error'])[:300]}."
+    if not clips:
+        if job and job["state"] in ("queued", "running"):
+            return parent_note + head + " No child clips have been published yet."
+        return (parent_note + head + " No generated clips exist yet. For an "
+                "indexed long video, call make_shorts; a project created with "
+                "kind='shorts' starts it automatically after analysis.")
+
+    lines = []
+    for clip in clips:
+        child_id = clip.get("child_project_id")
+        start, end = clip.get("start"), clip.get("end")
+        duration = (float(end) - float(start)
+                    if start is not None and end is not None else None)
+        bits = [f"[{child_id or 'building'}] "
+                f"{clip.get('title') or 'Untitled short'}"]
+        if duration is not None:
+            bits.append(f"{duration:.1f}s")
+        if clip.get("edl_version"):
+            bits.append(f"edit v{clip['edl_version']}")
+        elif clip.get("seed_error"):
+            bits.append(f"BUILD FAILED: {str(clip['seed_error'])[:160]}")
+        else:
+            bits.append("still building")
+        final = finals.get(child_id)
+        if final:
+            fb = f"final {final['state']} (job {final['id']}"
+            if final["state"] in ("queued", "running"):
+                fb += f", {final.get('progress') or 0}%"
+            fb += ")"
+            if final.get("error"):
+                fb += f": {str(final['error'])[:120]}"
+            bits.append(fb)
+        lines.append("  " + " — ".join(bits))
+
+    tail = ("Open a child with open_project(project_id), edit it with the "
+            "normal tools, render_preview and watch_video to verify it, then "
+            "export_final when it is ready.")
+    return parent_note + head + f" {len(clips)} clip(s):\n" + \
+        "\n".join(lines) + "\n\n" + tail
 
 
 def _t_export_final(tok, args):
@@ -987,6 +1138,7 @@ SESSION_IMPL = {
     "upload_start": _t_upload_start,
     "upload_finish": _t_upload_finish,
     "index_status": _t_index_status,
+    "shorts_status": _t_shorts_status,
     "export_final": _t_export_final,
     "wait_for_job": _t_wait_for_job,
     "download_url": _t_download_url,

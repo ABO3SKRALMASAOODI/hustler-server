@@ -53,10 +53,15 @@ else:
     MEDIA_TYPES = ("preview", "final", "filmstrip")
     FILMSTRIP_TYPES = ()
 INDEX_TYPES = ("index",)
-# shorts_plan rides the agent lane: it is the same shape of work as a turn —
-# LLM waiting plus light per-child tool calls — and must never steal a media
-# slot from the renders it fans out.
-AGENT_TYPES = ("agent_turn", "shorts_plan")
+# A normal agent turn is intentionally single-attempt because replaying its
+# EDL writes can apply the same edit twice. A shorts plan is resumable and has
+# its own per-child checkpoints, so it gets the media retry budget. Keeping the
+# two types in one lane used the agent attempt limit at claim time but the
+# media limit in the reaper: after one worker death a shorts job was neither
+# claimable nor exhaustible and sat "running" forever. Its own light lane
+# closes that gap and also stops a long podcast plan occupying a chat slot.
+AGENT_TYPES = ("agent_turn",)
+SHORTS_TYPES = ("shorts_plan",)
 MCP_TYPES = ("mcp_tool",)
 
 
@@ -519,6 +524,11 @@ def main():
                                config.MAX_ATTEMPTS_AGENT,
                                config.AGENT_POLL_INTERVAL_S),
             daemon=True, name=f"agent{i}"))
+    threads.append(threading.Thread(
+        target=lane, args=("shorts", SHORTS_TYPES,
+                           config.MAX_ATTEMPTS_MEDIA,
+                           config.AGENT_POLL_INTERVAL_S),
+        daemon=True, name="shorts"))
     for i in range(config.MCP_SLOTS):
         threads.append(threading.Thread(
             target=lane, args=(f"mcp{i}", MCP_TYPES, config.MAX_ATTEMPTS_MCP,

@@ -61,7 +61,20 @@ def _reset():
     # clears it explicitly.
     DB.update(clients={}, grants={}, codes={}, tokens={}, seq=0,
               static_project=3, expired_codes=set(), enqueued=[],
-              job_result=None)
+              job_result=None, created_project=None,
+              project_rows={
+                  3: {"id": 3, "title": "Long podcast", "kind": "shorts",
+                      "parent_project_id": None,
+                      "meta": {"shorts": {
+                          "status": "ready",
+                          "clips": [{"order": 0, "title": "Strong hook",
+                                     "start": 12.0, "end": 38.0,
+                                     "child_project_id": 9,
+                                     "edl_version": 6}]}}}},
+              shorts_job={"id": 8, "state": "done", "progress": 100,
+                          "error": None, "result": {"clips": 1}},
+              final_rows=[{"project_id": 9, "id": 10, "state": "done",
+                           "progress": 100, "error": None}])
 
 
 def _next_id():
@@ -150,6 +163,21 @@ class FakeCur:
             DB["static_project"] = p[0]
         elif "FROM mcp_catalog" in s:
             self.rows = [{"json": CATALOG}]
+        elif s.startswith("INSERT INTO chat_sessions"):
+            self.rows = [{"id": 70}]
+        elif s.startswith("INSERT INTO projects"):
+            DB["created_project"] = {"user_id": p[0], "title": p[1],
+                                     "chat_session_id": p[2], "kind": p[3]}
+            self.rows = [{"id": 71}]
+        elif "FROM projects WHERE id = %s AND user_id = %s" in s:
+            row = DB["project_rows"].get(p[0])
+            self.rows = [row] if row else []
+        elif "type = 'shorts_plan'" in s:
+            self.rows = [DB["shorts_job"]] if DB.get("shorts_job") else []
+        elif "project_id = ANY(%s) AND type = 'final'" in s:
+            wanted = set(p[0])
+            self.rows = [r for r in DB["final_rows"]
+                         if r["project_id"] in wanted]
         elif "type = 'agent_turn'" in s:
             self.rows = []
         elif s.startswith("INSERT INTO video_jobs"):
@@ -250,6 +278,35 @@ def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     # here is how the two tool surfaces would start to differ.
     assert editor["inputSchema"] == \
         CATALOG["tools"][0]["function"]["parameters"]
+
+
+def test_podcast_shorts_are_first_class_session_tools(client):
+    tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
+    by_name = {t["name"]: t for t in tools}
+    assert "shorts_status" in by_name
+    assert by_name["create_project"]["inputSchema"]["properties"]["kind"] \
+        ["enum"] == ["edit", "shorts"]
+
+
+def test_create_podcast_shorts_project_persists_its_kind(client):
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "create_project",
+                        "arguments": {"title": "My podcast",
+                                      "kind": "shorts"}}))
+    assert DB["created_project"]["kind"] == "shorts"
+    assert DB["static_project"] == 71
+    assert "starts automatically" in body
+    assert "shorts_status" in body
+
+
+def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "shorts_status", "arguments": {}}))
+    assert "status: ready" in body
+    assert "Planner job 8: done" in body
+    assert "[9] Strong hook" in body
+    assert "edit v6" in body and "final done (job 10)" in body
+    assert "open_project(project_id)" in body
 
 
 def test_sse_preferring_client_gets_an_sse_frame(client):

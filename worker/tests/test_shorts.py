@@ -129,7 +129,8 @@ def test_transcript_block_truncates():
 # ------------------------------------------------------------------ wiring
 def test_job_type_is_registered_everywhere():
     import main
-    assert "shorts_plan" in main.AGENT_TYPES
+    assert "shorts_plan" in main.SHORTS_TYPES
+    assert "shorts_plan" not in main.AGENT_TYPES
     assert main.RUNNERS.get("shorts_plan") is shorts.run_shorts_plan
     assert "shorts_plan" in main.FAIL_NOTES
     assert "shorts_plan" in main.REAPER_NOTES
@@ -153,6 +154,31 @@ def test_sub_minute_shorts_route_to_direct_edit():
     assert result.startswith("DIRECT SHORT:")
     assert "do the edit now" in result
     assert "REJECTED" not in result
+
+
+def test_make_shorts_returns_the_background_job_id():
+    """MCP has no Shorts board UI, so the caller needs the exact job to poll."""
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.has_active_job:
+                return False
+            if fn is dbx.enqueue_job:
+                assert args[0:3] == (7, 60, "shorts_plan")
+                return 321
+            raise AssertionError(fn)
+
+    ctx = SimpleNamespace(
+        has_main_video=True, duration=180.0,
+        index={"words": [{"word": "hello", "t0": 0.0, "t1": 0.5}]},
+        db=FakeDb(), project_id=7, job={"user_id": 60})
+    result = agent_tools.make_shorts(ctx, count=3, style_note="clean")
+    assert "job 321" in result
+    assert "wait_for_job(job_id=321)" in result
+    assert "shorts_status" in result
 
 
 def test_flat_clip_charge_rides_the_turn_charge():
