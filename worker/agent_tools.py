@@ -2346,8 +2346,22 @@ def find_song(ctx, query):
                 "user, or ask them to paste a link to the track "
                 "(fetch_url downloads it).")
     lines = "\n- ".join(song_find.describe(h) for h in hits[:5])
+    # The fallback catalog rides along on every search. YouTube walls
+    # music-label content hardest from datacenter IPs (Aug 9: every label
+    # upload tried was blocked while SoundCloud fetched clean), so the
+    # escape route has to be IN HAND before the first candidate fails —
+    # a second search after a wall is a tool call the model often skips.
+    sc_block = ""
+    try:
+        sc = song_find.search_soundcloud(q)[:3]
+    except song_find.SongFindError:
+        sc = []
+    if sc:
+        sc_block = ("\nSoundCloud fallbacks (this server downloads these "
+                    "reliably even when YouTube walls):\n- "
+                    + "\n- ".join(song_find.describe(h) for h in sc))
     return (f"{min(len(hits), 5)} candidate link(s) for \"{q}\", best "
-            "guess first:\n- " + lines +
+            "guess first:\n- " + lines + sc_block +
             "\nPick the one that IS the song the user named — prefer the "
             "artist's own/'- Topic' channel or 'Official Audio'; avoid "
             "lyric/sped-up/loop/cover versions UNLESS their words asked "
@@ -2355,10 +2369,12 @@ def find_song(ctx, query):
             "files are refused after minutes of download). Then "
             "fetch_url(url=<pick>, as_kind='music') "
             "downloads it ready for add_music. If YouTube blocks a "
-            "candidate (\"not a bot\" wall), that is per-UPLOAD — move to "
-            "the next candidate, don't give up on the song. In your "
-            "reply, tell the user exactly which version you grabbed "
-            "(title + channel) so they can correct the pick.")
+            "candidate (\"not a bot\" wall), that is per-UPLOAD — try the "
+            "next candidate"
+            + (", then the SoundCloud fallbacks" if sc_block else "")
+            + "; don't give up on the song. In your reply, tell the user "
+            "exactly which version you grabbed (title + channel) so they "
+            "can correct the pick.")
 
 
 def _queue_candidate_thumbs(ctx, hits, limit=5):

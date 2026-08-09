@@ -93,10 +93,39 @@ def test_results_teach_the_pick_and_the_download(monkeypatch):
     monkeypatch.setattr(config, "FIND_SONG_USER_IDS", "")
     monkeypatch.setattr(song_find, "search", lambda q, count=6: [
         _c("Song (Official Audio)", uploader="Artist - Topic")])
+    monkeypatch.setattr(song_find, "search_soundcloud",
+                        lambda q, count=6: [])
     out = agent_tools.find_song(_Ctx(), "song artist")
     assert "fetch_url" in out and "as_kind='music'" in out
     assert "which version you grabbed" in out
     assert "youtube.com/watch?v=x" in out
+
+
+def test_soundcloud_fallbacks_ride_along_and_survive_their_own_failure(
+        monkeypatch):
+    """Aug 9: from the worker's IP, YouTube walled every music-label
+    upload while SoundCloud fetched clean — so the escape route must be
+    IN the first answer (a second search after a wall is a call the
+    model often skips), and a broken SoundCloud search must cost the
+    YouTube results nothing."""
+    monkeypatch.setattr(song_find, "available", lambda: True)
+    monkeypatch.setattr(config, "FIND_SONG_USER_IDS", "")
+    monkeypatch.setattr(song_find, "search", lambda q, count=6: [
+        _c("Song (Official Audio)", uploader="Artist - Topic")])
+    monkeypatch.setattr(song_find, "search_soundcloud", lambda q, count=6: [
+        {"title": "Song", "uploader": "artist", "duration_s": 200.0,
+         "url": "https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A1"}])
+    out = agent_tools.find_song(_Ctx(), "song artist")
+    assert "SoundCloud fallbacks" in out
+    assert "api.soundcloud.com/tracks" in out
+    assert "then the SoundCloud fallbacks" in out
+
+    def broken(q, count=6):
+        raise song_find.SongFindError("soundcloud search down")
+    monkeypatch.setattr(song_find, "search_soundcloud", broken)
+    out = agent_tools.find_song(_Ctx(), "song artist")
+    assert "youtube.com/watch?v=x" in out
+    assert "SoundCloud fallbacks" not in out
 
 
 def test_no_results_never_claims_success(monkeypatch):

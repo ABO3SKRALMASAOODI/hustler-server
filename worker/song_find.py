@@ -167,7 +167,25 @@ def search(query, count=SEARCH_COUNT):
     return rank(_yt_candidates(query, count, what="a song name"), query)
 
 
+def search_soundcloud(query, count=SEARCH_COUNT):
+    """SoundCloud candidates for a song name — the fallback catalog.
+
+    Exists because of an afternoon of hard data (Aug 9): from the
+    worker's datacenter IP, YouTube walled every music-label upload
+    tried — The Weeknd's own audio, two WaterTower uploads, five
+    Interstellar candidates — while a SoundCloud track sailed through
+    the very same fetch pipeline into a finished mp3. Music content is
+    exactly what YouTube guards hardest; SoundCloud has no such wall.
+    Same ranker, same junk markers, same fetch_url handoff."""
+    return rank(_candidates("scsearch", query, count,
+                            what="a song name"), query)
+
+
 def _yt_candidates(query, count, what="a search query"):
+    return _candidates("ytsearch", query, count, what)
+
+
+def _candidates(engine, query, count, what="a search query"):
     query = (query or "").strip()
     if not query:
         raise SongFindError(f"{what} is required")
@@ -178,7 +196,7 @@ def _yt_candidates(query, count, what="a search query"):
            "--no-warnings", "--quiet",
            "--socket-timeout", "20",
            "--flat-playlist", "--dump-json",
-           f"ytsearch{int(count)}:{query}"]
+           f"{engine}{int(count)}:{query}"]
     # Operator cookies via ytaccess: a writable, NORMALIZED per-run copy,
     # never the mounted secret — yt-dlp writes rotated cookies back on
     # every run and /etc/secrets is read-only (url_media documents the
@@ -213,23 +231,37 @@ def _yt_candidates(query, count, what="a search query"):
             d = json.loads(line)
         except ValueError:
             continue
-        vid = d.get("id")
-        if not vid:
-            continue
+        if engine == "ytsearch":
+            vid = d.get("id")
+            if not vid:
+                continue
+            url = f"https://www.youtube.com/watch?v={vid}"
+            thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+        else:
+            # SoundCloud flat entries carry their own URL (an
+            # api.soundcloud.com/tracks/... form fetch_url handles as-is
+            # — verified end-to-end in prod, job 3891) and no stable
+            # thumbnail scheme worth guessing at.
+            url = (d.get("url") or d.get("webpage_url") or "").strip()
+            if not url:
+                continue
+            thumb = None
         dur = None
         try:
             dur = round(float(d.get("duration")), 1) if d.get("duration") \
                 else None
         except (TypeError, ValueError):
             dur = None
-        out.append({
+        entry = {
             "title": (d.get("title") or "").strip() or "untitled",
             "uploader": (d.get("uploader") or d.get("channel") or
                          "").strip() or None,
             "duration_s": dur,
-            "url": f"https://www.youtube.com/watch?v={vid}",
-            "_thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-        })
+            "url": url,
+        }
+        if thumb:
+            entry["_thumb"] = thumb
+        out.append(entry)
     if not out and proc.returncode != 0:
         detail = (proc.stderr or "").strip().splitlines()
         raise SongFindError((detail[-1] if detail else "search failed")[:160])
