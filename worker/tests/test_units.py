@@ -1624,9 +1624,16 @@ ictx_kb2 = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
 r = agent_tools.insert_media(ictx_kb2, "clips/1/rec.mp4", 0.0,
                              duration_s=2.0, clip_start_s=1.0,
                              motion="zoom_in")
-check("motion on a video clip is refused",
-      r.startswith("REJECTED") and "IMAGE" in r and
-      ictx_kb2.written is None)
+# Round 101: the placement LANDS and the redundant argument is dropped with a
+# note. It used to be a REJECTED — 92 of them in one week, each throwing away a
+# fully-specified insert (and a step of the user's wait) over an argument the
+# tool could simply ignore.
+check("motion on a video clip is dropped, not refused — the insert lands",
+      not r.startswith("REJECTED") and
+      ictx_kb2.written is not None and
+      "motion" not in ictx_kb2.written["inserts"][0])
+check("...and the note names add_zoom as the way to move a clip",
+      "motion='zoom_in' was ignored" in r and "add_zoom(" in r)
 check("style parser accepts animation",
       agent_tools._parse_partial_style({"animation": "slide_up"})
       == {"animation": "slide_up"})

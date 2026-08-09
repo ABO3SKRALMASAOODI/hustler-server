@@ -121,12 +121,26 @@ def test_rect_keeps_explicit_strength_and_reports_a_misfit():
 def test_rect_rejections():
     ctx = _Ctx(_session_edl())
     assert "REJECTED" in agent_tools.add_zoom(
-        ctx, 7.5, 9.5, cx=0.2, rect=MSG_RECT)            # two answers
-    assert "REJECTED" in agent_tools.add_zoom(
         ctx, 7.5, 9.5, rect=[0.5, 0.5, 0.4, 0.6])        # inverted
     assert "REJECTED" in agent_tools.add_zoom(
         ctx, 7.5, 9.5, mode="follow", rect=MSG_RECT)     # follow aims by path
     assert not ctx.written
+
+
+def test_rect_plus_cxcy_takes_the_rect_instead_of_rejecting():
+    """Round 101. This was the most frequent tool result in the whole product
+    — 357 rejections in one week, each costing a full agent step (~23s of a
+    user's wait, ~57k prompt tokens) to say something the tool can decide.
+    A rect is strictly more information than a point: the solver DERIVES the
+    pin from it. So the rect wins, the zoom lands, and the note teaches the
+    dialect inside a call that already worked."""
+    ctx = _Ctx(_session_edl())
+    res = agent_tools.add_zoom(ctx, 7.5, 9.5, cx=0.2, cy=0.9, rect=MSG_RECT)
+    assert "REJECTED" not in res
+    zm = _zoom(ctx)
+    assert zm.get("rect")                       # the rect was used
+    assert (zm["cx"], zm["cy"]) != (0.2, 0.9)   # solved from the rect, not
+    assert "the rect wins" in res               # ...and it says so, once
 
 
 def test_plain_cxcy_still_pins_and_the_reply_says_so():

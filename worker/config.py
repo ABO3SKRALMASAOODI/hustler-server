@@ -956,6 +956,15 @@ MAX_ATTEMPTS_AGENT = 1        # agent turns are not auto-retried (user can resen
 # of the three real tries, then stop for good.
 MAX_CLAIMS_ABSOLUTE = int(os.getenv("MAX_CLAIMS_ABSOLUTE", "6"))
 
+# How long a tray with NO main footage behind it must sit completely untouched
+# before the reaper commits it for the user (db.rescue_abandoned_trays).
+# 300s: long enough that a person picking files out of a phone gallery, or a
+# slow second upload, is never committed out from under — the scan requires no
+# asset activity at all in the window — and short enough that someone still
+# looking at the page gets their video analyzing while they are there rather
+# than never. Only ever fires on a project that has no working state to lose.
+TRAY_RESCUE_AFTER_S = int(os.getenv("TRAY_RESCUE_AFTER_S", "300"))
+
 AGENT_MAX_ITERATIONS = 30
 # How many times a turn that hits the iteration ceiling MID-WORK may resume
 # itself (round 96b, project 383: 30 productive calls in 7.5 min, then a

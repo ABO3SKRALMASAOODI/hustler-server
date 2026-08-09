@@ -1231,6 +1231,48 @@ COHORT_STAGES = [
     ("paid", "Paid"),
 ]
 
+# The stages worth plotting a GROWTH rate for. Deliberately not all six: trial
+# and paid are single digits per week right now, and a rate computed on 1 -> 3
+# reads as "+200% growth" next to a signup line moving 10%, which makes the
+# chart a liar at a glance. They stay in the funnel table where the raw counts
+# are visible beside them.
+GROWTH_STAGES = [
+    ("signed_up", "Signups"),
+    ("uploaded", "Uploaded"),
+    ("messaged", "Messaged"),
+    ("exported", "Exported"),
+]
+
+
+def _attach_growth(cohorts):
+    """Period-over-period growth %, per stage, onto each cohort row.
+
+    Growth is the derivative of the funnel the table already shows, so it is
+    computed HERE rather than in the browser: the lead-in rows are real zeros
+    that must not be divided by, and "no previous period" and "grew 0%" are
+    different facts that a client-side subtraction would collapse into the
+    same 0. Both come back as null, and the chart leaves a gap.
+
+    The first real cohort has no predecessor and is therefore null, not
+    +100% — the product did not grow infinitely in its first week, it simply
+    started. Growth from a genuine zero is likewise null rather than a
+    division by zero; the count itself carries that story.
+    """
+    prev = None
+    for c in cohorts:
+        g = {}
+        for key, _lbl in GROWTH_STAGES:
+            now = c.get(key) or 0
+            was = None if prev is None else (prev.get(key) or 0)
+            # A lead-in period is a real zero for this series, but it is not a
+            # period the product was live in — growing "from" it is not a fact.
+            if was is None or was == 0 or prev.get("lead_in"):
+                g[key] = None
+            else:
+                g[key] = round((now - was) / was * 100.0, 1)
+        c["growth"] = g
+        prev = c
+
 # TRIAL and PAID are two different questions and were being answered by one
 # number. Every plan sells a 3-day trial, Paddle creates the subscription at
 # checkout, and `is_subscribed` flips on day zero — so the old "Paid" column
@@ -1375,11 +1417,14 @@ def video_cohorts():
         # ever existed — the funnel table below skips these rows.
         "lead_in": bool(r["lead_in"]),
     } for r in rows]
+    _attach_growth(cohorts)
     return jsonify({
         "period": period,
         "metrics_epoch": METRICS_EPOCH,
         "stages": [{"key": k, "label": lbl} for k, lbl in COHORT_STAGES],
         "cohorts": cohorts,
+        "growth_stages": [{"key": k, "label": lbl}
+                          for k, lbl in GROWTH_STAGES],
         "trial_tracking": have_trials,
         "note": ("Each row is the cohort of users who signed up in that "
                  "period; each stage counts how many of THEM ever reached it "

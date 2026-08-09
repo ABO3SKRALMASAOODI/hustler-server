@@ -22,8 +22,56 @@ import model_prices
 # ------------------------------------------------------------------ #
 
 
+# A BLOCKING SOCKET WITH NO KEEPALIVE IS HOW THE HEARTBEAT DIED (round 101).
+#
+# psycopg2 talks to Postgres over a plain blocking socket. Given no
+# keepalives, a connection whose peer has gone away — a managed-Postgres
+# failover, an idle NAT mapping dropped by the network in between — does not
+# raise: the next execute() sits in recv() waiting for an answer that will
+# never come, forever, with no timeout of any kind.
+#
+# heartbeat_forever runs on ONE shared Db, in one thread, in a `while True`.
+# So one wedged socket there does not degrade the heartbeat; it ENDS it, for
+# the life of the process, silently. Every in-flight job then stops being
+# heartbeated while the process is otherwise perfectly healthy — still
+# claiming work, still rendering, still answering — and 120s later
+# (STALE_AFTER_S) the reaper marks each long-running one "Worker died and
+# retries are exhausted".
+#
+# That is the top live failure in the product. In the last-50-user audit it
+# killed 8 real users' agent turns on Aug 8 alone, five of them inside eleven
+# minutes (jobs 3389/3411/3423/3430/3431) — the cluster shape a stuck
+# heartbeat makes, not the scattered shape a crash makes. The tool that ran
+# last before each death was different every time (get_kept_transcript,
+# list_assets, reset_edit, add_zoom, render_preview…) because the tool was
+# never the problem, and the gap from that tool to the reaper was 128-378s in
+# every single case: just past the stale window, which is exactly what "the
+# beats stopped" looks like and nothing else does.
+#
+# So: bound every phase of the connection.
+#   connect_timeout  — the connect phase cannot hang.
+#   keepalives       — the kernel probes an idle socket and the connection
+#                      FAILS (raising OperationalError, which Db.run already
+#                      reconnects through) instead of blocking. Sized to
+#                      detect inside ~60s: comfortably under STALE_AFTER_S, so
+#                      a beat recovers before the reaper can act on its silence.
+#   statement_timeout — server-side backstop. Every query here is an indexed
+#                      single-row write or a small select; one that has run for
+#                      a minute is wedged, not slow.
+_CONNECT_KW = {
+    "connect_timeout": int(os.getenv("PGCONNECT_TIMEOUT_S", "10")),
+    "keepalives": 1,
+    "keepalives_idle": int(os.getenv("PGKEEPALIVE_IDLE_S", "30")),
+    "keepalives_interval": int(os.getenv("PGKEEPALIVE_INTERVAL_S", "10")),
+    "keepalives_count": int(os.getenv("PGKEEPALIVE_COUNT", "3")),
+    "options": "-c statement_timeout=%d"
+               % (int(os.getenv("PGSTATEMENT_TIMEOUT_S", "60")) * 1000),
+}
+
+
 def connect():
-    conn = psycopg2.connect(config.DATABASE_URL, cursor_factory=RealDictCursor)
+    conn = psycopg2.connect(config.DATABASE_URL, cursor_factory=RealDictCursor,
+                            **_CONNECT_KW)
     conn.autocommit = False
     return conn
 
@@ -420,12 +468,32 @@ def untrack_job(job_id):
 
 
 def heartbeat_forever():
+    """Keep every in-flight job's heartbeat fresh so the reaper leaves live
+    work alone.
+
+    This loop is load-bearing in a way its size hides: if it stops, nothing
+    else notices, and every long job on this process is failed by the reaper
+    from another thread while the work itself is running fine. So it is
+    written to survive its own database going away — see _CONNECT_KW for the
+    socket-level half of that, and note the two rules here:
+
+      * a failed beat DROPS THE CONNECTION. Db.run only reconnects on the
+        errors it recognises as connection loss; a statement timeout arrives
+        as a plain QueryCanceled and would otherwise leave this thread
+        re-using a session that has already proven unhealthy.
+      * a run of failures is said OUT LOUD, once, with the consequence spelled
+        out — the silent version of this cost eight real users their turn on
+        one day before anyone knew the beats had stopped.
+    """
     hdb = Db()
+    fails = 0
+    last_ok = time.time()
     while True:
         time.sleep(config.HEARTBEAT_EVERY_S)
         with _ACTIVE_LOCK:
             ids = list(ACTIVE_JOBS)
         if not ids:
+            last_ok = time.time()
             continue
         try:
             def _beat(conn):
@@ -435,8 +503,17 @@ def heartbeat_forever():
                                    WHERE id = ANY(%s) AND state = 'running'""",
                                 (ids,))
             hdb.run(_beat)
+            if fails:
+                print(f"[heartbeat] recovered after {fails} failed beat(s) — "
+                      f"{len(ids)} job(s) still alive", flush=True)
+            fails, last_ok = 0, time.time()
         except Exception as e:
-            print(f"[heartbeat] {e}", flush=True)
+            fails += 1
+            hdb.reset()
+            stale_in = config.STALE_AFTER_S - (time.time() - last_ok)
+            print(f"[heartbeat] beat {fails} FAILED ({str(e)[:160]}) — "
+                  f"{len(ids)} running job(s) will be reaped as 'Worker died' "
+                  f"in {stale_in:.0f}s if this does not recover", flush=True)
 
 
 # ------------------------------------------------------------------ #
@@ -500,6 +577,115 @@ def tray_pending_assets(conn, project_id):
                            (meta->'tray_place'->>'order')::float, 1e9),
                                 id ASC""", (project_id,))
         return cur.fetchall()
+
+
+def rescue_abandoned_trays(conn):
+    """Commit a tray that was uploaded to and then never submitted.
+
+    Round 101, from the last-50-user audit. The tray (round 84) asks for a
+    Submit press before an upload becomes the project's main footage, and a
+    press that never comes leaves the studio permanently dead: no `original`,
+    no index, no filmstrip, no greeting — an upload the user watched succeed
+    and a page that then does nothing forever. Ten users in three weeks
+    (3.5% of everyone who opened a project) ended their whole session there,
+    and EIGHT of them had staged exactly one file, where a tray has one
+    possible arrangement and nothing to arrange.
+
+    Deliberately narrow, because a tray someone is still filling must never
+    be committed under them:
+      - the project has NO main footage and has NEVER had an index job, so
+        there is no working state this could disturb — only a dead one it can
+        revive;
+      - nothing has been uploaded or touched for TRAY_RESCUE_AFTER_S, so a
+        multi-file batch mid-arrival is left alone;
+      - the WHOLE tray is committed, exactly as the Submit button commits it:
+        the first video becomes the footage, every other clip/image keeps its
+        arrangement as a tray_place for the indexer's existing sweep, and
+        every video gets the same perception pass. A rescue that revived the
+        project but silently dropped the user's other four uploads would be a
+        second bug wearing the fix's clothes.
+
+    Returns one (project_id, user_id, asset_id, index_job_id) per rescue.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT s.project_id, p.user_id
+            FROM assets s
+            JOIN projects p ON p.id = s.project_id
+            WHERE COALESCE(s.meta->>'staged', '') = 'true'
+              AND s.kind = 'video_clip'
+              AND NOT EXISTS (SELECT 1 FROM assets o
+                              WHERE o.project_id = s.project_id
+                                AND o.kind = 'original')
+              AND NOT EXISTS (SELECT 1 FROM video_jobs j
+                              WHERE j.project_id = s.project_id
+                                AND j.type = 'index')
+              AND NOT EXISTS (SELECT 1 FROM assets q
+                              WHERE q.project_id = s.project_id
+                                AND q.created_at > NOW()
+                                    - make_interval(secs => %s))
+            LIMIT 20
+        """, (config.TRAY_RESCUE_AFTER_S,))
+        targets = cur.fetchall()
+    out = []
+    for t in targets:
+        pid, uid = t["project_id"], t["user_id"]
+        with conn.cursor() as cur:
+            # Re-check under the project lock: a real submit landing between
+            # the scan and here must win, and this is the same lock that
+            # route takes.
+            cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                        (pid,))
+            cur.execute("""SELECT 1 FROM assets WHERE project_id = %s
+                             AND kind = 'original' LIMIT 1""", (pid,))
+            if cur.fetchone():
+                continue
+            cur.execute("""SELECT id, kind, duration_s FROM assets
+                           WHERE project_id = %s
+                             AND COALESCE(meta->>'staged','') = 'true'
+                           ORDER BY COALESCE((meta->>'tray_pos')::float, 1e9),
+                                    id""", (pid,))
+            tray = cur.fetchall()
+            main_i = next((i for i, a in enumerate(tray)
+                           if a["kind"] == "video_clip"), None)
+            if main_i is None:
+                continue
+            main_job = None
+            for i, a in enumerate(tray):
+                if i == main_i:
+                    cur.execute(
+                        """UPDATE assets SET kind = 'original',
+                             meta = COALESCE(meta,'{}'::jsonb)
+                                    - 'staged' - 'tray_pos'
+                           WHERE id = %s AND kind = 'video_clip'
+                             AND COALESCE(meta->>'staged','') = 'true'""",
+                        (a["id"],))
+                    if cur.rowcount != 1:
+                        break
+                    cur.execute(
+                        """INSERT INTO video_jobs (project_id, user_id, type,
+                                                   payload)
+                           VALUES (%s, %s, 'index', %s) RETURNING id""",
+                        (pid, uid, Json({"asset_id": a["id"]})))
+                    main_job = cur.fetchone()["id"]
+                    continue
+                patch = {"staged": None}
+                if a["kind"] in ("video_clip", "image_ref"):
+                    patch["tray_place"] = {"order": i,
+                                           "before_main": i < main_i,
+                                           "duration_s": a["duration_s"]}
+                cur.execute("""UPDATE assets
+                               SET meta = COALESCE(meta,'{}'::jsonb) || %s
+                               WHERE id = %s""", (Json(patch), a["id"]))
+                if a["kind"] in ("video_clip", "music"):
+                    cur.execute(
+                        """INSERT INTO video_jobs (project_id, user_id, type,
+                                                   payload)
+                           VALUES (%s, %s, 'index', %s)""",
+                        (pid, uid, Json({"asset_id": a["id"]})))
+            if main_job is not None:
+                out.append((pid, uid, tray[main_i]["id"], main_job))
+    return out
 
 
 def staged_assets(conn, project_id):

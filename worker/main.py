@@ -349,6 +349,20 @@ def reaper():
         except Exception as e:
             print(f"[reaper] {e}", flush=True)
             worker_db.reset()
+        # A tray nobody submitted is a dead studio, not a finished job — and
+        # it is invisible to everything above, because no job was ever
+        # created to reap. Same contract as the reaper's: a session that
+        # cannot end well must not be left to sit forever. Its own try so a
+        # sweep failure can never cost the queue its reaper.
+        try:
+            for pid, _uid, aid, jid in (
+                    worker_db.run(dbx.rescue_abandoned_trays) or []):
+                print(f"[reaper] tray on project {pid} was never submitted — "
+                      f"promoted asset {aid} to main footage and queued "
+                      f"index job {jid}", flush=True)
+        except Exception as e:
+            print(f"[reaper] tray rescue: {e}", flush=True)
+            worker_db.reset()
 
 
 def _sweep_tmp():

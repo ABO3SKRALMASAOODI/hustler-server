@@ -3570,11 +3570,21 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     # and derives the pin cx/cy that renders that exact window, so the
     # renderer, every stored EDL and every cached render stay untouched.
     rct = None
+    overrode_cxcy = False
     if rect is not None:
+        # BOTH given: take the rect and say so, do NOT reject (round 101).
+        # This was the single most common event in the whole product — 357
+        # rejections in one week, more than any other tool result of any
+        # kind. Every one cost a full agent step: ~23s of a user's wait and
+        # ~57k prompt tokens, to be told something the tool could resolve by
+        # itself. And it IS resolvable: a rect is strictly more information
+        # than a point — _solve_zoom_rect DERIVES the pin cx/cy from it — so
+        # "both" has an obviously right answer rather than an ambiguous one.
+        # The note in the result teaches the dialect for the next call
+        # without spending a round trip on the lesson.
         if tgt:
-            return ("REJECTED: rect and cx/cy are two different answers to "
-                    "where the zoom should look — pass ONE. rect=[x0,y0,x1,"
-                    "y1] frames a region; cx/cy pins a point in place.")
+            overrode_cxcy = True
+            tgt = {}
         if zmode == "follow":
             return ("REJECTED: a follow zoom is aimed by its `path`; rect "
                     "only applies to fixed zooms (punch/ease/push_in/"
@@ -3642,6 +3652,12 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
                  "everything magnifies around it (a point near an edge stays "
                  "near that edge; to cut to a framed close-up of a region, "
                  "pass rect=[x0,y0,x1,y1] instead)" if tgt else "")
+    if overrode_cxcy:
+        # Said once, in the result of a call that WORKED, instead of as a
+        # rejection that cost the turn a step.
+        aimed += (". NOTE: you passed cx/cy as well as rect — the rect wins "
+                  "(it already fixes where the frame lands, and the pin is "
+                  "derived from it). Pass rect alone next time")
     return ctx.write_edl(
         edl, f"{ZOOM_MODE_DESC[zmode]} zoom {int(st * 100)}% on {s}-{e}s "
              f"(output time){aimed} [{item['id']}]")
@@ -5303,6 +5319,21 @@ INSERT_NEEDS_WINDOW_S = 15.0    # clips longer than this need an explicit window
 INSERT_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 
 
+def _dropped_motion_note(motion, at=None, dur=None):
+    """The one line that replaces a rejection when `motion` rode a VIDEO
+    insert. Names the tool that DOES move a clip, with the window already
+    filled in, so the follow-up call needs no arithmetic."""
+    if not motion:
+        return ""
+    where = (f" add_zoom(start={at}, end={round(at + dur, 2)}, "
+             f"mode='push_in') over its window"
+             if at is not None and dur is not None
+             else " add_zoom over its window")
+    return (f"\nNote: motion={motion!r} was ignored — it is a Ken Burns move "
+            f"for STILLS, and this is a video clip that already moves. For a "
+            f"camera move on top of the clip, call{where}.")
+
+
 def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                  clip_start_s=None, motion=None):
     asset, err = _resolve_media_asset(ctx, asset_key,
@@ -5319,11 +5350,18 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                 "FINAL edited video, in seconds.")
     if motion is not None:
         motion = str(motion).strip().lower() or None
+    # A motion asked for on a VIDEO clip is dropped, not rejected (round 101).
+    # 92 rejections in a week, and every one of them threw away a placement
+    # the tool could have made: the insert is entirely well-specified without
+    # the motion, and the clip does move on its own — so refusing the whole
+    # call punished the agent for a redundant argument, at the price of a
+    # full step of the user's wait. If the agent really wants a move ON a
+    # clip, add_zoom over the insert's window is the tool, and the note says
+    # so where it will be read.
+    dropped_motion = None
+    if motion and kind != "image":
+        dropped_motion, motion = motion, None
     if motion:
-        if kind != "image":
-            return ("REJECTED: motion is only for IMAGE inserts (a Ken "
-                    "Burns move on a still) — video clips already move. "
-                    "Drop the motion argument for clips.")
         if motion not in INSERT_MOTIONS:
             return (f"REJECTED: motion must be one of "
                     f"{', '.join(INSERT_MOTIONS)}.")
@@ -5384,7 +5422,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
         moved = f" with a Ken Burns {motion} move" if motion else ""
         desc = (f"placed {kind} '{name}' ({dur}s){window}{moved} on the "
                 f"canvas [{item['id']}]")
-        return ctx.write_edl(edl, desc)
+        return ctx.write_edl(edl, desc) + _dropped_motion_note(dropped_motion)
 
     keep = [list(x) for x in edl["keep"]]
     orig_keep = [list(x) for x in keep]
@@ -5455,7 +5493,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                    "media is not transcribed or captioned.")
         if remap_notes:
             result += "\n" + "\n".join(remap_notes)
-    return result
+    return result + _dropped_motion_note(dropped_motion, final_at, dur)
 
 
 def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
@@ -13003,8 +13041,10 @@ TOOLS = {
                  "magnifies around it — right for emphasis on a subject "
                  "that is already well-composed, and wrong for framing a "
                  "thing near an edge (an edge point stays at the edge at "
-                 "any strength — it never slides to centre). Omit all "
-                 "three for the classic center zoom. Use 1-3 short zooms "
+                 "any strength — it never slides to centre). Pass rect OR "
+                 "cx/cy, not both; if both arrive the rect wins (it already "
+                 "determines the centre) and the call still succeeds. Omit "
+                 "all three for the classic center zoom. Use 1-3 short zooms "
                  "at emphatic moments, not wall-to-wall; for automatic "
                  "zooms on the strongest spoken words use "
                  "punch_in_on_emphasis. And if the zoom should MOVE while "
@@ -14079,10 +14119,23 @@ WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
                "generate_video", "fetch_url"}
 
 
-def _tool_disabled(name):
+def _tool_disabled(name, model=None):
     """Tools whose backing service is not configured are hidden entirely —
     the model must never see (or advertise) a capability that would only
     return 'unavailable'."""
+    # EARS THE MODEL DOES NOT HAVE ARE NOT A TOOL (round 101). listen_to was
+    # the third most-rejected tool in the product — 42 calls in a week that
+    # could only ever answer "this model lane cannot take audio", because
+    # the schema advertised hearing to a model whose provider had already
+    # refused an audio part. The deaf latch is set from the provider's own
+    # words (llm.mark_agent_deaf), so from that moment the honest schema
+    # simply has no listen_to in it, exactly like every other honest-off
+    # tool above. get_audio_analysis stays — it is measurement, not hearing.
+    if name == "listen_to":
+        if not config.AGENT_AUDIO:
+            return True
+        if model is not None and not llm.agent_hears(model):
+            return True
     if name == "generate_image":
         return not llm.image_available()
     if name == "generate_video":
@@ -14139,11 +14192,36 @@ def capability_names():
     return [n for n in TOOLS if n in WRITE_TOOLS and not _tool_disabled(n)]
 
 
-def openai_tools():
+def openai_tools(model=None):
+    """`model` is the agent model this schema is for, so per-model honest-off
+    (a provider that has refused audio parts) can hide a tool the same way an
+    unconfigured service does. Omitted by MCP and the tests, where the
+    deployment-wide answer is the right one."""
     out = []
+    edits = llm.image_edit_available()
     for name, (_fn, desc, props) in TOOLS.items():
-        if _tool_disabled(name):
+        if _tool_disabled(name, model):
             continue
+        # HONEST-OFF AT THE ARGUMENT LEVEL (round 101). generate_image was
+        # the fourth most-rejected tool — 61 calls in a week asking it to
+        # restyle a frame or an upload against an image model that can only
+        # text-to-image. The whole capability lives in two arguments, so the
+        # honest schema drops those two arguments and the sentences that
+        # advertise them; a tool the agent cannot misread costs no steps to
+        # be told no.
+        if name == "generate_image" and not edits:
+            props = {k: v for k, v in props.items()
+                     if k not in ("from_video_time_s", "from_asset_key")}
+            desc = ("Create an image with AI from a TEXT PROMPT. This image "
+                    "model cannot restyle or edit an existing frame or "
+                    "upload — it only makes new images from a description, "
+                    "so describe the whole picture you want. The result is "
+                    "saved as a project image asset; it appears in the video "
+                    "ONLY after you insert_media its storage_key (typically "
+                    "2-4s with a Ken Burns motion). It lands as a full-frame "
+                    "STILL moment — it does not modify or track the moving "
+                    "footage. aspect defaults to the output frame / source "
+                    "ratio.")
         out.append({
             "type": "function",
             "function": {

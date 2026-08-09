@@ -1990,7 +1990,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          "content": _CONTINUATION_NOTE.format(
                              done=done, plan=plan_note,
                              why=_cont.get("why", "step ceiling"))})
-    tools = agent_tools.openai_tools()
+    tools = agent_tools.openai_tools(model)
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
     timings = _cont.get("timings") or \
