@@ -46,6 +46,8 @@ class _Cur:
         p = params or ()
         if s.startswith("SELECT id FROM projects WHERE id"):
             self._one = {"id": p[0]}
+        elif "SELECT user_id, meta FROM projects" in s:
+            self._one = {"user_id": self.project_owner, "meta": {}}
         elif "SELECT user_id FROM projects" in s:
             self._one = {"user_id": self.project_owner}
         elif "FROM assets WHERE id" in s:

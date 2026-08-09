@@ -35,7 +35,8 @@ import storage
 import tiles as tilestrip
 import transcribe
 from schemas import (VideoIndex, VideoInfo, clamp_word_times,
-                     default_edl, is_canvas_program, validate_edl)
+                     default_edl, is_canvas_program, keep_boundaries,
+                     validate_edl)
 
 
 PROGRESS_EVERY_S = 5.0
@@ -770,7 +771,8 @@ def _sweep_tray_placements(worker_db, project_id):
     inserts = list(edl.get("inserts") or [])
     have_keys = {i.get("asset_key") for i in inserts}
     keep = edl.get("keep") or []
-    end_boundary = keep[-1][1] if keep else 0.0
+    bounds = keep_boundaries(keep, edl.get("speed") or [])
+    end_boundary = bounds[-1] if bounds else 0.0
     taken = {i.get("id") for i in inserts}
     added, placed_ids = 0, []
     for a in pending:
@@ -804,9 +806,11 @@ def _sweep_tray_placements(worker_db, project_id):
             src_dur = keep[-1][1] if keep else 0.0
             new_edl = validate_edl(new_edl, src_dur).model_dump()
         except Exception as e:
-            # Belt-and-braces (positions are keep boundaries by
-            # construction); never lose the placements over a nit.
-            print(f"[index] tray EDL validation note: {e}", flush=True)
+            # Do not commit an invalid EDL or clear tray_place: another index
+            # or a submit retry can place it after the defect is corrected.
+            print(f"[index] tray EDL validation failed — placements retained: "
+                  f"{e}", flush=True)
+            return 0
         version = worker_db.run(dbx.insert_edl, project_id, new_edl, "agent")
         # The player must have something to show for this version — nothing
         # else renders it (the studio's self-heal covers USER versions only,

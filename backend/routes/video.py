@@ -1837,7 +1837,13 @@ def _place_tray_now(cur, project_id, session_id, user_id):
     inserts = list(edl.get("inserts") or [])
     have_keys = {i.get("asset_key") for i in inserts}
     keep = edl.get("keep") or []
-    end_boundary = keep[-1][1] if keep else 0.0
+    # at_output_s is on the EDITED pre-insert clock, not the source clock.
+    # After a trim [[7.05, 13.33]], the end boundary is 6.28 — using 13.33
+    # persisted an invalid EDL and made the executor retry the same preview
+    # three times. Speed changes the edited clock too, so use the one shared
+    # boundary function rather than subtracting source spans here.
+    boundaries = wschemas.keep_boundaries(keep, edl.get("speed") or [])
+    end_boundary = boundaries[-1] if boundaries else 0.0
     taken = {i.get("id") for i in inserts}
     added, placed_ids = 0, []
     for a in pending:
@@ -1868,11 +1874,11 @@ def _place_tray_now(cur, project_id, session_id, user_id):
     if not added:
         return None, 0
     edl["inserts"] = inserts
-    try:
-        src_dur = keep[-1][1] if keep else 0.0
-        edl = wschemas.validate_edl(edl, src_dur).model_dump()
-    except Exception as e:
-        current_app.logger.warning("tray placement validation note: %s", e)
+    src_dur = keep[-1][1] if keep else 0.0
+    # Never persist an EDL validation merely described as a "note". A failed
+    # validation must roll this transaction back, leaving tray_place intact,
+    # instead of committing a timeline no preview or final can render.
+    edl = wschemas.validate_edl(edl, src_dur).model_dump()
     version = edl_row["version"] + 1
     cur.execute("""INSERT INTO edls (project_id, version, json, created_by)
                    VALUES (%s, %s, %s, 'user')""",
@@ -4965,12 +4971,26 @@ def start_shorts(user_id, project_id):
                                      "project it was cut from to make "
                                      "more."}), 400
         original = _active_original(cur, project_id)
-        indexed = bool(original and _index_row(cur, original["sha256"]))
-        if not indexed:
+        index_row = original and _index_row(cur, original["sha256"])
+        if not index_row:
             return jsonify({"error": "The video is still being analyzed — "
                                      "shorts start the moment that "
                                      "finishes.",
                             "code": "not_indexed"}), 409
+        source_duration = float(
+            ((index_row.get("json") or {}).get("video") or {})
+            .get("duration") or original.get("duration_s") or 0.0)
+        if source_duration < 60.0:
+            # This is deterministic, so do it before the credit gate and job
+            # enqueue.  The old path spent a queue slot, failed, then told the
+            # user to press the same impossible button again.
+            return jsonify({
+                "error": (f"This video is already {source_duration:.0f}s — "
+                          "it is short-form already. Edit it directly in "
+                          "chat instead of cutting shorts from it."),
+                "code": "source_already_short",
+                "duration_s": round(source_duration, 1),
+            }), 400
         # Same two walls as sending a message: a shorts run is model time
         # plus a fan of renders, so it needs the same credit standing.
         if plan_gate.needs_plan(conn, user_id):

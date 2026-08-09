@@ -38,7 +38,8 @@ import storage
 import timeline as timeline_mod
 import travel
 from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
-                     is_canvas_program, quad_bbox, speed_pieces, validate_edl)
+                     is_canvas_program, keep_boundaries, quad_bbox,
+                     speed_pieces, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -2842,11 +2843,61 @@ def _prune_graph_to_audio(graph, target="aout"):
     return ";".join(c for c, _i, _o, _f in kept)
 
 
+def _resolve_asset_local(key, asset_locals, fallback):
+    """Return a known byte-identical local path before fetching ``key``."""
+    aliased = (asset_locals or {}).get(key)
+    if aliased and os.path.exists(aliased):
+        return aliased
+    return fallback(key)
+
+
+def _repair_legacy_insert_boundaries(edl_dict):
+    """Snap only legacy off-boundary inserts so an old broken EDL can render.
+
+    The backend used the last kept SOURCE timestamp when a trimmed project
+    submitted a second tray.  Those versions are already in production and a
+    schema fix cannot rewrite history.  Rendering that exact legacy signature
+    at the edited end is what the corrected submit path would have done; every
+    other validation rule remains strict in ``validate_edl`` below.
+    """
+    if is_canvas_program(edl_dict):
+        return edl_dict
+    bounds = keep_boundaries(edl_dict.get("keep") or [],
+                             edl_dict.get("speed") or [])
+    if not bounds:
+        return edl_dict
+    try:
+        legacy_source_end = float((edl_dict.get("keep") or [])[-1][1])
+    except (TypeError, ValueError, IndexError):
+        return edl_dict
+    edited_end = bounds[-1]
+    repaired = None
+    for n, item in enumerate(edl_dict.get("inserts") or []):
+        try:
+            at = float(item.get("at_output_s"))
+        except (TypeError, ValueError, AttributeError):
+            continue                      # normal validation names the defect
+        if any(abs(boundary - at) <= 0.02 for boundary in bounds):
+            continue
+        # The old path always wrote keep[-1][1]. Do not disguise any other
+        # invalid anchor as legacy data; normal validation must reject it.
+        if abs(at - legacy_source_end) > 0.02:
+            continue
+        if repaired is None:
+            repaired = dict(edl_dict)
+            repaired["inserts"] = [dict(x)
+                                   for x in edl_dict.get("inserts") or []]
+        repaired["inserts"][n]["at_output_s"] = edited_end
+        print(f"[render] recovered legacy insert {item.get('id', n)}: "
+              f"{at:g}s -> boundary {edited_end:g}s", flush=True)
+    return repaired or edl_dict
+
+
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                progress_cb=None, want_wm=False, cancelled_cb=None,
                patch_locals=None, cap_ass_override=None,
                suppress_outro=False, cap_burn_offset=None,
-               audio_only=False):
+               audio_only=False, asset_locals=None):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -2871,7 +2922,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   cancelled_cb=cancelled_cb)
     info = media.probe(src_path)
     src_dur = info["duration"]
-    edl = validate_edl(edl_dict, max(src_dur, max(e for _, e in edl_dict["keep"]))
+    render_dict = _repair_legacy_insert_boundaries(edl_dict)
+    edl = validate_edl(render_dict,
+                       max(src_dur, max(e for _, e in render_dict["keep"]))
                        ).model_dump()
 
     frame = edl.get("frame") or None
@@ -2913,7 +2966,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                       play_res=(W, H))
 
     def _fetch(key, tag, idx):
-        cached = _cached_source(key)
+        cached = _resolve_asset_local(key, asset_locals, _cached_source)
         if cached:
             return cached
         local = os.path.join(workdir, f"{tag}_{idx}"
@@ -3358,6 +3411,53 @@ def _caption_index_fp(edl_json, index):
     return h.hexdigest()[:16]
 
 
+def _prune_source_cache(cache_dir, protect=None):
+    """Bound the persistent executor cache by age, item size and total bytes.
+
+    Cloud Run reuses an instance between unrelated customers.  That makes a
+    source cache valuable, but it also means a huge file from the previous job
+    can consume the scratch reservation of the next one.  Concurrency is one,
+    so no other request can be using an unprotected cache entry while this
+    runs; ``protect`` keeps the file this call is about to return.
+    """
+    now = time.time()
+    entries = []
+    for fn in os.listdir(cache_dir):
+        fp = os.path.join(cache_dir, fn)
+        if fp == protect:
+            continue
+        try:
+            st = os.stat(fp)
+        except OSError:
+            continue
+        # Interrupted downloads have no reuse value.  The remaining rules
+        # are inclusive limits: an exactly-4-GiB source is still cacheable.
+        if ".part" in fn or now - st.st_mtime > 6 * 3600 \
+                or st.st_size > config.SOURCE_CACHE_MAX_ITEM_BYTES:
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+            continue
+        entries.append((st.st_mtime, st.st_size, fp))
+
+    protected_size = 0
+    if protect:
+        try:
+            protected_size = os.path.getsize(protect)
+        except OSError:
+            protected_size = 0
+    total = protected_size + sum(size for _mtime, size, _fp in entries)
+    for _mtime, size, fp in sorted(entries):
+        if total <= config.SOURCE_CACHE_MAX_BYTES:
+            break
+        try:
+            os.remove(fp)
+            total -= size
+        except OSError:
+            pass
+
+
 def _cached_source(storage_key):
     """A sha-keyed local copy of an IMMUTABLE storage object (proxies are
     content-addressed, originals/clean sources never change under a key), so
@@ -3371,24 +3471,23 @@ def _cached_source(storage_key):
     try:
         cache_dir = os.path.join(config.TMP_DIR, "srccache")
         os.makedirs(cache_dir, exist_ok=True)
+        _prune_source_cache(cache_dir)
         name = hashlib.sha256(storage_key.encode()).hexdigest()[:32] + \
             os.path.splitext(storage_key)[1]
         local = os.path.join(cache_dir, name)
         if os.path.exists(local) and os.path.getsize(local) > 0:
             os.utime(local, None)      # LRU touch
             return local
+        object_size = storage.object_bytes(storage_key)
+        # Unknown-size objects take the ordinary workdir path, where the
+        # download remains job-owned and is removed in finally.  Large files
+        # do the same: caching them is precisely what starved the next final.
+        if not object_size or object_size > config.SOURCE_CACHE_MAX_ITEM_BYTES:
+            return None
         tmp = local + f".part{uuid.uuid4().hex[:6]}"
         storage.download_to(storage_key, tmp)
         os.replace(tmp, local)
-        # Best-effort prune: drop cache entries untouched for 6+ hours.
-        now = time.time()
-        for fn in os.listdir(cache_dir):
-            fp = os.path.join(cache_dir, fn)
-            try:
-                if now - os.path.getmtime(fp) > 6 * 3600:
-                    os.remove(fp)
-            except OSError:
-                pass
+        _prune_source_cache(cache_dir, protect=local)
         return local
     except Exception as e:
         print(f"[render] source cache miss-path failed ({e}) — "
@@ -3943,6 +4042,18 @@ def run_render_job(worker_db, job):
         # guard agrees is still a true render of its EDL.
         out_dur = None
         stitched_from = None
+        # A tray upload can appear twice in assets under different storage
+        # keys (main original + reusable video clip) while carrying the exact
+        # same sha256.  On a final the original is already local; let every
+        # byte-identical key reuse it.  This is not enabled for previews (their
+        # main input is a proxy, not byte-identical) or cleaned sources.
+        asset_locals = {}
+        if variant == "final" and src_local and src_asset \
+                and src_asset.get("storage_key") == original.get("storage_key") \
+                and src_sha and src_sha != "canvas":
+            for key in worker_db.run(dbx.project_asset_keys_by_sha,
+                                     project_id, src_sha):
+                asset_locals[key] = src_local
         if variant == "preview" and not force and not want_wm \
                 and not is_canvas:
             try:
@@ -3988,7 +4099,8 @@ def run_render_job(worker_db, job):
                                  preview=(variant == "preview"),
                                  progress_cb=_prog, want_wm=want_wm,
                                  cancelled_cb=lambda: _abandoned[0],
-                                 patch_locals=patch_locals)
+                                 patch_locals=patch_locals,
+                                 asset_locals=asset_locals)
         _mark("encode_s")
 
         # Render verification: the output must be the expected length and must
@@ -4021,7 +4133,8 @@ def run_render_job(worker_db, job):
                                  preview=(variant == "preview"),
                                  progress_cb=_prog, want_wm=want_wm,
                                  cancelled_cb=lambda: _abandoned[0],
-                                 patch_locals=patch_locals)
+                                 patch_locals=patch_locals,
+                                 asset_locals=asset_locals)
             _verify_render(edl_row["json"], out_local, out_dur, job_id,
                            variant, src_path=src_local, src_dur=src_dur)
         _mark("verify_s")

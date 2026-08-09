@@ -727,6 +727,22 @@ def any_asset_by_sha(conn, kind, sha256):
         return cur.fetchone()
 
 
+def project_asset_keys_by_sha(conn, project_id, sha256):
+    """Storage aliases for identical bytes inside one project.
+
+    The upload tray can legitimately register the same file as both the main
+    ``original`` and a ``video_clip``.  A final that splices that clip should
+    open the already-local original a second time, not download another 12 GB
+    copy of identical bytes into executor scratch.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""SELECT storage_key FROM assets
+                       WHERE project_id = %s AND sha256 = %s
+                         AND storage_key IS NOT NULL""",
+                    (project_id, sha256))
+        return [r["storage_key"] for r in cur.fetchall()]
+
+
 def latest_render_version(conn, project_id, variant):
     """EDL version of the newest render of this variant, or None — the
     baseline for round 81's verify plan: the render the user last SAW is the

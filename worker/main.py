@@ -191,6 +191,15 @@ FORCED_PREVIEW_FAIL_NOTE = (
 
 def _notify_failure(worker_db, job, err):
     note = FAIL_NOTES.get(job["type"])
+    if job["type"] == "shorts_plan":
+        reason = str(err)
+        if "shorts need a longer source" in reason:
+            note = ("This video is already short-form ({err}). Edit it "
+                    "directly here instead of pressing Make shorts again.")
+        elif "clip-worthy moments" in reason:
+            note = ("I couldn't find self-contained short moments in this "
+                    "transcript ({err}). Ask me in chat to build one short "
+                    "around the specific idea you want instead.")
     payload = job.get("payload") or {}
     if not note and job["type"] == "preview":
         if payload.get("force"):

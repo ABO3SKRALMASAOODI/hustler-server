@@ -649,6 +649,16 @@ TMP_DIR = os.getenv("WORKER_TMP_DIR", "/tmp/valmera")
 # kills the container rather than raising, and the job's only epitaph is
 # "Worker died and retries are exhausted".
 WORKDIR_HEADROOM = float(os.getenv("WORKDIR_HEADROOM", "2.2"))
+# The executor source cache is an optimisation, never a reservation on the
+# whole scratch disk.  A six-hour age limit alone let one 11.5 GB source sit
+# beside the next job: the second 11.5 GB final then saw only 20 GB free and
+# was correctly refused by the 2.2x capacity guard.  Keep normal phone/video
+# sources hot, but make unusually large files one-job downloads and cap the
+# aggregate cache so an idle instance is always ready for another large job.
+SOURCE_CACHE_MAX_ITEM_BYTES = int(float(os.getenv(
+    "SOURCE_CACHE_MAX_ITEM_GB", "4")) * 1024 ** 3)
+SOURCE_CACHE_MAX_BYTES = int(float(os.getenv(
+    "SOURCE_CACHE_MAX_GB", "8")) * 1024 ** 3)
 POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
 # The media lane runs preview + final encodes. Indexing gets its OWN lane
 # (INDEX_SLOTS) so a multi-minute whisper index can never wedge interactive
@@ -676,9 +686,12 @@ MEDIA_POLL_INTERVAL_S = float(os.getenv(
 # PROJECT (db.claim_job) so extra slots can never race two turns onto one
 # timeline. An agent turn is network waiting — the slots are nearly free —
 # and on Aug 8 a real user's queued message sat 14 minutes behind another
-# user's long turn while the box did nothing. If Render's env pins
-# WORKER_AGENT_SLOTS lower, RAISE THAT TOO — the env overrides this default.
-AGENT_SLOTS = int(os.getenv("WORKER_AGENT_SLOTS", "4"))
+# user's long turn while the box did nothing.  The live Render service still
+# had the old WORKER_AGENT_SLOTS=2 override after this default changed, and a
+# production overlap audit proved it was therefore still capped at exactly
+# two.  Four is now a correctness floor; the env may raise it, not silently
+# undo the capacity fix.
+AGENT_SLOTS = max(4, int(os.getenv("WORKER_AGENT_SLOTS", "4")))
 # The agent lane's claim poll is the gap between "user hit send" and "the
 # turn starts" — the first latency anyone feels, on every single message.
 # 0.5s, like the MCP lane: the claim is one indexed SKIP LOCKED query.
