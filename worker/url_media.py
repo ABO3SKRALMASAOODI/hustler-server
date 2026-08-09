@@ -374,8 +374,14 @@ def _extract(url, workdir, prefer=None, client_override=None):
         # video, region block, sign-in wall, extractor broken by a site
         # change). Surfacing its last line beats "download failed" — the user
         # can act on "Private video" and cannot act on a generic failure.
-        detail = (err or out or "").strip().splitlines()
-        tail = detail[-1][:200] if detail else "no media found at that link"
+        detail = [ln for ln in (err or out or "").strip().splitlines()
+                  if ln.strip()]
+        # THREE lines, not one. yt-dlp's final line is often just the
+        # summary ("Unable to download video data") while the line above
+        # carries the cause (the 403, the wall, the rotated-jar warning) —
+        # and on a box with no reachable logs, this error IS the log.
+        tail = (" | ".join(detail[-3:])[:300] if detail
+                else "no media found at that link")
         # A rotated-out cookie jar hides as a bot-wall failure (rejected
         # cookies = anonymous = challenged). Name the real culprit so the
         # operator refreshes the jar instead of re-plumbing the delivery —

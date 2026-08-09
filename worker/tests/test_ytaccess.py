@@ -195,6 +195,25 @@ def test_probe_flags_a_rotted_jar_even_on_success(monkeypatch):
     assert v["cookie_source"] == "env" and v["cookie_entries"] == 1
 
 
+def test_probe_downloads_only_after_extraction_passes(monkeypatch):
+    """Aug 9: --simulate passed from the very box whose downloads still
+    walled — the two gates are independent and the probe must see both."""
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(list(cmd))
+
+        class R:
+            stdout, stderr, returncode = "probe_ok id=x fmt=1\n", "", 0
+        return R()
+    monkeypatch.setattr(ytaccess.subprocess, "run", run)
+    v = ytaccess.probe()
+    assert len(calls) == 2
+    assert "--simulate" in calls[0] and "--simulate" not in calls[1]
+    assert v["ok"] and not v["download_ok"]    # the fake wrote no file
+    assert v["download_why"]
+
+
 def test_probe_verdict_is_json_ready(monkeypatch):
     _fake_probe_run(monkeypatch, stdout="probe_ok id=x fmt=251\n")
     json.dumps(ytaccess.probe())

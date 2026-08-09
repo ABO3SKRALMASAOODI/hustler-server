@@ -241,22 +241,11 @@ def pot_args():
 
 # ── the boot probe: the answer to "is it working", asked from the box ────
 
-def probe(url=None, timeout_s=120.0):
-    """One real extraction from THIS box, no download, verdict as a dict.
-
-    Runs the exact production flag set (cookies, PO tokens, EJS solver,
-    proxy) against one stable public video and asks only that an audio
-    format resolves — the two ways prod actually fails (the bot wall at
-    extraction; cookie-mode format resolution without the JS solver) both
-    happen before a single media byte, so --simulate covers them."""
-    url = url or config.YTDLP_PROBE_URL
-    content, source = resolve_cookies()
-    run_jar = prepare_run_jar()
+def _probe_cmd(url, run_jar):
     cmd = [sys.executable, "-m", "yt_dlp",
-           "--ignore-config", "--simulate",
+           "--ignore-config",
            "--socket-timeout", "20",
-           "-f", "ba/b",
-           "--print", "probe_ok id=%(id)s fmt=%(format_id)s"]
+           "-f", "ba/b"]
     if run_jar:
         cmd += ["--cookies", run_jar]
     if config.YTDLP_PROXY:
@@ -264,30 +253,84 @@ def probe(url=None, timeout_s=120.0):
     if config.YTDLP_REMOTE_COMPONENTS:
         cmd += ["--remote-components", config.YTDLP_REMOTE_COMPONENTS]
     cmd += pot_args()
-    cmd += ["--", url]
-    verdict = {"at": int(time.time()), "cookie_source": source,
-               "cookie_entries": 0, "pot": bool(pot_args()),
-               "ok": False, "why": ""}
+    return cmd, ["--", url]
+
+
+def _tail(text, n=3, cap=300):
+    lines = [ln for ln in (text or "").strip().splitlines() if ln.strip()]
+    return " | ".join(lines[-n:])[:cap] if lines else "no output"
+
+
+def probe(url=None, timeout_s=120.0):
+    """One real extraction AND one small real download from THIS box.
+
+    Runs the exact production flag set (cookies, PO tokens, EJS solver,
+    proxy) against one stable public video, in two stages, because prod
+    fails at two different gates and Aug 9 proved they are independent:
+    --simulate passed from the very box whose downloads still walled.
+
+      simulate  — the bot wall at extraction + format resolution
+      download  — the media-serving gate (a few hundred KB of worstaudio,
+                  capped, deleted immediately)
+
+    The probe URL can be overridden without a deploy through the app_kv
+    row 'ytdlp_probe_url' — pointing the next boot at whatever video prod
+    is actually failing on is the whole diagnostic loop."""
+    if url is None and config.DATABASE_URL:
+        try:
+            url = (db.Db().run(db.kv_get, "ytdlp_probe_url") or "").strip()
+        except Exception:
+            url = ""
+    url = url or config.YTDLP_PROBE_URL
+    content, source = resolve_cookies()
+    run_jar = prepare_run_jar()
+    verdict = {"at": int(time.time()), "url": url,
+               "cookie_source": source, "cookie_entries": 0,
+               "pot": bool(pot_args()), "ok": False, "why": "",
+               "download_ok": False, "download_why": ""}
     if content:
         verdict["cookie_entries"] = sum(
             1 for line in _normalize_jar(content).splitlines()
             if line.strip() and not line.startswith("#") and "\t" in line)
+    base, target = _probe_cmd(url, run_jar)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              errors="replace", timeout=timeout_s)
+        proc = subprocess.run(
+            base + ["--simulate",
+                    "--print", "probe_ok id=%(id)s fmt=%(format_id)s"]
+            + target,
+            capture_output=True, text=True, errors="replace",
+            timeout=timeout_s)
         err = proc.stderr or ""
         verdict["ok"] = proc.returncode == 0 and "probe_ok" in (
             proc.stdout or "")
         if stale_cookies(err):
             verdict["stale_cookies"] = True
         if not verdict["ok"]:
-            tail = (err.strip() or "no output").splitlines()
             verdict["why"] = ("bot_wall" if bot_walled(err) else "error"
-                              ) + ": " + tail[-1][:300]
+                              ) + ": " + _tail(err)
+        if verdict["ok"]:
+            with tempfile.TemporaryDirectory(prefix="ytprobe_") as d:
+                proc = subprocess.run(
+                    base + ["-f", "worstaudio/worst",
+                            "--max-filesize", str(4 << 20),
+                            "-o", os.path.join(d, "p.%(ext)s")]
+                    + target,
+                    capture_output=True, text=True, errors="replace",
+                    timeout=timeout_s)
+                err = proc.stderr or ""
+                got = any(os.path.getsize(os.path.join(d, f))
+                          for f in os.listdir(d))
+                verdict["download_ok"] = proc.returncode == 0 and got
+                if stale_cookies(err):
+                    verdict["stale_cookies"] = True
+                if not verdict["download_ok"]:
+                    verdict["download_why"] = (
+                        "bot_wall" if bot_walled(err) else "error"
+                    ) + ": " + _tail(err)
     except subprocess.TimeoutExpired:
-        verdict["why"] = f"timeout after {timeout_s:.0f}s"
+        verdict["why"] = verdict["why"] or f"timeout after {timeout_s:.0f}s"
     except Exception as e:                        # pragma: no cover
-        verdict["why"] = f"probe crashed: {str(e)[:200]}"
+        verdict["why"] = verdict["why"] or f"probe crashed: {str(e)[:200]}"
     finally:
         if run_jar:
             try:
@@ -310,7 +353,9 @@ def boot_probe():
         verdict = {"ok": False, "why": f"probe wrapper: {str(e)[:200]}"}
     line = ("[ytaccess] probe ok" if verdict.get("ok")
             else f"[ytaccess] probe FAILED — {verdict.get('why', '?')}")
-    print(f"{line} (cookies={verdict.get('cookie_source')}"
+    dl = ("download ok" if verdict.get("download_ok")
+          else f"download FAILED — {verdict.get('download_why', '?')}")
+    print(f"{line}; {dl} (cookies={verdict.get('cookie_source')}"
           f"/{verdict.get('cookie_entries', 0)} entries"
           f"{', STALE' if verdict.get('stale_cookies') else ''}, "
           f"pot={'on' if verdict.get('pot') else 'off'})", flush=True)
