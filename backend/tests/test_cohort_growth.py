@@ -7,7 +7,7 @@ os.environ.setdefault("SKIP_DB_INIT", "1")
 os.environ.setdefault("DATABASE_URL", "postgresql://stub/stub")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from routes.admin_video import _attach_growth  # noqa: E402
+from routes.admin_video import _attach_growth, _growth_percent  # noqa: E402
 
 
 def _row(signups, uploaded=0, messaged=0, exported=0, lead_in=False):
@@ -41,3 +41,9 @@ def test_growth_after_a_real_zero_is_unknown_not_infinite():
     _attach_growth(rows)
     assert rows[1]["growth"]["signed_up"] == 100.0
     assert rows[1]["growth"]["uploaded"] is None
+
+
+def test_week_to_date_growth_uses_equal_elapsed_windows():
+    assert _growth_percent(125, 88) == 42.0
+    assert _growth_percent(88, 88) == 0.0
+    assert _growth_percent(4, 0) is None

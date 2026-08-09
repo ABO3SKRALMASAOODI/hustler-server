@@ -1244,6 +1244,13 @@ GROWTH_STAGES = [
 ]
 
 
+def _growth_percent(now, was):
+    """Comparable-period growth, preserving unknown instead of infinity."""
+    if was is None or was == 0:
+        return None
+    return round((now - was) / was * 100.0, 1)
+
+
 def _attach_growth(cohorts):
     """Period-over-period growth %, per stage, onto each cohort row.
 
@@ -1269,7 +1276,7 @@ def _attach_growth(cohorts):
             if was is None or was == 0 or prev.get("lead_in"):
                 g[key] = None
             else:
-                g[key] = round((now - was) / was * 100.0, 1)
+                g[key] = _growth_percent(now, was)
         c["growth"] = g
         prev = c
 
@@ -1335,6 +1342,7 @@ def video_cohorts():
     period = (request.args.get("period") or "week").strip().lower()
     if period not in ("day", "week", "month"):
         period = "week"
+    week_to_date = None
     with adb() as conn:
         cur = conn.cursor()
         have_trials = _trial_columns_exist(cur)
@@ -1405,6 +1413,47 @@ def video_cohorts():
               COHORT_LEAD_IN.get(period, 3), period,
               period, period, period, METRICS_EPOCH))
         rows = cur.fetchall()
+        if period == "week":
+            # The open week must be compared with the SAME amount of elapsed
+            # time last week. Comparing Sunday morning with all seven days of
+            # the previous week systematically understates growth until the
+            # week closes and makes a healthy live number look discouraging.
+            cur.execute("""
+                WITH bounds AS (
+                    SELECT date_trunc('week', NOW()) AS current_start,
+                           NOW() AS as_of,
+                           date_trunc('week', NOW()) - INTERVAL '1 week'
+                               AS previous_start
+                )
+                SELECT b.current_start, b.as_of, b.previous_start,
+                       b.previous_start + (b.as_of - b.current_start)
+                           AS previous_cutoff,
+                       (SELECT COUNT(*) FROM users u
+                        WHERE """ + _scope('u') + """
+                          AND u.created_at >= b.current_start
+                          AND u.created_at < b.as_of) AS current_signed_up,
+                       (SELECT COUNT(*) FROM users u
+                        WHERE """ + _scope('u') + """
+                          AND u.created_at >= b.previous_start
+                          AND u.created_at < b.previous_start
+                                             + (b.as_of - b.current_start))
+                           AS previous_signed_up
+                FROM bounds b
+            """)
+            pace = cur.fetchone()
+            if pace:
+                current_count = int(pace["current_signed_up"] or 0)
+                previous_count = int(pace["previous_signed_up"] or 0)
+                week_to_date = {
+                    "current_signed_up": current_count,
+                    "previous_signed_up": previous_count,
+                    "growth_signed_up": _growth_percent(
+                        current_count, previous_count),
+                    "current_start": pace["current_start"].isoformat(),
+                    "as_of": pace["as_of"].isoformat(),
+                    "previous_start": pace["previous_start"].isoformat(),
+                    "previous_cutoff": pace["previous_cutoff"].isoformat(),
+                }
     cohorts = [{
         "cohort": r["cohort"].date().isoformat() if r["cohort"] else None,
         "signed_up": int(r["signed_up"] or 0),
@@ -1418,6 +1467,15 @@ def video_cohorts():
         "lead_in": bool(r["lead_in"]),
     } for r in rows]
     _attach_growth(cohorts)
+    if week_to_date:
+        # Make the graph and written current-week row use the fair comparison
+        # too. Historical weeks retain ordinary full-week growth.
+        for cohort in reversed(cohorts):
+            if not cohort["lead_in"]:
+                cohort["growth"]["signed_up"] = \
+                    week_to_date["growth_signed_up"]
+                cohort["growth_basis"] = "week_to_date"
+                break
     return jsonify({
         "period": period,
         "metrics_epoch": METRICS_EPOCH,
@@ -1425,6 +1483,7 @@ def video_cohorts():
         "cohorts": cohorts,
         "growth_stages": [{"key": k, "label": lbl}
                           for k, lbl in GROWTH_STAGES],
+        "week_to_date": week_to_date,
         "trial_tracking": have_trials,
         "note": ("Each row is the cohort of users who signed up in that "
                  "period; each stage counts how many of THEM ever reached it "
