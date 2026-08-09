@@ -9998,6 +9998,22 @@ def fetch_url(ctx, url, as_kind=None):
         # whole request.
         if ytaccess.bot_walled(str(e)):
             return f"Could not download that link — {e}"
+        # DRM / premium-locked uploads are per-ITEM too, not a dead end for
+        # the SONG. The official master of a chart hit is DRM-locked on
+        # SoundCloud and walled on YouTube (Aug 9: "Blinding Lights" was
+        # both), so a locked pick means try another candidate that is the
+        # SAME track — and only when just covers or locked masters remain
+        # is "upload the real file" the honest answer. Never pass a cover
+        # off as the original.
+        low = str(e).lower()
+        if any(w in low for w in ("drm", "premium", "paid members",
+                                  "purchase", "only available")):
+            return (f"Could not download that link — {e} This upload is "
+                    "LOCKED (DRM/premium). Try another candidate that is the "
+                    "same song; if only covers or other locked masters are "
+                    "left, tell the user this exact master can't be "
+                    "auto-fetched and to upload the file — do NOT add a "
+                    "cover/remix as if it were the original.")
         return (f"Could not download that link — {e}. Tell the user that "
                 "plainly and suggest they upload the file instead. Do NOT "
                 "claim anything was added.")

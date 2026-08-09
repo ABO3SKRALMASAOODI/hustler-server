@@ -327,6 +327,18 @@ def test_a_walled_candidate_says_try_the_next_not_give_up(monkeypatch,
                                 as_kind="music")
     assert "suggest they upload" in out and "Do NOT claim" in out
 
+    # A DRM/premium-locked pick (the official chart master on SoundCloud) is
+    # per-item too: try another candidate, never pass a cover off as the
+    # original, and only fall to "upload it" when nothing else is the song.
+    def drm(*a, **k):
+        raise agent_tools.url_media.FetchMediaError(
+            "[soundcloud] 718846078: This video is DRM protected")
+    monkeypatch.setattr(agent_tools.url_media, "fetch", drm)
+    out = agent_tools.fetch_url(Ctx(), "https://api.soundcloud.com/tracks/1",
+                                as_kind="music")
+    assert "another candidate" in out and "cover" in out
+    assert "suggest they upload the file instead" not in out  # not a dead end
+
 
 def test_cookie_jar_is_copied_never_the_mounted_secret(monkeypatch,
                                                        tmp_path):
