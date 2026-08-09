@@ -128,6 +128,27 @@ def test_soundcloud_fallbacks_ride_along_and_survive_their_own_failure(
     assert "SoundCloud fallbacks" not in out
 
 
+def test_a_walled_server_leads_with_soundcloud(monkeypatch):
+    """When the boot probe says this box is YouTube-walled, find_song must
+    put SoundCloud FIRST — recommending a source the datacenter IP cannot
+    reach just buys a guaranteed failed download before the recovery. This
+    is what removes the failed-first-attempt the user saw."""
+    monkeypatch.setattr(song_find, "available", lambda: True)
+    monkeypatch.setattr(config, "FIND_SONG_USER_IDS", "")
+    monkeypatch.setattr(song_find, "search", lambda q, count=6: [
+        _c("Song (Official Audio)", uploader="Artist - Topic")])
+    monkeypatch.setattr(song_find, "search_soundcloud", lambda q, count=6: [
+        {"title": "Song", "uploader": "artist", "duration_s": 200.0,
+         "url": "https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A1"}])
+    monkeypatch.setattr(agent_tools.ytaccess, "youtube_walled",
+                        lambda: True)
+    out = agent_tools.find_song(_Ctx(), "song artist")
+    # SoundCloud is named first and appears before the YouTube list.
+    assert "blocking this server's IP" in out
+    assert out.index("api.soundcloud.com") < out.index("youtube.com/watch")
+    assert "start here" in out
+
+
 def test_no_results_never_claims_success(monkeypatch):
     monkeypatch.setattr(song_find, "available", lambda: True)
     monkeypatch.setattr(config, "FIND_SONG_USER_IDS", "")

@@ -139,6 +139,34 @@ def test_the_psql_row_overrides_a_mounted_file(monkeypatch, tmp_path):
     assert source == "db" and "rotted" not in content
 
 
+def test_youtube_walled_reads_the_probe_row(monkeypatch):
+    monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
+    ytaccess._health_cache_reset()
+    state = {"row": None}
+
+    class FakeDb:
+        def run(self, fn, *a, **k):
+            return state["row"]
+    monkeypatch.setattr(ytaccess.db, "Db", FakeDb)
+
+    state["row"] = json.dumps({"ok": True, "download_ok": True})
+    assert ytaccess.youtube_walled() is False
+    ytaccess._health_cache_reset()
+    state["row"] = json.dumps({"ok": True, "download_ok": False,
+                               "download_why": "bot_wall: Sign in"})
+    assert ytaccess.youtube_walled() is True
+    ytaccess._health_cache_reset()
+    state["row"] = json.dumps({"ok": False, "why": "bot_wall: Sign in"})
+    assert ytaccess.youtube_walled() is True
+
+
+def test_youtube_walled_is_false_when_unknown(monkeypatch):
+    # No DB, or a probe that never ran, must NOT reorder anything.
+    monkeypatch.setattr(config, "DATABASE_URL", "")
+    ytaccess._health_cache_reset()
+    assert ytaccess.youtube_walled() is False
+
+
 def test_db_trouble_degrades_to_anonymous(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
     monkeypatch.setattr(config, "YTDLP_COOKIES_KV_KEY", "ytdlp_cookies")

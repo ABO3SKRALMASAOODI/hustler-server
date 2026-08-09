@@ -182,6 +182,42 @@ def _kv_cache_reset():
     _kv_cache.update(at=0.0, content=None)
 
 
+# The boot probe's verdict, read back so callers can ROUTE on it. find_song
+# uses this to lead with SoundCloud when YouTube is blocking this box —
+# there is no point recommending a source the datacenter IP cannot reach.
+_health_cache = {"at": 0.0, "walled": None}
+
+
+def youtube_walled():
+    """True when this box's last boot probe shows YouTube blocking its IP.
+
+    Read from the app_kv 'ytdlp_probe' row (either the extraction or the
+    download stage reporting a bot_wall). Self-healing: add a residential
+    YTDLP_PROXY and the next boot's probe clears the wall, so ordering
+    reverts on its own. Unknown, or any DB trouble, returns False — only a
+    POSITIVE, observed wall changes behavior, never a guess."""
+    if not config.DATABASE_URL:
+        return False
+    now = time.monotonic()
+    if now - _health_cache["at"] < _KV_TTL_S:
+        return bool(_health_cache["walled"])
+    walled = False
+    try:
+        raw = db.Db().run(db.kv_get, "ytdlp_probe")
+        if raw:
+            v = json.loads(raw)
+            walled = (str(v.get("why", "")).startswith("bot_wall")
+                      or str(v.get("download_why", "")).startswith("bot_wall"))
+    except Exception:
+        walled = False
+    _health_cache.update(at=now, walled=walled)
+    return walled
+
+
+def _health_cache_reset():
+    _health_cache.update(at=0.0, walled=None)
+
+
 def resolve_cookies():
     """The jar content and which door it came through, or (None, source).
 

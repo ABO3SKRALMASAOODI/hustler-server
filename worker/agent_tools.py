@@ -2266,6 +2266,20 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
         return (f"Music search failed ({str(e)[:180]}). Try a simpler "
                 "genre query, or use an uploaded file "
                 "(list_assets(kind='music')).")
+    relaxed_duration = False
+    if not hits and (mn is not None or mx is not None):
+        # A short edit needs only a short SLICE of a song, not a song whose
+        # source file is itself 8-30 seconds long.  Openverse is mostly full
+        # tracks, so applying the program duration to catalog results turned
+        # valid queries into repeated false-empty searches.  Preserve every
+        # licensing gate, relax only source duration, and tell the agent why.
+        try:
+            hits = music_search.search(query, commercial_only=commercial)
+            relaxed_duration = bool(hits)
+        except music_search.MusicSearchError as e:
+            return (f"Music search failed ({str(e)[:180]}). Try a simpler "
+                    "genre query, or use an uploaded file "
+                    "(list_assets(kind='music')).")
     if not hits:
         return (f"No tracks matched '{query}'. Search with "
                 "broader GENRE words ('dark phonk', 'lofi chill beat', "
@@ -2277,6 +2291,10 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
     ctx._music_hits = {h["id"]: h for h in hits}
     gate = (" Commercial-use request detected: non-commercial tracks were "
             "excluded." if commercial else "")
+    duration_note = (
+        " No source track matched the requested duration, so these longer "
+        "tracks are candidates to trim/fit to the edit."
+        if relaxed_duration else "")
     return ("Tracks found (each line carries its license terms — relay "
             "them):\n- "
             + "\n- ".join(music_search.describe(h) for h in hits)
@@ -2284,7 +2302,7 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
               "listen_to(asset_key=...) to HEAR it before committing, "
               "add_music to lay it in — and tell the user which track you "
               "chose and its license line (a CC BY credit is theirs to "
-              "carry in the caption)." + gate)
+              "carry in the caption)." + duration_note + gate)
 
 
 def fetch_music(ctx, id):
@@ -2356,36 +2374,51 @@ def find_song(ctx, query):
         return (f"No results for \"{q}\". Check the spelling with the "
                 "user, or ask them to paste a link to the track "
                 "(fetch_url downloads it).")
-    lines = "\n- ".join(song_find.describe(h) for h in hits[:5])
-    # The fallback catalog rides along on every search. YouTube walls
+    yt_lines = "\n- ".join(song_find.describe(h) for h in hits[:5])
+    # The other catalog rides along on every search. YouTube walls
     # music-label content hardest from datacenter IPs (Aug 9: every label
     # upload tried was blocked while SoundCloud fetched clean), so the
     # escape route has to be IN HAND before the first candidate fails —
     # a second search after a wall is a tool call the model often skips.
-    sc_block = ""
     try:
         sc = song_find.search_soundcloud(q)[:3]
     except song_find.SongFindError:
         sc = []
-    if sc:
+    sc_lines = "\n- ".join(song_find.describe(h) for h in sc)
+    _tail = ("Prefer the artist's own/'- Topic' channel or 'Official "
+             "Audio'; avoid lyric/sped-up/loop/cover versions UNLESS their "
+             "words asked for one, and NEVER a full album/mix — ONE track "
+             "only (huge files are refused after minutes of download). "
+             "fetch_url(url=<pick>, as_kind='music') downloads the pick "
+             "ready for add_music. In your reply, tell the user exactly "
+             "which version you grabbed (title + channel) so they can "
+             "correct the pick.")
+    # When the boot probe says THIS server is walled by YouTube (the normal
+    # state without a residential proxy), lead with SoundCloud — recommending
+    # a source the datacenter IP cannot reach just buys a guaranteed failed
+    # download first. Self-healing: add YTDLP_PROXY and the next probe clears
+    # the wall, so YouTube (better masters) leads again with no code change.
+    if sc and ytaccess.youtube_walled():
+        body = (f"{len(sc)} SoundCloud track(s) for \"{q}\" (this server "
+                "downloads these reliably; YouTube is currently blocking "
+                "this server's IP for music, so start here):\n- " + sc_lines)
+        if yt_lines:
+            body += ("\nYouTube candidates (usually WALLED from this server "
+                     "right now — try one only if none of the SoundCloud "
+                     "tracks is the song):\n- " + yt_lines)
+        return (body + "\nPick the one that IS the song the user named. "
+                + _tail)
+    sc_block = ""
+    if sc_lines:
         sc_block = ("\nSoundCloud fallbacks (this server downloads these "
-                    "reliably even when YouTube walls):\n- "
-                    + "\n- ".join(song_find.describe(h) for h in sc))
+                    "reliably even when YouTube walls):\n- " + sc_lines)
     return (f"{min(len(hits), 5)} candidate link(s) for \"{q}\", best "
-            "guess first:\n- " + lines + sc_block +
-            "\nPick the one that IS the song the user named — prefer the "
-            "artist's own/'- Topic' channel or 'Official Audio'; avoid "
-            "lyric/sped-up/loop/cover versions UNLESS their words asked "
-            "for one, and NEVER a full album/mix — ONE track only (huge "
-            "files are refused after minutes of download). Then "
-            "fetch_url(url=<pick>, as_kind='music') "
-            "downloads it ready for add_music. If YouTube blocks a "
-            "candidate (\"not a bot\" wall), that is per-UPLOAD — try the "
-            "next candidate"
+            "guess first:\n- " + yt_lines + sc_block +
+            "\nPick the one that IS the song the user named. If YouTube "
+            "blocks a candidate (\"not a bot\" wall), that is per-UPLOAD — "
+            "try the next candidate"
             + (", then the SoundCloud fallbacks" if sc_block else "")
-            + "; don't give up on the song. In your reply, tell the user "
-            "exactly which version you grabbed (title + channel) so they "
-            "can correct the pick.")
+            + "; don't give up on the song. " + _tail)
 
 
 def _queue_candidate_thumbs(ctx, hits, limit=5):
@@ -14288,9 +14321,19 @@ def openai_tools(model=None):
     deployment-wide answer is the right one."""
     out = []
     edits = llm.image_edit_available()
+    # When THIS model reads frames itself (direct sight), look_at's `question`
+    # is dead weight: it is only echoed back into the model's own next turn —
+    # it answers by LOOKING, not by having phrased a question. The argument is
+    # the vision PROMPT only on the blind fallback path (an external vision
+    # provider), so it stays in the schema exactly when the model cannot see.
+    # Measured over 10 days: filled on 553/554 look_at calls at ~175 chars
+    # each — pure narration the model paid to write and then re-read.
+    sees = model is not None and llm.agent_sees(model)
     for name, (_fn, desc, props) in TOOLS.items():
         if _tool_disabled(name, model):
             continue
+        if sees and name in ("look_at", "look_at_asset"):
+            props = {k: v for k, v in props.items() if k != "question"}
         # HONEST-OFF AT THE ARGUMENT LEVEL (round 101). generate_image was
         # the fourth most-rejected tool — 61 calls in a week asking it to
         # restyle a frame or an upload against an image model that can only

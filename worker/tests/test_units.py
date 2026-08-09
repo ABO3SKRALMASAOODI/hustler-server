@@ -1964,6 +1964,31 @@ check("generate_video appears once the video provider is configured",
           for t in at.openai_tools()))
 cfg.FAL_KEY = ""
 
+# look_at's `question` is dropped from the schema when the model reads frames
+# itself (direct sight) — it is only echoed back to the model there, and the
+# blind fallback (model=None / no multimodal) is the only path that uses it as
+# the vision prompt. Removing it stops ~175 chars of narration on nearly every
+# look_at call.
+def _look_at_props(tools):
+    for t in tools:
+        if t["function"]["name"] == "look_at":
+            return t["function"]["parameters"]["properties"]
+    return {}
+_saved_mm = cfg.AGENT_MULTIMODAL
+cfg.AGENT_MULTIMODAL = True
+check("look_at keeps `question` for a blind model (no model given)",
+      "question" in _look_at_props(at.openai_tools()))
+check("look_at drops `question` when the model sees the frames itself",
+      "question" not in _look_at_props(at.openai_tools("some-sighted-model")))
+check("look_at_asset drops `question` under direct sight too",
+      all("question" not in t["function"]["parameters"]["properties"]
+          for t in at.openai_tools("some-sighted-model")
+          if t["function"]["name"] == "look_at_asset"))
+cfg.AGENT_MULTIMODAL = False
+check("look_at keeps `question` when the model cannot see (multimodal off)",
+      "question" in _look_at_props(at.openai_tools("any-model")))
+cfg.AGENT_MULTIMODAL = _saved_mm
+
 check("video price = base for the base window, per-second beyond",
       _videogen.price_for(5) == 0.35 and _videogen.price_for(10) == 0.70)
 
