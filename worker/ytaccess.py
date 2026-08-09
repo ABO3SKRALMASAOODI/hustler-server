@@ -22,16 +22,22 @@ Cookie DELIVERY has five doors because each one is a door somebody
 actually tried to use (Aug 8-9: the jar went into a dashboard text field
 as an env VALUE, where the old path-only code silently ignored it):
 
-  1. YTDLP_COOKIES_FILE naming a real file — the documented Render Secret
-     File setup, still first.
-  2. YTDLP_COOKIES_FILE holding the jar CONTENT itself — pasting content
+  1. The app_kv row 'ytdlp_cookies' — delivery over psql. FIRST on
+     purpose: it is the OVERRIDE door, the one an operator reaches for
+     precisely because the jar already mounted on the box has gone stale
+     and the dashboard is out of reach (Aug 9: the mounted 55-entry file
+     was rotated-dead while a fresh valid jar existed — a file-first
+     order would have kept prod on the corpse forever). When a fresh
+     secret file goes up later, DELETE the row; the probe's
+     cookie_source names the active door, so the shadowing can't hide.
+  2. YTDLP_COOKIES_FILE naming a real file — the documented Render Secret
+     File setup.
+  3. YTDLP_COOKIES_FILE holding the jar CONTENT itself — pasting content
      where a path belongs must work, not silently degrade.
-  3. YTDLP_COOKIES holding the content, for operators who never saw the
+  4. YTDLP_COOKIES holding the content, for operators who never saw the
      _FILE convention.
-  4. Any jar-shaped file in /etc/secrets — the secret file was mounted but
+  5. Any jar-shaped file in /etc/secrets — the secret file was mounted but
      the pointer env var was never set.
-  5. The app_kv row 'ytdlp_cookies' — delivery over psql, for the operator
-     whose hands are on the database but not on the Render dashboard.
 
 Every door feeds the same normalizer (dashboard fields flatten the tabs
 the Netscape format requires — yt-dlp then ignores every line without a
@@ -183,6 +189,9 @@ def resolve_cookies():
     must degrade to the normal anonymous attempt, not crash every fetch —
     and a jar delivered mid-flight (psql, redeploy) must start working
     without a restart."""
+    from_db = _kv_cookies()
+    if from_db:
+        return from_db, "db"
     spec = (config.YTDLP_COOKIES_FILE or "").strip()
     if spec:
         if os.path.isfile(spec):
@@ -197,9 +206,6 @@ def resolve_cookies():
     scanned = _scan_secrets_dir()
     if scanned:
         return scanned, "secrets-scan"
-    from_db = _kv_cookies()
-    if from_db:
-        return from_db, "db"
     return None, "none"
 
 

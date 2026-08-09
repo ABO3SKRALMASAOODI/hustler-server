@@ -68,7 +68,8 @@ def test_normalizer_restores_tabs_and_real_newlines():
 
 # ── the five doors, in order ─────────────────────────────────────────────
 
-def test_door1_a_real_file_path_wins(monkeypatch, tmp_path):
+def test_door2_a_real_file_path_beats_env_content(monkeypatch,
+                                                  tmp_path):
     p = tmp_path / "jar.txt"
     p.write_text(JAR)
     monkeypatch.setattr(config, "YTDLP_COOKIES_FILE", str(p))
@@ -77,7 +78,7 @@ def test_door1_a_real_file_path_wins(monkeypatch, tmp_path):
     assert source == "file" and "SID" in content
 
 
-def test_door2_jar_content_pasted_into_the_path_var_still_works(monkeypatch):
+def test_door3_jar_content_pasted_into_the_path_var_still_works(monkeypatch):
     """The Aug-9 delivery: the whole Netscape file as the env var VALUE.
     The old path-only code silently ignored it — the exact bug that kept
     'still not working' true through two days of correct-looking setup."""
@@ -86,12 +87,12 @@ def test_door2_jar_content_pasted_into_the_path_var_still_works(monkeypatch):
     assert source == "env-inline" and "SID" in content
 
 
-def test_door3_plain_content_var(monkeypatch):
+def test_door4_plain_content_var(monkeypatch):
     monkeypatch.setattr(config, "YTDLP_COOKIES", FLAT_JAR)
     assert ytaccess.resolve_cookies()[1] == "env"
 
 
-def test_door4_secrets_scan_prefers_cookie_named_files(monkeypatch,
+def test_door5_secrets_scan_prefers_cookie_named_files(monkeypatch,
                                                        tmp_path):
     (tmp_path / "database-url").write_text("postgres://not-a-jar")
     (tmp_path / "zz-cookies.txt").write_text(JAR)
@@ -102,7 +103,7 @@ def test_door4_secrets_scan_prefers_cookie_named_files(monkeypatch,
     assert content == JAR          # the cookie-NAMED file beats sort order
 
 
-def test_door5_db_row_with_ttl_cache(monkeypatch):
+def test_door1_db_row_with_ttl_cache(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
     monkeypatch.setattr(config, "YTDLP_COOKIES_KV_KEY", "ytdlp_cookies")
     calls = {"n": 0}
@@ -118,6 +119,24 @@ def test_door5_db_row_with_ttl_cache(monkeypatch):
     ytaccess._kv_cache_reset()
     ytaccess.resolve_cookies()
     assert calls["n"] == 2
+
+
+def test_the_psql_row_overrides_a_mounted_file(monkeypatch, tmp_path):
+    """Aug 9, live: the box's mounted 55-entry jar was rotated-dead while
+    a fresh valid jar existed, and the dashboard was out of reach. The
+    psql row is the OVERRIDE door — it must beat the corpse on disk."""
+    stale = tmp_path / "mounted.txt"
+    stale.write_text(FLAT_JAR.replace("abc123", "rotted"))
+    monkeypatch.setattr(config, "YTDLP_COOKIES_FILE", str(stale))
+    monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
+    monkeypatch.setattr(config, "YTDLP_COOKIES_KV_KEY", "ytdlp_cookies")
+
+    class FakeDb:
+        def run(self, fn, *a, **k):
+            return JAR
+    monkeypatch.setattr(ytaccess.db, "Db", FakeDb)
+    content, source = ytaccess.resolve_cookies()
+    assert source == "db" and "rotted" not in content
 
 
 def test_db_trouble_degrades_to_anonymous(monkeypatch):
