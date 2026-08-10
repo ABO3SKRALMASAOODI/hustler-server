@@ -540,6 +540,17 @@ def video_projects():
                       AND vf.state='done') AS last_export,
                    (SELECT COUNT(*) FROM projects c
                     WHERE c.parent_project_id = p.id) AS shorts_count,
+                   -- Round 101: how many times this project's owner met the
+                   -- trial wall here (free account past its first edited
+                   -- video, prompt answered with the cards instead of a
+                   -- turn), and when last. The count is intent: every
+                   -- resend re-raises the cards and re-records.
+                   (SELECT COUNT(*) FROM client_events ce
+                    WHERE ce.project_id = p.id
+                      AND ce.kind = 'trial_gate_shown') AS trial_walls,
+                   (SELECT MAX(ce.created_at) FROM client_events ce
+                    WHERE ce.project_id = p.id
+                      AND ce.kind = 'trial_gate_shown') AS last_trial_wall,
                    -- User activity inside the children rolls up so a parent
                    -- whose owner refined short #3 by chat doesn't read as
                    -- untouched.
@@ -562,6 +573,9 @@ def video_projects():
          "exports": r["exports"],
          "shorts_count": r["shorts_count"],
          "shorts_messages": r["shorts_messages"],
+         "trial_walls": r["trial_walls"],
+         "last_trial_wall": (r["last_trial_wall"].isoformat()
+                             if r["last_trial_wall"] else None),
          "created_at": r["created_at"].isoformat(),
          "last_job": r["last_job"].isoformat() if r["last_job"] else None,
          "last_export": (r["last_export"].isoformat()
@@ -831,6 +845,18 @@ def video_project_detail(project_id):
                         ORDER BY id DESC LIMIT 50""",
                      (project_id, list(UPLOAD_EVENT_KINDS)))
         upload_events = [_upload_event_row(e) for e in cur2.fetchall()]
+        # The trial wall's story for THIS project: how many times the cards
+        # rose instead of a turn, first and last time. Zero rows → null.
+        cur2.execute("""SELECT COUNT(*) AS n, MIN(created_at) AS first_at,
+                               MAX(created_at) AS last_at
+                        FROM client_events
+                        WHERE project_id = %s
+                          AND kind = 'trial_gate_shown'""", (project_id,))
+        tw = cur2.fetchone()
+        trial_wall = ({"count": tw["n"],
+                       "first_at": tw["first_at"].isoformat(),
+                       "last_at": tw["last_at"].isoformat()}
+                      if tw and tw["n"] else None)
 
     # Family: a shorts parent lists its children; a child names its parent.
     # This is what turns "a session with no upload but a fully edited video"
@@ -867,6 +893,7 @@ def video_project_detail(project_id):
         "children": children,
         "parent": parent,
         "exports": exports,
+        "trial_wall": trial_wall,
         "upload_events": upload_events,
         "upload_failures": len([e for e in upload_events
                                 if e["kind"] in UPLOAD_FAILURE_KINDS]),

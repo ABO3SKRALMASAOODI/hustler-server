@@ -3052,6 +3052,12 @@ def post_message(user_id, project_id):
         # drain), and never for a subscriber (a trialing user IS subscribed
         # from day zero) or the admin account.
         if _trial_gate_applies(cur, user_id):
+            # Leave a trace for admin: WHO met the wall, WHERE and WHEN —
+            # every showing, so the resend count reads as intent. The
+            # blocked message itself is deliberately not persisted.
+            record_client_event(user_id, project_id, "trial_gate_shown",
+                                detail={"message_chars": len(text)},
+                                origin="server")
             return jsonify(_trial_offer_body()), 402
 
         # The plan gate — round 50: "this account has spent its 50 free
@@ -4962,7 +4968,13 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       # mode, retry count. The denominator's other half —
                       # upload_started says what was attempted, this says what
                       # the link actually delivered.
-                      "upload_transfer"}
+                      "upload_transfer",
+                      # The trial wall was SHOWN (round 101): a free account
+                      # past its first edited video sent a prompt and got the
+                      # cards instead of a turn. Server-recorded on every 402,
+                      # so admin can see who met the wall, how many times,
+                      # and when — the resend count is intent, not noise.
+                      "trial_gate_shown"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these
