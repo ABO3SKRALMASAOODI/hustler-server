@@ -31,9 +31,50 @@ MAX_SENTENCE_S = 6.0
 SENTENCE_GAP_S = 0.6
 
 
+# Approximate resident cost of loading each faster-whisper size (weights +
+# CTranslate2 runtime on CPU). Conservative on purpose: the price of guessing
+# low is not a slow load, it is the kernel killing the WHOLE worker — every
+# in-flight turn — the moment the fallback fires on a small instance. An
+# unknown name is priced as medium-class so it can never sneak a big load
+# past the guard.
+_GB = 1024 ** 3
+_MODEL_RAM_BYTES = (
+    ("tiny", int(0.4 * _GB)),
+    ("base", int(0.6 * _GB)),
+    ("small", int(1.2 * _GB)),
+    ("medium", int(2.6 * _GB)),
+    ("large", int(4.6 * _GB)),
+)
+
+
+def _guard_model_ram():
+    """Refuse to load the local model when the container cannot hold it.
+
+    Deepgram is the primary transcriber; this local model exists as its
+    fallback. On a 512MB instance the fallback's own load is an instant OOM —
+    indistinguishable from a crash, and it takes every running job with it.
+    Raising here instead fails ONE index job with an honest message, and the
+    retry usually lands back on the cloud service anyway."""
+    import storage
+    avail = storage._cgroup_memory_available()
+    if avail is None:
+        return                    # cannot measure: never block on a guess
+    name = (config.WHISPER_MODEL or "").lower()
+    need = next((b for prefix, b in _MODEL_RAM_BYTES
+                 if name.startswith(prefix)), int(2.6 * _GB))
+    if avail < need:
+        raise RuntimeError(
+            f"local speech model '{config.WHISPER_MODEL}' needs about "
+            f"{need / _GB:.1f} GB to load and this instance has "
+            f"{avail / _GB:.2f} GB free — refusing (the load would be "
+            "OOM-killed and take every running job with it). Cloud "
+            "transcription will retry.")
+
+
 def get_model():
     global _model
     if _model is None:
+        _guard_model_ram()
         from faster_whisper import WhisperModel
         _model = WhisperModel(config.WHISPER_MODEL,
                               device=config.WHISPER_DEVICE,
