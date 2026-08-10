@@ -243,17 +243,33 @@ def _notify_failure(worker_db, job, err):
 
 
 def lane(name, types, max_attempts, poll_interval=None):
+    # NOTHING may escape this loop. worker_db.reset() used to run bare inside
+    # the except — if reset itself threw (a torn connection mid-restart), the
+    # exception escaped and the THREAD died silently. Every other lane has
+    # siblings to cover for it; shorts had exactly one thread, and on Aug 9 a
+    # shorts_plan sat claimable for 108 minutes (job 3776: 50s of work,
+    # 8090s of queue wait) while the rest of the process worked normally —
+    # exactly the shape of a dead lone thread. The obituary print is so a
+    # dead lane can never again be invisible in the logs.
     worker_db = dbx.Db()
-    while True:
-        try:
-            job = worker_db.run(dbx.claim_job, types, max_attempts)
-            if job:
-                process_one(worker_db, job)
-                continue
-        except Exception as e:
-            print(f"[{name}] poll error: {e}", flush=True)
-            worker_db.reset()
-        time.sleep(poll_interval or config.POLL_INTERVAL_S)
+    try:
+        while True:
+            try:
+                job = worker_db.run(dbx.claim_job, types, max_attempts)
+                if job:
+                    process_one(worker_db, job)
+                    continue
+            except Exception as e:
+                print(f"[{name}] poll error: {e}", flush=True)
+                try:
+                    worker_db.reset()
+                except Exception as e2:
+                    print(f"[{name}] reset failed too ({e2}) — keeping the "
+                          "lane alive; next poll reconnects", flush=True)
+            time.sleep(poll_interval or config.POLL_INTERVAL_S)
+    finally:
+        print(f"[{name}] LANE THREAD EXITING — jobs of types {types} "
+              "will not be claimed by this thread again", flush=True)
 
 
 REAPER_NOTES = {
@@ -542,11 +558,16 @@ def main():
                                config.MAX_ATTEMPTS_AGENT,
                                config.AGENT_POLL_INTERVAL_S),
             daemon=True, name=f"agent{i}"))
-    threads.append(threading.Thread(
-        target=lane, args=("shorts", SHORTS_TYPES,
-                           config.MAX_ATTEMPTS_MEDIA,
-                           config.AGENT_POLL_INTERVAL_S),
-        daemon=True, name="shorts"))
+    # TWO shorts threads, deliberately: this was the only lane with a single
+    # thread, so one silent thread death (Aug 9) left shorts_plan jobs
+    # unclaimable for 108 minutes while every other lane worked. Per-project
+    # claim serialization already prevents the pair double-running one plan.
+    for i in range(2):
+        threads.append(threading.Thread(
+            target=lane, args=(f"shorts{i}", SHORTS_TYPES,
+                               config.MAX_ATTEMPTS_MEDIA,
+                               config.AGENT_POLL_INTERVAL_S),
+            daemon=True, name=f"shorts{i}"))
     for i in range(config.MCP_SLOTS):
         threads.append(threading.Thread(
             target=lane, args=(f"mcp{i}", MCP_TYPES, config.MAX_ATTEMPTS_MCP,
