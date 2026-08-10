@@ -3958,7 +3958,22 @@ def run_render_job(worker_db, job):
                 src_local = os.path.join(
                     workdir,
                     "src" + os.path.splitext(src_asset["storage_key"])[1])
-                storage.download_to(src_asset["storage_key"], src_local)
+                try:
+                    storage.download_to(src_asset["storage_key"], src_local)
+                except storage.WorkdirTooSmall as e:
+                    # A source bigger than the instance's whole scratch (a
+                    # 32-min DJI original needed 25.4 GB against 20.3 free,
+                    # job 3602) used to end the story: --memory is already at
+                    # Cloud Run's 32Gi ceiling, so there is no bigger box.
+                    # Feed ffmpeg/ffprobe the object over HTTPS instead —
+                    # every consumer of src_local (probe, render_edl, stitch)
+                    # is ffmpeg-family and range-reads remote inputs. Slower
+                    # per pass, but it renders; the download path stays the
+                    # default for everything that fits.
+                    print(f"[render {job_id}] {e} — streaming the source "
+                          "from storage instead of staging it", flush=True)
+                    src_local = storage.presign_get(
+                        src_asset["storage_key"], expires=21600)
         else:
             src_local = None            # canvas program: nothing to download
         if not _still_ours(10):

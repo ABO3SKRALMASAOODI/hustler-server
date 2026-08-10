@@ -3301,6 +3301,8 @@ def post_message(user_id, project_id):
             if job_id is None:
                 job_id = _enqueue(cur, project_id, user_id, "agent_turn",
                                   {"message_id": message_id})
+                _queue_depth_notice(cur, p["chat_session_id"], user_id,
+                                    job_id)
 
     if concierge is not None:
         # The model call runs in a thread with its own DB connection — the
@@ -3317,6 +3319,68 @@ def post_message(user_id, project_id):
 
     return jsonify({"queued": True, "message_id": message_id,
                     "job_id": job_id, "stacked": stacked})
+
+
+# The worker's agent pool size — the backend reads the same env so the queue
+# notice below matches how many turns actually run at once.
+_AGENT_SLOTS = max(1, int(os.getenv("WORKER_AGENT_SLOTS", "4")))
+
+
+def _queue_depth_notice(cur, session_id, user_id, job_id):
+    """When a fresh turn lands behind a saturated agent pool, say so in chat.
+
+    Aug 10: a paying user's first reply took 24 minutes — 23 of them queue
+    wait — and the silence made them re-send the same brief, which only
+    added a second turn's cost and contradicting stacked instructions.
+    Nothing here may ever fail the message post: best-effort, swallowed —
+    and under a SAVEPOINT, because a bare SQL error would otherwise poison
+    the enclosing transaction and take the message insert down with it.
+    """
+    try:
+        cur.execute("SAVEPOINT queue_notice")
+        cur.execute("SELECT COALESCE(is_subscribed, 0) AS sub FROM users "
+                    "WHERE id = %s", (user_id,))
+        my_sub = int((cur.fetchone() or {}).get("sub") or 0)
+        # Subscribers claim before free users (worker claim order), so their
+        # 'ahead' only counts other subscribers' queued turns.
+        cur.execute("""
+            SELECT COUNT(*) FILTER (WHERE j.state = 'running'
+                       AND j.heartbeat_at >= NOW() - INTERVAL '120 seconds')
+                       AS running,
+                   COUNT(*) FILTER (WHERE j.state = 'queued' AND j.id < %s
+                       AND (%s = 0 OR COALESCE(u.is_subscribed, 0) = 1))
+                       AS queued_ahead
+            FROM video_jobs j LEFT JOIN users u ON u.id = j.user_id
+            WHERE j.type IN ('agent_turn', 'shorts_plan', 'mcp_tool')
+              AND j.state IN ('running', 'queued')""",
+                    (job_id, my_sub))
+        row = cur.fetchone() or {}
+        ahead = int(row.get("running") or 0) + int(row.get("queued_ahead") or 0)
+        if ahead < _AGENT_SLOTS:
+            return
+        # One notice per wave: skip if this chat already got one recently.
+        cur.execute("""SELECT 1 FROM chat_messages
+                       WHERE session_id = %s AND role = 'activity'
+                         AND meta->>'queue_notice' = 'true'
+                         AND created_at > NOW() - INTERVAL '3 minutes'
+                       LIMIT 1""", (session_id,))
+        if cur.fetchone():
+            return
+        cur.execute("""INSERT INTO chat_messages (session_id, role, content,
+                                                  meta)
+                       VALUES (%s, 'activity', %s, %s)""",
+                    (session_id,
+                     f"Busy moment — about {ahead} edits are running or "
+                     "queued ahead of yours. Your request is saved and "
+                     "starts automatically; no need to re-send it.",
+                     Json({"queue_notice": True, "ahead": ahead})))
+        cur.execute("RELEASE SAVEPOINT queue_notice")
+    except Exception as e:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT queue_notice")
+        except Exception:
+            pass
+        print(f"[queue-notice] skipped: {e}", flush=True)
 
 
 def _concierge_respond(db_url, project_id, ctx, attachments):

@@ -820,22 +820,24 @@ def rate_limit_wait(exc, attempt, seconds_left, shutting_down=False):
     and it used to KILL the turn: minutes of finished edits ended in "I'm
     being rate-limited, resend that". Waiting is strictly better than dying
     while the turn still has wall clock. Bounds: never during a deploy drain,
-    at most 4 waits, never into the turn's last 20s, honour Retry-After up
-    to 60s, default 15s.
+    at most 6 waits, never into the turn's last 20s, honour Retry-After up
+    to 60s, otherwise grow 12s per attempt capped at 45s — four flat 15s
+    waits (60s total patience) was less than one real TPM burst, and job
+    4120 died mid-burst on Aug 9 while the burst still had minutes to run.
     """
     text = f"{exc}".lower()
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     if not (status == 429 or "rate limit" in text
             or "too many requests" in text):
         return None
-    if shutting_down or attempt > 4 or seconds_left < 20:
+    if shutting_down or attempt > 6 or seconds_left < 20:
         return None
-    wait = 15.0
+    wait = min(45.0, 12.0 * max(1, attempt))
     try:
         resp = getattr(exc, "response", None)
         ra = resp.headers.get("retry-after") if resp is not None else None
         if ra:
-            wait = min(60.0, max(1.0, float(ra)))
+            wait = min(60.0, max(wait, float(ra)))
     except Exception:
         pass
     return max(1.0, min(wait, seconds_left - 10.0))

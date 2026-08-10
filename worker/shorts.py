@@ -350,8 +350,8 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
     if not transcript.strip():
         # No speech at all: shorts from a music/gameplay video would need
         # shot-based selection, which v1 does not do — fail honestly.
-        raise RuntimeError("this video has no transcribed speech to cut "
-                          "shorts from")
+        raise dbx.PermanentJobError("this video has no transcribed speech "
+                                    "to cut shorts from")
     user = (f"Video duration: {duration:.1f}s. "
             f"Aim for {n_target} clips (fewer if the material is thin, "
             f"never more than {config.SHORTS_MAX_CLIPS}). {len_hint}\n"
@@ -645,8 +645,10 @@ def run_shorts_plan(worker_db, job):
             clips = _plan_clips(worker_db, job, index, duration, style,
                                 payload, subscribed, plan)
         if not clips:
+            # NOT permanent: this is an LLM planning answer, and a retry can
+            # genuinely land clips where the first pass came back empty.
             raise RuntimeError("I couldn't find clip-worthy moments in "
-                              "this transcript")
+                               "this transcript")
         worker_db.run(dbx.set_progress, job_id, 35)
 
         shorts_meta = {

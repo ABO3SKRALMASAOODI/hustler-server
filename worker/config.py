@@ -1050,6 +1050,10 @@ AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
 # before detecting an actually stuck turn.
 AGENT_TURN_TIMEOUT_S = min(
     600.0, float(os.getenv("AGENT_TURN_TIMEOUT_S", "600")))
+# Fresh turns yield (up to 3×20s) while the fleet's last-60s token burn is
+# above this — 75% of the org's 200K TPM tier. Raise alongside the provider
+# tier; see recent_llm_tokens / the admission gate in agent_loop.
+AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "150000"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # Transcript tools get a far larger budget: silently dropping the tail of a

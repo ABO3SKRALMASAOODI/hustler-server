@@ -154,6 +154,9 @@ def process_one(worker_db, job):
                         else config.MAX_ATTEMPTS_MCP
                         if job["type"] in MCP_TYPES
                         else config.MAX_ATTEMPTS_MEDIA)
+        if isinstance(e, dbx.PermanentJobError):
+            # The INPUT is the reason — a retry replays the same answer.
+            max_attempts = 0
         if job["attempts"] < max_attempts:
             requeued = worker_db.run(dbx.requeue_job, job_id, e)
             what = ("requeued" if requeued else
@@ -197,11 +200,26 @@ FORCED_PREVIEW_FAIL_NOTE = (
 
 def _notify_failure(worker_db, job, err):
     note = FAIL_NOTES.get(job["type"])
+    if "scratch space" in str(err):
+        # The full text is operator advice (Cloud Run flags, a deploy doc) —
+        # it reached user 387's chat verbatim on Aug 9. Users get the honest
+        # shape of the problem and a path; the operator detail stays in
+        # video_jobs.error where it belongs.
+        note = ("This video is so large it exceeded the render fleet's "
+                "staging room. Press Download to try again — it now streams "
+                "oversized sources. If it still fails, tell me in chat and "
+                "I'll export a lighter version.")
     if job["type"] == "shorts_plan":
         reason = str(err)
         if "shorts need a longer source" in reason:
             note = ("This video is already short-form ({err}). Edit it "
                     "directly here instead of pressing Make shorts again.")
+        elif "no transcribed speech" in reason:
+            # Retrying cannot grow a transcript — never tell them to press
+            # the button again (user 455 did, twice, and got the same wall).
+            note = ("This video has no speech, and shorts are cut around "
+                    "spoken moments. Edit it directly here instead — ask me "
+                    "for a beat-synced montage of its best shots.")
         elif "clip-worthy moments" in reason:
             note = ("I couldn't find self-contained short moments in this "
                     "transcript ({err}). Ask me in chat to build one short "

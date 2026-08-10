@@ -162,6 +162,12 @@ def claim_job(conn, types, max_attempts):
     # finals, and both jump over indexing — a turn's render_preview never
     # waits behind another project's index job.
     #
+    # WITHIN a class, subscribers claim first (Aug 10): both of that day's
+    # paying users sat 19-23 minutes in the agent queue behind free users'
+    # half-hour turns (jobs 3707/4395 — the wait was the whole latency).
+    # Free jobs still run whenever no paid work is queued; under sustained
+    # paid load a free turn waits, and that trade is deliberate.
+    #
     # TWO counters, deliberately. `attempts` is the refundable fairness budget
     # (release_jobs hands one back after a deploy); `total_claims` counts what
     # we have physically spent running this job and is NEVER given back. Job
@@ -217,7 +223,8 @@ def claim_job(conn, types, max_attempts):
             SET state = 'running', attempts = attempts + 1{claims_set},
                 heartbeat_at = NOW(), updated_at = NOW(), error = NULL
             WHERE id = (
-                SELECT id FROM video_jobs
+                SELECT video_jobs.id FROM video_jobs
+                LEFT JOIN users u ON u.id = video_jobs.user_id
                 WHERE type = ANY(%s)
                   AND attempts < %s
                   {claims_where}
@@ -226,8 +233,10 @@ def claim_job(conn, types, max_attempts):
                            AND heartbeat_at < NOW() - make_interval(secs => %s)))
                   {serial_where}
                 ORDER BY CASE type WHEN 'preview' THEN 0
-                                   WHEN 'final' THEN 1 ELSE 2 END, id
-                FOR UPDATE SKIP LOCKED
+                                   WHEN 'final' THEN 1 ELSE 2 END,
+                         COALESCE(u.is_subscribed, 0) DESC,
+                         video_jobs.id
+                FOR UPDATE OF video_jobs SKIP LOCKED
                 LIMIT 1
             )
             RETURNING *
@@ -1001,6 +1010,29 @@ def _capped_payload(obj):
         return {"_truncated": True, "_original_bytes": len(s),
                 "_prefix": s[:LLM_PAYLOAD_CAP] + "…[truncated]"}
     return json.loads(s)
+
+
+class PermanentJobError(RuntimeError):
+    """A job failure no retry can change — the input itself is the reason
+    (a 23s video asked for shorts, a silent video asked for speech cuts).
+    run_job fails these immediately instead of burning the retry budget:
+    jobs 3988/3989 each ran the same no-speech shorts_plan three times and
+    then told the user to press the button again."""
+
+
+def recent_llm_tokens(conn, seconds=60):
+    """Total tokens the whole fleet pushed through the model provider in the
+    last `seconds`. The provider's TPM ceiling is org-wide, so a turn about
+    to open a ~50K-token first call can check the shared burn instead of
+    walking into a 429 (Aug 9 16:39: 375K tokens/min against a 200K limit)."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0)
+                                           + COALESCE(completion_tokens, 0)), 0)
+                       FROM llm_calls
+                       WHERE created_at > NOW() - make_interval(secs => %s)""",
+                    (seconds,))
+        row = cur.fetchone()
+        return int(list(row.values())[0] if isinstance(row, dict) else row[0])
 
 
 def insert_llm_call(conn, project_id, job_id, purpose, model, request,

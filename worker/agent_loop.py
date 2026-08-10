@@ -592,14 +592,16 @@ def state_block(ctx, worker_db):
                                f'{a["storage_key"]}')
         staged = worker_db.run(dbx.staged_assets, ctx.project_id)
         if staged:
-            names = ", ".join(
-                (s.get("meta") or {}).get("filename")
-                or os.path.basename(s["storage_key"]) for s in staged[:8])
+            names = "; ".join(
+                f'"{(s.get("meta") or {}).get("filename") or os.path.basename(s["storage_key"])}" '
+                f'(storage_key {s["storage_key"]})' for s in staged[:8])
             media_lines.append(
                 f"  STAGING TRAY (not on the timeline yet — the user has "
-                f"not pressed Submit): {names}. You cannot place these; "
-                "if the user asks about them, tell them to press Submit "
-                "on the tray.")
+                f"not pressed Submit): {names}. You CAN look_at_asset these "
+                "to see and discuss them (a user who says 'did you see my "
+                "photo?' deserves an answer about the photo, 2026-08-09); "
+                "you cannot PLACE them — for placement, tell the user to "
+                "press Submit on the tray.")
     except Exception as e:
         print(f"[state] media inventory failed: {e}", flush=True)
 
@@ -2106,6 +2108,27 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     taste_pushed = False           # the craft audit was handed back once
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
+    # TPM admission (Aug 10): the provider's tokens-per-minute ceiling is
+    # org-wide, and a fresh turn's first call is the biggest single request
+    # we make (~50K tokens of state + filmstrips). Starting it into a burst
+    # that is already over the ceiling buys a guaranteed 429 — so a FRESH
+    # turn (nothing done yet, nothing to lose) peeks at the fleet's last-60s
+    # burn and yields briefly while it is above the soft cap. Continuations
+    # never wait: their clock is already running.
+    if not _cont:
+        for _adm in range(3):
+            try:
+                burn = worker_db.run(dbx.recent_llm_tokens, 60)
+            except Exception:
+                break                # the gate is advisory, never load-bearing
+            if burn < config.AGENT_TPM_SOFT_CAP:
+                break
+            print(f"[job {job['id']}] fleet pushed {burn} tokens in the last "
+                  f"60s (soft cap {config.AGENT_TPM_SOFT_CAP}) — pausing 20s "
+                  "before the first call instead of joining the burst",
+                  flush=True)
+            time.sleep(20)
+
     for iteration in range(config.AGENT_MAX_ITERATIONS):
         if SHUTDOWN.is_set():
             # Render SIGTERMs the worker before every deploy, and an agent
@@ -2389,7 +2412,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     if wait is not None:
                         _rl_waits += 1
                         print(f"[agent {job['id']}] rate-limited by the "
-                              f"model ({_rl_waits}/4) — waiting {wait:.0f}s "
+                              f"model ({_rl_waits}/6) — waiting {wait:.0f}s "
                               "and retrying instead of failing the turn",
                               flush=True)
                         time.sleep(wait)

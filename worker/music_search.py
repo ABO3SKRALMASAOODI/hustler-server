@@ -199,6 +199,15 @@ def search(query, min_s=None, max_s=None, count=MAX_RESULTS,
             errors.append(f"{name}: {str(e)[:120]}")
             continue
         if hits:
+            # Non-commercial licenses sink to the bottom even when the caller
+            # did not (or could not — a Japanese business brief carries no
+            # English "ad"/"client" keyword) flag commercial use. The agent
+            # picks from the top of this list, so the default pick must be a
+            # track the user can lawfully publish; NC stays available for the
+            # user who says the project is personal. Stable sort: provider
+            # relevance order is preserved within each license tier.
+            if not commercial_only:
+                hits.sort(key=lambda h: "nc" in (h.get("license") or "").lower())
             return hits[:count]
     if errors and len(errors) == len(lanes):
         raise MusicSearchError("; ".join(errors))

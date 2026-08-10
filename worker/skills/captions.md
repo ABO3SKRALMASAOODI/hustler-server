@@ -3,7 +3,14 @@
 BASICS
 - add_captions("from_transcript") burns word-timed captions for everything that survives the cut — timing always from the real transcript, never invented. add_captions('off') removes captions WE added.
 - To change how EXISTING captions look ("make it red", "move to the top"), use set_caption_style with just the fields to change — never re-add.
-- Manual caption items are only for text the user dictates.
+- Manual caption items are only for text the user dictates — and for translations.
+- add_captions REPLACES the whole caption set in one call. NEVER call mode='off' first and re-add — that is two EDL versions, a wasted render, and the loop detector will flag the thrash (it did, 2026-08-10).
+
+TRANSLATION CAPTIONS ("arabic subtitles", "translate the captions to X") — a real session's seams (2026-08-10):
+- Build manual items from get_kept_transcript: ONE item per transcript segment, the segment's own start/end, and a COMPLETE translation of every segment — count your items against the transcript segments before writing. Dropped or compressed lines are the first thing a bilingual viewer notices ("theres some missing words" was the user's literal complaint).
+- Translate meaning faithfully and fully — filler sounds can drop, spoken content cannot.
+- These are subtitles, not hype captions: default small and clean (preset 'elegant' or 'editorial', size 's', bottom), never spotlight/beast. RTL scripts (Arabic, Hebrew, Farsi) render correctly — write natural RTL text with its punctuation.
+- Style-only follow-ups ("smaller", "nicer font") → set_caption_style, one call, no items re-send. Text corrections → ONE add_captions(mode='items') call with the full corrected list, same timings.
 
 PRESET FAMILIES — default to a premium preset whenever the user asks for captions without specifying a plain look. Choose by the video:
 - Fast, punchy, hype, motivational → 'spotlight': ONE glowing word at a time, big caps, dead centre — the modern single-word look.
