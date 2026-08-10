@@ -525,6 +525,41 @@ def chart_registrations():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  CHARTS — Cumulative registration growth (all video-era time)
+#
+#  The "how fast am I growing" curve: one point per day from the metrics
+#  epoch to now, each carrying that day's signups and the running total.
+#  generate_series fills the zero days so flat stretches are visibly flat
+#  instead of silently skipped, and the running SUM is over the filled
+#  series so the curve never dips on a quiet day.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route('/charts/growth', methods=['GET'])
+@admin_required
+def chart_growth():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
+                    COALESCE(c.count, 0) AS added,
+                    SUM(COALESCE(c.count, 0)) OVER (ORDER BY d::date) AS total
+                FROM generate_series(DATE '{epoch}', NOW(), '1 day') AS d
+                LEFT JOIN (
+                    SELECT created_at::date AS dt, COUNT(*) AS count
+                    FROM users WHERE is_verified = 1 AND {scope}
+                    GROUP BY created_at::date
+                ) c ON c.dt = d::date
+                ORDER BY d
+            """.format(epoch=METRICS_EPOCH, scope=_scope('')))
+            rows = cur.fetchall()
+        return jsonify({'data': [dict(r) for r in rows]}), 200
+    finally:
+        conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  CHARTS — Jobs (30d)
 # ─────────────────────────────────────────────────────────────────────────────
 

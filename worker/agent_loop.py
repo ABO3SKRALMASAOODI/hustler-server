@@ -642,6 +642,37 @@ def state_block(ctx, worker_db):
             "then name it in the instruction — edit_shorts shares this "
             "project's music/clips/images into every short.")
         block += "\n" + "\n".join(lines)
+    elif ctx.project.get("parent_project_id"):
+        # The mirror image of the board block: a GENERATED SHORT must know
+        # who its parent is, or an agent sitting on one clip has no idea the
+        # other seven exist. On 2026-08-10 an MCP model on child 423 was
+        # asked to restyle "all of them", got edit_shorts rejected, and told
+        # the user projects could only be switched in the app — because
+        # nothing in its state said "you are one clip of board 406".
+        try:
+            parent = worker_db.run(dbx.get_project,
+                                   ctx.project["parent_project_id"])
+            if parent:
+                sibs = (((parent.get("meta") or {}).get("shorts") or {})
+                        .get("clips")) or []
+                live = [c for c in sibs if c.get("child_project_id")]
+                mine = next((i for i, c in enumerate(live, 1)
+                             if c.get("child_project_id")
+                             == ctx.project_id), None)
+                card = f"card {mine} of {len(live)}" if mine else \
+                    f"one of {len(live)} clips"
+                block += (
+                    f"\n\nTHIS PROJECT IS A GENERATED SHORT — {card} on "
+                    f"the Shorts board of parent project {parent['id']} "
+                    f"(“{parent.get('title') or ''}”). Edit THIS clip here "
+                    "with the normal tools. When the user asks for a "
+                    "change to ALL the shorts ('all of them', 'every "
+                    "short', 'the shorts'), call edit_shorts(instruction, "
+                    "shorts) right from here — it reaches the parent "
+                    "board automatically; never claim the parent must be "
+                    "opened first.")
+        except Exception as e:
+            print(f"[state] parent-board note failed: {e}", flush=True)
     # Round 82e: the HOUSE STYLE — what this footage most wants to become
     # when the user gives no brief, measured from the exemplar corpus
     # (worker/grammars/). Context, not command: the block itself says the

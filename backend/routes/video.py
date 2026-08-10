@@ -4647,7 +4647,7 @@ def _worker_confirmed_current(cur, project_id):
 # Mirrors worker/config.WATERMARK_VERSION — a worker test asserts they match.
 # The free-tier mark is burned into FINAL renders only (see the worker's
 # renderer.wants_watermark), so this is the backend half of the same rule.
-WATERMARK_VERSION = 2
+WATERMARK_VERSION = 3
 
 
 def _user_is_paid(cur, user_id):

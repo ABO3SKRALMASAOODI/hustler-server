@@ -5181,9 +5181,9 @@ for _paid in (False, True):
 for _W, _H in ((1080, 1920), (1920, 1080), (1080, 1080), (864, 1080)):
     _g = renderer.watermark_geometry(_W, _H)
     check(f"watermark {_W}x{_H}: text starts clear of the robot",
-          _g["x_in"] >= _g["margin"] + _g["rw"])
+          _g["x_in"] >= _g["margin_x"] + _g["rw"])
     check(f"watermark {_W}x{_H}: the mark fits inside the frame",
-          _g["margin"] + _g["rh"] < _H and _g["x_out"] < _W)
+          _g["margin_y"] + _g["rh"] < _H and _g["x_out"] < _W)
     # x_out is where the words START; they extend RIGHT from there (\an7).
     # Capitalising the text made it ~15% wider, and libass clips silently at
     # the frame edge -- a half-visible wordmark is worse than none, and no
@@ -5193,6 +5193,17 @@ for _W, _H in ((1080, 1920), (1920, 1080), (1080, 1080), (864, 1080)):
     check(f"watermark {_W}x{_H}: '{wconfig.WATERMARK_TEXT}' fits without "
           f"clipping (ends ~{int(_g['x_out'] + _tw)} of {_W})",
           _g["x_out"] + _tw < _W)
+
+# v3: the whole point of the move. On a 9:16 reel Instagram's full-screen
+# "cover" zoom crops ~9% off EACH side and overlays its header on the top
+# strip — the robot's left edge must clear the side-crop and its top edge
+# must sit below the UI band, or a zoomed Reel eats the mark again
+# (2026-08-10: it did, at the old single 3% margin).
+_g916 = renderer.watermark_geometry(1080, 1920)
+check("watermark 9:16: robot clears Instagram's ~9% side-crop",
+      _g916["margin_x"] >= int(1080 * 0.095))
+check("watermark 9:16: robot sits below the top UI band (>=4.5% of H)",
+      _g916["margin_y"] >= int(1920 * 0.045))
 
 # Font drift: a family-name mismatch falls back to DejaVu SILENTLY, which is
 # exactly how a bare font override once shipped the wrong face.

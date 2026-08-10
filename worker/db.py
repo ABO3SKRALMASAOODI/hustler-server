@@ -407,6 +407,45 @@ def get_job(conn, job_id):
         return cur.fetchone()
 
 
+_metrics_table_ok = None
+
+
+def bump_metric(conn, name, n=1):
+    """Add n to a named reliability counter (migration 017) — and never let
+    that be the story: this is called from failure paths (a job dying, a
+    tool refusing), where an exception here would replace the real event
+    with a bookkeeping one.
+
+    ALWAYS call this in its own transaction (its own Db.run), never inside
+    another operation's — a failed statement aborts the whole postgres
+    transaction, and the swallowed error would silently roll back the very
+    write it was annotating. to_regclass is checked first, same as
+    video_settings: a worker deployed before the migration must not poison
+    anything, it just counts nothing yet."""
+    global _metrics_table_ok
+    try:
+        if not n:
+            return
+        with conn.cursor() as cur:
+            # Only a POSITIVE probe is cached: bumps are rare (failures), so
+            # re-probing while the table is absent costs nothing and means a
+            # migration applied after boot starts counting without a restart.
+            if _metrics_table_ok is not True:
+                cur.execute(
+                    "SELECT to_regclass('public.metrics_counters') AS t")
+                _metrics_table_ok = bool((cur.fetchone() or {}).get("t"))
+                if not _metrics_table_ok:
+                    return
+            cur.execute("""INSERT INTO metrics_counters (name, count)
+                           VALUES (%s, %s)
+                           ON CONFLICT (name) DO UPDATE
+                           SET count = metrics_counters.count
+                                       + EXCLUDED.count,
+                               updated_at = NOW()""", (name, int(n)))
+    except Exception as e:
+        print(f"[metrics] bump {name} failed: {e}", flush=True)
+
+
 def user_has_prior_agent_turn(conn, user_id, before_job_id):
     """Round 81: anything but this user's FIRST agent turn ever? Consulted
     only while the first-turn model lane is configured, so the common case

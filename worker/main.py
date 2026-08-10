@@ -164,6 +164,8 @@ def process_one(worker_db, job):
             print(f"[job {job_id}] {what} after error: {e}", flush=True)
         else:
             worker_db.run(dbx.finish_job, job_id, "failed", e, None)
+            # Own transaction, after the terminal write — see bump_metric.
+            worker_db.run(dbx.bump_metric, "job_failed")
             print(f"[job {job_id}] FAILED: {e}", flush=True)
             _notify_failure(worker_db, job, e)
     finally:
@@ -270,6 +272,14 @@ def lane(name, types, max_attempts, poll_interval=None):
     finally:
         print(f"[{name}] LANE THREAD EXITING — jobs of types {types} "
               "will not be claimed by this thread again", flush=True)
+        # A dead lane IS a worker failure (the Aug 9 shorts lane sat dead
+        # for 108 minutes). Lanes are daemon threads and shutdown is
+        # os._exit, so this finally only runs for a genuine in-thread death,
+        # never on deploys. Fresh Db — the lane's own may be the casualty.
+        try:
+            dbx.Db().run(dbx.bump_metric, "worker_died")
+        except Exception:
+            pass
 
 
 REAPER_NOTES = {
@@ -346,8 +356,17 @@ def reaper():
             # precisely because deploys keep refunding the first. A job the
             # queue has stopped selecting is invisible, not finished — left
             # alone it sits `queued` forever under a spinner.
-            rows = ((worker_db.run(dbx.fail_exhausted_jobs) or [])
-                    + (worker_db.run(dbx.fail_ceilinged_jobs) or []))
+            exhausted = worker_db.run(dbx.fail_exhausted_jobs) or []
+            ceilinged = worker_db.run(dbx.fail_ceilinged_jobs) or []
+            rows = exhausted + ceilinged
+            # Reliability counters (migration 017). Every exhausted row is a
+            # job a dead worker was holding when its heartbeat went stale —
+            # the closest observable thing to "a worker died" from the DB
+            # side. Both lists are terminal failures.
+            if exhausted:
+                worker_db.run(dbx.bump_metric, "worker_died", len(exhausted))
+            if rows:
+                worker_db.run(dbx.bump_metric, "job_failed", len(rows))
             for row in rows:
                 print(f"[reaper] failed exhausted job {row['id']} "
                       f"({row['type']})", flush=True)

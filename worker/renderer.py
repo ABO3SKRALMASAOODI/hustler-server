@@ -1111,18 +1111,27 @@ def watermark_geometry(W, H):
     """Pixel geometry of the mark for an output frame: the robot's box, and
     where the text sits relative to it. One function so the ffmpeg overlay
     and the ASS text agree on where the robot ends and the words begin —
-    computing them separately is how the two drift into overlapping."""
+    computing them separately is how the two drift into overlapping.
+
+    The corner offset is per-axis (v3): Instagram's full-screen "cover" zoom
+    crops ~9% off each side of a 9:16 reel and overlays its header on the
+    top strip, so x clears the side-crop (10% of the width on vertical) and
+    y drops below the UI band (6% of the height) — still reading as the
+    top-left corner, no longer under the knife."""
     rh = max(24, _even(H * config.WATERMARK_ROBOT_H_FRAC))
     rw = max(16, _even(rh * config.WATERMARK_ROBOT_ASPECT))
-    margin = max(10, int(round(min(W, H) * config.WATERMARK_MARGIN_FRAC)))
+    margin_x = max(10, int(round(min(W, H)
+                                 * config.WATERMARK_MARGIN_X_FRAC)))
+    margin_y = max(10, int(round(H * config.WATERMARK_MARGIN_Y_FRAC)))
     fs = max(9, int(round(H * config.WATERMARK_TEXT_H_FRAC)))
     gap = max(6, int(round(fs * 0.72)))
     slide = max(4, int(round(W * config.WATERMARK_SLIDE_FRAC)))
-    return {"rw": rw, "rh": rh, "margin": margin, "fontsize": fs,
+    return {"rw": rw, "rh": rh, "margin_x": margin_x, "margin_y": margin_y,
+            "fontsize": fs,
             # tucked against the robot, then slid clear
-            "x_in": margin + rw + gap,
-            "x_out": margin + rw + gap + slide,
-            "y": margin + max(0, (rh - fs) // 2)}
+            "x_in": margin_x + rw + gap,
+            "x_out": margin_x + rw + gap + slide,
+            "y": margin_y + max(0, (rh - fs) // 2)}
 
 
 def build_watermark_ass(path, out_duration_s, W, H):
@@ -1158,7 +1167,7 @@ def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H):
     # which looks exactly like "slow" and never ends. The main stream drives
     # the length; the input is ALSO bounded with -t as a second line of
     # defence, generously, so it can never be the shorter one and truncate.
-    parts.append(f"[{vlabel}][wmbot]overlay={g['margin']}:{g['margin']}:"
+    parts.append(f"[{vlabel}][wmbot]overlay={g['margin_x']}:{g['margin_y']}:"
                  f"format=auto:shortest=1[{tail}]")
     if wm_ass_path:
         parts.append(f"[wmv]subtitles=filename='{wm_ass_path}'"

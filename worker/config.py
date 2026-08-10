@@ -1442,7 +1442,12 @@ MUSIC_TAIL_VERSION = 1
 # 2 = wordmark capitalised ("EDITED BY VALMERA AGENT"). Without this bump the
 # already-rendered exports stay stamped wm_v=1, pass the freshness gate, and
 # serve the old lowercase mark forever — which is precisely the end-card bug.
-WATERMARK_VERSION = 2
+# 3 = mark moved down-and-right out of Instagram's knife zone (2026-08-10):
+# a full-screen Reel on a tall phone is "cover"-zoomed, cropping ~9% off each
+# side, and the top strip sits under the status bar / Reels header — at the
+# old 3% corner the robot and the first words were being eaten. The bump
+# re-encodes every cached free-tier final at the new position.
+WATERMARK_VERSION = 3
 # ON by owner's decision (the tradeoff was raised and taken deliberately).
 #
 # KNOWN OUTSTANDING: 44 public pages (58 occurrences) plus public/llms.txt and
@@ -1465,7 +1470,15 @@ WATERMARK_FONT_NAME = "Plus Jakarta Sans ExtraBold"
 # Fractions of the OUTPUT frame, so the mark lands proportionate on 9:16,
 # 16:9, 1:1 and 4:5 without a per-ratio asset — same principle as the card.
 WATERMARK_ROBOT_H_FRAC = float(os.getenv("WATERMARK_ROBOT_H_FRAC", "0.058"))
-WATERMARK_MARGIN_FRAC = float(os.getenv("WATERMARK_MARGIN_FRAC", "0.030"))
+# Margins are PER-AXIS since v3 (they were one 3% figure, and Instagram ate
+# it — see the WATERMARK_VERSION note). X is a fraction of min(W,H): on a
+# 9:16 reel that is the width, a 10% inset that clears the ~9% side-crop of
+# the full-screen "cover" zoom; on 16:9 it stays a modest 5.6% of the width.
+# Y is a fraction of the HEIGHT directly, dropping the mark below the status
+# bar / "Reels" header band on vertical and keeping the same visual inset on
+# landscape.
+WATERMARK_MARGIN_X_FRAC = float(os.getenv("WATERMARK_MARGIN_X_FRAC", "0.10"))
+WATERMARK_MARGIN_Y_FRAC = float(os.getenv("WATERMARK_MARGIN_Y_FRAC", "0.06"))
 WATERMARK_TEXT_H_FRAC = float(os.getenv("WATERMARK_TEXT_H_FRAC", "0.0175"))
 # Aspect of brand/robot.png (1467x2157). Pinned as a constant because the
 # text's x position is computed from the robot's WIDTH, and a regenerated

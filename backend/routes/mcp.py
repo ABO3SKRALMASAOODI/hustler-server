@@ -479,6 +479,38 @@ SESSION_TOOLS = [
                                    "is. Default true."}}}},
 ]
 
+# Titles + behaviour hints for the session tools — the same treatment
+# _annotations_for gives the editor registry. Without them a connector must
+# treat list_projects exactly like export_final and confirm every call, and
+# in practice that is how "navigate to the parent project" got stuck on
+# 2026-08-10: each hop needed an approval, one bounced, and the model
+# concluded projects could only be switched in the studio app.
+# open_project is deliberately hinted read-only: the only thing it writes is
+# this connection's own active-project pointer — no project content changes,
+# and calling it twice with the same id lands the same state.
+_SESSION_META = {
+    #  name: (title, readOnlyHint, idempotentHint)
+    "list_projects":  ("List this account's projects", True, False),
+    "open_project":   ("Open a project (switch the active one)", True, True),
+    "create_project": ("Create a project", False, False),
+    "project_state":  ("Read the active project's state", True, False),
+    "upload_start":   ("Start uploading a local file", False, False),
+    "upload_finish":  ("Finish an upload", False, False),
+    "index_status":   ("Check video analysis progress", True, False),
+    "shorts_status":  ("Check podcast shorts progress", True, False),
+    "export_final":   ("Render the final export", False, False),
+    "wait_for_job":   ("Wait for a running job", True, False),
+    "download_url":   ("Get a download link for a render", True, False),
+    "watch_video":    ("Watch the video itself", True, False),
+}
+for _t in SESSION_TOOLS:
+    _title, _ro, _idem = _SESSION_META[_t["name"]]
+    _t.setdefault("title", _title)
+    _t.setdefault("annotations", {
+        "readOnlyHint": _ro, "destructiveHint": False,
+        "idempotentHint": _idem, "openWorldHint": False,
+    })
+
 SESSION_TOOL_NAMES = {t["name"] for t in SESSION_TOOLS}
 
 WORKFLOW = """
@@ -491,10 +523,18 @@ operating doctrine. Follow it.
 
 Two things are different from a normal tool session, and both matter:
 
-1. ONE ACTIVE PROJECT. Editing tools do not take a project id. Call
-   list_projects, then open_project(id) — that returns the whole project
-   state (footage, transcript, shots, current EDL). Do that before you edit
-   anything, and again with project_state() whenever you are unsure.
+1. ONE ACTIVE PROJECT — AND YOU CONTROL IT. Editing tools do not take a
+   project id. Call list_projects, then open_project(id) — that returns the
+   whole project state (footage, transcript, shots, current EDL). Do that
+   before you edit anything, and again with project_state() whenever you are
+   unsure. open_project works at ANY moment and is the ONLY thing that moves
+   this connection between projects: the project open in the user's studio
+   app is a separate pointer that neither constrains you nor follows you, so
+   NEVER tell the user to open a project in the app on your behalf — switch
+   it yourself. Generated shorts are ordinary projects: open_project(child)
+   edits one clip, and edit_shorts fans one instruction across the board
+   from the parent OR from inside any child (it resolves the family
+   automatically — no switching needed for that either).
 
 2. YOU ARE THE ONE TALKING TO THE USER. The ask_user tool exists for the
    in-house agent to suspend a turn; here, just ask them yourself. And nothing

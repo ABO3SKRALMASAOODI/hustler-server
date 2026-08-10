@@ -12369,6 +12369,12 @@ def make_shorts(ctx, count=None, style_note=None):
     the studio's Make shorts button. The heavy work runs as its own
     shorts_plan job so this turn can answer immediately; the board on the
     project shows the clips as they land."""
+    if ctx.project.get("parent_project_id"):
+        return (f"REJECTED: this project IS a generated short (from the "
+                f"board of project {ctx.project['parent_project_id']}) — do "
+                "not cut shorts from a short. Edit THIS clip with the "
+                "normal tools, or use edit_shorts to change several "
+                "siblings at once (it reaches the parent board from here).")
     if not ctx.has_main_video:
         return ("REJECTED: shorts are cut from the MAIN video and this "
                 "project has none yet — ask the user to upload their long "
@@ -12419,15 +12425,51 @@ def _shorts_children(ctx):
     return [c for c in clips if c.get("child_project_id")]
 
 
-def edit_shorts(ctx, instruction, shorts=None):
-    """Fan ONE instruction out to the child shorts on this project's board —
-    each child gets the instruction in its own chat and runs its own edit
-    turn on its own timeline. THE tool for "do X to all the shorts" asked on
-    the PARENT project (2026-08-09: 'add the interstellar music to all of
-    them' was answered by laying the track under the 85-minute ORIGINAL —
-    the parent agent had no way to reach its children)."""
+def _shorts_board(ctx):
+    """(board_project_id, live_clips, parent_row_or_None) — the Shorts board
+    this project belongs to. A shorts parent IS the board; a generated short
+    resolves THROUGH parent_project_id to its parent's board, so board tools
+    work from either side of the family.
+
+    That resolution is the whole point (2026-08-10): an MCP model sitting on
+    generated short 423 called edit_shorts, was told "no shorts on its
+    board", and concluded projects could only be switched in the studio app —
+    while the board was one parent_project_id away. A tool that knows where
+    the board lives must go there, not send the model on an errand."""
     kids = _shorts_children(ctx)
+    if kids:
+        return ctx.project["id"], kids, None
+    parent_id = ctx.project.get("parent_project_id")
+    if not parent_id:
+        return ctx.project["id"], [], None
+    parent = ctx.db.run(dbx.get_project, parent_id)
+    # Same-owner check is belt and braces — children are created under the
+    # parent's user — but a board reached by id must never cross accounts.
+    if not parent or parent.get("user_id") != ctx.project.get("user_id"):
+        return ctx.project["id"], [], None
+    clips = (((parent.get("meta") or {}).get("shorts") or {})
+             .get("clips")) or []
+    return parent["id"], [c for c in clips if c.get("child_project_id")], \
+        parent
+
+
+def edit_shorts(ctx, instruction, shorts=None):
+    """Fan ONE instruction out to the child shorts on this family's board —
+    each child gets the instruction in its own chat and runs its own edit
+    turn on its own timeline. THE tool for "do X to all the shorts", and it
+    works from the PARENT or from INSIDE any generated short (the board
+    resolves through parent_project_id). History: 2026-08-09, 'add the
+    interstellar music to all of them' was answered by laying the track
+    under the 85-minute ORIGINAL — the parent agent had no way to reach its
+    children; 2026-08-10, the same request from a child was rejected with
+    'no shorts on its board' and the session stalled on navigation."""
+    board_pid, kids, board_parent = _shorts_board(ctx)
     if not kids:
+        if ctx.project.get("parent_project_id"):
+            return ("REJECTED: this is a generated short and its parent "
+                    f"board (project {ctx.project['parent_project_id']}) "
+                    "has no live clips yet — the board may still be "
+                    "building or was cleared. Check shorts_status.")
         return ("REJECTED: this project has no shorts on its board. "
                 "make_shorts cuts them first; if the user wants THIS "
                 "video edited, use the normal editing tools.")
@@ -12454,17 +12496,23 @@ def edit_shorts(ctx, instruction, shorts=None):
                     f"{len(kids)}.")
 
     # Children were seeded sharing only the original+proxy. Any music, clip
-    # or image that landed on the PARENT afterwards (a fetched track, an
-    # upload) rides along by storage key, so "use the song I added here"
-    # works inside every child without eight re-downloads.
+    # or image that landed on the BOARD PARENT afterwards (a fetched track,
+    # an upload) rides along by storage key, so "use the song I added here"
+    # works inside every child without eight re-downloads. When this call
+    # comes from INSIDE a generated short, that child's own assets travel
+    # too — the track the user fetched while sitting on clip 7 is exactly
+    # the one "add it to all of them" means.
+    src_ids = [board_pid] if board_pid == ctx.project_id \
+        else [board_pid, ctx.project_id]
+
     def _carry_assets(conn):
         with conn.cursor() as cur:
             cur.execute("""SELECT * FROM assets
-                           WHERE project_id = %s
+                           WHERE project_id = ANY(%s)
                              AND kind IN ('music', 'video_clip', 'image_ref')
                              AND COALESCE(meta->>'role', '') !=
                                  'shorts_reference'
-                           ORDER BY id""", (ctx.project_id,))
+                           ORDER BY id""", (src_ids,))
             parent_assets = cur.fetchall()
         carried = 0
         for c in picks:
@@ -12479,7 +12527,7 @@ def edit_shorts(ctx, instruction, shorts=None):
                 meta = dict(a.get("meta") or {})
                 meta.pop("staged", None)
                 meta.pop("tray_pos", None)
-                meta["shared_from_project"] = ctx.project_id
+                meta["shared_from_project"] = a["project_id"]
                 dbx.insert_asset(
                     conn, child_id, a["kind"], a["storage_key"],
                     bytes_=a.get("bytes"), duration_s=a.get("duration_s"),
@@ -12500,7 +12548,7 @@ def edit_shorts(ctx, instruction, shorts=None):
                 continue
             mid = dbx.add_message(
                 conn, row["chat_session_id"], "user", text,
-                {"from_parent": ctx.project_id,
+                {"from_parent": board_pid,
                  "batch_tool": "edit_shorts"})
             # Round-100 stacking: an already-QUEUED turn re-aims at the
             # newest message on claim, so a second job row would only
@@ -12511,12 +12559,13 @@ def edit_shorts(ctx, instruction, shorts=None):
                                  AND state = 'queued' LIMIT 1""",
                             (child_id,))
                 queued = cur.fetchone() is not None
+            jid = None
             if not queued:
-                dbx.enqueue_job(conn, child_id, ctx.job["user_id"],
-                                "agent_turn", {"message_id": mid,
-                                               "from_parent":
-                                               ctx.project_id})
-            sent.append(c.get("title") or f"short {child_id}")
+                jid = dbx.enqueue_job(conn, child_id, ctx.job["user_id"],
+                                      "agent_turn", {"message_id": mid,
+                                                     "from_parent":
+                                                     board_pid})
+            sent.append((c.get("title") or f"short {child_id}", jid))
         return sent
 
     carried = ctx.db.run(_carry_assets)
@@ -12525,18 +12574,28 @@ def edit_shorts(ctx, instruction, shorts=None):
         return ("REJECTED: none of the selected shorts could take the "
                 "instruction (their projects are missing chats) — tell the "
                 "user to re-cut the board.")
-    names = "; ".join(f"“{t}”" for t in sent[:8])
-    return (f"Sent to {len(sent)} short(s): {names}. Each one is running "
-            "the instruction as its own edit turn on its own timeline and "
-            "re-renders when done — the board's cards update as they land. "
-            + (f"{carried} parent asset(s) (music/clips/images) were "
-               f"shared into the shorts first, so the instruction can use "
+    names = "; ".join(
+        f"“{t}”" + (f" (job {jid})" if jid else " (stacked onto its queued "
+                                              "turn)")
+        for t, jid in sent[:8])
+    via = ""
+    if board_parent is not None:
+        via = (f"(Resolved from this generated short to its parent board, "
+               f"project {board_pid} “{board_parent.get('title') or ''}” — "
+               "no need to switch projects.) ")
+    return (f"{via}Sent to {len(sent)} short(s): {names}. Each one is "
+            "running the instruction as its own edit turn on its own "
+            "timeline and re-renders when done — the board's cards update "
+            "as they land. "
+            + (f"{carried} shared asset(s) (music/clips/images) were "
+               f"copied into the shorts first, so the instruction can use "
                f"them by name. " if carried else "")
-            + "Each short's turn bills like a normal message. Tell the "
-            "user what was sent and that the shorts are updating on the "
-            "board — do NOT wait for them in this turn, and do NOT also "
-            "edit this parent timeline unless they asked for the original "
-            "video too.")
+            + "Each short's turn bills like a normal message. An MCP "
+            "caller can follow a specific clip with wait_for_job(job_id) "
+            "or the whole board with shorts_status. Tell the user what "
+            "was sent and that the shorts are updating on the board — do "
+            "NOT wait for them in this turn, and do NOT also edit the "
+            "timeline you are on unless they asked for that video too.")
 
 
 CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
@@ -14268,19 +14327,22 @@ TOOLS = {
                     {"count": {"type": "integer"},
                      "style_note": {"type": "string"}}),
     "edit_shorts": (edit_shorts, "Apply ONE instruction to the child "
-                    "shorts on this project's Shorts board — each selected "
+                    "shorts on the family's Shorts board — each selected "
                     "short gets it as a message in its own chat and runs "
                     "its own edit turn (billed like a message each). THE "
                     "tool when the user asks for changes to 'the shorts' / "
-                    "'all of them' / 'short 3' from the shorts project: "
-                    "NEVER apply such a request to this parent timeline. "
+                    "'all of them' / 'short 3': NEVER apply such a request "
+                    "to the long parent timeline. Works from the shorts "
+                    "PARENT or from INSIDE any generated short — it "
+                    "resolves the board through the parent automatically, "
+                    "so never ask anyone to switch projects first. "
                     "Write the instruction as the user would type it "
                     "('add <track> as a ducked music bed', 'make the "
-                    "captions one word at a time'); parent music/clip/"
-                    "image assets are shared into the shorts "
-                    "automatically so the instruction can name them. "
-                    "shorts: 'all' (default) or a list of board card "
-                    "numbers (1-based).",
+                    "captions one word at a time'); board-parent and "
+                    "current-project music/clip/image assets are shared "
+                    "into the shorts automatically so the instruction can "
+                    "name them. shorts: 'all' (default) or a list of board "
+                    "card numbers (1-based).",
                     {"instruction": {"type": "string"},
                      "shorts": {"type": "array",
                                 "items": {"type": "integer"}}}),
@@ -14548,11 +14610,23 @@ def openai_tools(model=None):
     return out
 
 
+def _count_tool_outcome(ctx, counter):
+    """Reliability bookkeeping: how often tools refuse or fail, incremented
+    at the dispatch chokepoint so the in-house loop and MCP callers are both
+    counted (admin reads it from metrics_counters). Its own transaction, its
+    own try — bookkeeping must never touch the turn."""
+    try:
+        ctx.db.run(dbx.bump_metric, counter)
+    except Exception:
+        pass
+
+
 def execute(ctx, name, args):
     """Dispatch one tool call. Returns a string for the model (AskUser
     propagates)."""
     entry = TOOLS.get(name)
     if not entry:
+        _count_tool_outcome(ctx, "tool_refused")
         return (f"Unknown tool '{name}'. Available: "
                 + ", ".join(TOOLS))
     # A latest-message correction such as "字幕なしに戻して" is not a taste
@@ -14571,11 +14645,16 @@ def execute(ctx, name, args):
             )
     fn = entry[0]
     try:
-        return fn(ctx, **(args or {}))
+        out = fn(ctx, **(args or {}))
     except AskUser:
         raise
     except TypeError as e:
+        _count_tool_outcome(ctx, "tool_refused")
         return (f"REJECTED: bad arguments for {name}: {e}. "
                 "Check the tool's parameter names.")
     except Exception as e:
+        _count_tool_outcome(ctx, "tool_failed")
         return f"Tool {name} errored: {str(e)[:300]}. Try a different approach."
+    if isinstance(out, str) and out.startswith("REJECTED"):
+        _count_tool_outcome(ctx, "tool_refused")
+    return out

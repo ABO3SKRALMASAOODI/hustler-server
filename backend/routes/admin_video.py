@@ -1747,3 +1747,116 @@ def video_settings_set():
     return jsonify({"ok": True,
                     "watermark_enabled": bool(row.get("watermark_enabled")),
                     "watermark_force": bool(row.get("watermark_force"))})
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Reliability (2026-08-10) — the isolated failure counters + the
+#  sessions-without-export ratio.
+#
+#  Counters live in metrics_counters (migration 017; the worker increments
+#  via db.bump_metric) because the raw evidence does not keep: video_jobs
+#  rows are deleted with their project, so counting failures over jobs
+#  undercounts forever after the first cleanup. Lazily created here too,
+#  mirroring video_settings, so deploy order cannot 500 this page.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _ensure_metrics_counters(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS metrics_counters (
+            name       TEXT PRIMARY KEY,
+            count      BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+
+
+@admin_video_bp.route("/admin/video/reliability", methods=["GET"])
+@admin_required
+def video_reliability():
+    """The "how often does it break" panel, isolated by failure kind:
+    worker deaths, terminal job failures, tool refusals, tool errors, and
+    how many opened sessions never produced an export (count + percentage).
+
+    The session ratio is computed live over projects that still exist.
+    Generated shorts children are excluded from it — they are system-made
+    and auto-rendered, so they would flatter the export rate — and the
+    account scope matches every other admin metric (post-epoch, no test
+    accounts)."""
+    with adb() as conn:
+        cur = conn.cursor()
+        _ensure_metrics_counters(cur)
+        conn.commit()
+        cur.execute("SELECT name, count, updated_at FROM metrics_counters")
+        counters = {r["name"]: r for r in cur.fetchall()}
+
+        cur.execute(f"""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE NOT exported) AS no_export,
+                   COUNT(*) FILTER (
+                       WHERE created_at >= NOW() - INTERVAL '30 days')
+                       AS total_30d,
+                   COUNT(*) FILTER (
+                       WHERE NOT exported
+                         AND created_at >= NOW() - INTERVAL '30 days')
+                       AS no_export_30d
+            FROM (
+                SELECT p.id, p.created_at,
+                       (EXISTS (SELECT 1 FROM video_jobs j
+                                WHERE j.project_id = p.id
+                                  AND j.type = 'final'
+                                  AND j.state = 'done')
+                        OR EXISTS (SELECT 1 FROM assets a
+                                   WHERE a.project_id = p.id
+                                     AND a.kind = 'render'
+                                     AND a.meta->>'variant' = 'final'))
+                       AS exported
+                FROM projects p
+                JOIN users u ON u.id = p.user_id
+                WHERE COALESCE(p.kind, 'edit') != 'short'
+                  AND {_scope('u')}
+            ) s
+        """)
+        sess = cur.fetchone() or {}
+
+        # Context beside the counter, not a replacement for it: what the
+        # still-existing job rows say, so a spike has a first place to look.
+        cur.execute("""
+            SELECT type, COUNT(*) AS n
+            FROM video_jobs
+            WHERE state = 'failed'
+              AND updated_at >= NOW() - INTERVAL '30 days'
+            GROUP BY type ORDER BY n DESC
+        """)
+        failed_by_type = [dict(r) for r in cur.fetchall()]
+
+    def _c(name):
+        row = counters.get(name) or {}
+        return {"count": int(row.get("count") or 0),
+                "updated_at": (row["updated_at"].isoformat()
+                               if row.get("updated_at") else None)}
+
+    total = int(sess.get("total") or 0)
+    no_export = int(sess.get("no_export") or 0)
+    total_30d = int(sess.get("total_30d") or 0)
+    no_export_30d = int(sess.get("no_export_30d") or 0)
+    return jsonify({
+        "counters": {
+            "worker_died": _c("worker_died"),
+            "job_failed": _c("job_failed"),
+            "tool_refused": _c("tool_refused"),
+            "tool_failed": _c("tool_failed"),
+        },
+        "sessions_without_export": {
+            "total_sessions": total,
+            "no_export": no_export,
+            "pct": round(100.0 * no_export / total, 1) if total else 0.0,
+            "total_sessions_30d": total_30d,
+            "no_export_30d": no_export_30d,
+            "pct_30d": (round(100.0 * no_export_30d / total_30d, 1)
+                        if total_30d else 0.0),
+        },
+        "failed_jobs_by_type_30d": failed_by_type,
+        "note": ("Counters accumulate from 2026-08-10 (migration 017) and "
+                 "survive project deletion; failed_jobs_by_type_30d is "
+                 "computed over still-existing job rows only."),
+    })
