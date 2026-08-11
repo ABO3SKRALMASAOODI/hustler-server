@@ -69,21 +69,39 @@ jobs:
 
       - name: build stable dependency base when needed
         run: |
+          wait_for_build() {
+            build_id="$1"
+            while true; do
+              build_state=$(gcloud builds describe "$build_id" \
+                --project valmera --format='value(status)')
+              case "$build_state" in
+                SUCCESS) return 0 ;;
+                FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED)
+                  echo "::error::Cloud Build $build_id ended $build_state"
+                  return 1
+                  ;;
+              esac
+              echo "Cloud Build $build_id: $build_state"
+              sleep 10
+            done
+          }
           dep_hash=$(sha256sum worker/Dockerfile worker/requirements.txt \
             | sha256sum | cut -c1-16)
           base_image="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-executor-base:deps-${dep_hash}"
           app_image="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-executor-app:${GITHUB_SHA}"
           if ! gcloud artifacts docker images describe "$base_image" \
               --project valmera >/dev/null 2>&1; then
-            gcloud builds submit worker/ \
+            base_build=$(gcloud builds submit worker/ \
               --config worker/cloudbuild.executor-base.yaml \
               --substitutions "_IMAGE=${base_image}" \
-              --project valmera --quiet
+              --project valmera --quiet --async --format='value(id)')
+            wait_for_build "$base_build"
           fi
-          gcloud builds submit worker/ \
+          app_build=$(gcloud builds submit worker/ \
             --config worker/cloudbuild.executor.yaml \
             --substitutions "_BASE_IMAGE=${base_image},_IMAGE=${app_image}" \
-            --project valmera --quiet
+            --project valmera --quiet --async --format='value(id)')
+          wait_for_build "$app_build"
           echo "APP_IMAGE=$app_image" >> "$GITHUB_ENV"
 
       - name: deploy heavy and preview executors

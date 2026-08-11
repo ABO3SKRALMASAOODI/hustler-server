@@ -176,15 +176,17 @@ REMOTE_EXECUTOR_SECRET  = <the same $EXEC_SECRET>
 
 Production also has a right-sized preview service. It keeps the same 8 vCPU
 but uses 8 GiB because previews read the 540p proxy rather than staging the
-full-resolution original:
+full-resolution original. For the standard Cloud Run service names, the worker
+derives this sibling URL automatically from `REMOTE_EXECUTOR_URL`; no Render
+dashboard change is required. The optional explicit override is:
 
 ```
 REMOTE_EXECUTOR_PREVIEW_URL = https://valmera-executor-preview-xxxx.a.run.app
 ```
 
-This variable is optional and fail-safe. Without it, previews use
-`REMOTE_EXECUTOR_URL` exactly as before. Finals, indexes and the heavyweight
-tool runners always stay on the 32 GiB service.
+Set the variable to an empty value to disable the derived preview route and
+send previews to `REMOTE_EXECUTOR_URL` exactly as before. Finals, indexes and
+the heavyweight tool runners always stay on the 32 GiB service.
 
 and, since dispatcher "slots" are now just threads awaiting HTTP (nearly free),
 raise the media/index fan-out so jobs dispatch in parallel:

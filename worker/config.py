@@ -842,11 +842,26 @@ WORKER_ROLE = os.getenv("WORKER_ROLE", "worker").strip().lower()
 # Dispatcher -> executor. Base URL of the Cloud Run service (no trailing path),
 # e.g. https://valmera-executor-xxxx.a.run.app. Empty = run media/index locally.
 REMOTE_EXECUTOR_URL = os.getenv("REMOTE_EXECUTOR_URL", "").strip().rstrip("/")
-# Optional 8-vCPU / lower-memory service for 540p previews. Falling back to the
-# main executor keeps deploy order and rollback safe: code can ship before the
-# service/env, and removing one variable restores the old route immediately.
-REMOTE_EXECUTOR_PREVIEW_URL = os.getenv(
-    "REMOTE_EXECUTOR_PREVIEW_URL", "").strip().rstrip("/")
+
+
+def _sibling_preview_executor_url(main_url):
+    """Derive Cloud Run's same-project preview service from the main URL."""
+    main_url = (main_url or "").strip().rstrip("/")
+    marker = "://valmera-executor-"
+    if not main_url or marker not in main_url \
+            or "://valmera-executor-preview-" in main_url:
+        return ""
+    return main_url.replace(
+        marker, "://valmera-executor-preview-", 1)
+
+
+# The production sibling is inferred so a Render-dashboard-only setting cannot
+# silently leave every preview on the 32-GiB lane. An explicit variable still
+# overrides it, and an explicitly empty value disables the preview route.
+_preview_env = os.getenv("REMOTE_EXECUTOR_PREVIEW_URL")
+REMOTE_EXECUTOR_PREVIEW_URL = (
+    _sibling_preview_executor_url(REMOTE_EXECUTOR_URL)
+    if _preview_env is None else _preview_env.strip().rstrip("/"))
 # Shared bearer secret checked by the executor (constant-time). MUST be long and
 # random; the executor refuses every /run without it. Set the SAME value on both
 # services. The executor still reads the job's real data from the DB — the body

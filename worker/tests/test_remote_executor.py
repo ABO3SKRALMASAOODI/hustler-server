@@ -82,6 +82,14 @@ JOB = {"id": 42, "type": "preview", "project_id": 7, "user_id": 3,
        "payload": {"edl_version": 5}}
 
 
+def test_preview_service_url_is_derived_from_the_main_cloud_run_url():
+    assert config._sibling_preview_executor_url(
+        "https://valmera-executor-123.us-central1.run.app/") == \
+        "https://valmera-executor-preview-123.us-central1.run.app"
+    assert config._sibling_preview_executor_url(
+        "https://custom-executor.example.com") == ""
+
+
 def test_success_roundtrip():
     seen = {}
 
