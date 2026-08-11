@@ -3837,14 +3837,24 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
         if not (sidecar.get("samples") or []):
             return None
 
-    # Kept span ∩ shot windows -> measurement windows (skip blink-length ones)
+    # One measurement window PER CAMERA SHOT, even when a filler/cut split the
+    # kept material inside it. Treating those fragments as different shots
+    # let one single-frame Haar false positive crop the first half of a wide
+    # two-person shot while the second half correctly fitted. A camera shot
+    # has one composition; edit gaps inside it do not create a new one.
     wins = []
-    for ks, ke in keep:
-        for sh in shots:
+    for sh in shots:
+        fragments = []
+        for ks, ke in keep:
             s = max(ks, float(sh.get("start", 0.0)))
             e = min(ke, float(sh.get("end", 0.0)))
-            if e - s >= 0.4:
-                wins.append([s, e])
+            if e - s > 0.01:
+                fragments.append([s, e])
+        if fragments and sum(e - s for s, e in fragments) >= 0.4:
+            # Bounding the kept fragments may span a removed filler gap. That
+            # gap is fine for measurement and for focus metadata (no pixels
+            # from it render); the original keep list below still owns cuts.
+            wins.append([fragments[0][0], fragments[-1][1]])
     if len(wins) < 2:
         return None
     if len(wins) > 60:
@@ -3863,10 +3873,22 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
         fp = os.path.join(ctx.workdir, f"track_{len(measured)}.jpg")
         pt = None
         spatial_pts, _coverage = _spatial_face_points(sidecar, [w])
-        if spatial_pts:
+        spatial_samples = []
+        for sample in (sidecar or {}).get("samples") or []:
+            try:
+                if w[0] <= float(sample.get("t")) <= w[1]:
+                    spatial_samples.append(sample)
+            except (TypeError, ValueError):
+                continue
+        # Repeated temporal evidence beats a fresh one-frame detector. If the
+        # index saw >=2 moments in this shot and found no repeatable face,
+        # auto mode must fit it; asking Haar once more reintroduced the exact
+        # false positive the 96-frame sidecar was built to eliminate.
+        if spatial_pts and (len(spatial_samples) < 2 or
+                            len(spatial_pts) >= 2):
             pt = subject.median_point(spatial_pts)
         try:
-            if pt is None and proxy:
+            if pt is None and proxy and len(spatial_samples) < 2:
                 media.frame_at(proxy, (w[0] + w[1]) / 2.0, fp)
                 pts, method = subject.points_from_frames([fp])
                 if method == "faces" and pts:

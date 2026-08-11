@@ -461,6 +461,9 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
 
         def __init__(self):
             self.edl = default_edl(self.duration)
+            # Reproduce a filler removal inside the wide camera shot. It must
+            # not turn one composition into two independently measured ones.
+            self.edl["keep"] = [[0.0, 3.2], [3.68, 6.52]]
 
         def latest_edl(self):
             return {"version": 1, "json": self.edl}
@@ -476,10 +479,11 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
                         lambda *_args, **_kwargs: None)
 
     def faces(paths):
-        # Reproduce the canary: the broad quorum calls this non-face/detail,
-        # while exact per-shot fallback still sees no face in shot one.
+        # Reproduce project 634: dense indexed samples saw no face throughout
+        # the wide shot, but a one-frame fallback hallucinated one at the
+        # right edge. The sidecar quorum must suppress that fallback.
         if len(paths) == 1 and paths[0].endswith("track_0.jpg"):
-            return [], "none"
+            return [(0.852, 0.189)], "faces"
         if len(paths) == 1 and paths[0].endswith("track_1.jpg"):
             return [(0.55, 0.25)], "faces"
         return [(0.5, 0.5)], "detail"
@@ -492,6 +496,7 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
     assert result.startswith("EDL v1 -> v2")
     assert [span["mode"] for span in ctx.edl["frame"]["focus_track"]] == [
         "pad_blur", "crop"]
+    assert ctx.edl["frame"]["focus_track"][0]["t1"] == 5.48
     captions_result = agent_tools.add_captions(
         ctx, mode="from_transcript",
         style={"preset": "podcast", "size": "l", "effect": "none"},
