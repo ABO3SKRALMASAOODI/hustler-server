@@ -21,12 +21,18 @@ name: deploy-executor
 on:
   push:
     branches: [main]
-    paths: ["worker/**"]
+    paths:
+      - "worker/**"
+      - "!worker/tests/**"
+      - "!worker/**/*.md"
   workflow_dispatch: {}
 
 concurrency:
   group: deploy-executor
-  cancel-in-progress: false
+  # Only the newest pushed source matters. Queuing every intermediate commit
+  # created paid revisions and duplicate dispatcher shutdowns for code nobody
+  # would ever run.
+  cancel-in-progress: true
 
 jobs:
   gate:
@@ -61,13 +67,55 @@ jobs:
         with:
           project_id: valmera
 
-      - name: deploy executor from this commit
+      - name: build stable dependency base when needed
+        run: |
+          dep_hash=$(sha256sum worker/Dockerfile worker/requirements.txt \
+            | sha256sum | cut -c1-16)
+          base_image="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-executor-base:deps-${dep_hash}"
+          app_image="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-executor-app:${GITHUB_SHA}"
+          if ! gcloud artifacts docker images describe "$base_image" \
+              --project valmera >/dev/null 2>&1; then
+            gcloud builds submit worker/ \
+              --config worker/cloudbuild.executor-base.yaml \
+              --substitutions "_IMAGE=${base_image}" \
+              --project valmera --quiet
+          fi
+          gcloud builds submit worker/ \
+            --config worker/cloudbuild.executor.yaml \
+            --substitutions "_BASE_IMAGE=${base_image},_IMAGE=${app_image}" \
+            --project valmera --quiet
+          echo "APP_IMAGE=$app_image" >> "$GITHUB_ENV"
+
+      - name: deploy heavy and preview executors
         run: |
           gcloud run deploy valmera-executor \
-            --source worker/ \
+            --image "$APP_IMAGE" \
             --region us-central1 \
             --project valmera \
+            --cpu 8 --memory 32Gi --concurrency 1 \
+            --min-instances 0 --max-instances 5 --timeout 3600 \
+            --execution-environment gen2 --no-cpu-boost \
             --quiet
+          if gcloud run services describe valmera-executor-preview \
+              --region us-central1 --project valmera >/dev/null 2>&1; then
+            gcloud run deploy valmera-executor-preview \
+              --image "$APP_IMAGE" \
+              --region us-central1 \
+              --project valmera \
+              --cpu 8 --memory 8Gi --concurrency 1 \
+              --min-instances 0 --max-instances 5 --timeout 1800 \
+              --execution-environment gen2 --no-cpu-boost \
+              --quiet
+          else
+            echo "::warning::valmera-executor-preview is not bootstrapped; heavy fallback remains active"
+          fi
+
+      - name: enforce bounded artifact retention
+        run: |
+          gcloud artifacts repositories set-cleanup-policies \
+            cloud-run-source-deploy \
+            --location us-central1 --project valmera \
+            --policy worker/artifact-cleanup-policy.json --quiet
 
       - name: verify the skew is gone
         run: |
@@ -83,3 +131,14 @@ jobs:
           curl -fsS --max-time 30 \
             https://valmera-executor-950454325677.us-central1.run.app/health \
             | python3 -c "import json,sys; h=json.load(sys.stdin); print('features:', h.get('features'))"
+          if gcloud run services describe valmera-executor-preview \
+              --region us-central1 --project valmera >/dev/null 2>&1; then
+            preview_url=$(gcloud run services describe valmera-executor-preview \
+              --region us-central1 --project valmera --format='value(status.url)')
+            preview_got=$(curl -fsS --max-time 30 "$preview_url/health" \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['code_version'])")
+            test "$want" = "$preview_got" || {
+              echo "::error::preview executor reports $preview_got, expected $want"
+              exit 1
+            }
+          fi

@@ -1,0 +1,11 @@
+tests/
+tools/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+.DS_Store
+DEPLOY_EXECUTOR.md
+README.md

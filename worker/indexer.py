@@ -43,6 +43,18 @@ from schemas import (VideoIndex, VideoInfo, clamp_word_times,
 PROGRESS_EVERY_S = 5.0
 
 
+def _cancelled(worker_db):
+    cb = getattr(worker_db, "cancelled", None)
+    return bool(cb and cb())
+
+
+def _set_progress(worker_db, job_id, pct):
+    """Progress is also the executor lease heartbeat; never discard `False`."""
+    if worker_db.run(dbx.set_progress, job_id, pct) is False:
+        raise dbx.JobLeaseLost(
+            f"job {job_id} was cancelled or handed to another worker")
+
+
 def _stage_progress(worker_db, job_id, lo, hi):
     """Map one ffmpeg stage's 0..1 onto the job's lo..hi band.
 
@@ -59,9 +71,11 @@ def _stage_progress(worker_db, job_id, lo, hi):
         last[0] = now
         pct = lo + int(round((hi - lo) * max(0.0, min(1.0, frac))))
         try:
-            worker_db.run(dbx.set_progress, job_id, pct)
+            _set_progress(worker_db, job_id, pct)
         except Exception:
-            # Progress is cosmetic; a hiccup here must never kill the encode.
+            # Never unwind out of ffmpeg's pipe reader: doing so can leave the
+            # child alive. Lease loss is already recorded on _LeasedDb, and
+            # media.run's watchdog observes that flag and kills/reaps it.
             pass
 
     return cb
@@ -206,7 +220,7 @@ def run_index_job(worker_db, job):
                 raise RuntimeError(
                     "The earlier upload this project reuses is gone from "
                     "storage — please upload the file again")
-            worker_db.run(dbx.set_progress, job_id, 3)
+            _set_progress(worker_db, job_id, 3)
             storage.copy_object(dedup_src, asset["storage_key"])
         worker_db.run(dbx.asset_upload_ready, asset["id"])
 
@@ -232,7 +246,7 @@ def run_index_job(worker_db, job):
             # 1'. Pull the browser's proxy and adopt it as ours.
             raw = os.path.join(workdir, "client_proxy_raw.mp4")
             storage.download_to(client_proxy_key, raw)
-            worker_db.run(dbx.set_progress, job_id, 8)
+            _set_progress(worker_db, job_id, 8)
             _mark("download_s")
             adopted = os.path.join(workdir, "proxy.mp4")
             proxy_info = media.adopt_client_proxy(raw, adopted, warnings_pre)
@@ -275,7 +289,7 @@ def run_index_job(worker_db, job):
             src = os.path.join(workdir,
                                "src" + os.path.splitext(asset["storage_key"])[1])
             storage.download_to(asset["storage_key"], src)
-            worker_db.run(dbx.set_progress, job_id, 8)
+            _set_progress(worker_db, job_id, 8)
             _mark("download_s")
             sha = media.sha256_file(src)
             _mark("sha256_s")
@@ -289,7 +303,7 @@ def run_index_job(worker_db, job):
                 f"{config.MAX_DURATION_S/3600:.0f}h")
         worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
                       info["width"], info["height"], info["fps"], sha)
-        worker_db.run(dbx.set_progress, job_id, 12)
+        _set_progress(worker_db, job_id, 12)
 
         proxy_key = f"proxies/{project_id}/{sha}.mp4"
 
@@ -346,9 +360,10 @@ def run_index_job(worker_db, job):
                 proxy_local = src        # browser encoded it; adopted above
             else:
                 proxy_local = os.path.join(workdir, "proxy.mp4")
-                media.make_proxy(src, proxy_local, info["fps"], info["vfr"],
-                                 info["has_audio"],
-                                 duration=info["duration"])
+                media.make_proxy(
+                    src, proxy_local, info["fps"], info["vfr"],
+                    info["has_audio"], duration=info["duration"],
+                    cancelled_cb=lambda: _cancelled(worker_db))
                 # Probed here, not at upload time: tile extraction needs the
                 # proxy's REAL duration to keep frame seeks inside it.
                 state["proxy_info"] = media.probe(proxy_local)
@@ -401,7 +416,9 @@ def run_index_job(worker_db, job):
             wav_local = None
             if info["has_audio"]:
                 wav_local = os.path.join(workdir, "audio.wav")
-                media.extract_wav(src, wav_local)
+                media.extract_wav(
+                    src, wav_local,
+                    cancelled_cb=lambda: _cancelled(worker_db))
             state["wav_local"] = wav_local
             state["wav_done_at"] = time.monotonic()
             up = None
@@ -452,7 +469,7 @@ def run_index_job(worker_db, job):
                 if len(done) == 2:
                     break
                 pct = min(90, pct + 3)
-                worker_db.run(dbx.set_progress, job_id, pct)
+                _set_progress(worker_db, job_id, pct)
             f_pic.result()                 # re-raise lane failures in order
             f_snd.result()
 
@@ -475,7 +492,7 @@ def run_index_job(worker_db, job):
         _t = time.monotonic()
         print(f"[index {job_id}] filmstrip: {len(tile_keys)} tile(s), "
               f"step {tile_step}s, {len(shots)} shot(s)", flush=True)
-        worker_db.run(dbx.set_progress, job_id, 92)
+        _set_progress(worker_db, job_id, 92)
 
         audio_key = f"audio/{project_id}/{sha}.wav" if wav_local else None
         worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,
@@ -487,7 +504,7 @@ def run_index_job(worker_db, job):
             worker_db.run(dbx.insert_asset, project_id, "audio", audio_key,
                           bytes_=os.path.getsize(wav_local),
                           duration_s=info["duration"], sha256=sha)
-        worker_db.run(dbx.set_progress, job_id, 94)
+        _set_progress(worker_db, job_id, 94)
 
         # 9. Assemble + persist the index
         speakers = len({w.speaker for w in words if w.speaker is not None})
@@ -547,7 +564,7 @@ def _run_clip_index(worker_db, job, asset):
         src = os.path.join(workdir,
                            "src" + os.path.splitext(asset["storage_key"])[1])
         storage.download_to(asset["storage_key"], src)
-        worker_db.run(dbx.set_progress, job_id, 10)
+        _set_progress(worker_db, job_id, 10)
         _mark("download_s")
         sha = media.sha256_file(src)
         if is_music:
@@ -559,7 +576,7 @@ def _run_clip_index(worker_db, job, asset):
             info = media.probe(src)
         worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
                       info["width"], info["height"], info["fps"], sha)
-        worker_db.run(dbx.set_progress, job_id, 20)
+        _set_progress(worker_db, job_id, 20)
         _mark("probe_s")
 
         cached = worker_db.run(dbx.get_index_by_sha, sha)
@@ -576,14 +593,16 @@ def _run_clip_index(worker_db, job, asset):
         if info["has_audio"]:
             wav_local = os.path.join(workdir, "audio.wav")
             try:
-                media.extract_wav(src, wav_local)
+                media.extract_wav(
+                    src, wav_local,
+                    cancelled_cb=lambda: _cancelled(worker_db))
             except Exception as e:
                 wav_local = None
                 warnings.append(f"audio extraction failed ({str(e)[:120]})")
-        worker_db.run(dbx.set_progress, job_id, 35)
+        _set_progress(worker_db, job_id, 35)
         words, sentences, language = _transcribe_wav(
             job_id, wav_local, info["duration"], warnings)
-        worker_db.run(dbx.set_progress, job_id, 60)
+        _set_progress(worker_db, job_id, 60)
         _mark("whisper_s")
         silences = _detect_silences(job_id, wav_local, info["duration"],
                                     warnings)
@@ -594,7 +613,7 @@ def _run_clip_index(worker_db, job, asset):
                 shots = scenes.detect_shots(src, info["duration"], warnings)
             except Exception as e:
                 warnings.append(f"shot detection failed ({str(e)[:120]})")
-            worker_db.run(dbx.set_progress, job_id, 70)
+            _set_progress(worker_db, job_id, 70)
             tile_keys, tile_step, spatial_sidecar = _build_and_upload_tiles(
                 job_id, project_id, sha, src, info["duration"], workdir,
                 warnings,
@@ -617,7 +636,7 @@ def _run_clip_index(worker_db, job, asset):
                 perception_sidecar = perception_mod.analyze_audio(wav_local)
             except Exception:
                 pass
-        worker_db.run(dbx.set_progress, job_id, 92)
+        _set_progress(worker_db, job_id, 92)
 
         speakers = len({w.speaker for w in words if w.speaker is not None})
         index = VideoIndex(

@@ -10,7 +10,7 @@
 # Playwright target, so the dep list resolves cleanly. Bump this deliberately
 # (and re-test the chromium layer) when moving to a newer Debian, never by
 # floating the tag.
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-bookworm AS worker-base
 
 # fontconfig + Noto give libass real glyphs to fall back to when the caption
 # font (DejaVu Sans) lacks a script. Without Devanagari/Arabic/CJK coverage,
@@ -153,6 +153,9 @@ RUN if [ "$STEMS" = "1" ]; then \
       && python -c "from demucs.pretrained import get_model; get_model('htdemucs'); print('htdemucs weights baked')"; \
     fi
 
+FROM worker-base AS worker-runtime
+
+WORKDIR /app
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \

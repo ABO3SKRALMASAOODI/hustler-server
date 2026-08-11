@@ -842,6 +842,11 @@ WORKER_ROLE = os.getenv("WORKER_ROLE", "worker").strip().lower()
 # Dispatcher -> executor. Base URL of the Cloud Run service (no trailing path),
 # e.g. https://valmera-executor-xxxx.a.run.app. Empty = run media/index locally.
 REMOTE_EXECUTOR_URL = os.getenv("REMOTE_EXECUTOR_URL", "").strip().rstrip("/")
+# Optional 8-vCPU / lower-memory service for 540p previews. Falling back to the
+# main executor keeps deploy order and rollback safe: code can ship before the
+# service/env, and removing one variable restores the old route immediately.
+REMOTE_EXECUTOR_PREVIEW_URL = os.getenv(
+    "REMOTE_EXECUTOR_PREVIEW_URL", "").strip().rstrip("/")
 # Shared bearer secret checked by the executor (constant-time). MUST be long and
 # random; the executor refuses every /run without it. Set the SAME value on both
 # services. The executor still reads the job's real data from the DB — the body

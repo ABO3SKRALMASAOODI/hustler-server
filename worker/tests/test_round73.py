@@ -196,6 +196,26 @@ def test_attempts_closes_the_race_the_state_check_cannot():
         "round-19's clause must survive: it is what makes cancellation stick"
 
 
+def test_total_claims_is_the_non_refundable_execution_lease():
+    """A deploy refunds attempts, so only total_claims uniquely names a run."""
+    c = _Conn(rowcount=1)
+    wdb.set_progress(c, 42, 89, attempts=2, total_claims=7)
+    sql, params = c.sql[0]
+    assert "total_claims = %s" in sql
+    assert "attempts = %s" not in sql
+    assert 7 in params
+
+    done = _Conn(rowcount=1)
+    assert wdb.finish_job(done, 42, "done", result={"ok": True},
+                          total_claims=7) is True
+    assert "total_claims = %s" in done.sql[0][0]
+
+    retried = _Conn(rowcount=1)
+    assert wdb.requeue_job(retried, 42, RuntimeError("temporary"),
+                           total_claims=7) is True
+    assert "total_claims = %s" in retried.sql[0][0]
+
+
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg")
 def test_cancellation_actually_kills_ffmpeg():
     """The point is the PROCESS dying, not an exception being raised.

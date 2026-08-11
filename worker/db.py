@@ -363,7 +363,7 @@ def active_job_ids():
         return list(ACTIVE_JOBS)
 
 
-def set_progress(conn, job_id, progress, attempts=None):
+def set_progress(conn, job_id, progress, attempts=None, total_claims=None):
     """The `state = 'running'` clause is what makes a cancellation STICK.
 
     This writes heartbeat_at, so without it a job cancelled out from under a
@@ -383,14 +383,21 @@ def set_progress(conn, job_id, progress, attempts=None):
     two instances, 16 vCPU, one job. Nothing polls; this is the write the
     renderer already makes every 3 seconds.
 
-    `attempts` closes the race the state check alone cannot: once the retry has
-    claimed the row it is `running` again, and an orphan checking only state
-    would see its own replacement and carry on. The dispatcher already ships
-    `attempts` to the executor in remote._job_payload, so the orphan knows
-    which run it is.
+    `total_claims` is the real execution lease. Unlike `attempts`, it is never
+    refunded during a graceful dispatcher deploy, so a replacement claim can
+    never receive the same value as the executor it superseded. `attempts` is
+    retained as a compatibility fallback for pre-lease callers.
     """
     with conn.cursor() as cur:
-        if attempts is None:
+        if total_claims is not None:
+            cur.execute("""UPDATE video_jobs
+                           SET progress = %s, heartbeat_at = NOW(),
+                               updated_at = NOW()
+                           WHERE id = %s AND state = 'running'
+                             AND total_claims = %s""",
+                        (min(100, max(0, int(progress))), job_id,
+                         total_claims))
+        elif attempts is None:
             cur.execute("""UPDATE video_jobs
                            SET progress = %s, heartbeat_at = NOW(),
                                updated_at = NOW()
@@ -406,18 +413,42 @@ def set_progress(conn, job_id, progress, attempts=None):
         return cur.rowcount > 0
 
 
-def finish_job(conn, job_id, state, error=None, result=None):
+def lease_is_current(conn, job_id, total_claims):
+    """Cheap preflight before an executor downloads or encodes anything."""
+    if job_id is None or total_claims is None:
+        return True
     with conn.cursor() as cur:
-        cur.execute("""UPDATE video_jobs
-                       SET state = %s, error = %s, result = %s,
-                           progress = CASE WHEN %s = 'done' THEN 100 ELSE progress END,
-                           updated_at = NOW()
-                       WHERE id = %s""",
-                    (state, (error or None) and str(error)[:2000],
-                     Json(result) if result is not None else None, state, job_id))
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE id = %s AND state = 'running'
+                         AND total_claims = %s""",
+                    (job_id, total_claims))
+        return cur.fetchone() is not None
 
 
-def requeue_job(conn, job_id, error):
+def finish_job(conn, job_id, state, error=None, result=None,
+               total_claims=None):
+    """Finish only the execution lease that produced this result.
+
+    A timed-out or deploy-orphaned request can return after its replacement.
+    Without the lease predicate that stale response can overwrite the new
+    run's state/result even if progress cancellation worked correctly.
+    """
+    with conn.cursor() as cur:
+        lease_where = " AND total_claims = %s" if total_claims is not None else ""
+        params = [state, (error or None) and str(error)[:2000],
+                  Json(result) if result is not None else None, state, job_id]
+        if total_claims is not None:
+            params.append(total_claims)
+        cur.execute(f"""UPDATE video_jobs
+                        SET state = %s, error = %s, result = %s,
+                            progress = CASE WHEN %s = 'done' THEN 100 ELSE progress END,
+                            updated_at = NOW()
+                        WHERE id = %s AND state = 'running'{lease_where}""",
+                    tuple(params))
+        return cur.rowcount > 0
+
+
+def requeue_job(conn, job_id, error, total_claims=None):
     """Only a job we STILL HOLD goes back on the queue.
 
     Same rule as release_jobs and set_progress, and the last writer that was
@@ -429,10 +460,14 @@ def requeue_job(conn, job_id, error):
     the caller's log cannot claim a requeue that did not happen.
     """
     with conn.cursor() as cur:
-        cur.execute("""UPDATE video_jobs
-                       SET state = 'queued', error = %s, updated_at = NOW()
-                       WHERE id = %s AND state = 'running'""",
-                    (str(error)[:2000], job_id))
+        lease_where = " AND total_claims = %s" if total_claims is not None else ""
+        params = [str(error)[:2000], job_id]
+        if total_claims is not None:
+            params.append(total_claims)
+        cur.execute(f"""UPDATE video_jobs
+                        SET state = 'queued', error = %s, updated_at = NOW()
+                        WHERE id = %s AND state = 'running'{lease_where}""",
+                    tuple(params))
         return cur.rowcount > 0
 
 
@@ -1102,6 +1137,10 @@ class PermanentJobError(RuntimeError):
     run_job fails these immediately instead of burning the retry budget:
     jobs 3988/3989 each ran the same no-speech shorts_plan three times and
     then told the user to press the button again."""
+
+
+class JobLeaseLost(RuntimeError):
+    """This physical run was replaced; continuing would bill for no result."""
 
 
 def recent_llm_tokens(conn, seconds=60):

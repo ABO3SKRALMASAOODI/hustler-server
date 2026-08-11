@@ -45,6 +45,13 @@ def executor_health(timeout=20):
     return resp.json()
 
 
+def _executor_url(job_type=None):
+    """Choose a right-sized service without ever losing the heavy fallback."""
+    if job_type == "preview" and config.REMOTE_EXECUTOR_PREVIEW_URL:
+        return config.REMOTE_EXECUTOR_PREVIEW_URL
+    return config.REMOTE_EXECUTOR_URL
+
+
 # Pre-warm throttle: one boot per cooldown window is all a session needs
 # (Cloud Run keeps an idle instance around well past this), and an active
 # chat must not turn every agent turn into a health request.
@@ -71,7 +78,9 @@ def warm_executor():
             return
         _warm_last = now
     try:
-        executor_health(timeout=45)
+        url = _executor_url("preview")
+        resp = requests.get(f"{url}/health", timeout=45)
+        resp.raise_for_status()
     except Exception:
         pass
 
@@ -146,14 +155,19 @@ def _job_payload(job):
         "project_id": job["project_id"],
         "user_id": job.get("user_id"),
         "attempts": job.get("attempts"),
+        # Monotonic execution lease. Unlike attempts, this is never refunded
+        # on a dispatcher deploy, so an orphan and its replacement cannot
+        # present the same identity to progress/result writes.
+        "total_claims": job.get("total_claims"),
         "payload": job.get("payload") or {},
     }
 
 
 def _run_remote(job):
-    if not config.REMOTE_EXECUTOR_URL:
+    url_base = _executor_url(job.get("type"))
+    if not url_base:
         raise RemoteExecutorError("REMOTE_EXECUTOR_URL is not set")
-    url = f"{config.REMOTE_EXECUTOR_URL}/run"
+    url = f"{url_base}/run"
     headers = {"Content-Type": "application/json"}
     if config.REMOTE_EXECUTOR_SECRET:
         headers["Authorization"] = f"Bearer {config.REMOTE_EXECUTOR_SECRET}"
@@ -196,6 +210,12 @@ def _run_remote(job):
         skew = check_executor_version(quiet=True)
         if skew:
             msg = f"{msg} [{skew}]"
+        if data.get("lease_lost"):
+            import db as dbx
+            raise dbx.JobLeaseLost(msg)
+        if data.get("retryable") is False:
+            import db as dbx
+            raise dbx.PermanentJobError(msg)
         raise RemoteExecutorError(msg)
     return data.get("result")
 

@@ -24,6 +24,7 @@ import hmac
 import json
 import os
 import shutil
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +41,8 @@ import stems
 import tracker
 import version
 import webrecord
+from schemas import EDLValidationError
+from storage import WorkdirTooSmall
 
 # Only the compute runners are exposed remotely. agent_turn stays on the
 # dispatcher (network-bound), so it is intentionally NOT in this map.
@@ -81,6 +84,37 @@ RUNNERS = {
     # exists in this image (see /health features and stems.available).
     "stems": stems.run_stems_job,
 }
+
+
+class _LeasedDb:
+    """Bind every executor progress write to one monotonic queue claim.
+
+    Runners deliberately share the ordinary Db interface. Keeping the binding
+    here means every present and future executor runner gets fencing without
+    relying on each call site to remember an extra argument.
+    """
+
+    def __init__(self, job_id, total_claims):
+        self._db = dbx.Db()
+        self._job_id = job_id
+        self._total_claims = total_claims
+        self._lost = threading.Event()
+
+    def run(self, fn, *args, **kwargs):
+        is_progress = fn is dbx.set_progress and args \
+            and args[0] == self._job_id and self._total_claims is not None
+        if is_progress:
+            kwargs["total_claims"] = self._total_claims
+        out = self._db.run(fn, *args, **kwargs)
+        if is_progress and out is False:
+            self._lost.set()
+        return out
+
+    def cancelled(self):
+        return self._lost.is_set()
+
+    def reset(self):
+        self._db.reset()
 
 
 def _authorized(headers):
@@ -185,8 +219,13 @@ class Handler(BaseHTTPRequestHandler):
         t0 = time.monotonic()
         print(f"[executor] start {jtype} job={job_id} "
               f"project={job.get('project_id')}", flush=True)
-        db = dbx.Db()
+        lease_claim = job.get("total_claims")
+        db = _LeasedDb(job_id, lease_claim)
         try:
+            if lease_claim is not None and not db.run(
+                    dbx.lease_is_current, job_id, lease_claim):
+                raise dbx.JobLeaseLost(
+                    f"job {job_id} execution lease {lease_claim} is no longer current")
             result = runner(db, job)
             dt = round(time.monotonic() - t0, 2)
             print(f"[executor] done {jtype} job={job_id} in {dt}s", flush=True)
@@ -198,7 +237,14 @@ class Handler(BaseHTTPRequestHandler):
                   flush=True)
             # 200 + {"error"} so the dispatcher parses the real message and runs
             # its normal requeue/reaper path — same as a local runner raising.
-            self._send(200, {"error": str(e)})
+            permanent = isinstance(
+                e, (dbx.PermanentJobError, EDLValidationError,
+                    WorkdirTooSmall))
+            self._send(200, {
+                "error": str(e),
+                "retryable": not permanent,
+                "lease_lost": isinstance(e, dbx.JobLeaseLost),
+            })
         finally:
             db.reset()   # close this request's connection (no pooling here)
 

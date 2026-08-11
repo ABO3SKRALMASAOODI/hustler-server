@@ -64,6 +64,7 @@ gcloud run deploy valmera-executor \
   --min-instances 0 \
   --max-instances 5 \
   --timeout 3600 \
+  --no-cpu-boost \
   --allow-unauthenticated \
   --set-env-vars "WORKER_ROLE=executor,REMOTE_EXECUTOR_SECRET=$EXEC_SECRET"
 ```
@@ -173,6 +174,18 @@ REMOTE_EXECUTOR_URL     = https://valmera-executor-xxxx.a.run.app
 REMOTE_EXECUTOR_SECRET  = <the same $EXEC_SECRET>
 ```
 
+Production also has a right-sized preview service. It keeps the same 8 vCPU
+but uses 8 GiB because previews read the 540p proxy rather than staging the
+full-resolution original:
+
+```
+REMOTE_EXECUTOR_PREVIEW_URL = https://valmera-executor-preview-xxxx.a.run.app
+```
+
+This variable is optional and fail-safe. Without it, previews use
+`REMOTE_EXECUTOR_URL` exactly as before. Finals, indexes and the heavyweight
+tool runners always stay on the 32 GiB service.
+
 and, since dispatcher "slots" are now just threads awaiting HTTP (nearly free),
 raise the media/index fan-out so jobs dispatch in parallel:
 
@@ -191,6 +204,11 @@ valmera-worker (dispatcher) starting: ... media/index=remote executor https://..
 Because the heavy encoding left this box, you can also **downsize the Render
 worker** to its cheapest instance — it now only orchestrates and runs
 network-bound agent turns.
+
+The GitHub workflow builds the multi-gigabyte dependency/model base only when
+`worker/Dockerfile` or `worker/requirements.txt` changes. Normal source pushes
+publish a thin source layer, deploy both services, disable the no-op 8→8 startup
+CPU boost, and retain only the three newest images after two days.
 
 ---
 

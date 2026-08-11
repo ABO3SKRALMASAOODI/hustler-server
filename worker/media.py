@@ -134,6 +134,36 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         if proc.returncode != 0:
             raise MediaError("ffmpeg failed: " + " | ".join(list(tail)[-12:]))
         return ""
+    if cancelled_cb:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True,
+                             errors="replace")
+        started = time.monotonic()
+        while True:
+            try:
+                out, err = p.communicate(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() - started > timeout:
+                    p.kill()
+                    p.communicate()
+                    raise MediaError(
+                        f"{os.path.basename(cmd[0])} timed out after {timeout}s")
+                try:
+                    if cancelled_cb():
+                        p.kill()
+                        p.communicate()
+                        raise MediaError(
+                            "job was cancelled or handed to another worker")
+                except MediaError:
+                    raise
+                except Exception:
+                    pass
+        if p.returncode != 0:
+            tail = (err or "").splitlines()[-12:]
+            raise MediaError(f"{os.path.basename(cmd[0])} failed: "
+                             + " | ".join(tail))
+        return out
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            errors="replace", timeout=timeout)
@@ -264,7 +294,7 @@ def _proxy_vf(h, pad_s=0.0):
 
 
 def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
-                  expected_out_s=None):
+                  expected_out_s=None, cancelled_cb=None):
     # DO NOT SLICE THIS ENCODE ACROSS CORES. It was tried and MEASURED, on a
     # 90s 3840x2160 95Mbps file (the profile of the customer upload that spent
     # 386.8s of a 493s index right here):
@@ -307,7 +337,8 @@ def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
     if progress_cb and expected_out_s:
         cmd += ["-progress", "pipe:1", "-nostats"]
     cmd += ["-movflags", "+faststart", dst]
-    run(cmd, progress_cb=progress_cb, expected_out_s=expected_out_s)
+    run(cmd, progress_cb=progress_cb, expected_out_s=expected_out_s,
+        cancelled_cb=cancelled_cb)
 
 
 # A proxy shorter than this fraction/margin of the recording isn't a proxy of
@@ -338,7 +369,8 @@ def client_proxy_gap_tolerance(declared_duration):
                    CLIENT_PROXY_GAP_MAX_S))
 
 
-def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None):
+def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None,
+               cancelled_cb=None):
     """Downscaled H.264 proxy, +faststart. VFR sources are normalized to CFR
     here so every downstream timestamp is stable.
 
@@ -358,8 +390,9 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None):
     this covers a genuinely short track and a truncated encode identically,
     without having to tell them apart.
     """
+    cancel_kw = ({"cancelled_cb": cancelled_cb} if cancelled_cb else {})
     _encode_proxy(src, dst, fps, vfr, has_audio, progress_cb=progress_cb,
-                  expected_out_s=duration)
+                  expected_out_s=duration, **cancel_kw)
     if not duration or duration <= 0:
         return
     got = probe(dst)
@@ -371,7 +404,8 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None):
           f"{duration:.2f}s recording ({os.path.basename(src)}) — holding the "
           f"last frame to fill it", flush=True)
     _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=gap,
-                  progress_cb=progress_cb, expected_out_s=duration)
+                  progress_cb=progress_cb, expected_out_s=duration,
+                  **cancel_kw)
 
 
 def adopt_client_proxy(src, dst, warnings=None):
@@ -419,9 +453,10 @@ def adopt_client_proxy(src, dst, warnings=None):
     return probe(dst)
 
 
-def extract_wav(src, dst):
+def extract_wav(src, dst, cancelled_cb=None):
+    cancel_kw = ({"cancelled_cb": cancelled_cb} if cancelled_cb else {})
     run(["ffmpeg", "-y", "-i", src, "-vn", "-ac", "1", "-ar", "16000",
-         "-c:a", "pcm_s16le", dst])
+         "-c:a", "pcm_s16le", dst], **cancel_kw)
 
 
 def extract_audio_clip(src, t0, t1, dst):

@@ -30,6 +30,8 @@ import remote  # noqa: E402
 
 class _StubDb:
     def run(self, fn, *a, **k):
+        if fn is dbx.lease_is_current:
+            return True
         return None
 
     def reset(self):
@@ -45,9 +47,12 @@ def _start_server():
 def _setup(monkeyrunners, secret="test-secret"):
     """Point the client at a fresh stub server and stub the DB."""
     srv, port = _start_server()
-    orig_cfg = (config.REMOTE_EXECUTOR_URL, config.REMOTE_EXECUTOR_SECRET,
+    orig_cfg = (config.REMOTE_EXECUTOR_URL,
+                config.REMOTE_EXECUTOR_PREVIEW_URL,
+                config.REMOTE_EXECUTOR_SECRET,
                 config.REMOTE_EXECUTOR_TIMEOUT_S)
     config.REMOTE_EXECUTOR_URL = f"http://127.0.0.1:{port}"
+    config.REMOTE_EXECUTOR_PREVIEW_URL = ""
     config.REMOTE_EXECUTOR_SECRET = secret
     config.REMOTE_EXECUTOR_TIMEOUT_S = 10
     orig_runners = dict(http_server.RUNNERS)
@@ -67,13 +72,14 @@ def _teardown(srv, saved):
     http_server.RUNNERS.clear()
     http_server.RUNNERS.update(orig_runners)
     dbx.Db = orig_db
-    (config.REMOTE_EXECUTOR_URL, config.REMOTE_EXECUTOR_SECRET,
-     config.REMOTE_EXECUTOR_TIMEOUT_S) = orig_cfg
+    (config.REMOTE_EXECUTOR_URL, config.REMOTE_EXECUTOR_PREVIEW_URL,
+     config.REMOTE_EXECUTOR_SECRET, config.REMOTE_EXECUTOR_TIMEOUT_S) = orig_cfg
     srv.shutdown()
 
 
 JOB = {"id": 42, "type": "preview", "project_id": 7, "user_id": 3,
-       "attempts": 0, "payload": {"edl_version": 5}}
+       "attempts": 0, "total_claims": 4,
+       "payload": {"edl_version": 5}}
 
 
 def test_success_roundtrip():
@@ -92,7 +98,18 @@ def test_success_roundtrip():
         assert seen["job"]["id"] == 42
         assert seen["job"]["payload"] == {"edl_version": 5}
         assert set(seen["job"]) == {"id", "type", "project_id", "user_id",
-                                    "attempts", "payload"}
+                                    "attempts", "total_claims", "payload"}
+    finally:
+        _teardown(srv, saved)
+
+
+def test_preview_uses_the_right_sized_service_when_configured():
+    srv, saved = _setup({"preview": lambda db, job: {"ok": True}})
+    try:
+        preview_url = config.REMOTE_EXECUTOR_URL
+        config.REMOTE_EXECUTOR_URL = "http://127.0.0.1:1"
+        config.REMOTE_EXECUTOR_PREVIEW_URL = preview_url
+        assert remote.run_render_remote(None, JOB) == {"ok": True}
     finally:
         _teardown(srv, saved)
 
@@ -137,6 +154,36 @@ def test_runner_error_surfaces():
             assert False, "should have raised"
         except remote.RemoteExecutorError as e:
             assert "EDL version 5 not found" in str(e)
+    finally:
+        _teardown(srv, saved)
+
+
+def test_permanent_runner_error_is_not_retried():
+    def boom(db, job):
+        raise dbx.PermanentJobError("invalid EDL input")
+
+    srv, saved = _setup({"preview": boom})
+    try:
+        try:
+            remote.run_render_remote(None, JOB)
+            assert False, "should have raised"
+        except dbx.PermanentJobError as e:
+            assert "invalid EDL input" in str(e)
+    finally:
+        _teardown(srv, saved)
+
+
+def test_lost_lease_is_preserved_across_http():
+    def boom(db, job):
+        raise dbx.JobLeaseLost("superseded")
+
+    srv, saved = _setup({"preview": boom})
+    try:
+        try:
+            remote.run_render_remote(None, JOB)
+            assert False, "should have raised"
+        except dbx.JobLeaseLost as e:
+            assert "superseded" in str(e)
     finally:
         _teardown(srv, saved)
 

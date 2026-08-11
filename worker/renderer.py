@@ -46,6 +46,10 @@ DUCK_DB = -12.0            # music under speech AND program audio under voiceove
 MAX_ENABLE_SPANS = 80
 AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
+
+class RenderVerificationError(media.MediaError, dbx.PermanentJobError):
+    """The same bytes and EDL will fail identically; a retry only rebills it."""
+
 # Color-grade presets (EDL.effects.grade). Applied to all footage after
 # concat, BEFORE captions burn — text never gets graded.
 GRADE_FILTERS = {
@@ -3410,7 +3414,7 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
         print(f"[render {job_id}] LENGTH MISMATCH {variant}: "
               f"{_stream_report(out_path)} | expected {expected:.2f}s "
               f"(programme {program:.2f}s + outro {outro:.2f}s)", flush=True)
-        raise media.MediaError(
+        raise RenderVerificationError(
             f"{variant} render duration check failed: output is "
             f"{out_dur:.2f}s but the edit is {expected:.2f}s "
             f"(tolerance {tol:.2f}s) — the render is the wrong length")
@@ -3863,6 +3867,7 @@ def run_render_job(worker_db, job):
     # so an abandoned executor can tell "still mine" from "the retry has already
     # claimed it and I am rendering for nobody". See _still_ours below.
     my_attempt = job.get("attempts")
+    my_claim = job.get("total_claims")
     variant = "preview" if job["type"] == "preview" else "final"
     version = int(job["payload"].get("edl_version"))
     # A render the USER could not play is the one case where re-encoding the
@@ -3879,7 +3884,7 @@ def run_render_job(worker_db, job):
 
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
-        raise RuntimeError(f"EDL version {version} not found")
+        raise dbx.PermanentJobError(f"EDL version {version} not found")
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     # A canvas program (no main video) renders purely from its inserts on the
     # canvas — there is no original/proxy/index to require or download.
@@ -3985,13 +3990,14 @@ def run_render_job(worker_db, job):
     def _still_ours(progress):
         """Write progress; return False once this run has been superseded.
 
-        The answer costs nothing: set_progress' UPDATE already carries
-        `state='running' AND attempts=%s`, so its rowcount IS the answer and
-        was previously discarded. On a DB error assume we are still ours —
-        losing the connection for one tick must never kill a healthy export.
+        The answer costs nothing: set_progress' UPDATE already carries the
+        non-refundable `total_claims` lease (falling back to attempts for an
+        old payload), so its rowcount IS the answer. On a DB error assume we
+        are still ours — losing one tick must never kill a healthy export.
         """
         try:
-            ok = worker_db.run(dbx.set_progress, job_id, progress, my_attempt)
+            ok = worker_db.run(dbx.set_progress, job_id, progress,
+                               attempts=my_attempt, total_claims=my_claim)
         except Exception:
             return True
         if ok is False:
@@ -4004,7 +4010,7 @@ def run_render_job(worker_db, job):
             # single most expensive thing this instance can be asked to do for
             # a job that no longer exists.
             if not _still_ours(5):
-                raise RuntimeError(
+                raise dbx.JobLeaseLost(
                     "job was cancelled or handed to another worker")
             src_local = _cached_source(src_asset["storage_key"])
             if not src_local:
@@ -4030,7 +4036,8 @@ def run_render_job(worker_db, job):
         else:
             src_local = None            # canvas program: nothing to download
         if not _still_ours(10):
-            raise RuntimeError("job was cancelled or handed to another worker")
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
         _mark("download_s")
 
         out_local = os.path.join(workdir, f"{variant}_v{version}.mp4")
@@ -4170,6 +4177,10 @@ def run_render_job(worker_db, job):
                                  patch_locals=patch_locals,
                                  asset_locals=asset_locals)
         _mark("encode_s")
+        if not _still_ours(91):
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
+
         # Render verification: the output must be the expected length and must
         # not be newly-black vs the source. On failure this raises, so the
         # worker retries the encode once (MAX_ATTEMPTS_MEDIA) before surfacing a
@@ -4236,6 +4247,13 @@ def run_render_job(worker_db, job):
                 verify_local = None
         _mark("sheet_s")
 
+        # The render itself can finish in the narrow window between progress
+        # ticks and a dispatcher deploy. Never upload or register those stale
+        # bytes: they are both storage churn and a result nobody can consume.
+        if not _still_ours(95):
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
+
         stamp = _render_stamp(job_id)
         render_key = f"media/{project_id}/{stamp}.mp4"
         storage.upload_file(out_local, render_key, "video/mp4")
@@ -4247,7 +4265,10 @@ def run_render_job(worker_db, job):
         if verify_local and os.path.exists(verify_local):
             verify_sheet_key = f"media/{project_id}/{stamp}_vf.jpg"
             storage.upload_file(verify_local, verify_sheet_key, "image/jpeg")
-        worker_db.run(dbx.set_progress, job_id, 96)
+        if not _still_ours(96):
+            storage.delete_keys([render_key, sheet_key, verify_sheet_key])
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
         _mark("upload_s")
 
         out_info = media.probe(out_local)
@@ -4276,6 +4297,12 @@ def run_render_job(worker_db, job):
                                         "t1": round(le, 2)})
             except Exception:
                 listen_keys = []
+        if not _still_ours(98):
+            storage.delete_keys(
+                [render_key, sheet_key, verify_sheet_key]
+                + [item["key"] for item in listen_keys])
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
         asset_id = worker_db.run(
             dbx.insert_asset, project_id, "render", render_key,
             bytes_=os.path.getsize(out_local), duration_s=out_dur,

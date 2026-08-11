@@ -103,6 +103,7 @@ RUNNERS = _build_runners()
 def process_one(worker_db, job):
     job_id = job["id"]
     dbx.track_job(job_id)
+    lease_claim = job.get("total_claims")
     t0 = time.monotonic()
     queue_wait = None
     if job.get("created_at"):
@@ -142,7 +143,12 @@ def process_one(worker_db, job):
             print(f"[job {job_id}] not charged — the turn produced nothing "
                   f"usable ({result.get('truncated') and 'truncated'})",
                   flush=True)
-        worker_db.run(dbx.finish_job, job_id, "done", None, result)
+        finished = worker_db.run(dbx.finish_job, job_id, "done", None, result,
+                                 lease_claim)
+        if finished is False:
+            print(f"[job {job_id}] result discarded — execution lease "
+                  f"{lease_claim} was superseded", flush=True)
+            return
         print(f"[job {job_id}] done in {total}s "
               f"(queue {queue_wait}s) timings="
               f"{(result or {}).get('timings') if isinstance(result, dict) else None}",
@@ -158,16 +164,21 @@ def process_one(worker_db, job):
             # The INPUT is the reason — a retry replays the same answer.
             max_attempts = 0
         if job["attempts"] < max_attempts:
-            requeued = worker_db.run(dbx.requeue_job, job_id, e)
+            requeued = worker_db.run(dbx.requeue_job, job_id, e, lease_claim)
             what = ("requeued" if requeued else
                     "NOT requeued (already terminal — reaped or superseded)")
             print(f"[job {job_id}] {what} after error: {e}", flush=True)
         else:
-            worker_db.run(dbx.finish_job, job_id, "failed", e, None)
-            # Own transaction, after the terminal write — see bump_metric.
-            worker_db.run(dbx.bump_metric, "job_failed")
-            print(f"[job {job_id}] FAILED: {e}", flush=True)
-            _notify_failure(worker_db, job, e)
+            finished = worker_db.run(dbx.finish_job, job_id, "failed", e,
+                                     None, lease_claim)
+            if finished is not False:
+                # Own transaction, after the terminal write — see bump_metric.
+                worker_db.run(dbx.bump_metric, "job_failed")
+                print(f"[job {job_id}] FAILED: {e}", flush=True)
+                _notify_failure(worker_db, job, e)
+            else:
+                print(f"[job {job_id}] stale failure discarded — execution "
+                      f"lease {lease_claim} was superseded", flush=True)
     finally:
         dbx.untrack_job(job_id)
 

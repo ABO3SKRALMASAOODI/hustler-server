@@ -1,0 +1,14 @@
+# Thin executor revision.
+#
+# The base image is the full dependency/model image built only when
+# Dockerfile or requirements.txt changes. Source-only deploys add this small
+# layer instead of rebuilding and storing ~2.8 GiB of mostly identical blobs.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+COPY . .
+
+# Bypass main.py's dispatcher-only imports. Cloud Run needs only the executor
+# HTTP server and the runners it exposes.
+CMD ["python", "http_server.py"]

@@ -1,0 +1,17 @@
+[
+  {
+    "name": "delete-older-than-2d",
+    "action": {"type": "Delete"},
+    "condition": {
+      "tagState": "any",
+      "olderThan": "2d"
+    }
+  },
+  {
+    "name": "keep-3-most-recent",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {
+      "keepCount": 3
+    }
+  }
+]
