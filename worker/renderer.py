@@ -1228,6 +1228,31 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     total_dur = tl.out_duration + tail_ext
     keep = [(max(0.0, s), min(e, src_dur)) for s, e in edl["keep"]]
     keep = [(s, e) for s, e in keep if e - s > 0.01]
+    # focus_track is source-time composition state. A later word-safe cut can
+    # legitimately merge two adjacent keep spans back across a camera cut;
+    # if rendering then chooses one mode from the merged segment's midpoint,
+    # the whole segment inherits either fit or crop. Project 632 had the right
+    # EDL ([wide=pad_blur, close-up=crop]) yet rendered the close-up as a tiny
+    # inset for exactly this reason. Re-split the *local render blocks* at
+    # every focus boundary. This does not alter the EDL, duration or timeline;
+    # it only guarantees one normalization mode/aim per ffmpeg block.
+    focus_track = ((edl.get("frame") or {}).get("focus_track")
+                   if isinstance(edl.get("frame"), dict) else None) or []
+    if keep and focus_track:
+        focus_edges = set()
+        for span in focus_track:
+            for key in ("t0", "t1"):
+                try:
+                    focus_edges.add(float(span[key]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        split_keep = []
+        for s, e in keep:
+            edges = [s] + sorted(
+                x for x in focus_edges if s + 0.01 < x < e - 0.01) + [e]
+            split_keep.extend((a, b) for a, b in zip(edges, edges[1:])
+                              if b - a > 0.01)
+        keep = split_keep
     # A canvas program (image/clip-only, no main video) has no keep segments and
     # no input [0]: its program is the inserts alone, concatenated on the canvas.
     canvas_prog = not (edl.get("keep") or []) and bool(edl.get("canvas"))
@@ -1474,8 +1499,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # that sits in different places in different shots (the seeder splits
         # keep segments at shot cuts, so an aim change lands on a cut). No
         # track, or no covering span, keeps the single frame_focus exactly.
-        _ftrack = ((edl.get("frame") or {}).get("focus_track")
-                   if isinstance(edl.get("frame"), dict) else None) or []
+        _ftrack = focus_track
 
         def _frame_for(s, e):
             if not _ftrack:

@@ -321,7 +321,11 @@ def test_mixed_reframe_track_fits_unmeasured_shots_and_maps_geometry():
         index = {"video": {"width": 1920, "height": 1080}}
 
     edl = default_edl(6.0)
-    edl["keep"] = [[0.0, 3.0], [3.0, 6.0]]
+    # A later filler/boundary repair may merge the keep list back across the
+    # shot cut. The renderer must still split locally at focus_track edges;
+    # choosing one mode from this merged segment's midpoint would otherwise
+    # make both shots crop or both shots fit.
+    edl["keep"] = [[0.0, 6.0]]
     edl["frame"] = {
         "ratio": "9:16", "mode": "crop", "focus_x": 0.5,
         "focus_y": 0.5,
@@ -346,6 +350,7 @@ def test_mixed_reframe_track_fits_unmeasured_shots_and_maps_geometry():
         src_w=1920, src_h=1080, frame_focus=(0.5, 0.5))
     assert "boxblur=" in graph  # first segment preserves the full picture
     assert "crop=" in graph     # second segment remains a tight crop
+    assert "split=2" in graph   # local render blocks restored at track edge
 
 
 def test_reframe_track_marks_no_face_shots_as_safe_fit(tmp_path):
