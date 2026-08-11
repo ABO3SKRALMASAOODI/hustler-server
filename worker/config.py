@@ -38,13 +38,26 @@ AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
 # editing agent — its own eyes — instead of asking the separate VISION_*
 # provider to describe them second-hand.
 AGENT_MULTIMODAL = os.getenv("AGENT_MULTIMODAL", "1") == "1"
-# Whether AGENT_MODEL accepts input_audio content parts — the agent's EARS
-# (round 98): listen_to and render_preview hand it short clips of the actual
-# sound. Same honest-off contract as images: default on, and a provider that
-# rejects the part latches itself deaf for the process (llm._agent_deaf)
-# while the turn continues on text + the deterministic audio QC.
-AGENT_AUDIO = os.getenv("AGENT_AUDIO", "1") == "1"
+# Whether AGENT_MODEL itself accepts input_audio content parts. GPT-5.6 Luna
+# explicitly does NOT (text + image only), so defaulting this on advertised
+# ears that could only produce a provider 400. Keep the direct path for a
+# future audio-capable agent lane, but require an explicit operator opt-in.
+AGENT_AUDIO = os.getenv("AGENT_AUDIO", "0") == "1"
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
+
+# Audio judgment runs on its own small, bounded reviewer call. The editing
+# model remains Luna (reasoning + tools + images); gpt-audio-1.5 hears the
+# candidate or rendered mix and returns a concise professional assessment as
+# text to the editor. Same-provider inheritance means production needs no new
+# secret, while an empty AUDIO_REVIEW_MODEL disables the reviewer honestly.
+AUDIO_REVIEW_BASE_URL = os.getenv(
+    "AUDIO_REVIEW_BASE_URL", "https://api.openai.com/v1").strip()
+AUDIO_REVIEW_MODEL = os.getenv(
+    "AUDIO_REVIEW_MODEL", "gpt-audio-1.5").strip()
+AUDIO_REVIEW_API_KEY = (
+    os.getenv("AUDIO_REVIEW_API_KEY", "").strip()
+    or (OPENAI_API_KEY if AUDIO_REVIEW_BASE_URL == OPENAI_BASE_URL else ""))
+AUDIO_REVIEW_TIMEOUT_S = float(os.getenv("AUDIO_REVIEW_TIMEOUT_S", "45"))
 
 # THE NUMBER THAT TURNS A FIVE-SECOND WAIT INTO A DEAD TURN (round 80).
 #

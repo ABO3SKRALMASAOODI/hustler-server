@@ -169,6 +169,13 @@ class ToolContext:
         # sounds professional in the cut.
         self._listened_asset_keys = set()
         self._pending_listened_asset_keys = set()
+        # Explicit "listen first" is an instruction even when the user has
+        # already approved the track. One failed reviewer call counts as an
+        # honest attempt so an outage cannot recreate an impossible refusal
+        # loop; only a successful call enters _listened_asset_keys.
+        self._audio_review_attempted_asset_keys = set()
+        self.audio_reviewed_versions = set()
+        self.last_audio_review = None
         # EDL versions this turn already enqueued a SPECULATIVE preview for
         # (round 98) — the loop's fire-ahead encode. Bounds repeats and lets
         # render_preview adopt instead of re-enqueueing.
@@ -243,7 +250,8 @@ class ToolContext:
         # touch two providers (the agent on one, vision on another, and paying
         # users on a different agent model from free ones), and one blended rate
         # is wrong for at least one of them. Keyed by model id:
-        #   {model: {"in": n, "out": n, "cached": n, "reasoning": n}}
+        #   {model: {"in": n, "out": n, "cached": n, "reasoning": n,
+        #            "audio_in": n, "audio_out": n}}
         self.model_usage = {}
         self.credit_budget = None     # set by run_agent_job; None = uncapped
         # The client + model THIS turn talks to, resolved from the user's plan
@@ -263,18 +271,21 @@ class ToolContext:
         self.trialing = False
 
     def add_usage(self, model, tokens_in, tokens_out, cached_in=0,
-                  reasoning=0):
+                  reasoning=0, audio_in=0, audio_out=0):
         """Record one model call's usage, for the in-turn spend cap."""
         self.tokens_in += tokens_in or 0
         self.tokens_out += tokens_out or 0
         self.tokens_cached_in += cached_in or 0
         slot = self.model_usage.setdefault(
             (model or "").strip().lower(),
-            {"in": 0, "out": 0, "cached": 0, "reasoning": 0})
+            {"in": 0, "out": 0, "cached": 0, "reasoning": 0,
+             "audio_in": 0, "audio_out": 0})
         slot["in"] += tokens_in or 0
         slot["out"] += tokens_out or 0
         slot["cached"] += cached_in or 0
         slot["reasoning"] += reasoning or 0
+        slot["audio_in"] += audio_in or 0
+        slot["audio_out"] += audio_out or 0
 
     def running_credits(self):
         """Model cost spent so far this turn, in credits, using the same
@@ -289,12 +300,17 @@ class ToolContext:
         if self.model_usage:
             for model, u in self.model_usage.items():
                 p = model_prices.price_for(model, config.PRICE_FALLBACK)
-                cached = min(max(u["cached"], 0), u["in"])
-                out = u["out"] + (u["reasoning"]
-                                  if p.get("reasoning_separate") else 0)
-                cost += ((u["in"] - cached) * p["in"]
+                audio_in = min(max(u.get("audio_in", 0), 0), u["in"])
+                audio_out = min(max(u.get("audio_out", 0), 0), u["out"])
+                cached = min(max(u["cached"], 0), u["in"] - audio_in)
+                out = (u["out"] - audio_out
+                       + (u["reasoning"]
+                          if p.get("reasoning_separate") else 0))
+                cost += ((u["in"] - audio_in - cached) * p["in"]
                          + cached * p["cached_in"]
-                         + out * p["out"]) / 1e6
+                         + audio_in * p["audio_in"]
+                         + out * p["out"]
+                         + audio_out * p["audio_out"]) / 1e6
         else:
             cached_in = min(max(self.tokens_cached_in, 0), self.tokens_in)
             cost = ((self.tokens_in - cached_in) * config.LLM_PRICE_IN_PER_M +
@@ -2765,14 +2781,33 @@ def _user_chose_exact_audio(ctx, name=""):
     return False
 
 
+def _user_requested_audio_listen(ctx):
+    ask = str(getattr(ctx, "user_message", "") or "").casefold()
+    return any(term in ask for term in (
+        "listen", "audition", "hear it", "hear the", "check the audio",
+        "check the sound", "verify the music", "verify it is audible",
+        "verify it's audible", "verify its audible",
+    ))
+
+
 def _audio_was_auditioned(ctx, requested_key, resolved_key, name=""):
     if not (isinstance(ctx, ToolContext) or
             getattr(ctx, "enforce_spatial", False)):
         return True
-    if _user_chose_exact_audio(ctx, name):
-        return True
     listened = getattr(ctx, "_listened_asset_keys", None) or set()
-    return requested_key in listened or resolved_key in listened
+    if requested_key in listened or resolved_key in listened:
+        return True
+    if _user_chose_exact_audio(ctx, name):
+        # Approval outranks a taste gate, but never erases the user's explicit
+        # command to listen first. A real attempt is enough when the dedicated
+        # reviewer itself is down: add the approved track and report measured
+        # QC rather than arguing with the user forever.
+        if not _user_requested_audio_listen(ctx):
+            return True
+        attempted = getattr(
+            ctx, "_audio_review_attempted_asset_keys", None) or set()
+        return requested_key in attempted or resolved_key in attempted
+    return False
 
 
 def search_music(ctx, query, min_seconds=None, max_seconds=None,
@@ -12370,7 +12405,11 @@ def render_preview(ctx):
                            "why in one clause.")
             note += audio_qc.summary_line(aq)
             lkeys = result.get("listen_keys") or []
-            if lkeys and _hearing_on(ctx):
+            has_designed_audio = bool(
+                (row["json"].get("music") or [])
+                or (row["json"].get("sfx") or [])
+                or (row["json"].get("voiceover") or []))
+            if lkeys and has_designed_audio and llm.audio_review_available():
                 got = []
                 for i, lk in enumerate(lkeys[:2]):
                     try:
@@ -12383,11 +12422,23 @@ def render_preview(ctx):
                     except Exception:
                         continue
                 if got:
-                    ctx.pending_audio.extend(got)
-                    note += (" The changed seconds' SOUND follows this "
-                             "message — LISTEN before replying: music level "
-                             "under the speech, every sfx ON its moment, no "
-                             "click or dead air at the cuts.")
+                    prompt = (
+                        "You are the final audio QC editor. Listen to this "
+                        "rendered PROGRAM mix. In at most 100 words start "
+                        "with PASS or FIX, then say whether added music/SFX/"
+                        "voiceover is truly audible, whether speech is clear, "
+                        "and whether there is pumping, clipping, clicks, dead "
+                        "air, or a cheap/harsh balance. Give one exact dB or "
+                        "timing correction only if needed. Do not infer from "
+                        "the prompt; judge the sound itself.")
+                    review = llm.ask_audio(
+                        prompt, [path for _, path in got],
+                        [label for label, _ in got],
+                        purpose="audio_render_review")
+                    if review:
+                        ctx.last_audio_review = review
+                        ctx.audio_reviewed_versions.add(version)
+                        note += " AUDIO LISTEN: " + review
             return note
         if j["state"] == "failed":
             return (f"Preview render FAILED: {j.get('error')}. "
@@ -13076,25 +13127,24 @@ def apply_edit_recipe(ctx, operations, brief=None):
 
 
 def _hearing_on(ctx):
-    """Can THIS surface put real sound in the model's context? Only the
-    agent loop drains pending_audio (MCP results are text+image), and only
-    a model that takes input_audio parts can receive it."""
+    """Can the editing model itself receive sound parts directly?"""
     model = getattr(ctx, "agent_model", None) or config.AGENT_MODEL
     return bool(getattr(ctx, "direct_sight", False)) and llm.agent_hears(model)
 
 
 _HEARING_OFF_NOTE = (
-    "REJECTED: this model lane cannot take audio in its context, so "
-    "listening is unavailable here. Use get_audio_analysis for measured "
-    "tempo/beats/energy/stress, and the AUDIO CHECK measurements on every "
-    "preview — decisions stay grounded, just via numbers instead of ears.")
+    "REJECTED: the dedicated audio reviewer is unavailable on this "
+    "deployment. Use get_audio_analysis for measured tempo/beats/energy and "
+    "the deterministic AUDIO CHECK on every preview. If the user approved "
+    "this exact track, still add it instead of refusing their choice.")
 
 
 def listen_to(ctx, times=None, output_times=None, asset_key=None,
               span_s=4.0):
-    """READ: the agent's own EARS — short clips of ACTUAL sound delivered
-    into its context, mirroring look_at's contract for pictures."""
-    if not _hearing_on(ctx):
+    """READ: real audio judgment over bounded source/asset/program clips."""
+    direct_hearing = _hearing_on(ctx)
+    reviewer = llm.audio_review_available()
+    if not (direct_hearing or reviewer):
         return _HEARING_OFF_NOTE
     try:
         span = min(max(float(span_s or 4.0), 2.0), 10.0)
@@ -13118,6 +13168,7 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
         return out, None
 
     made = []          # (label, local_path)
+    attempted_asset_keys = set()
 
     def _cut(local_src, wins, label_fmt):
         for i, (s, e) in enumerate(wins):
@@ -13154,15 +13205,9 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
             _cut(_asset_local_path(ctx, asset), wins,
                  "ASSET '" + name + "' {s:.1f}-{e:.1f}s")
             if made:
-                bucket = ("_pending_listened_asset_keys"
-                          if getattr(ctx, "direct_sight", False)
-                          else "_listened_asset_keys")
-                listened = getattr(ctx, bucket, None)
-                if listened is None:
-                    listened = set()
-                    setattr(ctx, bucket, listened)
-                listened.add(str(asset_key))
-                listened.add(str(asset.get("storage_key") or asset_key))
+                attempted_asset_keys.update((
+                    str(asset_key),
+                    str(asset.get("storage_key") or asset_key)))
         elif output_times:
             row = ctx.latest_edl()
             lp = ctx.last_preview or {}
@@ -13204,11 +13249,54 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
         return f"Listening failed ({str(e)[:160]}) — decide from get_audio_analysis instead."
     if not made:
         return "REJECTED: nothing listenable in that range."
+    attempted = getattr(ctx, "_audio_review_attempted_asset_keys", None)
+    if attempted is None:
+        attempted = set()
+        setattr(ctx, "_audio_review_attempted_asset_keys", attempted)
+    attempted.update(attempted_asset_keys)
+
+    labels = [label for label, _ in made]
+    if reviewer:
+        prompt = (
+            "You are a senior music editor and audio post-production mixer. "
+            "Listen to the attached labeled clip(s), not their filenames. "
+            "In at most 120 words state what is actually audible: music/style/"
+            "energy or dialogue, any cheap/harsh/noisy artifacts, whether it "
+            "fits professional social-video use, and one concrete mix or "
+            "placement recommendation. If this is a rendered PROGRAM mix, "
+            "explicitly say whether the music/SFX is genuinely audible under "
+            "the speech and whether dialogue remains intelligible. Never "
+            "pretend to hear something absent.")
+        assessment = llm.ask_audio(
+            prompt, [path for _, path in made], labels,
+            purpose="audio_listen")
+        if assessment:
+            listened = getattr(ctx, "_listened_asset_keys", None)
+            if listened is None:
+                listened = set()
+                setattr(ctx, "_listened_asset_keys", listened)
+            listened.update(attempted_asset_keys)
+            ctx.last_audio_review = assessment
+            return ("Listening delivered and reviewed: "
+                    + "; ".join(labels)
+                    + ". AUDIO REVIEW: " + assessment)
+        return ("Listening extraction succeeded for " + "; ".join(labels)
+                + ", but the dedicated audio reviewer did not answer. Use "
+                  "get_audio_analysis and render AUDIO CHECK measurements; "
+                  "do not repeat this exact call or refuse an exact track "
+                  "the user already approved.")
+
+    # Explicitly configured audio-capable editing models retain the old direct
+    # carrier. Production Luna never enters this branch.
     ctx.pending_audio.extend(made)
-    return ("Listening delivered: "
-            + "; ".join(label for label, _ in made)
-            + ". The SOUND follows this message — judge it with your own "
-              "ears (levels, vibe, timing, room tone), then act on what "
+    if attempted_asset_keys:
+        pending = getattr(ctx, "_pending_listened_asset_keys", None)
+        if pending is None:
+            pending = set()
+            setattr(ctx, "_pending_listened_asset_keys", pending)
+        pending.update(attempted_asset_keys)
+    return ("Listening delivered: " + "; ".join(labels)
+            + ". The SOUND follows this message — judge it, then act on what "
               "you actually heard.")
 
 
@@ -14327,18 +14415,18 @@ TOOLS = {
                        "question": {"type": "string"},
                        "start": {"type": "number"},
                        "end": {"type": "number"}}),
-    "listen_to": (listen_to, "YOUR OWN EARS. times=[...] hears the SOURCE "
+    "listen_to": (listen_to, "REAL AUDIO REVIEW. times=[...] reviews the SOURCE "
                   "footage's actual sound at those moments; "
                   "output_times=[...] the ASSEMBLED program's mix (works "
                   "after render_preview — the program's sound exists once "
                   "rendered); asset_key an uploaded song/clip/render (+ "
-                  "optional times, clip seconds). Short clips (span_s, "
-                  "default 4s) arrive in your context as REAL AUDIO you "
-                  "judge yourself — room tone, delivery, music vibe, mix "
-                  "balance, sfx landing. Choosing or judging sound without "
-                  "listening is guessing: listen before you claim. Batch "
-                  "the moments into ONE call. If this lane cannot take "
-                  "audio the tool says so — use get_audio_analysis then.",
+                  "optional times, clip seconds). A dedicated audio-capable "
+                  "reviewer listens to the bounded clips and returns its "
+                  "professional judgment of room tone, delivery, music vibe, "
+                  "mix balance and SFX landing. Choosing or judging sound "
+                  "without this is guessing: listen before you claim. Batch "
+                  "the moments into ONE call. If the reviewer is unavailable, "
+                  "the tool says so and deterministic audio analysis remains.",
                   {"times": {"type": "array", "items": {"type": "number"}},
                    "output_times": {"type": "array",
                                     "items": {"type": "number"}},
@@ -16102,19 +16190,14 @@ def _tool_disabled(name, model=None):
     """Tools whose backing service is not configured are hidden entirely —
     the model must never see (or advertise) a capability that would only
     return 'unavailable'."""
-    # EARS THE MODEL DOES NOT HAVE ARE NOT A TOOL (round 101). listen_to was
-    # the third most-rejected tool in the product — 42 calls in a week that
-    # could only ever answer "this model lane cannot take audio", because
-    # the schema advertised hearing to a model whose provider had already
-    # refused an audio part. The deaf latch is set from the provider's own
-    # words (llm.mark_agent_deaf), so from that moment the honest schema
-    # simply has no listen_to in it, exactly like every other honest-off
-    # tool above. get_audio_analysis stays — it is measurement, not hearing.
+    # listen_to is backed by a dedicated audio model when the editing model is
+    # text/image-only (the production Luna lane). Direct model hearing remains
+    # a supported opt-in, but the tool disappears only when NEITHER path is
+    # available.
     if name == "listen_to":
-        if not config.AGENT_AUDIO:
-            return True
-        if model is not None and not llm.agent_hears(model):
-            return True
+        direct = bool(config.AGENT_AUDIO and
+                      (model is None or llm.agent_hears(model)))
+        return not (direct or llm.audio_review_available())
     if name == "generate_image":
         return not llm.image_available()
     if name == "generate_video":

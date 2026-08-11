@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
 import agent_loop                                              # noqa: E402
+import config                                                  # noqa: E402
 import llm                                                     # noqa: E402
 
 # The production error, verbatim from video_jobs 3068's error column.
@@ -68,3 +69,71 @@ def test_strip_audio_parts_is_the_gate():
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}
     ]}]
     assert agent_loop._strip_audio_parts(msgs) is False
+
+
+def test_reply_cannot_deny_a_rendered_audio_review():
+    class Ctx:
+        audio_reviewed_versions = {2}
+
+        def latest_edl(self):
+            return {"version": 2, "json": {}}
+
+    violation = agent_loop._audio_denial_violation(
+        Ctx(), "Audio playback was unavailable to me, so I could not hear it.")
+    assert violation and "DID hear" in violation
+    assert agent_loop._audio_denial_violation(
+        Ctx(), "The rendered mix was reviewed and the music is audible.") is None
+
+
+def test_dedicated_reviewer_uses_audio_chat_and_records_modality_tokens(
+        monkeypatch, tmp_path):
+    clip = tmp_path / "clip.mp3"
+    clip.write_bytes(b"bounded-audio")
+    sent = {}
+    recorded = {}
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+        @staticmethod
+        def json():
+            return {
+                "choices": [{"message": {
+                    "content": "PASS — music is audible and speech is clear."
+                }}],
+                "usage": {
+                    "prompt_tokens": 900,
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"audio_tokens": 700},
+                    "completion_tokens_details": {"audio_tokens": 0},
+                },
+            }
+
+    def fake_post(url, **kwargs):
+        sent.update(url=url, **kwargs)
+        return Response()
+
+    def fake_record(purpose, request, response, usage):
+        recorded.update(purpose=purpose, request=request, response=response,
+                        audio=llm.audio_token_counts(usage))
+
+    monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "test-key")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_MODEL", "gpt-audio-1.5")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_BASE_URL",
+                        "https://api.openai.com/v1")
+    monkeypatch.setattr(llm, "_audio_review_dead", False)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm, "record", fake_record)
+
+    answer = llm.ask_audio(
+        "Judge this mix.", [str(clip)], ["PROGRAM 0-4s"],
+        purpose="audio_render_review")
+    assert answer.startswith("PASS")
+    body = sent["json"]
+    assert body["model"] == "gpt-audio-1.5"
+    assert body["modalities"] == ["text"]
+    parts = body["messages"][0]["content"]
+    assert any(part.get("type") == "input_audio" for part in parts)
+    assert recorded["purpose"] == "audio_render_review"
+    assert recorded["audio"] == (700, 0)

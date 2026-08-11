@@ -237,18 +237,24 @@ def run_mcp_job(worker_db, job):
         def _recorder(purpose, request, response, usage):
             cached_in = llm.cached_input_tokens(usage)
             reasoning = llm.reasoning_tokens(usage)
+            audio_in, audio_out = llm.audio_token_counts(usage)
             model = (request or {}).get("model")
             if usage:
                 ctx.add_usage(model,
                               getattr(usage, "prompt_tokens", 0) or 0,
                               getattr(usage, "completion_tokens", 0) or 0,
-                              cached_in, reasoning)
-            if isinstance(response, dict) and (cached_in or reasoning):
+                              cached_in, reasoning, audio_in, audio_out)
+            if isinstance(response, dict) and (
+                    cached_in or reasoning or audio_in or audio_out):
                 extra = {}
                 if cached_in:
                     extra["cached_in"] = cached_in
                 if reasoning:
                     extra["reasoning_out"] = reasoning
+                if audio_in:
+                    extra["audio_in"] = audio_in
+                if audio_out:
+                    extra["audio_out"] = audio_out
                 response = dict(response, **extra)
             worker_db.run(dbx.insert_llm_call, job["project_id"], job["id"],
                           purpose, model, request, response,

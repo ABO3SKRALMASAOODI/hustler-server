@@ -1180,12 +1180,13 @@ def run_agent_job(worker_db, job):
     def _llm_recorder(purpose, request, response, usage):
         cached_in = llm.cached_input_tokens(usage)
         reasoning = llm.reasoning_tokens(usage)
+        audio_in, audio_out = llm.audio_token_counts(usage)
         model = (request or {}).get("model")
         if usage:
             ctx.add_usage(model,
                           getattr(usage, "prompt_tokens", 0) or 0,
                           getattr(usage, "completion_tokens", 0) or 0,
-                          cached_in, reasoning)
+                          cached_in, reasoning, audio_in, audio_out)
         # The cache-hit slice and the reasoning count ride in the response
         # payload rather than in new columns: charge_turn_credits reads them
         # back with response->>'cached_in' / ->>'reasoning_out' and prices each
@@ -1197,12 +1198,17 @@ def run_agent_job(worker_db, job):
         # model_prices says the provider bills it separately. Recording it
         # unconditionally is what makes that flag checkable against reality
         # instead of assumed.
-        if isinstance(response, dict) and (cached_in or reasoning):
+        if isinstance(response, dict) and (
+                cached_in or reasoning or audio_in or audio_out):
             extra = {}
             if cached_in:
                 extra["cached_in"] = cached_in
             if reasoning:
                 extra["reasoning_out"] = reasoning
+            if audio_in:
+                extra["audio_in"] = audio_in
+            if audio_out:
+                extra["audio_out"] = audio_out
             response = dict(response, **extra)
         worker_db.run(dbx.insert_llm_call, job["project_id"], job["id"],
                       purpose, model,
@@ -1477,6 +1483,29 @@ def _reply_violations(draft, wrote, previewed, acted=None):
     return v
 
 
+_AUDIO_DENIAL = re.compile(
+    r"(?i)(audio playback (?:was|is) unavailable|"
+    r"(?:this )?environment (?:does not|doesn't) provide (?:separate )?"
+    r"listen(?:ing)?|(?:i |we )?(?:cannot|can't|could not|couldn't) "
+    r"(?:personally )?(?:hear|listen)|cannot confirm[^.\n]{0,80}heard by ear|"
+    r"listening is unavailable)")
+
+
+def _audio_denial_violation(ctx, draft):
+    """Catch a false 'I cannot hear' after the rendered mix was reviewed."""
+    try:
+        latest = ctx.latest_edl()["version"]
+    except Exception:
+        return None
+    if latest not in (getattr(ctx, "audio_reviewed_versions", None) or set()):
+        return None
+    match = _AUDIO_DENIAL.search(draft or "")
+    if not match:
+        return None
+    return (f'denies listening ("{match.group(0).strip()}"), but the '
+            "dedicated audio reviewer DID hear this rendered EDL version")
+
+
 def _assets_made_note(ctx):
     """', but <what> was saved to your project' — or '' when nothing was.
 
@@ -1552,12 +1581,18 @@ def _turn_facts(ctx, start_version):
             pv += f"; self-check: {ctx.last_selfcheck[:120]}"
     else:
         pv = "none"
+    heard_versions = getattr(ctx, "audio_reviewed_versions", None) or set()
+    audio_review = ("rendered v" + ", v".join(str(v)
+                    for v in sorted(heard_versions))) if heard_versions \
+        else "none"
     return ("TURN FACTS (system-verified):\n"
             f"- {edl_line}\n"
             f"- Successful write tools this turn: {writes}\n"
             f"- Images generated this turn: {images}\n"
             f"- Media downloaded from links this turn: {fetched}\n"
             f"- Preview: {pv}\n"
+            f"- Program audio reviewed by the dedicated listener: "
+            f"{audio_review}\n"
             "Rules: your reply may not claim any change, render, or setting "
             "that is not present in these facts. If no writes occurred, say "
             "plainly that nothing was changed and why, or what you need "
@@ -1751,6 +1786,9 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
                  or getattr(ctx, "audio_extracted", None))
     previewed = ctx.last_preview is not None
     viol = _reply_violations(draft, wrote, previewed, acted)
+    audio_denial = _audio_denial_violation(ctx, draft)
+    if audio_denial:
+        viol.append(audio_denial)
     # Echo detection only polices turns that DID nothing: a working turn's
     # summary may legitimately resemble the last one (same request repeated),
     # and its content claims are already checked against the turn facts.
@@ -1787,6 +1825,7 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     except Exception as e:
         print(f"[honesty] regeneration failed: {e}", flush=True)
     if redraft and not _reply_violations(redraft, wrote, previewed, acted) \
+            and not _audio_denial_violation(ctx, redraft) \
             and (acted or previewed
                  or not _echo_violation(redraft, messages)):
         return redraft
@@ -1816,6 +1855,15 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
                             "uploaded")
             note = ("this turn did NOT change the edit, but "
                     + " and ".join(made) + " and saved to the project")
+        if _audio_denial_violation(ctx, redraft or draft):
+            # Do not preserve the false sentence underneath a corrective note.
+            # The language guard that follows can translate this system-authored
+            # fact when the user is not writing in English.
+            changed = ("modified the edit and " if wrote else "")
+            return ("Done — this turn " + changed + "rendered the preview. "
+                    "The dedicated audio reviewer listened to the rendered "
+                    "program mix; see the verified steps above for the exact "
+                    "changes and audio judgment.")
         print(f"[honesty] job {ctx.job['id']}: regeneration still misreports "
               "real work — posting a corrective note", flush=True)
         return f"*(system: {note})*\n\n" + (redraft or draft)

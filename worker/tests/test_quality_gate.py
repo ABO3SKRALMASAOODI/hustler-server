@@ -113,6 +113,18 @@ def test_selected_audio_requires_real_audition_unless_user_chose_it():
         ctx, "music/1/remix.mp3", "music/1/remix.mp3",
         "Drake - National Treasures (remix).mp3")
 
+    # Approval bypasses the editor's taste veto, not the user's literal order
+    # to listen first. One real reviewer attempt then prevents an impossible
+    # retry loop if the reviewer itself is temporarily unavailable.
+    ctx.user_message = "listen to this exact remix first, then add it"
+    assert not agent_tools._audio_was_auditioned(
+        ctx, "music/1/remix.mp3", "music/1/remix.mp3",
+        "Drake - National Treasures (remix).mp3")
+    ctx._audio_review_attempted_asset_keys = {"music/1/remix.mp3"}
+    assert agent_tools._audio_was_auditioned(
+        ctx, "music/1/remix.mp3", "music/1/remix.mp3",
+        "Drake - National Treasures (remix).mp3")
+
 
 def test_asset_listen_wins_over_empty_optional_clock_arrays(monkeypatch,
                                                              tmp_path):
@@ -152,6 +164,56 @@ def test_asset_listen_wins_over_empty_optional_clock_arrays(monkeypatch,
         Ctx(), times=[], output_times=[], asset_key=asset["storage_key"])
     assert result.startswith("Listening delivered:")
     assert "ASSET 'National Treasures remix.mp3'" in result
+
+
+def test_dedicated_audio_reviewer_returns_real_judgment(monkeypatch,
+                                                         tmp_path):
+    class Ctx:
+        agent_model = "text-image-only-model"
+        direct_sight = True
+        project_id = 622
+        workdir = str(tmp_path)
+        pending_audio = []
+        _pending_listened_asset_keys = set()
+        _listened_asset_keys = set()
+        _audio_review_attempted_asset_keys = set()
+        _asset_locals = {}
+        last_audio_review = None
+
+    asset = {
+        "id": 42, "kind": "music", "storage_key": "music/622/remix.mp3",
+        "duration_s": 120.0, "bytes": 1024,
+        "meta": {"filename": "Approved remix.mp3"},
+    }
+    monkeypatch.setattr(agent_tools, "_hearing_on", lambda _ctx: False)
+    monkeypatch.setattr(agent_tools.llm, "audio_review_available", lambda: True)
+    monkeypatch.setattr(
+        agent_tools, "_resolve_media_asset",
+        lambda _ctx, _key, _kinds: (asset, None))
+    monkeypatch.setattr(
+        agent_tools, "_asset_local_path", lambda _ctx, _asset: "source.mp3")
+
+    def fake_extract(_src, _start, _end, dest):
+        with open(dest, "wb") as handle:
+            handle.write(b"review-me")
+
+    seen = {}
+
+    def fake_review(prompt, paths, labels, purpose):
+        seen.update(prompt=prompt, paths=paths, labels=labels, purpose=purpose)
+        return ("The remix is clean and energetic; start it at -18 dB with "
+                "smooth speech ducking.")
+
+    monkeypatch.setattr(agent_tools.media, "extract_audio_clip", fake_extract)
+    monkeypatch.setattr(agent_tools.llm, "ask_audio", fake_review)
+    ctx = Ctx()
+    result = agent_tools.listen_to(
+        ctx, times=[], output_times=[], asset_key=asset["storage_key"])
+    assert result.startswith("Listening delivered and reviewed:")
+    assert "clean and energetic" in result
+    assert asset["storage_key"] in ctx._listened_asset_keys
+    assert ctx.pending_audio == []
+    assert seen["purpose"] == "audio_listen"
 
 
 def test_user_approved_music_can_be_part_of_an_atomic_recipe(monkeypatch):

@@ -79,6 +79,15 @@ MODEL_PRICES = {
         "in": 0.20, "cached_in": 0.02, "out": 1.20,
         "reasoning_separate": False,
     },
+    # Dedicated bounded-clip listener. Official gpt-audio-1.5 model page,
+    # checked Aug 11 2026: text $2.50 in / $10 out; audio $32 in / $64 out
+    # per 1M tokens. No cached-input price is published, so a cache hit must
+    # conservatively cost the miss rate rather than invent a discount.
+    "gpt-audio-1.5": {
+        "in": 2.50, "cached_in": 2.50, "out": 10.00,
+        "audio_in": 32.00, "audio_out": 64.00,
+        "reasoning_separate": False,
+    },
     # DeepSeek V4 Pro -- the default agent model Jul 26-31 2026.
     # Disk-cached prefix hits are 480x cheaper than a miss, which is why the
     # three-part charge exists at all: an agent turn re-sends the same system
@@ -105,7 +114,7 @@ MODEL_PRICES = {
     },
 }
 
-_FIELDS = ("in", "cached_in", "out")
+_FIELDS = ("in", "cached_in", "out", "audio_in", "audio_out")
 
 
 def normalize(model):
@@ -119,9 +128,14 @@ def price_for(model, fallback):
     row = MODEL_PRICES.get(normalize(model))
     if not row:
         out = dict(fallback)
+        out.setdefault("audio_in", out.get("in", 0.0))
+        out.setdefault("audio_out", out.get("out", 0.0))
         out.setdefault("reasoning_separate", False)
         return out
-    return dict(row)
+    out = dict(row)
+    out.setdefault("audio_in", out["in"])
+    out.setdefault("audio_out", out["out"])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -178,11 +192,24 @@ def _lit(text):
 
 def _case(field, model_col, fallback):
     """CASE that maps a row's model id to one price field."""
+    def _value(cfg):
+        if field == "audio_in":
+            return cfg.get(field, cfg["in"])
+        if field == "audio_out":
+            return cfg.get(field, cfg["out"])
+        return cfg[field]
+
+    if field == "audio_in":
+        fallback_value = fallback.get(field, fallback["in"])
+    elif field == "audio_out":
+        fallback_value = fallback.get(field, fallback["out"])
+    else:
+        fallback_value = fallback[field]
     whens = " ".join(
-        "WHEN {} THEN {}".format(_lit(mid), float(cfg[field]))
+        "WHEN {} THEN {}".format(_lit(mid), float(_value(cfg)))
         for mid, cfg in sorted(MODEL_PRICES.items()))
     return "(CASE lower(COALESCE({}, '')) {} ELSE {} END)".format(
-        model_col, whens, float(fallback[field]))
+        model_col, whens, float(fallback_value))
 
 
 def _reasoning_case(model_col):
@@ -205,15 +232,31 @@ def row_cost_sql(fallback, model_col="model", response_col="response",
     number can never make a charge negative, and reasoning tokens are added only
     for models that report them outside completion_tokens.
     """
-    cached = ("LEAST(GREATEST(COALESCE(({}->>'cached_in')::float, 0), 0), "
-              "COALESCE({}, 0))").format(response_col, prompt_col)
+    total_in = "GREATEST(COALESCE({}, 0), 0)".format(prompt_col)
+    total_out = "GREATEST(COALESCE({}, 0), 0)".format(completion_col)
+    audio_in = (
+        "LEAST(GREATEST(COALESCE(({}->>'audio_in')::float, 0), 0), {})"
+    ).format(response_col, total_in)
+    audio_out = (
+        "LEAST(GREATEST(COALESCE(({}->>'audio_out')::float, 0), 0), {})"
+    ).format(response_col, total_out)
+    cached = (
+        "LEAST(GREATEST(COALESCE(({}->>'cached_in')::float, 0), 0), "
+        "GREATEST({} - {}, 0))"
+    ).format(response_col, total_in, audio_in)
     reasoning = ("GREATEST(COALESCE(({}->>'reasoning_out')::float, 0), 0) * {}"
                  ).format(response_col, _reasoning_case(model_col))
     return (
-        "((GREATEST(COALESCE({p}, 0) - {cached}, 0) * {p_in}"
+        "((GREATEST({total_in} - {audio_in} - {cached}, 0) * {p_in}"
         " + {cached} * {p_cached}"
-        " + (COALESCE({c}, 0) + {reason}) * {p_out}) / 1000000.0)"
-    ).format(p=prompt_col, c=completion_col, cached=cached, reason=reasoning,
+        " + {audio_in} * {p_audio_in}"
+        " + (GREATEST({total_out} - {audio_out}, 0) + {reason}) * {p_out}"
+        " + {audio_out} * {p_audio_out}) / 1000000.0)"
+    ).format(total_in=total_in, total_out=total_out,
+             audio_in=audio_in, audio_out=audio_out,
+             cached=cached, reason=reasoning,
              p_in=_case("in", model_col, fallback),
              p_cached=_case("cached_in", model_col, fallback),
-             p_out=_case("out", model_col, fallback))
+             p_out=_case("out", model_col, fallback),
+             p_audio_in=_case("audio_in", model_col, fallback),
+             p_audio_out=_case("audio_out", model_col, fallback))

@@ -66,9 +66,9 @@ def test_the_default_agent_model_is_priced():
         model_prices.MODEL_PRICES
 
 
-def test_cached_input_is_cheaper_than_a_miss_for_every_model():
+def test_cached_input_never_costs_more_than_a_miss_for_every_model():
     for name, p in model_prices.MODEL_PRICES.items():
-        assert p["cached_in"] < p["in"], name
+        assert p["cached_in"] <= p["in"], name
         assert p["out"] > 0 and p["in"] > 0, name
 
 
@@ -106,6 +106,13 @@ def test_the_sql_prices_each_model_separately():
         assert str(p["in"]) in sql
     assert "cached_in" in sql
     assert "reasoning_out" in sql
+    assert "audio_in" in sql and "audio_out" in sql
+
+
+def test_audio_model_uses_official_modality_prices():
+    audio = model_prices.price_for("gpt-audio-1.5", config.PRICE_FALLBACK)
+    assert audio["in"] == 2.50 and audio["out"] == 10.00
+    assert audio["audio_in"] == 32.00 and audio["audio_out"] == 64.00
 
 
 # ── reasoning tokens ────────────────────────────────────────────────────
@@ -119,6 +126,11 @@ class _Usage:
 class _Details:
     def __init__(self, reasoning_tokens):
         self.reasoning_tokens = reasoning_tokens
+
+
+class _AudioDetails:
+    def __init__(self, audio_tokens):
+        self.audio_tokens = audio_tokens
 
 
 def test_reads_the_object_spelling():
@@ -139,6 +151,13 @@ def test_a_provider_reporting_none_yields_zero():
     assert llm.reasoning_tokens(_Usage(completion_tokens=100)) == 0
     assert llm.reasoning_tokens(None) == 0
     assert llm.reasoning_tokens(_Usage(reasoning_tokens="lots")) == 0
+
+
+def test_reads_audio_token_details_without_double_pricing_them_as_text():
+    usage = _Usage(
+        prompt_tokens_details=_AudioDetails(800),
+        completion_tokens_details={"audio_tokens": 120})
+    assert llm.audio_token_counts(usage) == (800, 120)
 
 
 # ── the in-turn cap ─────────────────────────────────────────────────────
@@ -182,6 +201,16 @@ def test_reasoning_is_charged_only_where_the_provider_bills_it_separately():
     baseline = _ctx()
     baseline.add_usage("grok-4.5", 1000, 1000)
     assert separate.running_credits() > baseline.running_credits()
+
+
+def test_audio_tokens_use_the_audio_rate_in_the_live_cap():
+    ctx = _ctx()
+    ctx.add_usage("gpt-audio-1.5", 1000, 200,
+                  audio_in=800, audio_out=100)
+    p = model_prices.price_for("gpt-audio-1.5", config.PRICE_FALLBACK)
+    expect = ((200 * p["in"] + 800 * p["audio_in"]
+               + 100 * p["out"] + 100 * p["audio_out"]) / 1e6)
+    assert ctx.running_credits() == model_prices.usd_to_credits(expect)
 
 
 def test_the_cap_still_clamps_a_bogus_cache_count():
