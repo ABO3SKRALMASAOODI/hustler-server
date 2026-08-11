@@ -279,6 +279,17 @@ class CaptionStyle(BaseModel):
     # How much larger an emphasised word renders, 1.0-3.0.
     emphasis_scale: Optional[float] = None
 
+    @field_validator("effect", mode="before")
+    @classmethod
+    def _effect_none(cls, v):
+        # Models and API clients naturally use the same explicit sentinel as
+        # `animation`. Treating effect="none" as a schema failure cost a full
+        # extra agent round trip in the production quality canary even though
+        # the intended canonical EDL value is simply null.
+        if isinstance(v, str) and v.strip().lower() in ("", "none", "off"):
+            return None
+        return v
+
     @field_validator("leading")
     @classmethod
     def _leading_range(cls, v):

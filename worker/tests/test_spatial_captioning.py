@@ -13,7 +13,7 @@ import agent_tools
 import captions
 import renderer
 import spatial
-from schemas import default_edl, validate_edl
+from schemas import CaptionStyle, default_edl, validate_edl
 from timeline import Timeline
 
 
@@ -431,9 +431,15 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
         {"t": 3.5, "faces": []},
         {"t": 4.5, "faces": []},
         {"t": 5.0, "faces": []},
-        {"t": 5.5, "faces": [[0.45, 0.08, 0.65, 0.42]]},
-        {"t": 6.0, "faces": [[0.45, 0.08, 0.65, 0.42]]},
-        {"t": 6.5, "faces": [[0.45, 0.08, 0.65, 0.42]]},
+        {"t": 5.5, "faces": [[0.45, 0.08, 0.65, 0.42]],
+         "text": [[0.42, 0.62, 0.69, 0.85]], "dense_ui": False},
+        {"t": 6.0, "faces": [[0.45, 0.08, 0.65, 0.42]],
+         "text": [[0.38, 0.57, 0.54, 0.64],
+                  [0.42, 0.71, 0.62, 0.85],
+                  [0.26, 0.91, 0.59, 1.0]], "dense_ui": False},
+        {"t": 6.5, "faces": [[0.45, 0.08, 0.65, 0.42]],
+         "text": [[0.36, 0.49, 0.59, 0.61],
+                  [0.42, 0.62, 0.62, 0.85]], "dense_ui": False},
     ]}
 
     class Ctx:
@@ -481,3 +487,26 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
     assert result.startswith("EDL v1 -> v2")
     assert [span["mode"] for span in ctx.edl["frame"]["focus_track"]] == [
         "pad_blur", "crop"]
+    captions_result = agent_tools.add_captions(
+        ctx, mode="from_transcript",
+        style={"preset": "podcast", "size": "l", "effect": "none"},
+        max_words_per_caption=4)
+    assert captions_result.startswith("EDL v1 -> v2")
+    assert ctx.edl["frame"]["focus_track"][-1]["mode"] == "crop"
+    assert ctx.edl["captions"]["placement_track"][-1]["t1"] == 6.52
+
+
+def test_caption_text_filter_rejects_tall_texture_but_keeps_real_lines():
+    sample = {"dense_ui": False, "text": [
+        [0.42, 0.62, 0.69, 0.85],   # merged jacket/microphone texture
+        [0.20, 0.72, 0.80, 0.80],   # genuine horizontal subtitle line
+    ]}
+    assert agent_tools._caption_source_text_boxes(sample) == [
+        [0.20, 0.72, 0.80, 0.80]]
+    sample["dense_ui"] = True
+    assert len(agent_tools._caption_source_text_boxes(sample)) == 2
+
+
+def test_caption_effect_none_is_a_canonical_no_effect_not_a_retry():
+    assert CaptionStyle.model_validate({"effect": "none"}).effect is None
+    assert CaptionStyle.model_validate({"effect": "off"}).effect is None

@@ -1805,6 +1805,38 @@ _CAPTION_ZONES = {
 }
 
 
+def _caption_source_text_boxes(sample):
+    """Text evidence reliable enough to constrain caption composition.
+
+    Dense UI keeps every detected region: even an unlabeled panel is content
+    the editor should not cover. Natural footage is different. MSER can group
+    jacket seams, a microphone and chair edges into tall pseudo-"text" boxes;
+    the production mixed-shot canary produced three such boxes in three face
+    frames and forced the whole edit back to pad_blur. Real word/subtitle lines
+    are horizontally line-shaped. Keep those, but never let a tall natural
+    texture overrule a measured face and shot-specific framing.
+    """
+    boxes = list(sample.get("text") or [])
+    if sample.get("dense_ui"):
+        return boxes
+    reliable = []
+    for box in boxes:
+        try:
+            w = float(box[2]) - float(box[0])
+            h = float(box[3]) - float(box[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        aspect = w / max(h, 1e-9)
+        # Normal word lines are thin; a broad title/lower-third block may be
+        # taller but is still unmistakably horizontal. Near-square/tall
+        # groups are the natural-texture false positives this gate removes.
+        line_shaped = h <= 0.13 and aspect >= 2.1
+        title_shaped = h <= 0.20 and aspect >= 3.0
+        if w >= 0.10 and h >= 0.008 and (line_shaped or title_shaped):
+            reliable.append(box)
+    return reliable
+
+
 def _box_zone_overlap(box, zone):
     x0, y0, x1, y1 = box
     zy0, zy1 = zone
@@ -1845,7 +1877,7 @@ def _caption_placement_track(ctx, edl, sidecar, preferred="bottom"):
             continue
         faces = [m for box in sample.get("faces") or []
                  if (m := _source_box_to_output(ctx, edl, t, box))]
-        text_boxes = [m for box in sample.get("text") or []
+        text_boxes = [m for box in _caption_source_text_boxes(sample)
                       if (m := _source_box_to_output(ctx, edl, t, box))]
         pos, scores = _safe_caption_position(
             faces, text_boxes, bool(sample.get("dense_ui")), preferred)
@@ -1911,7 +1943,7 @@ def _fixed_text_band(ctx, edl, out_start, out_end, preferred="middle",
         faces = [mapped for box in (sample.get("faces") or [])
                  if (mapped := _source_box_to_output(
                      ctx, edl, source_t, box)) is not None]
-        text_boxes = [mapped for box in (sample.get("text") or [])
+        text_boxes = [mapped for box in _caption_source_text_boxes(sample)
                       if (mapped := _source_box_to_output(
                           ctx, edl, source_t, box)) is not None]
         _pos, scores = _safe_caption_position(
