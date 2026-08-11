@@ -3947,6 +3947,20 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
     spatial_pts, spatial_coverage = _spatial_face_points(sidecar, keep)
     if len(spatial_pts) >= 3 and spatial_coverage >= 0.35:
         pts, method = spatial_pts, "faces_spatial"
+    # Global coverage is the wrong quorum for a shot-local composition. In a
+    # wide interview followed by a one-second close-up, three strong face
+    # detections can be only 3/9 samples: that correctly says "most of the
+    # VIDEO has no face", but it is excellent evidence that ONE SHOT does.
+    # Give the per-shot compiler that repeated local evidence before the
+    # no-face/global-detail branch turns the entire program into pad_blur.
+    if mode == "auto" and \
+            len((ctx.index or {}).get("shots") or []) >= 2 and \
+            len(spatial_pts) >= 2:
+        local_pt = subject.median_point(spatial_pts)
+        track_res = _reframe_with_track(
+            ctx, ratio, local_pt, preserve_unmeasured=True)
+        if track_res is not None:
+            return track_res
 
     def _kept(focus):
         """Share of the picture's detail the crop window would keep."""

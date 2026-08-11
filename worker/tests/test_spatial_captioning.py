@@ -430,6 +430,7 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
         {"t": 2.5, "faces": []},
         {"t": 3.5, "faces": []},
         {"t": 4.5, "faces": []},
+        {"t": 5.0, "faces": []},
         {"t": 5.5, "faces": [[0.45, 0.08, 0.65, 0.42]]},
         {"t": 6.0, "faces": [[0.45, 0.08, 0.65, 0.42]]},
         {"t": 6.5, "faces": [[0.45, 0.08, 0.65, 0.42]]},
@@ -464,11 +465,13 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
                         lambda *_args, **_kwargs: None)
 
     def faces(paths):
-        # The broad five-frame read sees the close-up. Exact per-shot fallback
-        # still sees no face in shot one and the face in shot two.
+        # Reproduce the canary: the broad quorum calls this non-face/detail,
+        # while exact per-shot fallback still sees no face in shot one.
         if len(paths) == 1 and paths[0].endswith("track_0.jpg"):
             return [], "none"
-        return [(0.55, 0.25)], "faces"
+        if len(paths) == 1 and paths[0].endswith("track_1.jpg"):
+            return [(0.55, 0.25)], "faces"
+        return [(0.5, 0.5)], "detail"
 
     monkeypatch.setattr(agent_tools.subject, "points_from_frames", faces)
     monkeypatch.setattr(agent_tools.subject, "crop_detail_kept",
