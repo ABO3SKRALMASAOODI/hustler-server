@@ -35,14 +35,16 @@ env vars on the Render worker. To roll back, delete those two vars.
 
 ---
 
-## 0. One image, two roles
+## 0. One image, three roles
 
-The same `worker/` image runs as either role, chosen by `WORKER_ROLE`:
+The same `worker/` image runs in three production roles, chosen by
+`WORKER_ROLE`:
 
 | Role | Where | `WORKER_ROLE` | Does |
 |---|---|---|---|
-| dispatcher (default) | existing Render worker | `worker` (or unset) | polls queue, runs agent turns, ships media/index to the executor |
-| executor | new Cloud Run service | `executor` | runs `indexer`/`renderer` per HTTP request, scales to zero |
+| dispatcher (default) | existing Render worker | `worker` (or unset) | polls queue and ships work to request-based executors |
+| executor | Cloud Run service | `executor` | runs media/index/tool compute per request, scales to zero |
+| agent executor | Cloud Run service | `agent_executor` | runs isolated agent turns per request, scales to zero |
 
 ---
 
@@ -194,8 +196,11 @@ raise the media/index fan-out so jobs dispatch in parallel:
 ```
 WORKER_MEDIA_SLOTS = 4
 WORKER_INDEX_SLOTS = 4
-WORKER_AGENT_SLOTS = 2     # unchanged; agent turns still run here
+WORKER_AGENT_SLOTS = 2     # local rollback capacity
 ```
+
+When `valmera-agent` is bootstrapped, the dispatcher auto-discovers it and
+uses five HTTP dispatch slots instead. See `DEPLOY_AGENT_EXECUTOR.md`.
 
 Redeploy. The worker log should print:
 

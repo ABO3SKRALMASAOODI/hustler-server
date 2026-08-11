@@ -732,6 +732,11 @@ MEDIA_POLL_INTERVAL_S = float(os.getenv(
 # tuning knob into an outage. Default stays 4; the env now wins in BOTH
 # directions. (Heartbeats log RSS so the next death names its number.)
 AGENT_SLOTS = max(1, int(os.getenv("WORKER_AGENT_SLOTS", "4")))
+# Shorts planning is LLM/tool work with the same memory profile as a normal
+# turn, but it has its own lane so a long podcast plan cannot occupy chat
+# capacity. Keeping this configurable lets an agent-only service own it while
+# a dispatcher-only service leaves it at zero through worker_lane_slots().
+SHORTS_SLOTS = max(1, int(os.getenv("WORKER_SHORTS_SLOTS", "2")))
 # The agent lane's claim poll is the gap between "user hit send" and "the
 # turn starts" — the first latency anyone feels, on every single message.
 # 0.5s, like the MCP lane: the claim is one indexed SKIP LOCKED query.
@@ -836,7 +841,7 @@ MCP_VIDEO_DOWNLOAD_MAX_MB = float(os.getenv("MCP_VIDEO_DOWNLOAD_MAX_MB",
                                             "2048"))
 
 # ── Remote executor (round 38): request-based media/index compute ──────────
-# The worker image runs in one of two ROLES, chosen by WORKER_ROLE:
+# The worker image runs in one of these roles, chosen by WORKER_ROLE:
 #   "worker"   (default) — the always-on DISPATCHER. Polls the queue and owns
 #              all retry/heartbeat/reaper/credit logic. Runs agent_turn LOCALLY
 #              (it is network-bound — waiting on the LLM — so a GPU/many-core
@@ -851,7 +856,61 @@ MCP_VIDEO_DOWNLOAD_MAX_MB = float(os.getenv("MCP_VIDEO_DOWNLOAD_MAX_MB",
 #              fresh instance handles each render — no INDEX_SLOTS=1 queue, and
 #              $0 while idle. It writes progress to the same Postgres, so the
 #              studio's job-status polling is unchanged.
+#   "agent_executor" — the same authenticated HTTP shell, exposing only one
+#              stateful agent_turn per request on a smaller scale-to-zero
+#              service. It owns credit charging and the terminal job write.
+#   "dispatcher" / "agent" — optional Render-only lane-isolation roles; the
+#              default worker remains backward compatible.
 WORKER_ROLE = os.getenv("WORKER_ROLE", "worker").strip().lower()
+WORKER_ROLES = frozenset(("worker", "dispatcher", "agent", "executor",
+                          "agent_executor"))
+
+
+def worker_lane_slots(role=None):
+    """Return the queue lanes this process is allowed to claim.
+
+    ``worker`` preserves the historical all-in-one topology. ``dispatcher``
+    owns only render/index coordination, while ``agent`` owns only the
+    stateful editor lanes. The two roles may run as separate Render services
+    against the same PostgreSQL queue: claim_job's SKIP LOCKED transaction and
+    per-project serialization remain the source of truth across processes.
+
+    Keeping role isolation here instead of encoding it as six dashboard env
+    knobs prevents one missed variable from accidentally putting ffmpeg or
+    Whisper work back on the memory-sensitive agent service.
+    """
+    selected = (role or WORKER_ROLE).strip().lower()
+    if selected not in WORKER_ROLES:
+        raise ValueError(
+            f"Unknown WORKER_ROLE={selected!r}; expected one of "
+            f"{', '.join(sorted(WORKER_ROLES))}")
+    none = {"media": 0, "filmstrip": 0, "index": 0,
+            "agent": 0, "shorts": 0, "mcp": 0}
+    if selected in ("executor", "agent_executor"):
+        return none
+    if selected == "dispatcher":
+        return dict(none, media=max(0, MEDIA_SLOTS),
+                    filmstrip=1 if _REMOTE_EXEC else 0,
+                    index=max(0, INDEX_SLOTS))
+    if selected == "agent":
+        return dict(none, agent=(REMOTE_AGENT_DISPATCH_SLOTS
+                                if REMOTE_AGENT_EXECUTOR_URL
+                                else AGENT_SLOTS), shorts=SHORTS_SLOTS,
+                    mcp=max(0, MCP_SLOTS))
+    effective_agent_slots = (REMOTE_AGENT_DISPATCH_SLOTS
+                             if REMOTE_AGENT_EXECUTOR_URL else AGENT_SLOTS)
+    return dict(none, media=max(0, MEDIA_SLOTS),
+                filmstrip=1 if _REMOTE_EXEC else 0,
+                index=max(0, INDEX_SLOTS), agent=effective_agent_slots,
+                shorts=SHORTS_SLOTS, mcp=max(0, MCP_SLOTS))
+
+
+# Render sends SIGTERM on every replacement. Its service-level shutdown delay
+# is configured separately (up to 300s); this process budget stays a little
+# below that wire so an agent can finish the current LLM/tool step and post an
+# honest partial result instead of becoming a stale-heartbeat death.
+SHUTDOWN_GRACE_S = max(
+    1.0, min(290.0, float(os.getenv("WORKER_SHUTDOWN_GRACE_S", "22"))))
 # Dispatcher -> executor. Base URL of the Cloud Run service (no trailing path),
 # e.g. https://valmera-executor-xxxx.a.run.app. Empty = run media/index locally.
 REMOTE_EXECUTOR_URL = os.getenv("REMOTE_EXECUTOR_URL", "").strip().rstrip("/")
@@ -868,6 +927,16 @@ def _sibling_preview_executor_url(main_url):
         marker, "://valmera-executor-preview-", 1)
 
 
+def _sibling_agent_executor_url(main_url):
+    """Derive the request-based agent service from the main executor URL."""
+    main_url = (main_url or "").strip().rstrip("/")
+    marker = "://valmera-executor-"
+    if not main_url or marker not in main_url \
+            or "://valmera-executor-preview-" in main_url:
+        return ""
+    return main_url.replace(marker, "://valmera-agent-", 1)
+
+
 # The production sibling is inferred so a Render-dashboard-only setting cannot
 # silently leave every preview on the 32-GiB lane. An explicit variable still
 # overrides it, and an explicitly empty value disables the preview route.
@@ -875,6 +944,22 @@ _preview_env = os.getenv("REMOTE_EXECUTOR_PREVIEW_URL")
 REMOTE_EXECUTOR_PREVIEW_URL = (
     _sibling_preview_executor_url(REMOTE_EXECUTOR_URL)
     if _preview_env is None else _preview_env.strip().rstrip("/"))
+# Agent turns are I/O-heavy but occasionally load enough native media state to
+# kill the small always-on dispatcher. The sibling Cloud Run service runs one
+# turn per request, scales to zero, and owns the terminal DB write. An explicit
+# empty value is the instant rollback to local Render execution.
+_agent_executor_env = os.getenv("REMOTE_AGENT_EXECUTOR_URL")
+REMOTE_AGENT_EXECUTOR_URL = (
+    _sibling_agent_executor_url(REMOTE_EXECUTOR_URL)
+    if _agent_executor_env is None
+    else _agent_executor_env.strip().rstrip("/"))
+# Once the turn itself is remote these are cheap HTTP-waiting threads, not five
+# copies of native audio/video state in the Render process. Match Cloud Run's
+# max-instances so the dispatcher no longer recreates a smaller queue in front
+# of an idle autoscaler. Explicit empty REMOTE_AGENT_EXECUTOR_URL restores the
+# memory-safe local AGENT_SLOTS value immediately.
+REMOTE_AGENT_DISPATCH_SLOTS = max(
+    1, int(os.getenv("REMOTE_AGENT_DISPATCH_SLOTS", "5")))
 # Shared bearer secret checked by the executor (constant-time). MUST be long and
 # random; the executor refuses every /run without it. Set the SAME value on both
 # services. The executor still reads the job's real data from the DB — the body
@@ -936,6 +1021,11 @@ STEMS_MAX_SOURCE_S = float(os.getenv("STEMS_MAX_SOURCE_S", "720"))
 STEMS_TIMEOUT_S = float(os.getenv("STEMS_TIMEOUT_S", "1380"))
 
 REMOTE_EXECUTOR_TIMEOUTS = {
+    # A productive turn may run for many steps even though its no-progress
+    # stall window is shorter. Keep the request below Cloud Run's 3600s cap;
+    # the agent executor commits the job itself, so a lost dispatcher response
+    # cannot discard completed work.
+    "agent_turn": int(os.getenv("REMOTE_TIMEOUT_AGENT_S", "3400")),
     # A preview is deliberately the impatient one: it renders from the 540p
     # proxy and a user is watching a spinner while it runs.
     "preview": int(os.getenv("REMOTE_TIMEOUT_PREVIEW_S", "1500")),
@@ -1556,6 +1646,10 @@ FFMPEG_OVERRUN_FLOOR_S = float(os.getenv("FFMPEG_OVERRUN_FLOOR_S", "10"))
 
 
 def require_core():
+    if WORKER_ROLE not in WORKER_ROLES:
+        raise SystemExit(
+            f"Worker cannot start — invalid WORKER_ROLE={WORKER_ROLE!r}; "
+            f"expected one of {', '.join(sorted(WORKER_ROLES))}")
     missing = [k for k, v in {
         "DATABASE_URL": DATABASE_URL,
         "S3_ENDPOINT": S3_ENDPOINT,
@@ -1565,3 +1659,8 @@ def require_core():
     }.items() if not v]
     if missing:
         raise SystemExit(f"Worker cannot start — missing env: {', '.join(missing)}")
+    if WORKER_ROLE in ("agent", "agent_executor") \
+            and not REMOTE_EXECUTOR_URL:
+        raise SystemExit(
+            "Agent worker cannot start without REMOTE_EXECUTOR_URL — refusing "
+            "to pull render/index compute back onto the agent service")

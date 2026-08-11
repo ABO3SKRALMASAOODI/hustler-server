@@ -28,6 +28,7 @@ import config
 import db as dbx
 import filmstrip
 import indexer
+import job_completion
 import mcp_exec
 import remote
 import renderer
@@ -64,18 +65,28 @@ AGENT_TYPES = ("agent_turn",)
 SHORTS_TYPES = ("shorts_plan",)
 MCP_TYPES = ("mcp_tool",)
 
+# Set before a planned shutdown releases or drains anything. Every lane checks
+# it before its next claim, closing the race where Render sent SIGTERM, the
+# active set became empty, and a polling thread claimed fresh work during the
+# final milliseconds before os._exit().
+DRAINING = threading.Event()
+
 
 def _build_runners():
-    """agent_turn always runs locally on the dispatcher (it is network-bound —
-    a remote many-core/GPU box would sit idle waiting on the LLM). index/media
-    go to the remote executor when REMOTE_EXECUTOR_URL is set, else they run
-    locally exactly as before — so the split is off until you opt in."""
+    """Choose local runners or their request-based execution owners.
+
+    Media/index use the heavy executor. Agent turns use their smaller sibling
+    when discovered; that service exists for memory isolation and scale-out,
+    not extra CPU. Explicit empty URLs restore the historical local paths.
+    """
     if config.REMOTE_EXECUTOR_URL:
         return {
             "index": remote.run_index_remote,
             "preview": remote.run_render_remote,
             "final": remote.run_render_remote,
-            "agent_turn": agent_loop.run_agent_job,
+            "agent_turn": (remote.run_agent_remote
+                           if config.REMOTE_AGENT_EXECUTOR_URL
+                           else agent_loop.run_agent_job),
             "shorts_plan": shorts.run_shorts_plan,
             "mcp_tool": mcp_exec.run_mcp_job,
             # Local even with a remote executor: it reads the proxy, runs one
@@ -114,37 +125,21 @@ def process_one(worker_db, job):
               f"attempt={job['attempts']} queue_wait={queue_wait}s", flush=True)
         result = RUNNERS[job["type"]](worker_db, job)
         total = round(time.monotonic() - t0, 2)
+        # A request-based agent executor owns its credit + terminal write so a
+        # Render redeploy cannot lose the result after Cloud Run completed it.
+        # The marker exists only in the HTTP envelope; it is not persisted in
+        # video_jobs.result.
+        if isinstance(result, dict) and result.pop(
+                "_remote_job_completed", False):
+            print(f"[job {job_id}] completed by agent executor in {total}s "
+                  f"(queue {queue_wait}s)", flush=True)
+            return
         if isinstance(result, dict):
             timings = result.setdefault("timings", {})
             timings["queue_wait_s"] = queue_wait
             timings["total_s"] = total
-        if job["type"] in ("agent_turn", "shorts_plan") \
-                and isinstance(result, dict) \
-                and result.get("billable", True):
-            try:
-                # A shorts run pays the model cost like a turn PLUS a flat
-                # fee per finished clip — a plain turn never fans out N
-                # final renders.
-                extra = (config.SHORTS_CLIP_CREDITS
-                         * int(result.get("clips") or 0)
-                         if job["type"] == "shorts_plan" else 0.0)
-                charged = worker_db.run(dbx.charge_turn_credits,
-                                        job["user_id"], job_id, extra)
-                result["credits_charged"] = charged
-            except Exception as ce:
-                # Billing must never fail a finished edit.
-                print(f"[job {job_id}] credit charge failed: {ce}",
-                      flush=True)
-        elif job["type"] == "agent_turn" and isinstance(result, dict):
-            # A turn the loop marked unbillable produced nothing the user can
-            # use — see run_agent_job's truncation path. Recorded as 0 rather
-            # than left absent so the admin views show the waiver, not a gap.
-            result["credits_charged"] = 0.0
-            print(f"[job {job_id}] not charged — the turn produced nothing "
-                  f"usable ({result.get('truncated') and 'truncated'})",
-                  flush=True)
-        finished = worker_db.run(dbx.finish_job, job_id, "done", None, result,
-                                 lease_claim)
+        finished = job_completion.finalize_success(
+            worker_db, job, result, lease_claim)
         if finished is False:
             print(f"[job {job_id}] result discarded — execution lease "
                   f"{lease_claim} was superseded", flush=True)
@@ -266,7 +261,7 @@ def lane(name, types, max_attempts, poll_interval=None):
     # dead lane can never again be invisible in the logs.
     worker_db = dbx.Db()
     try:
-        while True:
+        while not DRAINING.is_set():
             try:
                 job = worker_db.run(dbx.claim_job, types, max_attempts)
                 if job:
@@ -279,18 +274,23 @@ def lane(name, types, max_attempts, poll_interval=None):
                 except Exception as e2:
                     print(f"[{name}] reset failed too ({e2}) — keeping the "
                           "lane alive; next poll reconnects", flush=True)
-            time.sleep(poll_interval or config.POLL_INTERVAL_S)
+            # Event.wait wakes immediately when a deploy begins; time.sleep
+            # made every polling lane blind to the drain until its timer ended.
+            DRAINING.wait(poll_interval or config.POLL_INTERVAL_S)
     finally:
-        print(f"[{name}] LANE THREAD EXITING — jobs of types {types} "
-              "will not be claimed by this thread again", flush=True)
+        planned = DRAINING.is_set()
+        why = "drained for shutdown" if planned else "UNEXPECTED EXIT"
+        print(f"[{name}] lane {why} — jobs of types {types} will not be "
+              "claimed by this thread again", flush=True)
         # A dead lane IS a worker failure (the Aug 9 shorts lane sat dead
         # for 108 minutes). Lanes are daemon threads and shutdown is
         # os._exit, so this finally only runs for a genuine in-thread death,
         # never on deploys. Fresh Db — the lane's own may be the casualty.
-        try:
-            dbx.Db().run(dbx.bump_metric, "worker_died")
-        except Exception:
-            pass
+        if not planned:
+            try:
+                dbx.Db().run(dbx.bump_metric, "worker_died")
+            except Exception:
+                pass
 
 
 REAPER_NOTES = {
@@ -487,6 +487,7 @@ def _on_shutdown(signum, _frame):
     running turn to finalize honestly between steps, and exit waits for them
     (bounded well inside Render's grace period).
     """
+    DRAINING.set()
     agent_loop.SHUTDOWN.set()
     ids = dbx.active_job_ids()
     try:
@@ -497,7 +498,7 @@ def _on_shutdown(signum, _frame):
         # Best effort — if we can't reach the DB the reaper still cleans up,
         # just the slower, attempt-charging way.
         print(f"[shutdown] could not release jobs: {e}", flush=True)
-    deadline = time.time() + 22       # Render's grace is ~30s; leave margin
+    deadline = time.time() + config.SHUTDOWN_GRACE_S
     while time.time() < deadline and dbx.active_job_ids():
         time.sleep(0.5)
     left = len(dbx.active_job_ids())
@@ -513,12 +514,14 @@ def main():
     _sweep_tmp()
     signal.signal(signal.SIGTERM, _on_shutdown)
     signal.signal(signal.SIGINT, _on_shutdown)
+    slots = config.worker_lane_slots()
     exec_mode = ("remote executor " + config.REMOTE_EXECUTOR_URL
                  if config.REMOTE_EXECUTOR_URL else "local")
-    print(f"valmera-worker (dispatcher) starting: code={version.code_version()} "
-          f"media_slots={config.MEDIA_SLOTS} "
-          f"index_slots={config.INDEX_SLOTS} agent_slots={config.AGENT_SLOTS} "
-          f"mcp_slots={config.MCP_SLOTS} "
+    print(f"valmera-worker ({config.WORKER_ROLE}) starting: "
+          f"code={version.code_version()} media_slots={slots['media']} "
+          f"filmstrip_slots={slots['filmstrip']} "
+          f"index_slots={slots['index']} agent_slots={slots['agent']} "
+          f"shorts_slots={slots['shorts']} mcp_slots={slots['mcp']} "
           f"media/index={exec_mode} whisper={config.WHISPER_MODEL}/"
           f"{config.WHISPER_DEVICE} agent_model={config.AGENT_MODEL} "
           f"vision={config.VISION_MODEL or 'off'}"
@@ -560,29 +563,40 @@ def main():
         threading.Thread(target=_probe, daemon=True,
                          name="version-probe").start()
 
+    if config.REMOTE_AGENT_EXECUTOR_URL:
+        def _agent_probe():
+            try:
+                remote.check_agent_executor_version()
+            except Exception as e:
+                print(f"[dispatcher] agent executor version probe error: "
+                      f"{str(e)[:200]}", flush=True)
+
+        threading.Thread(target=_agent_probe, daemon=True,
+                         name="agent-version-probe").start()
+
     threads = [
         threading.Thread(target=dbx.heartbeat_forever, daemon=True,
                          name="heartbeat"),
         threading.Thread(target=reaper, daemon=True, name="reaper"),
     ]
-    for i in range(config.MEDIA_SLOTS):
+    for i in range(slots["media"]):
         threads.append(threading.Thread(
             target=lane, args=(f"media{i}", MEDIA_TYPES,
                                config.MAX_ATTEMPTS_MEDIA,
                                config.MEDIA_POLL_INTERVAL_S),
             daemon=True, name=f"media{i}"))
-    if FILMSTRIP_TYPES:
+    if slots["filmstrip"] and FILMSTRIP_TYPES:
         threads.append(threading.Thread(
             target=lane, args=("filmstrip", FILMSTRIP_TYPES,
                                config.MAX_ATTEMPTS_MEDIA),
             daemon=True, name="filmstrip"))
-    for i in range(config.INDEX_SLOTS):
+    for i in range(slots["index"]):
         threads.append(threading.Thread(
             target=lane, args=(f"index{i}", INDEX_TYPES,
                                config.MAX_ATTEMPTS_MEDIA,
                                config.MEDIA_POLL_INTERVAL_S),
             daemon=True, name=f"index{i}"))
-    for i in range(config.AGENT_SLOTS):
+    for i in range(slots["agent"]):
         threads.append(threading.Thread(
             target=lane, args=(f"agent{i}", AGENT_TYPES,
                                config.MAX_ATTEMPTS_AGENT,
@@ -592,13 +606,13 @@ def main():
     # thread, so one silent thread death (Aug 9) left shorts_plan jobs
     # unclaimable for 108 minutes while every other lane worked. Per-project
     # claim serialization already prevents the pair double-running one plan.
-    for i in range(2):
+    for i in range(slots["shorts"]):
         threads.append(threading.Thread(
             target=lane, args=(f"shorts{i}", SHORTS_TYPES,
                                config.MAX_ATTEMPTS_MEDIA,
                                config.AGENT_POLL_INTERVAL_S),
             daemon=True, name=f"shorts{i}"))
-    for i in range(config.MCP_SLOTS):
+    for i in range(slots["mcp"]):
         threads.append(threading.Thread(
             target=lane, args=(f"mcp{i}", MCP_TYPES, config.MAX_ATTEMPTS_MCP,
                                config.MCP_POLL_INTERVAL_S),
@@ -612,7 +626,7 @@ def main():
 if __name__ == "__main__":
     # One image, two roles. The executor is the stateless compute endpoint
     # (Cloud Run); the default "worker" is the always-on dispatcher.
-    if config.WORKER_ROLE == "executor":
+    if config.WORKER_ROLE in ("executor", "agent_executor"):
         import http_server
         http_server.serve()
     else:

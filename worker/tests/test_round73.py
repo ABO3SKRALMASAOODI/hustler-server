@@ -134,6 +134,26 @@ def test_non_index_lanes_do_not_receive_index_fair_share_clause():
     assert config.INDEX_FAIR_SHARE_PER_PROJECT not in params
 
 
+def test_agent_claim_is_serialized_in_postgres_across_processes():
+    """Two Render services may poll at once, but one project gets one editor.
+
+    This protection must live inside the claim transaction—not in a Python
+    lock—because dedicated agent workers do not share process memory.
+    Lower-id queued siblings close the READ COMMITTED/SKIP LOCKED race, and a
+    fresh running sibling holds the project until its heartbeat goes stale.
+    """
+    _with_column(True)
+    c = _Conn(fetchone={"id": 9})
+    wdb.claim_job(c, ["agent_turn"], config.MAX_ATTEMPTS_AGENT)
+    sql, _params = c.sql[0]
+    assert "live.project_id = video_jobs.project_id" in sql
+    assert "live.type IN ('agent_turn', 'shorts_plan'" in sql
+    assert "live.heartbeat_at >= NOW()" in sql
+    assert "live.id < video_jobs.id" in sql
+    assert "FOR UPDATE OF video_jobs SKIP LOCKED" in sql
+
+
+
 def test_a_ceilinged_job_fails_visibly_instead_of_sitting_queued():
     """claim_job stops selecting it, which makes it invisible rather than
     bounded — the studio would spin forever on a job no worker will take."""

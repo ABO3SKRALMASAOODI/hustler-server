@@ -251,8 +251,9 @@ check("truncation is distinguished from a deliberate empty reply",
       "finish == \"length\"" in _src and "truncated_out" in _src)
 check("a truncated turn is marked unbillable",
       '"billable"' in _src)
-_main = open(os.path.join(os.path.dirname(__file__), "..", "main.py")).read()
+_completion = open(os.path.join(os.path.dirname(__file__), "..",
+                                "job_completion.py")).read()
 check("and the charge site honours that",
-      'result.get("billable", True)' in _main)
+      'result.get("billable", True)' in _completion)
 
 print(f"\n{PASS} checks passed.")

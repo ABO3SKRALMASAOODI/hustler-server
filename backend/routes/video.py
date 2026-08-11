@@ -3321,9 +3321,11 @@ def post_message(user_id, project_id):
                     "job_id": job_id, "stacked": stacked})
 
 
-# The worker's agent pool size — the backend reads the same env so the queue
-# notice below matches how many turns actually run at once.
-_AGENT_SLOTS = max(1, int(os.getenv("WORKER_AGENT_SLOTS", "4")))
+# Total capacity across every request-based agent instance. Historically this
+# was the per-process WORKER_AGENT_SLOTS value because there was only one
+# worker. Keeping it separate lets Cloud Run expose five isolated turns without
+# lying to the Render process about its memory-safe local rollback concurrency.
+_AGENT_CAPACITY = max(1, int(os.getenv("WORKER_AGENT_CAPACITY", "5")))
 
 
 def _queue_depth_notice(cur, session_id, user_id, job_id):
@@ -3356,7 +3358,7 @@ def _queue_depth_notice(cur, session_id, user_id, job_id):
                     (job_id, my_sub))
         row = cur.fetchone() or {}
         ahead = int(row.get("running") or 0) + int(row.get("queued_ahead") or 0)
-        if ahead < _AGENT_SLOTS:
+        if ahead < _AGENT_CAPACITY:
             return
         # One notice per wave: skip if this chat already got one recently.
         cur.execute("""SELECT 1 FROM chat_messages

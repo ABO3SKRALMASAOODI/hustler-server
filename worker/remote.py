@@ -1,8 +1,8 @@
 """Dispatcher -> executor client (round 38).
 
-When WORKER_ROLE=worker AND REMOTE_EXECUTOR_URL is set, the dispatcher ships
-index/preview/final jobs to a stateless Cloud Run executor instead of encoding
-them on its own (cheap, network-bound) box. These wrappers have the SAME
+When WORKER_ROLE=worker and remote siblings are configured, the dispatcher
+ships media/index work to the heavy Cloud Run executor and agent turns to the
+smaller request-based agent service. These wrappers have the SAME
 `(worker_db, job)` signature as the local runners in indexer/renderer, so
 main.RUNNERS can swap one for the other with nothing else changing — the
 dispatcher keeps claiming, heart-beating, retrying, reaping and credit-charging
@@ -15,6 +15,7 @@ we POST is only what the runner needs to identify the work — never asset bytes
 
 import threading
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -36,17 +37,20 @@ _skew_note = ""
 _skew_lock = threading.Lock()
 
 
-def executor_health(timeout=20):
+def executor_health(timeout=20, job_type=None):
     """GET /health on the executor. Returns the parsed body, or raises."""
-    if not config.REMOTE_EXECUTOR_URL:
-        raise RemoteExecutorError("REMOTE_EXECUTOR_URL is not set")
-    resp = requests.get(f"{config.REMOTE_EXECUTOR_URL}/health", timeout=timeout)
+    url = _executor_url(job_type)
+    if not url:
+        raise RemoteExecutorError("remote executor URL is not set")
+    resp = requests.get(f"{url}/health", timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
 
 def _executor_url(job_type=None):
     """Choose a right-sized service without ever losing the heavy fallback."""
+    if job_type == "agent_turn" and config.REMOTE_AGENT_EXECUTOR_URL:
+        return config.REMOTE_AGENT_EXECUTOR_URL
     if job_type == "preview" and config.REMOTE_EXECUTOR_PREVIEW_URL:
         return config.REMOTE_EXECUTOR_PREVIEW_URL
     return config.REMOTE_EXECUTOR_URL
@@ -125,6 +129,32 @@ def check_executor_version(quiet=False):
     return note
 
 
+def check_agent_executor_version(quiet=False):
+    """Report agent-service skew without conflating it with render skew."""
+    if not config.REMOTE_AGENT_EXECUTOR_URL:
+        return ""
+    mine = version.code_version()
+    try:
+        theirs = executor_health(job_type="agent_turn")
+    except Exception as e:
+        if not quiet:
+            print(f"[dispatcher] agent executor version check failed: "
+                  f"{str(e)[:200]}", flush=True)
+        return ""
+    remote_v = str(theirs.get("code_version") or "unknown")
+    if mine != "unknown" and remote_v != "unknown" and mine != remote_v:
+        note = (f"the agent executor is running DIFFERENT code than this "
+                f"dispatcher (executor {remote_v}, dispatcher {mine})")
+        if not quiet:
+            print(f"[dispatcher] *** AGENT VERSION SKEW *** {note}",
+                  flush=True)
+        return note
+    if not quiet:
+        print(f"[dispatcher] agent executor code={remote_v} "
+              "(matches dispatcher)", flush=True)
+    return ""
+
+
 def executor_supports(feature, timeout=8):
     """Does the executor advertise `feature` in /health's `features` list?
 
@@ -160,6 +190,10 @@ def _job_payload(job):
         # present the same identity to progress/result writes.
         "total_claims": job.get("total_claims"),
         "payload": job.get("payload") or {},
+        # Private transport metadata, ignored by ordinary runners. It lets the
+        # request-based agent owner preserve the queue timing even though a
+        # datetime is deliberately not serialized into this body.
+        "_queue_wait_s": job.get("_queue_wait_s"),
     }
 
 
@@ -207,7 +241,9 @@ def _run_remote(job):
         # both times it cost a day to reconstruct from the database. It is one
         # cheap GET on a failure path, so it never touches a healthy render.
         msg = str(data["error"])[:500]
-        skew = check_executor_version(quiet=True)
+        skew = (check_agent_executor_version(quiet=True)
+                if job.get("type") == "agent_turn"
+                else check_executor_version(quiet=True))
         if skew:
             msg = f"{msg} [{skew}]"
         if data.get("lease_lost"):
@@ -217,7 +253,10 @@ def _run_remote(job):
             import db as dbx
             raise dbx.PermanentJobError(msg)
         raise RemoteExecutorError(msg)
-    return data.get("result")
+    result = data.get("result")
+    if data.get("job_completed") and isinstance(result, dict):
+        result["_remote_job_completed"] = True
+    return result
 
 
 def capture_available():
@@ -375,3 +414,15 @@ def run_render_remote(worker_db, job):      # signature matches run_render_job
 
 def run_index_remote(worker_db, job):       # signature matches run_index_job
     return _run_remote(job)
+
+
+def run_agent_remote(worker_db, job):       # signature matches run_agent_job
+    remote_job = dict(job)
+    created = job.get("created_at")
+    if created is not None:
+        try:
+            remote_job["_queue_wait_s"] = round(max(
+                0.0, (datetime.now(timezone.utc) - created).total_seconds()), 2)
+        except (TypeError, ValueError):
+            remote_job["_queue_wait_s"] = None
+    return _run_remote(remote_job)

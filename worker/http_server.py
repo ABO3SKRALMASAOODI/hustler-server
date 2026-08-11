@@ -1,7 +1,7 @@
-"""Stateless media/index executor (round 38).
+"""Stateless request-based executor (round 38; agent isolation round 104).
 
-Runs when WORKER_ROLE=executor. This is the compute box — deploy it on a
-scale-to-zero, many-core (or GPU) host such as Google Cloud Run:
+Runs with WORKER_ROLE=executor for compute or WORKER_ROLE=agent_executor for
+isolated agent turns. Deploy either as a scale-to-zero Cloud Run service:
 
     gcloud run deploy valmera-executor \
         --source worker/ --region us-central1 \
@@ -34,6 +34,7 @@ import db as dbx
 import frameserve
 import indexer
 import inpaint
+import job_completion
 import matte
 import renderer
 import screenmatch
@@ -44,8 +45,8 @@ import webrecord
 from schemas import EDLValidationError
 from storage import WorkdirTooSmall
 
-# Only the compute runners are exposed remotely. agent_turn stays on the
-# dispatcher (network-bound), so it is intentionally NOT in this map.
+# Only compute runners are exposed by the heavy executor. The separate
+# agent_executor role replaces this whole map with agent_turn only.
 #
 # `capture` is the exception that proves the rule (round 61): it is not a
 # queued job at all, it is one TOOL CALL inside an agent turn — but the thing
@@ -53,7 +54,7 @@ from storage import WorkdirTooSmall
 # that on the dispatcher OOM-killed a real customer's turn on the first
 # production use of the feature. The turn still runs there and blocks on this
 # call; only the browser moved. See webrecord.run_capture_job.
-RUNNERS = {
+COMPUTE_RUNNERS = {
     "index": indexer.run_index_job,
     "preview": renderer.run_render_job,
     "final": renderer.run_render_job,
@@ -84,6 +85,15 @@ RUNNERS = {
     # exists in this image (see /health features and stems.available).
     "stems": stems.run_stems_job,
 }
+
+# A separate Cloud Run service uses the same authenticated HTTP contract but
+# exposes only agent_turn. It scales independently from ffmpeg and cannot be
+# tricked into accepting a render job merely by changing the request body.
+if config.WORKER_ROLE == "agent_executor":
+    import agent_loop
+    RUNNERS = {"agent_turn": agent_loop.run_agent_job}
+else:
+    RUNNERS = COMPUTE_RUNNERS
 
 
 class _LeasedDb:
@@ -150,7 +160,7 @@ class Handler(BaseHTTPRequestHandler):
             # holding a terminal can answer "is the render service current?"
             # in one curl instead of a day of database forensics. Best effort
             # — a health endpoint that can 500 is not a health endpoint.
-            body = {"status": "ok", "role": "executor"}
+            body = {"status": "ok", "role": config.WORKER_ROLE}
             try:
                 body.update(version.version_report())
             except Exception as e:
@@ -221,6 +231,8 @@ class Handler(BaseHTTPRequestHandler):
               f"project={job.get('project_id')}", flush=True)
         lease_claim = job.get("total_claims")
         db = _LeasedDb(job_id, lease_claim)
+        if job_id is not None:
+            dbx.track_job(job_id)
         try:
             if lease_claim is not None and not db.run(
                     dbx.lease_is_current, job_id, lease_claim):
@@ -228,8 +240,31 @@ class Handler(BaseHTTPRequestHandler):
                     f"job {job_id} execution lease {lease_claim} is no longer current")
             result = runner(db, job)
             dt = round(time.monotonic() - t0, 2)
+            completed = False
+            if config.WORKER_ROLE == "agent_executor" \
+                    and jtype == "agent_turn":
+                if isinstance(result, dict):
+                    timings = result.setdefault("timings", {})
+                    timings["queue_wait_s"] = job.get("_queue_wait_s")
+                    timings["total_s"] = dt
+                completed = job_completion.finalize_success(
+                    db, job, result, lease_claim)
+                if completed is False:
+                    raise dbx.JobLeaseLost(
+                        f"job {job_id} execution lease {lease_claim} was "
+                        "superseded before agent completion")
             print(f"[executor] done {jtype} job={job_id} in {dt}s", flush=True)
-            self._send(200, {"result": result})
+            try:
+                self._send(200, {"result": result,
+                                 "job_completed": bool(completed)})
+            except (BrokenPipeError, ConnectionResetError):
+                if not completed:
+                    raise
+                # The Render waiter disappeared after the agent executor had
+                # already committed the fenced result. That is exactly why
+                # completion ownership lives here; it is success, not a retry.
+                print(f"[executor] dispatcher disconnected after committed "
+                      f"agent job={job_id}; result is safe", flush=True)
         except Exception as e:
             traceback.print_exc()
             dt = round(time.monotonic() - t0, 2)
@@ -246,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
                 "lease_lost": isinstance(e, dbx.JobLeaseLost),
             })
         finally:
+            if job_id is not None:
+                dbx.untrack_job(job_id)
             db.reset()   # close this request's connection (no pooling here)
 
 
@@ -256,8 +293,14 @@ def serve():
         print("[executor] WARNING: REMOTE_EXECUTOR_SECRET is unset — /run is "
               "OPEN. Set it on this service and the dispatcher.", flush=True)
     port = config.EXECUTOR_PORT
+    # The dispatcher normally supplies the heartbeat while awaiting HTTP. The
+    # agent executor also beats locally so a Render redeploy or network reset
+    # cannot let the reaper kill a still-running turn whose result this request
+    # is responsible for committing.
+    threading.Thread(target=dbx.heartbeat_forever, daemon=True,
+                     name="executor-heartbeat").start()
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"valmera-executor listening on :{port} "
+    print(f"valmera-{config.WORKER_ROLE.replace('_', '-')} listening on :{port} "
           f"(code={version.code_version()} "
           f"whisper={config.WHISPER_MODEL}/{config.WHISPER_DEVICE})",
           flush=True)
