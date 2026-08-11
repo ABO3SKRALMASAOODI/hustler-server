@@ -886,12 +886,77 @@ def video_project_detail(project_id):
             if pr:
                 parent = {"id": pr["id"], "title": pr["title"]}
 
+        # The board itself — what the shorts run actually produced, in board
+        # order, each clip WATCHABLE from the parent page. Before this the
+        # parent inspector showed children only as title pills, so a shorts
+        # session's output was invisible without opening every child project
+        # one by one (owner request, 2026-08-11).
+        shorts_board = None
+        clips = (((p.get("meta") or {}).get("shorts") or {})
+                 .get("clips")) or []
+        if clips:
+            child_ids = [int(c["child_project_id"]) for c in clips
+                         if c.get("child_project_id")]
+            renders, final_jobs = {}, {}
+            if child_ids:
+                cur3.execute("""
+                    SELECT DISTINCT ON (a.project_id, a.meta->>'variant')
+                           a.project_id, a.meta->>'variant' AS variant,
+                           a.storage_key,
+                           a.meta->>'edl_version' AS edl_v
+                    FROM assets a
+                    WHERE a.project_id = ANY(%s) AND a.kind = 'render'
+                    ORDER BY a.project_id, a.meta->>'variant', a.id DESC""",
+                             (child_ids,))
+                for r in cur3.fetchall():
+                    renders.setdefault(r["project_id"], {})[r["variant"]] = r
+                cur3.execute("""
+                    SELECT DISTINCT ON (project_id)
+                           project_id, state, progress, error
+                    FROM video_jobs
+                    WHERE project_id = ANY(%s) AND type = 'final'
+                    ORDER BY project_id, id DESC""", (child_ids,))
+                final_jobs = {r["project_id"]: r for r in cur3.fetchall()}
+            child_meta = {c["id"]: c for c in children}
+            shorts_board = []
+            ordered = sorted(clips, key=lambda c: (
+                c.get("order", 10 ** 6),
+                c.get("child_project_id") or 10 ** 12))
+            for i, cclip in enumerate(ordered, 1):
+                cid = cclip.get("child_project_id")
+                dur = None
+                try:
+                    dur = round(float(cclip["end"]) - float(cclip["start"]),
+                                1)
+                except (KeyError, TypeError, ValueError):
+                    pass
+                rend = renders.get(cid) or {}
+                best = rend.get("final") or rend.get("preview")
+                fj = final_jobs.get(cid)
+                shorts_board.append({
+                    "card": i,
+                    "child_project_id": cid,
+                    "title": cclip.get("title"),
+                    "duration_s": dur,
+                    "edl_version": cclip.get("edl_version"),
+                    "seed_error": cclip.get("seed_error"),
+                    "messages": (child_meta.get(cid) or {}).get("messages"),
+                    "final_job": ({"state": fj["state"],
+                                   "progress": fj["progress"],
+                                   "error": fj["error"]} if fj else None),
+                    "render": ({"variant": best["variant"],
+                                "edl_version": best["edl_v"],
+                                "url": _presign(best["storage_key"])}
+                               if best else None),
+                })
+
     return jsonify({
         "project": {"id": p["id"], "title": p["title"], "email": p["email"],
                     "kind": p.get("kind"),
                     "created_at": p["created_at"].isoformat()},
         "children": children,
         "parent": parent,
+        "shorts_board": shorts_board,
         "exports": exports,
         "trial_wall": trial_wall,
         "upload_events": upload_events,
@@ -1779,9 +1844,10 @@ def video_reliability():
 
     The session ratio is computed live over projects that still exist.
     Generated shorts children are excluded from it — they are system-made
-    and auto-rendered, so they would flatter the export rate — and the
-    account scope matches every other admin metric (post-epoch, no test
-    accounts)."""
+    and auto-rendered, so they would flatter the export rate — but a shorts
+    PARENT counts as exported when any of its clips carries a done final
+    (the run's clips ARE that session's deliverable). Account scope matches
+    every other admin metric (post-epoch, no test accounts)."""
     with adb() as conn:
         cur = conn.cursor()
         _ensure_metrics_counters(cur)
@@ -1808,7 +1874,17 @@ def video_reliability():
                         OR EXISTS (SELECT 1 FROM assets a
                                    WHERE a.project_id = p.id
                                      AND a.kind = 'render'
-                                     AND a.meta->>'variant' = 'final'))
+                                     AND a.meta->>'variant' = 'final')
+                        -- A shorts parent renders nothing itself; its
+                        -- deliverables are its children's finals. Without
+                        -- this branch every successful shorts session read
+                        -- as "never exported" (11 of them on 2026-08-11).
+                        OR EXISTS (SELECT 1 FROM projects c
+                                   JOIN video_jobs cj
+                                     ON cj.project_id = c.id
+                                   WHERE c.parent_project_id = p.id
+                                     AND cj.type = 'final'
+                                     AND cj.state = 'done'))
                        AS exported
                 FROM projects p
                 JOIN users u ON u.id = p.user_id
