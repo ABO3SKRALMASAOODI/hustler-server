@@ -216,6 +216,84 @@ def test_dedicated_audio_reviewer_returns_real_judgment(monkeypatch,
     assert seen["purpose"] == "audio_listen"
 
 
+def test_program_listen_rebinds_a_stale_render_key_to_current_preview(
+        monkeypatch, tmp_path):
+    stale = {
+        "id": 70, "kind": "render", "storage_key": "media/p/v2.mp4",
+        "duration_s": 6.2, "bytes": 1024,
+        "meta": {"edl_version": 2},
+    }
+    current = {
+        "id": 71, "kind": "render", "storage_key": "media/p/v3.mp4",
+        "duration_s": 6.2, "bytes": 1024,
+        "meta": {"edl_version": 3},
+    }
+
+    class DB:
+        def run(self, fn, *args):
+            assert fn is dbx.get_asset and args == (71,)
+            return current
+
+    class Ctx:
+        agent_model = "text-image-only-model"
+        direct_sight = True
+        project_id = 652
+        workdir = str(tmp_path)
+        pending_audio = []
+        _pending_listened_asset_keys = set()
+        _listened_asset_keys = set()
+        _audio_review_attempted_asset_keys = set()
+        _asset_locals = {}
+        last_audio_review = None
+        last_preview = {"edl_version": 3, "render_asset_id": 71,
+                        "duration_s": 6.2}
+        db = DB()
+
+        def latest_edl(self):
+            return {"version": 3, "json": default_edl(6.1)}
+
+    used_assets = []
+    monkeypatch.setattr(agent_tools, "_hearing_on", lambda _ctx: False)
+    monkeypatch.setattr(agent_tools.llm, "audio_review_available", lambda: True)
+    monkeypatch.setattr(
+        agent_tools, "_resolve_media_asset",
+        lambda _ctx, _key, _kinds: (stale, None))
+
+    def fake_local(_ctx, asset):
+        used_assets.append(asset["id"])
+        return "current-preview.mp4"
+
+    def fake_extract(_src, _start, _end, dest):
+        with open(dest, "wb") as handle:
+            handle.write(b"current-mix")
+
+    monkeypatch.setattr(agent_tools, "_asset_local_path", fake_local)
+    monkeypatch.setattr(agent_tools.media, "extract_audio_clip", fake_extract)
+    monkeypatch.setattr(
+        agent_tools.llm, "ask_audio",
+        lambda *_args, **_kwargs: "Music is audible and speech is clear.")
+
+    result = agent_tools.listen_to(
+        Ctx(), times=[0.5], output_times=[3.0],
+        asset_key=stale["storage_key"], span_s=2.0)
+
+    assert result.startswith("Listening delivered and reviewed:")
+    assert "PROGRAM sound" in result
+    assert "ASSET" not in result
+    assert used_assets == [71]
+
+
+def test_render_audio_review_cannot_pass_when_required_music_is_absent():
+    edl = default_edl(6.1)
+    edl["music"] = [{"id": "mus1", "storage_key": "music/x.mp3",
+                     "start": 0.0, "end": 6.1, "gain_db": -18.0,
+                     "duck": True}]
+    prompt = agent_tools._render_audio_review_prompt(edl)
+    assert "REQUIRED to contain music" in prompt
+    assert "absent or effectively inaudible" in prompt
+    assert "start with FIX, never PASS" in prompt
+
+
 def test_user_approved_music_can_be_part_of_an_atomic_recipe(monkeypatch):
     ctx, fake = _real_ctx("go bring it and add it")
     monkeypatch.setattr(

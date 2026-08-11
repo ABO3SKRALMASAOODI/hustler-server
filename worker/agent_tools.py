@@ -12217,6 +12217,27 @@ def speculative_preview(ctx):
     ctx.spec_enqueued.add(version)
 
 
+def _render_audio_review_prompt(edl):
+    expected = []
+    if edl.get("music"):
+        expected.append("music")
+    if edl.get("sfx"):
+        expected.append("sound effects")
+    if edl.get("voiceover"):
+        expected.append("voiceover")
+    return (
+        "You are the final audio QC editor. Listen to this rendered PROGRAM "
+        "mix. The edit is REQUIRED to contain " + ", ".join(expected) + ". "
+        "In at most 100 words start with PASS or FIX, then say whether added "
+        "music/SFX/voiceover is truly audible, whether speech is clear, and "
+        "whether there is pumping, clipping, clicks, dead air, or a cheap/"
+        "harsh balance. Give one exact dB or timing correction only if needed. "
+        "If a REQUIRED layer is absent or effectively inaudible, you MUST "
+        "start with FIX, never PASS. Do not infer that it landed from this "
+        "prompt; judge the sound itself."
+    )
+
+
 def render_preview(ctx):
     row = ctx.latest_edl()
     version = row["version"]
@@ -12422,15 +12443,7 @@ def render_preview(ctx):
                     except Exception:
                         continue
                 if got:
-                    prompt = (
-                        "You are the final audio QC editor. Listen to this "
-                        "rendered PROGRAM mix. In at most 100 words start "
-                        "with PASS or FIX, then say whether added music/SFX/"
-                        "voiceover is truly audible, whether speech is clear, "
-                        "and whether there is pumping, clipping, clicks, dead "
-                        "air, or a cheap/harsh balance. Give one exact dB or "
-                        "timing correction only if needed. Do not infer from "
-                        "the prompt; judge the sound itself.")
+                    prompt = _render_audio_review_prompt(row["json"])
                     review = llm.ask_audio(
                         prompt, [path for _, path in got],
                         [label for label, _ in got],
@@ -13189,6 +13202,32 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
                 ctx, asset_key, ("music", "render", "audio", "video_clip"))
             if err:
                 return err
+            # A render key is evidence for one immutable EDL version. After a
+            # repair render, reusing the earlier key made the agent listen to
+            # v2 while judging v3, conclude its gain fix had not landed, and
+            # hit the preview ceiling. Program review must always bind to the
+            # current preview, even when the model repeats a cached render key.
+            render_program = asset["kind"] == "render"
+            if render_program:
+                row = ctx.latest_edl()
+                preview = ctx.last_preview or {}
+                asset_version = (asset.get("meta") or {}).get("edl_version")
+                if asset_version != row["version"]:
+                    if (preview.get("edl_version") != row["version"] or
+                            not preview.get("render_asset_id")):
+                        return (
+                            "REJECTED: that render belongs to an older edit "
+                            "version and the current program has no preview. "
+                            "Render the current version before judging its mix."
+                        )
+                    current = ctx.db.run(
+                        dbx.get_asset, preview["render_asset_id"])
+                    if not current:
+                        return (
+                            "REJECTED: the current preview file is gone — "
+                            "render_preview again before judging its mix."
+                        )
+                    asset = current
             big = (asset.get("bytes") or 0) > 80 * 1024 * 1024
             if asset["kind"] == "video_clip" and big \
                     and asset["id"] not in ctx._asset_locals:
@@ -13197,14 +13236,19 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
                         "measured tempo/energy instead.")
             dur = float(asset.get("duration_s") or
                         _asset_media_duration(ctx, asset) or 0.0)
-            wins, err = _windows(times if times else [dur / 2.0],
-                                 max(dur, 1.0), "times")
+            requested_times = (output_times if render_program and output_times
+                               else times)
+            wins, err = _windows(requested_times if requested_times
+                                 else [dur / 2.0], max(dur, 1.0),
+                                 "output_times" if render_program else "times")
             if err:
                 return err
             name = ((asset.get("meta") or {}).get("filename")
                     or os.path.basename(asset["storage_key"]))[:40]
-            _cut(_asset_local_path(ctx, asset), wins,
-                 "ASSET '" + name + "' {s:.1f}-{e:.1f}s")
+            label = ("PROGRAM sound {s:.1f}-{e:.1f}s (output clock)"
+                     if render_program else
+                     "ASSET '" + name + "' {s:.1f}-{e:.1f}s")
+            _cut(_asset_local_path(ctx, asset), wins, label)
             if made:
                 attempted_asset_keys.update((
                     str(asset_key),
