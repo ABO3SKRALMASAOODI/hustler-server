@@ -2169,6 +2169,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          + (f"ANCHORS({anchors}). " if anchors else "")
                          + " ".join(f"{i + 1}) {s}"
                                     for i, s in enumerate(ep["steps"]))
+                         + ((" COMPLETED TOOLS: " + ", ".join(
+                             ep.get("completed_tools") or []) + ".")
+                            if ep.get("completed_tools") else "")
                          + " — finish its unfinished steps.")
         messages.append({"role": "user",
                          "content": _CONTINUATION_NOTE.format(

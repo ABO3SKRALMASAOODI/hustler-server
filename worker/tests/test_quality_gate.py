@@ -272,6 +272,10 @@ def test_structured_edit_brief_survives_atomic_execution():
     assert ctx.edit_plan["must_keep"] == ["HUD", "winning move"]
     assert ctx.edit_plan["must_avoid"] == ["blind center crop",
                                             "decorative SFX"]
+    assert ctx.edit_plan["steps"] == [
+        "preserve the full gameplay frame", "apply a restrained finish"]
+    assert ctx.edit_plan["completed_tools"] == [
+        "set_frame", "set_color_grade"]
 
 
 def test_edit_recipe_aborts_every_staged_move_on_late_rejection():
@@ -345,7 +349,36 @@ def test_literal_whole_program_fit_overrides_subject_aware_plan_guard():
     agent_tools.set_edit_plan(
         ctx, ["Try automatic subject-aware framing."],
         brief="Uniform lossless vertical fit")
+    fake.rows[-1]["json"]["frame"] = {
+        "ratio": "9:16", "mode": "crop", "focus_x": 0.5,
+        "focus_y": 0.4,
+        "focus_track": [
+            {"t0": 0.0, "t1": 10.0, "x": 0.4, "y": 0.4,
+             "mode": "pad_blur"},
+            {"t0": 10.0, "t1": 20.0, "x": 0.7, "y": 0.4,
+             "mode": "crop"},
+        ],
+    }
 
     result = agent_tools.set_frame(ctx, "9:16", "pad_blur")
     assert result.startswith("EDL v1 -> v2")
     assert fake.inserts == 1
+
+
+def test_unrelated_repair_cannot_erase_measured_per_shot_framing():
+    ctx, fake = _real_ctx("make the captions more consistent")
+    fake.rows[-1]["json"]["frame"] = {
+        "ratio": "9:16", "mode": "crop", "focus_x": 0.55,
+        "focus_y": 0.25,
+        "focus_track": [
+            {"t0": 0.0, "t1": 15.0, "x": 0.5, "y": 0.3,
+             "mode": "pad_blur"},
+            {"t0": 15.0, "t1": 20.0, "x": 0.7, "y": 0.3,
+             "mode": "crop"},
+        ],
+    }
+
+    result = agent_tools.set_frame(ctx, "9:16", "pad_blur")
+    assert result.startswith("REJECTED")
+    assert "discard the existing measured per-shot focus_track" in result
+    assert fake.inserts == 0

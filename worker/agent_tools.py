@@ -3607,7 +3607,8 @@ def _plan_requires_shot_specific_frame(ctx):
     text = " ".join(str(x or "") for x in (
         plan.get("brief"), plan.get("intent"), *(plan.get("steps") or [])))
     text = text.casefold().replace("-", " ")
-    return any(phrase in text for phrase in (
+    return ("refram" in text and "auto mode" in text) or any(
+        phrase in text for phrase in (
         "auto reframe", "automatic reframe", "automatically reframe",
         "automatic subject aware", "subject aware framing",
         "shot specific framing", "per shot framing", "per shot reframe",
@@ -3644,6 +3645,31 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
         return ('REJECTED: ratio must be one of source, 16:9, 9:16, 1:1, 4:5 '
                 'and mode one of crop, pad, pad_blur. Example: '
                 'set_frame("9:16", "crop") for TikTok.')
+    current_frame = (ctx.latest_edl()["json"].get("frame") or {})
+    # Measured per-shot framing is valuable state, not a disposable default.
+    # A critic repair once correctly had [wide=fit, close-up=crop], then a
+    # broad set_frame used to fix captions silently erased that track and
+    # regressed the close-up. Only another measured auto_reframe (internal
+    # calls mark _measured) or a literal user request for one uniform frame
+    # may collapse the track.
+    explicit_uniform_crop = any(phrase in str(
+            getattr(ctx, "user_message", "") or "").casefold()
+        for phrase in (
+            "center crop the whole video", "centre crop the whole video",
+            "same crop for every shot", "same framing for every shot",
+            "uniform crop", "uniform framing"))
+    if frame.ratio != "source" and current_frame.get("focus_track") \
+            and not _measured \
+            and not _user_explicitly_wants_uniform_fit(ctx) \
+            and not explicit_uniform_crop:
+        return (
+            "REJECTED: set_frame would discard the existing measured per-"
+            "shot focus_track and replace it with one uniform composition. "
+            "That regresses wide-shot preservation or leaves later close-"
+            "ups tiny/off-target. Keep the measured track while making the "
+            "other repair, call auto_reframe to measure a replacement, or "
+            "only use a uniform frame when the user's own request explicitly "
+            "asks for the same fit/crop on every shot.")
     # A production canary recorded "automatic subject-aware framing" and
     # then executed one global pad_blur anyway. It technically preserved the
     # wide shot, but also left a later clean close-up tiny in the same inset.
@@ -12923,7 +12949,18 @@ def apply_edit_recipe(ctx, operations, brief=None):
     if committed.startswith("EDL v"):
         existing = dict(getattr(ctx, "edit_plan", None) or {})
         existing["brief"] = existing.get("brief") or label
-        existing["steps"] = [f"completed: {name}" for name in plan_steps]
+        # The original direction remains the binding contract across repair
+        # passes and continuations. Replacing its steps with the latest tool
+        # names made a later repair forget "auto/per-shot framing" and erase
+        # a correct focus_track. Keep intent and execution history separately.
+        if not existing.get("steps"):
+            existing["steps"] = [f"completed: {name}"
+                                 for name in plan_steps]
+        completed = list(existing.get("completed_tools") or [])
+        for name in plan_steps:
+            if name not in completed:
+                completed.append(name)
+        existing["completed_tools"] = completed[-24:]
         ctx.edit_plan = existing
         committed += "\nRecipe operations:\n" + "\n".join(notes)
     return committed
