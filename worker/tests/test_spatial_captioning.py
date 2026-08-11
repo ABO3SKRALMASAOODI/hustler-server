@@ -419,3 +419,62 @@ def test_reframe_track_handles_one_face_then_unmeasured_broll(tmp_path):
     assert result.startswith("EDL v1 -> v2")
     assert [span["mode"] for span in ctx.edl["frame"]["focus_track"]] == [
         "crop", "pad_blur"]
+
+
+def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
+        monkeypatch, tmp_path):
+    """Wide shot detail must not force the later face close-up to stay tiny."""
+    sidecar = {"samples": [
+        {"t": 0.5, "faces": []},
+        {"t": 1.5, "faces": []},
+        {"t": 2.5, "faces": []},
+        {"t": 3.5, "faces": []},
+        {"t": 4.5, "faces": []},
+        {"t": 5.5, "faces": [[0.45, 0.08, 0.65, 0.42]]},
+        {"t": 6.0, "faces": [[0.45, 0.08, 0.65, 0.42]]},
+        {"t": 6.5, "faces": [[0.45, 0.08, 0.65, 0.42]]},
+    ]}
+
+    class Ctx:
+        has_main_video = True
+        enforce_spatial = True
+        duration = 6.52
+        workdir = str(tmp_path)
+        index = {
+            "video": {"duration": 6.52, "width": 960, "height": 540},
+            "shots": [{"start": 0.0, "end": 5.48},
+                      {"start": 5.48, "end": 6.52}],
+        }
+        _spatial = sidecar
+
+        def __init__(self):
+            self.edl = default_edl(self.duration)
+
+        def latest_edl(self):
+            return {"version": 1, "json": self.edl}
+
+        def proxy_path(self):
+            return "proxy.mp4"
+
+        def write_edl(self, edl, _summary):
+            self.edl = edl
+            return "EDL v1 -> v2"
+
+    monkeypatch.setattr(agent_tools.media, "frame_at",
+                        lambda *_args, **_kwargs: None)
+
+    def faces(paths):
+        # The broad five-frame read sees the close-up. Exact per-shot fallback
+        # still sees no face in shot one and the face in shot two.
+        if len(paths) == 1 and paths[0].endswith("track_0.jpg"):
+            return [], "none"
+        return [(0.55, 0.25)], "faces"
+
+    monkeypatch.setattr(agent_tools.subject, "points_from_frames", faces)
+    monkeypatch.setattr(agent_tools.subject, "crop_detail_kept",
+                        lambda *_args, **_kwargs: 0.20)
+    ctx = Ctx()
+    result = agent_tools.auto_reframe(ctx, "9:16", "auto")
+    assert result.startswith("EDL v1 -> v2")
+    assert [span["mode"] for span in ctx.edl["frame"]["focus_track"]] == [
+        "pad_blur", "crop"]

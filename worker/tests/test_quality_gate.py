@@ -176,6 +176,17 @@ def test_quality_gate_is_enforced_at_the_single_commit_boundary():
     assert fake.inserts == 1
 
 
+def test_two_successful_previews_freeze_the_last_proven_edl():
+    ctx, fake = _real_ctx()
+    ctx.rendered_versions.update({1, 2})
+    changed = dict(ctx.latest_edl()["json"])
+    changed["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
+    result = ctx.write_edl(changed, "optional third-candidate polish")
+    assert result.startswith("REJECTED")
+    assert "unreviewed third candidate" in result
+    assert fake.inserts == 0
+
+
 def test_add_zoom_rejects_the_old_center_default_before_writing():
     class Ctx:
         duration = 20.0

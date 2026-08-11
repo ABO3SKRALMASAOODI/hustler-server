@@ -156,3 +156,25 @@ def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook():
     full_bytes = len(json.dumps(full, separators=(",", ":")))
     compact_bytes = len(json.dumps(compact, separators=(",", ":")))
     assert compact_bytes < full_bytes * 0.5
+
+
+def test_successful_auto_preview_rubric_is_not_reported_as_render_failure(
+        monkeypatch):
+    class Ctx:
+        versions_written = [2]
+        rendered_versions = set()
+        autorendered = False
+        autorendering = False
+        job = {"id": 99}
+
+        def latest_edl(self):
+            return {"version": 2, "json": {}}
+
+    monkeypatch.setattr(
+        agent_loop.agent_tools, "render_preview",
+        lambda _ctx: ("Preview v2 rendered: 6.1s. CHECK: deliberate crop — "
+                      "FAILED if the subject is clipped."))
+    monkeypatch.setattr(agent_loop, "_activity", lambda *_a, **_k: None)
+    _latest, fail_note = agent_loop._auto_render_if_needed(
+        Ctx(), object(), 7, {})
+    assert fail_note is None

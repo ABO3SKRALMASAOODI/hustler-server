@@ -112,9 +112,14 @@ text on existing text. Look specifically for:
 - broken continuity, duplicate frames, unexpected black frames, harsh or
   cheap-looking effects, and visual clutter.
 
-Do not flag expected pad/pad_blur background described in the context. Do not
-invent audio defects. Do not approve merely because a requested operation is
-technically visible: decide whether the frame looks deliberately composed.
+Do not flag expected pad/pad_blur background merely because bars exist. But do
+compare treatment ACROSS SHOTS: if a wide composition appropriately fits and a
+later clear close-up/product shot stays unnecessarily tiny in the same inset,
+flag that uniform treatment when the edit brief asks for deliberate or
+shot-specific framing. The close shot should normally fill cleanly while the
+wide shot remains preserved. Do not invent audio defects. Do not approve
+merely because a requested operation is technically visible: decide whether
+the frame looks deliberately composed.
 Report only defects visible in the images; uncertainty lowers confidence.
 
 Return ONLY this JSON shape, with at most 6 findings:

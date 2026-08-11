@@ -1276,7 +1276,12 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings):
         _activity(worker_db, session_id, "render_preview",
                   {"auto": "model skipped it"}, result,
                   edl_version=latest["version"])
-        if "FAILED" in result:
+        # Successful proof text deliberately contains rubric phrases such as
+        # "FAILED if the subject is clipped". A substring check read that as
+        # an encode failure and appended a false warning even though the v4
+        # preview was attached. Only the render tool's actual failure prefix
+        # means failure.
+        if result.startswith("Preview render FAILED:"):
             fail_note = ("\n\n(Heads up: the preview render failed — "
                          f"{result[:200]})")
     return latest, fail_note

@@ -83,3 +83,20 @@ def test_independent_review_sees_edited_output_and_raw_source(monkeypatch,
     assert "format=social interview" in seen["context"]
     assert "must avoid=burned text collision" in seen["context"]
     assert all(os.path.exists(path) for path in seen["paths"])
+
+
+def test_critic_compares_framing_treatment_across_shots(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(preview_critic.llm, "vision_available", lambda: True)
+
+    def ask(prompt, _paths, **_kwargs):
+        seen["prompt"] = prompt
+        return '{"verdict":"pass","findings":[]}'
+
+    monkeypatch.setattr(preview_critic.llm, "ask_vision", ask)
+    report = preview_critic.review(
+        ["render.jpg", "raw.jpg"], ["edited", "raw"],
+        "brief asks for shot-specific framing")
+    assert report["verdict"] == "pass"
+    assert "compare treatment ACROSS SHOTS" in seen["prompt"]
+    assert "close shot should normally fill" in seen["prompt"]

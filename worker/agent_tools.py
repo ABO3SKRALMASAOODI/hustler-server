@@ -346,6 +346,22 @@ class ToolContext:
         version (no version row is created), or a REJECTED message on
         validation failure."""
         prev = self.latest_edl()
+        # The turn owns exactly a candidate proof and one repair proof. Once
+        # both have rendered successfully, another write would create a third
+        # unreviewed candidate; turn-end honesty would then auto-render it and
+        # quietly defeat the preview ceiling. A production canary did exactly
+        # that: it approved v3, added optional polish as v4, got the explicit
+        # preview-cap rejection, then forced a third encode at turn end. Freeze
+        # the last proven version instead. A new user turn gets a fresh budget.
+        if len(self.rendered_versions) >= config.AGENT_MAX_PREVIEWS_PER_TURN:
+            return (
+                f"REJECTED (EDL v{prev['version']} unchanged): both the "
+                "candidate preview and repair preview have already rendered "
+                "successfully this turn. Any further write would be an "
+                "unreviewed third candidate. Preserve this last proven "
+                "version and reply; make additional optional polish only in "
+                "a new user turn."
+            )
         if not self._states_seen:
             # Seed with the state the turn STARTED in, or undoing every edit
             # back to the beginning would read as progress.
@@ -3962,16 +3978,6 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
 
     if str(method).startswith("faces"):
         pt = subject.median_point(pts)
-        if mode == "auto":
-            keep_score = _kept(pt)
-            if keep_score is not None and keep_score < CROP_DETAIL_KEEP_MIN:
-                return _fit_instead(
-                    pt,
-                    f"A face was found at ({pt[0]:.2f}, {pt[1]:.2f}), but "
-                    f"a {ratio} crop centered there would retain only "
-                    f"{keep_score * 100:.0f}% of the frame's detail. This "
-                    "is likely a screen/game/wide composition where the "
-                    "surrounding content matters as much as the face.")
         drift = subject.spread(pts)
         track_needed = (len((ctx.index or {}).get("shots") or []) >= 2 and
                         len(spatial_pts) >= 2 and
@@ -3985,6 +3991,21 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
                 ctx, ratio, pt, preserve_unmeasured=(mode == "auto"))
             if track_res is not None:
                 return track_res
+        # Only judge one global crop after shot-specific composition has had
+        # its chance. A wide two-shot followed by a face close-up correctly
+        # has low GLOBAL detail retention: the first shot must fit while the
+        # second can crop. Returning a global pad here before building the
+        # mixed track made the close-up stay tiny inside the wide-shot bars.
+        if mode == "auto":
+            keep_score = _kept(pt)
+            if keep_score is not None and keep_score < CROP_DETAIL_KEEP_MIN:
+                return _fit_instead(
+                    pt,
+                    f"A face was found at ({pt[0]:.2f}, {pt[1]:.2f}), but "
+                    f"a {ratio} crop centered there would retain only "
+                    f"{keep_score * 100:.0f}% of the frame's detail. This "
+                    "is likely a screen/game/wide composition where the "
+                    "surrounding content matters as much as the face.")
         res = set_frame(ctx, ratio, "crop", focus_x=pt[0], focus_y=pt[1])
         if res.startswith("EDL v"):
             measured_total = (len((sidecar or {}).get("samples") or [])
