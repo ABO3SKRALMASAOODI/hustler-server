@@ -100,6 +100,9 @@ def test_preview_service_url_is_derived_from_the_main_cloud_run_url():
     assert config._sibling_agent_executor_url(
         "https://valmera-executor-123.us-central1.run.app/") == \
         "https://valmera-agent-123.us-central1.run.app"
+    assert config._sibling_batch_launcher_url(
+        "https://valmera-executor-123.us-central1.run.app/") == \
+        "https://valmera-batch-launcher-123.us-central1.run.app"
 
 
 def test_success_roundtrip():
@@ -112,8 +115,11 @@ def test_success_roundtrip():
     srv, saved = _setup({"preview": fake_render})
     try:
         out = remote.run_render_remote(None, JOB)
-        assert out == {"render_asset_id": 99, "variant": "preview",
-                       "cached": False}
+        assert out.pop("_remote_job_completed") is True
+        assert out["render_asset_id"] == 99
+        assert out["variant"] == "preview"
+        assert out["cached"] is False
+        assert out["timings"]["total_s"] >= 0
         # the executor received exactly the JSON-safe subset
         assert seen["job"]["id"] == 42
         assert seen["job"]["payload"] == {"edl_version": 5}
@@ -130,7 +136,9 @@ def test_preview_uses_the_right_sized_service_when_configured():
         preview_url = config.REMOTE_EXECUTOR_URL
         config.REMOTE_EXECUTOR_URL = "http://127.0.0.1:1"
         config.REMOTE_EXECUTOR_PREVIEW_URL = preview_url
-        assert remote.run_render_remote(None, JOB) == {"ok": True}
+        result = remote.run_render_remote(None, JOB)
+        assert result.pop("_remote_job_completed") is True
+        assert result["ok"] is True
     finally:
         _teardown(srv, saved)
 
@@ -173,7 +181,7 @@ def test_runner_error_surfaces():
         try:
             remote.run_index_remote(None, job)
             assert False, "should have raised"
-        except remote.RemoteExecutorError as e:
+        except dbx.PermanentJobError as e:
             assert "EDL version 5 not found" in str(e)
     finally:
         _teardown(srv, saved)
@@ -250,5 +258,16 @@ def test_agent_executor_owns_terminal_commit_and_marks_the_response():
         assert result["credits_charged"] == 0.0
         assert result["timings"]["queue_wait_s"] is not None
         assert result["timings"]["total_s"] >= 0
+    finally:
+        _teardown(srv, saved)
+
+
+def test_media_executor_also_owns_terminal_commit():
+    """A dispatcher disconnect after ffmpeg success cannot buy it twice."""
+    srv, saved = _setup({"preview": lambda db, job: {"ok": True}})
+    try:
+        result = remote.run_render_remote(None, JOB)
+        assert result.pop("_remote_job_completed") is True
+        assert result["ok"] is True
     finally:
         _teardown(srv, saved)

@@ -859,11 +859,15 @@ MCP_VIDEO_DOWNLOAD_MAX_MB = float(os.getenv("MCP_VIDEO_DOWNLOAD_MAX_MB",
 #   "agent_executor" — the same authenticated HTTP shell, exposing only one
 #              stateful agent_turn per request on a smaller scale-to-zero
 #              service. It owns credit charging and the terminal job write.
+#   "batch_executor" — one Cloud Run Job execution. It receives exactly one
+#              final/index row, commits it itself, then exits. Platform retries
+#              stay at zero; the shared failure policy alone decides whether a
+#              new application-level execution is useful.
 #   "dispatcher" / "agent" — optional Render-only lane-isolation roles; the
 #              default worker remains backward compatible.
 WORKER_ROLE = os.getenv("WORKER_ROLE", "worker").strip().lower()
 WORKER_ROLES = frozenset(("worker", "dispatcher", "agent", "executor",
-                          "agent_executor"))
+                          "agent_executor", "batch_executor"))
 
 
 def worker_lane_slots(role=None):
@@ -886,7 +890,7 @@ def worker_lane_slots(role=None):
             f"{', '.join(sorted(WORKER_ROLES))}")
     none = {"media": 0, "filmstrip": 0, "index": 0,
             "agent": 0, "shorts": 0, "mcp": 0}
-    if selected in ("executor", "agent_executor"):
+    if selected in ("executor", "agent_executor", "batch_executor"):
         return none
     if selected == "dispatcher":
         return dict(none, media=max(0, MEDIA_SLOTS),
@@ -953,6 +957,30 @@ REMOTE_AGENT_EXECUTOR_URL = (
     _sibling_agent_executor_url(REMOTE_EXECUTOR_URL)
     if _agent_executor_env is None
     else _agent_executor_env.strip().rstrip("/"))
+
+
+def _sibling_batch_launcher_url(main_url):
+    """Derive the tiny same-project scale-to-zero Jobs launcher."""
+    main_url = (main_url or "").strip().rstrip("/")
+    marker = "://valmera-executor-"
+    if not main_url or marker not in main_url \
+            or "://valmera-executor-preview-" in main_url:
+        return ""
+    return main_url.replace(marker, "://valmera-batch-launcher-", 1)
+
+
+# Finals and indexes use Cloud Run Jobs when this sibling exists. An old
+# deployment answers /launch with 404 and the client safely falls back to the
+# request service, so rolling the two halves cannot take rendering down.
+_batch_launcher_env = os.getenv("REMOTE_BATCH_LAUNCHER_URL")
+REMOTE_BATCH_LAUNCHER_URL = (
+    _sibling_batch_launcher_url(REMOTE_EXECUTOR_URL)
+    if _batch_launcher_env is None
+    else _batch_launcher_env.strip().rstrip("/"))
+REMOTE_BATCH_JOB_NAME = os.getenv(
+    "REMOTE_BATCH_JOB_NAME", "valmera-batch").strip()
+BATCH_POLL_INTERVAL_S = max(
+    0.5, float(os.getenv("BATCH_POLL_INTERVAL_S", "2")))
 # Once the turn itself is remote these are cheap HTTP-waiting threads, not five
 # copies of native audio/video state in the Render process. Match Cloud Run's
 # max-instances so the dispatcher no longer recreates a smaller queue in front

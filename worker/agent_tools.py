@@ -209,6 +209,16 @@ class ToolContext:
         # See write_edl for why this is reported rather than blocked.
         self._states_seen = {}
         self.rendered_versions = set()  # versions with a successful preview
+        # A failed physical render is evidence about one immutable EDL
+        # version.  Never enqueue that same version again; a repair is a new
+        # EDL write and therefore a new version/job/cache key.
+        self.failed_preview_versions = {}
+        self.last_preview_failure = None
+        # A speculative preview may become terminal before the model reaches
+        # render_preview. Remember its row, not merely that it was enqueued,
+        # so the later tool call adopts the success/failure instead of
+        # creating a second physical job for the same immutable version.
+        self.spec_preview_jobs = {}
         self.preview_requests = 0      # candidate proof + one repair proof
         self.autorendered = False     # loop set: model skipped render_preview
         # Round 91 grade contact strips: iterating a color against ~2s strips
@@ -12202,7 +12212,9 @@ def speculative_preview(ctx):
         return
     if len(ctx.spec_enqueued) >= config.SPECULATIVE_PREVIEWS_MAX:
         return
-    if ctx.db.run(dbx.pending_preview_job, ctx.project_id, version):
+    pending = ctx.db.run(dbx.pending_preview_job, ctx.project_id, version)
+    if pending:
+        ctx.spec_preview_jobs[version] = pending
         ctx.spec_enqueued.add(version)
         return
     payload = {"edl_version": version}
@@ -12212,8 +12224,11 @@ def speculative_preview(ctx):
             payload["verify_times"] = [t for t, _ in plan]
     except Exception:
         pass
-    ctx.db.run(dbx.enqueue_job, ctx.project_id, ctx.job["user_id"],
-               "preview", payload)
+    payload.update({"source": "agent_preview", "agent_job_id": ctx.job["id"]})
+    job_id, _created = ctx.db.run(
+        dbx.get_or_enqueue_preview_job, ctx.project_id,
+        ctx.job["user_id"], payload)
+    ctx.spec_preview_jobs[version] = job_id
     ctx.spec_enqueued.add(version)
 
 
@@ -12245,6 +12260,9 @@ def render_preview(ctx):
             (ctx.last_preview or {}).get("edl_version") == version:
         return (f"Preview v{version} is already rendered and attached — "
                 "no need to render again.")
+    prior_failure = ctx.failed_preview_versions.get(version)
+    if prior_failure:
+        return _failed_preview_message(version, prior_failure, repeated=True)
     strip = _grade_strip_shortcut(ctx, row)
     if strip:
         return strip
@@ -12265,13 +12283,15 @@ def render_preview(ctx):
     # Adopt the speculative encode of this exact version when one is already
     # queued/running (round 98) — same payload shape, same verify plan,
     # half the wait and none of the double cost.
-    job_id = ctx.db.run(dbx.pending_preview_job, ctx.project_id, version)
+    payload = {"edl_version": version, "source": "agent_preview",
+               "agent_job_id": ctx.job["id"]}
+    if plan:
+        payload["verify_times"] = [t for t, _ in plan]
+    job_id = ctx.spec_preview_jobs.get(version)
     if not job_id:
-        payload = {"edl_version": version}
-        if plan:
-            payload["verify_times"] = [t for t, _ in plan]
-        job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id,
-                            ctx.job["user_id"], "preview", payload)
+        job_id, _created = ctx.db.run(
+            dbx.get_or_enqueue_preview_job, ctx.project_id,
+            ctx.job["user_id"], payload)
     deadline = time.time() + config.PREVIEW_WAIT_TIMEOUT_S
     while time.time() < deadline:
         time.sleep(1)
@@ -12454,11 +12474,34 @@ def render_preview(ctx):
                         note += " AUDIO LISTEN: " + review
             return note
         if j["state"] == "failed":
-            return (f"Preview render FAILED: {j.get('error')}. "
-                    "Inspect the EDL (get_edl) and fix the invalid part, "
-                    "then render again.")
+            failure = dict(((j.get("result") or {}).get("failure") or {}))
+            failure.setdefault("error", j.get("error") or "unknown render error")
+            failure.setdefault("kind", "unknown")
+            failure.setdefault("agent_repairable", False)
+            ctx.failed_preview_versions[version] = failure
+            ctx.last_preview_failure = failure
+            return _failed_preview_message(version, failure)
     return ("Preview render is taking too long — it may still finish and "
             "attach to the chat. Summarize your edit for the user now.")
+
+
+def _failed_preview_message(version, failure, repeated=False):
+    err = str((failure or {}).get("error") or "unknown render error")[:500]
+    repairable = bool((failure or {}).get("agent_repairable"))
+    if repairable:
+        lead = "The same failed version was NOT re-enqueued" if repeated else \
+            "This version will NOT be retried unchanged"
+        return (
+            f"Preview render FAILED: v{version}: {err}. {lead}. "
+            f"Inspect v{version} with get_edl, correct the invalid or too-"
+            "expensive part with an editing tool so it creates a NEW EDL "
+            f"version (v{version + 1} or later), then render that new version "
+            "once. Do not call render_preview on this unchanged version.")
+    return (
+        f"Preview render FAILED: v{version}: {err}. The failure is not "
+        "classified as an EDL defect, so do not rewrite the user's edit or "
+        "blindly re-enqueue it. Tell the user the edit is saved and the "
+        "render service needs another attempt later.")
 
 
 def _frame_context(edl):

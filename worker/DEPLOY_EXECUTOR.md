@@ -1,4 +1,18 @@
-# Request-based media/index executor (round 38)
+# Scale-to-zero executor fleet
+
+> **COST/RELIABILITY UPDATE (Aug 2026).** Interactive previews remain on the
+> request service, while `final` and `index` run as one-shot Cloud Run Jobs.
+> The Jobs lane is configured with **zero platform retries** and 8 vCPU / 16
+> GiB, so a dispatcher restart cannot duplicate paid work and a deterministic
+> bad EDL/ffmpeg command cannot replay for another hour. The shared application
+> policy permits at most one retry for a genuinely transient failure. Invalid
+> preview EDLs are not retried unchanged: the agent receives one structured
+> repair pass and must write a new EDL version before rendering again.
+>
+> `valmera-agent` now uses the agent-only image and 1 vCPU / 2 GiB at
+> concurrency 2. It omits executor-only browser/model payloads, reducing cold
+> start time and letting two network-bound LLM turns share an instance. All
+> services and the Job still scale to zero.
 
 > **ROUND 97: DEPLOYS ARE AUTOMATIC.** `.github/workflows/deploy-executor.yml`
 > redeploys this service from every push to main that touches `worker/`, then
@@ -35,16 +49,23 @@ env vars on the Render worker. To roll back, delete those two vars.
 
 ---
 
-## 0. One image, three roles
+## 0. Four roles, purpose-built runtime images
 
-The same `worker/` image runs in three production roles, chosen by
-`WORKER_ROLE`:
+The worker source runs in four production roles, chosen by `WORKER_ROLE`.
+Compute roles share the full executor image; the agent role uses the slim
+agent image built by `Dockerfile.agent-base` / `Dockerfile.agent-runtime`.
 
 | Role | Where | `WORKER_ROLE` | Does |
 |---|---|---|---|
 | dispatcher (default) | existing Render worker | `worker` (or unset) | polls queue and ships work to request-based executors |
-| executor | Cloud Run service | `executor` | runs media/index/tool compute per request, scales to zero |
-| agent executor | Cloud Run service | `agent_executor` | runs isolated agent turns per request, scales to zero |
+| executor | Cloud Run services | `executor` | interactive preview/tool compute per request, scales to zero |
+| agent executor | Cloud Run service | `agent_executor` | runs isolated agent turns with concurrency 2, scales to zero |
+| batch executor | Cloud Run Job | `batch_executor` | owns one final/index through terminal DB commit; platform retries are zero |
+
+`valmera-batch-launcher` is a tiny authenticated scale-to-zero bridge. Render
+calls it because Render cannot directly mint Google IAM tokens. The launcher
+starts the Job with an immutable queue-row/claim payload; it performs no media
+work and adds no idle monthly charge.
 
 ---
 

@@ -208,3 +208,69 @@ def test_successful_auto_preview_rubric_is_not_reported_as_render_failure(
     _latest, fail_note = agent_loop._auto_render_if_needed(
         Ctx(), object(), 7, {})
     assert fail_note is None
+
+
+def test_failed_edl_preview_gets_one_new_version_repair_pass():
+    class Ctx:
+        last_preview_failure = {
+            "error": "invalid filtergraph", "agent_repairable": True}
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 7, "json": {}}
+
+    messages = []
+    pushed = agent_loop._preview_repair_pushback(
+        Ctx(), messages, agent_loop.time.monotonic(), False)
+    assert pushed is True
+    assert "immutable EDL v7" in messages[-1]["content"]
+    assert "new EDL version" in messages[-1]["content"]
+    assert agent_loop._preview_repair_pushback(
+        Ctx(), messages, agent_loop.time.monotonic(), True) is False
+
+
+def test_same_failed_preview_version_is_not_enqueued_again():
+    class Ctx:
+        rendered_versions = set()
+        failed_preview_versions = {
+            4: {"error": "invalid EDL", "agent_repairable": True}}
+        last_preview = None
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 4, "json": {}}
+
+    result = agent_tools.render_preview(Ctx())
+    assert result.startswith("Preview render FAILED:")
+    assert "NOT re-enqueued" in result
+    assert "NEW EDL version" in result
+
+
+def test_speculative_preview_remembers_the_exact_adopted_job(monkeypatch):
+    """A terminal speculative failure must be read, not inserted again."""
+    class FakeDb:
+        calls = []
+
+        def run(self, fn, *_args):
+            self.calls.append(fn)
+            if fn is agent_tools.dbx.pending_preview_job:
+                return 77
+            raise AssertionError("an existing speculative row was duplicated")
+
+    class Ctx:
+        write_calls = []
+        rendered_versions = set()
+        spec_enqueued = set()
+        spec_preview_jobs = {}
+        project_id = 12
+        db = FakeDb()
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 4, "json": {}}
+
+    monkeypatch.setattr(agent_tools.config, "SPECULATIVE_PREVIEWS", True)
+    monkeypatch.setattr(agent_tools.config, "SPECULATIVE_PREVIEWS_MAX", 2)
+    agent_tools.speculative_preview(Ctx())
+    assert Ctx.spec_preview_jobs == {4: 77}
+    assert Ctx.spec_enqueued == {4}

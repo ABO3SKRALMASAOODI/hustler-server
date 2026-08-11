@@ -70,6 +70,7 @@ def test_explicit_agent_executor_rollback_restores_local_slot_limit():
 def test_executor_never_polls_the_database_queue():
     assert set(_topology("executor").values()) == {0}
     assert set(_topology("agent_executor").values()) == {0}
+    assert set(_topology("batch_executor").values()) == {0}
 
 
 def test_agent_role_refuses_to_start_without_remote_compute():

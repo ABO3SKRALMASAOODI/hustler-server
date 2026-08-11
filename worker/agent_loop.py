@@ -1293,6 +1293,35 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings):
     return latest, fail_note
 
 
+def _preview_repair_pushback(ctx, messages, t_start, already_pushed):
+    """Give one invalid EDL a corrective model pass, never a blind retry."""
+    failure = getattr(ctx, "last_preview_failure", None) or {}
+    if already_pushed or not failure.get("agent_repairable"):
+        return False
+    # A correction needs one model dispatch plus one proof render.  At the
+    # wall, preserving the saved EDL and explaining honestly is safer than a
+    # half-written repair that the user never sees.
+    if config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start) < 120:
+        return False
+    version = ctx.latest_edl()["version"]
+    messages.append({
+        "role": "system",
+        "content": (
+            f"The preview of immutable EDL v{version} failed: "
+            f"{str(failure.get('error') or 'unknown error')[:500]}. "
+            "Do NOT call render_preview on that same version and do NOT "
+            "repeat the exact tool call that produced it. Inspect get_edl, "
+            "diagnose the smallest invalid/over-expensive part, and make ONE "
+            "corrective edit that creates a new EDL version while preserving "
+            "the user's intent. Render the new version once. If no honest "
+            "EDL correction can address this failure, make no speculative "
+            "change and tell the user the saved edit needs an infrastructure "
+            "retry later."
+        ),
+    })
+    return True
+
+
 # ── TURN FACTS: the reply must match what the tools actually did ──────
 
 EDIT_CLAIM = re.compile(
@@ -2244,6 +2273,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     truncated_retries = 0
     truncated_out = False          # last step died at the ceiling, saying nothing
     taste_pushed = False           # the craft audit was handed back once
+    preview_repair_pushed = bool(_cont.get("preview_repair_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
     # TPM admission (Aug 10): the provider's tokens-per-minute ceiling is
@@ -2327,6 +2357,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "why": "turn clock", "steps": total_steps,
                            "t_start": time.monotonic(),
                            "timings": timings, "honesty": honesty,
+                           "preview_repair_pushed": preview_repair_pushed,
                            "warned": None,
                            "writes0": len(ctx.versions_written),
                            "renders0": len(ctx.rendered_versions),
@@ -2722,6 +2753,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # Auto-render first so the turn facts include the real preview.
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings)
+            if _preview_repair_pushback(
+                    ctx, messages, t_start, preview_repair_pushed):
+                preview_repair_pushed = True
+                print(f"[job {job['id']}] preview v{latest['version']} "
+                      "failed deterministically — requesting one corrected "
+                      "EDL version instead of retrying it", flush=True)
+                if body:
+                    messages.append({"role": "assistant", "content": body})
+                continue
             draft = body
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
@@ -2986,6 +3026,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                    "why": "step ceiling",
                    "steps": total_steps, "t_start": t_start,
                    "timings": timings, "honesty": honesty, "warned": warned,
+                   "preview_repair_pushed": preview_repair_pushed,
                    "writes0": len(ctx.versions_written),
                    "renders0": len(ctx.rendered_versions)})
     return _finalize(

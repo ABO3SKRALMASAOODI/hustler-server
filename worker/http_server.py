@@ -30,8 +30,10 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
+import compute_cost
 import db as dbx
 import frameserve
+import failure_policy
 import indexer
 import inpaint
 import job_completion
@@ -241,18 +243,24 @@ class Handler(BaseHTTPRequestHandler):
             result = runner(db, job)
             dt = round(time.monotonic() - t0, 2)
             completed = False
-            if config.WORKER_ROLE == "agent_executor" \
-                    and jtype == "agent_turn":
+            # The process that spent the compute owns the result.  This used
+            # to be agent-only, leaving a completed preview/final dependent on
+            # the Render waiter's HTTP connection.  A Render deploy after the
+            # encode therefore bought the same Cloud Run work again.
+            if job_id is not None:
                 if isinstance(result, dict):
                     timings = result.setdefault("timings", {})
                     timings["queue_wait_s"] = job.get("_queue_wait_s")
                     timings["total_s"] = dt
+                    compute_cost.annotate_request(
+                        timings, dt, config.WORKER_ROLE,
+                        os.getenv("K_SERVICE", ""))
                 completed = job_completion.finalize_success(
                     db, job, result, lease_claim)
                 if completed is False:
                     raise dbx.JobLeaseLost(
                         f"job {job_id} execution lease {lease_claim} was "
-                        "superseded before agent completion")
+                        "superseded before executor completion")
             print(f"[executor] done {jtype} job={job_id} in {dt}s", flush=True)
             try:
                 self._send(200, {"result": result,
@@ -260,11 +268,11 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 if not completed:
                     raise
-                # The Render waiter disappeared after the agent executor had
+                # The Render waiter disappeared after the executor had
                 # already committed the fenced result. That is exactly why
                 # completion ownership lives here; it is success, not a retry.
                 print(f"[executor] dispatcher disconnected after committed "
-                      f"agent job={job_id}; result is safe", flush=True)
+                      f"job={job_id}; result is safe", flush=True)
         except Exception as e:
             traceback.print_exc()
             dt = round(time.monotonic() - t0, 2)
@@ -272,12 +280,16 @@ class Handler(BaseHTTPRequestHandler):
                   flush=True)
             # 200 + {"error"} so the dispatcher parses the real message and runs
             # its normal requeue/reaper path — same as a local runner raising.
-            permanent = isinstance(
-                e, (dbx.PermanentJobError, EDLValidationError,
-                    WorkdirTooSmall))
+            decision = failure_policy.classify(e, jtype)
+            failure_timings = {"total_s": dt}
+            compute_cost.annotate_request(
+                failure_timings, dt, config.WORKER_ROLE,
+                os.getenv("K_SERVICE", ""))
             self._send(200, {
                 "error": str(e),
-                "retryable": not permanent,
+                "retryable": decision.retryable,
+                "failure": decision.payload(e),
+                "timings": failure_timings,
                 "lease_lost": isinstance(e, dbx.JobLeaseLost),
             })
         finally:

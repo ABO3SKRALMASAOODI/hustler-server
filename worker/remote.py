@@ -20,11 +20,21 @@ from datetime import datetime, timezone
 import requests
 
 import config
+import db as dbx
+import failure_policy
 import version
 
 
 class RemoteExecutorError(RuntimeError):
     pass
+
+
+class BatchUnavailable(RuntimeError):
+    """The launcher definitely did not start a Job; request fallback is safe."""
+
+
+class RemoteBatchDetached(RuntimeError):
+    """A Job may be running without this dispatcher; leave its DB lease alone."""
 
 
 # The last version skew observed against the executor, or "" when the two
@@ -197,6 +207,79 @@ def _job_payload(job):
     }
 
 
+def _launch_batch_and_wait(worker_db, job):
+    """Start one durable Cloud Run Job, detach shutdown ownership, poll DB."""
+    launcher = config.REMOTE_BATCH_LAUNCHER_URL
+    if not launcher or not config.REMOTE_BATCH_JOB_NAME:
+        raise BatchUnavailable("batch launcher is not configured")
+    job_id = job["id"]
+    claim = job.get("total_claims")
+    if claim is None:
+        raise BatchUnavailable("job has no monotonic execution claim")
+
+    reserved = worker_db.run(dbx.reserve_batch_launch, job_id, claim)
+    if reserved:
+        headers = {"Content-Type": "application/json"}
+        if config.REMOTE_EXECUTOR_SECRET:
+            headers["Authorization"] = f"Bearer {config.REMOTE_EXECUTOR_SECRET}"
+        try:
+            response = requests.post(
+                f"{launcher}/launch", json={"job": _job_payload(job)},
+                headers=headers, timeout=30)
+        except requests.RequestException as exc:
+            # We cannot distinguish "never reached the launcher" from "the
+            # launch succeeded and its response was lost". The durable mark
+            # prevents an expensive duplicate; the stale reaper recovers if
+            # no Job ever appears.
+            dbx.untrack_job(job_id)
+            raise RemoteBatchDetached(
+                f"batch launch response was ambiguous: {exc}") from exc
+
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+        if response.status_code == 404:
+            worker_db.run(dbx.clear_batch_launch, job_id, claim)
+            raise BatchUnavailable("launcher is not deployed yet")
+        if data.get("safe_to_fallback"):
+            worker_db.run(dbx.clear_batch_launch, job_id, claim)
+            raise BatchUnavailable(str(data.get("error") or "launch refused"))
+        if response.status_code not in (200, 202) or not data.get("launched"):
+            dbx.untrack_job(job_id)
+            raise RemoteBatchDetached(
+                f"batch launcher returned {response.status_code}: "
+                f"{(response.text or '')[:400]}")
+        worker_db.run(dbx.record_batch_launch, job_id, claim,
+                      data.get("operation") or "accepted")
+
+    # Ownership has crossed the launch boundary. A Render SIGTERM must not
+    # refund/requeue this row while the independently-running Job is healthy.
+    dbx.untrack_job(job_id)
+    deadline = time.monotonic() + config.executor_timeout_for(job["type"]) + 300
+    while time.monotonic() < deadline:
+        current = worker_db.run(dbx.get_job, job_id)
+        if not current:
+            raise RemoteBatchDetached(f"batch job row {job_id} disappeared")
+        if current["state"] == "done":
+            result = current.get("result")
+            if not isinstance(result, dict):
+                result = {"result": result}
+            result["_remote_job_completed"] = True
+            result["_remote_job_terminal_state"] = "done"
+            return result
+        if current["state"] == "failed":
+            return {"_remote_job_completed": True,
+                    "_remote_job_terminal_state": "failed",
+                    "_remote_job_error": current.get("error")}
+        if current["state"] == "queued":
+            return {"_remote_job_completed": True,
+                    "_remote_job_terminal_state": "requeued"}
+        time.sleep(config.BATCH_POLL_INTERVAL_S)
+    raise RemoteBatchDetached(
+        f"batch execution for job {job_id} outlived the dispatcher poll window")
+
+
 def _run_remote(job):
     url_base = _executor_url(job.get("type"))
     if not url_base:
@@ -246,13 +329,23 @@ def _run_remote(job):
                 else check_executor_version(quiet=True))
         if skew:
             msg = f"{msg} [{skew}]"
+        failure = data.get("failure") or {}
         if data.get("lease_lost"):
             import db as dbx
-            raise dbx.JobLeaseLost(msg)
+            err = dbx.JobLeaseLost(msg)
+            err.executor_timings = data.get("timings") or {}
+            raise failure_policy.attach(
+                err, failure_policy.classify(err, job.get("type")), failure)
         if data.get("retryable") is False:
             import db as dbx
-            raise dbx.PermanentJobError(msg)
-        raise RemoteExecutorError(msg)
+            err = dbx.PermanentJobError(msg)
+            err.executor_timings = data.get("timings") or {}
+            raise failure_policy.attach(
+                err, failure_policy.classify(err, job.get("type")), failure)
+        err = RemoteExecutorError(msg)
+        err.executor_timings = data.get("timings") or {}
+        raise failure_policy.attach(
+            err, failure_policy.classify(err, job.get("type")), failure)
     result = data.get("result")
     if data.get("job_completed") and isinstance(result, dict):
         result["_remote_job_completed"] = True
@@ -409,10 +502,21 @@ def run_stems_remote(project_id, payload, user_id=None):
 
 
 def run_render_remote(worker_db, job):      # signature matches run_render_job
+    if job.get("type") == "final":
+        try:
+            return _launch_batch_and_wait(worker_db, job)
+        except BatchUnavailable as exc:
+            print(f"[dispatcher] batch final unavailable ({exc}); using "
+                  "request executor for this job", flush=True)
     return _run_remote(job)
 
 
 def run_index_remote(worker_db, job):       # signature matches run_index_job
+    try:
+        return _launch_batch_and_wait(worker_db, job)
+    except BatchUnavailable as exc:
+        print(f"[dispatcher] batch index unavailable ({exc}); using request "
+              "executor for this job", flush=True)
     return _run_remote(job)
 
 

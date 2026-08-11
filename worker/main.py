@@ -27,6 +27,7 @@ import agent_loop
 import config
 import db as dbx
 import filmstrip
+import failure_policy
 import indexer
 import job_completion
 import mcp_exec
@@ -125,13 +126,14 @@ def process_one(worker_db, job):
               f"attempt={job['attempts']} queue_wait={queue_wait}s", flush=True)
         result = RUNNERS[job["type"]](worker_db, job)
         total = round(time.monotonic() - t0, 2)
-        # A request-based agent executor owns its credit + terminal write so a
-        # Render redeploy cannot lose the result after Cloud Run completed it.
+        # A request-based executor owns its terminal write so a Render redeploy
+        # cannot lose the result after Cloud Run completed it.
         # The marker exists only in the HTTP envelope; it is not persisted in
         # video_jobs.result.
         if isinstance(result, dict) and result.pop(
                 "_remote_job_completed", False):
-            print(f"[job {job_id}] completed by agent executor in {total}s "
+            terminal = result.pop("_remote_job_terminal_state", "done")
+            print(f"[job {job_id}] {terminal} by remote executor in {total}s "
                   f"(queue {queue_wait}s)", flush=True)
             return
         if isinstance(result, dict):
@@ -149,23 +151,31 @@ def process_one(worker_db, job):
               f"{(result or {}).get('timings') if isinstance(result, dict) else None}",
               flush=True)
     except Exception as e:
+        if isinstance(e, remote.RemoteBatchDetached):
+            # The Cloud Run Job owns heartbeats + terminal state. Requeueing
+            # an ambiguous launch here is exactly how one execution becomes
+            # two paid 8-vCPU executions. The stale reaper is the bounded
+            # recovery path if no Job actually started.
+            print(f"[job {job_id}] detached from batch execution: {e}",
+                  flush=True)
+            return
         traceback.print_exc()
-        max_attempts = (config.MAX_ATTEMPTS_AGENT
-                        if job["type"] in AGENT_TYPES
-                        else config.MAX_ATTEMPTS_MCP
-                        if job["type"] in MCP_TYPES
-                        else config.MAX_ATTEMPTS_MEDIA)
-        if isinstance(e, dbx.PermanentJobError):
-            # The INPUT is the reason — a retry replays the same answer.
-            max_attempts = 0
-        if job["attempts"] < max_attempts:
+        decision = failure_policy.decision_for(e, job["type"])
+        if decision.retryable and job["attempts"] < decision.max_attempts:
             requeued = worker_db.run(dbx.requeue_job, job_id, e, lease_claim)
             what = ("requeued" if requeued else
                     "NOT requeued (already terminal — reaped or superseded)")
             print(f"[job {job_id}] {what} after error: {e}", flush=True)
         else:
+            failure_result = {
+                "failure": decision.payload(e),
+                "timings": dict(getattr(e, "executor_timings", {}) or {}),
+            }
+            failure_result["timings"].setdefault("queue_wait_s", queue_wait)
+            failure_result["timings"].setdefault(
+                "total_s", round(time.monotonic() - t0, 2))
             finished = worker_db.run(dbx.finish_job, job_id, "failed", e,
-                                     None, lease_claim)
+                                     failure_result, lease_claim)
             if finished is not False:
                 # Own transaction, after the terminal write — see bump_metric.
                 worker_db.run(dbx.bump_metric, "job_failed")

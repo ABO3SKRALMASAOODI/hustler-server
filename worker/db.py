@@ -551,6 +551,94 @@ def pending_preview_job(conn, project_id, edl_version):
         return row["id"] if row else None
 
 
+def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
+    """Atomically join or enqueue one live preview for an EDL version.
+
+    ``pending_preview_job`` followed by ``enqueue_job`` is a check-then-insert
+    race across agent turns, the backend self-heal, and speculative rendering.
+    Production accumulated up to eleven successful previews of one version.
+    A transaction advisory lock is shared with no long-running work: it covers
+    only this lookup+insert and disappears at commit.
+
+    Returns ``(job_id, created)``.
+    """
+    version = int((payload or {}).get("edl_version"))
+    with conn.cursor() as cur:
+        # The two-int namespace keeps this lock separate from future project
+        # locks while making the key stable across Python processes.
+        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                    (int(project_id), version))
+        # Once a newer immutable EDL exists, no older preview can ever become
+        # the player's current picture. Marking a RUNNING row done makes its
+        # next fenced progress write return False; the executor watchdog then
+        # kills ffmpeg within seconds instead of finishing obsolete work.
+        cur.execute("""UPDATE video_jobs
+                       SET state = 'done', result = %s, updated_at = NOW()
+                       WHERE project_id = %s AND type = 'preview'
+                         AND state IN ('queued', 'running')
+                         AND payload->>'edl_version' ~ '^[0-9]+$'
+                         AND (payload->>'edl_version')::int < %s""",
+                    (Json({"superseded_by": version}), project_id, version))
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'preview'
+                         AND state IN ('queued', 'running')
+                         AND payload->>'edl_version' = %s
+                       ORDER BY id DESC LIMIT 1""",
+                    (project_id, str(version)))
+        row = cur.fetchone()
+        if row:
+            return row["id"], False
+        cur.execute("""INSERT INTO video_jobs
+                          (project_id, user_id, type, payload)
+                       VALUES (%s, %s, 'preview', %s) RETURNING id""",
+                    (project_id, user_id, Json(payload)))
+        return cur.fetchone()["id"], True
+
+
+def reserve_batch_launch(conn, job_id, total_claims):
+    """Persist an idempotency key before asking Cloud Run to start a Job."""
+    with conn.cursor() as cur:
+        marker = Json({"batch_launch_claim": int(total_claims)})
+        cur.execute("""UPDATE video_jobs
+                       SET payload = COALESCE(payload, '{}'::jsonb) || %s,
+                           updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND total_claims = %s
+                         AND COALESCE(payload->>'batch_launch_claim', '')
+                             <> %s
+                       RETURNING id""",
+                    (marker, job_id, total_claims, str(total_claims)))
+        return cur.fetchone() is not None
+
+
+def record_batch_launch(conn, job_id, total_claims, operation):
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET payload = COALESCE(payload, '{}'::jsonb) || %s,
+                           heartbeat_at = NOW(), updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND total_claims = %s
+                         AND payload->>'batch_launch_claim' = %s""",
+                    (Json({"batch_operation": str(operation)[:500]}),
+                     job_id, total_claims, str(total_claims)))
+        return cur.rowcount > 0
+
+
+def clear_batch_launch(conn, job_id, total_claims):
+    """Allow safe request-service fallback after a definite launch refusal."""
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET payload = COALESCE(payload, '{}'::jsonb)
+                                     - 'batch_launch_claim'
+                                     - 'batch_operation',
+                           updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND total_claims = %s
+                         AND payload->>'batch_launch_claim' = %s""",
+                    (job_id, total_claims, str(total_claims)))
+        return cur.rowcount > 0
+
+
 def kv_get(conn, key):
     """One value from app_kv, or None — including when the table itself
     does not exist yet (migration 016 may land after the code that wants

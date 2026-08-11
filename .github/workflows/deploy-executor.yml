@@ -55,7 +55,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.have_key == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -103,8 +103,32 @@ jobs:
             --project valmera --quiet --async --format='value(id)')
           wait_for_build "$app_build"
           echo "APP_IMAGE=$app_image" >> "$GITHUB_ENV"
+          agent_dep_hash=$(sha256sum worker/Dockerfile.agent-base \
+            worker/requirements.txt | sha256sum | cut -c1-16)
+          agent_base="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-agent-base:deps-${agent_dep_hash}"
+          agent_image="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-agent-app:${GITHUB_SHA}"
+          if ! gcloud artifacts docker images describe "$agent_base" \
+              --project valmera >/dev/null 2>&1; then
+            agent_base_build=$(gcloud builds submit worker/ \
+              --config worker/cloudbuild.agent-base.yaml \
+              --substitutions "_IMAGE=${agent_base}" \
+              --project valmera --quiet --async --format='value(id)')
+            wait_for_build "$agent_base_build"
+          fi
+          agent_build=$(gcloud builds submit worker/ \
+            --config worker/cloudbuild.agent.yaml \
+            --substitutions "_BASE_IMAGE=${agent_base},_IMAGE=${agent_image}" \
+            --project valmera --quiet --async --format='value(id)')
+          wait_for_build "$agent_build"
+          echo "AGENT_IMAGE=$agent_image" >> "$GITHUB_ENV"
+          launcher_image="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-batch-launcher:${GITHUB_SHA}"
+          launcher_build=$(gcloud builds submit worker/batch_launcher/ \
+            --tag "$launcher_image" --project valmera --quiet --async \
+            --format='value(id)')
+          wait_for_build "$launcher_build"
+          echo "LAUNCHER_IMAGE=$launcher_image" >> "$GITHUB_ENV"
 
-      - name: deploy heavy, preview, and agent executors
+      - name: deploy request, agent, launcher, and batch executors
         run: |
           gcloud run deploy valmera-executor \
             --image "$APP_IMAGE" \
@@ -130,15 +154,38 @@ jobs:
           if gcloud run services describe valmera-agent \
               --region us-central1 --project valmera >/dev/null 2>&1; then
             gcloud run deploy valmera-agent \
-              --image "$APP_IMAGE" \
+              --image "$AGENT_IMAGE" \
               --region us-central1 \
               --project valmera \
-              --cpu 1 --memory 1Gi --concurrency 1 \
-              --min-instances 0 --max-instances 5 --timeout 3600 \
+              --cpu 1 --memory 2Gi --concurrency 2 \
+              --min-instances 0 --max-instances 3 --timeout 3600 \
               --execution-environment gen2 --cpu-boost --cpu-throttling \
               --quiet
           else
             echo "::warning::valmera-agent is not bootstrapped; Render keeps running agent turns locally"
+          fi
+          if gcloud run services describe valmera-batch-launcher \
+              --region us-central1 --project valmera >/dev/null 2>&1; then
+            gcloud run deploy valmera-batch-launcher \
+              --image "$LAUNCHER_IMAGE" \
+              --region us-central1 --project valmera \
+              --cpu 1 --memory 512Mi --concurrency 20 \
+              --min-instances 0 --max-instances 2 --timeout 30 \
+              --execution-environment gen2 --cpu-throttling \
+              --allow-unauthenticated --quiet
+          else
+            echo "::warning::valmera-batch-launcher is not bootstrapped; request-service fallback remains active"
+          fi
+          if gcloud run jobs describe valmera-batch \
+              --region us-central1 --project valmera >/dev/null 2>&1; then
+            gcloud run jobs update valmera-batch \
+              --image "$APP_IMAGE" \
+              --region us-central1 --project valmera \
+              --cpu 8 --memory 16Gi --tasks 1 --parallelism 1 \
+              --max-retries 0 --task-timeout 3600 \
+              --command python --args batch_runner.py --quiet
+          else
+            echo "::warning::valmera-batch is not bootstrapped; request-service fallback remains active"
           fi
 
       - name: enforce bounded artifact retention
@@ -190,4 +237,11 @@ jobs:
               echo "::error::agent executor reports $agent_got, expected $want"
               exit 1
             }
+          fi
+          if gcloud run services describe valmera-batch-launcher \
+              --region us-central1 --project valmera >/dev/null 2>&1; then
+            launcher_url=$(gcloud run services describe valmera-batch-launcher \
+              --region us-central1 --project valmera --format='value(status.url)')
+            curl -fsS --max-time 30 "$launcher_url/health" \
+              | python3 -c "import json,sys; h=json.load(sys.stdin); assert h.get('status') == 'ok', h; print('batch launcher:', h.get('job'))"
           fi

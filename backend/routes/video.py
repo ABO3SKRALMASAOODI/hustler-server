@@ -4385,7 +4385,7 @@ def user_edl_write(user_id, project_id):
                     (project_id, project_id, Json(normalized)))
         version = cur.fetchone()["version"]
 
-        # A QUEUED PREVIEW OF AN OLDER VERSION IS ALREADY WORTHLESS.
+        # AN ACTIVE PREVIEW OF AN OLDER VERSION IS ALREADY WORTHLESS.
         #
         # Retire them before counting. Two things go wrong without this, and
         # one of them strands the user permanently: cutting twice in a few
@@ -4400,11 +4400,13 @@ def user_edl_write(user_id, project_id):
         #
         # Marked 'done' rather than 'failed' — the state check allows no
         # 'cancelled', and a failure would land in the admin attention feed as
-        # if something had broken.
+        # if something had broken. For a RUNNING row this is cooperative
+        # cancellation: its next fenced progress write returns false and the
+        # executor watchdog kills obsolete ffmpeg within seconds.
         cur.execute("""UPDATE video_jobs
                           SET state = 'done', result = %s, updated_at = NOW()
                         WHERE project_id = %s AND type = 'preview'
-                          AND state = 'queued'
+                          AND state IN ('queued', 'running')
                           AND (payload->>'edl_version')::int < %s""",
                     (Json({"superseded_by": version}), project_id, version))
         superseded = cur.rowcount
