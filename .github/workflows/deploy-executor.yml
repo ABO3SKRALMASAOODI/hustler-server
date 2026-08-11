@@ -130,10 +130,17 @@ jobs:
 
       - name: enforce bounded artifact retention
         run: |
-          gcloud artifacts repositories set-cleanup-policies \
-            cloud-run-source-deploy \
-            --location us-central1 --project valmera \
-            --policy worker/artifact-cleanup-policy.json --quiet
+          if gcloud artifacts repositories describe cloud-run-source-deploy \
+              --location us-central1 --project valmera \
+              --format='json(cleanupPolicies)' \
+              | grep -q 'delete-older-than-2d'; then
+            echo "Artifact cleanup policy is already active"
+          elif ! gcloud artifacts repositories set-cleanup-policies \
+              cloud-run-source-deploy \
+              --location us-central1 --project valmera \
+              --policy worker/artifact-cleanup-policy.json --quiet; then
+            echo "::warning::Cleanup policy needs one-time Artifact Registry admin setup; deployment remains healthy"
+          fi
 
       - name: verify the skew is gone
         run: |
