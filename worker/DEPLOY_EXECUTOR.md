@@ -1,11 +1,12 @@
 # Scale-to-zero executor fleet
 
-> **COST/RELIABILITY UPDATE (Aug 2026).** Interactive previews remain on the
-> request service, while `final` and `index` run as one-shot Cloud Run Jobs.
-> The Jobs lane is configured with **zero platform retries** and 8 vCPU / 16
-> GiB, so a dispatcher restart cannot duplicate paid work and a deterministic
-> bad EDL/ffmpeg command cannot replay for another hour. The shared application
-> policy permits at most one retry for a genuinely transient failure. Invalid
+> **COST/RELIABILITY UPDATE (Aug 2026).** Interactive previews remain on their
+> 8-GiB request service; `final` and `index` use a 16-GiB request service with
+> the same fast startup and a one-time 32-GiB capacity fallback for unusually
+> large sources. The executor now owns the terminal DB write, so a dispatcher
+> restart cannot duplicate paid work and a deterministic bad EDL/ffmpeg command
+> cannot replay for another hour. The shared application policy permits at
+> most one retry for a genuinely transient failure. Invalid
 > preview EDLs are not retried unchanged: the agent receives one structured
 > repair pass and must write a new EDL version before rendering again.
 >
@@ -58,14 +59,16 @@ agent image built by `Dockerfile.agent-base` / `Dockerfile.agent-runtime`.
 | Role | Where | `WORKER_ROLE` | Does |
 |---|---|---|---|
 | dispatcher (default) | existing Render worker | `worker` (or unset) | polls queue and ships work to request-based executors |
-| executor | Cloud Run services | `executor` | interactive preview/tool compute per request, scales to zero |
+| executor | Cloud Run services | `executor` | preview/tool/final/index compute per request, right-sized by job, scales to zero |
 | agent executor | Cloud Run service | `agent_executor` | runs isolated agent turns with concurrency 2, scales to zero |
 | batch executor | Cloud Run Job | `batch_executor` | owns one final/index through terminal DB commit; platform retries are zero |
 
-`valmera-batch-launcher` is a tiny authenticated scale-to-zero bridge. Render
-calls it because Render cannot directly mint Google IAM tokens. The launcher
-starts the Job with an immutable queue-row/claim payload; it performs no media
-work and adds no idle monthly charge.
+`valmera-batch-launcher` is a tiny authenticated scale-to-zero bridge retained
+for explicit bulk/non-interactive runs. Production measurements showed about
+55 seconds of scheduler startup on consecutive Job executions, so it is not
+derived or used by the interactive dispatcher by default. Setting
+`REMOTE_BATCH_LAUNCHER_URL` explicitly enables it. It performs no media work
+and adds no idle monthly charge.
 
 ---
 

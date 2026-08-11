@@ -941,6 +941,17 @@ def _sibling_agent_executor_url(main_url):
     return main_url.replace(marker, "://valmera-agent-", 1)
 
 
+def _sibling_batch_executor_url(main_url):
+    """Derive the right-sized request service for final/index work."""
+    main_url = (main_url or "").strip().rstrip("/")
+    marker = "://valmera-executor-"
+    if not main_url or marker not in main_url \
+            or "://valmera-executor-preview-" in main_url \
+            or "://valmera-executor-batch-" in main_url:
+        return ""
+    return main_url.replace(marker, "://valmera-executor-batch-", 1)
+
+
 # The production sibling is inferred so a Render-dashboard-only setting cannot
 # silently leave every preview on the 32-GiB lane. An explicit variable still
 # overrides it, and an explicitly empty value disables the preview route.
@@ -958,6 +969,15 @@ REMOTE_AGENT_EXECUTOR_URL = (
     if _agent_executor_env is None
     else _agent_executor_env.strip().rstrip("/"))
 
+# Final/index requests retain the service lane's fast startup while using half
+# the memory of the 32-GiB maximum-upload fallback. Sources too large for this
+# lane receive one explicit capacity fallback to the main service in remote.py.
+_batch_executor_env = os.getenv("REMOTE_EXECUTOR_BATCH_URL")
+REMOTE_EXECUTOR_BATCH_URL = (
+    _sibling_batch_executor_url(REMOTE_EXECUTOR_URL)
+    if _batch_executor_env is None
+    else _batch_executor_env.strip().rstrip("/"))
+
 
 def _sibling_batch_launcher_url(main_url):
     """Derive the tiny same-project scale-to-zero Jobs launcher."""
@@ -969,14 +989,14 @@ def _sibling_batch_launcher_url(main_url):
     return main_url.replace(marker, "://valmera-batch-launcher-", 1)
 
 
-# Finals and indexes use Cloud Run Jobs when this sibling exists. An old
-# deployment answers /launch with 404 and the client safely falls back to the
-# request service, so rolling the two halves cannot take rendering down.
+# Cloud Run Jobs remain an explicit opt-in lane for non-interactive/bulk work.
+# Production measurements showed ~55s of scheduler startup on two consecutive
+# executions, so deriving this URL by default would save compute but violate
+# the interactive speed promise. Setting the URL explicitly re-enables the
+# durable Job handoff without changing code.
 _batch_launcher_env = os.getenv("REMOTE_BATCH_LAUNCHER_URL")
 REMOTE_BATCH_LAUNCHER_URL = (
-    _sibling_batch_launcher_url(REMOTE_EXECUTOR_URL)
-    if _batch_launcher_env is None
-    else _batch_launcher_env.strip().rstrip("/"))
+    (_batch_launcher_env or "").strip().rstrip("/"))
 REMOTE_BATCH_JOB_NAME = os.getenv(
     "REMOTE_BATCH_JOB_NAME", "valmera-batch").strip()
 BATCH_POLL_INTERVAL_S = max(

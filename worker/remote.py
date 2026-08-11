@@ -29,6 +29,10 @@ class RemoteExecutorError(RuntimeError):
     pass
 
 
+class RemoteServiceUnavailable(RemoteExecutorError):
+    """A derived sibling definitely does not exist; heavy fallback is safe."""
+
+
 class BatchUnavailable(RuntimeError):
     """The launcher definitely did not start a Job; request fallback is safe."""
 
@@ -63,6 +67,9 @@ def _executor_url(job_type=None):
         return config.REMOTE_AGENT_EXECUTOR_URL
     if job_type == "preview" and config.REMOTE_EXECUTOR_PREVIEW_URL:
         return config.REMOTE_EXECUTOR_PREVIEW_URL
+    if job_type in ("final", "index") \
+            and config.REMOTE_EXECUTOR_BATCH_URL:
+        return config.REMOTE_EXECUTOR_BATCH_URL
     return config.REMOTE_EXECUTOR_URL
 
 
@@ -280,8 +287,8 @@ def _launch_batch_and_wait(worker_db, job):
         f"batch execution for job {job_id} outlived the dispatcher poll window")
 
 
-def _run_remote(job):
-    url_base = _executor_url(job.get("type"))
+def _run_remote(job, url_override=None):
+    url_base = url_override or _executor_url(job.get("type"))
     if not url_base:
         raise RemoteExecutorError("REMOTE_EXECUTOR_URL is not set")
     url = f"{url_base}/run"
@@ -301,6 +308,10 @@ def _run_remote(job):
         # raises so process_one requeues within the media attempt budget — a
         # re-run is safe (renders are deterministic and cache-deduped).
         raise RemoteExecutorError(f"executor call failed: {e}") from e
+    if resp.status_code == 404 \
+            and url_base != config.REMOTE_EXECUTOR_URL:
+        raise RemoteServiceUnavailable(
+            f"derived executor service is not deployed: {url_base}")
     if resp.status_code != 200:
         body = (resp.text or "")[:500]
         raise RemoteExecutorError(
@@ -508,7 +519,7 @@ def run_render_remote(worker_db, job):      # signature matches run_render_job
         except BatchUnavailable as exc:
             print(f"[dispatcher] batch final unavailable ({exc}); using "
                   "request executor for this job", flush=True)
-    return _run_remote(job)
+    return _run_request_with_capacity_fallback(job)
 
 
 def run_index_remote(worker_db, job):       # signature matches run_index_job
@@ -517,7 +528,26 @@ def run_index_remote(worker_db, job):       # signature matches run_index_job
     except BatchUnavailable as exc:
         print(f"[dispatcher] batch index unavailable ({exc}); using request "
               "executor for this job", flush=True)
-    return _run_remote(job)
+    return _run_request_with_capacity_fallback(job)
+
+
+def _run_request_with_capacity_fallback(job):
+    """Use the fast 16-GiB lane, preserving 32-GiB upload compatibility."""
+    primary = _executor_url(job.get("type"))
+    try:
+        return _run_remote(job)
+    except Exception as error:
+        is_capacity = getattr(error, "failure_kind", "") == \
+            "executor_capacity"
+        definitely_missing = isinstance(error, RemoteServiceUnavailable)
+        if primary and primary != config.REMOTE_EXECUTOR_URL \
+                and (is_capacity or definitely_missing):
+            why = "source needs 32 GiB" if is_capacity else \
+                "right-sized service is not deployed"
+            print(f"[dispatcher] {job.get('type')} {why}; using heavy "
+                  "request executor once", flush=True)
+            return _run_remote(job, url_override=config.REMOTE_EXECUTOR_URL)
+        raise
 
 
 def run_agent_remote(worker_db, job):       # signature matches run_agent_job

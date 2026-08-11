@@ -22,6 +22,8 @@ def request_profile(role=None, service=None):
         return "agent-1cpu-2g-concurrency2", 1, 2
     if "preview" in service:
         return "preview-8cpu-8g", 8, 8
+    if "executor-batch" in service:
+        return "request-batch-8cpu-16g", 8, 16
     return "request-heavy-8cpu-32g", 8, 32
 
 

@@ -55,11 +55,15 @@ def _setup(monkeyrunners, secret="test-secret"):
     orig_cfg = (config.WORKER_ROLE,
                 config.REMOTE_EXECUTOR_URL,
                 config.REMOTE_EXECUTOR_PREVIEW_URL,
+                config.REMOTE_EXECUTOR_BATCH_URL,
+                config.REMOTE_BATCH_LAUNCHER_URL,
                 config.REMOTE_AGENT_EXECUTOR_URL,
                 config.REMOTE_EXECUTOR_SECRET,
                 config.REMOTE_EXECUTOR_TIMEOUT_S)
     config.REMOTE_EXECUTOR_URL = f"http://127.0.0.1:{port}"
     config.REMOTE_EXECUTOR_PREVIEW_URL = ""
+    config.REMOTE_EXECUTOR_BATCH_URL = ""
+    config.REMOTE_BATCH_LAUNCHER_URL = ""
     config.REMOTE_AGENT_EXECUTOR_URL = f"http://127.0.0.1:{port}"
     config.REMOTE_EXECUTOR_SECRET = secret
     config.REMOTE_EXECUTOR_TIMEOUT_S = 10
@@ -81,7 +85,9 @@ def _teardown(srv, saved):
     http_server.RUNNERS.update(orig_runners)
     dbx.Db = orig_db
     (config.WORKER_ROLE, config.REMOTE_EXECUTOR_URL,
-     config.REMOTE_EXECUTOR_PREVIEW_URL, config.REMOTE_AGENT_EXECUTOR_URL,
+     config.REMOTE_EXECUTOR_PREVIEW_URL, config.REMOTE_EXECUTOR_BATCH_URL,
+     config.REMOTE_BATCH_LAUNCHER_URL,
+     config.REMOTE_AGENT_EXECUTOR_URL,
      config.REMOTE_EXECUTOR_SECRET, config.REMOTE_EXECUTOR_TIMEOUT_S) = orig_cfg
     srv.shutdown()
 
@@ -100,6 +106,9 @@ def test_preview_service_url_is_derived_from_the_main_cloud_run_url():
     assert config._sibling_agent_executor_url(
         "https://valmera-executor-123.us-central1.run.app/") == \
         "https://valmera-agent-123.us-central1.run.app"
+    assert config._sibling_batch_executor_url(
+        "https://valmera-executor-123.us-central1.run.app/") == \
+        "https://valmera-executor-batch-123.us-central1.run.app"
     assert config._sibling_batch_launcher_url(
         "https://valmera-executor-123.us-central1.run.app/") == \
         "https://valmera-batch-launcher-123.us-central1.run.app"
@@ -141,6 +150,42 @@ def test_preview_uses_the_right_sized_service_when_configured():
         assert result["ok"] is True
     finally:
         _teardown(srv, saved)
+
+
+def test_final_uses_fast_right_sized_request_service_when_configured():
+    srv, saved = _setup({"final": lambda db, job: {"ok": True}})
+    try:
+        batch_url = config.REMOTE_EXECUTOR_URL
+        config.REMOTE_EXECUTOR_URL = "http://127.0.0.1:1"
+        config.REMOTE_EXECUTOR_BATCH_URL = batch_url
+        config.REMOTE_BATCH_LAUNCHER_URL = ""
+        result = remote.run_render_remote(None, dict(JOB, type="final"))
+        assert result.pop("_remote_job_completed") is True
+        assert result["ok"] is True
+    finally:
+        _teardown(srv, saved)
+
+
+def test_oversized_source_falls_back_once_to_32g_without_retrying_job(
+        monkeypatch):
+    monkeypatch.setattr(config, "REMOTE_EXECUTOR_URL", "https://heavy")
+    monkeypatch.setattr(
+        config, "REMOTE_EXECUTOR_BATCH_URL", "https://right-sized")
+    calls = []
+
+    def fake_remote(job, url_override=None):
+        calls.append(url_override)
+        if len(calls) == 1:
+            error = dbx.PermanentJobError("workdir needs more capacity")
+            error.failure_kind = "executor_capacity"
+            raise error
+        return {"ok": True}
+
+    monkeypatch.setattr(remote, "_run_remote", fake_remote)
+    result = remote._run_request_with_capacity_fallback(
+        dict(JOB, type="final"))
+    assert result == {"ok": True}
+    assert calls == [None, "https://heavy"]
 
 
 def test_missing_secret_is_401():

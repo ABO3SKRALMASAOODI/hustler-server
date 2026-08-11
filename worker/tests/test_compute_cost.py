@@ -21,3 +21,16 @@ def test_preview_and_agent_profiles_are_named_from_service():
     assert compute_cost.request_profile(
         "agent_executor", "valmera-agent")[0] \
         == "agent-1cpu-2g-concurrency2"
+    assert compute_cost.request_profile(
+        "executor", "valmera-executor-batch")[0] \
+        == "request-batch-8cpu-16g"
+
+
+def test_fast_batch_request_service_costs_less_than_heavy_fallback():
+    heavy, right_sized = {}, {}
+    compute_cost.annotate_request(
+        heavy, 100, "executor", "valmera-executor")
+    compute_cost.annotate_request(
+        right_sized, 100, "executor", "valmera-executor-batch")
+    assert right_sized["gross_compute_usd_ceiling"] \
+        < heavy["gross_compute_usd_ceiling"]
