@@ -1499,6 +1499,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # that sits in different places in different shots (the seeder splits
         # keep segments at shot cuts, so an aim change lands on a cut). No
         # track, or no covering span, keeps the single frame_focus exactly.
+        # build_filtergraph splits LOCAL render blocks at focus edges above;
+        # the EDL keep list remains the user's real editorial cuts and never
+        # gains fake mid-word boundaries merely to express composition.
         _ftrack = focus_track
 
         def _frame_for(s, e):

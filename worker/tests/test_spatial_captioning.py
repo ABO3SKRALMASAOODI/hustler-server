@@ -495,6 +495,9 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
     ctx = Ctx()
     result = agent_tools.auto_reframe(ctx, "9:16", "auto")
     assert result.startswith("EDL v1 -> v2")
+    # Shot-local framing is metadata, not a cut. The renderer splits its own
+    # ffmpeg blocks at 5.48 without creating a false mid-word EDL boundary.
+    assert ctx.edl["keep"] == [[0.0, 3.2], [3.68, 6.52]]
     assert [span["mode"] for span in ctx.edl["frame"]["focus_track"]] == [
         "pad_blur", "crop"]
     assert ctx.edl["frame"]["focus_track"][0]["t1"] == 5.48

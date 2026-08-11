@@ -3940,15 +3940,14 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
             return res
         return None
 
-    # Split the keep list on span boundaries so every segment has ONE aim.
-    cuts = sorted({sp["t0"] for sp in spans} | {sp["t1"] for sp in spans})
-    new_keep = []
-    for ks, ke in keep:
-        edges = [ks] + [c for c in cuts if ks + 0.05 < c < ke - 0.05] + [ke]
-        for a, b in zip(edges, edges[1:]):
-            new_keep.append([round(a, 3), round(b, 3)])
+    # Composition state is not editorial state. Older revisions split `keep`
+    # at every focus boundary so each ffmpeg segment had one aim. The renderer
+    # now performs that split locally (without changing the EDL timeline), so
+    # retaining those synthetic keep edges only creates false "mid-word cut"
+    # audits at ordinary camera cuts and sends the agent into unnecessary
+    # repair passes. Preserve the user's actual cuts exactly; focus_track owns
+    # only framing, and renderer.build_filtergraph owns its local blocks.
     med = subject.median_point([(sp["x"], sp["y"]) for sp in spans])
-    edl["keep"] = new_keep
     edl["frame"] = {"ratio": str(ratio), "mode": "crop",
                     "focus_x": med[0], "focus_y": med[1],
                     "focus_track": spans}
