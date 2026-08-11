@@ -98,10 +98,80 @@ def test_selected_audio_requires_real_audition_unless_user_chose_it():
     assert agent_tools._audio_was_auditioned(
         ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
 
+    ctx.user_message = "go bring it and add it"
+    assert agent_tools._audio_was_auditioned(
+        ctx, "music/1/remix.mp3", "music/1/remix.mp3",
+        "Drake - National Treasures (remix).mp3")
+
     ctx._listened_asset_keys.clear()
     ctx.user_message = "use this music I attached"
     assert agent_tools._audio_was_auditioned(
         ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
+
+    ctx.user_message = "add a remix, it's fine"
+    assert agent_tools._audio_was_auditioned(
+        ctx, "music/1/remix.mp3", "music/1/remix.mp3",
+        "Drake - National Treasures (remix).mp3")
+
+
+def test_asset_listen_wins_over_empty_optional_clock_arrays(monkeypatch,
+                                                             tmp_path):
+    """Regression for project 622's impossible audition loop.
+
+    The model correctly supplied asset_key, but also emitted the optional
+    output_times=[] schema field. Empty output_times must not route a project
+    MP3 into the rendered-program branch.
+    """
+    class Ctx:
+        agent_model = "hearing-model"
+        direct_sight = True
+        project_id = 622
+        workdir = str(tmp_path)
+        pending_audio = []
+        _pending_listened_asset_keys = set()
+        _asset_locals = {}
+
+    asset = {
+        "id": 41, "kind": "music", "storage_key": "fetched/622/remix.mp3",
+        "duration_s": 120.0, "bytes": 1024,
+        "meta": {"filename": "National Treasures remix.mp3"},
+    }
+    monkeypatch.setattr(agent_tools, "_hearing_on", lambda _ctx: True)
+    monkeypatch.setattr(
+        agent_tools, "_resolve_media_asset",
+        lambda _ctx, _key, _kinds: (asset, None))
+    monkeypatch.setattr(
+        agent_tools, "_asset_local_path", lambda _ctx, _asset: "source.mp3")
+
+    def fake_extract(_src, _start, _end, dest):
+        with open(dest, "wb") as handle:
+            handle.write(b"audition")
+
+    monkeypatch.setattr(agent_tools.media, "extract_audio_clip", fake_extract)
+    result = agent_tools.listen_to(
+        Ctx(), times=[], output_times=[], asset_key=asset["storage_key"])
+    assert result.startswith("Listening delivered:")
+    assert "ASSET 'National Treasures remix.mp3'" in result
+
+
+def test_user_approved_music_can_be_part_of_an_atomic_recipe(monkeypatch):
+    ctx, fake = _real_ctx("go bring it and add it")
+    monkeypatch.setattr(
+        agent_tools, "_resolve_music",
+        lambda _ctx, key: ({"name": "Approved remix.mp3",
+                            "duration_s": 120.0, "storage_key": key}, None))
+    monkeypatch.setattr(
+        agent_tools, "_audio_was_auditioned", lambda *_args, **_kwargs: True)
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "set_frame",
+         "args": {"ratio": "9:16", "mode": "pad_blur"}},
+        {"tool": "add_music",
+         "args": {"storage_key": "fetched/622/remix.mp3"}},
+    ], brief="fit frame and add the approved remix")
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
+    assert fake.rows[-1]["json"]["music"][0]["storage_key"] == \
+        "fetched/622/remix.mp3"
 
 
 def test_independent_text_layers_cannot_stack_but_title_hierarchy_can():

@@ -2741,7 +2741,28 @@ def _user_chose_exact_audio(ctx, name=""):
         return True
     stem = os.path.splitext(os.path.basename(str(name or "")))[0]
     stem = " ".join(stem.replace("_", " ").replace("-", " ").split())
-    return len(stem) >= 5 and stem.casefold() in ask
+    if len(stem) >= 5 and stem.casefold() in ask:
+        return True
+    # A follow-up such as "go bring it and add it" selects the concrete
+    # candidate already named/fetched in the conversation. Requiring the user
+    # to retype its full filename made the safety gate argue with an explicit
+    # approval forever (production project 622). These phrases exempt only the
+    # exact asset handed to add_music; they do not let a generic autonomous
+    # music choice skip audition.
+    pronoun_approval = (
+        "add it", "use it", "put it in", "add that", "use that",
+        "add this track", "use this track", "add this song",
+        "use this song", "go bring it", "bring it and add it",
+    )
+    if stem and any(p in ask for p in pronoun_approval):
+        return True
+    # The candidate itself is a remix and the user explicitly approved a
+    # remix/said it is fine: that is a real selection constraint, not a vague
+    # request for the model to guess a genre from metadata.
+    if "remix" in stem.casefold() and "remix" in ask and any(
+            p in ask for p in ("add", "use", "fine", "okay", "ok")):
+        return True
+    return False
 
 
 def _audio_was_auditioned(ctx, requested_key, resolved_key, name=""):
@@ -12954,6 +12975,11 @@ RECIPE_TOOLS = frozenset({
     "add_zoom", "remove_zoom", "add_zoom_path", "remove_zoom_path",
     "punch_in_on_emphasis", "set_fades",
     "set_volume", "set_speed", "remove_speed",
+    # These mutate only the in-memory EDL and reference an asset that already
+    # exists. They are transaction-safe; search/fetch/listen remain separate
+    # evidence/side-effect calls. Excluding them made the agent try a correct
+    # music request in a recipe, get refused, then enter needless retries.
+    "add_music", "remove_music", "swap_music", "set_music_fit",
     "add_stylize", "remove_stylize", "set_master_loudness",
 })
 
@@ -13101,7 +13127,43 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
             made.append((label_fmt.format(s=s, e=e), lp))
 
     try:
-        if output_times is not None:
+        # asset_key is an independent sound source and must win over empty
+        # arrays emitted for optional schema fields. Production project 622
+        # repeatedly sent asset_key + output_times=[]; the old order mistook
+        # the MP3 for an unrendered program mix, making audition impossible
+        # while add_music simultaneously required that audition.
+        if asset_key:
+            asset, err = _resolve_media_asset(
+                ctx, asset_key, ("music", "render", "audio", "video_clip"))
+            if err:
+                return err
+            big = (asset.get("bytes") or 0) > 80 * 1024 * 1024
+            if asset["kind"] == "video_clip" and big \
+                    and asset["id"] not in ctx._asset_locals:
+                return ("REJECTED: that clip is too large to fetch just for "
+                        "its sound. get_audio_analysis(asset_key) gives its "
+                        "measured tempo/energy instead.")
+            dur = float(asset.get("duration_s") or
+                        _asset_media_duration(ctx, asset) or 0.0)
+            wins, err = _windows(times if times else [dur / 2.0],
+                                 max(dur, 1.0), "times")
+            if err:
+                return err
+            name = ((asset.get("meta") or {}).get("filename")
+                    or os.path.basename(asset["storage_key"]))[:40]
+            _cut(_asset_local_path(ctx, asset), wins,
+                 "ASSET '" + name + "' {s:.1f}-{e:.1f}s")
+            if made:
+                bucket = ("_pending_listened_asset_keys"
+                          if getattr(ctx, "direct_sight", False)
+                          else "_listened_asset_keys")
+                listened = getattr(ctx, bucket, None)
+                if listened is None:
+                    listened = set()
+                    setattr(ctx, bucket, listened)
+                listened.add(str(asset_key))
+                listened.add(str(asset.get("storage_key") or asset_key))
+        elif output_times:
             row = ctx.latest_edl()
             lp = ctx.last_preview or {}
             if lp.get("edl_version") != row["version"] \
@@ -13120,38 +13182,7 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
                 return err
             _cut(_asset_local_path(ctx, asset), wins,
                  "PROGRAM sound {s:.1f}-{e:.1f}s (output clock)")
-        elif asset_key:
-            asset, err = _resolve_media_asset(
-                ctx, asset_key, ("music", "render", "audio", "video_clip"))
-            if err:
-                return err
-            big = (asset.get("bytes") or 0) > 80 * 1024 * 1024
-            if asset["kind"] == "video_clip" and big \
-                    and asset["id"] not in ctx._asset_locals:
-                return ("REJECTED: that clip is too large to fetch just for "
-                        "its sound. get_audio_analysis(asset_key) gives its "
-                        "measured tempo/energy instead.")
-            dur = float(asset.get("duration_s") or
-                        _asset_media_duration(ctx, asset) or 0.0)
-            wins, err = _windows(times if times is not None else [dur / 2.0],
-                                 max(dur, 1.0), "times")
-            if err:
-                return err
-            name = ((asset.get("meta") or {}).get("filename")
-                    or os.path.basename(asset["storage_key"]))[:40]
-            _cut(_asset_local_path(ctx, asset), wins,
-                 "ASSET '" + name + "' {s:.1f}-{e:.1f}s")
-            if made:
-                bucket = ("_pending_listened_asset_keys"
-                          if getattr(ctx, "direct_sight", False)
-                          else "_listened_asset_keys")
-                listened = getattr(ctx, bucket, None)
-                if listened is None:
-                    listened = set()
-                    setattr(ctx, bucket, listened)
-                listened.add(str(asset_key))
-                listened.add(str(asset.get("storage_key") or asset_key))
-        elif times is not None:
+        elif times:
             if not ctx.has_main_video:
                 return ("REJECTED: no main video — pass asset_key to listen "
                         "to an uploaded file instead.")

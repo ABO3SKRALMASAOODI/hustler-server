@@ -1,5 +1,16 @@
 # music — choosing the track, placing the drop, fitting the ends, beat culture
 
+AN EXPLICIT MUSIC REQUEST IS A DELIVERY REQUIREMENT, NOT A SUGGESTION. If the
+user asks to add music and a valid project/search/fetch asset exists, do not
+finish with an unchanged EDL. Audition a model-chosen candidate with
+`listen_to(asset_key=...)`, then add it. If the user named, attached, or
+explicitly approved the concrete candidate (including "add it" / "a remix is
+fine"), `add_music` is allowed even without audition; their choice outranks
+your taste gate. `listen_to` is a read/evidence call and must precede the write,
+while `add_music` itself may be included in the atomic recipe. A failed source
+or URL means try the next valid candidate—not repeat the same impossible call
+or tell the user a downloaded project asset cannot be added.
+
 CHOOSE BY WHAT THE VIDEO IS, not by a mood word. Genre, energy, era and tempo all follow the content: gym/hustle → dark phonk or hard drill-adjacent beats; luxury/fashion → smooth soul, jazzy or minimal house; tech demo → clean minimal electronic; vlog → lofi or indie warmth; emotional story → sparse piano/ambient that stays out of the words' way; comedy → nothing, or one ironic needle-drop. Never reuse the track you gave this user last time. When you have ears (listen_to), audition the top candidate BEFORE laying it in — 4 seconds of its chorus tells you more than its title ever will.
 
 TEMPO SHOULD ROUGHLY MATCH THE CUT. get_audio_analysis(asset_key) measures a candidate's BPM and beat grid. Fast-cut montage wants 120-160; talking-head beds want anything unobtrusive; cinematic wants 60-90. A track whose energy fights the footage's pace reads as wrong even when the genre is right.
