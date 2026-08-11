@@ -131,7 +131,9 @@ def test_kinetic_text_mutes_captions_only_when_captions_exist():
                 captions={"mode": "from_transcript"})
     r = agent_tools.add_kinetic_text(ctx)
     assert "muted over this window" in r
-    assert ctx.written["caption_mutes"] == [[0.0, 10.0]]
+    text = ctx.written["texts"][0]
+    assert ctx.written["caption_mutes"] == [[text["start"], text["end"]]]
+    assert ctx.written["caption_mutes"] != [[0.0, 10.0]]
 
     ctx2 = _KCtx(words, keep=[[0.0, 10.0]])
     agent_tools.add_kinetic_text(ctx2)

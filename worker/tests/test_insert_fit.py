@@ -154,6 +154,74 @@ def test_fit_tool_sets_clears_and_rejects():
                                                        fit="stretch")
 
 
+def test_new_inserts_preserve_the_whole_asset_by_default():
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 10.0]]
+    ctx = _Ctx(e)
+    res = agent_tools.insert_media(
+        ctx, REC, 10.0, duration_s=2.0, clip_start_s=1.0)
+    assert res.startswith("EDL v"), res
+    assert ctx.latest_edl()["json"]["inserts"][0]["fit"] == "pad_blur"
+
+
+def test_destructive_insert_crop_requires_inspecting_selected_window():
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 10.0]]
+    e["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
+    ctx = _Ctx(e)
+    ctx.enforce_spatial = True
+    ctx.db.assets[REC].update(width=1920, height=1080)
+    res = agent_tools.insert_media(
+        ctx, REC, 10.0, duration_s=2.0, clip_start_s=4.0, fit="crop")
+    assert res.startswith("REJECTED") and "look_at_asset" in res
+    assert not ctx.written
+
+    ctx._looked_asset_times = {REC: {5.0}}
+    res = agent_tools.insert_media(
+        ctx, REC, 10.0, duration_s=2.0, clip_start_s=4.0, fit="crop")
+    assert res.startswith("EDL v")
+    assert ctx.latest_edl()["json"]["inserts"][0]["fit"] == "crop"
+
+
+def test_full_frame_broll_refuses_a_destructive_aspect_crop():
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 10.0]]
+    e["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
+    ctx = _Ctx(e)
+    ctx.db.assets[REC].update(width=1920, height=1080)
+    res = agent_tools.add_overlay(
+        ctx, REC, 1.0, duration_s=2.0, fit="cover")
+    assert res.startswith("REJECTED"), res
+    assert "only" in res and "axis would survive" in res
+    assert not ctx.written
+
+
+def test_indexed_flat_black_clip_window_is_rejected():
+    class BlankDb(_DB):
+        def run(self, fn, *a):
+            if getattr(fn, "__name__", "") == "get_index_by_sha":
+                return {"json": {"spatial": {"samples": [
+                    {"t": 1.0, "faces": [], "text": [],
+                     "dense_ui": False, "mean_luma": 0.2,
+                     "std_luma": 0.3, "edge_density": 0.0},
+                    {"t": 2.0, "faces": [], "text": [],
+                     "dense_ui": False, "mean_luma": 0.1,
+                     "std_luma": 0.2, "edge_density": 0.0},
+                ]}}}
+            return super().run(fn, *a)
+
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 10.0]]
+    ctx = _Ctx(e)
+    ctx.db.assets[REC]["sha256"] = "blanksha"
+    ctx.db = BlankDb(ctx.db.assets)
+    res = agent_tools.insert_media(
+        ctx, REC, 10.0, duration_s=2.0, clip_start_s=0.5)
+    assert res.startswith("REJECTED"), res
+    assert "visibly shows nothing" in res
+    assert not ctx.written
+
+
 # ------------------------------------------------ the wordmark font ----
 
 def test_jakarta_is_a_text_font_and_maps_to_its_real_family():

@@ -21,10 +21,13 @@ That leaves two levers, and this file pins both:
 
 import os
 import sys
+import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import agent_prompt                                     # noqa: E402
+import agent_loop                                       # noqa: E402
+import agent_tools                                      # noqa: E402
 import llm                                              # noqa: E402
 
 
@@ -106,3 +109,50 @@ def test_the_loop_still_dispatches_every_tool_call_in_a_batch():
     assert "for tc in msg.tool_calls:" in src, (
         "the loop must iterate the whole batch; executing msg.tool_calls[0] "
         "would silently drop every call after the first")
+
+
+def test_initial_filmstrip_pixels_are_not_resent_after_planning():
+    filmstrip_image = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,FILMSTRIP"},
+    }
+    exact_image = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,EXACT"},
+    }
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "FILMSTRIPS & STILLS — fresh"},
+            {"type": "text", "text": "[MAIN VIDEO 0-30s]"},
+            filmstrip_image,
+        ]},
+        {"role": "user", "content": [
+            {"type": "text", "text": "Frames for your own eyes"},
+            exact_image,
+        ]},
+    ]
+    assert agent_loop._compact_initial_filmstrip(messages) is True
+    assert all(p["type"] == "text" for p in messages[0]["content"])
+    assert any("look_at" in p["text"] for p in messages[0]["content"])
+    # Evidence requested after planning is not the broad filmstrip and must
+    # remain in the model's context for the next decision.
+    assert messages[1]["content"][1] is exact_image
+    assert agent_loop._compact_initial_filmstrip(messages) is False
+
+
+def test_prompt_prefers_one_atomic_recipe_for_multi_move_edits():
+    p = agent_prompt.SYSTEM_PROMPT
+    assert "apply_edit_recipe" in p
+    assert "aborts the entire batch" in p
+
+
+def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook():
+    full = agent_tools.openai_tools("any-model")
+    compact = agent_tools.openai_tools("any-model", compact=True)
+    assert [x["function"]["name"] for x in compact] == [
+        x["function"]["name"] for x in full]
+    assert [x["function"]["parameters"] for x in compact] == [
+        x["function"]["parameters"] for x in full]
+    full_bytes = len(json.dumps(full, separators=(",", ":")))
+    compact_bytes = len(json.dumps(compact, separators=(",", ":")))
+    assert compact_bytes < full_bytes * 0.5

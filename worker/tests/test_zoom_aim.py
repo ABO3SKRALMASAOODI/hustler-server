@@ -155,9 +155,9 @@ def test_plain_cxcy_still_pins_and_the_reply_says_so():
     assert "HOLDS its screen position" in res and "rect=[x0,y0,x1,y1]" in res
 
 
-def test_default_strength_without_rect_is_unchanged():
+def test_default_strength_with_measured_point_is_unchanged():
     ctx = _Ctx(_session_edl())
-    agent_tools.add_zoom(ctx, 7.5, 9.5)
+    agent_tools.add_zoom(ctx, 7.5, 9.5, cx=0.5, cy=0.5)
     assert _zoom(ctx)["strength"] == 0.15        # the round-67 default
 
 
@@ -165,7 +165,7 @@ def test_strength_cap_is_now_4_5():
     """Round 76: excluding a NEIGHBOURING chat bubble from a close-up
     needs ~4.2 (bubbles sit ~0.01 apart). 4.5 (5.5x) is the ceiling."""
     ctx = _Ctx(_session_edl())
-    agent_tools.add_zoom(ctx, 7.5, 9.5, strength=9.0)
+    agent_tools.add_zoom(ctx, 7.5, 9.5, strength=9.0, cx=0.5, cy=0.5)
     assert _zoom(ctx)["strength"] == 4.5
     ctx2 = _Ctx(_session_edl())
     agent_tools.add_zoom(ctx2, 7.5, 9.5, strength=2.0, cx=0.0, cy=0.9)

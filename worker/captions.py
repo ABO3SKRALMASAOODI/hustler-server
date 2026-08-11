@@ -1542,6 +1542,76 @@ def _clamp_event_ends_to_mutes(events, mutes):
             if float(ev["end"]) - float(ev["start"]) > 0.04]
 
 
+def _placement_runs(out_words, track):
+    """Contiguous word runs sharing one measured caption position.
+
+    Words in an uncovered span are intentionally omitted: the compiler left
+    that source window uncovered because every candidate band was occupied.
+    Showing fewer captions is preferable to printing them across a face/UI.
+    """
+    if not track:
+        return []
+    spans = [(float(x.get("t0", 0)), float(x.get("t1", 0)), x.get("position"))
+             for x in track]
+    runs, current, current_pos = [], [], None
+    for raw in out_words:
+        word = dict(raw)
+        smid = (float(word.get("src_t0", 0)) +
+                float(word.get("src_t1", 0))) / 2.0
+        pos = next((p for a, b, p in spans if a <= smid <= b), None)
+        if pos != current_pos or word.get("brk"):
+            if current and current_pos:
+                runs.append((current_pos, current))
+            current, current_pos = [], pos
+        if pos:
+            if not current:
+                word["brk"] = True
+            current.append(word)
+    if current and current_pos:
+        runs.append((current_pos, current))
+    return runs
+
+
+def _positioned_events(out_words, captions, global_style, play_res):
+    """Build transcript events per measured placement run."""
+    runs = _placement_runs(out_words, captions.get("placement_track") or [])
+    events = []
+    for pos, words in runs:
+        run_style = dict(global_style or {})
+        run_style["position"] = pos
+        if _preset_of(_norm_style(run_style)):
+            made = events_premium(
+                words, style=run_style,
+                max_words=captions.get("max_words_per_caption"),
+                play_res=play_res,
+                emphasis_words=captions.get("emphasis_words"))
+        elif _norm_style(run_style)["dynamic"]:
+            made = events_dynamic(
+                words, style=run_style,
+                max_words=captions.get("max_words_per_caption"),
+                line_chars=line_chars_for(run_style, play_res),
+                karaoke_group_n=captions.get("karaoke_group_n"))
+            for ev in made:
+                ev["item_style"] = {"position": pos}
+        else:
+            made = events_from_transcript(
+                words, max_words=captions.get("max_words_per_caption"),
+                line_chars=line_chars_for(run_style, play_res))
+            for ev in made:
+                ev["item_style"] = {"position": pos}
+        events.extend(made)
+    events.sort(key=lambda x: (float(x.get("start", 0)),
+                               int(x.get("layer", 0))))
+    # Separate placement runs must obey the same no-overlap contract as each
+    # individual caption family.
+    starts = sorted({float(ev["start"]) for ev in events})
+    for ev in events:
+        nxt = next((s for s in starts if s > float(ev["start"]) + 0.001), None)
+        if nxt is not None and float(ev["end"]) > nxt:
+            ev["end"] = nxt
+    return [ev for ev in events if float(ev["end"]) > float(ev["start"]) + 0.01]
+
+
 def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
     """EDL captions field -> .ass file (or None when captions are off).
     Captions come from the MAIN footage's transcript only — inserted clips
@@ -1571,7 +1641,10 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         # edge instead of one whole block late.
         out_words = _drop_muted_words(out_words, edl.get("caption_mutes"))
         global_style = captions.get("style")
-        if _preset_of(_norm_style(global_style)):
+        if captions.get("placement_track"):
+            events = _positioned_events(
+                out_words, captions, global_style, play_res)
+        elif _preset_of(_norm_style(global_style)):
             events = events_premium(
                 out_words, style=global_style,
                 max_words=captions.get("max_words_per_caption"),

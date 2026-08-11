@@ -995,6 +995,16 @@ def set_index_perception(conn, sha256, perception_json, pipeline_version):
         """, (json.dumps(perception_json), sha256, pipeline_version))
 
 
+def set_index_spatial(conn, sha256, spatial_json, pipeline_version):
+    """Merge only the spatial sidecar; see set_index_perception's race rule."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE indexes
+            SET json = jsonb_set(json, '{spatial}', %s::jsonb)
+            WHERE video_sha256 = %s AND pipeline_version = %s
+        """, (json.dumps(spatial_json), sha256, pipeline_version))
+
+
 def latest_edl(conn, project_id):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM edls WHERE project_id = %s

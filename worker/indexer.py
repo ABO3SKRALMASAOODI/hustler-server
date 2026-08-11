@@ -31,6 +31,7 @@ import db as dbx
 import llm
 import media
 import scenes
+import spatial
 import storage
 import tiles as tilestrip
 import transcribe
@@ -117,22 +118,31 @@ def _detect_silences(job_id, wav_local, duration, warnings):
 def _build_and_upload_tiles(job_id, project_id, sha, src_path, duration,
                             workdir, warnings, seek_ceiling=None):
     """Filmstrip tiles from src_path -> uploaded keys. Returns
-    (tile_keys, tile_step_s). Degrades to an empty strip with a warning —
+    (tile_keys, tile_step_s, spatial_sidecar). Degrades to an empty strip with a warning —
     the transcript and cut points are unaffected."""
     tile_dir = os.path.join(workdir, "tiles")
     try:
-        built, step = tilestrip.build_for_video(
+        built, step, sample_times, sample_frames = \
+            tilestrip.build_for_video_with_frames(
             src_path, duration, tile_dir, seek_ceiling=seek_ceiling,
             parallelism=config.THUMB_PARALLELISM)
     except Exception as e:
         warnings.append(f"filmstrip build failed ({str(e)[:120]}) — the "
                         "video has no visual strip; use look_at instead")
         print(f"[index {job_id}] filmstrip degraded: {e}", flush=True)
-        return [], None
+        return [], None, None
     if not built:
         warnings.append("filmstrip build produced no tiles — the video has "
                         "no visual strip; use look_at instead")
-        return [], None
+        return [], None, None
+    try:
+        spatial_sidecar = spatial.analyze_frames(
+            sample_times, sample_frames,
+            max_samples=spatial.FILMSTRIP_SAMPLE_BUDGET)
+    except Exception as e:
+        spatial_sidecar = None
+        warnings.append(f"spatial analysis failed ({str(e)[:120]}) — face/"
+                        "source-text safety will analyze on first use")
 
     jobs = [(tp, f"tiles/{project_id}/{sha}/tile_{i:03d}.jpg")
             for i, (tp, _t0, _t1) in enumerate(built, start=1)]
@@ -160,7 +170,7 @@ def _build_and_upload_tiles(job_id, project_id, sha, src_path, duration,
         warnings.append(f"only {len(keys)} of {len(jobs)} filmstrip tiles "
                         "uploaded — the strip ends early; use look_at for "
                         "the rest")
-    return keys, step
+    return keys, step, spatial_sidecar
 
 
 def run_index_job(worker_db, job):
@@ -371,7 +381,16 @@ def run_index_job(worker_db, job):
                 f_up = sub.submit(storage.upload_file, proxy_local,
                                   proxy_key, "video/mp4")
                 state["shots"] = f_shots.result()
-                state["tile_keys"], state["tile_step"] = f_tiles.result()
+                (state["tile_keys"], state["tile_step"],
+                 state["spatial"]) = f_tiles.result()
+                try:
+                    state["spatial"] = spatial.augment_with_shot_frames(
+                        proxy_local, info["duration"], workdir,
+                        state.get("spatial"), state["shots"])
+                except Exception as e:
+                    warnings.append(
+                        f"shot-boundary spatial supplement failed "
+                        f"({str(e)[:120]}) — coarse face/text track kept")
                 try:
                     f_up.result()
                 except Exception:
@@ -445,6 +464,7 @@ def run_index_job(worker_db, job):
         words, sentences = state["words"], state["sentences"]
         language, silences = state["language"], state["silences"]
         perception_sidecar = state.get("perception")
+        spatial_sidecar = state.get("spatial")
         # Lane timings for the admin views: the two lanes overlap, so the
         # old per-stage ladder is now picture/sound walls plus their split.
         t_lanes = time.monotonic() - _t
@@ -486,6 +506,7 @@ def run_index_job(worker_db, job):
             language=language,
             warnings=warnings,
             perception=perception_sidecar,
+            spatial=spatial_sidecar,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         _finish_setup(worker_db, project_id, session_id, info, index,
@@ -574,11 +595,20 @@ def _run_clip_index(worker_db, job, asset):
             except Exception as e:
                 warnings.append(f"shot detection failed ({str(e)[:120]})")
             worker_db.run(dbx.set_progress, job_id, 70)
-            tile_keys, tile_step = _build_and_upload_tiles(
+            tile_keys, tile_step, spatial_sidecar = _build_and_upload_tiles(
                 job_id, project_id, sha, src, info["duration"], workdir,
                 warnings,
                 seek_ceiling=max(0.0, info["duration"] - 0.05))
+            try:
+                spatial_sidecar = spatial.augment_with_shot_frames(
+                    src, info["duration"], workdir, spatial_sidecar, shots)
+            except Exception as e:
+                warnings.append(
+                    f"shot-boundary spatial supplement failed "
+                    f"({str(e)[:120]}) — coarse face/text track kept")
             _mark("tiles_s")
+        else:
+            spatial_sidecar = None
 
         perception_sidecar = None
         if wav_local:
@@ -605,6 +635,7 @@ def _run_clip_index(worker_db, job, asset):
             language=language,
             warnings=warnings,
             perception=perception_sidecar,
+            spatial=spatial_sidecar,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         worker_db.run(dbx.update_asset_meta, asset["id"],

@@ -1200,7 +1200,7 @@ check("set_color_grade rejects unknown presets listing the real ones",
       agent_tools.set_color_grade(ToolCtx({}), "sepia")
       .startswith("REJECTED"))
 tctx = ToolCtx({"keep": [[0.0, 20.0]]})
-agent_tools.add_zoom(tctx, 2, 4, strength=9.0)
+agent_tools.add_zoom(tctx, 2, 4, strength=9.0, cx=0.5, cy=0.5)
 check("add_zoom clamps strength and assigns an id",
       tctx.written["effects"]["zooms"][0]["strength"] == 4.5 and
       tctx.written["effects"]["zooms"][0]["id"] == "zm1")
@@ -1601,12 +1601,14 @@ agent_tools.set_transitions(tctx2, "none")
 check("set_transitions 'none' clears an existing transition",
       tctx2.written["effects"]["transition"] is None)
 tctx3 = ToolCtx({"keep": [[0.0, 20.0]]})
-r = agent_tools.add_zoom(tctx3, 2, 6, strength=0.3, mode="push_in")
+r = agent_tools.add_zoom(tctx3, 2, 6, strength=0.3, mode="push_in",
+                         cx=0.5, cy=0.5)
 check("add_zoom stores non-default modes",
       tctx3.written["effects"]["zooms"][0]["mode"] == "push_in" and
       "Ken Burns push-in" in r)
 tctx4 = ToolCtx({"keep": [[0.0, 20.0]]})
-agent_tools.add_zoom(tctx4, 2, 6, strength=0.3, mode="punch")
+agent_tools.add_zoom(tctx4, 2, 6, strength=0.3, mode="punch",
+                     cx=0.5, cy=0.5)
 check("add_zoom omits mode for the punch default",
       "mode" not in tctx4.written["effects"]["zooms"][0])
 check("add_zoom rejects unknown modes listing the real ones",

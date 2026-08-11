@@ -943,6 +943,43 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     return msgs
 
 
+def _compact_initial_filmstrip(messages):
+    """Drop only the turn's broad filmstrip pixels after planning.
+
+    The first model call needs the complete contact sheets to decide what the
+    footage is. Re-sending the same large image payload on every dispatch and
+    preview call added latency without adding evidence. Once the model has
+    recorded a plan or landed a write, keep the labels and an explicit memory
+    note but remove those initial pixels. Exact frames returned later by
+    look_at/look_at_asset live in separate messages and are never touched.
+    """
+    marker = "FILMSTRIPS & STILLS"
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") != "user" or not isinstance(content, list):
+            continue
+        first_text = next((part.get("text", "") for part in content
+                           if isinstance(part, dict)
+                           and part.get("type") == "text"), "")
+        if not first_text.startswith(marker):
+            continue
+        text_parts = [part for part in content
+                      if isinstance(part, dict)
+                      and part.get("type") == "text"]
+        if len(text_parts) == len(content):
+            return False
+        text_parts[0] = {
+            "type": "text",
+            "text": ("FILMSTRIPS & STILLS — inspected during the initial "
+                     "planning call. Their labels remain below. For any "
+                     "new visual decision, use look_at/look_at_asset at "
+                     "exact measured moments; do not rely on memory."),
+        }
+        message["content"] = text_parts
+        return True
+    return False
+
+
 def _activity(worker_db, session_id, name, args, result, source=None,
               edl_version=None, change=None):
     res_str = (result or "").replace("\n", " ")
@@ -1946,8 +1983,8 @@ def _time_pressure_note(result, t_start, warned):
     return result
 
 
-_TASTE_PUSHBACK = """[system: the TASTE AUDIT on the preview you just \
-rendered is still outstanding. These are craft defects in YOUR edit — things \
+_TASTE_PUSHBACK = """[system: the INDEPENDENT QUALITY REVIEW on the preview you just \
+rendered is still outstanding. These are visible or measured craft defects in YOUR edit — things \
 the user did not ask for — and the turn does not end with them unanswered:
 
 {findings}
@@ -1961,7 +1998,7 @@ having things taken OUT of it.
 and say which one and why, in one clause, in your reply.
 
 What you may not do is reply as though the preview came back clean. \
-"Preview is ready" over an audit like this is how an edit nobody wants gets \
+"Preview is ready" over a review like this is how an edit nobody wants gets \
 handed over as finished.]"""
 
 
@@ -2111,8 +2148,20 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         plan_note = ""
         ep = getattr(ctx, "edit_plan", None)
         if ep and ep.get("steps"):
+            anchors = "; ".join(
+                row for row in (
+                    f"format={ep.get('format')}" if ep.get("format") else "",
+                    f"intent={ep.get('intent')}" if ep.get("intent") else "",
+                    ("style=" + str(ep.get("style_family"))
+                     if ep.get("style_family") else ""),
+                    ("must keep=" + ", ".join(ep.get("must_keep") or [])
+                     if ep.get("must_keep") else ""),
+                    ("must avoid=" + ", ".join(ep.get("must_avoid") or [])
+                     if ep.get("must_avoid") else ""),
+                ) if row)
             plan_note = (" YOUR RECORDED PLAN: "
                          + (f"[{ep['brief']}] " if ep.get("brief") else "")
+                         + (f"ANCHORS({anchors}). " if anchors else "")
                          + " ".join(f"{i + 1}) {s}"
                                     for i, s in enumerate(ep["steps"]))
                          + " — finish its unfinished steps.")
@@ -2120,7 +2169,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          "content": _CONTINUATION_NOTE.format(
                              done=done, plan=plan_note,
                              why=_cont.get("why", "step ceiling"))})
-    tools = agent_tools.openai_tools(model)
+    tools = agent_tools.openai_tools(
+        model, compact=bool(getattr(ctx, "edit_plan", None)
+                            or ctx.versions_written))
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
     timings = _cont.get("timings") or \
@@ -2786,6 +2837,19 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                    "is labeled; timestamps are printed "
                                    "under the tiles):"})
                 messages.append({"role": "user", "content": content})
+                # Only now are those pixels evidence the model has received.
+                # A look_at and add_zoom emitted in the SAME tool batch must
+                # not let guessed coordinates pass before this message exists.
+                ctx._looked_source_times.update(
+                    getattr(ctx, "_pending_looked_source_times", set()))
+                ctx._looked_output_times.update(
+                    getattr(ctx, "_pending_looked_output_times", set()))
+                for key, times in getattr(
+                        ctx, "_pending_looked_asset_times", {}).items():
+                    ctx._looked_asset_times.setdefault(key, set()).update(times)
+            ctx._pending_looked_source_times = set()
+            ctx._pending_looked_output_times = set()
+            ctx._pending_looked_asset_times = {}
 
         # Round 98 — direct HEARING, the exact pending_images contract for
         # sound: a listen tool (or render_preview) queued short clips this
@@ -2812,6 +2876,24 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                        "is labeled with its clock and "
                                        "span):"})
                     messages.append({"role": "user", "content": content})
+                    # Promotion happens after the audio part is attached, so
+                    # listen_to + add_music in one parallel tool batch cannot
+                    # masquerade as an audition the model never heard.
+                    ctx._listened_asset_keys.update(getattr(
+                        ctx, "_pending_listened_asset_keys", set()))
+            ctx._pending_listened_asset_keys = set()
+
+        # The broad contact sheets did their job on the planning call. Keep
+        # exact look/listen evidence added above, but do not pay to resend all
+        # project pixels on every subsequent model dispatch.
+        if getattr(ctx, "edit_plan", None) or ctx.versions_written:
+            _compact_initial_filmstrip(messages)
+            # The first planning request receives every tool's complete
+            # handbook. Once a plan or edit exists, re-sending 61k characters
+            # of descriptions on every dispatch is pure latency/context
+            # pressure. Keep every function and its full parameter schema,
+            # but reduce each description to a short reminder.
+            tools = agent_tools.openai_tools(model, compact=True)
 
         # Round 98: speculative preview. A step that landed writes is almost
         # always followed by render_preview one model call (~13s) later —

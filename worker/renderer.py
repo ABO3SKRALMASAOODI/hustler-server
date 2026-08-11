@@ -1477,30 +1477,33 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         _ftrack = ((edl.get("frame") or {}).get("focus_track")
                    if isinstance(edl.get("frame"), dict) else None) or []
 
-        def _focus_for(s, e):
+        def _frame_for(s, e):
             if not _ftrack:
-                return frame_focus
+                return frame_focus, mode
             m = (s + e) / 2.0
             for sp in _ftrack:
                 try:
                     if float(sp.get("t0", 0)) <= m <= float(sp.get("t1", 0)):
                         fx, fy = sp.get("x"), sp.get("y")
+                        span_mode = sp.get("mode") or mode
                         if fx is None and fy is None:
-                            return frame_focus
-                        return (fx if fx is not None else
-                                (frame_focus[0] if frame_focus else None),
-                                fy if fy is not None else
-                                (frame_focus[1] if frame_focus else None))
+                            return frame_focus, span_mode
+                        return ((fx if fx is not None else
+                                 (frame_focus[0] if frame_focus else None),
+                                 fy if fy is not None else
+                                 (frame_focus[1] if frame_focus else None)),
+                                span_mode)
                 except (TypeError, ValueError):
                     continue
-            return frame_focus
+            return frame_focus, mode
 
         for i in range(n):
             # frame_focus reaches ONLY the main footage: the focus point was
             # measured on the source video, so inserts (below) keep the
             # center crop.
+            seg_focus, seg_mode = _frame_for(*keep[i])
             _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
-                             mode, f"s{i}", focus=_focus_for(*keep[i]),
+                             seg_mode, f"s{i}", focus=seg_focus,
                              seg_dur=seg_out_len[i])
 
     # insert blocks: trim to their window (source_start_s picks where in

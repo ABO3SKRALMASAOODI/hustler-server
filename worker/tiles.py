@@ -149,8 +149,23 @@ def build_for_video(src_path, duration, out_dir, seek_ceiling=None,
                     parallelism=4, step_s=None, max_tiles=None):
     """The whole strip for one video file. Returns (tiles, step) where
     tiles = [(path, t_start, t_end)]."""
+    built, step, _times, _frames = build_for_video_with_frames(
+        src_path, duration, out_dir, seek_ceiling=seek_ceiling,
+        parallelism=parallelism, step_s=step_s, max_tiles=max_tiles)
+    return built, step
+
+
+def build_for_video_with_frames(src_path, duration, out_dir,
+                                seek_ceiling=None, parallelism=4,
+                                step_s=None, max_tiles=None):
+    """Tile build plus its already-decoded frames for structured perception.
+
+    Keeping this as a second API preserves every existing caller while the
+    indexer avoids decoding the same 144 instants twice for filmstrip and
+    face/text tracks.
+    """
     times, step = plan_times(duration, step_s=step_s, max_tiles=max_tiles)
     frames = extract_frames(src_path, times, out_dir,
                             seek_ceiling=seek_ceiling,
                             parallelism=parallelism)
-    return build_tiles(times, frames, out_dir), step
+    return build_tiles(times, frames, out_dir), step, times, frames

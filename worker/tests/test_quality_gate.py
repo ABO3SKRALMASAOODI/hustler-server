@@ -1,0 +1,309 @@
+"""Regression gate for the edit defects that caused immediate churn."""
+
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import agent_tools
+import db as dbx
+import quality_gate
+from schemas import default_edl
+
+
+def _zoom(zid, start=2.0, end=3.0, **extra):
+    return {"id": zid, "start": start, "end": end, "strength": 0.15,
+            **extra}
+
+
+def _with_zooms(*items):
+    edl = default_edl(20.0)
+    edl["effects"] = {"zooms": list(items)}
+    return edl
+
+
+def test_new_zoom_needs_a_real_target_but_legacy_zoom_can_be_repaired():
+    previous = _with_zooms(_zoom("legacy"))
+    proposed = _with_zooms(_zoom("legacy"), _zoom("new", 5.0, 6.0))
+    findings = quality_gate.blocking_findings(previous, proposed)
+    assert any("new" in x and "no measured visual target" in x
+               for x in findings)
+
+    # Delta-based: deleting an old blind zoom must never be blocked by the
+    # fact that the saved EDL predates the rule.
+    repaired = _with_zooms()
+    assert quality_gate.blocking_findings(previous, repaired) == []
+
+
+def test_unchanged_idless_legacy_hazard_does_not_block_unrelated_repair():
+    legacy = _zoom(None)
+    previous = _with_zooms(legacy)
+    proposed = _with_zooms(dict(legacy))
+    proposed["effects"]["grade"] = "warm"
+    assert quality_gate.blocking_findings(previous, proposed) == []
+
+    # A newly added id-less hazard is still a delta and must be refused.
+    proposed["effects"]["zooms"].append(_zoom(None, 6.0, 7.0))
+    assert any("no measured visual target" in finding for finding in
+               quality_gate.blocking_findings(previous, proposed))
+
+
+def test_aimed_zoom_passes_and_overlapping_magnification_does_not():
+    previous = _with_zooms(_zoom("old", 2.0, 4.0, cx=0.4, cy=0.4))
+    safe = _with_zooms(_zoom("old", 2.0, 4.0, cx=0.4, cy=0.4),
+                       _zoom("new", 6.0, 7.0, cx=0.7, cy=0.4))
+    assert quality_gate.blocking_findings(previous, safe) == []
+
+    stacked = _with_zooms(_zoom("old", 2.0, 4.0, cx=0.4, cy=0.4),
+                          _zoom("new", 3.0, 5.0, cx=0.7, cy=0.4))
+    assert any("overlaps zoom old" in x
+               for x in quality_gate.blocking_findings(previous, stacked))
+
+
+def test_sfx_are_opt_in_and_cannot_be_stacked_into_one_muddy_hit():
+    previous = default_edl(20.0)
+    proposed = default_edl(20.0)
+    proposed["sfx"] = [
+        {"id": "sx1", "storage_key": "a.wav", "at": 5.0,
+         "gain_db": -10.0},
+        {"id": "sx2", "storage_key": "b.wav", "at": 5.2,
+         "gain_db": -10.0},
+    ]
+    unasked = quality_gate.blocking_findings(previous, proposed,
+                                              "make this edit nice")
+    assert any("without an explicit sound-design request" in x for x in unasked)
+    assert any("only 0.20s apart" in x for x in unasked)
+
+    spaced = default_edl(20.0)
+    spaced["sfx"] = [dict(proposed["sfx"][0]),
+                     dict(proposed["sfx"][1], at=7.0)]
+    assert quality_gate.blocking_findings(
+        previous, spaced, "add sound effects to both visible clicks") == []
+
+
+def test_selected_audio_requires_real_audition_unless_user_chose_it():
+    class Ctx:
+        enforce_spatial = True
+        user_message = "add cinematic background music"
+        _listened_asset_keys = set()
+
+    ctx = Ctx()
+    assert not agent_tools._audio_was_auditioned(
+        ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
+    ctx._pending_listened_asset_keys = {"music/1/pick.mp3"}
+    assert not agent_tools._audio_was_auditioned(
+        ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
+    ctx._listened_asset_keys.add("music/1/pick.mp3")
+    assert agent_tools._audio_was_auditioned(
+        ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
+
+    ctx._listened_asset_keys.clear()
+    ctx.user_message = "use this music I attached"
+    assert agent_tools._audio_was_auditioned(
+        ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
+
+
+def test_independent_text_layers_cannot_stack_but_title_hierarchy_can():
+    previous = default_edl(20.0)
+    previous["texts"] = [{"id": "tx1", "text": "OLD", "start": 2.0,
+                          "end": 5.0, "template": "callout"}]
+    stacked = default_edl(20.0)
+    stacked["texts"] = list(previous["texts"]) + [
+        {"id": "tx2", "text": "NEW", "start": 3.0, "end": 4.0,
+         "template": "big_number"}]
+    assert any("Two independent word layers" in finding for finding in
+               quality_gate.blocking_findings(previous, stacked))
+
+    hierarchy = default_edl(20.0)
+    hierarchy["texts"] = [
+        {"id": "tx1", "text": "TITLE", "start": 2.0, "end": 5.0,
+         "template": "title"},
+        {"id": "tx2", "text": "SUBTITLE", "start": 2.0, "end": 5.0,
+         "template": "subtitle"},
+    ]
+    assert quality_gate.blocking_findings(
+        default_edl(20.0), hierarchy) == []
+
+
+class _Db:
+    def __init__(self):
+        self.rows = [{"version": 1, "json": default_edl(20.0)}]
+        self.inserts = 0
+
+    def run(self, fn, *args):
+        if fn is dbx.latest_edl:
+            return self.rows[-1]
+        if fn is dbx.insert_edl:
+            self.inserts += 1
+            row = {"version": self.rows[-1]["version"] + 1, "json": args[1]}
+            self.rows.append(row)
+            return row["version"]
+        if fn is dbx.get_edl_version:
+            return next(x for x in self.rows if x["version"] == args[1])
+        raise AssertionError(f"unexpected DB call: {fn}")
+
+
+def _real_ctx(message="make it engaging"):
+    fake = _Db()
+    ctx = agent_tools.ToolContext(
+        fake, {"id": 9, "user_id": 3},
+        {"id": 7, "chat_session_id": 11},
+        {"video": {"duration": 20.0, "width": 1920, "height": 1080,
+                   "fps": 30.0}, "words": []},
+        tempfile.mkdtemp())
+    ctx.user_message = message
+    # Tests that stage aimed zooms model the exact-frame observation required
+    # of the production agent. Missing-target tests still fail independently.
+    ctx._looked_output_times.add(2.5)
+    ctx._looked_output_times.add(3.5)
+    ctx._looked_output_times.add(4.5)
+    return ctx, fake
+
+
+def test_quality_gate_is_enforced_at_the_single_commit_boundary():
+    ctx, fake = _real_ctx()
+    edl = ctx.latest_edl()["json"]
+    edl = {**edl, "effects": {"zooms": [_zoom("zm1")]}}
+    result = ctx.write_edl(edl, "blind center punch")
+    assert result.startswith("REJECTED BY QUALITY GATE")
+    assert fake.inserts == 0 and ctx.latest_edl()["version"] == 1
+
+    aimed = {**edl, "effects": {"zooms": [
+        _zoom("zm1", cx=0.35, cy=0.42)]}}
+    result = ctx.write_edl(aimed, "measured face punch")
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
+
+
+def test_add_zoom_rejects_the_old_center_default_before_writing():
+    class Ctx:
+        duration = 20.0
+
+        def latest_edl(self):
+            return {"json": default_edl(20.0)}
+
+        def write_edl(self, *_args):
+            raise AssertionError("unsafe zoom reached write_edl")
+
+    result = agent_tools.add_zoom(Ctx(), 2.0, 3.0)
+    assert result.startswith("REJECTED") and "no visual target" in result
+
+
+def test_real_agent_cannot_claim_guessed_zoom_coordinates_as_evidence():
+    ctx, fake = _real_ctx()
+    ctx._looked_output_times.clear()
+    result = agent_tools.add_zoom(ctx, 8.0, 9.0, cx=0.5, cy=0.5)
+    assert result.startswith("REJECTED")
+    assert "look_at evidence" in result
+    assert fake.inserts == 0
+
+    # A look call in the same parallel tool batch is only pending; the model
+    # has not received those pixels yet, so it still cannot aim from them.
+    ctx._pending_looked_output_times.add(8.5)
+    result = agent_tools.add_zoom(ctx, 8.0, 9.0, cx=0.5, cy=0.5)
+    assert result.startswith("REJECTED") and fake.inserts == 0
+
+    ctx._looked_output_times.add(8.5)
+    result = agent_tools.add_zoom(ctx, 8.0, 9.0, cx=0.5, cy=0.5)
+    assert result.startswith("EDL v1 -> v2")
+
+
+def test_source_face_target_maps_through_a_vertical_crop():
+    class Ctx:
+        index = {"video": {"width": 1920, "height": 1080}}
+
+    edl = default_edl(20.0)
+    edl["frame"] = {"ratio": "9:16", "mode": "crop",
+                    "focus_x": 0.75, "focus_y": 0.5}
+    # A face at the crop focus maps to the middle of the output, while a face
+    # on the discarded left side is correctly refused.
+    mapped = agent_tools._source_point_to_output(Ctx(), edl, 3.0, (0.75, 0.4))
+    assert mapped is not None and 0.45 <= mapped[0] <= 0.55
+    assert agent_tools._source_point_to_output(
+        Ctx(), edl, 3.0, (0.05, 0.4)) is None
+
+
+def test_edit_recipe_commits_multiple_safe_moves_as_one_version():
+    ctx, fake = _real_ctx()
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "set_frame",
+         "args": {"ratio": "9:16", "mode": "pad_blur"}},
+        {"tool": "set_color_grade", "args": {"preset": "warm"}},
+    ], brief="measured vertical talking-head treatment")
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
+    assert fake.rows[-1]["json"]["frame"]["ratio"] == "9:16"
+    assert fake.rows[-1]["json"]["effects"]["grade"] == "warm"
+    assert ctx.edit_plan["brief"] == "measured vertical talking-head treatment"
+
+
+def test_structured_edit_brief_survives_atomic_execution():
+    ctx, _fake = _real_ctx()
+    planned = agent_tools.set_edit_plan(
+        ctx,
+        ["preserve the full gameplay frame", "apply a restrained finish"],
+        brief="clean gameplay highlight",
+        format="gameplay montage",
+        intent="make the win readable without hiding the HUD",
+        style_family="clean high-energy",
+        must_keep=["HUD", "winning move"],
+        must_avoid=["blind center crop", "decorative SFX"],
+    )
+    assert planned.startswith("Plan recorded")
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "set_frame",
+         "args": {"ratio": "9:16", "mode": "pad_blur"}},
+        {"tool": "set_color_grade", "args": {"preset": "vibrant"}},
+    ])
+    assert result.startswith("EDL v1 -> v2")
+    assert ctx.edit_plan["format"] == "gameplay montage"
+    assert ctx.edit_plan["must_keep"] == ["HUD", "winning move"]
+    assert ctx.edit_plan["must_avoid"] == ["blind center crop",
+                                            "decorative SFX"]
+
+
+def test_edit_recipe_aborts_every_staged_move_on_late_rejection():
+    ctx, fake = _real_ctx()
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "set_color_grade", "args": {"preset": "warm"}},
+        {"tool": "add_zoom", "args": {"start": 2.0, "end": 3.0}},
+    ])
+    assert result.startswith("RECIPE ABORTED")
+    assert fake.inserts == 0
+    assert fake.rows[-1]["json"].get("effects") is None
+
+
+def test_edit_recipe_final_quality_gate_is_atomic():
+    ctx, fake = _real_ctx()
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "add_zoom",
+         "args": {"start": 2.0, "end": 4.0, "cx": .4, "cy": .4}},
+        {"tool": "add_zoom",
+         "args": {"start": 3.0, "end": 5.0, "cx": .7, "cy": .4}},
+    ])
+    assert result.startswith("REJECTED BY QUALITY GATE")
+    assert fake.inserts == 0
+
+
+def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
+    tools = {t["function"]["name"]: t for t in agent_tools.openai_tools()}
+    assert "apply_edit_recipe" in tools
+    schema = tools["apply_edit_recipe"]["function"]["parameters"]
+    assert schema["required"] == ["operations"]
+    assert "apply_edit_recipe" in agent_tools.WRITE_TOOLS
+
+
+def test_severe_dimension_change_cannot_guess_a_center_crop():
+    ctx, fake = _real_ctx("make this vertical")
+    result = agent_tools.set_frame(ctx, "9:16", "crop")
+    assert result.startswith("REJECTED")
+    assert "auto_reframe" in result and "discard" in result
+    assert fake.inserts == 0
+
+    # Literal intent is allowed; the safety rule must not argue with someone
+    # who specifically chose the center rather than merely requesting 9:16.
+    centered, centered_db = _real_ctx("use a center crop for the whole video")
+    result = agent_tools.set_frame(centered, "9:16", "crop")
+    assert result.startswith("EDL v1 -> v2")
+    assert centered_db.inserts == 1

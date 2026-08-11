@@ -379,6 +379,10 @@ class CaptionsFromTranscript(BaseModel):
     # cannot desync a karaoke preset. None (never []) so an EDL written before
     # this existed keeps its exact signature and its cached render.
     text_fixes: Optional[List[List[str]]] = None
+    # Source-time spans chosen from measured face/text boxes. Render-time
+    # caption placement follows this deterministic track rather than assuming
+    # one global bottom/middle position fits every shot.
+    placement_track: Optional[List["CaptionPlacementSpan"]] = None
 
     _style = field_validator("style", mode="before")(_coerce_style)
 
@@ -408,6 +412,13 @@ class CaptionsFromTranscript(BaseModel):
         # bounded so a runaway list can't bloat the EDL; [] collapses to
         # None so it never shows as a change in edl_signature.
         return words[:60] or None
+
+
+class CaptionPlacementSpan(BaseModel):
+    t0: float
+    t1: float
+    position: Literal["bottom", "top", "middle"]
+    reason: Optional[str] = None
 
 
 class MusicItem(BaseModel):
@@ -491,6 +502,10 @@ class FocusSpan(BaseModel):
     t1: float
     x: Optional[float] = None
     y: Optional[float] = None
+    # Auto-reframe can safely FIT an unmeasurable/wide cutaway while tightly
+    # cropping the measured talking-head shots around it. None preserves the
+    # frame's global mode for every legacy track.
+    mode: Optional[Literal["crop", "pad", "pad_blur"]] = None
 
     @field_validator("x", "y")
     @classmethod
@@ -707,6 +722,11 @@ class ZoomItem(BaseModel):
                            "follow", "path"]] = None
     cx: Optional[float] = None
     cy: Optional[float] = None
+    # Provenance for an exact inspected/measured target. An explicit (0.5,
+    # 0.5) canonicalizes to cx=cy=None for legacy render-byte identity, so
+    # this flag preserves the distinction between "measured center" and the
+    # old blind default without changing renderer geometry.
+    target_measured: Optional[bool] = None
     path: Optional[List[ZoomPathPoint]] = None
     ease: Optional[Literal["cubic_in_out", "linear"]] = None
     rect: Optional[List[float]] = None
@@ -1871,6 +1891,20 @@ def validate_edl(data, duration=None):
         kg = edl.captions.karaoke_group_n
         if kg is not None:
             edl.captions.karaoke_group_n = min(max(int(kg), 1), 8)
+        track = []
+        for i, span in enumerate(edl.captions.placement_track or []):
+            s, e = _r(span.t0), _r(span.t1)
+            _check_span(f"captions.placement_track[{i}]", s, e, duration)
+            track.append(CaptionPlacementSpan(
+                t0=s, t1=e, position=span.position,
+                reason=(span.reason or "")[:80] or None))
+        track.sort(key=lambda x: x.t0)
+        for a, b in zip(track, track[1:]):
+            if b.t0 < a.t1 - 0.001:
+                raise EDLValidationError(
+                    "captions.placement_track spans overlap; each source "
+                    "moment must choose exactly one placement.")
+        edl.captions.placement_track = track or None
 
     # Frame: 'source' is the absence of a frame — normalize so old EDLs and
     # explicit-source EDLs compare identical.
@@ -2880,3 +2914,6 @@ class VideoIndex(BaseModel):
     # PIPELINE_VERSION and never triggers a re-index. Declared here so any
     # code path that round-trips an index through this model preserves it.
     perception: Optional[dict] = None
+    # Pixel-measured face/text/UI track with its own version, computed lazily
+    # for old indexes to avoid a fleet-wide re-index storm.
+    spatial: Optional[dict] = None

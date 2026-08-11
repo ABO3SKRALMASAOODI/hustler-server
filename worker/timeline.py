@@ -248,7 +248,10 @@ class Timeline:
                 lo, hi = rng
                 t0o = min(max(t0o, lo), hi)
                 t1o = min(max(t1o, lo), hi)
-            out.append({"w": token, "t0": t0o, "t1": t1o})
+            out.append({"w": token, "t0": t0o, "t1": t1o,
+                        # Runtime-only provenance for spatial caption
+                        # placement. Render timing remains output time.
+                        "src_t0": t0, "src_t1": t1})
         return out
 
 

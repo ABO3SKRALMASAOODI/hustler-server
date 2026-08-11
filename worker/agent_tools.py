@@ -19,12 +19,15 @@ import db as dbx
 import inpaint
 import llm
 import matte
+import graphics
 import personseg
 import media
 import model_prices
 import music_search
 import net_fetch
 import perception
+import preview_critic
+import quality_gate
 # The takeover's geometry (how far the camera travels, where it aims) is
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
 # will use — importing the resolver is the only way those two cannot drift.
@@ -32,6 +35,7 @@ import renderer
 import sfx_search
 import sheets
 import song_find
+import spatial
 import stock
 import storage
 import subject
@@ -119,6 +123,7 @@ class ToolContext:
         self._proxy_local = None
         self._asset_locals = {}       # asset id -> downloaded local path
         self._perception = None       # main video's audio analysis, cached
+        self._spatial = None          # face/text/UI track, cached
         self._asset_perception = {}   # asset/library key -> audio analysis
         self._music_hits = {}         # search_music results this turn, by id
         self._sfx_hits = {}           # search_sfx results this turn, by id
@@ -136,6 +141,15 @@ class ToolContext:
         # image content perfectly well. sight_out says the caller takes the
         # pictures themselves, and mcp_exec drains them into the reply.
         self.pending_images = []
+        # Exact moments whose pixels were actually delivered this turn.
+        # Authored zooms must be backed by one of these observations; typing
+        # plausible-looking cx/cy values is not visual evidence.
+        self._looked_source_times = set()
+        self._looked_output_times = set()
+        self._looked_asset_times = {}
+        self._pending_looked_source_times = set()
+        self._pending_looked_output_times = set()
+        self._pending_looked_asset_times = {}
         self.direct_sight = False
         self.sight_out = False
         # The edit plan the agent recorded for THIS turn (set_edit_plan,
@@ -150,6 +164,11 @@ class ToolContext:
         # results, exactly like pending_images — and only when the agent
         # model actually hears (llm.agent_hears).
         self.pending_audio = []
+        # Audio assets the editing model actually auditioned this turn.
+        # Search-result names/tags are not sufficient evidence that an SFX
+        # sounds professional in the cut.
+        self._listened_asset_keys = set()
+        self._pending_listened_asset_keys = set()
         # EDL versions this turn already enqueued a SPECULATIVE preview for
         # (round 98) — the loop's fire-ahead encode. Bounds repeats and lets
         # render_preview adopt instead of re-enqueueing.
@@ -165,6 +184,7 @@ class ToolContext:
         # the model's mood. It is now a thing the turn has to answer for.
         self.last_taste = []
         self.last_taste_version = None
+        self.last_visual_critic = None
         # What the user asked for THIS turn, verbatim. Read only to SUPPRESS
         # taste findings (round 52): a fade from black is a defect on a reel
         # right up until the moment somebody asks for one, and a critic that
@@ -349,6 +369,10 @@ class ToolContext:
                         "call reset_edit to start from the full video, then "
                         "rebuild what they asked for.")
             return msg
+        blocked = quality_gate.blocking_findings(
+            prev["json"], normalized, self.user_message)
+        if blocked:
+            return quality_gate.rejection_message(prev["version"], blocked)
         if edl_signature(normalized) == edl_signature(prev["json"]):
             return (f"NO CHANGE — the EDL is identical to v{prev['version']}; "
                     "the requested change may need a different tool or may "
@@ -1135,6 +1159,15 @@ def _look_at_output(ctx, output_times, question):
                     "not shown here]")
         frames.append(fp)
         labels.append(lb + sfx)
+    if frames:
+        bucket = ("_pending_looked_output_times"
+                  if getattr(ctx, "direct_sight", False)
+                  else "_looked_output_times")
+        seen = getattr(ctx, bucket, None)
+        if seen is None:
+            seen = set()
+            setattr(ctx, bucket, seen)
+        seen.update(float(wants[i]) for i in results)
     missing = len(wants) - len(frames)
     out = _deliver_frames(
         ctx, frames, labels, question,
@@ -1243,6 +1276,18 @@ def look_at(ctx, times=None, question="", start=None, end=None,
                 "from get_shots, the transcript and get_video_info instead, "
                 "and say you could not LOOK at it rather than that the video "
                 "is broken.")
+    bucket = ("_pending_looked_source_times"
+              if getattr(ctx, "direct_sight", False)
+              else "_looked_source_times")
+    seen = getattr(ctx, bucket, None)
+    if seen is None:
+        seen = set()
+        setattr(ctx, bucket, seen)
+    for label in frame_names:
+        try:
+            seen.add(float(label.lstrip("@").rstrip("s")))
+        except (TypeError, ValueError):
+            continue
     try:
         has_frame = bool((ctx.latest_edl()["json"].get("frame") or {})
                          .get("ratio"))
@@ -1345,6 +1390,14 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
             local = _asset_local_path(ctx, asset)
         except Exception as e:
             return f"Cannot fetch that asset right now ({e})."
+        bucket = ("_pending_looked_asset_times"
+                  if getattr(ctx, "direct_sight", False)
+                  else "_looked_asset_times")
+        seen = getattr(ctx, bucket, None)
+        if seen is None:
+            seen = {}
+            setattr(ctx, bucket, seen)
+        seen.setdefault(str(asset_key), set()).add(0.0)
         return _deliver_frames(ctx, [local], [name[:60] or "image"], question,
                                f"The uploaded image '{name}'")
     dur = _asset_media_duration(ctx, asset)
@@ -1379,6 +1432,15 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
                 f"({(err or 'unknown error')[:220]}). The clip can still "
                 "be inserted — you just cannot see inside it; ask the user "
                 "which part to use instead of guessing.")
+    bucket = ("_pending_looked_asset_times"
+              if getattr(ctx, "direct_sight", False)
+              else "_looked_asset_times")
+    seen = getattr(ctx, bucket, None)
+    if seen is None:
+        seen = {}
+        setattr(ctx, bucket, seen)
+    seen.setdefault(str(asset_key), set()).update(
+        float(times[i]) for i, _fp in pairs)
     out = _deliver_frames(
         ctx, frames, frame_names, question,
         f"Frames from '{name}' ({asset['kind']}, {dur:.0f}s long)")
@@ -1671,6 +1733,331 @@ def _parse_style(style):
                 '(all fields optional).')
 
 
+def _get_spatial(ctx):
+    """Cached face/text/UI track for the main source."""
+    if getattr(ctx, "_spatial", None) is not None:
+        return ctx._spatial
+    indexed = (getattr(ctx, "index", None) or {}).get("spatial")
+    if isinstance(indexed, dict) and indexed.get("v") == \
+            spatial.SPATIAL_VERSION:
+        ctx._spatial = indexed
+        return indexed
+    original = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
+    if not original or not original.get("sha256"):
+        raise spatial.SpatialError("no indexed main video")
+    index_row = ctx.db.run(dbx.get_index_by_sha, original["sha256"])
+    if not index_row:
+        raise spatial.SpatialError("no index row for this video")
+    ctx._spatial = spatial.get_or_compute_for_index(
+        ctx.db, dbx, index_row, ctx.proxy_path(), ctx.workdir)
+    return ctx._spatial
+
+
+def _source_box_to_output(ctx, edl, source_t, box):
+    """A source-frame box clipped/mapped into the rendered output frame."""
+    video = ctx.index.get("video") or {}
+    try:
+        sw, sh = float(video["width"]), float(video["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    frame = edl.get("frame") or {}
+    W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
+    kind, fx0, fy0, fx1, fy1 = renderer.fit_fractions(
+        sw, sh, W, H, _frame_mode_at_source(edl, source_t),
+        _frame_focus_at_source(edl, source_t))
+    x0, y0, x1, y1 = (float(v) for v in box)
+    if kind == "crop":
+        x0, y0, x1, y1 = (max(x0, fx0), max(y0, fy0),
+                          min(x1, fx1), min(y1, fy1))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return [round((x0 - fx0) / max(fx1 - fx0, 1e-9), 4),
+                round((y0 - fy0) / max(fy1 - fy0, 1e-9), 4),
+                round((x1 - fx0) / max(fx1 - fx0, 1e-9), 4),
+                round((y1 - fy0) / max(fy1 - fy0, 1e-9), 4)]
+    return [round(fx0 + x0 * (fx1 - fx0), 4),
+            round(fy0 + y0 * (fy1 - fy0), 4),
+            round(fx0 + x1 * (fx1 - fx0), 4),
+            round(fy0 + y1 * (fy1 - fy0), 4)]
+
+
+_CAPTION_ZONES = {
+    "top": (0.04, 0.31),
+    "middle": (0.31, 0.68),
+    # Stops above feed-platform chrome; captions.py applies the exact margin.
+    "bottom": (0.66, 0.88),
+}
+
+
+def _box_zone_overlap(box, zone):
+    x0, y0, x1, y1 = box
+    zy0, zy1 = zone
+    inter = max(0.0, min(y1, zy1) - max(y0, zy0)) * max(0.0, x1 - x0)
+    area = max(1e-9, (x1 - x0) * (y1 - y0))
+    return inter / area
+
+
+def _safe_caption_position(faces, text, dense_ui, preferred="bottom"):
+    """Pick a clean vertical band, or None when every band is occupied."""
+    base = {"bottom": 0.0, "top": 0.25, "middle": 0.8}
+    # Honor the visual grammar as a preference, not as permission to write on
+    # a face. A spotlight preset starts in the middle; other looks start low.
+    if preferred in base:
+        base[preferred] -= 0.2
+    score = dict(base)
+    for pos, zone in _CAPTION_ZONES.items():
+        for box in faces:
+            ov = _box_zone_overlap(box, zone)
+            cy = (box[1] + box[3]) / 2.0
+            score[pos] += 7.0 * ov + (2.5 if zone[0] <= cy <= zone[1] else 0)
+        for box in text:
+            score[pos] += 4.5 * _box_zone_overlap(box, zone)
+        if dense_ui:
+            score[pos] += 0.8
+    winner = min(score, key=score.get)
+    return (winner, score) if score[winner] <= 2.6 else (None, score)
+
+
+def _caption_placement_track(ctx, edl, sidecar, preferred="bottom"):
+    """Measured source-time placement spans plus unsafe/analyzed counts."""
+    keep = [(float(a), float(b)) for a, b in (edl.get("keep") or [])]
+    picks = []
+    for sample in (sidecar or {}).get("samples") or []:
+        t = float(sample.get("t", 0))
+        span = next(((a, b) for a, b in keep if a <= t <= b), None)
+        if span is None:
+            continue
+        faces = [m for box in sample.get("faces") or []
+                 if (m := _source_box_to_output(ctx, edl, t, box))]
+        text_boxes = [m for box in sample.get("text") or []
+                      if (m := _source_box_to_output(ctx, edl, t, box))]
+        pos, scores = _safe_caption_position(
+            faces, text_boxes, bool(sample.get("dense_ui")), preferred)
+        picks.append({"t": t, "span": span, "position": pos,
+                      "face": bool(faces), "text": bool(text_boxes),
+                      "scores": scores})
+    if not picks:
+        return [], 0, 0
+    out, unsafe = [], 0
+    for i, pick in enumerate(picks):
+        a, b = pick["span"]
+        prev_t = picks[i - 1]["t"] if i > 0 and picks[i - 1]["span"] == \
+            pick["span"] else a
+        next_t = picks[i + 1]["t"] if i + 1 < len(picks) and \
+            picks[i + 1]["span"] == pick["span"] else b
+        t0 = max(a, (prev_t + pick["t"]) / 2.0 if i > 0 else a)
+        t1 = min(b, (pick["t"] + next_t) / 2.0
+                 if i + 1 < len(picks) else b)
+        if t1 - t0 < 0.05:
+            continue
+        if pick["position"] is None:
+            unsafe += 1
+            continue
+        reason = ("avoids face and source text" if pick["face"] and pick["text"]
+                  else "avoids face" if pick["face"]
+                  else "avoids source text" if pick["text"]
+                  else "clean frame band")
+        row = {"t0": round(t0, 2), "t1": round(t1, 2),
+               "position": pick["position"], "reason": reason}
+        if out and out[-1]["position"] == row["position"] and \
+                out[-1]["reason"] == row["reason"] and \
+                row["t0"] - out[-1]["t1"] <= 0.08:
+            out[-1]["t1"] = row["t1"]
+        else:
+            out.append(row)
+    return out, unsafe, len(picks)
+
+
+def _fixed_text_band(ctx, edl, out_start, out_end, preferred="middle",
+                     lock=False):
+    """Choose one measured-safe band for a designed text window.
+
+    Caption placement may change shot by shot; a title/callout is one visual
+    object and therefore needs one stable band for its whole lifetime.  This
+    aggregates the same face/source-text evidence over the object's exact
+    PROGRAM window and rejects a band when it collides in more than 20% of
+    measured frames. ``lock`` means an explicit user y-coordinate may not be
+    silently moved to another band.
+    """
+    try:
+        sidecar = _get_spatial(ctx)
+    except Exception as exc:
+        return None, 0, 0, str(exc)[:160]
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+    except Exception as exc:
+        return None, 0, 0, f"could not map timeline: {str(exc)[:120]}"
+
+    rows = []
+
+    def _scores(source_t, sample):
+        faces = [mapped for box in (sample.get("faces") or [])
+                 if (mapped := _source_box_to_output(
+                     ctx, edl, source_t, box)) is not None]
+        text_boxes = [mapped for box in (sample.get("text") or [])
+                      if (mapped := _source_box_to_output(
+                          ctx, edl, source_t, box)) is not None]
+        _pos, scores = _safe_caption_position(
+            faces, text_boxes, bool(sample.get("dense_ui")), preferred)
+        return scores
+
+    for sample in (sidecar or {}).get("samples") or []:
+        try:
+            source_t = float(sample.get("t"))
+        except (TypeError, ValueError):
+            continue
+        program_t = tl.src_to_out(source_t)
+        if program_t is None or program_t < out_start - 0.06 or \
+                program_t > out_end + 0.06:
+            continue
+        rows.append(_scores(source_t, sample))
+
+    # A global sidecar is deliberately bounded, so a two-second title on a
+    # long video can fall between samples. Measure the exact authored window
+    # instead of interpreting "no nearby sample" as "empty frame". The
+    # per-turn cache is capped: kinetic text can request many phrases, but it
+    # may never turn exact collision checks into an unbounded seek loop.
+    window = max(0.0, float(out_end) - float(out_start))
+    fractions = [0.5] if window <= 2.5 else (
+        [0.25, 0.75] if window <= 8.0 else [0.15, 0.5, 0.85])
+    targets = []
+    for frac in fractions:
+        output_t = float(out_start) + window * frac
+        source_t = tl.out_to_src(output_t)
+        if source_t is not None:
+            targets.append(float(source_t))
+    if len(rows) < 2 and targets:
+        cache = getattr(ctx, "_exact_spatial_samples", None)
+        if cache is None:
+            cache = {}
+            setattr(ctx, "_exact_spatial_samples", cache)
+        try:
+            proxy = ctx.proxy_path()
+        except Exception:
+            proxy = None
+        for source_t in targets:
+            key = round(source_t, 2)
+            sample = cache.get(key)
+            if sample is None and proxy and len(cache) < 12:
+                fp = os.path.join(
+                    ctx.workdir, f"text_band_{len(cache)}_{int(key * 100)}.jpg")
+                try:
+                    media.frame_at(proxy, source_t, fp, width=360)
+                    sample = spatial.analyze_frame(fp)
+                    cache[key] = sample
+                except Exception:
+                    sample = None
+            if sample is not None:
+                rows.append(_scores(source_t, sample))
+
+    # An inserted card/asset has no main-source time. It is not evidence of a
+    # collision, so retain the authored band and let the independent preview
+    # critic inspect that separate asset. Main-footage windows are measured.
+    if not rows and targets:
+        return (None, 0, 0,
+                "no exact frame could be measured for this text window")
+    if not rows:
+        return preferred, 0, 0, None
+
+    aggregate = {
+        band: sum(row[band] for row in rows) / len(rows)
+        for band in _CAPTION_ZONES
+    }
+    band = preferred if lock else min(aggregate, key=aggregate.get)
+    unsafe = sum(1 for row in rows if row[band] > 2.6)
+    if unsafe / len(rows) > 0.20:
+        return None, len(rows), unsafe, None
+    return band, len(rows), unsafe, None
+
+
+def _direct_caption_style(ctx, edl):
+    """Choose one coherent caption grammar from measurable format + brief.
+
+    Variety is between projects, not random style-switching inside a video.
+    The mapping is deterministic so identical footage/briefs render the same,
+    but a sports reel, luxury film, podcast and long tutorial no longer all
+    fall through to the same generic classic subtitle.
+    """
+    plan = getattr(ctx, "edit_plan", None) or {}
+    ask = " ".join(filter(None, [
+        str(getattr(ctx, "user_message", "") or ""),
+        str(plan.get("brief") or ""), str(plan.get("format") or ""),
+        str(plan.get("intent") or ""), str(plan.get("style_family") or ""),
+        " ".join(plan.get("must_keep") or []),
+        " ".join(plan.get("must_avoid") or []),
+    ])).casefold()
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    out_dur = max(0.1, program_duration(edl))
+    words = (getattr(ctx, "index", None) or {}).get("words") or []
+    kept = edl.get("keep") or []
+    visible_words = [w for w in words if any(
+        float(a) - 0.05 <= (float(w.get("t0", 0)) +
+                            float(w.get("t1", 0))) / 2.0 <= float(b) + 0.05
+        for a, b in kept)]
+    wpm = len(visible_words) * 60.0 / out_dur
+    ratio = ((edl.get("frame") or {}).get("ratio") or "source")
+    if ratio == "source":
+        try:
+            vertical = float(video.get("height")) > float(video.get("width")) * 1.05
+        except (TypeError, ValueError):
+            vertical = False
+    else:
+        try:
+            rw, rh = (float(x) for x in str(ratio).split(":"))
+            vertical = rh > rw * 1.05
+        except (TypeError, ValueError):
+            vertical = False
+    short_form = vertical and out_dur <= 180.0
+    speakers = int((getattr(ctx, "index", None) or {}).get("speakers") or 0)
+
+    def hit(*needles):
+        return any(n in ask for n in needles)
+
+    if hit("plain captions", "simple captions", "basic captions",
+           "classic subtitles", "minimal subtitles", "captions بسيطة"):
+        return {"preset": "classic", "size": "m"}, \
+            "the brief explicitly asks for restrained/classic subtitles"
+    if hit("luxury", "luxurious", "premium brand", "expensive", "jewelry",
+           "jewellery", "watch ad"):
+        return {"preset": "luxe", "highlight_color": "#E2BE72"}, \
+            "luxury/product language calls for restrained serif type and gold accents"
+    if hit("fashion", "editorial", "runway", "magazine", "beauty campaign"):
+        return {"preset": "fashion", "highlight_color": "#FF5B91"}, \
+            "fashion/editorial content benefits from a wide magazine-like display face"
+    if hit("sports", "gym", "workout", "gaming", "gameplay", "hype",
+           "meme", "high energy", "energetic"):
+        return {"preset": "impact", "highlight_color": "#B7FF3C"}, \
+            "high-energy footage needs compact, forceful type that survives motion"
+    if hit("lyrics", "lyric", "song edit", "music video", "singing"):
+        return {"preset": "lyric", "highlight_color": "#E2BE72"}, \
+            "music/lyric footage calls for phrase-led display type and a distinct stressed word"
+    if hit("wedding", "cinematic", "travel film", "documentary", "calm",
+           "emotional", "storytelling"):
+        return {"preset": "editorial", "highlight_color": "#F2D1A0"}, \
+            "calm/cinematic footage needs air and a quiet serif hierarchy"
+    if hit("tutorial", "screen recording", "software", "saas", "tech",
+           "product demo", "explainer", "educational", "business"):
+        return {"preset": "stacked", "highlight_color": "#59D9FF"}, \
+            "tutorial/business speech needs a clean stacked hierarchy with legible keywords"
+    if hit("podcast", "interview", "talking head", "reel", "viral",
+           "creator", "nice captions", "good captions", "cool captions",
+           "beautiful captions") or speakers >= 2:
+        preset = "podcast" if speakers >= 2 or wpm < 145 else "stacked"
+        return {"preset": preset, "highlight_color": "#FFD84D"}, \
+            "the talking-head/podcast format calls for a compact social caption grammar"
+    if short_form:
+        preset = "stacked" if wpm >= 115 else "podcast"
+        return {"preset": preset,
+                "highlight_color": "#59D9FF" if preset == "stacked" else "#FFD84D"}, \
+            f"the measured vertical short-form pace is {wpm:.0f} words/minute"
+    if out_dur <= 90.0:
+        return {"preset": "elegant", "highlight_color": "#F2D1A0"}, \
+            "a short landscape piece benefits from calm lower-third typography"
+    return {"preset": "classic", "size": "m"}, \
+        "long-form footage is safer with restrained subtitles than oversized social type"
+
+
 def add_captions(ctx, mode=None, items=None, style=None,
                  max_words_per_caption=None, emphasis_words=None):
     edl = dict(ctx.latest_edl()["json"])
@@ -1702,6 +2089,13 @@ def add_captions(ctx, mode=None, items=None, style=None,
         edl["captions"] = norm
         return ctx.write_edl(edl, f"{len(norm)} manual caption(s) set")
     if mode in (None, "", "from_transcript"):
+        directed_style_note = ""
+        if parsed_style is None and (isinstance(ctx, ToolContext) or
+                                     getattr(ctx, "enforce_spatial", False)):
+            chosen, why = _direct_caption_style(ctx, edl)
+            parsed_style = _parse_style(chosen)
+            directed_style_note = (f"\nAuto-directed caption look: "
+                                   f"{chosen['preset']} — {why}.")
         mw = None
         if max_words_per_caption is not None:
             try:
@@ -1710,6 +2104,42 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 return "REJECTED: max_words_per_caption must be an integer."
         preset = (parsed_style or {}).get("preset")
         premium = preset and preset != "classic"
+        # Caption geometry is compiled from pixels, not guessed from a global
+        # preset. This also catches an already-captioned source before a second
+        # transcript layer is burned over it.
+        placement = []
+        # Lightweight test/tool stubs predate spatial perception; every real
+        # agent/MCP request uses ToolContext and must pass the pixel gate.
+        if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial", False):
+            try:
+                spatial_track = _get_spatial(ctx)
+            except Exception as exc:
+                return ("REJECTED: captions were not added because face/"
+                        f"source-text analysis is unavailable ({str(exc)[:140]}). "
+                        "Retry once; placing captions blind can cover a face "
+                        "or stack over text already in the video.")
+            burned_score = spatial.burned_caption_score(
+                spatial_track, ctx.index.get("words") or [])
+            if burned_score >= spatial.BURNED_CAPTION_BLOCK_SCORE:
+                return (f"REJECTED: the source already appears to carry "
+                        f"burned-in captions during "
+                        f"{int(round(burned_score * 100))}% of sampled "
+                        "speaking moments. Adding another transcript layer "
+                        "would stack words. Leave the existing typography, "
+                        "or explicitly remove/cover it first and verify clean "
+                        "pixels before adding replacement captions.")
+            preferred = ((parsed_style or {}).get("position") or
+                         ("middle" if preset in ("spotlight", "lyric")
+                          else "bottom"))
+            placement, unsafe, analyzed = _caption_placement_track(
+                ctx, edl, spatial_track, preferred)
+            if analyzed and unsafe / analyzed > 0.35:
+                return (f"REJECTED: {unsafe} of {analyzed} analyzed caption "
+                        "moments have no clean top/middle/bottom band because "
+                        "the frame is occupied by faces or source/UI text. "
+                        "Captions were not burned over that content; use a "
+                        "designed panel or selectively mute captions for "
+                        "those shots.")
         # karaoke groups larger than the hard max read as a wall of text —
         # clamp the STORED value so EDL, diff line and reply all match what
         # actually renders, and disclose the clamp. Premium presets chunk
@@ -1785,7 +2215,8 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 "video is mostly music, say so to the user.")
         cfg = {"mode": "from_transcript",
                "max_words_per_caption": mw,
-               "style": parsed_style}
+               "style": parsed_style,
+               "placement_track": placement or None}
         if emphasis_words:
             cfg["emphasis_words"] = emphasis_words
         edl["captions"] = _bake_karaoke_group(cfg)
@@ -1798,7 +2229,9 @@ def add_captions(ctx, mode=None, items=None, style=None,
             desc += f", {len(emphasis_words)} emphasis words"
         if parsed_style:
             desc += f", style {parsed_style}"
-        return ctx.write_edl(edl, desc) + karaoke_note
+        if placement:
+            desc += f", {len(placement)} measured placement span(s)"
+        return ctx.write_edl(edl, desc) + karaoke_note + directed_style_note
     if mode == "off":
         edl["captions"] = None
         return ctx.write_edl(edl, "captions removed")
@@ -2233,9 +2666,35 @@ def _resolve_music(ctx, storage_key):
                               "fetch_music downloads one, and fetch_url "
                               "ingests any music link the user pastes.")
         return None, f"REJECTED: '{storage_key}' is not a music asset here. {hint}"
-    return {"name": os.path.basename(storage_key),
+    return {"name": _asset_name(asset),
             "duration_s": asset.get("duration_s"), "library": False,
             "storage_key": storage_key}, None
+
+
+def _user_chose_exact_audio(ctx, name=""):
+    """True only when the message selects an attached/named track itself."""
+    ask = str(getattr(ctx, "user_message", "") or "").casefold()
+    attachment_phrases = (
+        "use this song", "use this music", "use this audio", "use this track",
+        "use the attached song", "use the attached music",
+        "use my song", "use my music", "the song i uploaded",
+        "the music i uploaded", "الموسيقى المرفقة", "استخدم هذه الأغنية",
+    )
+    if any(p in ask for p in attachment_phrases):
+        return True
+    stem = os.path.splitext(os.path.basename(str(name or "")))[0]
+    stem = " ".join(stem.replace("_", " ").replace("-", " ").split())
+    return len(stem) >= 5 and stem.casefold() in ask
+
+
+def _audio_was_auditioned(ctx, requested_key, resolved_key, name=""):
+    if not (isinstance(ctx, ToolContext) or
+            getattr(ctx, "enforce_spatial", False)):
+        return True
+    if _user_chose_exact_audio(ctx, name):
+        return True
+    listened = getattr(ctx, "_listened_asset_keys", None) or set()
+    return requested_key in listened or resolved_key in listened
 
 
 def search_music(ctx, query, min_seconds=None, max_seconds=None,
@@ -2595,12 +3054,22 @@ def _speech_overlap_s(ctx, edl, start_out, end_out):
 def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
               duck=None, offset_s=None, fade_in_s=None, fade_out_s=None,
               loop=True):
+    requested_key = storage_key
     track, err = _resolve_music(ctx, storage_key)
     if err:
         return err
     # What the EDL stores is the RESOLVED key: hand this tool a video and the
     # sound that plays is the audio extracted from it, never the video object.
     storage_key = track["storage_key"]
+    if not _audio_was_auditioned(
+            ctx, requested_key, storage_key, track.get("name")):
+        return ("REJECTED: this music was selected without hearing it. "
+                "Search metadata cannot tell whether a track's mood, mix, "
+                "intro, or production quality fits the footage. Call "
+                "listen_to(asset_key=...) first, then add it only if the "
+                "actual audio fits. If this model lane cannot hear, ask the "
+                "user to choose a track instead of guessing. An exact song "
+                "the user explicitly selected is exempt.")
     edl = dict(ctx.latest_edl()["json"])
     # Clamp against the FINAL program duration (kept footage + inserts), not
     # just the kept footage — otherwise music can never reach the end of a
@@ -2796,17 +3265,28 @@ def _resolve_sfx(ctx, storage_key):
             "project. search_sfx finds real sounds online (fetch_sfx "
             "downloads one), or list_assets(kind='music') for the user's "
             "uploads.")
-    return {"name": os.path.basename(storage_key),
+    return {"name": _asset_name(asset),
             "duration_s": asset.get("duration_s"), "library": False,
             "storage_key": storage_key}, None
 
 
 def add_sfx(ctx, storage_key, at, gain_db=-6.0):
     """Place a one-shot sound at a point in the program timeline."""
+    requested_key = storage_key
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
         return err
     storage_key = sound["storage_key"]      # a video resolves to its audio
+    if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial", False):
+        listened = getattr(ctx, "_listened_asset_keys", None) or set()
+        if requested_key not in listened and storage_key not in listened:
+            return ("REJECTED: this sound was not auditioned by the editing "
+                    "model. File names and search tags do not reveal whether "
+                    "an effect is cheap, harsh, comical, or the wrong "
+                    "texture. Call listen_to(asset_key=...) first and add it "
+                    "only if the actual sound fits the requested moment. If "
+                    "this model lane cannot hear audio, leave SFX out rather "
+                    "than guessing.")
     try:
         at = float(at)
     except (TypeError, ValueError):
@@ -2887,10 +3367,17 @@ def move_sfx(ctx, id, at):
 def swap_music(ctx, id, storage_key):
     """Change WHICH track plays, keeping its position, level and fit —
     'no, use a different song'."""
+    requested_key = storage_key
     track, err = _resolve_music(ctx, storage_key)
     if err:
         return err
     storage_key = track["storage_key"]      # a video resolves to its audio
+    if not _audio_was_auditioned(
+            ctx, requested_key, storage_key, track.get("name")):
+        return ("REJECTED: the replacement track was not auditioned. Call "
+                "listen_to(asset_key=...) and swap only after hearing the "
+                "actual song; if this model lane cannot hear, let the user "
+                "choose rather than guessing from metadata.")
     edl = dict(ctx.latest_edl()["json"])
     items = [dict(m) for m in (edl.get("music") or [])]
     hit = next((m for m in items if m.get("id") == id), None)
@@ -3077,6 +3564,35 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None):
         return ('REJECTED: ratio must be one of source, 16:9, 9:16, 1:1, 4:5 '
                 'and mode one of crop, pad, pad_blur. Example: '
                 'set_frame("9:16", "crop") for TikTok.')
+    # A severe cover-crop with no aim is not a dimension conversion; it is a
+    # guess that can show a wall while the subject sits outside the viewport.
+    # Keep source-like crops compatible, and honor a literal user request for
+    # a centered crop, but route every other large aspect change through the
+    # measured auto_reframe path (or a lossless fit).
+    if frame.ratio != "source" and frame.mode == "crop" \
+            and frame.focus_x is None and frame.focus_y is None \
+            and getattr(ctx, "has_main_video", False):
+        v = (getattr(ctx, "index", None) or {}).get("video") or {}
+        try:
+            src_ar = float(v.get("width")) / float(v.get("height"))
+            rw, rh = (float(x) for x in frame.ratio.split(":"))
+            out_ar = rw / rh
+            discarded = 1.0 - min(src_ar, out_ar) / max(src_ar, out_ar)
+        except (TypeError, ValueError, ZeroDivisionError):
+            discarded = 1.0 if frame.ratio in ("9:16", "1:1", "4:5") else 0.0
+        ask = str(getattr(ctx, "user_message", "") or "").casefold()
+        center_was_explicit = any(x in ask for x in (
+            "center crop", "centre crop", "crop from the center",
+            "crop from centre", "قص من المنتصف", "قص من الوسط"))
+        if discarded > 0.18 and not center_was_explicit:
+            return (
+                f"REJECTED: an unaimed {frame.ratio} crop would discard "
+                f"about {discarded * 100:.0f}% of one picture axis without "
+                "knowing where the subject is. That is how a new dimension "
+                "ends up showing a wall, blank UI, or half a face. Use "
+                f"auto_reframe(ratio='{frame.ratio}') to measure every "
+                "composition, pass measured focus_x/focus_y, or use "
+                "mode='pad_blur' to preserve the whole frame.")
     edl = dict(ctx.latest_edl()["json"])
     if frame.ratio == "source":
         edl["frame"] = None
@@ -3134,7 +3650,38 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None):
 CROP_DETAIL_KEEP_MIN = 0.55
 
 
-def _reframe_with_track(ctx, ratio, global_pt):
+def _spatial_face_points(sidecar, windows):
+    """Face centres measured across a set of source-time windows.
+
+    One largest face per sample avoids averaging two people visible in the
+    same two-shot into the wall between them. The sidecar covers up to 96
+    real frames, so a long video is no longer represented by five guesses.
+    Returns (points, sample_coverage).
+    """
+    samples = []
+    for sample in (sidecar or {}).get("samples") or []:
+        try:
+            t = float(sample.get("t"))
+        except (TypeError, ValueError):
+            continue
+        if any(float(a) <= t <= float(b) for a, b in windows):
+            samples.append(sample)
+    points = []
+    for sample in samples:
+        boxes = sample.get("faces") or []
+        if not boxes:
+            continue
+        try:
+            box = max(boxes, key=lambda b: (float(b[2]) - float(b[0])) *
+                      (float(b[3]) - float(b[1])))
+            points.append(((float(box[0]) + float(box[2])) / 2.0,
+                           (float(box[1]) + float(box[3])) / 2.0))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return points, len(points) / max(1, len(samples))
+
+
+def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
     """A crop that FOLLOWS the subject across shot changes, or None when a
     single point serves (one shot, one position, or anything unmeasurable).
 
@@ -3157,10 +3704,14 @@ def _reframe_with_track(ctx, ratio, global_pt):
     keep = [(float(s), float(e)) for s, e in (edl.get("keep") or [])]
     if not keep:
         return None
+    sidecar = getattr(ctx, "_spatial", None) or \
+        ((ctx.index or {}).get("spatial") or {})
     try:
         proxy = ctx.proxy_path()
     except Exception:
-        return None
+        proxy = None
+        if not (sidecar.get("samples") or []):
+            return None
 
     # Kept span ∩ shot windows -> measurement windows (skip blink-length ones)
     wins = []
@@ -3170,27 +3721,46 @@ def _reframe_with_track(ctx, ratio, global_pt):
             e = min(ke, float(sh.get("end", 0.0)))
             if e - s >= 0.4:
                 wins.append([s, e])
-    if len(wins) < 2 or len(wins) > 60:
+    if len(wins) < 2:
+        return None
+    if len(wins) > 60:
+        if preserve_unmeasured:
+            res = set_frame(ctx, ratio, "pad_blur")
+            if res.startswith("EDL v"):
+                res += (f"\nThe kept program crosses {len(wins)} shot "
+                        "windows; the whole frame was preserved instead of "
+                        "reducing rapidly changing compositions to an "
+                        "unsafe fixed crop.")
+            return res
         return None
 
     measured = []
     for w in wins:
         fp = os.path.join(ctx.workdir, f"track_{len(measured)}.jpg")
         pt = None
+        spatial_pts, _coverage = _spatial_face_points(sidecar, [w])
+        if spatial_pts:
+            pt = subject.median_point(spatial_pts)
         try:
-            media.frame_at(proxy, (w[0] + w[1]) / 2.0, fp)
-            pts, method = subject.points_from_frames([fp])
-            if method == "faces" and pts:
-                pt = pts[0]
+            if pt is None and proxy:
+                media.frame_at(proxy, (w[0] + w[1]) / 2.0, fp)
+                pts, method = subject.points_from_frames([fp])
+                if method == "faces" and pts:
+                    pt = pts[0]
         except Exception:
-            pt = None
+            pass
         measured.append([w[0], w[1], pt])
     have = [m for m in measured if m[2]]
-    if len(have) < 2:
+    if not have:
         return None
-    # Windows with no face inherit the nearest measured aim, then adjacent
-    # windows whose aims agree merge — the track only changes where the
-    # picture actually does.
+    if len(have) < 2 and not (preserve_unmeasured and
+                              len(have) < len(measured)):
+        return None
+    # A no-face shot is not permission to inherit the prior speaker's crop:
+    # it may be a screen, product, wide two-shot or B-roll, and inheriting is
+    # the exact mechanism that produced blank-wall/empty-car vertical cuts.
+    # Auto mode FITS that shot; an explicitly requested crop keeps the old
+    # nearest measured aim because the user chose edge-to-edge truncation.
     for i, m in enumerate(measured):
         if m[2] is None:
             prev = next((measured[j][2] for j in range(i - 1, -1, -1)
@@ -3198,26 +3768,31 @@ def _reframe_with_track(ctx, ratio, global_pt):
             nxt = next((measured[j][2] for j in range(i + 1, len(measured))
                         if measured[j][2]), None)
             m[2] = prev or nxt or global_pt
+            m.append("pad_blur" if preserve_unmeasured else "crop")
+        else:
+            m.append("crop")
     spans = []
-    for s, e, pt in measured:
+    for s, e, pt, span_mode in measured:
         if spans and abs(spans[-1]["x"] - pt[0]) < 0.06 \
                 and abs(spans[-1]["y"] - pt[1]) < 0.10 \
+                and spans[-1].get("mode") == span_mode \
                 and abs(spans[-1]["t1"] - s) < 0.05:
             spans[-1]["t1"] = e
             continue
         spans.append({"t0": round(s, 3), "t1": round(e, 3),
-                      "x": round(pt[0], 3), "y": round(pt[1], 3)})
+                      "x": round(pt[0], 3), "y": round(pt[1], 3),
+                      "mode": span_mode})
     if len(spans) < 2:
         return None                      # one aim — the single point serves
     if len(spans) > 24:
-        # Bound the filtergraph: keep the 24 longest, re-merge the rest into
-        # neighbours by extending the previous span.
-        spans.sort(key=lambda sp: sp["t0"])
-        while len(spans) > 24:
-            shortest = min(range(1, len(spans)),
-                           key=lambda i: spans[i]["t1"] - spans[i]["t0"])
-            spans[shortest - 1]["t1"] = spans[shortest]["t1"]
-            spans.pop(shortest)
+        if preserve_unmeasured:
+            res = set_frame(ctx, ratio, "pad_blur")
+            if res.startswith("EDL v"):
+                res += ("\nThe video changes composition more than 24 times; "
+                        "the whole frame was preserved instead of collapsing "
+                        "different crop modes into unsafe guesses.")
+            return res
+        return None
 
     # Split the keep list on span boundaries so every segment has ONE aim.
     cuts = sorted({sp["t0"] for sp in spans} | {sp["t1"] for sp in spans})
@@ -3237,11 +3812,17 @@ def _reframe_with_track(ctx, ratio, global_pt):
              "shot cuts")
     if not res.startswith("EDL v"):
         return None                      # validation refused — fall back
+    fitted = sum(1 for sp in spans if sp.get("mode") == "pad_blur")
     res += (f"\nMeasured per shot: the subject sits in different places in "
             f"different shots (e.g. two speakers), so ONE fixed crop would "
             f"frame the wall between them. The crop re-aims at {len(spans)} "
             "shot boundaries instead — each cut lands on the person "
             "speaking's side of the frame.")
+    if fitted:
+        res += (f" {fitted} shot span(s) had no measured face, so those "
+                "specific spans fit the whole picture over a blurred "
+                "background instead of inheriting a previous crop and "
+                "showing empty/irrelevant space.")
     return res
 
 
@@ -3284,10 +3865,11 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
-        res = set_frame(ctx, ratio, "crop")
+        res = set_frame(ctx, ratio, "pad_blur" if mode == "auto" else "crop")
         if res.startswith("EDL v"):
-            res += (f"\nNote: could not fetch frames ({err}), so the crop "
-                    "is the plain CENTER crop.")
+            res += (f"\nNote: could not fetch frames ({err}), so auto mode "
+                    "preserved the whole picture with pad_blur instead of "
+                    "guessing a crop target.")
         return res
     edl = dict(ctx.latest_edl()["json"])
     keep = edl.get("keep") or [[0.0, ctx.duration]]
@@ -3312,10 +3894,11 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         except media.MediaError:
             pass
     if not frames:
-        res = set_frame(ctx, ratio, "crop")
+        res = set_frame(ctx, ratio, "pad_blur" if mode == "auto" else "crop")
         if res.startswith("EDL v"):
-            res += ("\nNote: could not extract frames, so the crop is the "
-                    "plain CENTER crop.")
+            res += ("\nNote: could not extract frames, so auto mode kept "
+                    "the whole picture with pad_blur instead of inventing a "
+                    "center target.")
         return res
 
     # MEASURE FIRST (round 52). A face is found in the pixels, in milliseconds,
@@ -3326,6 +3909,28 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
     # day it was the only route, it was unconfigured, and every one of them got
     # a dead-centre crop with an apology attached.
     pts, method = subject.points_from_frames(frames)
+    # Prefer the structured temporal track when it has a real quorum. The
+    # five local frames above still measure crop detail, but long/multi-shot
+    # videos now derive WHERE from up to 180 indexed frames instead of gaps
+    # tens of seconds wide.
+    sidecar = getattr(ctx, "_spatial", None) or \
+        ((ctx.index or {}).get("spatial") or {})
+    # Existing projects predate the spatial sidecar. Compute and persist it
+    # on their first real auto-reframe so they receive the same shot coverage
+    # as new uploads instead of quietly falling back to five broad samples.
+    if not (sidecar.get("samples") or []) and (
+            isinstance(ctx, ToolContext) or
+            getattr(ctx, "enforce_spatial", False)):
+        try:
+            sidecar = _get_spatial(ctx)
+        except Exception:
+            # The five frames extracted above still provide a bounded,
+            # conservative fallback; auto mode fits rather than guessing when
+            # those cannot prove a safe crop.
+            sidecar = {}
+    spatial_pts, spatial_coverage = _spatial_face_points(sidecar, keep)
+    if len(spatial_pts) >= 3 and spatial_coverage >= 0.35:
+        pts, method = spatial_pts, "faces_spatial"
 
     def _kept(focus):
         """Share of the picture's detail the crop window would keep."""
@@ -3355,21 +3960,37 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
                     f"set_frame('{ratio}', 'crop').")
         return res
 
-    if method == "faces":
+    if str(method).startswith("faces"):
         pt = subject.median_point(pts)
+        if mode == "auto":
+            keep_score = _kept(pt)
+            if keep_score is not None and keep_score < CROP_DETAIL_KEEP_MIN:
+                return _fit_instead(
+                    pt,
+                    f"A face was found at ({pt[0]:.2f}, {pt[1]:.2f}), but "
+                    f"a {ratio} crop centered there would retain only "
+                    f"{keep_score * 100:.0f}% of the frame's detail. This "
+                    "is likely a screen/game/wide composition where the "
+                    "surrounding content matters as much as the face.")
         drift = subject.spread(pts)
-        if drift > 0.15:
+        track_needed = (len((ctx.index or {}).get("shots") or []) >= 2 and
+                        len(spatial_pts) >= 2 and
+                        (drift > 0.15 or spatial_coverage < 0.95))
+        if drift > 0.15 or track_needed:
             # The subject sits in DIFFERENT places across the samples — a
             # multi-camera conversation, a walking subject. One fixed point
             # would median between the positions (the Aug 8 wall crops), so
             # measure per shot and let the crop re-aim at cuts.
-            track_res = _reframe_with_track(ctx, ratio, pt)
+            track_res = _reframe_with_track(
+                ctx, ratio, pt, preserve_unmeasured=(mode == "auto"))
             if track_res is not None:
                 return track_res
         res = set_frame(ctx, ratio, "crop", focus_x=pt[0], focus_y=pt[1])
         if res.startswith("EDL v"):
+            measured_total = (len((sidecar or {}).get("samples") or [])
+                              if method == "faces_spatial" else len(frames))
             res += (f"\nMeasured from the pixels: a face was detected in "
-                    f"{len(pts)} of {len(frames)} sampled frames, sitting at "
+                    f"{len(pts)} of {measured_total} sampled frames, sitting at "
                     f"({pt[0]:.2f}, {pt[1]:.2f}) of the source frame — the "
                     "crop follows it instead of the frame center. No vision "
                     "model was needed.")
@@ -3435,10 +4056,11 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         except (TypeError, ValueError, KeyError):
             continue
     if not pts:
-        res = set_frame(ctx, ratio, "crop")
+        res = set_frame(ctx, ratio, "pad_blur" if mode == "auto" else "crop")
         if res.startswith("EDL v"):
             res += ("\nNote: the vision model gave no usable subject "
-                    "positions, so the crop is the plain CENTER crop.")
+                    "positions, so auto mode preserved the whole frame with "
+                    "pad_blur instead of guessing a center crop.")
         return res
     # Median, not mean: one wide establishing shot must not drag the crop
     # off every talking-head frame.
@@ -3624,6 +4246,10 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
             return ("REJECTED: cx/cy must be numbers 0-1 — fractions of the "
                     "output frame ((0,0) = top-left, (0.5,0.5) = center). "
                     "Use look_at to find the subject first.")
+    if (cx is None) != (cy is None):
+        return ("REJECTED: a zoom target needs BOTH cx and cy. Inspect the "
+                "exact frame with look_at and provide the measured point, or "
+                "pass rect=[x0,y0,x1,y1] to frame a measured region.")
     # rect (round 72): FRAME A REGION. cx/cy pin a POINT — the renderer keeps
     # the aimed point at ITS OWN screen position while everything magnifies
     # around it, which is right for emphasis on a well-composed subject and
@@ -3676,6 +4302,50 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
         return (f"REJECTED: `path` only applies to mode 'follow'; this zoom "
                 f"is '{zmode}'. Use mode='follow' to make the frame travel, "
                 "or drop path for a fixed target.")
+    elif not tgt:
+        return ("REJECTED: this zoom has no visual target. Centering by "
+                "default is how empty walls, blank UI and half-visible faces "
+                "get magnified. Inspect the exact moment with look_at, then "
+                "pass BOTH cx/cy for a measured subject or rect for a "
+                "measured region.")
+    # Coordinates alone are not proof. The old agent repeatedly supplied
+    # syntactically valid cx/cy guesses from a broad filmstrip and magnified
+    # walls or empty UI. A real agent/recipe must have looked at the exact
+    # source or assembled-program moment during this turn. One observation
+    # grounds a fixed push; a travelling zoom needs observations near both
+    # ends of its path.
+    if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial", False):
+        out_seen = [float(t) for t in
+                    (getattr(ctx, "_looked_output_times", None) or [])]
+        src_seen = [float(t) for t in
+                    (getattr(ctx, "_looked_source_times", None) or [])]
+        window = e - s
+        probes = ([s + window * 0.15, s + window * 0.85]
+                  if zmode == "follow" else [(s + e) / 2.0])
+        tolerance = max(0.55, min(1.5, window * 0.25))
+        try:
+            tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                          edl.get("speed") or [])
+        except Exception:
+            tl = None
+
+        def observed(output_t):
+            if any(abs(t - output_t) <= tolerance for t in out_seen):
+                return True
+            source_t = tl.out_to_src(output_t) if tl is not None else None
+            return source_t is not None and any(
+                abs(t - source_t) <= tolerance for t in src_seen)
+
+        if not all(observed(t) for t in probes):
+            need = ("the start and end of this travelling move"
+                    if zmode == "follow" else
+                    f"the exact {((s + e) / 2.0):.2f}s output moment")
+            return (f"REJECTED: the target coordinates are ungrounded — no "
+                    f"look_at evidence from {need} was delivered this turn. "
+                    "Inspect it with look_at(output_times=[...]) (or its "
+                    "mapped source time), read cx/cy or rect from that "
+                    "frame, then add the zoom. A filled coordinate field is "
+                    "not proof that the target exists there.")
     fx = dict(edl.get("effects") or {})
     zooms = [dict(z) for z in (fx.get("zooms") or [])]
     item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
@@ -3683,6 +4353,7 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     if zmode != "punch":
         item["mode"] = zmode
     item.update(tgt)
+    item["target_measured"] = True
     if rct:
         item["rect"] = rct
     if pts:
@@ -3822,6 +4493,38 @@ def add_zoom_path(ctx, keyframes, ease=None):
                 s = 0.25
         clean.append({"t": t, "cx": cx, "cy": cy, "strength": s})
     clean.sort(key=lambda p: p["t"])
+    if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial", False):
+        if len(clean) > 8:
+            return ("REJECTED: an authored travelling zoom takes at most 8 "
+                    "visually grounded keyframes (one look_at batch). Use "
+                    "fewer deliberate waypoints; 24 guessed coordinates do "
+                    "not become more accurate by being dense.")
+        out_seen = [float(t) for t in
+                    (getattr(ctx, "_looked_output_times", None) or [])]
+        src_seen = [float(t) for t in
+                    (getattr(ctx, "_looked_source_times", None) or [])]
+        try:
+            tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                          edl.get("speed") or [])
+        except Exception:
+            tl = None
+
+        def observed(output_t):
+            if any(abs(t - output_t) <= 0.65 for t in out_seen):
+                return True
+            source_t = tl.out_to_src(output_t) if tl is not None else None
+            return source_t is not None and any(
+                abs(t - source_t) <= 0.65 for t in src_seen)
+
+        missing = [p["t"] for p in clean if not observed(p["t"])]
+        if missing:
+            shown = ", ".join(f"{t:g}" for t in missing[:8])
+            return ("REJECTED: travelling-zoom keyframes at output "
+                    f"{shown}s have no exact look_at evidence from this "
+                    "turn. Inspect all waypoint moments in one "
+                    "look_at(output_times=[...]) call, then read each "
+                    "target from those frames. A smooth path through guessed "
+                    "coordinates is still a wrong zoom.")
     # Round 77 drift check. Interpolation means the camera is IN MOTION for
     # the ENTIRE gap between two keyframes that disagree — there is no
     # implicit hold. A path that went straight from a 4.4x close-up to the
@@ -5406,6 +6109,40 @@ def _asset_media_duration(ctx, asset):
         return float(dur)
 
 
+def _blank_asset_window(ctx, asset, start, duration):
+    """Objective blank-frame evidence for an indexed video-clip window."""
+    sha = asset.get("sha256")
+    if not sha:
+        return None
+    try:
+        row = ctx.db.run(dbx.get_index_by_sha, sha)
+        sidecar = ((row or {}).get("json") or {}).get("spatial") or {}
+    except Exception:
+        return None
+    a, b = float(start), float(start) + float(duration)
+    samples = [s for s in (sidecar.get("samples") or [])
+               if a - 0.05 <= float(s.get("t") or 0.0) <= b + 0.05]
+    if not samples:
+        return None
+
+    def _is_blank(sample):
+        if sample.get("faces") or sample.get("text") or sample.get("dense_ui"):
+            return False
+        try:
+            mean = float(sample.get("mean_luma"))
+            spread = float(sample.get("std_luma"))
+            edges = float(sample.get("edge_density") or 0.0)
+        except (TypeError, ValueError):
+            return False                    # old sidecar: no proof, no block
+        return spread < 4.0 and edges < 0.002 and (mean < 8.0 or mean > 247.0)
+
+    if all(_is_blank(s) for s in samples):
+        return (f"all {len(samples)} measured frame(s) in clip window "
+                f"{a:.1f}-{b:.1f}s are flat "
+                f"{'black/near-black' if float(samples[0]['mean_luma']) < 8 else 'white/near-white'}")
+    return None
+
+
 INSERT_NEEDS_WINDOW_S = 15.0    # clips longer than this need an explicit window
 
 
@@ -5428,7 +6165,7 @@ def _dropped_motion_note(motion, at=None, dur=None):
 
 
 def insert_media(ctx, asset_key, at_output_s, duration_s=None,
-                 clip_start_s=None, motion=None):
+                 clip_start_s=None, motion=None, fit="auto"):
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
@@ -5458,6 +6195,22 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
         if motion not in INSERT_MOTIONS:
             return (f"REJECTED: motion must be one of "
                     f"{', '.join(INSERT_MOTIONS)}.")
+    fitv = str(fit or "auto").strip().lower().replace("-", "_")
+    if fitv in ("auto", "safe", "contain", "fit"):
+        # Lossless by default. A same-aspect asset renders identically; a
+        # mismatched one gets a blurred extension instead of silently losing
+        # the subject/card edges to a center crop.
+        fitv = "pad_blur"
+    elif fitv in ("pad", "letterbox"):
+        fitv = "pad"
+    elif fitv in ("pad_blur", "blur", "blurred"):
+        fitv = "pad_blur"
+    elif fitv in ("crop", "cover", "fill"):
+        fitv = "crop"
+    else:
+        return ("REJECTED: fit must be 'auto' (safe whole-picture fit), "
+                "'pad_blur', 'pad', or 'crop'. Use crop only after "
+                "look_at_asset confirms the meaningful content survives.")
     off = 0.0
     if kind == "image":
         try:
@@ -5488,8 +6241,34 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
             return (f"REJECTED: the window {off}-{round(off + dur, 2)}s runs "
                     f"past the end of the clip ({clip_dur:.1f}s). Use "
                     f"clip_start_s <= {max(0.0, round(clip_dur - dur, 2))}.")
+        blank = _blank_asset_window(ctx, asset, off, dur)
+        if blank:
+            return (f"REJECTED: the selected part of '{name}' visibly shows "
+                    f"nothing: {blank}. Choose another clip_start_s after "
+                    "look_at_asset, or do not insert this clip.")
 
     edl = dict(ctx.latest_edl()["json"])
+    if fitv == "crop" and (isinstance(ctx, ToolContext) or
+                            getattr(ctx, "enforce_spatial", False)):
+        asset_ar = _ensure_asset_dims(ctx, asset)
+        output_ar = _output_aspect(ctx, edl)
+        if asset_ar and output_ar:
+            discarded = 1.0 - min(asset_ar, output_ar) / max(
+                asset_ar, output_ar)
+            if discarded > 0.18:
+                seen = ((getattr(ctx, "_looked_asset_times", None) or {})
+                        .get(str(asset_key), set()))
+                inspected = bool(seen) if kind == "image" else any(
+                    off - 0.2 <= float(t) <= off + dur + 0.2 for t in seen)
+                if not inspected:
+                    return (
+                        f"REJECTED: cropping this {asset_ar:.2f}:1 asset into "
+                        f"the {output_ar:.2f}:1 program would discard about "
+                        f"{discarded * 100:.0f}% of one picture axis, and no "
+                        "frame from the selected asset window was inspected "
+                        "this turn. Use fit='auto' to preserve the whole "
+                        "composition, or call look_at_asset on that exact "
+                        "window before deliberately choosing crop.")
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
 
     if not ctx.has_main_video or is_canvas_program(edl):
@@ -5504,7 +6283,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
             edl["canvas"] = _canvas_for_asset(ctx, asset)
         item = {"id": _next_item_id(inserts, "ins"), "asset_key": asset_key,
                 "kind": kind, "at_output_s": round(max(0.0, at), 2),
-                "duration_s": dur}
+                "duration_s": dur, "fit": fitv}
         if kind == "video" and off:
             item["source_start_s"] = off
         if motion:
@@ -5561,7 +6340,8 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     final_at = round(target_pre + sum(d for a2, d in tl.ins
                                       if a2 <= target_pre + 1e-6), 2)
     item = {"id": _next_item_id(inserts, "ins"), "asset_key": asset_key,
-            "kind": kind, "at_output_s": target_pre, "duration_s": dur}
+            "kind": kind, "at_output_s": target_pre, "duration_s": dur,
+            "fit": fitv}
     if kind == "video" and off:
         item["source_start_s"] = off
     if motion:
@@ -5724,6 +6504,7 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
     # The clip's real length bounds the window. Without it a duration longer
     # than the file renders as a block the footage cannot fill.
     src_len = None
+    asset = None
     if hit.get("kind") == "video":
         asset, _err = _resolve_media_asset(ctx, hit["asset_key"],
                                            ("video_clip",))
@@ -5758,6 +6539,32 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         room = round((src_len - off) / r, 2)
         if dur > room:
             dur = room
+    if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial", False):
+        need_visual_proof = isinstance(crop_val, list)
+        if fit_val == "crop":
+            if asset is None:
+                kinds = ("video_clip",) if hit.get("kind") == "video" \
+                    else ("image_ref",)
+                asset, _asset_err = _resolve_media_asset(
+                    ctx, hit["asset_key"], kinds)
+            asset_ar = _ensure_asset_dims(ctx, asset) if asset else None
+            output_ar = _output_aspect(ctx, edl)
+            if asset_ar and output_ar:
+                discarded = 1.0 - min(asset_ar, output_ar) / max(
+                    asset_ar, output_ar)
+                need_visual_proof = need_visual_proof or discarded > 0.18
+        if need_visual_proof:
+            seen = ((getattr(ctx, "_looked_asset_times", None) or {})
+                    .get(str(hit["asset_key"]), set()))
+            inspected = bool(seen) if hit.get("kind") == "image" else any(
+                off - 0.2 <= float(t) <= off + dur * r + 0.2 for t in seen)
+            if not inspected:
+                return (
+                    "REJECTED: this insert framing would discard part of "
+                    "the asset, but no frame from its selected window was "
+                    "inspected this turn. Call look_at_asset on that exact "
+                    "window, then set the crop/cover only from visible "
+                    "evidence—or use fit='pad_blur' to preserve everything.")
     old_crop = list(hit.get("crop") or [])
     old_mute = bool(hit.get("mute"))
     old_fit = hit.get("fit") or None
@@ -6265,6 +7072,12 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
                     f"the clip ({clip_dur:.1f}s).")
     if dur < 0.2:
         return "REJECTED: the overlay window is shorter than 0.2s."
+    if kind == "video":
+        blank = _blank_asset_window(ctx, asset, off or 0.0, dur)
+        if blank:
+            return (f"REJECTED: the selected b-roll window in '{name}' "
+                    f"visibly shows nothing: {blank}. Inspect the clip and "
+                    "pick another source_start_s before covering the video.")
     for label, v in (("entrance", entrance), ("exit", exit)):
         if v is not None and v not in OVERLAY_ANIMS:
             return (f"REJECTED: {label} must be one of "
@@ -6277,6 +7090,21 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
         elif fitv != "cover":
             return ("REJECTED: fit must be 'cover' (full-frame b-roll "
                     "cutaway) or omitted (width-fraction PIP).")
+    if fitv == "cover":
+        asset_aspect = _ensure_asset_dims(ctx, asset) or _asset_aspect(ctx, asset)
+        output_aspect = _output_aspect(ctx, edl)
+        if asset_aspect and output_aspect:
+            visible = min(float(asset_aspect), float(output_aspect)) / \
+                max(float(asset_aspect), float(output_aspect))
+            if visible < 0.60:
+                return (
+                    f"REJECTED: this {asset_aspect:.2f}:1 asset is too far "
+                    f"from the {output_aspect:.2f}:1 output for a blind "
+                    f"full-frame cover — only {visible * 100:.0f}% of one "
+                    "axis would survive the center crop, so the subject or "
+                    "useful UI may disappear. Use a matching-orientation "
+                    "asset, use a full-width PIP (omit fit, scale=1.0), or "
+                    "insert_media with its safe whole-picture fit.")
     xv, xerr = _parse_anim_float(x if x is not None else 0.5, "x")
     if xerr:
         return xerr
@@ -6688,6 +7516,27 @@ def _asset_aspect(ctx, asset):
         ah = float(asset.get("height") or 0)
         return (aw / ah) if aw > 0 and ah > 0 else None
     except (TypeError, ValueError):
+        return None
+
+
+def _output_aspect(ctx, edl):
+    canvas = edl.get("canvas") or {}
+    try:
+        if canvas.get("width") and canvas.get("height"):
+            return float(canvas["width"]) / float(canvas["height"])
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    ratio = ((edl.get("frame") or {}).get("ratio") or "source")
+    if ratio != "source" and ":" in str(ratio):
+        try:
+            rw, rh = (float(x) for x in str(ratio).split(":"))
+            return rw / rh
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        return float(video["width"]) / float(video["height"])
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
         return None
 
 
@@ -7774,6 +8623,32 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
             float(size_scale)
         except (TypeError, ValueError):
             return "REJECTED: size_scale must be a number (0.4-3.0)."
+    placement_note = ""
+    if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial", False):
+        default_y = float(graphics.TEMPLATES.get(tpl, {}).get("y", 0.5))
+        wanted_y = float(y) if y is not None else default_y
+        preferred = ("top" if wanted_y < 0.34 else
+                     "bottom" if wanted_y > 0.66 else "middle")
+        band, analyzed, unsafe, err = _fixed_text_band(
+            ctx, edl, s, e, preferred, lock=bool(y is not None))
+        if err:
+            return ("REJECTED: text was not added because face/source-text "
+                    f"analysis is unavailable ({err}). Placing a title blind "
+                    "can print it across a face or existing words.")
+        if analyzed and band is None:
+            return (f"REJECTED: the requested {preferred} text band is "
+                    f"occupied by faces or source/UI text in {unsafe} of "
+                    f"{analyzed} measured frames across {s}-{e}s. Choose a "
+                    "different moment, shorten the text window, or use a "
+                    "designed full-frame card instead of writing over the "
+                    "content.")
+        if band and y is None:
+            safe_y = {"top": 0.16, "middle": 0.50, "bottom": 0.80}[band]
+            if abs(safe_y - default_y) > 0.02:
+                placement_note = (f"\nMeasured placement moved the {tpl} "
+                                  f"from {preferred} to {band} to avoid "
+                                  "faces/source text across its window.")
+            y = safe_y
     texts = [dict(tx) for tx in (edl.get("texts") or [])]
     item = {"id": _next_item_id(texts, "tx"), "text": t[:200], "start": s,
             "end": e, "template": tpl,
@@ -7786,9 +8661,17 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
             "box": bool(box) if box is not None else None}
     texts.append(item)
     edl["texts"] = texts
+    muted_note = ""
+    if edl.get("captions"):
+        mutes = [list(m) for m in (edl.get("caption_mutes") or [])]
+        mutes.append([s, e])
+        edl["caption_mutes"] = mutes
+        muted_note = ("\nTranscript captions are muted under this designed "
+                      "text window so two independent word layers never "
+                      "stack on screen.")
     return ctx.write_edl(
         edl, f"{tpl} text \"{t[:40]}\" at {s}-{e}s (program time) "
-             f"[{item['id']}]") + clamped
+             f"[{item['id']}]") + clamped + placement_note + muted_note
 
 
 # ── Typography choreography (round 82e) ─────────────────────────────────
@@ -7895,20 +8778,43 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
     emph = {str(w).strip().lower().strip(".,!?") for w in
             (emphasis_words or []) if str(w).strip()}
     texts = [dict(tx) for tx in (edl.get("texts") or [])]
-    slots = _KINETIC_ZONES[z]
     base_scale = float(size_scale) if size_scale is not None else 0.55
-    made = []
+    preferred_band = {"upper": "top", "lower": "bottom",
+                      "sides": "middle"}[z]
+    zone_for_band = {"top": "upper", "bottom": "lower",
+                     "middle": "sides"}
+    made, skipped, moved = [], 0, 0
     for i, (ptext, pa, pb) in enumerate(phrases):
         nxt = phrases[i + 1][1] if i + 1 < len(phrases) else None
         hold_end = min(nxt if nxt is not None else pb + 1.4, pb + 2.2, e)
         hold_end = max(hold_end, pa + 0.5)
-        x, y = slots[i % len(slots)]
+        item_start = round(max(s, pa - 0.05), 2)
+        item_end = round(hold_end, 2)
+        if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial",
+                                                   False):
+            band, analyzed, unsafe, err = _fixed_text_band(
+                ctx, edl, item_start, item_end, preferred_band, lock=False)
+            if err:
+                return ("REJECTED: kinetic text was not added because "
+                        "face/source-text analysis is unavailable "
+                        f"({err}).")
+            if analyzed and band is None:
+                skipped += 1
+                continue
+            band = band or preferred_band
+        else:
+            band = preferred_band
+        actual_zone = zone_for_band[band]
+        band_slots = _KINETIC_ZONES[actual_zone]
+        x, y = band_slots[len(made) % len(band_slots)]
+        if actual_zone != z:
+            moved += 1
         stressed = bool(emph and
                         emph & {t.lower().strip(".,!?")
                                 for t in ptext.split()})
         item = {"id": _next_item_id(texts, "tx"), "text": ptext[:60],
-                "start": round(max(s, pa - 0.05), 2),
-                "end": round(hold_end, 2), "template": "callout",
+                "start": item_start, "end": item_end,
+                "template": "callout",
                 "x": x, "y": y,
                 "size_scale": round(base_scale + (0.25 if stressed else 0.0),
                                     2),
@@ -7919,16 +8825,22 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                 "exit": "fade", "uppercase": None, "box": None}
         texts.append(item)
         made.append(item)
+    if not made:
+        return (f"REJECTED: every candidate phrase across {s}-{e}s fell on "
+                "faces, source text, or dense UI in the measured frames. "
+                "Use clean cutaways, a designed text card, or choose a "
+                "different window instead of stacking words over content.")
     edl["texts"] = texts
     # The spoken words are now ON screen — bottom captions repeating them
     # over the same window would print everything twice.
     muted_note = ""
     if edl.get("captions"):
         mutes = [list(m) for m in (edl.get("caption_mutes") or [])]
-        mutes.append([s, e])
+        mutes.extend([[item["start"], item["end"]] for item in made])
         edl["caption_mutes"] = mutes
-        muted_note = (" Captions are muted over this window so the words "
-                      "don't print twice.")
+        muted_note = (" Captions are muted over this window only under the "
+                      "phrases actually placed so the words don't print "
+                      "twice.")
     res = ctx.write_edl(
         edl, f"kinetic typography: {len(made)} phrase(s) choreographed to "
              f"the speech across {s}-{e}s (program time) "
@@ -7936,16 +8848,21 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
     if not res.startswith("EDL v"):
         return res
     sample = "; ".join(f'"{m["text"]}"@{m["start"]}s' for m in made[:4])
-    res += (f"\n{len(made)} phrases placed in the {z} zone, alternating "
-            f"sides, each appearing AT its spoken moment: {sample}..."
+    res += (f"\n{len(made)} phrases placed from measured clean bands, each "
+            f"appearing AT its spoken moment: {sample}..."
             f"{muted_note}")
+    if moved:
+        res += (f"\nMeasured composition moved {moved} phrase(s) out of "
+                f"the requested {z} zone to avoid faces/source text.")
+    if skipped:
+        res += (f"\nSkipped {skipped} phrase(s) because every frame band "
+                "was occupied; no words were printed over that content.")
     if truncated:
         res += (f"\nStopped at {_KINETIC_MAX_ITEMS} items — continue with "
                 f"start={made[-1]['end']} for the rest.")
     res += ("\nEvery phrase is an ordinary text item (remove_text by id, "
-            "or re-run over a window after remove_text to restyle). "
-            "RENDER and LOOK: if any phrase sits on the speaker's face in "
-            "this framing, re-run with zone='lower' or 'sides'.")
+            "or re-run over a window after remove_text to restyle). Render "
+            "and inspect the independent visual review before delivery.")
     return res
 
 
@@ -8206,12 +9123,19 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
                       "method": stats.get("method")}
     texts.append(item)
     edl["texts"] = texts
+    muted_note = ""
+    if edl.get("captions"):
+        mutes = [list(m) for m in (edl.get("caption_mutes") or [])]
+        mutes.append([s, e])
+        edl["caption_mutes"] = mutes
+        muted_note = (" Transcript captions are muted under the depth-title "
+                      "window so a second word layer cannot cover it.")
     written = ctx.write_edl(
         edl, f"{tpl} text \"{t[:40]}\" BEHIND the subject at {s}-{e}s "
              f"[{item['id']}]")
     if not written.startswith("EDL v"):
         return written
-    bits = [written]
+    bits = [written + muted_note]
     if stats.get("cached"):
         bits.append("The subject mask for that exact moment was already "
                     "measured, so this cost nothing to add.")
@@ -10577,7 +11501,7 @@ def _demo_zoom_runs(clicks):
 
 
 def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
-                  click_sounds=True, zooms=True, click_times=None):
+                  click_sounds=False, zooms=True, click_times=None):
     """Splice a screen recording in and cut it like a product video: one
     gliding zoom per run of clicks, a click sound on each click."""
     asset, err = _resolve_media_asset(ctx, asset_key, ("video_clip",))
@@ -10596,13 +11520,9 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
     # refusing it was the tool refusing to do its job on the footage most
     # people have. Two levels of graceful degradation, in order:
     #
-    #   1. caller-supplied click_times  -> full treatment (zooms + sounds),
-    #      minus the click POSITIONS, which record_website_demo knows and a
-    #      user's recording does not. So the zooms are centre-weighted eased
-    #      punches at the clicks instead of a path between them: the moment is
-    #      still emphasised, and nothing is invented about WHERE on screen it
-    #      happened. The agent can add the travel itself with add_zoom_path
-    #      once look_at has told it where the buttons are.
+    #   1. caller-supplied click_times -> timing only. A click time does not
+    #      reveal WHERE the click landed, so it is enough to sync explicitly
+    #      requested sounds but never enough to invent a center zoom.
     #   2. nothing at all -> place it and say plainly what was NOT synced.
     #
     # It never claims a click it was not told about.
@@ -10710,40 +11630,18 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
     made_zooms, made_sfx = 0, 0
     notes = [notes_late] if notes_late else []
 
-    # Positioned clicks drive a TRAVELLING zoom (the frame glides between the
-    # buttons); positionless ones — a user's own recording, where we were told
-    # WHEN but can never know WHERE — drive an eased centre punch over the same
-    # window. Both are the same shared move from worker/travel.py; the only
-    # difference is that nothing is invented about where on screen the click
-    # landed.
+    # Positioned clicks drive a TRAVELLING zoom. Positionless clicks never
+    # drive a zoom: timing is not spatial evidence, and a center punch can
+    # magnify empty UI while the actual interaction sits at an edge.
     clicks = [e for e in events if e.get("kind") == "click"
               and "x" in e and "y" in e]
     blind_clicks = [e for e in events if e.get("kind") == "click"
                     and not ("x" in e and "y" in e)]
     if zooms and not clicks and blind_clicks:
-        for run in _demo_zoom_runs(blind_clicks):
-            if made_zooms >= DEMO_MAX_ZOOMS:
-                notes.append(
-                    f"stopped at {DEMO_MAX_ZOOMS} zooms — the rest of the "
-                    "clicks still have their sounds")
-                break
-            s = prog_t(run[0]["t"] - DEMO_ZOOM_LEAD_S)
-            e = prog_t(run[-1]["t"] + DEMO_ZOOM_TAIL_S)
-            if e - s < 0.45:
-                continue
-            if zlist and zlist[-1].get("end", 0) > s - 0.15:
-                s = round(zlist[-1]["end"] + 0.15, 2)
-                if e - s < 0.45:
-                    continue
-            zlist.append({"id": _next_item_id(zlist, "zm"), "start": s,
-                          "end": e, "strength": strength, "mode": "ease"})
-            made_zooms += 1
-        if made_zooms:
-            notes.append(
-                "the zooms are centred eased punches, not a travelling move — "
-                "I was told when the clicks are but not where on screen. Use "
-                "look_at on the clip and add_zoom_path to make the frame "
-                "travel between the buttons")
+        notes.append(
+            "no zooms were added for the supplied click times: they say WHEN "
+            "but not WHERE the interaction is. Inspect the clip and use "
+            "add_zoom_path with measured coordinates if movement is wanted")
     if zooms and clicks:
         # A navigation resets the run: the viewer needs the whole new page
         # before being pushed into a corner of it.
@@ -10801,6 +11699,7 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
             else:
                 item_z["mode"] = "ease"
                 item_z["cx"], item_z["cy"] = pts[0]["cx"], pts[0]["cy"]
+                item_z["target_measured"] = True
             zlist.append(item_z)
             made_zooms += 1
 
@@ -11091,8 +11990,10 @@ def render_preview(ctx):
             # — the editor reviews its own work directly and only finishes
             # when it has SEEN the edit is right. A blind agent model falls
             # back to the separate vision reviewer exactly as before.
-            delivered = False if result.get("cached") \
-                else _queue_check_frames(ctx, result, plan)
+            # A cached render may predate the independent reviewer entirely.
+            # Its overview sheet is still real evidence, so inspect it rather
+            # than assuming "reviewed when made" for legacy output.
+            delivered = _queue_check_frames(ctx, result, plan)
             if delivered:
                 claims = ""
                 if plan:
@@ -11111,7 +12012,18 @@ def render_preview(ctx):
                          "repeat the exact call that just failed, and never "
                          "give up while a genuinely different approach "
                          "remains.")
-            check = None if (result.get("cached") or delivered) \
+            # A fresh, tool-free reviewer inspects EVERY new render. The
+            # editor still receives the frames above, but is no longer the
+            # only judge of work it authored itself.
+            critic_report = _independent_preview_review(ctx, result, plan)
+            critic_repairs = preview_critic.repair_lines(critic_report)
+            if critic_report is not None:
+                ctx.last_visual_critic = critic_report
+                note += preview_critic.summary_line(critic_report)
+            # The old generic reviewer remains only as an availability
+            # fallback when neither the independent critic nor direct sight
+            # could inspect the render.
+            check = None if (delivered or critic_report is not None) \
                 else _self_check(ctx, result, plan)
             if check:
                 ctx.last_selfcheck = check
@@ -11182,11 +12094,14 @@ def render_preview(ctx):
                     user_asked=ctx.user_message or "")
                 # Published to the loop as well as printed here: a finding the
                 # model can read and skip past is not a review.
-                ctx.last_taste = list(findings)
+                ctx.last_taste = list(findings) + critic_repairs
                 ctx.last_taste_version = row.get("version")
                 note += taste.audit_line(findings)
             except Exception:
-                pass
+                # Visual review must still block a bad handoff when a
+                # deterministic taste rule itself happens to fail.
+                ctx.last_taste = list(critic_repairs)
+                ctx.last_taste_version = row.get("version")
             # Round 98 — the SOUND side of the self-check. Deterministic mix
             # measurements from the render job (audio_qc): findings are WORK,
             # exactly like the taste audit. And when the agent model has
@@ -11234,6 +12149,14 @@ def _frame_context(edl):
     ratio, mode = frame.get("ratio"), frame.get("mode")
     if not ratio:
         return ""
+    mixed = {sp.get("mode") for sp in (frame.get("focus_track") or [])
+             if sp.get("mode") and sp.get("mode") != mode}
+    if mixed:
+        return (f"The output frame is {ratio} with measured per-shot fit: "
+                "speaker shots may crop tightly, while unmeasured/wide "
+                "shots use pad_blur to preserve the whole composition. "
+                "Blurred bars on those spans are EXPECTED; a blank/irrelevant "
+                "crop is not. ")
     if mode in ("pad", "pad_blur"):
         bg = "blurred" if mode == "pad_blur" else "solid black"
         return (f"The output frame is {ratio} letterboxed ({bg} bars around "
@@ -11303,6 +12226,122 @@ def _queue_check_frames(ctx, result, plan=None):
         except Exception as e:
             print(f"[render] result sheet fetch failed: {e}", flush=True)
     return queued > 0
+
+
+def _independent_preview_review(ctx, result, plan=None):
+    """Fresh critic over edited output plus a small raw-source comparison.
+
+    This is deliberately independent of ``ctx.pending_images``: those pixels
+    go back into the authoring conversation, while these go into a stateless,
+    tool-free call with an adversarial rubric. Missing storage or vision is an
+    honest no-review, never a failed preview.
+    """
+    if not llm.vision_available():
+        return None
+    images, labels = [], []
+
+    def _download(key, stem, label):
+        if not key:
+            return
+        local = os.path.join(
+            ctx.workdir, f"critic_{stem}_{uuid.uuid4().hex[:8]}.jpg")
+        try:
+            storage.download_to(key, local)
+        except Exception as exc:
+            print(f"[critic] image fetch skipped ({key}): {exc}", flush=True)
+            return
+        images.append(local)
+        labels.append(label)
+
+    _download(result.get("sheet_key"), "overview",
+              "EDITED RENDER overview, a timestamped 3x3 sample")
+    if plan:
+        _download(result.get("verify_sheet_key"), "changed",
+                  "EDITED RENDER changed moments, one numbered tile per claim")
+
+    # Compare changed moments to their corresponding RAW source tiles. First
+    # and last tiles are useful for a generic overview, but on an 85-minute
+    # upload they say nothing about a crop at minute 29—the exact blind spot
+    # that let the authoring model share its own mistaken assumption with the
+    # old reviewer. Keep this bounded to four cached JPEGs.
+    raw_keys = list((ctx.index or {}).get("tile_keys") or [])
+    if raw_keys:
+        pick_indexes = []
+        try:
+            step = float((ctx.index or {}).get("tile_step_s") or 0.0)
+            edl_now = ctx.latest_edl()["json"]
+            tl_now = Timeline(edl_now.get("keep") or [],
+                              edl_now.get("inserts") or [],
+                              edl_now.get("speed") or [])
+            if step > 0:
+                for output_t, _claim in (plan or []):
+                    source_t = tl_now.out_to_src(float(output_t))
+                    if source_t is None:
+                        continue
+                    idx = min(max(int(source_t / (step * 4.0)), 0),
+                              len(raw_keys) - 1)
+                    if idx not in pick_indexes:
+                        pick_indexes.append(idx)
+        except Exception:
+            pick_indexes = []
+        if not pick_indexes:
+            pick_indexes = [0]
+            if len(raw_keys) > 1:
+                pick_indexes.append(len(raw_keys) - 1)
+        for i, idx in enumerate(pick_indexes[:4], 1):
+            key = raw_keys[idx]
+            _download(key, f"raw{i}",
+                      f"RAW SOURCE filmstrip around changed moment {i}, "
+                      "with timestamped source frames")
+    if not images:
+        return None
+
+    try:
+        edl = ctx.latest_edl()["json"]
+    except Exception:
+        edl = {}
+    lines = [
+        f"User request: {(ctx.user_message or '')[:1000]}",
+        f"Output duration: {result.get('duration_s')}s; raw source: "
+        f"{getattr(ctx, 'duration', None)}s.",
+        _frame_context(edl),
+    ]
+    edit_plan = getattr(ctx, "edit_plan", None) or {}
+    if edit_plan:
+        lines.append("Recorded direction: " +
+                     str(edit_plan.get("brief") or "")[:300])
+        anchors = "; ".join(
+            x for x in (
+                f"format={edit_plan.get('format')}"
+                if edit_plan.get("format") else "",
+                f"intent={edit_plan.get('intent')}"
+                if edit_plan.get("intent") else "",
+                f"style={edit_plan.get('style_family')}"
+                if edit_plan.get("style_family") else "",
+                ("must keep=" + ", ".join(edit_plan.get("must_keep") or []))
+                if edit_plan.get("must_keep") else "",
+                ("must avoid=" + ", ".join(edit_plan.get("must_avoid") or []))
+                if edit_plan.get("must_avoid") else "",
+            ) if x)
+        if anchors:
+            lines.append("Editorial anchors: " + anchors[:1000])
+        lines.append("Planned moves: " + "; ".join(
+            str(s)[:160] for s in (edit_plan.get("steps") or [])[:12]))
+    if plan:
+        lines.append("Changed-moment claims: " + "; ".join(
+            f"tile {i + 1} at {t:.1f}s — {claim}"
+            for i, (t, claim) in enumerate(plan)))
+    fx = edl.get("effects") or {}
+    zooms = fx.get("zooms") or []
+    if zooms:
+        lines.append("Authored zooms: " + "; ".join(
+            f"{z.get('start')}-{z.get('end')}s aimed at "
+            f"({z.get('cx')},{z.get('cy')}) mode={z.get('mode', 'punch')}"
+            for z in zooms[:8]))
+    caps = edl.get("captions") or {}
+    if caps:
+        lines.append("Caption layer: " + json.dumps(caps, default=str)[:900])
+    return preview_critic.review(images, labels, "\n".join(x for x in lines if x))
 
 
 def _self_check(ctx, result, plan=None):
@@ -11604,7 +12643,8 @@ def _asset_audio_analysis(ctx, asset_key):
     return _cap(out)
 
 
-def set_edit_plan(ctx, steps, brief=None):
+def set_edit_plan(ctx, steps, brief=None, format=None, intent=None,
+                  style_family=None, must_keep=None, must_avoid=None):
     """Record the turn's edit plan — working memory, not an EDL write.
 
     Round 98. The prompt has always demanded 'plan the edit before you touch
@@ -11624,14 +12664,144 @@ def set_edit_plan(ctx, steps, brief=None):
             clean.append(s[:140])
     if not clean:
         return "REJECTED: every step was empty."
-    ctx.edit_plan = {"brief": (str(brief or "").strip()[:200] or None),
-                     "steps": clean}
+    def _clean_constraints(value, label):
+        if value is None:
+            return [], None
+        if not isinstance(value, (list, tuple)):
+            return None, f"REJECTED: {label} must be an array of short strings."
+        rows = [str(v or "").strip()[:120] for v in value]
+        return [v for v in rows if v][:8], None
+
+    keeps, err = _clean_constraints(must_keep, "must_keep")
+    if err:
+        return err
+    avoids, err = _clean_constraints(must_avoid, "must_avoid")
+    if err:
+        return err
+    ctx.edit_plan = {
+        "brief": (str(brief or "").strip()[:200] or None),
+        "format": (str(format or "").strip()[:80] or None),
+        "intent": (str(intent or "").strip()[:160] or None),
+        "style_family": (str(style_family or "").strip()[:100] or None),
+        "must_keep": keeps,
+        "must_avoid": avoids,
+        "steps": clean,
+    }
     head = (f" Brief: {ctx.edit_plan['brief']}."
             if ctx.edit_plan["brief"] else "")
-    return (f"Plan recorded ({len(clean)} steps).{head} "
+    anchors = []
+    if ctx.edit_plan["format"]:
+        anchors.append(f"format={ctx.edit_plan['format']}")
+    if ctx.edit_plan["style_family"]:
+        anchors.append(f"style={ctx.edit_plan['style_family']}")
+    if keeps:
+        anchors.append("must keep: " + "; ".join(keeps))
+    if avoids:
+        anchors.append("must avoid: " + "; ".join(avoids))
+    anchor_note = (" Anchors: " + " | ".join(anchors) + "."
+                   if anchors else "")
+    return (f"Plan recorded ({len(clean)} steps).{head}{anchor_note} "
             + " ".join(f"{i + 1}) {s}" for i, s in enumerate(clean))
             + " — now execute it in big batched steps. If the edit has to "
               "change course, record the new plan the same way.")
+
+
+# Pure EDL operations that can be staged against an in-memory context and
+# committed as ONE version. Anything that creates/downloads an asset, starts a
+# render, asks the user, or modifies pixels outside the EDL is intentionally
+# absent: transactional means no external side effect can escape an abort.
+RECIPE_TOOLS = frozenset({
+    "keep_segments", "cut_range", "cut_output_range", "restore_range",
+    "cut_silences", "remove_filler_words",
+    "add_captions", "set_caption_style", "set_caption_fixes",
+    "set_caption_mutes",
+    "set_frame", "auto_reframe",
+    "set_color_grade", "set_grade_custom", "set_transitions",
+    "add_zoom", "remove_zoom", "add_zoom_path", "remove_zoom_path",
+    "punch_in_on_emphasis", "set_fades",
+    "set_volume", "set_speed", "remove_speed",
+    "add_stylize", "remove_stylize", "set_master_loudness",
+})
+
+
+class _RecipeContext:
+    """ToolContext view whose EDL writes land in memory until final commit."""
+
+    def __init__(self, base, edl, version):
+        object.__setattr__(self, "_base", base)
+        # A recipe must be unable to mutate the live DB row through a nested
+        # list/dict alias even if one legacy tool edits its input in place.
+        object.__setattr__(self, "_edl", json.loads(json.dumps(edl)))
+        object.__setattr__(self, "_version", version)
+        # add_captions must still run the real pixel gate on this proxy.
+        object.__setattr__(self, "enforce_spatial", True)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    def latest_edl(self):
+        return {"version": self._version, "json": self._edl}
+
+    def write_edl(self, edl, desc):
+        try:
+            normalized = validate_edl(edl, self.duration).model_dump()
+        except EDLValidationError as exc:
+            return f"REJECTED while staging recipe: {exc}"
+        if edl_signature(normalized) == edl_signature(self._edl):
+            return "NO CHANGE while staging recipe"
+        object.__setattr__(self, "_edl", normalized)
+        return f"EDL v{self._version} -> staged: {desc}."
+
+
+def apply_edit_recipe(ctx, operations, brief=None):
+    """Stage several ordinary edit tools and atomically commit one EDL."""
+    if not isinstance(operations, list) or not operations:
+        return ("REJECTED: operations must be a non-empty array of "
+                "{tool:'name', args:{...}} objects.")
+    if len(operations) > 12:
+        return "REJECTED: one recipe takes at most 12 operations."
+    row = ctx.latest_edl()
+    stage = _RecipeContext(ctx, row["json"], row["version"])
+    notes, plan_steps = [], []
+    for i, op in enumerate(operations, 1):
+        if not isinstance(op, dict):
+            return f"REJECTED: operation {i} is not an object; nothing changed."
+        name = str(op.get("tool") or "").strip()
+        args = op.get("args") or {}
+        if name not in RECIPE_TOOLS:
+            allowed = ", ".join(sorted(RECIPE_TOOLS))
+            return (f"REJECTED: operation {i} uses '{name}', which is not a "
+                    "transaction-safe recipe tool. Nothing changed. Allowed: "
+                    f"{allowed}.")
+        if not isinstance(args, dict):
+            return (f"REJECTED: operation {i} args must be an object; "
+                    "nothing changed.")
+        result = execute(stage, name, args)
+        if not isinstance(result, str) or result.startswith((
+                "REJECTED", "Unknown tool", "FAILED", "Could not",
+                "Tool ")):
+            return (f"RECIPE ABORTED at operation {i} ({name}); no EDL version "
+                    f"was created.\n{result}")
+        if result.startswith("NO CHANGE"):
+            notes.append(f"{i}) {name}: no change")
+        else:
+            notes.append(f"{i}) {name}: staged")
+            plan_steps.append(name)
+    if edl_signature(stage._edl) == edl_signature(row["json"]):
+        return ("NO CHANGE — the complete recipe resolves to the current EDL; "
+                "nothing was committed.\n" + "\n".join(notes))
+    label = (str(brief or "").strip()[:160] or
+             ", ".join(plan_steps[:8]) or "edit recipe")
+    committed = ctx.write_edl(
+        stage._edl,
+        f"atomically applied recipe '{label}' ({len(plan_steps)} change(s))")
+    if committed.startswith("EDL v"):
+        existing = dict(getattr(ctx, "edit_plan", None) or {})
+        existing["brief"] = existing.get("brief") or label
+        existing["steps"] = [f"completed: {name}" for name in plan_steps]
+        ctx.edit_plan = existing
+        committed += "\nRecipe operations:\n" + "\n".join(notes)
+    return committed
 
 
 def _hearing_on(ctx):
@@ -11726,6 +12896,16 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
                     or os.path.basename(asset["storage_key"]))[:40]
             _cut(_asset_local_path(ctx, asset), wins,
                  "ASSET '" + name + "' {s:.1f}-{e:.1f}s")
+            if made:
+                bucket = ("_pending_listened_asset_keys"
+                          if getattr(ctx, "direct_sight", False)
+                          else "_listened_asset_keys")
+                listened = getattr(ctx, bucket, None)
+                if listened is None:
+                    listened = set()
+                    setattr(ctx, bucket, listened)
+                listened.add(str(asset_key))
+                listened.add(str(asset.get("storage_key") or asset_key))
         elif times is not None:
             if not ctx.has_main_video:
                 return ("REJECTED: no main video — pass asset_key to listen "
@@ -11796,6 +12976,89 @@ def get_audio_analysis(ctx, asset_key=None):
                 + "\n- ".join(lines))
 
 
+def _frame_focus_at_source(edl, source_t):
+    """The crop focus the renderer uses for a source moment."""
+    frame = edl.get("frame") or {}
+    base = (frame.get("focus_x"), frame.get("focus_y"))
+    for span in frame.get("focus_track") or []:
+        try:
+            if float(span.get("t0")) <= source_t <= float(span.get("t1")):
+                return (span.get("x") if span.get("x") is not None else base[0],
+                        span.get("y") if span.get("y") is not None else base[1])
+        except (TypeError, ValueError):
+            continue
+    return base
+
+
+def _frame_mode_at_source(edl, source_t):
+    """The fit/crop mode the renderer uses for a source moment."""
+    frame = edl.get("frame") or {}
+    base = frame.get("mode") or "crop"
+    for span in frame.get("focus_track") or []:
+        try:
+            if float(span.get("t0")) <= source_t <= float(span.get("t1")):
+                return span.get("mode") or base
+        except (TypeError, ValueError):
+            continue
+    return base
+
+
+def _source_point_to_output(ctx, edl, source_t, point):
+    """Map a measured source-frame point into the rendered output frame."""
+    video = ctx.index.get("video") or {}
+    try:
+        sw, sh = float(video["width"]), float(video["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    frame = edl.get("frame") or {}
+    W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
+    fit = renderer.fit_fractions(
+        sw, sh, W, H, _frame_mode_at_source(edl, source_t),
+        _frame_focus_at_source(edl, source_t))
+    kind, x0, y0, x1, y1 = fit
+    x, y = point
+    if kind == "crop":
+        # The point may genuinely have been cropped out. A professional edit
+        # does not zoom toward an invisible subject and hope it comes back.
+        if not (x0 <= x <= x1 and y0 <= y <= y1):
+            return None
+        x = (x - x0) / max(x1 - x0, 1e-9)
+        y = (y - y0) / max(y1 - y0, 1e-9)
+    else:
+        x = x0 + x * (x1 - x0)
+        y = y0 + y * (y1 - y0)
+    return round(min(max(x, 0.0), 1.0), 3), \
+        round(min(max(y, 0.0), 1.0), 3)
+
+
+def _face_at_source_moments(ctx, edl, moments):
+    """{source_t: (output_x, output_y)} measured from exact proxy frames.
+
+    Audio emphasis decides *when* a punch might be useful; it cannot decide
+    *where* to aim it. Only a detected face is accepted here. Gradient energy
+    is a useful crop fallback but not strong enough evidence to magnify.
+    """
+    try:
+        proxy = ctx.proxy_path()
+    except Exception:
+        return {}
+    out = {}
+    for i, source_t in enumerate(moments):
+        fp = os.path.join(ctx.workdir,
+                          f"emphasis_face_{i}_{int(source_t * 100)}.jpg")
+        try:
+            media.frame_at(proxy, source_t, fp, width=640)
+        except media.MediaError:
+            continue
+        points, method = subject.points_from_frames([fp])
+        if method != "faces" or not points:
+            continue
+        mapped = _source_point_to_output(ctx, edl, source_t, points[0])
+        if mapped is not None:
+            out[source_t] = mapped
+    return out
+
+
 def punch_in_on_emphasis(ctx, count=3, strength=0.14):
     """Punch zooms on the most vocally stressed KEPT words, in ONE version.
     Every timestamp is a real word time mapped through the current cut —
@@ -11833,7 +13096,7 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
                   edl.get("speed") or [])
     prog = round(tl.out_duration, 2)
     scores = perception.word_stress(p, words)
-    picked = []          # (word, program_t0)
+    picked = []          # (word, program_t0, source_mid)
     for i in sorted(range(len(words)), key=lambda k: -scores[k]):
         if len(picked) >= n:
             break
@@ -11849,26 +13112,40 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
         pt = round(pt, 2)
         if any(abs(pt - q[1]) < 4.0 for q in picked):
             continue                     # spaced >= 4s apart in program time
-        picked.append((w, pt))
+        picked.append((w, pt, mid))
     if not picked:
         return ("No stressed words survive the current cut with 4s spacing "
                 "— nothing was written. Place zooms by hand with add_zoom "
                 "if you still want them. Do NOT tell the user zooms were "
                 "added.")
     picked.sort(key=lambda q: q[1])
+    targets = _face_at_source_moments(ctx, edl, [q[2] for q in picked])
+    if not targets:
+        return ("No visually safe punch-in target was found at the stressed "
+                "words — exact frames contained no confidently detected face "
+                "inside the rendered crop, so nothing was written. Audio "
+                "emphasis tells us WHEN, not WHERE; inspect a desired moment "
+                "with look_at and use add_zoom with measured coordinates.")
     fx = dict(edl.get("effects") or {})
     zooms = [dict(z) for z in (fx.get("zooms") or [])]
     placed = []
-    for w, pt in picked:
+    for w, pt, source_mid in picked:
+        target = targets.get(source_mid)
+        if target is None:
+            continue
         # 60ms early so the punch lands ON the word's attack, not after it.
         s = round(max(0.0, pt - 0.06), 2)
         e = round(min(prog, s + 0.9), 2)
         if e - s < 0.2:
             continue                     # the word sits at the very end
+        if any(min(e, float(z.get("end", 0))) -
+               max(s, float(z.get("start", 0))) > 0.05 for z in zooms):
+            continue                     # never stack magnification
         item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
-                "strength": st}
+                "strength": st, "cx": target[0], "cy": target[1],
+                "target_measured": True}
         zooms.append(item)
-        placed.append((w, pt, item["id"]))
+        placed.append((w, pt, item["id"], target))
     if not placed:
         return ("No placeable emphasis moments — the stressed words all sit "
                 "at the very end of the program. Nothing was written.")
@@ -11879,8 +13156,9 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
              "vocally stressed words")
     if res.startswith("EDL v"):
         res += ("\nPunch-ins (program time, from measured vocal stress):\n"
-                + "\n".join(f"  '{w['w']}' @ {pt}s [{zid}]"
-                            for w, pt, zid in placed))
+                + "\n".join(f"  '{w['w']}' @ {pt}s, face target "
+                            f"({target[0]:g},{target[1]:g}) [{zid}]"
+                            for w, pt, zid, target in placed))
     return res
 
 
@@ -12369,7 +13647,7 @@ def make_shorts(ctx, count=None, style_note=None):
     the studio's Make shorts button. The heavy work runs as its own
     shorts_plan job so this turn can answer immediately; the board on the
     project shows the clips as they land."""
-    if ctx.project.get("parent_project_id"):
+    if getattr(ctx, "project", {}).get("parent_project_id"):
         return (f"REJECTED: this project IS a generated short (from the "
                 f"board of project {ctx.project['parent_project_id']}) — do "
                 "not cut shorts from a short. Edit THIS clip with the "
@@ -12666,8 +13944,9 @@ TOOLS = {
                    {"name": {"type": "string"}}),
     "set_edit_plan": (set_edit_plan, "Record YOUR edit plan for this "
                       "request before executing it — one short line per "
-                      "move, in order (steps=[...], optional brief= one "
-                      "line naming the format and direction). Call it in "
+                      "move, in order. Record format, intent, style_family, "
+                      "must_keep and must_avoid as structured anchors — not "
+                      "only a vague 'make it engaging' brief. Call it in "
                       "the same batch as your reads on any multi-step "
                       "edit: the plan survives auto-continuations (a "
                       "resumed pass finishes what was PLANNED instead of "
@@ -12677,7 +13956,36 @@ TOOLS = {
                       "write.",
                       {"steps": {"type": "array",
                                  "items": {"type": "string"}},
-                       "brief": {"type": "string"}}),
+                       "brief": {"type": "string"},
+                       "format": {"type": "string"},
+                       "intent": {"type": "string"},
+                       "style_family": {"type": "string"},
+                       "must_keep": {"type": "array",
+                                     "items": {"type": "string"}},
+                       "must_avoid": {"type": "array",
+                                      "items": {"type": "string"}}}),
+    "apply_edit_recipe": (
+        apply_edit_recipe,
+        "Atomically apply TWO OR MORE transaction-safe EDL operations in "
+        "one tool call and create exactly one new version. Pass operations "
+        "as [{tool:'set_frame', args:{ratio:'9:16'}}, ...]. Every operation "
+        "is staged against the result of the previous one; if any operation "
+        "is rejected or the final quality gate fails, the whole recipe is "
+        "aborted and NOTHING changes. Use this for the large write batch "
+        "after planning instead of spending one model round trip per simple "
+        "edit. Asset downloads/generation, rendering, and user questions are "
+        "intentionally unavailable inside recipes.",
+        {"operations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string"},
+                    "args": {"type": "object"},
+                },
+                "required": ["tool", "args"],
+            }},
+         "brief": {"type": "string"}}),
     "find_silences": (find_silences, "Silences of at least min_seconds, with "
                       "midpoints and surrounding words — cut points should "
                       "snap to these midpoints or word boundaries.",
@@ -12837,7 +14145,13 @@ TOOLS = {
                      "modern single-word look for hype/motivation/fast "
                      "talking; the ONLY preset that belongs mid-frame), "
                      "'elegant' (calm lower-third, serif-italic accents — "
-                     "interviews/luxury), 'classic' (plain legacy look). "
+                     "interviews/luxury), 'lyric' (phrase-led music/quote "
+                     "typography), plus stacked/iridescent/chrome/editorial/"
+                     "fashion/luxe/impact composed looks; 'classic' is the "
+                     "plain legacy look. If style is omitted, the tool "
+                     "chooses a coherent preset and accent deterministically "
+                     "from the measured format, speech pace and brief — it "
+                     "does not make every project wear the same caption skin. "
                      "PLACEMENT: multi-word presets default to the BOTTOM, "
                      "clear of the face — do not move them to 'middle'; "
                      "only a single-word-at-a-time look may sit centred. "
@@ -12921,6 +14235,10 @@ TOOLS = {
                   "override that. storage_key is an exact key from "
                   "list_assets(kind='music') — the user's own uploads or a "
                   "track fetch_music just downloaded — never invent one. "
+                  "Unless the user explicitly chose that exact attached or "
+                  "named track, listen_to must audition it in THIS turn "
+                  "before placement; if the model cannot hear, ask the user "
+                  "to choose rather than guessing from metadata. "
                   "start/end are OUTPUT-timeline seconds "
                   "and DEFAULT TO THE WHOLE VIDEO, so omit them for 'add "
                   "some music'. Fades in/out by default. loop=true (the "
@@ -12989,7 +14307,9 @@ TOOLS = {
                 "user's own message asks for sound effects (by name or "
                 "clearly: 'add a whoosh', 'sound effects please'). 'Make it "
                 "viral/punchy/engaging' is NOT a request for sfx — offer "
-                "them in your reply instead. "
+                "them in your reply instead. The exact asset must also have "
+                "been auditioned with listen_to in THIS turn; if this lane "
+                "cannot hear it, omit it rather than judging from a name. "
                 "storage_key is an exact key from fetch_sfx or "
                 "list_assets(kind='music') — never invent one. `at` is an "
                 "OUTPUT-timeline second (the edited program, not source "
@@ -13132,11 +14452,18 @@ TOOLS = {
                      "a slow Ken Burns move instead of sitting frozen — use "
                      "it whenever the user wants an image to feel animated. "
                      "Inserted media is NOT transcribed — captions cover "
-                     "the main footage only.",
+                     "the main footage only. fit defaults to 'auto': the "
+                     "WHOLE asset is preserved over a blurred extension, so "
+                     "a portrait card cannot be center-cropped into an empty "
+                     "middle band. fit='crop' fills edge-to-edge but is "
+                     "allowed only as a deliberate choice after "
+                     "look_at_asset confirms the content survives.",
                      {"asset_key": {"type": "string"},
                       "at_output_s": {"type": "number"},
                       "duration_s": {"type": "number"},
                       "clip_start_s": {"type": "number"},
+                      "fit": {"type": "string",
+                              "enum": ["auto", "crop", "pad", "pad_blur"]},
                       "motion": {"type": "string",
                                  "enum": ["zoom_in", "zoom_out",
                                           "pan_left", "pan_right"]}}),
@@ -13335,19 +14662,20 @@ TOOLS = {
         showcase_demo,
         "PLACE A SCREEN RECORDING AND CUT IT LIKE A PRODUCT VIDEO — one call. "
         "Splices the clip into the edit, then puts a zoom on each run of "
-        "clicks and lands a click sound on the exact frame of each press. "
+        "POSITIONED clicks. Click sounds are OFF by default and must be "
+        "explicitly requested. "
         "Works on ANY video clip, not just a record_website_demo capture. On "
         "a capture I made, the event track is exact: the frame pushes in and "
         "TRAVELS between the buttons, with a soft pop on each page change and "
         "a swipe under each scroll. On a recording the USER made, pass "
-        "click_times=[...] (seconds into the clip) and it does the same job "
-        "minus the travel — clicks cannot be seen in pixels, so I know when "
-        "but not where, and the zooms are eased centre punches instead of a "
-        "path to a coordinate I would have had to invent. With neither, it "
+        "click_times=[...] (seconds into the clip) to supply timing. Clicks "
+        "cannot be located from timing alone, so no zoom is invented without "
+        "a position. With neither, it "
         "still places the clip and tells you plainly that nothing was synced. "
         "at_output_s defaults to the END of the current edit; zoom_strength "
         "0.05-4.5 (0.4 default — screen text needs a real push to read); set "
-        "zooms=false or click_sounds=false to place it plainly. Follow up "
+        "zooms=false to place it plainly; click_sounds=true is opt-in. Follow "
+        "up "
         "with add_zoom_path to make the frame travel on a user recording, and "
         "enhance_cursor if the pointer is too small to follow.",
         {"asset_key": {"type": "string"},
@@ -13386,8 +14714,11 @@ TOOLS = {
                  "thing near an edge (an edge point stays at the edge at "
                  "any strength — it never slides to centre). Pass rect OR "
                  "cx/cy, not both; if both arrive the rect wins (it already "
-                 "determines the centre) and the call still succeeds. Omit "
-                 "all three for the classic center zoom. Use 1-3 short zooms "
+                 "determines the centre) and the call still succeeds. "
+                 "Omitting all targets is REJECTED, and coordinates are "
+                 "accepted only after look_at delivered the exact source or "
+                 "output moment in THIS turn: every zoom needs measured "
+                 "visual evidence, not plausible numbers. Use 1-3 short zooms "
                  "at emphatic moments, not wall-to-wall; for automatic "
                  "zooms on the strongest spoken words use "
                  "punch_in_on_emphasis. And if the zoom should MOVE while "
@@ -14369,6 +15700,7 @@ REQUIRED_ARGS = {
     "fetch_music": ["id"],
     "listen_to": [],
     "set_edit_plan": ["steps"],
+    "apply_edit_recipe": ["operations"],
     "extract_audio": ["asset_key"],
     "add_sfx": ["storage_key", "at"],
     "move_sfx": ["id", "at"],
@@ -14451,7 +15783,8 @@ REQUIRED_ARGS = {
 # generate_image and fetch_url are here for the capabilities digest; their
 # successes are tracked separately via ctx.images_generated / ctx.urls_fetched
 # (neither writes the EDL — they create an ASSET the agent then places).
-WRITE_TOOLS = {"keep_segments", "cut_range", "cut_output_range",
+WRITE_TOOLS = {"apply_edit_recipe",
+               "keep_segments", "cut_range", "cut_output_range",
                "restore_range",
                "cut_silences", "remove_filler_words", "add_captions",
                "add_kinetic_text",
@@ -14562,7 +15895,16 @@ def capability_names():
     return [n for n in TOOLS if n in WRITE_TOOLS and not _tool_disabled(n)]
 
 
-def openai_tools(model=None):
+def _compact_description(description):
+    """A post-plan reminder, not a second copy of the full handbook."""
+    text = " ".join(str(description or "").split())
+    first = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
+    if len(first) <= 240:
+        return first
+    return first[:237].rsplit(" ", 1)[0] + "..."
+
+
+def openai_tools(model=None, compact=False):
     """`model` is the agent model this schema is for, so per-model honest-off
     (a provider that has refused audio parts) can hide a tool the same way an
     unconfigured service does. Omitted by MCP and the tests, where the
@@ -14602,6 +15944,8 @@ def openai_tools(model=None):
                     "STILL moment — it does not modify or track the moving "
                     "footage. aspect defaults to the output frame / source "
                     "ratio.")
+        if compact:
+            desc = _compact_description(desc)
         out.append({
             "type": "function",
             "function": {
