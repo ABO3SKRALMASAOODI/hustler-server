@@ -5,7 +5,8 @@ Cloud Run service named `valmera-agent` runs one `agent_turn` per HTTP request:
 
 - request-based billing, `min-instances=0` — no idle instance charge;
 - `max-instances=5`, concurrency 1 — up to five isolated turns at once;
-- 2 vCPU / 4 GiB — native media state from one turn cannot kill another;
+- 1 vCPU / 1 GiB — the first production turn peaked below 270 millicores and
+  150 MiB, leaving ample headroom while halving the request-time compute rate;
 - the existing render executor still performs ffmpeg, indexing, capture,
   frames, tracking, matte, cleanup and stem separation.
 
@@ -30,8 +31,8 @@ Use these service settings:
 ```text
 service: valmera-agent
 region: us-central1
-CPU: 2
-memory: 4 GiB
+CPU: 1
+memory: 1 GiB
 concurrency: 1
 minimum instances: 0
 maximum instances: 5
