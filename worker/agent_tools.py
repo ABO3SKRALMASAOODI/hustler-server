@@ -515,9 +515,18 @@ def get_video_info(ctx):
     n_spk = ctx.index.get("speakers") or 0
     spk_txt = (f", {n_spk} speakers (labelled S0..S{n_spk - 1} in "
                "get_transcript)" if n_spk > 1 else "")
-    n_fill = sum(1 for w in words if w.get("filler"))
-    fill_txt = (f", {n_fill} filler sound(s) — remove_filler_words() cuts them"
-                if n_fill else "")
+    fillers = [w for w in words if w.get("filler")]
+    n_fill = len(fillers)
+    shown_fillers = ", ".join(
+        f"'{w.get('w', '')}' @{float(w.get('t0', 0)):g}-"
+        f"{float(w.get('t1', 0)):g}s" for w in fillers[:8])
+    if n_fill > 8:
+        shown_fillers += f", +{n_fill - 8} more"
+    fill_txt = (
+        f", {n_fill} filler sound(s) ({shown_fillers}) — "
+        "remove_filler_words() already has these exact indexed spans; "
+        "do NOT call get_words first"
+        if n_fill else "")
     n_mom = len(ctx.index.get("moments") or [])
     mom_txt = (f", {n_mom} sampled frames described (get_shots shows what is "
                "on screen over time)" if n_mom else "")

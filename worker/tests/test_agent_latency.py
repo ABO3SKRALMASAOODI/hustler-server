@@ -22,6 +22,7 @@ That leaves two levers, and this file pins both:
 import os
 import sys
 import json
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -29,6 +30,7 @@ import agent_prompt                                     # noqa: E402
 import agent_loop                                       # noqa: E402
 import agent_tools                                      # noqa: E402
 import llm                                              # noqa: E402
+from schemas import default_edl                         # noqa: E402
 
 
 class _Err(Exception):
@@ -98,6 +100,9 @@ def test_the_prompt_asks_for_independent_tool_calls_in_one_message():
     # has not been given yet — the one rule this whole prompt is built on.
     assert "find_silences before cut_silences" in p
     assert "13 seconds" in p, "the reason should be the measurement, not an assertion"
+    assert "NOT a reconnaissance round" in p
+    assert "NEVER needs a prior `get_words`" in p
+    assert "include every exact evidence read" in p
 
 
 def test_broad_speech_polish_is_finished_in_the_first_candidate():
@@ -105,6 +110,24 @@ def test_broad_speech_polish_is_finished_in_the_first_candidate():
     assert '"polished/professional social clip"' in p
     assert "word-safe filler/dead-pause cleanup" in p
     assert "first-pass social mastering" in p
+
+
+def test_video_info_exposes_exact_fillers_without_an_extra_read_round():
+    index = {
+        "video": {"duration": 6.52, "width": 960, "height": 540,
+                  "fps": 25.0, "has_audio": True},
+        "words": [{"w": "um", "t0": 3.2, "t1": 3.68,
+                   "filler": True}],
+        "shots": [], "sentences": [], "silences": [], "speakers": 1,
+    }
+    ctx = SimpleNamespace(
+        has_main_video=True, index=index, duration=6.52,
+        latest_edl=lambda: {"version": 1, "json": default_edl(6.52)},
+    )
+    info = agent_tools.get_video_info(ctx)
+    assert "'um' @3.2-3.68s" in info
+    assert "already has these exact indexed spans" in info
+    assert "do NOT call get_words first" in info
 
 
 def test_the_loop_still_dispatches_every_tool_call_in_a_batch():
