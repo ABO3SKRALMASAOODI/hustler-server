@@ -13031,6 +13031,7 @@ RECIPE_TOOLS = frozenset({
     # evidence/side-effect calls. Excluding them made the agent try a correct
     # music request in a recipe, get refused, then enter needless retries.
     "add_music", "remove_music", "swap_music", "set_music_fit",
+    "set_audio_gain",
     "add_stylize", "remove_stylize", "set_master_loudness",
 })
 

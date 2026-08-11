@@ -180,3 +180,40 @@ def test_dedicated_reviewer_retries_transient_model_error(
     assert answer.startswith("PASS")
     assert len(calls) == 3
     assert recorded["response"]["attempts"] == 3
+
+
+def test_render_reviewer_retries_http_200_non_answers(monkeypatch, tmp_path):
+    clip = tmp_path / "mix.mp3"
+    clip.write_bytes(b"bounded-audio")
+    answers = ["", "I will listen to the provided clip to assess it.",
+               "PASS — music is audible and speech is clear."]
+    sent_prompts = []
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+        def __init__(self, answer):
+            self.answer = answer
+
+        def json(self):
+            return {"choices": [{"message": {"content": self.answer}}],
+                    "usage": {}}
+
+    def fake_post(_url, **kwargs):
+        sent_prompts.append(kwargs["json"]["messages"][0]["content"][0][
+            "text"])
+        return Response(answers[len(sent_prompts) - 1])
+
+    monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "test-key")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_MODEL", "gpt-audio-1.5")
+    monkeypatch.setattr(llm, "_audio_review_dead", False)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+
+    answer = llm.ask_audio(
+        "Start with PASS or FIX.", [str(clip)],
+        purpose="audio_render_review")
+
+    assert answer.startswith("PASS")
+    assert len(sent_prompts) == 3
+    assert "Answer NOW" in sent_prompts[-1]

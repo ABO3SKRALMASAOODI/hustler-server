@@ -381,6 +381,10 @@ def test_edit_recipe_commits_multiple_safe_moves_as_one_version():
     assert ctx.edit_plan["brief"] == "measured vertical talking-head treatment"
 
 
+def test_existing_audio_gain_is_transaction_safe_recipe_work():
+    assert "set_audio_gain" in agent_tools.RECIPE_TOOLS
+
+
 def test_structured_edit_brief_survives_atomic_execution():
     ctx, _fake = _real_ctx()
     planned = agent_tools.set_edit_plan(

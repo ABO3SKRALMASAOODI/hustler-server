@@ -507,6 +507,28 @@ def _chat_usage(raw):
     )
 
 
+def _audio_answer_is_actionable(answer, purpose):
+    """Reject empty/non-answers before they reach the editing agent.
+
+    The audio model has returned HTTP 200 with either no content or a planning
+    sentence such as "I will listen to the clip". That is not hearing evidence.
+    Final-mix review has a stricter contract: PASS/FIX is what makes the result
+    executable instead of an unstructured impression.
+    """
+    value = str(answer or "").strip()
+    if not value:
+        return False
+    lowered = value.casefold()
+    if any(phrase in lowered for phrase in (
+            "i will listen", "i'll listen", "will now listen",
+            "provided clip to assess", "once i listen")):
+        return False
+    if purpose == "audio_render_review" and not re.search(
+            r"(?:^|\W)(?:pass|fix)(?:\W|$)", lowered):
+        return False
+    return True
+
+
 def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
               purpose="audio_review"):
     """Have the dedicated audio model judge bounded clips and return text.
@@ -557,6 +579,8 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
         retries_left = 2
         attempts = 0
         used_dual_modality = False
+        answer = ""
+        usage = None
         while True:
             attempts += 1
             response = requests.post(
@@ -573,16 +597,30 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
                     retries_left > 0):
                 retries_left -= 1
                 continue
+            if response.status_code < 400:
+                payload = response.json()
+                message = ((payload.get("choices") or [{}])[0].get("message")
+                           or {})
+                answer = (message.get("content") or
+                          (message.get("audio") or {}).get("transcript")
+                          or "").strip()
+                usage = _chat_usage(payload.get("usage"))
+                if (not _audio_answer_is_actionable(answer, purpose) and
+                        retries_left > 0):
+                    retries_left -= 1
+                    content[0]["text"] = (
+                        prompt + "\n\nYou already have the audio. Answer NOW "
+                        "from what is audible. Return plain text only; do not "
+                        "describe what you will do and do not return JSON."
+                    )
+                    continue
             break
         if response.status_code >= 400:
             raise RuntimeError(
                 f"audio review HTTP {response.status_code}: "
                 f"{response.text[:240]}")
-        payload = response.json()
-        message = ((payload.get("choices") or [{}])[0].get("message") or {})
-        answer = (message.get("content") or
-                  (message.get("audio") or {}).get("transcript") or "").strip()
-        usage = _chat_usage(payload.get("usage"))
+        if not _audio_answer_is_actionable(answer, purpose):
+            answer = ""
         record(purpose,
                {"model": config.AUDIO_REVIEW_MODEL, "question": prompt,
                 "clips": recorded},
