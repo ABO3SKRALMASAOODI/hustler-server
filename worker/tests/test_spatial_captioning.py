@@ -1,5 +1,6 @@
 """Pixel-grounded caption placement and source-text collision regressions."""
 
+import json
 import os
 import sys
 import tempfile
@@ -504,6 +505,95 @@ def test_auto_reframe_builds_mixed_track_before_global_detail_fit(
     assert captions_result.startswith("EDL v1 -> v2")
     assert ctx.edl["frame"]["focus_track"][-1]["mode"] == "crop"
     assert ctx.edl["captions"]["placement_track"][-1]["t1"] == 6.52
+
+
+def test_auto_reframe_retry_preserves_complete_measured_track(
+        monkeypatch, tmp_path):
+    """A repair-pass retry cannot flatten a proven mixed composition."""
+    class Ctx:
+        has_main_video = True
+        duration = 6.52
+        workdir = str(tmp_path)
+        index = {
+            "video": {"duration": 6.52, "width": 960, "height": 540},
+            "shots": [{"start": 0.0, "end": 5.48},
+                      {"start": 5.48, "end": 6.52}],
+        }
+
+        def __init__(self):
+            self.edl = default_edl(self.duration)
+            self.edl["keep"] = [[0.0, 3.2], [3.68, 5.48], [5.48, 6.52]]
+            self.edl["frame"] = {
+                "ratio": "9:16", "mode": "crop",
+                "focus_x": 0.55, "focus_y": 0.253,
+                "focus_track": [
+                    {"t0": 0.0, "t1": 5.48, "x": 0.55, "y": 0.253,
+                     "mode": "pad_blur"},
+                    {"t0": 5.48, "t1": 6.52, "x": 0.55, "y": 0.253,
+                     "mode": "crop"},
+                ],
+            }
+
+        def latest_edl(self):
+            return {"version": 2, "json": self.edl}
+
+        def proxy_path(self):
+            raise AssertionError("a complete measured track needs no retry")
+
+        def write_edl(self, _edl, _summary):
+            raise AssertionError("the existing measured track must survive")
+
+    ctx = Ctx()
+    before = json.loads(json.dumps(ctx.edl["frame"]))
+    result = agent_tools.auto_reframe(ctx, "9:16", "auto")
+    assert result.startswith("NO CHANGE")
+    assert ctx.edl["frame"] == before
+
+
+def test_auto_reframe_retry_remeasures_when_track_does_not_cover_keep(
+        monkeypatch, tmp_path):
+    """Restored source outside the old track must not inherit stale aims."""
+    class Ctx:
+        has_main_video = True
+        duration = 8.0
+        workdir = str(tmp_path)
+        index = {
+            "video": {"duration": 8.0, "width": 960, "height": 540},
+            "shots": [{"start": 0.0, "end": 4.0},
+                      {"start": 4.0, "end": 8.0}],
+        }
+
+        def __init__(self):
+            self.edl = default_edl(self.duration)
+            self.edl["frame"] = {
+                "ratio": "9:16", "mode": "crop",
+                "focus_x": 0.5, "focus_y": 0.3,
+                "focus_track": [
+                    {"t0": 0.0, "t1": 4.0, "x": 0.5, "y": 0.3,
+                     "mode": "crop"},
+                ],
+            }
+
+        def latest_edl(self):
+            return {"version": 2, "json": self.edl}
+
+        def proxy_path(self):
+            return "proxy.mp4"
+
+        def write_edl(self, edl, _summary):
+            self.edl = edl
+            return "EDL v2 -> v3"
+
+    monkeypatch.setattr(agent_tools.media, "frame_at",
+                        lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_tools.subject, "points_from_frames",
+                        lambda _paths: ([], "detail"))
+    monkeypatch.setattr(agent_tools.subject, "crop_detail_kept",
+                        lambda *_args, **_kwargs: 0.2)
+    monkeypatch.setattr(agent_tools.llm, "vision_available", lambda: False)
+    ctx = Ctx()
+    result = agent_tools.auto_reframe(ctx, "9:16", "auto")
+    assert not result.startswith("NO CHANGE")
 
 
 def test_caption_text_filter_rejects_tall_texture_but_keeps_real_lines():

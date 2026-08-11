@@ -4003,6 +4003,49 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         return ("REJECTED: mode must be 'auto' (measure the footage and "
                 "choose), 'crop' (fill the frame, cutting the sides), 'pad' "
                 "or 'pad_blur' (fit the WHOLE picture into the new frame).")
+    # A measured per-shot track is strictly richer evidence than another
+    # generic `auto` request. Preview critics commonly ask to "re-measure" a
+    # composition they dislike; if that later measurement is temporarily
+    # unavailable (or its broad five-frame detail score wins), replacing a
+    # correct mixed fit/crop track with one global pad_blur leaves close-ups
+    # tiny. That happened in production project 637: v2 correctly fitted the
+    # wide two-shot and cropped the close-up, then a repair-pass auto_reframe
+    # silently flattened both to pad_blur in v3.
+    #
+    # Keep the high-information state when it still covers every kept source
+    # interval and the requested aspect is unchanged. Restored footage outside
+    # the measured track, or a new aspect ratio, still falls through and gets
+    # measured normally.
+    current = ctx.latest_edl()["json"]
+    current_frame = current.get("frame") or {}
+    track = current_frame.get("focus_track") or []
+    if mode == "auto" and str(current_frame.get("ratio")) == str(ratio) \
+            and track:
+        coverage = sorted(
+            (float(span.get("t0", 0.0)), float(span.get("t1", 0.0)))
+            for span in track
+            if float(span.get("t1", 0.0)) - float(span.get("t0", 0.0))
+            > 0.01)
+
+        def _covered(start, end):
+            cursor = float(start)
+            for left, right in coverage:
+                if right <= cursor + 1e-3:
+                    continue
+                if left > cursor + 1e-3:
+                    return False
+                cursor = max(cursor, right)
+                if cursor >= float(end) - 1e-3:
+                    return True
+            return cursor >= float(end) - 1e-3
+
+        keep = current.get("keep") or [[0.0, ctx.duration]]
+        if coverage and all(_covered(start, end) for start, end in keep):
+            return ("NO CHANGE — the current frame already has a measured "
+                    f"per-shot focus_track covering every kept interval at "
+                    f"{ratio}. Preserved that mixed composition instead of "
+                    "downgrading it to one global crop/fit; change the mode "
+                    "or ratio explicitly if uniform framing is intended.")
     if mode in ("pad", "pad_blur"):
         # pad modes never discard picture, so there is nothing to aim.
         return set_frame(ctx, ratio, mode, _measured=True)
