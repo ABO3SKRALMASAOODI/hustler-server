@@ -253,6 +253,10 @@ def test_initialize_carries_the_editing_doctrine(client):
     assert b["result"]["protocolVersion"] == "2025-06-18"
     assert "DOCTRINE." in b["result"]["instructions"]
     assert "ONE ACTIVE PROJECT" in b["result"]["instructions"]
+    assert "Never say MCP can only send instructions" in \
+        b["result"]["instructions"]
+    assert "Do not use edit_shorts when the user asks YOU" in \
+        b["result"]["instructions"]
 
 
 def test_unknown_protocol_version_falls_back_to_ours(client):
@@ -284,6 +288,8 @@ def test_podcast_shorts_are_first_class_session_tools(client):
     tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
     by_name = {t["name"]: t for t in tools}
     assert "shorts_status" in by_name
+    assert "open_short" in by_name
+    assert by_name["open_short"]["annotations"]["readOnlyHint"] is True
     assert by_name["create_project"]["inputSchema"]["properties"]["kind"] \
         ["enum"] == ["edit", "shorts"]
 
@@ -304,9 +310,39 @@ def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
                        {"name": "shorts_status", "arguments": {}}))
     assert "status: ready" in body
     assert "Planner job 8: done" in body
-    assert "[9] Strong hook" in body
+    assert "card 1, project [9] Strong hook" in body
     assert "edit v6" in body and "final done (job 10)" in body
-    assert "open_project(project_id)" in body
+    assert "open_short(card)" in body
+    assert "delegates a prompt" in body
+
+
+def test_open_short_puts_the_child_edl_under_direct_mcp_control(client):
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "open_short", "arguments": {"card": 1}}))
+    assert DB["static_project"] == 9
+    assert "DIRECT MCP editing" in body
+    assert "No Valmera agent was called" in body
+    assert "Every normal editor tool" in body
+
+
+def test_open_short_rejects_a_child_outside_the_active_board(client):
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "open_short",
+                        "arguments": {"child_project_id": 999}}))
+    assert DB["static_project"] == 3
+    assert "is not a generated short" in body
+
+
+def test_open_short_card_numbers_match_status_while_earlier_card_builds(client):
+    DB["project_rows"][3]["meta"]["shorts"]["clips"].insert(
+        0, {"order": -1, "title": "Building", "start": 0, "end": 20})
+    waiting = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                          {"name": "open_short", "arguments": {"card": 1}}))
+    assert "still building" in waiting
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "open_short", "arguments": {"card": 2}}))
+    assert DB["static_project"] == 9
+    assert "DIRECT MCP editing" in body
 
 
 def test_sse_preferring_client_gets_an_sse_frame(client):

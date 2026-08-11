@@ -288,6 +288,7 @@ _TITLE_OVERRIDES = {
     "read_skill": "Read an editing skill",
     "wait_for_job": "Wait for a running job",
     "shorts_status": "Check podcast shorts progress",
+    "edit_shorts": "Delegate batch edits to Valmera agents",
 }
 
 
@@ -356,6 +357,24 @@ SESSION_TOOLS = [
                     "editing tool.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer"}}, "required": ["project_id"]}},
+    {"name": "open_short",
+     "description": "Open one generated short for DIRECT editing by this "
+                    "MCP caller. Select it by its 1-based board card number "
+                    "or child project ID; every normal editor tool then acts "
+                    "on that short's EDL with exactly the same capabilities "
+                    "as Valmera's own agent. This does NOT call or delegate "
+                    "to Valmera's agent. Use this, then watch_video and the "
+                    "normal editing tools, when the user says YOU should "
+                    "edit a short. If parent_project_id is omitted, the "
+                    "active parent or generated child determines the board.",
+     "inputSchema": {"type": "object", "properties": {
+         "card": {"type": "integer", "minimum": 1,
+                  "description": "1-based card number from shorts_status."},
+         "child_project_id": {"type": "integer",
+                              "description": "Generated child project ID."},
+         "parent_project_id": {"type": "integer",
+                               "description": "Optional Shorts board project "
+                                              "when it is not active."}}}},
     {"name": "create_project",
      "description": "Create an empty project and make it active. Upload a "
                     "video into it with upload_start, or build a canvas "
@@ -492,6 +511,7 @@ _SESSION_META = {
     #  name: (title, readOnlyHint, idempotentHint)
     "list_projects":  ("List this account's projects", True, False),
     "open_project":   ("Open a project (switch the active one)", True, True),
+    "open_short":     ("Open a short for direct editing", True, True),
     "create_project": ("Create a project", False, False),
     "project_state":  ("Read the active project's state", True, False),
     "upload_start":   ("Start uploading a local file", False, False),
@@ -531,10 +551,19 @@ Two things are different from a normal tool session, and both matter:
    this connection between projects: the project open in the user's studio
    app is a separate pointer that neither constrains you nor follows you, so
    NEVER tell the user to open a project in the app on your behalf — switch
-   it yourself. Generated shorts are ordinary projects: open_project(child)
-   edits one clip, and edit_shorts fans one instruction across the board
-   from the parent OR from inside any child (it resolves the family
-   automatically — no switching needed for that either).
+   it yourself. Generated shorts are ordinary projects. open_short(card) or
+   open_project(child_id) puts that child's timeline under ALL the same editor
+   tools as Valmera's own agent; watch it, make the EDL changes yourself,
+   render it, and inspect the result. Never say MCP can only send instructions
+   to a short — that is false.
+
+   IMPORTANT — DIRECT EDITING VS DELEGATION. edit_shorts does NOT edit an EDL.
+   It forwards a text prompt to Valmera's separate in-house agent on every
+   selected child. Do not use edit_shorts when the user asks YOU, the outside
+   MCP model, to do the edit or rejects agent delegation. In that case call
+   shorts_status, open_short for each requested card, and use the normal editor
+   tools directly. Use edit_shorts only when the user explicitly wants the
+   batch delegated to Valmera's agents and understands that distinction.
 
 2. YOU ARE THE ONE TALKING TO THE USER. The ask_user tool exists for the
    in-house agent to suspend a turn; here, just ask them yourself. And nothing
@@ -557,8 +586,9 @@ Two things are different from a normal tool session, and both matter:
    create_project(title, kind="shorts"), upload the long main video, and poll
    index_status. The shorts planner starts automatically after analysis. Poll
    shorts_status to get the parent run, every generated child project ID and
-   its render state. Open each ready child project and refine it with the same
-   editor tools, then render_preview, watch_video and export_final. On an
+   its render state. Open each ready child with open_short and refine it
+   YOURSELF with the same editor tools, then render_preview, watch_video and
+   export_final. On an
    existing normal long-video project, make_shorts starts the same workflow
    and returns a planner job ID. A source under one minute is already a direct
    short: edit that project normally instead of trying to extract clips.
@@ -739,6 +769,93 @@ def _t_open_project(tok, args):
     _set_active_project(tok, project_id)
     state = _run_tool_job(tok, "__state__", {})
     return f"Opened project {project_id} — \"{p['title']}\".\n\n{state}"
+
+
+def _t_open_short(tok, args):
+    """Resolve a board card to its child and put that EDL under MCP control.
+
+    This is session plumbing, not an agent tool: it changes only the caller's
+    active-project pointer. Every edit after it still goes through the live
+    agent_tools registry, so there is no second or reduced editor.
+    """
+    raw_parent = args.get("parent_project_id")
+    active_id = tok.get("active_project_id")
+    try:
+        lookup_id = int(raw_parent) if raw_parent is not None else int(active_id)
+    except (TypeError, ValueError):
+        return ("No Shorts board is selected. Open its parent or any generated "
+                "child first, or pass parent_project_id.")
+
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT id, title, kind, parent_project_id, meta
+                       FROM projects
+                       WHERE id = %s AND user_id = %s""",
+                    (lookup_id, int(tok["user_id"])))
+        selected = cur.fetchone()
+        if not selected:
+            return f"Project {lookup_id} does not exist on this account."
+        if raw_parent is None and selected.get("parent_project_id"):
+            cur.execute("""SELECT id, title, kind, parent_project_id, meta
+                           FROM projects
+                           WHERE id = %s AND user_id = %s""",
+                        (selected["parent_project_id"], int(tok["user_id"])))
+            parent = cur.fetchone()
+        else:
+            parent = selected
+        if not parent:
+            return "The generated short's parent board no longer exists."
+
+        clips = sorted(
+            ((((parent.get("meta") or {}).get("shorts") or {}).get("clips"))
+             or []),
+            key=lambda c: (c.get("order", 10 ** 6),
+                           c.get("child_project_id") or 10 ** 12))
+        live = [c for c in clips if c.get("child_project_id")]
+        if not clips or not live:
+            return (f"Project {parent['id']} has no ready generated shorts. "
+                    "Call shorts_status to check the planner.")
+
+        raw_card = args.get("card")
+        raw_child = args.get("child_project_id")
+        if (raw_card is None) == (raw_child is None):
+            return ("Pass exactly one selector: card (the 1-based number from "
+                    "shorts_status) or child_project_id.")
+        if raw_card is not None:
+            try:
+                card = int(raw_card)
+            except (TypeError, ValueError):
+                return "card must be a 1-based integer from shorts_status."
+            if card < 1 or card > len(clips):
+                return (f"Card {card} does not exist on parent {parent['id']} "
+                        f"— choose 1-{len(clips)}.")
+            clip = clips[card - 1]
+            if not clip.get("child_project_id"):
+                return (f"Card {card} is still building and has no child EDL "
+                        "to open yet. Poll shorts_status and try again.")
+        else:
+            try:
+                child_id = int(raw_child)
+            except (TypeError, ValueError):
+                return "child_project_id must be an integer from shorts_status."
+            clip = next((c for c in live
+                         if int(c["child_project_id"]) == child_id), None)
+            if not clip:
+                return (f"Project {child_id} is not a generated short on "
+                        f"parent {parent['id']}.")
+
+        child_id = int(clip["child_project_id"])
+        child = _project_for_user(cur, child_id, tok["user_id"])
+        if not child:
+            return f"Generated short project {child_id} no longer exists."
+
+    _set_active_project(tok, child_id)
+    state = _run_tool_job(tok, "__state__", {})
+    return (f"Opened short project {child_id} — "
+            f"\"{clip.get('title') or child.get('title') or 'Untitled short'}\" "
+            f"from board {parent['id']} for DIRECT MCP editing. No Valmera "
+            "agent was called. Every normal editor tool now acts on this "
+            f"short's EDL.\n\n{state}")
 
 
 def _t_create_project(tok, args):
@@ -953,12 +1070,12 @@ def _t_shorts_status(tok, args):
                 "kind='shorts' starts it automatically after analysis.")
 
     lines = []
-    for clip in clips:
+    for card, clip in enumerate(clips, 1):
         child_id = clip.get("child_project_id")
         start, end = clip.get("start"), clip.get("end")
         duration = (float(end) - float(start)
                     if start is not None and end is not None else None)
-        bits = [f"[{child_id or 'building'}] "
+        bits = [f"card {card}, project [{child_id or 'building'}] "
                 f"{clip.get('title') or 'Untitled short'}"]
         if duration is not None:
             bits.append(f"{duration:.1f}s")
@@ -979,9 +1096,11 @@ def _t_shorts_status(tok, args):
             bits.append(fb)
         lines.append("  " + " — ".join(bits))
 
-    tail = ("Open a child with open_project(project_id), edit it with the "
-            "normal tools, render_preview and watch_video to verify it, then "
-            "export_final when it is ready.")
+    tail = ("For DIRECT editing by this MCP model: open_short(card), use the "
+            "normal editor tools on that child EDL, render_preview and "
+            "watch_video to verify it, then export_final when ready. "
+            "edit_shorts is different: it delegates a prompt to Valmera's "
+            "in-house agents instead of editing directly.")
     return parent_note + head + f" {len(clips)} clip(s):\n" + \
         "\n".join(lines) + "\n\n" + tail
 
@@ -1173,6 +1292,7 @@ def _t_watch_video(tok, args):
 SESSION_IMPL = {
     "list_projects": _t_list_projects,
     "open_project": _t_open_project,
+    "open_short": _t_open_short,
     "create_project": _t_create_project,
     "project_state": _t_project_state,
     "upload_start": _t_upload_start,

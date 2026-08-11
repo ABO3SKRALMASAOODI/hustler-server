@@ -97,3 +97,12 @@ def test_control_tools_are_not_offered_to_the_model():
     assert mcp_exec.CATALOG_TOOL not in published
     assert mcp_exec.STATE_TOOL not in published
     assert mcp_exec.MEDIA_TOOL not in published
+
+
+def test_batch_shorts_tool_is_honest_about_agent_delegation():
+    tool = next(t for t in mcp_exec.catalog()["tools"]
+                if t["function"]["name"] == "edit_shorts")
+    desc = tool["function"]["description"]
+    assert "DELEGATION ONLY" in desc
+    assert "does NOT directly edit any EDL" in desc
+    assert "open_short/open_project" in desc

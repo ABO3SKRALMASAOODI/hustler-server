@@ -23,10 +23,11 @@ the same `ToolContext` an agent turn uses. There is nothing to keep in sync
 because there is no copy — `worker/tests/test_mcp_surface.py` fails if one
 ever appears.
 
-On top of that, twelve **session tools** the studio UI normally covers and a
-headless model cannot: `list_projects`, `open_project`, `create_project`,
-`project_state`, `upload_start`, `upload_finish`, `index_status`,
-`shorts_status`, `export_final`, `wait_for_job`, `download_url`, `watch_video`.
+On top of that, thirteen **session tools** the studio UI normally covers and a
+headless model cannot: `list_projects`, `open_project`, `open_short`,
+`create_project`, `project_state`, `upload_start`, `upload_finish`,
+`index_status`, `shorts_status`, `export_final`, `wait_for_job`, `download_url`,
+`watch_video`.
 
 ## Turning it on (once)
 
@@ -146,7 +147,7 @@ create_project(title="My podcast", kind="shorts")
   → upload_start / upload_finish
   → index_status() until done
   → shorts_status() until the child projects are ready
-  → open_project(child_id) → refine / render_preview / watch_video / export_final
+  → open_short(card) → edit directly / render_preview / watch_video / export_final
 ```
 
 The Shorts planner starts automatically after a `kind="shorts"` project's
@@ -156,6 +157,14 @@ main video finishes analysis. On an existing normal long-video project,
 short with its parent so a caller never has to guess which new project belongs
 to which podcast. A source under one minute is already a direct short and is
 edited normally rather than rejected by the multi-clip extractor.
+
+`open_short(card)` is the explicit direct-edit path: it switches the MCP
+connection to that generated child, after which the complete live editor tool
+registry operates on the child's EDL. No Valmera agent is called. By contrast,
+`edit_shorts` is deliberately a delegation tool: it forwards one prompt into
+each selected child's chat and starts Valmera's in-house agent there. An MCP
+model must not use it when the user asked that outside model to perform the
+edits itself.
 
 **Uploading a local file.** MCP arguments are JSON, so bytes never travel over
 the protocol. `upload_start` returns a presigned URL and the exact `curl` to

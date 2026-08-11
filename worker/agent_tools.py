@@ -12583,8 +12583,9 @@ def edit_shorts(ctx, instruction, shorts=None):
         via = (f"(Resolved from this generated short to its parent board, "
                f"project {board_pid} “{board_parent.get('title') or ''}” — "
                "no need to switch projects.) ")
-    return (f"{via}Sent to {len(sent)} short(s): {names}. Each one is "
-            "running the instruction as its own edit turn on its own "
+    return (f"{via}DELEGATED to Valmera's in-house agents for {len(sent)} "
+            f"short(s): {names}. This call did not edit their EDLs directly. "
+            "Each agent is running the instruction as its own edit turn on its own "
             "timeline and re-renders when done — the board's cards update "
             "as they land. "
             + (f"{carried} shared asset(s) (music/clips/images) were "
@@ -12593,7 +12594,7 @@ def edit_shorts(ctx, instruction, shorts=None):
             + "Each short's turn bills like a normal message. An MCP "
             "caller can follow a specific clip with wait_for_job(job_id) "
             "or the whole board with shorts_status. Tell the user what "
-            "was sent and that the shorts are updating on the board — do "
+            "was delegated and that the shorts are updating on the board — do "
             "NOT wait for them in this turn, and do NOT also edit the "
             "timeline you are on unless they asked for that video too.")
 
@@ -14326,13 +14327,16 @@ TOOLS = {
                     "planner.",
                     {"count": {"type": "integer"},
                      "style_note": {"type": "string"}}),
-    "edit_shorts": (edit_shorts, "Apply ONE instruction to the child "
-                    "shorts on the family's Shorts board — each selected "
-                    "short gets it as a message in its own chat and runs "
-                    "its own edit turn (billed like a message each). THE "
-                    "tool when the user asks for changes to 'the shorts' / "
-                    "'all of them' / 'short 3': NEVER apply such a request "
-                    "to the long parent timeline. Works from the shorts "
+    "edit_shorts": (edit_shorts, "DELEGATION ONLY — this does NOT directly "
+                    "edit any EDL. It forwards ONE instruction to Valmera's "
+                    "separate in-house agent in each selected child's chat; "
+                    "each agent then runs its own billed edit turn. An MCP "
+                    "caller whose user asked that caller to edit personally "
+                    "must instead open_short/open_project each child and use "
+                    "the normal editing tools directly. Use this only when "
+                    "agent delegation is intended. NEVER apply a request "
+                    "about the generated shorts to the long parent timeline. "
+                    "Works from the shorts "
                     "PARENT or from INSIDE any generated short — it "
                     "resolves the board through the parent automatically, "
                     "so never ask anyone to switch projects first. "
