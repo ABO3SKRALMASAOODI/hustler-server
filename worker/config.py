@@ -694,6 +694,13 @@ POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
 _REMOTE_EXEC = bool(os.getenv("REMOTE_EXECUTOR_URL", "").strip())
 MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "3" if _REMOTE_EXEC else "1"))
 INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "2" if _REMOTE_EXEC else "1"))
+# When projects compete for the index lane, at most this many of one
+# project's older/live jobs rank ahead of another project's first job. This
+# is a fairness share, not a hard concurrency cap: claim_job deliberately
+# releases it when no other project is queued, so a solo multi-upload project
+# still uses every available lane.
+INDEX_FAIR_SHARE_PER_PROJECT = max(
+    1, int(os.getenv("WORKER_INDEX_FAIR_SHARE_PER_PROJECT", "2")))
 MEDIA_POLL_INTERVAL_S = float(os.getenv(
     "WORKER_MEDIA_POLL_INTERVAL_S", "0.5" if _REMOTE_EXEC else "2.0"))
 # Round 100: 4, up from 2, and claim_job now serializes agent work PER

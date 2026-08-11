@@ -318,3 +318,34 @@ def test_severe_dimension_change_cannot_guess_a_center_crop():
     result = agent_tools.set_frame(centered, "9:16", "crop")
     assert result.startswith("EDL v1 -> v2")
     assert centered_db.inserts == 1
+
+
+def test_binding_subject_aware_plan_cannot_collapse_to_uniform_fit():
+    ctx, fake = _real_ctx(
+        "Keep the wide two-person shot visible, then intentionally frame "
+        "the close-up for a vertical social clip.")
+    agent_tools.set_edit_plan(
+        ctx,
+        ["Reframe to 9:16 with automatic subject-aware framing.",
+         "Keep the wide composition and tightly compose the close-up."],
+        brief="Shot-specific vertical treatment",
+        intent="A deliberate composition for each shot",
+    )
+
+    rejected = agent_tools.set_frame(ctx, "9:16", "pad_blur")
+    assert rejected.startswith("REJECTED")
+    assert "auto_reframe" in rejected and "uniform fit" in rejected
+    assert fake.inserts == 0
+
+
+def test_literal_whole_program_fit_overrides_subject_aware_plan_guard():
+    ctx, fake = _real_ctx(
+        "Fit every shot and keep every frame fully visible; never crop any "
+        "shot.")
+    agent_tools.set_edit_plan(
+        ctx, ["Try automatic subject-aware framing."],
+        brief="Uniform lossless vertical fit")
+
+    result = agent_tools.set_frame(ctx, "9:16", "pad_blur")
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1

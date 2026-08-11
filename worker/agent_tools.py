@@ -3595,7 +3595,39 @@ def set_volume(ctx, start, end, gain_db):
     return ctx.write_edl(edl, f"volume {g:+.1f}dB on {s}-{e}s (source time)")
 
 
-def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None):
+def _plan_requires_shot_specific_frame(ctx):
+    """Whether the recorded direction promises composition-aware framing.
+
+    The plan is a binding execution contract, not decorative chain-of-thought.
+    Keep this deliberately narrow: ordinary requests for a vertical export do
+    not force a crop, while an explicit promise to auto/subject/per-shot
+    reframe must not silently collapse into one global letterbox treatment.
+    """
+    plan = getattr(ctx, "edit_plan", None) or {}
+    text = " ".join(str(x or "") for x in (
+        plan.get("brief"), plan.get("intent"), *(plan.get("steps") or [])))
+    text = text.casefold().replace("-", " ")
+    return any(phrase in text for phrase in (
+        "auto reframe", "automatic reframe", "automatically reframe",
+        "automatic subject aware", "subject aware framing",
+        "shot specific framing", "per shot framing", "per shot reframe",
+        "frame each shot", "frame every shot",
+    ))
+
+
+def _user_explicitly_wants_uniform_fit(ctx):
+    """A literal whole-program fit overrides the plan consistency guard."""
+    ask = str(getattr(ctx, "user_message", "") or "").casefold()
+    return any(phrase in ask for phrase in (
+        "pad the whole video", "pad every shot", "fit the whole video",
+        "fit every shot", "never crop any shot", "do not crop any shot",
+        "keep every frame fully visible", "letterbox the whole video",
+        "blurred bars throughout", "blurred background throughout",
+    ))
+
+
+def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
+              _measured=False):
     payload = {"ratio": str(ratio), "mode": str(mode or "crop")}
     for k, v in (("focus_x", focus_x), ("focus_y", focus_y)):
         if v is not None:
@@ -3612,6 +3644,24 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None):
         return ('REJECTED: ratio must be one of source, 16:9, 9:16, 1:1, 4:5 '
                 'and mode one of crop, pad, pad_blur. Example: '
                 'set_frame("9:16", "crop") for TikTok.')
+    # A production canary recorded "automatic subject-aware framing" and
+    # then executed one global pad_blur anyway. It technically preserved the
+    # wide shot, but also left a later clean close-up tiny in the same inset.
+    # The vision critic missed it once; the plan contract is deterministic.
+    # Calls made *inside* auto_reframe carry _measured=True because a measured
+    # global fit is a valid outcome when every shot really needs preserving.
+    if frame.ratio != "source" and frame.mode in ("pad", "pad_blur") \
+            and not _measured and _plan_requires_shot_specific_frame(ctx) \
+            and not _user_explicitly_wants_uniform_fit(ctx):
+        return (
+            "REJECTED: the recorded edit plan promises automatic/subject-"
+            "aware framing, but set_frame would apply one uniform fit to "
+            "every shot. That can preserve a wide composition while leaving "
+            "a later close-up unnecessarily tiny. Use "
+            f"auto_reframe(ratio='{frame.ratio}', mode='auto') so each shot "
+            "is measured (wide/UI shots may fit; clear subject shots may "
+            "crop), or record a revised plan if a uniform fit is genuinely "
+            "the intended treatment.")
     # A severe cover-crop with no aim is not a dimension conversion; it is a
     # guess that can show a wall while the subject sits outside the viewport.
     # Keep source-like crops compatible, and honor a literal user request for
@@ -3773,7 +3823,7 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
         return None
     if len(wins) > 60:
         if preserve_unmeasured:
-            res = set_frame(ctx, ratio, "pad_blur")
+            res = set_frame(ctx, ratio, "pad_blur", _measured=True)
             if res.startswith("EDL v"):
                 res += (f"\nThe kept program crosses {len(wins)} shot "
                         "windows; the whole frame was preserved instead of "
@@ -3834,7 +3884,7 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True):
         return None                      # one aim — the single point serves
     if len(spans) > 24:
         if preserve_unmeasured:
-            res = set_frame(ctx, ratio, "pad_blur")
+            res = set_frame(ctx, ratio, "pad_blur", _measured=True)
             if res.startswith("EDL v"):
                 res += ("\nThe video changes composition more than 24 times; "
                         "the whole frame was preserved instead of collapsing "
@@ -3907,13 +3957,16 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
                 "or 'pad_blur' (fit the WHOLE picture into the new frame).")
     if mode in ("pad", "pad_blur"):
         # pad modes never discard picture, so there is nothing to aim.
-        return set_frame(ctx, ratio, mode)
+        return set_frame(ctx, ratio, mode, _measured=True)
     if not ctx.has_main_video:
-        return set_frame(ctx, ratio, "crop" if mode == "auto" else mode)
+        return set_frame(ctx, ratio, "crop" if mode == "auto" else mode,
+                         _measured=True)
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
-        res = set_frame(ctx, ratio, "pad_blur" if mode == "auto" else "crop")
+        res = set_frame(ctx, ratio,
+                        "pad_blur" if mode == "auto" else "crop",
+                        _measured=True)
         if res.startswith("EDL v"):
             res += (f"\nNote: could not fetch frames ({err}), so auto mode "
                     "preserved the whole picture with pad_blur instead of "
@@ -3942,7 +3995,9 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         except media.MediaError:
             pass
     if not frames:
-        res = set_frame(ctx, ratio, "pad_blur" if mode == "auto" else "crop")
+        res = set_frame(ctx, ratio,
+                        "pad_blur" if mode == "auto" else "crop",
+                        _measured=True)
         if res.startswith("EDL v"):
             res += ("\nNote: could not extract frames, so auto mode kept "
                     "the whole picture with pad_blur instead of inventing a "
@@ -4009,7 +4064,7 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         """The honest answer when a crop would cut off content: fit the WHOLE
         picture into the new frame over a blurred backdrop. Nothing is lost,
         and the tool says exactly what it measured and how to override."""
-        res = set_frame(ctx, ratio, "pad_blur")
+        res = set_frame(ctx, ratio, "pad_blur", _measured=True)
         if res.startswith("EDL v"):
             res += ("\nFITTED, NOT CROPPED — measured, not assumed. " + why +
                     " So the whole frame is scaled into the new "
@@ -4052,7 +4107,8 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
                     f"{keep_score * 100:.0f}% of the frame's detail. This "
                     "is likely a screen/game/wide composition where the "
                     "surrounding content matters as much as the face.")
-        res = set_frame(ctx, ratio, "crop", focus_x=pt[0], focus_y=pt[1])
+        res = set_frame(ctx, ratio, "crop", focus_x=pt[0], focus_y=pt[1],
+                        _measured=True)
         if res.startswith("EDL v"):
             measured_total = (len((sidecar or {}).get("samples") or [])
                               if method == "faces_spatial" else len(frames))
@@ -4090,7 +4146,7 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         pt = energy_pt
         res = set_frame(ctx, ratio, "crop",
                         focus_x=pt[0] if pt else None,
-                        focus_y=pt[1] if pt else None)
+                        focus_y=pt[1] if pt else None, _measured=True)
         if res.startswith("EDL v"):
             if pt:
                 res += (f"\nNo face was found in the sampled frames and no "
@@ -4123,7 +4179,9 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
         except (TypeError, ValueError, KeyError):
             continue
     if not pts:
-        res = set_frame(ctx, ratio, "pad_blur" if mode == "auto" else "crop")
+        res = set_frame(ctx, ratio,
+                        "pad_blur" if mode == "auto" else "crop",
+                        _measured=True)
         if res.startswith("EDL v"):
             res += ("\nNote: the vision model gave no usable subject "
                     "positions, so auto mode preserved the whole frame with "
@@ -4147,7 +4205,7 @@ def auto_reframe(ctx, ratio="9:16", mode="auto"):
                 f"only {keep * 100:.0f}% of the picture's detail — this "
                 "footage fills its frame edge to edge.")
     res = set_frame(ctx, ratio, "crop", focus_x=round(fx, 3),
-                    focus_y=round(fy, 3))
+                    focus_y=round(fy, 3), _measured=True)
     if res.startswith("EDL v"):
         res += (f"\nMeasured on {len(pts)} sampled frames: subject sits at "
                 f"({fx:.2f}, {fy:.2f}) of the source frame — the crop "

@@ -107,6 +107,33 @@ def test_queue_still_works_before_the_migration_has_run():
     assert "attempts < %s" in sql, "the pre-round-73 budget still applies"
 
 
+def test_index_claims_fair_share_only_during_cross_project_contention():
+    """The SQL both protects another project and preserves solo throughput.
+
+    The outer NOT EXISTS opens every row when no other project is queued;
+    otherwise the correlated COUNT admits only this project's oldest N jobs.
+    Lower-id queued rows are counted so simultaneous SKIP LOCKED claimers
+    cannot all see a zero-running snapshot and take the same project's batch.
+    """
+    _with_column(True)
+    c = _Conn(fetchone={"id": 7})
+    wdb.claim_job(c, ["index"], config.MAX_ATTEMPTS_MEDIA)
+    sql, params = c.sql[0]
+    assert "waiting.project_id <> video_jobs.project_id" in sql
+    assert "SELECT COUNT(*) FROM video_jobs ahead" in sql
+    assert "ahead.id < video_jobs.id" in sql
+    assert config.INDEX_FAIR_SHARE_PER_PROJECT in params
+
+
+def test_non_index_lanes_do_not_receive_index_fair_share_clause():
+    _with_column(True)
+    c = _Conn(fetchone={"id": 8})
+    wdb.claim_job(c, ["preview", "final"], config.MAX_ATTEMPTS_MEDIA)
+    sql, params = c.sql[0]
+    assert "video_jobs ahead" not in sql
+    assert config.INDEX_FAIR_SHARE_PER_PROJECT not in params
+
+
 def test_a_ceilinged_job_fails_visibly_instead_of_sitting_queued():
     """claim_job stops selecting it, which makes it invisible rather than
     bounded — the studio would spin forever on a job no worker will take."""

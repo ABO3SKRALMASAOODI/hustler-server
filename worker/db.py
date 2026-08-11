@@ -182,14 +182,19 @@ def claim_job(conn, types, max_attempts):
     # whose project already has a LIVE agent-lane job (running with a fresh
     # heartbeat) is simply skipped and picked up when the running one ends.
     # The backend can now accept and stack messages instead of refusing them.
-    # Media/index/filmstrip claims are untouched — renders of one project
-    # were always allowed to overlap.
+    # Agent work serializes per project. Index work instead gets a dynamic
+    # fair share: when another project is waiting, only the first N live/
+    # older index jobs of this project are eligible. When nobody else waits,
+    # the condition opens and a batch upload may use every lane. This prevents
+    # one five-file upload from occupying all index threads for minutes while
+    # a different user's tiny clip sits behind it.
     has_claims = claims_column_ready(conn)
     claims_set = ", total_claims = COALESCE(total_claims, 0) + 1" if has_claims else ""
     claims_where = "AND COALESCE(total_claims, 0) < %s" if has_claims else ""
     serialize = any(t in ("agent_turn", "shorts_plan", "mcp_tool")
                     for t in types)
     serial_where = ""
+    index_fair_where = ""
     params = [list(types), max_attempts]
     if has_claims:
         params.append(config.MAX_CLAIMS_ABSOLUTE)
@@ -217,6 +222,35 @@ def claim_job(conn, types, max_attempts):
                                  AND live.id < video_jobs.id
                                  AND live.attempts < %s)))"""
         params.extend([config.STALE_AFTER_S, max_attempts])
+    if tuple(types) == ("index",):
+        # The lower-id queued rows make the rank stable even while another
+        # claim transaction has locked the first row but not committed its
+        # RUNNING update yet. That is the same READ COMMITTED race closure as
+        # agent serialization above. The outer NOT EXISTS preserves full
+        # throughput for a solo project; the rank applies only during real
+        # cross-project contention.
+        index_fair_where = """
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM video_jobs waiting
+                      WHERE waiting.project_id <> video_jobs.project_id
+                        AND waiting.type = 'index'
+                        AND waiting.state = 'queued'
+                        AND waiting.attempts < %s)
+                    OR (
+                      SELECT COUNT(*) FROM video_jobs ahead
+                      WHERE ahead.project_id = video_jobs.project_id
+                        AND ahead.id <> video_jobs.id
+                        AND ahead.type = 'index'
+                        AND ((ahead.state = 'running'
+                              AND ahead.heartbeat_at >= NOW()
+                                  - make_interval(secs => %s))
+                             OR (ahead.state = 'queued'
+                                 AND ahead.id < video_jobs.id
+                                 AND ahead.attempts < %s)))
+                       < %s)"""
+        params.extend([max_attempts, config.STALE_AFTER_S, max_attempts,
+                       config.INDEX_FAIR_SHARE_PER_PROJECT])
     with conn.cursor() as cur:
         cur.execute(f"""
             UPDATE video_jobs
@@ -232,6 +266,7 @@ def claim_job(conn, types, max_attempts):
                        OR (state = 'running'
                            AND heartbeat_at < NOW() - make_interval(secs => %s)))
                   {serial_where}
+                  {index_fair_where}
                 ORDER BY CASE type WHEN 'preview' THEN 0
                                    WHEN 'final' THEN 1 ELSE 2 END,
                          COALESCE(u.is_subscribed, 0) DESC,
