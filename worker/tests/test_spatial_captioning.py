@@ -352,6 +352,10 @@ def test_mixed_reframe_track_fits_unmeasured_shots_and_maps_geometry():
     assert "boxblur=" in graph  # first segment preserves the full picture
     assert "crop=" in graph     # second segment remains a tight crop
     assert "split=2" in graph   # local render blocks restored at track edge
+    # Scene-boundary seconds are frame-start PTS. ffmpeg trim otherwise pulls
+    # the final wide frame into the new crop for a one-frame flash.
+    assert "trim=start=0.000:end=3.033" in graph
+    assert "trim=start=3.033:end=6.000" in graph
 
 
 def test_reframe_track_marks_no_face_shots_as_safe_fit(tmp_path):

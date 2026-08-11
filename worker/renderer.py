@@ -46,6 +46,10 @@ DUCK_DB = -12.0            # music under speech AND program audio under voiceove
 MAX_ENABLE_SPANS = 80
 AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
+
+class RenderVerificationError(media.MediaError, dbx.PermanentJobError):
+    """The same bytes and EDL will fail identically; a retry only rebills it."""
+
 # Color-grade presets (EDL.effects.grade). Applied to all footage after
 # concat, BEFORE captions burn — text never gets graded.
 GRADE_FILTERS = {
@@ -1239,13 +1243,27 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     focus_track = ((edl.get("frame") or {}).get("focus_track")
                    if isinstance(edl.get("frame"), dict) else None) or []
     if keep and focus_track:
-        focus_edges = set()
+        raw_focus_edges = set()
         for span in focus_track:
             for key in ("t0", "t1"):
                 try:
-                    focus_edges.add(float(span[key]))
+                    raw_focus_edges.add(float(span[key]))
                 except (KeyError, TypeError, ValueError):
                     continue
+        # PySceneDetect reports a cut at the PTS of the first new-shot frame,
+        # but ffmpeg's second-based trim at that exact decimal admits the
+        # preceding frame on real CFR sources (project 642: trim start 5.480
+        # cropped frame 136 from the WIDE shot before frame 137's close-up).
+        # Move only INTERNAL composition handoffs one source/output frame
+        # forward. Keeping both local blocks' shared edge shifted preserves
+        # duration while making the old composition own the last old-shot
+        # frame and the new composition own the first new-shot frame. Do not
+        # shift the track's outer bounds: that would invent 40ms blocks at the
+        # beginning/end of every video.
+        ordered_focus_edges = sorted(raw_focus_edges)
+        frame_step = 1.0 / max(float(fps), 1.0)
+        focus_edges = {
+            edge + frame_step for edge in ordered_focus_edges[1:-1]}
         split_keep = []
         for s, e in keep:
             edges = [s] + sorted(
@@ -3396,7 +3414,7 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
         print(f"[render {job_id}] LENGTH MISMATCH {variant}: "
               f"{_stream_report(out_path)} | expected {expected:.2f}s "
               f"(programme {program:.2f}s + outro {outro:.2f}s)", flush=True)
-        raise media.MediaError(
+        raise RenderVerificationError(
             f"{variant} render duration check failed: output is "
             f"{out_dur:.2f}s but the edit is {expected:.2f}s "
             f"(tolerance {tol:.2f}s) — the render is the wrong length")
@@ -3865,7 +3883,7 @@ def run_render_job(worker_db, job):
 
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
-        raise RuntimeError(f"EDL version {version} not found")
+        raise dbx.PermanentJobError(f"EDL version {version} not found")
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     # A canvas program (no main video) renders purely from its inserts on the
     # canvas — there is no original/proxy/index to require or download.
@@ -3990,7 +4008,7 @@ def run_render_job(worker_db, job):
             # single most expensive thing this instance can be asked to do for
             # a job that no longer exists.
             if not _still_ours(5):
-                raise RuntimeError(
+                raise dbx.JobLeaseLost(
                     "job was cancelled or handed to another worker")
             src_local = _cached_source(src_asset["storage_key"])
             if not src_local:
@@ -4016,7 +4034,8 @@ def run_render_job(worker_db, job):
         else:
             src_local = None            # canvas program: nothing to download
         if not _still_ours(10):
-            raise RuntimeError("job was cancelled or handed to another worker")
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
         _mark("download_s")
 
         out_local = os.path.join(workdir, f"{variant}_v{version}.mp4")
@@ -4156,6 +4175,9 @@ def run_render_job(worker_db, job):
                                  patch_locals=patch_locals,
                                  asset_locals=asset_locals)
         _mark("encode_s")
+        if not _still_ours(91):
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
 
         # Render verification: the output must be the expected length and must
         # not be newly-black vs the source. On failure this raises, so the
@@ -4222,6 +4244,13 @@ def run_render_job(worker_db, job):
             except Exception:
                 verify_local = None
         _mark("sheet_s")
+
+        # The render itself can finish in the narrow window between progress
+        # ticks and a dispatcher deploy. Never upload or register those stale
+        # bytes: they are both storage churn and a result nobody can consume.
+        if not _still_ours(95):
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
 
         stamp = _render_stamp(job_id)
         render_key = f"media/{project_id}/{stamp}.mp4"
