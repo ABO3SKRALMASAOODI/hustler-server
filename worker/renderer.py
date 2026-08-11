@@ -46,10 +46,6 @@ DUCK_DB = -12.0            # music under speech AND program audio under voiceove
 MAX_ENABLE_SPANS = 80
 AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
-
-class RenderVerificationError(media.MediaError, dbx.PermanentJobError):
-    """The same bytes and EDL will fail identically; a retry only rebills it."""
-
 # Color-grade presets (EDL.effects.grade). Applied to all footage after
 # concat, BEFORE captions burn — text never gets graded.
 GRADE_FILTERS = {
@@ -3414,7 +3410,7 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
         print(f"[render {job_id}] LENGTH MISMATCH {variant}: "
               f"{_stream_report(out_path)} | expected {expected:.2f}s "
               f"(programme {program:.2f}s + outro {outro:.2f}s)", flush=True)
-        raise RenderVerificationError(
+        raise media.MediaError(
             f"{variant} render duration check failed: output is "
             f"{out_dur:.2f}s but the edit is {expected:.2f}s "
             f"(tolerance {tol:.2f}s) — the render is the wrong length")
@@ -3883,7 +3879,7 @@ def run_render_job(worker_db, job):
 
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
-        raise dbx.PermanentJobError(f"EDL version {version} not found")
+        raise RuntimeError(f"EDL version {version} not found")
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     # A canvas program (no main video) renders purely from its inserts on the
     # canvas — there is no original/proxy/index to require or download.
@@ -4008,7 +4004,7 @@ def run_render_job(worker_db, job):
             # single most expensive thing this instance can be asked to do for
             # a job that no longer exists.
             if not _still_ours(5):
-                raise dbx.JobLeaseLost(
+                raise RuntimeError(
                     "job was cancelled or handed to another worker")
             src_local = _cached_source(src_asset["storage_key"])
             if not src_local:
@@ -4034,8 +4030,7 @@ def run_render_job(worker_db, job):
         else:
             src_local = None            # canvas program: nothing to download
         if not _still_ours(10):
-            raise dbx.JobLeaseLost(
-                "job was cancelled or handed to another worker")
+            raise RuntimeError("job was cancelled or handed to another worker")
         _mark("download_s")
 
         out_local = os.path.join(workdir, f"{variant}_v{version}.mp4")
@@ -4175,10 +4170,6 @@ def run_render_job(worker_db, job):
                                  patch_locals=patch_locals,
                                  asset_locals=asset_locals)
         _mark("encode_s")
-        if not _still_ours(91):
-            raise dbx.JobLeaseLost(
-                "job was cancelled or handed to another worker")
-
         # Render verification: the output must be the expected length and must
         # not be newly-black vs the source. On failure this raises, so the
         # worker retries the encode once (MAX_ATTEMPTS_MEDIA) before surfacing a
@@ -4244,13 +4235,6 @@ def run_render_job(worker_db, job):
             except Exception:
                 verify_local = None
         _mark("sheet_s")
-
-        # The render itself can finish in the narrow window between progress
-        # ticks and a dispatcher deploy. Never upload or register those stale
-        # bytes: they are both storage churn and a result nobody can consume.
-        if not _still_ours(95):
-            raise dbx.JobLeaseLost(
-                "job was cancelled or handed to another worker")
 
         stamp = _render_stamp(job_id)
         render_key = f"media/{project_id}/{stamp}.mp4"
