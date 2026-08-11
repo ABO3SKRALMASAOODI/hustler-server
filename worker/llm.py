@@ -545,18 +545,35 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
     }
     url = config.AUDIO_REVIEW_BASE_URL.rstrip("/") + "/chat/completions"
     try:
-        response = requests.post(
-            url, json=body, timeout=config.AUDIO_REVIEW_TIMEOUT_S,
-            headers={"Authorization": f"Bearer {config.AUDIO_REVIEW_API_KEY}",
-                     "Content-Type": "application/json"})
-        if response.status_code == 400 and "modalit" in response.text.lower():
-            body["modalities"] = ["text", "audio"]
-            body["audio"] = {"voice": "alloy", "format": "wav"}
+        headers = {
+            "Authorization": f"Bearer {config.AUDIO_REVIEW_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        # The audio endpoint can occasionally return model_error/500 "invalid
+        # content" for an otherwise valid clip, then accept the identical
+        # request immediately afterwards. Do not surface that transient as
+        # "the tools refused". Two bounded retries add latency only on a real
+        # reviewer failure and keep the approved edit path finite.
+        retries_left = 2
+        attempts = 0
+        used_dual_modality = False
+        while True:
+            attempts += 1
             response = requests.post(
                 url, json=body, timeout=config.AUDIO_REVIEW_TIMEOUT_S,
-                headers={
-                    "Authorization": f"Bearer {config.AUDIO_REVIEW_API_KEY}",
-                    "Content-Type": "application/json"})
+                headers=headers)
+            lowered = response.text.lower()
+            if (response.status_code == 400 and "modalit" in lowered and
+                    not used_dual_modality):
+                body["modalities"] = ["text", "audio"]
+                body["audio"] = {"voice": "alloy", "format": "wav"}
+                used_dual_modality = True
+                continue
+            if (response.status_code in (500, 502, 503, 504) and
+                    retries_left > 0):
+                retries_left -= 1
+                continue
+            break
         if response.status_code >= 400:
             raise RuntimeError(
                 f"audio review HTTP {response.status_code}: "
@@ -569,7 +586,7 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
         record(purpose,
                {"model": config.AUDIO_REVIEW_MODEL, "question": prompt,
                 "clips": recorded},
-               {"answer": answer or None}, usage)
+               {"answer": answer or None, "attempts": attempts}, usage)
         return answer or None
     except Exception as exc:
         msg = str(exc)

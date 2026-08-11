@@ -137,3 +137,46 @@ def test_dedicated_reviewer_uses_audio_chat_and_records_modality_tokens(
     assert any(part.get("type") == "input_audio" for part in parts)
     assert recorded["purpose"] == "audio_render_review"
     assert recorded["audio"] == (700, 0)
+
+
+def test_dedicated_reviewer_retries_transient_model_error(
+        monkeypatch, tmp_path):
+    clip = tmp_path / "clip.mp3"
+    clip.write_bytes(b"bounded-audio")
+    calls = []
+    recorded = {}
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.text = ("model produced invalid content" if status_code == 500
+                         else "ok")
+
+        def json(self):
+            return {
+                "choices": [{"message": {
+                    "content": "PASS — requested music is audible."
+                }}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs)
+        return Response(500 if len(calls) < 3 else 200)
+
+    def fake_record(purpose, request, response, usage):
+        recorded.update(purpose=purpose, response=response)
+
+    monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "test-key")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_MODEL", "gpt-audio-1.5")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_BASE_URL",
+                        "https://api.openai.com/v1")
+    monkeypatch.setattr(llm, "_audio_review_dead", False)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm, "record", fake_record)
+
+    answer = llm.ask_audio("Judge this mix.", [str(clip)])
+
+    assert answer.startswith("PASS")
+    assert len(calls) == 3
+    assert recorded["response"]["attempts"] == 3
