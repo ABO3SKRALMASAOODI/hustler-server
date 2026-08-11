@@ -56,6 +56,18 @@ _COMMERCIAL_USE = re.compile(
     r"\bfor\s+(?:our|my|the)\s+(?:company|business|brand|client|product)\b"
     r")")
 
+_BROAD_POLISH = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:polish(?:ed)?|professional|pro[- ]?quality|publication[- ]?ready|"
+    r"social[- ]?ready|tight(?:en|ened)?|engaging)\b.{0,48}"
+    r"\b(?:clip|video|edit|reel|short|social|tiktok|instagram|podcast|"
+    r"interview|talking[- ]?head)\b|"
+    r"\b(?:clip|video|edit|reel|short|social|tiktok|instagram|podcast|"
+    r"interview|talking[- ]?head)\b.{0,48}"
+    r"\b(?:polish(?:ed)?|professional|pro[- ]?quality|publication[- ]?ready|"
+    r"social[- ]?ready|tight(?:en|ened)?|engaging)\b"
+    r")")
+
 
 def no_captions(text):
     return bool(_NO_CAPTIONS.search(text or ""))
@@ -83,6 +95,17 @@ def commercial_use(text):
     return bool(_COMMERCIAL_USE.search(text or ""))
 
 
+def broad_polish_requested(text):
+    """True when the user asks for an editorial outcome, not one local tweak.
+
+    This is deliberately narrower than matching the word ``nice``. The
+    contract below authorizes standard format finishing only when the user
+    actually asked for a polished/professional/tight edit; preservation
+    requests remain a stronger lock.
+    """
+    return bool(_BROAD_POLISH.search(text or ""))
+
+
 def request_contract(text):
     """A short system anchor placed immediately beside the current request."""
     lines = [
@@ -102,6 +125,18 @@ def request_contract(text):
             "order and timing except for changes the user explicitly named. "
             "If the current EDL already violates that lock, reset it first; "
             "do not add generic polish, captions, cuts, music or effects."
+        )
+    elif broad_polish_requested(text):
+        lines.append(
+            "BROAD-POLISH CONTRACT: this is an outcome request, so it DOES "
+            "authorize the standard load-bearing finish for the footage's "
+            "recognized format; it does not authorize random decoration. "
+            "For a speech-led social/podcast/interview edit, remove indexed "
+            "timed filler sounds and genuinely dead pauses when their cuts "
+            "are word-safe, and include social loudness mastering in the "
+            "FIRST atomic recipe. Skip either move when the user asks for "
+            "natural/raw/uncut delivery or preserved levels. Never infer "
+            "music, SFX, transitions or extra zooms from the word 'polish'."
         )
     if reset_requested(text):
         lines.append(

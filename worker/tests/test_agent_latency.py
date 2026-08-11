@@ -100,6 +100,13 @@ def test_the_prompt_asks_for_independent_tool_calls_in_one_message():
     assert "13 seconds" in p, "the reason should be the measurement, not an assertion"
 
 
+def test_broad_speech_polish_is_finished_in_the_first_candidate():
+    p = agent_prompt.SYSTEM_PROMPT
+    assert '"polished/professional social clip"' in p
+    assert "word-safe filler/dead-pause cleanup" in p
+    assert "first-pass social mastering" in p
+
+
 def test_the_loop_still_dispatches_every_tool_call_in_a_batch():
     """Guards the half that makes batching worth asking for. If a refactor ever
     executed only the first call of a batch, the prompt above would make the

@@ -55,6 +55,32 @@ def test_latest_message_always_has_priority():
     assert "final user message has highest priority" in contract
 
 
+def test_broad_polish_is_an_outcome_request_but_a_local_nice_tweak_is_not():
+    assert request_intent.broad_polish_requested(
+        "Turn this into a polished vertical social clip")
+    assert request_intent.broad_polish_requested(
+        "Make a professional podcast edit from this")
+    assert not request_intent.broad_polish_requested(
+        "Make this caption color nice")
+
+
+def test_broad_speech_polish_frontloads_cleanup_and_mastering():
+    contract = request_intent.request_contract(
+        "Turn this into a polished vertical social clip")
+    assert "BROAD-POLISH CONTRACT" in contract
+    assert "remove indexed timed filler" in contract
+    assert "social loudness mastering" in contract
+    assert "FIRST atomic recipe" in contract
+    assert "Never infer music, SFX, transitions or extra zooms" in contract
+
+
+def test_preservation_lock_wins_over_broad_polish_defaults():
+    contract = request_intent.request_contract(
+        "Polish this social video but keep the original timing unchanged")
+    assert "PRESERVATION LOCK" in contract
+    assert "BROAD-POLISH CONTRACT" not in contract
+
+
 def test_business_briefs_are_commercial_music_contexts():
     for text in (
         "Turn this into a premium Instagram ad for our startup",
