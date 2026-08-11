@@ -3605,9 +3605,18 @@ def _plan_requires_shot_specific_frame(ctx):
     """
     plan = getattr(ctx, "edit_plan", None) or {}
     text = " ".join(str(x or "") for x in (
-        plan.get("brief"), plan.get("intent"), *(plan.get("steps") or [])))
+        getattr(ctx, "user_message", ""), plan.get("brief"),
+        plan.get("intent"), *(plan.get("steps") or [])))
     text = text.casefold().replace("-", " ")
-    return ("refram" in text and "auto mode" in text) or any(
+    # "Keep the wide shot, then make the close-up intentional" is already a
+    # request for two compositions even if the plan never says the magic word
+    # "auto". Project 641 instead planned one global pad plus a small zoom;
+    # the result remained a tiny horizontal close-up inside blurred bars.
+    distinguishes_wide_and_close = (
+        "wide" in text and any(term in text for term in (
+            "close up", "closeup", "tight shot", "tight composition")))
+    return distinguishes_wide_and_close or \
+        ("refram" in text and "auto mode" in text) or any(
         phrase in text for phrase in (
         "auto reframe", "automatic reframe", "automatically reframe",
         "automatic subject aware", "subject aware framing",
@@ -3676,12 +3685,13 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
     # The vision critic missed it once; the plan contract is deterministic.
     # Calls made *inside* auto_reframe carry _measured=True because a measured
     # global fit is a valid outcome when every shot really needs preserving.
-    if frame.ratio != "source" and frame.mode in ("pad", "pad_blur") \
-            and not _measured and _plan_requires_shot_specific_frame(ctx) \
+    if frame.ratio != "source" and not _measured \
+            and _plan_requires_shot_specific_frame(ctx) \
             and not _user_explicitly_wants_uniform_fit(ctx):
         return (
             "REJECTED: the recorded edit plan promises automatic/subject-"
-            "aware framing, but set_frame would apply one uniform fit to "
+            "aware or shot-specific framing, but set_frame would apply one "
+            "uniform fit/crop to "
             "every shot. That can preserve a wide composition while leaving "
             "a later close-up unnecessarily tiny. Use "
             f"auto_reframe(ratio='{frame.ratio}', mode='auto') so each shot "

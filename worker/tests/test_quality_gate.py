@@ -342,6 +342,25 @@ def test_binding_subject_aware_plan_cannot_collapse_to_uniform_fit():
     assert fake.inserts == 0
 
 
+def test_wide_then_closeup_request_cannot_use_uniform_frame_plus_zoom():
+    """Production project 641: measured zoom did not repair global padding."""
+    ctx, fake = _real_ctx(
+        "Keep the wide two-person shot fully visible, then make the close-up "
+        "feel intentionally framed. Use at most one measured subtle zoom.")
+    agent_tools.set_edit_plan(
+        ctx,
+        ["Fit the full wide interview into vertical.",
+         "Use the inspected close-up framing to decide on one subtle zoom."],
+        brief="Preserve the wide setup and make the close-up deliberate",
+        intent="Full context first, intentional close-up finish",
+    )
+
+    rejected = agent_tools.set_frame(ctx, "9:16", "pad_blur", 0.5, 0.5)
+    assert rejected.startswith("REJECTED")
+    assert "shot-specific" in rejected and "auto_reframe" in rejected
+    assert fake.inserts == 0
+
+
 def test_literal_whole_program_fit_overrides_subject_aware_plan_guard():
     ctx, fake = _real_ctx(
         "Fit every shot and keep every frame fully visible; never crop any "
