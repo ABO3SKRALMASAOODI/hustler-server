@@ -275,16 +275,36 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     fx["zooms"] = _shift(fx.get("zooms"), lambda z: (z["start"], z["end"]),
                          lambda z, a, b: {**z, "start": round(a, 3),
                                           "end": round(b, 3)})
-    fx["regions"] = _shift(fx.get("regions"),
-                           lambda r: (r["start"], r["end"]),
-                           lambda r, a, b: {**r, "start": round(a, 3),
-                                            "end": round(b, 3)})
-    # custom filter chains: windowed only under plan()'s gate (an unwindowed
-    # one refused the stitch), so start/end are always present here
-    fx["custom"] = _shift(fx.get("custom"),
-                          lambda c: (c["start"], c["end"]),
-                          lambda c, a, b: {**c, "start": round(a, 3),
-                                           "end": round(b, 3)})
+
+    def _shift_optional_window(items, clip=False):
+        """Shift timed effects and preserve whole-program effects.
+
+        The ordinary stitch gate historically guaranteed regions/custom
+        were windowed and contained. Changed-section proofs may instead
+        sample a global effect or a stylize span larger than the proof.
+        Clipping stylize to that sample prevents a two-second standalone EDL
+        from retaining a full-program timestamp range.
+        """
+        out = []
+        for item in items or []:
+            a, b = item.get("start"), item.get("end")
+            if a is None and b is None:
+                out.append(dict(item))
+                continue
+            if a is None or b is None:
+                continue
+            a, b = float(a), float(b)
+            if a >= w1 - 0.001 or b <= w0 + 0.001:
+                continue
+            if clip:
+                a, b = max(a, w0), min(b, w1)
+            out.append({**item, "start": round(a - w0, 3),
+                        "end": round(b - w0, 3)})
+        return out
+
+    fx["regions"] = _shift_optional_window(fx.get("regions"))
+    fx["custom"] = _shift_optional_window(fx.get("custom"))
+    fx["stylize"] = _shift_optional_window(fx.get("stylize"), clip=True)
     e["overlays"] = _shift(
         e.get("overlays"),
         lambda o: (o.get("start") or 0.0,

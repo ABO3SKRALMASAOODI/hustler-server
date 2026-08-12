@@ -150,7 +150,11 @@ def test_changed_section_renderer_outputs_only_requested_seconds(tmp_path):
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
         str(source),
     ], timeout=60)
-    edl = _edl(keep=[[0.0, 4.0]])
+    edl = _edl(
+        keep=[[0.0, 4.0]],
+        effects={"stylize": [{"id": "st1", "kind": "grain",
+                               "start": 0.0, "end": 4.0,
+                               "intensity": 0.25}]})
     duration, ranges, mapped = renderer._render_changed_sections(
         7, {"version": 2, "json": edl},
         {"video": {"duration": 4.0, "width": 320, "height": 180,
@@ -177,6 +181,30 @@ def test_windowed_proof_keeps_and_shifts_program_audio():
     assert window["sfx"][0]["at"] == 1.0
     assert window["voiceover"][0]["start_output_s"] == 0.0
     assert window["voiceover"][0]["source_offset_s"] == 2.0
+
+
+def test_proof_window_clips_stylize_and_preserves_global_effects():
+    edl = _edl(effects={
+        "stylize": [
+            {"id": "st1", "kind": "grain", "start": 0.0,
+             "end": 10.0, "intensity": 0.4},
+            {"id": "st2", "kind": "vignette", "start": None,
+             "end": None, "intensity": 0.3},
+        ],
+        "regions": [{"id": "rg1", "kind": "blur", "x": 0.1,
+                     "y": 0.1, "w": 0.2, "h": 0.2,
+                     "start": None, "end": None}],
+        "custom": [{"id": "cf1", "chain": "hflip",
+                    "start": None, "end": None}],
+    })
+    window = stitch.window_edl(edl, Timeline(edl["keep"]), 3.0, 5.0,
+                               keep_audio=True)
+    stylize = window["effects"]["stylize"]
+    assert stylize[0]["start"] == 0.0
+    assert stylize[0]["end"] == 2.0
+    assert stylize[1]["start"] is None
+    assert window["effects"]["regions"][0]["start"] is None
+    assert window["effects"]["custom"][0]["start"] is None
 
 
 def test_deploy_workflow_right_sizes_and_coalesces():
