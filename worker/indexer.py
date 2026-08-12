@@ -899,6 +899,18 @@ def _sweep_tray_placements(worker_db, project_id):
     return added
 
 
+def _shorts_index_route(project_kind, duration, reindex=False):
+    """Choose the post-index handoff for a project selected as Shorts.
+
+    A sub-minute source already is one short and belongs in the direct editor.
+    A long source is ready for a user-authored brief; merely choosing the mode
+    must never spend model/render time or decide the creative direction.
+    """
+    if project_kind != "shorts" or reindex:
+        return None
+    return "direct_edit" if float(duration or 0.0) < 60.0 else "await_brief"
+
+
 def _finish_setup(worker_db, project_id, session_id, info, index,
                   user_id=None, reindex=False, asset_id=None):
     """Seed EDL v1 (keep everything) if none exists, splice any staged tray
@@ -957,12 +969,16 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     # route it into the normal editor and preserve any brief the user sent
     # while uploading. Project 480 lost that brief, failed a shorts_plan at
     # 59.97s, then made the user wait through an unrelated recovery edit.
-    # Long sources still flow straight into the multi-clip planner.
+    # Long sources WAIT for direction. Choosing SHORTS is a mode choice, not a
+    # creative brief; auto-starting here picked clips before the user could say
+    # how many, which moments, what length, or what style they wanted.
+    awaiting_shorts_brief = False
     try:
         project_row = worker_db.run(dbx.get_project, project_id)
-        if (project_row or {}).get("kind") == "shorts" and not reindex \
-                and user_id:
-            if float(info.get("duration") or 0.0) < 60.0:
+        shorts_route = _shorts_index_route(
+            (project_row or {}).get("kind"), info.get("duration"), reindex)
+        if shorts_route and user_id:
+            if shorts_route == "direct_edit":
                 worker_db.run(dbx.set_project_kind, project_id, "edit")
                 found = (worker_db.run(dbx.pending_user_message,
                                        project_id, session_id)
@@ -994,17 +1010,11 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                         "styled and I'll edit it directly.",
                         {"kind": "direct_short"})
                 return
-            if worker_db.run(dbx.has_active_job, project_id, "shorts_plan"):
-                print(f"[index] project {project_id}: shorts_plan already "
-                      "live — not enqueuing another", flush=True)
-            else:
-                worker_db.run(dbx.enqueue_job, project_id, user_id,
-                              "shorts_plan", {"source": "auto"})
-                print(f"[index] project {project_id}: shorts mode — "
-                      "enqueued shorts_plan", flush=True)
-            return
+            awaiting_shorts_brief = True
+            print(f"[index] project {project_id}: shorts mode ready — "
+                  "waiting for the user's direction", flush=True)
     except Exception as e:
-        print(f"[index] shorts auto-start failed: {e}", flush=True)
+        print(f"[index] shorts routing failed: {e}", flush=True)
 
     pending, out_of_credits = None, False
     if session_id and user_id and config.OPENAI_API_KEY:
@@ -1041,17 +1051,31 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     if tray_added:
         stats += (f", plus {tray_added} more upload"
                   f"{'s' if tray_added != 1 else ''} placed on the timeline")
-    summary = f"Your video is ready to edit — {stats}. "
-    if pending:
-        summary += ("I'm starting on the request you sent while I was "
-                    "analyzing — give me a moment.")
-    elif out_of_credits:
-        summary += ("I found the request you sent while I was analyzing, "
-                    "but you're out of credits. Start your trial and send it "
-                    "again.")
+    if awaiting_shorts_brief:
+        summary = f"Your video is ready to turn into shorts — {stats}. "
+        if pending:
+            summary += ("I'm starting on the Shorts direction you sent while "
+                        "I was analyzing — give me a moment.")
+        elif out_of_credits:
+            summary += ("I found the Shorts direction you sent while I was "
+                        "analyzing, but you're out of credits. Start your "
+                        "trial and send it again.")
+        else:
+            summary += ("Tell me what kind of shorts you want — how many, "
+                        "the moments or topics to prioritize, target length, "
+                        "and the caption or pacing style.")
     else:
-        summary += ("Tell me what you'd like changed — for example: "
-                    f"\"{_opening_example(n_words, n_sil)}.\"")
+        summary = f"Your video is ready to edit — {stats}. "
+        if pending:
+            summary += ("I'm starting on the request you sent while I was "
+                        "analyzing — give me a moment.")
+        elif out_of_credits:
+            summary += ("I found the request you sent while I was analyzing, "
+                        "but you're out of credits. Start your trial and send "
+                        "it again.")
+        else:
+            summary += ("Tell me what you'd like changed — for example: "
+                        f"\"{_opening_example(n_words, n_sil)}.\"")
     if quiet:
         # Quiet refresh: only speak when there is something the user needs.
         if session_id and pending:
@@ -1069,8 +1093,12 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                            "reindex": True,
                            "credits_exhausted": True})
     else:
-        drafted = _greet_via_llm(worker_db, project_id, stats, pending,
-                                 out_of_credits, index)
+        # The Shorts greeting is product state, not creative copy: it must
+        # explicitly ask for the missing brief. A generic LLM greeting can
+        # accidentally sound as though clip selection already started.
+        drafted = (None if awaiting_shorts_brief else
+                   _greet_via_llm(worker_db, project_id, stats, pending,
+                                  out_of_credits, index))
         if drafted:
             summary = drafted
         if edl_was_reset:

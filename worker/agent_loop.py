@@ -642,6 +642,25 @@ def state_block(ctx, worker_db):
             "then name it in the instruction — edit_shorts shares this "
             "project's music/clips/images into every short.")
         block += "\n" + "\n".join(lines)
+    elif (ctx.project.get("kind") == "shorts"
+          and not ctx.project.get("parent_project_id")
+          and ctx.has_main_video):
+        # Selecting Shorts now establishes an intake project; indexing does
+        # not invent a brief and launch the planner. This state instruction is
+        # what turns the user's first real direction into the one intentional
+        # make_shorts call, including prompts held while indexing.
+        block += (
+            "\n\nTHIS IS A SHORTS INTAKE PROJECT. The source is indexed, but "
+            "no Shorts run has started because the user must choose the "
+            "creative direction first. When the user describes the shorts "
+            "they want, call make_shorts exactly once: use their requested "
+            "count when stated and preserve their full direction (moments, "
+            "topics, length, captions, pacing, tone, and audience) in "
+            "style_note. Infer a sensible count only if they ask you to "
+            "choose. If they are only asking a question or have not yet "
+            "given a creative brief, answer or ask for the missing direction "
+            "without starting a run. Do not edit the original long timeline "
+            "unless they explicitly ask for that instead.")
     elif ctx.project.get("parent_project_id"):
         # The mirror image of the board block: a GENERATED SHORT must know
         # who its parent is, or an agent sitting on one clip has no idea the

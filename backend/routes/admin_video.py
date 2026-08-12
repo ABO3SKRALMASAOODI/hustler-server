@@ -523,6 +523,7 @@ def video_projects():
         # story (cut from the parent) is visible.
         cur.execute("""
             SELECT p.id, p.title, p.kind, p.created_at, u.email,
+                   u.trial_status, u.trial_started_at, u.trial_plan,
                    (SELECT COUNT(*) FROM chat_messages cm
                     WHERE cm.session_id = p.chat_session_id
                       AND cm.role='user') AS messages,
@@ -551,6 +552,20 @@ def video_projects():
                    (SELECT MAX(ce.created_at) FROM client_events ce
                     WHERE ce.project_id = p.id
                       AND ce.kind = 'trial_gate_shown') AS last_trial_wall,
+                   -- Funnel step immediately to the right of the wall in
+                   -- admin: did this project's cards lead to a real Paddle
+                   -- trial? Credit only the most recent wall before Paddle
+                   -- opened the trial, so one checkout cannot make several
+                   -- of the user's projects look converted.
+                   (u.trial_started_at IS NOT NULL AND p.id = (
+                       SELECT ce.project_id FROM client_events ce
+                       WHERE ce.user_id = u.id
+                         AND ce.kind = 'trial_gate_shown'
+                         AND ce.created_at <=
+                             u.trial_started_at AT TIME ZONE 'UTC'
+                       ORDER BY ce.created_at DESC, ce.id DESC
+                       LIMIT 1
+                   )) AS trial_started_after_wall,
                    -- User activity inside the children rolls up so a parent
                    -- whose owner refined short #3 by chat doesn't read as
                    -- untouched.
@@ -576,6 +591,11 @@ def video_projects():
          "trial_walls": r["trial_walls"],
          "last_trial_wall": (r["last_trial_wall"].isoformat()
                              if r["last_trial_wall"] else None),
+         "trial_started_after_wall": bool(r["trial_started_after_wall"]),
+         "trial_started_at": (r["trial_started_at"].isoformat()
+                              if r["trial_started_at"] else None),
+         "trial_status": r["trial_status"],
+         "trial_plan": r["trial_plan"],
          "created_at": r["created_at"].isoformat(),
          "last_job": r["last_job"].isoformat() if r["last_job"] else None,
          "last_export": (r["last_export"].isoformat()
@@ -624,7 +644,19 @@ PREVIEWABLE = ("thumb", "sheet", "render", "proxy", "image_ref", "original",
 def video_project_detail(project_id):
     with adb() as conn:
         cur = conn.cursor()
-        cur.execute("""SELECT p.*, u.email FROM projects p
+        cur.execute("""SELECT p.*, u.email, u.trial_status,
+                              u.trial_started_at, u.trial_plan,
+                              (u.trial_started_at IS NOT NULL AND p.id = (
+                                  SELECT ce.project_id
+                                  FROM client_events ce
+                                  WHERE ce.user_id = u.id
+                                    AND ce.kind = 'trial_gate_shown'
+                                    AND ce.created_at <=
+                                        u.trial_started_at AT TIME ZONE 'UTC'
+                                  ORDER BY ce.created_at DESC, ce.id DESC
+                                  LIMIT 1
+                              )) AS trial_started_after_wall
+                       FROM projects p
                        JOIN users u ON u.id = p.user_id
                        WHERE p.id = %s""", (project_id,))
         p = cur.fetchone()
@@ -959,6 +991,12 @@ def video_project_detail(project_id):
         "shorts_board": shorts_board,
         "exports": exports,
         "trial_wall": trial_wall,
+        "trial_conversion": ({
+            "started_at": p["trial_started_at"].isoformat(),
+            "status": p["trial_status"],
+            "plan": p["trial_plan"],
+        } if p.get("trial_started_after_wall") and p.get("trial_started_at")
+          else None),
         "upload_events": upload_events,
         "upload_failures": len([e for e in upload_events
                                 if e["kind"] in UPLOAD_FAILURE_KINDS]),

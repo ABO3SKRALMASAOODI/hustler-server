@@ -156,6 +156,17 @@ def test_sub_minute_shorts_route_to_direct_edit():
     assert "REJECTED" not in result
 
 
+def test_indexed_shorts_wait_for_a_brief_before_planning():
+    """Mode selection alone must not make the creative decisions."""
+    import indexer
+
+    assert indexer._shorts_index_route("shorts", 59.9) == "direct_edit"
+    assert indexer._shorts_index_route("shorts", 60.0) == "await_brief"
+    assert indexer._shorts_index_route("shorts", 1800.0) == "await_brief"
+    assert indexer._shorts_index_route("edit", 1800.0) is None
+    assert indexer._shorts_index_route("shorts", 1800.0, reindex=True) is None
+
+
 def test_make_shorts_returns_the_background_job_id():
     """MCP has no Shorts board UI, so the caller needs the exact job to poll."""
     from types import SimpleNamespace
