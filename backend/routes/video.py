@@ -1881,7 +1881,7 @@ def _tray_out(a):
             "filename": m.get("filename"),
             "duration_s": a.get("duration_s"),
             "tray_pos": m.get("tray_pos"),
-            "storage_key": a["storage_key"]}
+            "storage_key": a["storage_key"], "role": m.get("role")}
 
 
 def _asset_meta_patch(cur, asset_id, patch):
@@ -2044,6 +2044,12 @@ def tray_submit(user_id, project_id):
     identically at the start of a session and mid-session."""
     data = request.get_json() or {}
     order = data.get("order") or []
+    reference_ids = set()
+    for raw in (data.get("references") or []):
+        try:
+            reference_ids.add(int(raw))
+        except (TypeError, ValueError):
+            continue
     with vdb() as conn:
         cur = conn.cursor()
         p = _project_for_user(cur, project_id, user_id)
@@ -2058,6 +2064,7 @@ def tray_submit(user_id, project_id):
             return jsonify({"error": "Nothing in the tray"}), 400
         # Arrange by the submitted order; unlisted ids keep tray order after.
         by_id = {a["id"]: a for a in staged}
+        reference_ids.intersection_update(by_id)
         ordered = []
         for aid in order:
             try:
@@ -2074,9 +2081,21 @@ def tray_submit(user_id, project_id):
         if not original:
             promoted_idx, promoted = next(
                 ((i, a) for i, a in enumerate(ordered)
-                 if a["kind"] == "video_clip"), (-1, None))
+                 if a["kind"] == "video_clip"
+                 and a["id"] not in reference_ids), (-1, None))
         jobs = []
         for i, a in enumerate(ordered):
+            if a["id"] in reference_ids:
+                # Reference footage remains available to the agent's eyes and
+                # perception tools but never becomes a scene by accident.
+                _asset_meta_patch(cur, a["id"],
+                                  {"staged": None, "tray_place": None,
+                                   "placed": None, "role": "edit_reference"})
+                if a["kind"] == "video_clip" and not _index_job_for_asset(
+                        cur, project_id, a["id"]):
+                    jobs.append(_enqueue(cur, project_id, user_id, "index",
+                                         {"asset_id": a["id"]}))
+                continue
             if promoted is not None and a["id"] == promoted["id"]:
                 # The project's main footage. Kind flips to original; the
                 # index job seeds the EDL and greets when done.
@@ -2112,6 +2131,7 @@ def tray_submit(user_id, project_id):
                 # No main video anywhere and none in the tray: a canvas
                 # program (images-only tray). Seed it so placement lands.
                 has_visual = any(a["kind"] in ("video_clip", "image_ref")
+                                 and a["id"] not in reference_ids
                                  for a in ordered)
                 if has_visual:
                     cur.execute("""INSERT INTO edls (project_id, version,
@@ -2122,6 +2142,7 @@ def tray_submit(user_id, project_id):
             placed_version, placed = _place_tray_now(cur, project_id,
                                                      session_id, user_id)
         n = len(ordered)
+        timeline_n = n - len(reference_ids)
         # ONE technical message at the start of a session, not two. When this
         # submit promoted main footage, the index greet ("your video is ready
         # to edit…") arrives minutes later at most and already counts the
@@ -2132,9 +2153,18 @@ def tray_submit(user_id, project_id):
         # state. The ack survives ONLY for tray-only additions to an existing
         # project, where no index greet will speak for them.
         if session_id and promoted is None and (placed or jobs):
-            what = (f"{n} upload{'s' if n != 1 else ''} "
-                    + ("placed on the timeline" if placed
-                       else "joining the timeline") + " in your order")
+            if timeline_n:
+                what = (f"{timeline_n} upload"
+                        f"{'s' if timeline_n != 1 else ''} "
+                        + ("placed on the timeline" if placed
+                           else "joining the timeline") + " in your order")
+                if reference_ids:
+                    what += (f"; {len(reference_ids)} kept as "
+                             f"reference{'s' if len(reference_ids) != 1 else ''}")
+            else:
+                what = (f"{len(reference_ids)} reference"
+                        f"{'s' if len(reference_ids) != 1 else ''} ready — "
+                        "I'll study them without adding them to the timeline")
             cur.execute("""INSERT INTO chat_messages (session_id, role,
                                                       content, meta)
                            VALUES (%s, 'assistant', %s, %s)""",
@@ -2142,6 +2172,7 @@ def tray_submit(user_id, project_id):
                          "Got your uploads — " + what + ".",
                          Json({"kind": "tray_submitted"})))
     return jsonify({"ok": True, "submitted": n,
+                    "references": len(reference_ids),
                     "promoted_asset_id":
                         promoted["id"] if promoted is not None else None,
                     "main_index_job_id": main_index_job,

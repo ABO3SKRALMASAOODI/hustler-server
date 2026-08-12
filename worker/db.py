@@ -1357,6 +1357,16 @@ def has_active_agent_turn(conn, project_id):
         return cur.fetchone() is not None
 
 
+def has_newer_agent_turn(conn, project_id, after_job_id):
+    """A chat edit queued after an automatic shorts run started."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND id > %s
+                       LIMIT 1""", (project_id, after_job_id))
+        return cur.fetchone() is not None
+
+
 def asset_upload_ready(conn, asset_id):
     """Flip a deferred/dedup original to ready once its bytes exist. The
     same stamp /uploads/original-ready writes — upload_state is load-bearing

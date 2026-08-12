@@ -577,7 +577,8 @@ def state_block(ctx, worker_db):
                      placed_keys else "NOT placed in the program")
             role = ("STYLE REFERENCE ONLY — an example to inspect, never "
                     "source footage to insert or edit"
-                    if cmeta.get("role") == "shorts_reference" else
+                    if cmeta.get("role") in
+                    ("shorts_reference", "edit_reference") else
                     "source clip")
             media_lines.append(
                 f'  clip "{name}" ({float(dur or 0):.1f}s) — {role}; {state}, '
@@ -585,11 +586,14 @@ def state_block(ctx, worker_db):
         images = worker_db.run(
             lambda conn: _image_assets(conn, ctx.project_id))
         for a in images:
-            name = (a.get("meta") or {}).get("filename") or \
+            ameta = a.get("meta") or {}
+            name = ameta.get("filename") or \
                 os.path.basename(a["storage_key"])
             where = ("placed in the program" if a["storage_key"] in
                      placed_keys else "NOT placed in the program")
-            media_lines.append(f'  image "{name}" — {where}, storage_key '
+            role = ("STYLE REFERENCE ONLY; "
+                    if ameta.get("role") == "edit_reference" else "")
+            media_lines.append(f'  image "{name}" — {role}{where}, storage_key '
                                f'{a["storage_key"]}')
         staged = worker_db.run(dbx.staged_assets, ctx.project_id)
         if staged:
@@ -1113,7 +1117,8 @@ def run_agent_job(worker_db, job):
         worker_db.run(dbx.add_message, session_id, "assistant",
                       "I can't edit yet — the video hasn't finished "
                       "indexing. Give it a moment and resend your request.")
-        return {"status": "no_index"}
+        return {"status": "no_index", "outcome": "blocked",
+                "billable": False}
 
     workdir = os.path.join(config.TMP_DIR, f"agent_{job['id']}")
     os.makedirs(workdir, exist_ok=True)
@@ -2036,6 +2041,79 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
     return final
 
 
+def _turn_has_asset_progress(ctx):
+    return any(getattr(ctx, name, None) for name in (
+        "images_generated", "videos_generated", "urls_fetched",
+        "web_recordings", "audio_extracted", "audio_fetched",
+        "stock_added"))
+
+
+def _record_outer_tool_outcome(ctx, name, result):
+    """Record one model-visible tool result (a recipe remains one call)."""
+    kind = agent_tools.tool_result_kind(result)
+    first = str(result or "").strip().splitlines()[0][:500]
+    # Normalize volatile numbers so "same invalid window at 7.91s/7.92s" is
+    # still one repeated structural failure, while retaining the words and
+    # tool identity that distinguish different recovery attempts.
+    fingerprint = name + "|" + re.sub(r"\d+(?:\.\d+)?", "#", first)
+    ctx.turn_tool_outcomes.append(
+        {"tool": name, "kind": kind, "fingerprint": fingerprint,
+         "writes": len(ctx.versions_written)})
+    if name in agent_tools.WRITE_TOOLS:
+        ctx.write_attempts += 1
+
+
+def _repeated_tool_failure(ctx):
+    rows = ctx.turn_tool_outcomes
+    if len(rows) < 2:
+        return False
+    a, b = rows[-2], rows[-1]
+    return (a.get("kind") in {"failed", "refused"}
+            and b.get("kind") in {"failed", "refused"}
+            and a.get("fingerprint") == b.get("fingerprint")
+            and a.get("writes") == b.get("writes"))
+
+
+def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
+    """Return (outcome, billable) from value delivered, not job state."""
+    has_value = bool(ctx.versions_written or _turn_has_asset_progress(ctx)
+                     or ctx.last_preview)
+    kinds = [row.get("kind") for row in ctx.turn_tool_outcomes]
+    failed = "failed" in kinds
+    refused = "refused" in kinds
+    attempted_edit = bool(ctx.write_attempts or getattr(ctx, "edit_plan", None))
+
+    if not has_value and (failed or status in {"timeout", "shutdown"}):
+        outcome = "internal_error"
+    elif not has_value and (refused or attempted_edit
+                            or status in {"budget", "awaiting_user"}):
+        outcome = "blocked"
+    elif has_value and (status != "replied" or fail_note or failed):
+        outcome = "partial"
+    else:
+        outcome = "fulfilled"
+
+    # A read/analysis answer can be valuable without a timeline write. An
+    # attempted EDIT that created nothing is not. Nor is a turn whose only
+    # terminal fact is our own tool/infrastructure failure or truncation.
+    billable = not (
+        not has_value and (
+            attempted_edit or failed or refused or truncated
+            or status in {"timeout", "shutdown", "budget", "no_index"}
+        )
+    )
+    return outcome, billable
+
+
+def _outcome_meta(ctx, outcome):
+    counts = {}
+    for row in ctx.turn_tool_outcomes:
+        counts[row["kind"]] = counts.get(row["kind"], 0) + 1
+    return {"outcome": outcome,
+            "tool_outcomes": counts,
+            "write_attempts": ctx.write_attempts}
+
+
 def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
               timings, honesty=None, extra_meta=None):
     """Post a system-authored assistant reply (timeout/step-limit paths),
@@ -2047,14 +2125,16 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     if fail_note:
         final_text += fail_note
     final_text = _disclose_outstanding_quality(ctx, final_text)
+    outcome, billable = _turn_completion(ctx, status, fail_note=fail_note)
     meta = {"edl_version": latest["version"], "preview": ctx.last_preview,
-            **_quality_handoff(ctx)}
+            **_quality_handoff(ctx), **_outcome_meta(ctx, outcome)}
     if extra_meta:
         meta.update(extra_meta)
     worker_db.run(dbx.add_message, session_id, "assistant", final_text, meta)
     return {"status": status, "edl_version": latest["version"],
             "steps": total_steps, "auto_render": ctx.autorendered,
-            "honesty": honesty, "timings": timings}
+            "honesty": honesty, "timings": timings,
+            "outcome": outcome, "billable": billable}
 
 
 def _messages_for_record(messages):
@@ -2216,20 +2296,25 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # written directly and the studio's next poll shows the state.
             if ctx.versions_written:
                 latest = ctx.latest_edl()
+                outcome = "partial"
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "I had to stop mid-request for a moment of "
                               "maintenance on my side — the edits I finished "
                               "are saved. Tell me to continue and I'll pick "
                               "up exactly where I left off.",
-                              {"edl_version": latest["version"]})
+                              {"edl_version": latest["version"],
+                               **_outcome_meta(ctx, outcome)})
             else:
+                outcome = "internal_error"
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "I had to pause for a moment of maintenance on "
                               "my side before I could change anything — your "
                               "edit is untouched. Please send that again.",
-                              {"edl_version": ctx.latest_edl()["version"]})
+                              {"edl_version": ctx.latest_edl()["version"],
+                               **_outcome_meta(ctx, outcome)})
             return {"status": "shutdown", "steps": total_steps,
-                    "timings": timings, "billable": False}
+                    "timings": timings, "billable": False,
+                    "outcome": outcome}
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
             # This is an INACTIVITY wall, never a total-edit wall. A complex
             # turn that is still landing EDL versions or successful previews
@@ -2288,14 +2373,17 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # user nothing happened would leave them re-pasting a link whose
             # media is already sitting in their media picker.
             saved = _assets_made_note(ctx)
+            outcome, billable = _turn_completion(ctx, "timeout")
             worker_db.run(dbx.add_message, session_id, "assistant",
                           "That request stopped making progress before I "
                           "could finish anything — the edit itself was not changed"
                           f"{saved}. Please try again, or break the request "
                           "into smaller steps.",
-                          {"error": "turn_timeout"})
+                          {"error": "turn_timeout",
+                           **_outcome_meta(ctx, outcome)})
             return {"status": "timeout", "steps": total_steps,
-                    "timings": timings}
+                    "timings": timings, "outcome": outcome,
+                    "billable": billable}
 
         # Graceful spend cap: stop before starting another (expensive) model
         # call once this turn's model cost has reached the budget. Honest stop
@@ -2352,21 +2440,26 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "below. Send a follow-up to keep going.",
                     "budget", total_steps, timings, honesty)
             if exhausted:
+                outcome, billable = _turn_completion(ctx, "budget")
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "You're out of credits, so I stopped before "
                               "changing anything. " + _refill,
                               {"error": "turn_budget",
                                "credits_exhausted": True,
                                "free_trial_exhausted": not subscribed,
-                               "trial_cap_reached": trialing})
+                               "trial_cap_reached": trialing,
+                               **_outcome_meta(ctx, outcome)})
             else:
+                outcome, billable = _turn_completion(ctx, "budget")
                 worker_db.run(dbx.add_message, session_id, "assistant",
                               "This request needed more work than its budget "
                               "allows, so I stopped before changing anything. "
                               "Try breaking it into smaller steps.",
-                              {"error": "turn_budget"})
+                              {"error": "turn_budget",
+                               **_outcome_meta(ctx, outcome)})
             return {"status": "budget", "steps": total_steps,
-                    "timings": timings}
+                    "timings": timings, "outcome": outcome,
+                    "billable": billable}
 
         progress = (85 if ctx.rendered_versions else
                     55 if ctx.versions_written else
@@ -2658,10 +2751,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if fail_note:
                 final += fail_note
             honesty["auto_render"] = ctx.autorendered
+            outcome, billable = _turn_completion(
+                ctx, "replied", fail_note=fail_note,
+                truncated=truncated_out)
             message_meta = {
                 "edl_version": latest["version"],
                 "preview": ctx.last_preview,
                 **_quality_handoff(ctx),
+                **_outcome_meta(ctx, outcome),
             }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           message_meta)
@@ -2673,9 +2770,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # the provider; the user must not. Same principle as
                     # charge_turn_credits' "a turn that got nothing back costs
                     # nothing", one layer up where the reason is visible.
-                    "billable": not (truncated_out and not ctx.versions_written
-                                     and not _assets_made_note(ctx)
-                                     and not ctx.last_preview),
+                    "billable": billable, "outcome": outcome,
                     "truncated": truncated_out or None}
 
         messages.append({
@@ -2734,15 +2829,18 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         worker_db.run(dbx.add_message, session_id,
                                       "assistant", q.question,
                                       {"ask_user": True,
-                                       "edl_version": _cur_v})
+                                       "edl_version": _cur_v,
+                                       "outcome": "blocked"})
                         return {"status": "awaiting_user",
-                                "steps": total_steps, "timings": timings}
+                                "steps": total_steps, "timings": timings,
+                                "outcome": "blocked"}
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
                 tt["n"] += 1
                 tt["s"] = round(tt["s"] + time.monotonic() - t0, 2)
                 if name in agent_tools.WRITE_TOOLS and \
                         isinstance(result, str) and result.startswith("EDL v"):
                     ctx.write_calls.append(name)
+            _record_outer_tool_outcome(ctx, name, result)
             total_steps += 1
             # A fresh write's change ranges belong to ITS activity row only —
             # consume them here so a later read call the same step can never
@@ -2759,6 +2857,26 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       change=chg)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
+
+        if _repeated_tool_failure(ctx):
+            last = ctx.turn_tool_outcomes[-1]
+            print(f"[job {job['id']}] stopping repeated deterministic "
+                  f"failure from {last['tool']} before another model call",
+                  flush=True)
+            has_progress = bool(ctx.versions_written
+                                or _turn_has_asset_progress(ctx))
+            text = (
+                "I stopped this attempt because the same editing operation "
+                "failed twice without changing anything. No credits are "
+                "charged for this run; try a different instruction or tell "
+                "me the exact scene to target."
+                if not has_progress else
+                "I stopped the repeated failing operation instead of spending "
+                "more time on the same error. The edits that did succeed are "
+                "saved and previewed below; that last part is not complete."
+            )
+            return _finalize(ctx, worker_db, session_id, text, "tool_stall",
+                             total_steps, timings, honesty)
 
         # Round 67 — direct sight. A look tool captured frames for the
         # AGENT'S OWN eyes this step; deliver them as image parts in a user

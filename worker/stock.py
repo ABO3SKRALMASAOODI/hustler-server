@@ -8,7 +8,7 @@ Three providers, tried in order:
 
   Pexels    (PEXELS_API_KEY)  — video + photo, the better-curated library
   Pixabay   (PIXABAY_API_KEY) — video + photo, the fallback library
-  Openverse (keyless)         — PHOTO ONLY, and a different kind of photo:
+  Openverse (anonymous/auth)  — PHOTO ONLY, and a different kind of photo:
             Wikimedia Commons / Flickr / museum collections, which is where
             pictures of REAL subjects live — a named person, a company, a
             rocket on its pad. Stock libraries answer "a busy city";
@@ -76,16 +76,15 @@ def _openverse_search(query, kind, orientation, count):
     happens in search()."""
     if kind != KIND_PHOTO:
         return []
-    from music_search import _license_note, _license_ok
+    from music_search import (_license_note, _license_ok,
+                              _openverse_get_json)
     params = {"q": query, "license_type": "modification",
               "page_size": max(3, count)}
     aspect = {"portrait": "tall", "landscape": "wide",
               "square": "square"}.get(orientation)
     if aspect:
         params["aspect_ratio"] = aspect
-    data = net_fetch.get_json(OPENVERSE_IMAGE_API, params=params,
-                              timeout_s=API_TIMEOUT_S,
-                              allowed_hosts=["api.openverse.org"])
+    data = _openverse_get_json(OPENVERSE_IMAGE_API, params=params)
     out = []
     for p in (data.get("results") or []):
         if not _license_ok(p.get("license") or ""):

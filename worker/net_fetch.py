@@ -532,3 +532,26 @@ def get_json(url, *, allowed_hosts=None, timeout_s, params=None,
     except Exception:
         raise FetchError(
             f"{urlparse(url).hostname} returned a non-JSON response")
+
+
+def post_form_json(url, *, allowed_hosts=None, timeout_s, data=None,
+                   user_agent="valmera/1.0 (+https://valmera.io)",
+                   headers=None):
+    """POST form data and parse JSON under the outbound-host policy.
+
+    This deliberately narrow companion to :func:`get_json` exists for OAuth
+    client-credentials endpoints.  Secrets remain in the request body and are
+    never interpolated into an exception or log message.
+    """
+    check_url(url, allowed_hosts)
+    hdrs = dict(headers or {})
+    hdrs.update({"User-Agent": user_agent, "Accept": "application/json"})
+    r = requests.post(url, data=dict(data or {}),
+                      timeout=(CONNECT_TIMEOUT_S, timeout_s), headers=hdrs)
+    if r.status_code != 200:
+        raise FetchError(f"HTTP {r.status_code} from {urlparse(url).hostname}")
+    try:
+        return r.json()
+    except Exception:
+        raise FetchError(
+            f"{urlparse(url).hostname} returned a non-JSON response")

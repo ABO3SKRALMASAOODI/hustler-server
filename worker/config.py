@@ -401,10 +401,16 @@ DEEPGRAM_UPLOAD = os.getenv("DEEPGRAM_UPLOAD", "flac").strip().lower()
 # ── Live music search (round 98) ─────────────────────────────────────────────
 # The bundled CC0 pack is retired from the agent's surface; search_music /
 # fetch_music find commercial-use tracks online at request time instead
-# (music_search.py). Openverse needs no key; a JAMENDO_CLIENT_ID upgrades
-# results to a real music catalog ordered by this month's popularity.
+# (music_search.py). Openverse works anonymously, but authenticated clients
+# receive a materially larger and more reliable quota.  OPENVERSE_API_TOKEN
+# accepts a pre-issued bearer token; client credentials are preferred because
+# the worker can renew their ten-hour tokens itself.  A bad/expired credential
+# falls back to anonymous search rather than disabling the catalog.
 MUSIC_SEARCH_ENABLED = os.getenv("MUSIC_SEARCH_ENABLED", "1") == "1"
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
+OPENVERSE_API_TOKEN = os.getenv("OPENVERSE_API_TOKEN", "").strip()
+OPENVERSE_CLIENT_ID = os.getenv("OPENVERSE_CLIENT_ID", "").strip()
+OPENVERSE_CLIENT_SECRET = os.getenv("OPENVERSE_CLIENT_SECRET", "").strip()
 MUSIC_FETCH_MAX_MB = int(os.getenv("MUSIC_FETCH_MAX_MB", "30"))
 
 # Round 69 — TWO FLAGS THAT WERE ALWAYS FREE AND ALWAYS OFF.

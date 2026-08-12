@@ -154,6 +154,51 @@ def test_fit_tool_sets_clears_and_rejects():
                                                        fit="stretch")
 
 
+def test_image_window_ignores_neutral_seek_and_can_rotate_one_scene():
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 10.0]]
+    e["inserts"] = [_img_ins(at_output_s=10.0)]
+    ctx = _Ctx(e)
+    res = agent_tools.set_insert_window(
+        ctx, "ins13", duration_s=3.0, clip_start_s=0, rotation="cw")
+    assert res.startswith("EDL v"), res
+    assert ctx.latest_edl()["json"]["inserts"][0]["rotation"] == 90
+    cleared = agent_tools.set_insert_window(ctx, "ins13", rotation="clear")
+    assert cleared.startswith("EDL v")
+    assert ctx.latest_edl()["json"]["inserts"][0].get("rotation") is None
+
+
+def test_insert_rotation_is_local_in_the_filtergraph():
+    ins = _img_ins(rotation=90)
+    g = _graph(_edl(ins), [(1, ins, False)])
+    assert "[insv0]transpose=clock[insvr0]" in g
+    assert "[insvr0]scale=" in g
+
+
+def test_visual_only_freeze_keeps_program_clock_and_audio(monkeypatch):
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 10.0]]
+    ctx = _Ctx(e)
+    placed = {}
+    monkeypatch.setattr(
+        agent_tools, "_freeze_frame_asset",
+        lambda *_args: ("generated/1/freeze.png", None))
+
+    def fake_overlay(_ctx, key, at, **kwargs):
+        placed.update(key=key, at=at, **kwargs)
+        return "EDL v2: visual freeze"
+
+    monkeypatch.setattr(agent_tools, "add_overlay", fake_overlay)
+    result = agent_tools.add_freeze_frame(
+        ctx, 3.0, duration_s=2.0, audio_mode="continue", motion=None)
+    assert result.startswith("EDL v2"), result
+    assert placed == {"key": "generated/1/freeze.png", "at": 3.0,
+                      "duration_s": 2.0, "x": 0.5, "y": 0.5,
+                      "scale": 1.0, "fit": "cover"}
+    assert "speech, source audio, music" in result
+    assert "Nothing after it shifts" in result
+
+
 def test_new_inserts_preserve_the_whole_asset_by_default():
     e = default_edl(SRC)
     e["keep"] = [[0.0, 10.0]]

@@ -10,8 +10,9 @@ stock.py idiom exactly:
             per-track Creative Commons licensing; ordered by THIS MONTH'S
             popularity so results skew current. Tried first when
             configured.
-  Openverse (keyless)           — the CC audio aggregator (Jamendo, FMA,
-            Wikimedia...) as the always-available fallback.
+  Openverse (anonymous/auth)    — the CC audio aggregator (Jamendo, FMA,
+            Wikimedia...) as the always-available fallback. Production can
+            authenticate for a larger, steadier quota.
 
 LICENSING IS INFORMATION, NOT A WALL. Every hit carries its license and
 author, and the line the agent reads states the obligation outright —
@@ -33,12 +34,16 @@ set_music_fit and get_audio_analysis all work on them unchanged.
 
 import re
 import subprocess
+import threading
+import time
+import uuid as uuidlib
 
 import config
 import net_fetch
 
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
 OPENVERSE_API = "https://api.openverse.org/v1/audio/"
+OPENVERSE_TOKEN_API = "https://api.openverse.org/v1/auth_tokens/token/"
 
 MAX_RESULTS = 12
 API_TIMEOUT_S = 20
@@ -47,6 +52,96 @@ DOWNLOAD_TIMEOUT_S = 180
 
 class MusicSearchError(Exception):
     pass
+
+
+_openverse_token = None
+_openverse_token_expires_at = 0.0
+_openverse_token_retry_at = 0.0
+_openverse_token_lock = threading.Lock()
+
+
+def _openverse_auth_headers(force_refresh=False):
+    """Return a bearer header when credentials are configured.
+
+    Openverse client-credential tokens currently last ten hours.  Refreshing
+    five minutes early keeps an edit from hitting the expiry boundary.  Token
+    acquisition failure intentionally degrades to the anonymous API: search
+    must not go down merely because an optional credential is stale.
+    """
+    static = config.OPENVERSE_API_TOKEN
+    if static:
+        return {"Authorization": f"Bearer {static}"}
+    if not (config.OPENVERSE_CLIENT_ID and config.OPENVERSE_CLIENT_SECRET):
+        return {}
+    global _openverse_token, _openverse_token_expires_at
+    global _openverse_token_retry_at
+    now = time.monotonic()
+    if (not force_refresh and _openverse_token
+            and now < _openverse_token_expires_at):
+        return {"Authorization": f"Bearer {_openverse_token}"}
+    if not force_refresh and now < _openverse_token_retry_at:
+        return {}
+    with _openverse_token_lock:
+        now = time.monotonic()
+        if (not force_refresh and _openverse_token
+                and now < _openverse_token_expires_at):
+            return {"Authorization": f"Bearer {_openverse_token}"}
+        try:
+            data = net_fetch.post_form_json(
+                OPENVERSE_TOKEN_API,
+                data={"grant_type": "client_credentials",
+                      "client_id": config.OPENVERSE_CLIENT_ID,
+                      "client_secret": config.OPENVERSE_CLIENT_SECRET},
+                timeout_s=API_TIMEOUT_S,
+                allowed_hosts=["api.openverse.org"])
+            token = str(data.get("access_token") or "").strip()
+            if not token:
+                raise MusicSearchError("Openverse returned no access token")
+            ttl = max(60, int(data.get("expires_in") or 36000))
+            _openverse_token = token
+            _openverse_token_expires_at = time.monotonic() + max(30, ttl - 300)
+            _openverse_token_retry_at = 0.0
+            return {"Authorization": f"Bearer {token}"}
+        except Exception:
+            _openverse_token = None
+            _openverse_token_expires_at = 0.0
+            # A bad secret or provider outage must not add a 20-second OAuth
+            # failure to every search in the same edit. Anonymous calls remain
+            # usable while one worker-local retry is deferred.
+            _openverse_token_retry_at = time.monotonic() + 300.0
+            return {}
+
+
+def _openverse_get_json(url, *, params=None):
+    """GET Openverse with auth when available and never fail on bad auth.
+
+    A 401 with a cached client token gets one refresh.  A pre-issued token or
+    broken credentials then get one anonymous attempt, which is important:
+    optional auth may raise limits, but can never become a catalog kill switch.
+    """
+    headers = _openverse_auth_headers()
+    try:
+        return net_fetch.get_json(
+            url, params=params, headers=headers, timeout_s=API_TIMEOUT_S,
+            allowed_hosts=["api.openverse.org"])
+    except net_fetch.FetchError as exc:
+        if "HTTP 401" not in str(exc) or not headers:
+            raise
+    if (not config.OPENVERSE_API_TOKEN
+            and config.OPENVERSE_CLIENT_ID and config.OPENVERSE_CLIENT_SECRET):
+        refreshed = _openverse_auth_headers(force_refresh=True)
+        if refreshed:
+            try:
+                return net_fetch.get_json(
+                    url, params=params, headers=refreshed,
+                    timeout_s=API_TIMEOUT_S,
+                    allowed_hosts=["api.openverse.org"])
+            except net_fetch.FetchError as exc:
+                if "HTTP 401" not in str(exc):
+                    raise
+    return net_fetch.get_json(
+        url, params=params, timeout_s=API_TIMEOUT_S,
+        allowed_hosts=["api.openverse.org"])
 
 
 def available():
@@ -145,9 +240,7 @@ def _openverse_search(query, min_s, max_s, count, commercial_only=False):
               # Pull enough candidates that filtering NC locally does not
               # turn the first page into a false "no music" result.
               "page_size": min(20, count * (3 if commercial_only else 1))}
-    data = net_fetch.get_json(OPENVERSE_API, params=params,
-                              timeout_s=API_TIMEOUT_S,
-                              allowed_hosts=["api.openverse.org"])
+    data = _openverse_get_json(OPENVERSE_API, params=params)
     out = []
     for t in (data.get("results") or []):
         lic = "-".join(x for x in (t.get("license"),
@@ -212,6 +305,58 @@ def search(query, min_s=None, max_s=None, count=MAX_RESULTS,
     if errors and len(errors) == len(lanes):
         raise MusicSearchError("; ".join(errors))
     return []
+
+
+def resolve(result_id):
+    """Recover a provider result by its stable id on a later agent turn."""
+    raw = str(result_id or "").strip()
+    provider, sep, ident = raw.partition(":")
+    if not sep or not ident:
+        raise MusicSearchError("result id must include its provider prefix")
+    if provider == "openverse":
+        try:
+            uuidlib.UUID(ident)
+        except (ValueError, AttributeError):
+            raise MusicSearchError("that Openverse result id is not valid")
+        data = _openverse_get_json(f"{OPENVERSE_API}{ident}/")
+        lic = "-".join(x for x in (data.get("license"),
+                                    data.get("license_version")) if x)
+        if not _license_ok(data.get("license") or ""):
+            raise MusicSearchError("that result has no usable remix license")
+        try:
+            dur = round(float(data.get("duration") or 0) / 1000.0, 1) or None
+        except (TypeError, ValueError):
+            dur = None
+        url = data.get("url")
+        if not url:
+            raise MusicSearchError("that result no longer has downloadable audio")
+        return {"provider": "openverse", "id": raw,
+                "title": (data.get("title") or "").strip() or "untitled",
+                "artist": (data.get("creator") or "").strip() or None,
+                "duration_s": dur, "license": lic,
+                "page_url": data.get("foreign_landing_url"), "_url": url}
+    if provider == "jamendo":
+        if not config.JAMENDO_CLIENT_ID or not ident.isdigit():
+            raise MusicSearchError("that Jamendo result cannot be resolved")
+        data = net_fetch.get_json(
+            JAMENDO_API,
+            params={"client_id": config.JAMENDO_CLIENT_ID, "format": "json",
+                    "id": ident, "include": "licenses"},
+            timeout_s=API_TIMEOUT_S, allowed_hosts=["api.jamendo.com"])
+        rows = data.get("results") or []
+        if not rows:
+            raise MusicSearchError("that Jamendo result no longer exists")
+        t = rows[0]
+        lic = t.get("license_ccurl") or ""
+        url = t.get("audiodownload") or t.get("audio")
+        if not (_CC_LICENSE.search(lic) and _license_ok(lic) and url):
+            raise MusicSearchError("that result is no longer downloadable")
+        return {"provider": "jamendo", "id": raw,
+                "title": (t.get("name") or "").strip() or "untitled",
+                "artist": (t.get("artist_name") or "").strip() or None,
+                "duration_s": float(t.get("duration") or 0) or None,
+                "license": lic, "page_url": t.get("shareurl"), "_url": url}
+    raise MusicSearchError(f"unsupported result provider '{provider}'")
 
 
 def download(item, out_path):

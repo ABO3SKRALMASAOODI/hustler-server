@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
 import music_search                                            # noqa: E402
+import net_fetch                                               # noqa: E402
 
 
 def test_nc_is_allowed_and_labeled_loudly():
@@ -80,3 +81,42 @@ def test_commercial_search_filters_nc_without_hiding_it_from_personal_use(
         "tech", None, None, 5, commercial_only=True)
     assert [x["id"] for x in personal] == ["openverse:nc", "openverse:by"]
     assert [x["id"] for x in commercial] == ["openverse:by"]
+
+
+def test_openverse_bad_static_token_falls_back_to_anonymous(monkeypatch):
+    calls = []
+    monkeypatch.setattr(music_search.config, "OPENVERSE_API_TOKEN", "stale")
+    monkeypatch.setattr(music_search.config, "OPENVERSE_CLIENT_ID", "")
+    monkeypatch.setattr(music_search.config, "OPENVERSE_CLIENT_SECRET", "")
+
+    def fake_get_json(*args, **kwargs):
+        calls.append(kwargs.get("headers"))
+        if kwargs.get("headers"):
+            raise net_fetch.FetchError("HTTP 401 from api.openverse.org")
+        return {"results": []}
+
+    monkeypatch.setattr(music_search.net_fetch, "get_json", fake_get_json)
+    assert music_search._openverse_get_json(music_search.OPENVERSE_API) == {
+        "results": []}
+    assert calls == [{"Authorization": "Bearer stale"}, None]
+
+
+def test_openverse_client_credentials_are_cached(monkeypatch):
+    monkeypatch.setattr(music_search.config, "OPENVERSE_API_TOKEN", "")
+    monkeypatch.setattr(music_search.config, "OPENVERSE_CLIENT_ID", "client")
+    monkeypatch.setattr(music_search.config, "OPENVERSE_CLIENT_SECRET", "secret")
+    monkeypatch.setattr(music_search, "_openverse_token", None)
+    monkeypatch.setattr(music_search, "_openverse_token_expires_at", 0.0)
+    monkeypatch.setattr(music_search, "_openverse_token_retry_at", 0.0)
+    posts = []
+
+    def fake_post(*args, **kwargs):
+        posts.append(kwargs["data"])
+        return {"access_token": "fresh", "expires_in": 36000}
+
+    monkeypatch.setattr(music_search.net_fetch, "post_form_json", fake_post)
+    first = music_search._openverse_auth_headers()
+    second = music_search._openverse_auth_headers()
+    assert first == second == {"Authorization": "Bearer fresh"}
+    assert len(posts) == 1
+    assert posts[0]["grant_type"] == "client_credentials"

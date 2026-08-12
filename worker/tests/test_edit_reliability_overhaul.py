@@ -106,3 +106,23 @@ def test_large_edl_section_pages_are_complete_valid_json():
     assert page["version"] == 8
     assert len(page["sections"]["captions"]) == 40
     assert page["pagination"]["captions"]["next_offset"] == 140
+
+
+def test_get_edl_accepts_natural_section_aliases_without_a_retry():
+    class Ctx:
+        duration = 30.0
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 4, "json": {
+                "keep": [[0, 30]], "texts": [{"id": "tx1", "text": "Hi",
+                                                "start": 0, "end": 2}],
+                "effects": {"grade": "warm"}, "music": []}}
+
+    payload = json.loads(agent_tools.get_edl(
+        Ctx(), sections=["cuts", "text", "zooms", "program"]))
+    assert payload["sections"]["keep"] == [[0, 30]]
+    assert payload["sections"]["texts"][0]["id"] == "tx1"
+    assert payload["sections"]["effects"]["grade"] == "warm"
+    assert "overview" in payload
+    assert payload["aliases_resolved"]["cuts"] == ["keep"]

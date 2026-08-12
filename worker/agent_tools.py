@@ -215,6 +215,10 @@ class ToolContext:
         # tool handed a clip). A real project asset, so a turn that only did
         # this did NOT do nothing — the honesty layer reads it.
         self.audio_extracted = []
+        # Online music/SFX downloads are real project assets too. Track them
+        # separately from extraction so outcome billing can distinguish a
+        # useful fetch-only turn from one whose provider call failed.
+        self.audio_fetched = []
         # Stock search results are cached per TURN so add_stock_media places
         # the exact clip the model chose from, not whatever a repeat query
         # returns (providers reorder results between identical calls).
@@ -254,6 +258,13 @@ class ToolContext:
         # the plan and the rest is released by converting, not by waiting.
         self.plan = "free"
         self.trialing = False
+        # Agent-loop outcome accounting.  A tool refusal is often our model
+        # dialect or capability mismatch, not value delivered to the user.
+        # The loop records the outer call (a recipe counts once, not once per
+        # staged operation) and uses these facts to avoid charging a turn that
+        # attempted an edit but produced no edit, asset, or proof.
+        self.turn_tool_outcomes = []
+        self.write_attempts = 0
 
     def add_usage(self, model, tokens_in, tokens_out, cached_in=0,
                   reasoning=0, audio_in=0, audio_out=0):
@@ -3114,6 +3125,37 @@ def _resolve_music(ctx, storage_key):
             "storage_key": storage_key}, None
 
 
+def _search_hit_cache_key(ctx, lane):
+    return f"search_hits:{lane}:project:{ctx.project_id}"
+
+
+def _remember_search_hits(ctx, lane, hits):
+    """Keep the latest small result page across agent turns, best effort."""
+    try:
+        ctx.db.run(dbx.kv_put, _search_hit_cache_key(ctx, lane),
+                   json.dumps({h["id"]: h for h in hits[:12]}))
+    except Exception:
+        pass
+
+
+def _recover_search_hit(ctx, lane, result_id, resolver):
+    rid = str(result_id or "").strip()
+    current = (getattr(ctx, f"_{lane}_hits", None) or {}).get(rid)
+    if current:
+        return current, None
+    try:
+        raw = ctx.db.run(dbx.kv_get, _search_hit_cache_key(ctx, lane))
+        cached = json.loads(raw) if raw else {}
+        if isinstance(cached, dict) and isinstance(cached.get(rid), dict):
+            return cached[rid], None
+    except Exception:
+        pass
+    try:
+        return resolver(rid), None
+    except Exception as exc:
+        return None, str(exc)[:180]
+
+
 def search_music(ctx, query, min_seconds=None, max_seconds=None,
                  commercial_use=None):
     """READ: find music on the open web (round 98; the bundled pack is
@@ -3162,6 +3204,7 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
                 "carries it); platforms license trend audio inside their "
                 "own apps only.")
     ctx._music_hits = {h["id"]: h for h in hits}
+    _remember_search_hits(ctx, "music", hits)
     gate = (" Commercial-use request detected: non-commercial tracks were "
             "excluded." if commercial else "")
     duration_note = (
@@ -3180,11 +3223,12 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
 def fetch_music(ctx, id):
     """WRITE (to the project's assets): download a search_music hit and
     register it as a normal music asset, ready for add_music."""
-    hit = (getattr(ctx, "_music_hits", None) or {}).get(str(id or "").strip())
+    hit, recover_error = _recover_search_hit(
+        ctx, "music", id, music_search.resolve)
     if not hit:
-        return ("REJECTED: that id is not from THIS turn's search_music "
-                "results — call search_music first and fetch one of the "
-                "ids it returned.")
+        return ("REJECTED: that music result id could not be recovered"
+                + (f" ({recover_error})" if recover_error else "")
+                + ". Call search_music and choose one of its current ids.")
     lp = os.path.join(ctx.workdir, f"musicfetch_{uuid.uuid4().hex[:8]}.mp3")
     try:
         music_search.download(hit, lp)
@@ -3213,6 +3257,7 @@ def fetch_music(ctx, id):
                      "license": hit.get("license"), "license_note": note,
                      "author": artist,
                      "caption": "found online by search_music"})
+    ctx.audio_fetched.append(key)
     return (f"Fetched \"{title}\"{' by ' + artist if artist else ''} — "
             f"{dur:.0f}s, saved as storage_key={key}. License: {note}. "
             f"Next: add_music(storage_key='{key}') — set_music_fit retimes it, "
@@ -3409,6 +3454,7 @@ def search_sfx(ctx, query, max_seconds=None):
                 "the sound ('whoosh', 'camera shutter', 'keyboard click', "
                 "'pop', 'riser') rather than a mood word.")
     ctx._sfx_hits = {h["id"]: h for h in hits}
+    _remember_search_hits(ctx, "sfx", hits)
     return ("Sounds found (each line carries its license terms — relay "
             "them):\n- "
             + "\n- ".join(sfx_search.describe(h) for h in hits)
@@ -3419,11 +3465,12 @@ def search_sfx(ctx, query, max_seconds=None):
 def fetch_sfx(ctx, id):
     """WRITE (to the project's assets): download a search_sfx hit and
     register it as a normal audio asset, ready for add_sfx."""
-    hit = (getattr(ctx, "_sfx_hits", None) or {}).get(str(id or "").strip())
+    hit, recover_error = _recover_search_hit(ctx, "sfx", id,
+                                             sfx_search.resolve)
     if not hit:
-        return ("REJECTED: that id is not from THIS turn's search_sfx "
-                "results — call search_sfx first and fetch one of the "
-                "ids it returned.")
+        return ("REJECTED: that sound result id could not be recovered"
+                + (f" ({recover_error})" if recover_error else "")
+                + ". Call search_sfx and choose one of its current ids.")
     lp = os.path.join(ctx.workdir, f"sfxfetch_{uuid.uuid4().hex[:8]}.mp3")
     try:
         sfx_search.download(hit, lp)
@@ -3450,6 +3497,7 @@ def fetch_sfx(ctx, id):
                      "license": hit.get("license"), "license_note": note,
                      "author": hit.get("author"),
                      "caption": "found online by search_sfx"})
+    ctx.audio_fetched.append(key)
     return (f"Fetched \"{title}\" — {dur:g}s, saved as storage_key={key}. "
             f"License: {note}. Next: add_sfx(storage_key='{key}', "
             f"at=<moment>) — every "
@@ -6684,7 +6732,8 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
 
 
 def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
-                      rate=None, crop=None, mute=None, fit=None):
+                      rate=None, crop=None, mute=None, fit=None,
+                      rotation=None):
     """Change WHICH PART of an already-spliced clip plays, in place.
 
     Round 61. Nothing could edit an insert once it existed — there was
@@ -6714,9 +6763,10 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
                 f"{have}. Call get_edl to see them.")
     if duration_s is None and clip_start_s is None and rate is None \
-            and crop is None and mute is None and fit is None:
+            and crop is None and mute is None and fit is None \
+            and rotation is None:
         return ("REJECTED: give duration_s, clip_start_s, rate, crop, mute "
-                "and/or fit — otherwise there is nothing to change.")
+                "fit and/or rotation — otherwise there is nothing to change.")
     # fit (round 79): how this ONE scene maps onto the canvas. The program's
     # cover-crop default beheads a still whose aspect fights the canvas (a
     # 9:16 logo on a 16:9 program shows only its middle band); 'pad' shows
@@ -6793,9 +6843,19 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
             crop_val = [round(cx0, 4), round(cy0, 4),
                         round(cx1, 4), round(cy1, 4)]
     if hit.get("kind") == "image" and clip_start_s is not None:
-        return ("REJECTED: clip_start_s is for video inserts — a still has no "
-                "timeline to seek into. Use duration_s to change how long it "
-                "shows.")
+        # A uniform image/video batch often carries the neutral seek 0. It has
+        # no effect on a still, so ignoring it is safer than aborting every
+        # sibling operation in an atomic recipe.
+        try:
+            neutral_image_seek = abs(float(clip_start_s)) < 1e-9
+        except (TypeError, ValueError):
+            neutral_image_seek = False
+        if neutral_image_seek:
+            clip_start_s = None
+        else:
+            return ("REJECTED: clip_start_s is for video inserts — a still "
+                    "has no timeline to seek into. Use duration_s to change "
+                    "how long it shows.")
     if hit.get("kind") == "image" and rate is not None:
         return ("REJECTED: rate is for video inserts — a still has no speed. "
                 "Use duration_s to change how long it shows.")
@@ -6852,11 +6912,28 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         room = round((src_len - off) / r, 2)
         if dur > room:
             dur = room
+    rot_val = None                    # None = untouched; "clear"; or degrees
+    if rotation is not None:
+        aliases = {"none": 0, "clear": 0, "auto": 0, "upright": 0,
+                   "cw": 90, "clockwise": 90, "right": 90,
+                   "ccw": 270, "counterclockwise": 270, "left": 270,
+                   "upside_down": 180, "upside-down": 180}
+        try:
+            rv = aliases.get(str(rotation).strip().lower(), rotation)
+            rv = int(round(float(rv))) % 360
+        except (TypeError, ValueError):
+            return ("REJECTED: rotation must be 0, 90, 180 or 270 degrees "
+                    "clockwise, or 'clear'.")
+        if rv not in (0, 90, 180, 270):
+            return ("REJECTED: rotation must be a quarter turn: 0, 90, 180 "
+                    "or 270 degrees clockwise.")
+        rot_val = "clear" if rv == 0 else rv
     old_crop = list(hit.get("crop") or [])
     old_mute = bool(hit.get("mute"))
     old_fit = hit.get("fit") or None
+    old_rotation = int(hit.get("rotation") or 0)
     prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0),
-            old_rate, old_crop, old_mute, old_fit)
+            old_rate, old_crop, old_mute, old_fit, old_rotation)
     hit["duration_s"] = dur
     hit["source_start_s"] = round(off, 2) or None
     if hit["source_start_s"] is None:
@@ -6877,9 +6954,14 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         hit.pop("fit", None)
     elif fit_val is not None:
         hit["fit"] = fit_val
+    if rot_val == "clear":
+        hit.pop("rotation", None)
+    elif rot_val is not None:
+        hit["rotation"] = rot_val
     new_crop = list(hit.get("crop") or [])
     new_mute = bool(hit.get("mute"))
     new_fit = hit.get("fit") or None
+    new_rotation = int(hit.get("rotation") or 0)
     span = round(dur * r, 2)
     at_rate = f" at {r:g}x" if abs(r - 1.0) > 1e-6 else ""
     reg = ""
@@ -6905,11 +6987,13 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         reg += ", cover-cropped to fill the frame"
     elif fit_val == "clear" and old_fit:
         reg += ", back to the program's default framing"
+    if new_rotation != old_rotation:
+        reg += f", rotated {new_rotation}° clockwise"
     if new_mute:
         reg += ", its own audio MUTED"
     elif mute_val is False and old_mute:
         reg += ", its own audio back ON"
-    if (dur, off, r, new_crop, new_mute, new_fit) == prev:
+    if (dur, off, r, new_crop, new_mute, new_fit, new_rotation) == prev:
         return (f"insert {id} already plays {off}-{round(off + span, 2)}s"
                 f"{at_rate}{reg}")
     edl["inserts"] = inserts
@@ -10186,7 +10270,7 @@ def _freeze_frame_asset(ctx, src_t, blur=0.0, darken=0.0):
 def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
                      subtitle=None, blur=0.0, darken=0.0, motion="zoom_in",
                      template="title", color=None, accent_color=None,
-                     font=None):
+                     font=None, audio_mode="pause"):
     """FREEZE THE PICTURE on a moment and hold it — with an optional line of
     text over the held frame.
 
@@ -10216,6 +10300,11 @@ def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
         darken = min(max(float(darken or 0.0), 0.0), 0.85)
     except (TypeError, ValueError):
         return "REJECTED: blur and darken must be numbers 0-1."
+    audio_mode = str(audio_mode or "pause").strip().lower()
+    if audio_mode not in ("pause", "continue"):
+        return ("REJECTED: audio_mode must be 'pause' (insert a silent hold "
+                "and shift what follows) or 'continue' (freeze only the "
+                "picture while the existing speech/audio keeps running).")
     if not ctx.has_main_video:
         return ("REJECTED: there is no main video to freeze a frame from. "
                 "insert_media an image instead.")
@@ -10234,6 +10323,42 @@ def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
     key, err = _freeze_frame_asset(ctx, src_t, blur, darken)
     if err:
         return err
+
+    if audio_mode == "continue":
+        # A full-frame still overlay replaces only the viewer's picture. The
+        # program clock and every audio lane continue underneath it, which is
+        # the precise visual/audio decoupling needed for a held sunset or
+        # reaction frame over the last spoken phrase.
+        placed = add_overlay(ctx, key, at, duration_s=dur, x=0.5, y=0.5,
+                             scale=1.0, fit="cover")
+        if not placed.startswith("EDL v"):
+            return placed
+        results = [placed]
+        t = (text or "").strip()
+        if t:
+            results.append(add_text(
+                ctx, t, at, min(at + dur, prog), template=template,
+                x=0.5, y=0.46, color=color, accent_color=accent_color,
+                font=font, entrance="fade", exit="fade"))
+        sub = (subtitle or "").strip()
+        if sub:
+            results.append(add_text(
+                ctx, sub, at, min(at + dur, prog), template="subtitle",
+                x=0.5, y=0.66, color=color,
+                entrance="fade", exit="fade"))
+        good = [r for r in results if isinstance(r, str)
+                and r.startswith("EDL v")]
+        tail = (f"\nVisual-only freeze: the exact frame at source "
+                f"{src_t:.2f}s covers {at}-{round(min(at + dur, prog), 2)}s, "
+                "while the existing speech, source audio, music and program "
+                "timing continue underneath it. Nothing after it shifts.")
+        if motion:
+            tail += (" A moving Ken Burns treatment is unavailable in "
+                     "visual-only mode; this hold is intentionally still.")
+        failed = [r for r in results[1:] if not str(r).startswith("EDL v")]
+        if failed:
+            tail += "\nText follow-up: " + " | ".join(str(r) for r in failed)
+        return (good[-1] if good else placed).split(". Before:")[0] + tail
 
     before = {i.get("id") for i in (edl.get("inserts") or [])}
     placed = insert_media(ctx, key, at, duration_s=dur,
@@ -12199,6 +12324,16 @@ def audit_captions(ctx, offset=0, limit=80):
     return json.dumps(result, indent=1)
 
 
+_EDL_SECTION_ALIASES = {
+    "segments": ("keep",), "cuts": ("keep",), "text": ("texts",),
+    "zooms": ("effects",), "transitions": ("effects",),
+    "grades": ("effects",), "fades": ("effects",),
+    "audio": ("music", "volume", "voiceover", "sfx", "stem_mix",
+              "master"),
+}
+_EDL_OVERVIEW_ALIASES = {"program", "overview", "summary"}
+
+
 def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
     """Current EDL without ever returning amputated/invalid JSON.
 
@@ -12217,14 +12352,38 @@ def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
     if sections is not None and not isinstance(sections, (list, tuple, str)):
         return ("REJECTED: sections must be a section name or array of names "
                 f"from {sorted(edl.keys())}.")
-    wanted = ([sections] if isinstance(sections, str) else list(sections or []))
-    unknown = sorted({str(name) for name in wanted if str(name) not in edl})
+    requested = ([sections] if isinstance(sections, str)
+                 else list(sections or []))
+    wanted, resolved = [], {}
+    overview = False
+    unknown = []
+    canonical_lc = {str(key).lower(): key for key in edl}
+    for raw in requested:
+        label = str(raw).strip()
+        low = label.lower()
+        if low in canonical_lc:
+            names = (canonical_lc[low],)
+        elif low in _EDL_SECTION_ALIASES:
+            names = tuple(n for n in _EDL_SECTION_ALIASES[low] if n in edl)
+            resolved[label] = list(names)
+        elif low in _EDL_OVERVIEW_ALIASES:
+            overview = True
+            resolved[label] = ["compact_overview"]
+            continue
+        else:
+            unknown.append(label)
+            continue
+        for name in names:
+            if name not in wanted:
+                wanted.append(name)
+    unknown = sorted(set(unknown))
     if unknown:
         return (f"REJECTED: unknown EDL section(s) {unknown}. Available: "
-                f"{sorted(edl.keys())}.")
+                f"{sorted(edl.keys())}. Accepted aliases: "
+                f"{sorted(set(_EDL_SECTION_ALIASES) | _EDL_OVERVIEW_ALIASES)}.")
     if compact:
         return json.dumps(_compact_edl(row, ctx), indent=1)
-    if wanted:
+    if wanted or overview:
         selected, pages = {}, {}
         for raw_name in wanted:
             name = str(raw_name)
@@ -12241,6 +12400,10 @@ def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
                 selected[name] = value
         payload = {"version": row["version"], "sections": selected,
                    "pagination": pages}
+        if overview:
+            payload["overview"] = _compact_edl(row, ctx)
+        if resolved:
+            payload["aliases_resolved"] = resolved
         rendered = json.dumps(payload, indent=1)
         if len(rendered) > 21000:
             return json.dumps({
@@ -13287,7 +13450,77 @@ RECIPE_TOOLS = frozenset({
     "add_stylize", "remove_stylize", "set_master_loudness",
     "enhance_video", "add_custom_filter", "remove_custom_filter",
     "beat_align_cuts",
+    # reset_edit creates only a fresh in-memory EDL when called through the
+    # staging context. Keeping it outside recipes made a clean rebuild begin
+    # with a guaranteed refusal and a second model dispatch.
+    "reset_edit",
 })
+
+
+# Mechanical dialect repair for ids the model can infer correctly but spell
+# with the long noun instead of the EDL's compact prefix.  These mappings are
+# one-to-one; they never guess which object the user meant.
+_ID_PREFIX_ALIASES = {
+    "music": "mus", "zoom": "zm", "text": "tx", "overlay": "ov",
+    "insert": "ins", "stylize": "st", "customfilter": "cf",
+    "custom_filter": "cf",
+}
+_ID_TOOLS = {
+    "remove_music", "swap_music", "set_music_fit", "set_audio_gain",
+    "remove_zoom", "remove_zoom_path", "remove_text", "remove_overlay",
+    "move_overlay", "remove_insert", "move_insert", "set_insert_window",
+    "remove_stylize", "remove_custom_filter", "remove_speed",
+}
+_IDEMPOTENT_RECIPE_REMOVES = {
+    "remove_music", "remove_zoom", "remove_zoom_path", "remove_text",
+    "remove_overlay", "remove_insert", "remove_stylize",
+    "remove_custom_filter", "remove_speed",
+}
+
+
+def _canonical_object_id(value):
+    raw = str(value or "").strip()
+    low = raw.lower()
+    for long, short in _ID_PREFIX_ALIASES.items():
+        match = re.fullmatch(re.escape(long) + r"[-_ ]?(\d+)", low)
+        if match:
+            return short + match.group(1)
+    return raw
+
+
+def _normalize_tool_call(name, args):
+    """Repair only unambiguous tool dialect aliases.
+
+    Returns ``(name, args, notes)``.  This is shared by direct calls and
+    recipes so batching does not mysteriously accept a different dialect.
+    """
+    name = str(name or "").strip()
+    args = dict(args or {})
+    notes = []
+    if name in {"add_overlay", "insert_media", "set_insert_window"} \
+            and "duration" in args and "duration_s" not in args:
+        args["duration_s"] = args.pop("duration")
+        notes.append("duration -> duration_s")
+    if name in {"get_transcript", "get_audio_analysis"}:
+        key = str(args.get("asset_key") or "").strip().lower()
+        if key in {"main", "source", "original", "main_video"}:
+            args.pop("asset_key", None)
+            notes.append("main asset alias -> omitted")
+    if name in _ID_TOOLS and "id" in args:
+        fixed = _canonical_object_id(args.get("id"))
+        if fixed != args.get("id"):
+            notes.append(f"id {args.get('id')} -> {fixed}")
+            args["id"] = fixed
+    # `auto` is a real reframe mode, but it belongs to auto_reframe.  The
+    # production model repeatedly combined it with set_frame and paid a
+    # refusal.  Focus coordinates are deliberately dropped: auto_reframe
+    # measures its own per-shot focus rather than trusting the generic 0.5.
+    if name == "set_frame" and str(args.get("mode") or "").lower() == "auto":
+        name = "auto_reframe"
+        args.pop("focus_x", None)
+        args.pop("focus_y", None)
+        notes.append("set_frame(mode=auto) -> auto_reframe")
+    return name, args, notes
 
 
 class _RecipeContext:
@@ -13332,6 +13565,10 @@ def apply_edit_recipe(ctx, operations, brief=None):
             return f"REJECTED: operation {i} is not an object; nothing changed."
         name = str(op.get("tool") or "").strip()
         args = op.get("args") or {}
+        if isinstance(args, dict):
+            name, args, repairs = _normalize_tool_call(name, args)
+        else:
+            repairs = []
         if name not in RECIPE_TOOLS:
             allowed = ", ".join(sorted(RECIPE_TOOLS))
             return (f"REJECTED: operation {i} uses '{name}', which is not a "
@@ -13341,15 +13578,24 @@ def apply_edit_recipe(ctx, operations, brief=None):
             return (f"REJECTED: operation {i} args must be an object; "
                     "nothing changed.")
         result = execute(stage, name, args)
-        if not isinstance(result, str) or result.startswith((
-                "REJECTED", "Unknown tool", "FAILED", "Could not",
-                "Tool ")):
+        result_kind = tool_result_kind(result)
+        if not isinstance(result, str) or result_kind in {"refused", "failed"}:
+            # Removing an object is idempotent inside an atomic repair batch.
+            # A stale id must not discard eleven valid sibling operations; the
+            # requested end state (that object absent) is already true.
+            if name in _IDEMPOTENT_RECIPE_REMOVES and \
+                    isinstance(result, str) and result.startswith("REJECTED:") \
+                    and " with id '" in result and "Existing" in result:
+                notes.append(f"{i}) {name}: already absent")
+                continue
             return (f"RECIPE ABORTED at operation {i} ({name}); no EDL version "
                     f"was created.\n{result}")
         if result.startswith("NO CHANGE"):
-            notes.append(f"{i}) {name}: no change")
+            notes.append(f"{i}) {name}: no change"
+                         + (f" ({'; '.join(repairs)})" if repairs else ""))
         else:
-            notes.append(f"{i}) {name}: staged")
+            notes.append(f"{i}) {name}: staged"
+                         + (f" ({'; '.join(repairs)})" if repairs else ""))
             plan_steps.append(name)
     if edl_signature(stage._edl) == edl_signature(row["json"]):
         return ("NO CHANGE — the complete recipe resolves to the current EDL; "
@@ -14514,7 +14760,7 @@ TOOLS = {
                                       "items": {"type": "string"}}}),
     "apply_edit_recipe": (
         apply_edit_recipe,
-        "Atomically apply TWO OR MORE transaction-safe EDL operations in "
+        "Atomically apply ONE OR MORE transaction-safe EDL operations in "
         "one tool call and create exactly one new version. Pass operations "
         "as [{tool:'set_frame', args:{ratio:'9:16'}}, ...]. Every operation "
         "is staged against the result of the previous one; if any operation "
@@ -15056,7 +15302,11 @@ TOOLS = {
                           "that the default cover-crop beheads ('the image "
                           "looks corrupted / cut off') — 'pad_blur' fits it "
                           "over a blurred backdrop, 'crop' forces the "
-                          "cover-crop, 'auto' clears the override.",
+                          "cover-crop, 'auto' clears the override. "
+                          "rotation repairs THIS scene clockwise by "
+                          "0/90/180/270 degrees — use it for one sideways "
+                          "phone clip instead of a whole-program custom "
+                          "filter.",
                           {"id": {"type": "string"},
                            "duration_s": {"type": "number"},
                            "clip_start_s": {"type": "number"},
@@ -15066,7 +15316,8 @@ TOOLS = {
                            "mute": {"type": "boolean"},
                            "fit": {"type": "string",
                                    "enum": ["pad", "pad_blur", "crop",
-                                            "auto"]}}),
+                                            "auto"]},
+                           "rotation": {"type": ["integer", "string"]}}),
     "move_insert": (move_insert, "MOVE A SPLICED SCENE — reorder an inserted "
                     "clip between any other scenes, in place. after_id is "
                     "the insert it should play right AFTER (the scene map "
@@ -15970,9 +16221,13 @@ TOOLS = {
                          "zoom_in/zoom_out/pan_left/pan_right gives the still "
                          "a slow drift so it does not sit dead; text + "
                          "subtitle are burned centred and BOUND to the frozen "
-                         "frame. It is a real cut — the program pauses and "
-                         "everything after shifts later — so spoken-word "
-                         "captions never land on it and no mute is needed.",
+                         "frame. audio_mode='pause' (default) is a real cut: "
+                         "the program pauses and everything after shifts. "
+                         "audio_mode='continue' freezes ONLY the picture as "
+                         "a full-frame cover while the original speech, "
+                         "music and timeline continue — use it when a visual "
+                         "must hold over an ongoing phrase without stretching "
+                         "or desynchronizing the audio.",
                          {"at_output_s": {"type": "number"},
                           "duration_s": {"type": "number"},
                           "text": {"type": "string"},
@@ -15986,7 +16241,9 @@ TOOLS = {
                           "color": {"type": "string"},
                           "accent_color": {"type": "string"},
                           "font": {"type": "string",
-                                   "enum": list(TEXT_FONTS)}}),
+                                   "enum": list(TEXT_FONTS)},
+                          "audio_mode": {"type": "string",
+                                         "enum": ["pause", "continue"]}}),
     "add_stylize": (add_stylize, "Layer a windowed finishing effect on the "
                     "program picture: 'grain' (film grain), 'vignette' "
                     "(darkened corners), 'glow' (soft bloom), 'chromatic' "
@@ -16195,7 +16452,11 @@ TOOLS = {
     "get_edl": (get_edl, "Current EDL JSON and version. Large timelines "
                 "return a compact index instead of invalid truncated JSON. "
                 "Request top-level sections such as ['captions','overlays'] "
-                "and paginate list sections with offset/limit. compact=true "
+                "and paginate list sections with offset/limit. Natural "
+                "aliases are accepted without a retry: cuts/segments -> "
+                "keep, text -> texts, zooms/transitions/grades/fades -> "
+                "effects, audio -> all audio sections, and program/overview/"
+                "summary -> the compact program overview. compact=true "
                 "always returns counts, caption state and duplicate assets.",
                 {"sections": {"type": ["array", "string"],
                               "items": {"type": "string"}},
@@ -16535,6 +16796,27 @@ def _count_tool_outcome(ctx, counter):
         pass
 
 
+def tool_result_kind(result):
+    """Stable outer-call classification for billing/outcome telemetry."""
+    if not isinstance(result, str):
+        return "success"
+    text = result.strip()
+    first = text.splitlines()[0] if text else ""
+    low = first.lower()
+    if text.startswith(("REJECTED", "RECIPE ABORTED", "Unknown tool")):
+        return "refused"
+    # Tool failures are not written in one historical dialect: some begin
+    # "Could not…", while others say "the image was generated but could not
+    # be saved" or "audio analysis unavailable". Classify the first line by
+    # meaning so those turns neither charge nor enter another blind retry.
+    if first.startswith(("Tool ", "FAILED")) or re.search(
+            r"\b(failed|could not|unavailable|errored)\b", low):
+        return "failed"
+    if text.startswith("NO CHANGE"):
+        return "no_change"
+    return "success"
+
+
 def execute(ctx, name, args):
     """Dispatch one tool call. Returns a string for the model (AskUser
     propagates)."""
@@ -16543,18 +16825,14 @@ def execute(ctx, name, args):
         _count_tool_outcome(ctx, "tool_refused")
         return (f"Unknown tool '{name}'. Available: "
                 + ", ".join(TOOLS))
-    args = dict(args or {})
-    # Recover the small, unambiguous dialect mistakes seen repeatedly in real
-    # turns. These are aliases, not guesses: every target tool has exactly one
-    # duration parameter, and "main/source/original" means omission on the
-    # three tools whose omitted asset_key is explicitly the main footage.
-    if name in {"add_overlay", "insert_media", "set_insert_window"} \
-            and "duration" in args and "duration_s" not in args:
-        args["duration_s"] = args.pop("duration")
-    if name in {"get_transcript", "get_audio_analysis"}:
-        key = str(args.get("asset_key") or "").strip().lower()
-        if key in {"main", "source", "original", "main_video"}:
-            args.pop("asset_key", None)
+    name, args, _repairs = _normalize_tool_call(name, args)
+    # Normalization may route set_frame(mode=auto) to auto_reframe, so resolve
+    # the registry entry after dialect repair rather than before it.
+    entry = TOOLS.get(name)
+    if not entry:
+        _count_tool_outcome(ctx, "tool_refused")
+        return (f"Unknown tool '{name}'. Available: "
+                + ", ".join(TOOLS))
     fn = entry[0]
     try:
         out = fn(ctx, **args)
@@ -16567,6 +16845,9 @@ def execute(ctx, name, args):
     except Exception as e:
         _count_tool_outcome(ctx, "tool_failed")
         return f"Tool {name} errored: {str(e)[:300]}. Try a different approach."
-    if isinstance(out, str) and out.startswith("REJECTED"):
+    kind = tool_result_kind(out)
+    if kind == "refused":
         _count_tool_outcome(ctx, "tool_refused")
+    elif kind == "failed":
+        _count_tool_outcome(ctx, "tool_failed")
     return out

@@ -1668,10 +1668,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # it to the canvas. None emits the exact legacy chain.
         crop = item.get("crop")
         ins_in, imode = f"insv{j}", (item.get("fit") or mode)
+        rotation = int(item.get("rotation") or 0) % 360
+        if rotation:
+            if rotation == 90:
+                rot_filter = "transpose=clock"
+            elif rotation == 180:
+                rot_filter = "hflip,vflip"
+            else:
+                rot_filter = "transpose=cclock"
+            parts.append(f"[{ins_in}]{rot_filter}[insvr{j}]")
+            ins_in = f"insvr{j}"
         if crop:
             cx0, cy0, cx1, cy1 = (float(c) for c in crop)
             parts.append(
-                f"[insv{j}]crop=trunc(iw*{cx1 - cx0:.4f}/2)*2"
+                f"[{ins_in}]crop=trunc(iw*{cx1 - cx0:.4f}/2)*2"
                 f":trunc(ih*{cy1 - cy0:.4f}/2)*2"
                 f":trunc(iw*{cx0:.4f}/2)*2"
                 f":trunc(ih*{cy0:.4f}/2)*2[insvc{j}]")

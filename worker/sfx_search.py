@@ -4,7 +4,8 @@ The bundled pack is deleted (2026-08-08: its 18 sounds live in R2 under
 legacy-sfx/ and every EDL reference was rewritten to those plain keys) and
 AI sound GENERATION is gone with it — generated one-shots read as uncanny
 under real footage, and the owner pulled them. What replaced both is the
-thing editors actually do: fetch the real sound. Openverse (keyless, the
+thing editors actually do: fetch the real sound. Openverse (anonymous or
+authenticated, the
 same aggregator music_search already trusts) fronts Freesound's half a
 million recorded effects — the exact library a working editor's whoosh,
 camera shutter and UI click already come from — served as direct CDN mp3s.
@@ -19,6 +20,7 @@ a "click" that runs four minutes is a field recording, not an accent.
 
 import config
 import net_fetch
+import music_search
 from music_search import _license_note, _license_ok
 
 OPENVERSE_API = "https://api.openverse.org/v1/audio/"
@@ -52,9 +54,7 @@ def search(query, max_s=None, count=MAX_RESULTS):
     # shape is enforced by the duration cap, not a category filter.
     params = {"q": query, "license_type": "modification",
               "page_size": max(count * 2, 10)}
-    data = net_fetch.get_json(OPENVERSE_API, params=params,
-                              timeout_s=API_TIMEOUT_S,
-                              allowed_hosts=["api.openverse.org"])
+    data = music_search._openverse_get_json(OPENVERSE_API, params=params)
     out = []
     for t in (data.get("results") or []):
         if not _license_ok(t.get("license") or ""):
@@ -82,6 +82,20 @@ def search(query, max_s=None, count=MAX_RESULTS):
         if len(out) >= count:
             break
     return out
+
+
+def resolve(result_id):
+    """Recover a stable Openverse hit after the search turn has ended."""
+    if not str(result_id or "").startswith("openverse:"):
+        raise SfxSearchError("sound result id must be an Openverse id")
+    try:
+        hit = music_search.resolve(result_id)
+    except music_search.MusicSearchError as exc:
+        raise SfxSearchError(str(exc))
+    return {"provider": hit["provider"], "id": hit["id"],
+            "title": hit["title"], "author": hit.get("artist"),
+            "duration_s": hit.get("duration_s"), "license": hit.get("license"),
+            "page_url": hit.get("page_url"), "_url": hit.get("_url")}
 
 
 def download(item, out_path):

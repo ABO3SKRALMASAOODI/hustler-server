@@ -10,6 +10,7 @@ picker, the license reuse from music_search, and the tool-level contract
 """
 import os
 import sys
+import json
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
@@ -63,10 +64,10 @@ class _Ctx:
     workdir = "/tmp"
 
 
-def test_fetch_requires_a_same_turn_search_id():
+def test_fetch_rejects_an_unrecoverable_result_id():
     ctx = _Ctx()
     out = agent_tools.fetch_sfx(ctx, "openverse:never-searched")
-    assert out.startswith("REJECTED") and "search_sfx first" in out
+    assert out.startswith("REJECTED") and "Call search_sfx" in out
 
 
 def test_search_results_hand_off_to_fetch_and_add(monkeypatch):
@@ -93,3 +94,23 @@ def test_failed_download_never_claims_success(monkeypatch):
     monkeypatch.setattr(sfx_search, "download", boom)
     out = agent_tools.fetch_sfx(ctx, "openverse:x")
     assert "Could not download" in out and "Do NOT claim" in out
+
+
+def test_search_hit_cache_survives_the_agent_turn():
+    hit = _hit()
+
+    class CacheDb:
+        def run(self, fn, *args):
+            if fn.__name__ == "kv_get":
+                return json.dumps({hit["id"]: hit})
+            return None
+
+    class CacheCtx:
+        db = CacheDb()
+        project_id = 44
+        _sfx_hits = {}
+
+    got, err = agent_tools._recover_search_hit(
+        CacheCtx(), "sfx", hit["id"],
+        lambda _rid: (_ for _ in ()).throw(AssertionError("no API call")))
+    assert err is None and got["title"] == "Camera Shutter"

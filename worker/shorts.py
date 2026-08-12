@@ -486,6 +486,38 @@ def _visual_plan_clips(index, duration, n_target, want, note, workdir):
                             index=index, visual=True)
 
 
+def _transcript_is_useful(index, duration):
+    """Whether speech is rich enough to choose highlights by meaning.
+
+    Whisper occasionally returns a sign-off or three hallucinated words from
+    minutes of otherwise visual footage.  Treating that as a transcript hid
+    the filmstrips from the shorts planner and produced an empty plan twice.
+    """
+    words = index.get("words") or []
+    if words:
+        count = len([w for w in words if str(w.get("w") or "").strip()])
+    else:
+        text = " ".join(str(s.get("text") or "")
+                        for s in (index.get("sentences") or []))
+        count = len(re.findall(r"\w+", text, flags=re.UNICODE))
+    if count == 0:
+        return False
+    minutes = max(float(duration or 0.0) / 60.0, 0.25)
+    # Fewer than two words/minute on a long source is not a semantic spine.
+    if duration >= 60.0 and count < 8 and count / minutes < 2.0:
+        return False
+    spans = []
+    for sent in (index.get("sentences") or []):
+        try:
+            spans.append(max(0.0, float(sent["t1"]) - float(sent["t0"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    coverage = sum(spans) / max(float(duration or 0.0), 0.1)
+    if duration >= 60.0 and count < 12 and coverage < 0.03:
+        return False
+    return True
+
+
 def _plan_clips(worker_db, job, index, duration, style, payload,
                 subscribed, plan, workdir=None):
     """Plan validated clip windows from speech, or visually when speechless."""
@@ -510,6 +542,14 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
     note = (payload.get("style_note") or "").strip()[:400]
 
     transcript = _transcript_block(index)
+    visual_ready = bool(index.get("tile_keys") or []) \
+        and llm.vision_available()
+    if (not transcript.strip() or not _transcript_is_useful(index, duration)) \
+            and visual_ready:
+        wd = workdir or os.path.join(
+            config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
+        os.makedirs(wd, exist_ok=True)
+        return _visual_plan_clips(index, duration, n_target, want, note, wd)
     if not transcript.strip():
         wd = workdir or os.path.join(
             config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
@@ -527,7 +567,16 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
                     "shorts_plan", max_tokens=3500)
     raw_clips = _complete_conversation_arcs(
         (out or {}).get("clips") or [], index, duration)
-    return _validated_clips(raw_clips, duration, want, index=index)
+    clips = _validated_clips(raw_clips, duration, want, index=index)
+    # One empty language-plan answer should not turn into a whole job retry
+    # when the same job already has visual evidence. Fall through to vision in
+    # this execution, preserving both time and the model tokens already spent.
+    if not clips and visual_ready:
+        wd = workdir or os.path.join(
+            config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
+        os.makedirs(wd, exist_ok=True)
+        return _visual_plan_clips(index, duration, n_target, want, note, wd)
+    return clips
 
 
 # ------------------------------------------------------------------ children

@@ -138,6 +138,46 @@ def test_plan_without_speech_uses_visual_filmstrips(monkeypatch, tmp_path):
     assert out[0]["title"] == "Clean knockout sequence"
 
 
+def test_thin_signoff_transcript_routes_to_visual_tiles(monkeypatch, tmp_path):
+    monkeypatch.setattr(shorts.llm, "vision_available", lambda: True)
+    monkeypatch.setattr(shorts.storage, "download_to", lambda *_a: None)
+    monkeypatch.setattr(
+        shorts.llm, "ask_vision",
+        lambda *_a, **_k: '{"clips":[{"start":30,"end":55,'
+        '"title":"Visual highlight","score":90}]}')
+    monkeypatch.setattr(
+        shorts, "_ask_json",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("thin transcript must not use speech planner")))
+    index = _index([{"t0": 226, "t1": 228,
+                     "text": "Thanks for watching!"}])
+    index.update({"words": [{"w": "Thanks"}, {"w": "for"},
+                             {"w": "watching"}],
+                  "tile_keys": ["tiles/a.jpg"],
+                  "shots": [{"start": 30.0, "end": 55.0}]})
+    out = shorts._plan_clips(
+        None, {"id": 704, "user_id": 1}, index, 228.0, None, {},
+        False, "free", workdir=str(tmp_path))
+    assert [c["title"] for c in out] == ["Visual highlight"]
+
+
+def test_empty_transcript_plan_falls_back_to_vision(monkeypatch, tmp_path):
+    monkeypatch.setattr(shorts.llm, "vision_available", lambda: True)
+    monkeypatch.setattr(shorts.storage, "download_to", lambda *_a: None)
+    monkeypatch.setattr(shorts, "_ask_json", lambda *_a, **_k: {"clips": []})
+    monkeypatch.setattr(
+        shorts.llm, "ask_vision",
+        lambda *_a, **_k: '{"clips":[{"start":60,"end":90,'
+        '"title":"Seen in tiles","score":88}]}')
+    index = _index(SENTS)
+    index.update({"tile_keys": ["tiles/a.jpg"],
+                  "shots": [{"start": 60.0, "end": 90.0}]})
+    out = shorts._plan_clips(
+        None, {"id": 9, "user_id": 1}, index, 600.0, None, {},
+        False, "free", workdir=str(tmp_path))
+    assert [c["title"] for c in out] == ["Seen in tiles"]
+
+
 def test_transcript_block_truncates():
     sents = [{"t0": i, "t1": i + 1, "text": "word " * 30, "speaker": 0}
              for i in range(3000)]

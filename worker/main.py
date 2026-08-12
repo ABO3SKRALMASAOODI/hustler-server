@@ -217,6 +217,20 @@ FORCED_PREVIEW_FAIL_NOTE = (
 
 
 def _notify_failure(worker_db, job, err):
+    if job["type"] == "shorts_plan":
+        try:
+            # The later chat turn is authoritative and runs immediately after
+            # this serialized shorts job. Posting the automatic planner's
+            # failure beside that editor's answer produced two contradictory
+            # assistants in one conversation.
+            if worker_db.run(dbx.has_newer_agent_turn, job["project_id"],
+                             job["id"]):
+                print(f"[notify] suppressing stale shorts failure for job "
+                      f"{job['id']} — a newer agent turn owns the reply",
+                      flush=True)
+                return
+        except Exception:
+            pass
     note = FAIL_NOTES.get(job["type"])
     if "scratch space" in str(err):
         # The full text is operator advice (Cloud Run flags, a deploy doc) —

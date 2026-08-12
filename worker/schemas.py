@@ -722,6 +722,8 @@ class InsertItem(BaseModel):
     # 'pad_blur' on a blurred backdrop, 'crop' forces the cover-crop. None
     # (every pre-round-79 EDL) renders byte-identically to the legacy chain.
     fit: Optional[Literal["crop", "pad", "pad_blur"]] = None
+    # Per-scene orientation repair. None keeps historical signatures stable.
+    rotation: Optional[int] = None
 
     @field_validator("rate")
     @classmethod
@@ -729,6 +731,16 @@ class InsertItem(BaseModel):
         if v is None:
             return None
         return min(max(float(v), INSERT_RATE_MIN), INSERT_RATE_MAX)
+
+    @field_validator("rotation")
+    @classmethod
+    def _rotation_quarter_turn(cls, v):
+        if v is None:
+            return None
+        n = int(round(float(v))) % 360
+        if n not in (0, 90, 180, 270):
+            raise ValueError("rotation must be 0, 90, 180 or 270 degrees")
+        return n or None
 
     @field_validator("crop")
     @classmethod

@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import stock                                                 # noqa: E402
+import music_search                                          # noqa: E402
 
 
 # ── orientation from the output frame ────────────────────────────────────
@@ -200,8 +201,9 @@ def test_openverse_photos_carry_their_license_line(monkeypatch):
     def fake(url, params=None, **kw):
         seen.update(params or {})
         return _OPENVERSE_PAGE
-    monkeypatch.setattr(stock, "net_fetch",
-                        type("N", (), {"get_json": staticmethod(fake)}))
+    # Openverse auth/retry is shared by music, SFX and photos; stub that
+    # shared request boundary rather than the unrelated Pexels/Pixabay client.
+    monkeypatch.setattr(music_search, "_openverse_get_json", fake)
     hits = stock.search("elon musk", kind=stock.KIND_PHOTO,
                         orientation="portrait")
     # ND is unusable in an edit and filtered; the BY hit survives with the

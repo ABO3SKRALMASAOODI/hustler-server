@@ -391,6 +391,42 @@ def test_edit_recipe_quality_advisories_do_not_abort_atomic_commit():
     assert fake.inserts == 1
 
 
+def test_recipe_repairs_long_ids_and_stale_removals_without_aborting():
+    ctx, fake = _real_ctx()
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "remove_zoom", "args": {"id": "zoom1"}},
+        {"tool": "set_color_grade", "args": {"preset": "warm"}},
+    ])
+    assert result.startswith("EDL v1 -> v2")
+    assert "remove_zoom: already absent" in result
+    assert fake.rows[-1]["json"]["effects"]["grade"] == "warm"
+
+
+def test_tool_dialect_normalizes_auto_frame_and_compact_ids():
+    name, args, notes = agent_tools._normalize_tool_call(
+        "set_frame", {"ratio": "9:16", "mode": "auto",
+                      "focus_x": 0.5, "focus_y": 0.5})
+    assert name == "auto_reframe"
+    assert args == {"ratio": "9:16", "mode": "auto"}
+    assert notes
+    name, args, _ = agent_tools._normalize_tool_call(
+        "set_music_fit", {"id": "music1", "loop": True})
+    assert name == "set_music_fit" and args["id"] == "mus1"
+
+
+def test_reset_edit_is_transaction_safe_inside_recipe():
+    ctx, fake = _real_ctx()
+    first = dict(ctx.latest_edl()["json"])
+    first["effects"] = {"grade": "cool"}
+    ctx.write_edl(first, "old grade")
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "reset_edit", "args": {}},
+        {"tool": "set_color_grade", "args": {"preset": "warm"}},
+    ])
+    assert result.startswith("EDL v2 -> v3")
+    assert fake.rows[-1]["json"]["effects"]["grade"] == "warm"
+
+
 def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
     tools = {t["function"]["name"]: t for t in agent_tools.openai_tools()}
     assert "apply_edit_recipe" in tools
