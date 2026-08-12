@@ -176,6 +176,7 @@ class ToolContext:
         self._audio_review_attempted_asset_keys = set()
         self.audio_reviewed_versions = set()
         self.last_audio_review = None
+        self.last_audio_qc_findings = []
         # EDL versions this turn already enqueued a SPECULATIVE preview for
         # (round 98) — the loop's fire-ahead encode. Bounds repeats and lets
         # render_preview adopt instead of re-enqueueing.
@@ -192,6 +193,15 @@ class ToolContext:
         self.last_taste = []
         self.last_taste_version = None
         self.last_visual_critic = None
+        # Candidate + one ordinary repair remains the default. A third proof
+        # is earned only when the latest rendered version still has a concrete
+        # independent or deterministic defect. The model cannot set this.
+        self.quality_repair_required = False
+        self.quality_repair_version = None
+        # Set only on the new EDL created after two reviewed candidates.  It
+        # carries the critic's one-time third-preview permission across the
+        # write (where ``latest_edl`` changes versions) to render_preview.
+        self.quality_recovery_version = None
         # What the user asked for THIS turn, verbatim. Read only to SUPPRESS
         # taste findings (round 52): a fade from black is a defect on a reel
         # right up until the moment somebody asks for one, and a critic that
@@ -334,6 +344,22 @@ class ToolContext:
         return (self.credit_budget is not None and
                 self.running_credits() >= self.credit_budget)
 
+    def preview_limit(self):
+        """Candidate + repair, plus one critic-authorized recovery proof."""
+        ordinary = min(2, config.AGENT_MAX_PREVIEWS_PER_TURN)
+        try:
+            latest_version = self.latest_edl()["version"]
+        except Exception:
+            latest_version = None
+        earned_recovery = (
+            config.AGENT_MAX_PREVIEWS_PER_TURN > ordinary
+            and ((self.quality_repair_required
+                  and self.quality_repair_version == latest_version)
+                 or self.quality_recovery_version == latest_version)
+        )
+        return config.AGENT_MAX_PREVIEWS_PER_TURN if earned_recovery \
+            else ordinary
+
     def clamp(self, t):
         try:
             t = float(t)
@@ -372,19 +398,22 @@ class ToolContext:
         version (no version row is created), or a REJECTED message on
         validation failure."""
         prev = self.latest_edl()
-        # The turn owns exactly a candidate proof and one repair proof. Once
-        # both have rendered successfully, another write would create a third
-        # unreviewed candidate; turn-end honesty would then auto-render it and
-        # quietly defeat the preview ceiling. A production canary did exactly
-        # that: it approved v3, added optional polish as v4, got the explicit
-        # preview-cap rejection, then forced a third encode at turn end. Freeze
-        # the last proven version instead. A new user turn gets a fresh budget.
-        if len(self.rendered_versions) >= config.AGENT_MAX_PREVIEWS_PER_TURN:
+        # The turn normally owns a candidate proof and one repair proof. A
+        # third write is allowed only when the latest proof itself earned a
+        # recovery pass by returning a concrete quality defect. This keeps the
+        # optional-polish freeze while no longer trapping a known-bad version.
+        limit = self.preview_limit()
+        if len(self.rendered_versions) >= limit:
+            reason = ("the critic-authorized recovery preview has also "
+                      "rendered" if limit > 2 else
+                      "the candidate preview and repair preview have already "
+                      "rendered successfully")
+            candidate = ("unreviewed fourth candidate" if limit > 2 else
+                         "unreviewed third candidate")
             return (
-                f"REJECTED (EDL v{prev['version']} unchanged): both the "
-                "candidate preview and repair preview have already rendered "
-                "successfully this turn. Any further write would be an "
-                "unreviewed third candidate. Preserve this last proven "
+                f"REJECTED (EDL v{prev['version']} unchanged): {reason} "
+                f"this turn. Any further write would be an {candidate}. "
+                "Preserve this last proven "
                 "version and reply; make additional optional polish only in "
                 "a new user turn."
             )
@@ -424,6 +453,12 @@ class ToolContext:
         version = self.db.run(dbx.insert_edl, self.project_id, normalized,
                               "agent")
         self.versions_written.append(version)
+        # The third proof is earned by a concrete finding on the SECOND
+        # rendered candidate.  Keep that permission attached to the newly
+        # written recovery version; otherwise latest_edl changed here and
+        # render_preview immediately fell back to the ordinary limit of two.
+        if limit > 2 and len(self.rendered_versions) >= 2:
+            self.quality_recovery_version = version
         chg = edl_diff.change_ranges(prev["json"], normalized)
         self.last_change = dict(chg, edl_version=version) if chg else None
         before = describe_edl(prev["json"])
@@ -2097,10 +2132,28 @@ def _direct_caption_style(ctx, edl):
     def hit(*needles):
         return any(n in ask for n in needles)
 
-    if hit("plain captions", "simple captions", "basic captions",
-           "classic subtitles", "minimal subtitles", "captions بسيطة"):
+    if hit("classic subtitles", "legacy subtitles", "basic subtitles",
+           "captions بسيطة"):
         return {"preset": "classic", "size": "m"}, \
-            "the brief explicitly asks for restrained/classic subtitles"
+            "the brief explicitly asks for the legacy subtitle treatment"
+    if hit("documentary subtitles", "closed captions", "accessible captions",
+           "subtitle panel", "boxed subtitles", "long-form subtitles"):
+        return {"preset": "documentary"}, \
+            "the brief calls for durable long-form readability on a backing panel"
+    if hit("news", "broadcast", "newscast", "headline", "lower third captions"):
+        return {"preset": "broadcast", "highlight_color": "#5DD6FF"}, \
+            "news/explainer language calls for a clear left-aligned lower-third"
+    if hit("retro", "vintage", "throwback", "old school", "poster"):
+        return {"preset": "retro"}, \
+            "the requested retro treatment needs condensed outlined display type"
+    if hit("neon", "cyber", "cyberpunk", "electric glow"):
+        return {"preset": "neon", "highlight_color": "#7DEBFF"}, \
+            "the requested neon treatment needs one coherent cool glow accent"
+    if hit("plain captions", "simple captions", "minimal captions", "clean",
+           "aesthetic", "premium", "nice captions", "good captions",
+           "beautiful captions"):
+        return {"preset": "clean", "emphasis": "big"}, \
+            "the brief asks for restrained premium typography with size-only hierarchy"
     if hit("luxury", "luxurious", "premium brand", "expensive", "jewelry",
            "jewellery", "watch ad"):
         return {"preset": "luxe", "highlight_color": "#E2BE72"}, \
@@ -2115,30 +2168,140 @@ def _direct_caption_style(ctx, edl):
     if hit("lyrics", "lyric", "song edit", "music video", "singing"):
         return {"preset": "lyric", "highlight_color": "#E2BE72"}, \
             "music/lyric footage calls for phrase-led display type and a distinct stressed word"
-    if hit("wedding", "cinematic", "travel film", "documentary", "calm",
+    if hit("wedding", "cinematic", "travel film", "calm",
            "emotional", "storytelling"):
         return {"preset": "editorial", "highlight_color": "#F2D1A0"}, \
             "calm/cinematic footage needs air and a quiet serif hierarchy"
     if hit("tutorial", "screen recording", "software", "saas", "tech",
            "product demo", "explainer", "educational", "business"):
-        return {"preset": "stacked", "highlight_color": "#59D9FF"}, \
-            "tutorial/business speech needs a clean stacked hierarchy with legible keywords"
+        return {"preset": "clean", "emphasis": "big"}, \
+            "tutorial/business speech needs a restrained, highly legible hierarchy"
     if hit("podcast", "interview", "talking head", "reel", "viral",
-           "creator", "nice captions", "good captions", "cool captions",
-           "beautiful captions") or speakers >= 2:
-        preset = "podcast" if speakers >= 2 or wpm < 145 else "stacked"
-        return {"preset": preset, "highlight_color": "#FFD84D"}, \
-            "the talking-head/podcast format calls for a compact social caption grammar"
+           "creator", "cool captions") or speakers >= 2:
+        preset = "clean" if wpm < 175 else "stacked"
+        return {"preset": preset, "emphasis": "big"}, \
+            "the talking-head format calls for readable white type and semantic hierarchy"
     if short_form:
-        preset = "stacked" if wpm >= 115 else "podcast"
-        return {"preset": preset,
-                "highlight_color": "#59D9FF" if preset == "stacked" else "#FFD84D"}, \
+        preset = "stacked" if wpm >= 165 else "clean"
+        return {"preset": preset, "emphasis": "big"}, \
             f"the measured vertical short-form pace is {wpm:.0f} words/minute"
     if out_dur <= 90.0:
-        return {"preset": "elegant", "highlight_color": "#F2D1A0"}, \
-            "a short landscape piece benefits from calm lower-third typography"
-    return {"preset": "classic", "size": "m"}, \
-        "long-form footage is safer with restrained subtitles than oversized social type"
+        return {"preset": "clean", "emphasis": "big"}, \
+            "a short landscape piece benefits from clean, restrained typography"
+    return {"preset": "documentary"}, \
+        "long-form footage benefits from readable subtitles on a stable contrast panel"
+
+
+_CAPTION_STOPWORDS = {
+    # Function words should almost never become the visual hero. The list is
+    # intentionally multilingual but small; unknown languages still work via
+    # length/digit/end-of-phrase scoring instead of being rejected.
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
+    "can", "did", "do", "does", "for", "from", "had", "has", "have",
+    "he", "her", "here", "him", "his", "how", "i", "if", "in", "is",
+    "it", "its", "just", "me", "my", "no", "not", "of", "on", "or",
+    "our", "she", "so", "that", "the", "their", "them", "then", "there",
+    "they", "this", "to", "up", "us", "was", "we", "were", "what",
+    "when", "where", "which", "who", "why", "will", "with", "you", "your",
+    "de", "del", "el", "ella", "en", "es", "esta", "este", "la", "las",
+    "lo", "los", "para", "pero", "por", "que", "se", "sin", "su", "un",
+    "una", "y", "yo", "le", "les", "des", "du", "et", "la", "le",
+    "les", "mais", "ou", "pour", "que", "qui", "sur", "un", "une",
+}
+
+
+def _caption_token_key(value):
+    """Unicode-safe caption matching (Arabic/CJK/etc. must not collapse)."""
+    return re.sub(r"[^\w']+", "", str(value or "").casefold(),
+                  flags=re.UNICODE).strip("_")
+
+
+def _auto_caption_emphasis(ctx, edl, limit=25):
+    """Pick sparse, semantic emphasis from the words that survive this EDL.
+
+    This is a renderer safeguard, not a request for the model to remember an
+    optional field. It selects roughly one meaningful word per 6-8 spoken
+    words, covers every phrase, prefers numbers/outcomes/rare terms, and
+    returns transcript spelling verbatim so matching remains honest.
+    """
+    keep = edl.get("keep") or []
+    visible = []
+    for w in (ctx.index.get("words") or []):
+        if w.get("filler"):
+            continue
+        try:
+            mid = (float(w["t0"]) + float(w["t1"])) / 2.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if keep and not any(float(a) - 0.05 <= mid <= float(b) + 0.05
+                            for a, b in keep):
+            continue
+        raw = str(w.get("w") or "").strip()
+        key = _caption_token_key(raw)
+        if key:
+            visible.append({"raw": raw.strip("\"'.,!?;:…()[]"),
+                            "key": key, "t0": float(w["t0"]),
+                            "t1": float(w["t1"]),
+                            "sentence_end": raw.rstrip().endswith(
+                                (".", "!", "?", "…"))})
+    if not visible:
+        return []
+    freq = {}
+    for w in visible:
+        freq[w["key"]] = freq.get(w["key"], 0) + 1
+
+    def score(w, index, group):
+        raw, key = w["raw"], w["key"]
+        if key in _CAPTION_STOPWORDS or len(key) <= 1:
+            return -20.0
+        s = 0.0
+        if any(ch.isdigit() for ch in raw):
+            s += 12.0
+        if any(ch in raw for ch in "$€£¥%"):
+            s += 5.0
+        s += min(len(key), 12) * 0.22
+        if len(key) >= 7:
+            s += 1.2
+        if freq.get(key, 0) == 1:
+            s += 1.0
+        else:
+            s -= min(1.5, (freq[key] - 1) * 0.35)
+        if index == len(group) - 1:
+            s += 1.0  # phrase-ending outcome/verb often carries the landing
+        return s
+
+    # Phrase groups mirror caption reading units, not arbitrary global rarity.
+    groups, cur = [], []
+    for w in visible:
+        if cur and (w["t0"] - cur[-1]["t1"] > 0.9 or len(cur) >= 8):
+            groups.append(cur)
+            cur = []
+        cur.append(w)
+        if w["sentence_end"]:
+            groups.append(cur)
+            cur = []
+    if cur:
+        groups.append(cur)
+
+    target = min(limit, max(1, round(len(visible) / 7)))
+    ranked_groups = []
+    for gi, group in enumerate(groups):
+        candidates = sorted(
+            ((score(w, i, group), i, w) for i, w in enumerate(group)),
+            key=lambda x: (-x[0], x[1]))
+        if candidates and candidates[0][0] > -10:
+            ranked_groups.append((candidates[0][0], gi, candidates[0][2]))
+
+    # Long videos can have more phrases than the 25-word contract. Keep the
+    # strongest phrase heroes, but restore chronological order in the EDL.
+    selected = sorted(ranked_groups, key=lambda x: (-x[0], x[1]))[:target]
+    selected.sort(key=lambda x: x[1])
+    out, seen = [], set()
+    for _score, _gi, w in selected:
+        if w["key"] not in seen:
+            seen.add(w["key"])
+            out.append(w["raw"])
+    return out[:limit]
 
 
 def add_captions(ctx, mode=None, items=None, style=None,
@@ -2251,8 +2414,8 @@ def add_captions(ctx, mode=None, items=None, style=None,
                              "applies to static looks and is ignored here.")
         if emphasis_words and not premium:
             karaoke_note += ("\nNote: emphasis_words only take effect with "
-                            "a premium preset (podcast/beast/karaoke/"
-                            "elegant) — pass style {preset:'podcast'} to "
+                            "a premium preset — pass style "
+                            "{preset:'clean'} to "
                             "use them.")
         if (parsed_style or {}).get("uppercase") is not None and not premium:
             karaoke_note += ("\nNote: uppercase only applies with a premium "
@@ -2296,6 +2459,18 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 f"\nNote: only {visible} transcribed word(s) fall inside the "
                 "kept footage, so captions will be very sparse — if this "
                 "video is mostly music, say so to the user.")
+        auto_emphasis = False
+        if premium and emphasis_words is None:
+            # A premium preset without hierarchy was the dominant production
+            # failure: the model omitted an optional argument, so the most
+            # important part of the design simply never activated. Make the
+            # product own the default; an explicit [] still means "none".
+            emphasis_words = _auto_caption_emphasis(ctx, edl)
+            auto_emphasis = bool(emphasis_words)
+            if auto_emphasis:
+                karaoke_note += (f"\nAutomatically selected "
+                                  f"{len(emphasis_words)} semantic emphasis "
+                                  "word(s) from the kept transcript.")
         cfg = {"mode": "from_transcript",
                "max_words_per_caption": mw,
                "style": parsed_style,
@@ -2309,7 +2484,8 @@ def add_captions(ctx, mode=None, items=None, style=None,
         if mw:
             desc += f", <= {mw} words each"
         if emphasis_words:
-            desc += f", {len(emphasis_words)} emphasis words"
+            desc += (f", {len(emphasis_words)} emphasis words"
+                     + (" auto-selected" if auto_emphasis else ""))
         if parsed_style:
             desc += f", style {parsed_style}"
         if placement:
@@ -2328,7 +2504,7 @@ def _parse_partial_style(style):
     fills defaults, so merging cannot reset fields the user didn't mention."""
     if not isinstance(style, dict) or not style:
         return ('ERR: style must be a non-empty object with any of '
-                '{"preset":"podcast|beast|karaoke|elegant|stacked|iridescent|chrome|editorial|fashion|luxe|impact|classic",'
+                '{"preset":"clean|documentary|broadcast|podcast|beast|karaoke|...|classic",'
                 '"color":"#RRGGBB","size":"s|m|l|xl","size_scale":0.5-3.0,'
                 '"position":"bottom|top|middle","uppercase":true|false,'
                 '"dynamic":true|false,"highlight_color":"#RRGGBB",'
@@ -2336,7 +2512,10 @@ def _parse_partial_style(style):
                 '"font":"<bundled family>","effect":"chroma|chrome|glow",'
                 '"layout":"stack|flow","leading":0.5-2.2,'
                 '"emphasis":"big|huge|accent|pop|box|serif|chrome|glow|chroma",'
-                '"emphasis_scale":1.0-3.0}')
+                '"emphasis_scale":1.0-3.0,"outline_color":"#RRGGBB",'
+                '"outline_width":0-12,"shadow":0-12,'
+                '"background_color":"#RRGGBB","background_opacity":0-1,'
+                '"tracking":-8-24,"text_align":"left|center|right"}')
     # Mirrors captions.STYLE_KEYS (+ dynamic/uppercase, which are booleans
     # handled separately there). A field missing HERE is rejected outright;
     # a field missing from STYLE_KEYS is accepted and then silently ignored.
@@ -2344,13 +2523,20 @@ def _parse_partial_style(style):
                                    "dynamic", "highlight_color", "animation",
                                    "preset", "uppercase", "font", "effect",
                                    "layout", "leading", "emphasis",
-                                   "emphasis_scale"})
+                                   "emphasis_scale", "outline_color",
+                                   "outline_width", "shadow",
+                                   "background_color", "background_opacity",
+                                   "tracking", "text_align"})
     if unknown:
         return (f"ERR: unknown style field(s) {unknown} — the style fields are "
                 "preset, color, size, size_scale, position, uppercase, "
                 "dynamic, highlight_color, animation, font, effect, layout, "
-                "leading, emphasis and emphasis_scale. preset picks a look "
-                "(podcast/beast/karaoke/elegant/stacked/iridescent/chrome/editorial/fashion/luxe/impact/classic); "
+                "leading, emphasis, emphasis_scale, outline_color, "
+                "outline_width, shadow, background_color, "
+                "background_opacity, tracking and text_align. preset picks "
+                "a look (clean/documentary/broadcast/retro/neon/podcast/"
+                "beast/karaoke/elegant/stacked/iridescent/chrome/editorial/"
+                "fashion/luxe/impact/lyric/classic); "
                 "font names a bundled family (e.g. 'Playfair Display Black'); "
                 "effect layers chroma/chrome/glow onto emphasised words; "
                 "layout 'stack' gives each line its own position, which is "
@@ -2361,7 +2547,7 @@ def _parse_partial_style(style):
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
-                '{"preset":"podcast|beast|karaoke|elegant|stacked|iridescent|chrome|editorial|fashion|luxe|impact|classic",'
+                '{"preset":"clean|documentary|broadcast|podcast|beast|karaoke|...|classic",'
                 '"color":"#RRGGBB","size":"s|m|l|xl",'
                 '"position":"bottom|top|middle","dynamic":true|false,'
                 '"highlight_color":"#RRGGBB","leading":0.5-2.2,'
@@ -2523,13 +2709,22 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
         if eff_preset == "classic":
             eff_preset = None
     emph_note = ""
+    auto_emphasis = False
+    if emphasis_words is None and eff_preset and isinstance(merged, dict) \
+            and not merged.get("emphasis_words"):
+        auto = _auto_caption_emphasis(ctx, edl)
+        if auto:
+            merged["emphasis_words"] = auto
+            auto_emphasis = True
+            emph_note = (f"\nAutomatically selected {len(auto)} semantic "
+                         "emphasis word(s) from the kept transcript.")
     if emphasis_words is not None:
         if isinstance(merged, dict):
             merged["emphasis_words"] = emphasis_words or None
             if emphasis_words and not eff_preset:
                 emph_note = ("\nNote: emphasis_words only take effect with "
-                             "a premium preset (podcast/beast/karaoke/"
-                             "elegant) — set style {preset:'podcast'} to "
+                             "a premium preset — set style "
+                             "{preset:'clean'} to "
                              "use them.")
         else:
             emph_note = ("\nNote: emphasis_words apply to from_transcript "
@@ -2578,6 +2773,8 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
     edl["captions"] = _bake_karaoke_group(merged)
     desc = f"caption style updated: {json.dumps(partial)}" if partial \
         else f"caption emphasis words set ({len(emphasis_words or [])})"
+    if auto_emphasis:
+        desc += f", {len(merged.get('emphasis_words') or [])} emphasis words auto-selected"
     result = ctx.write_edl(edl, desc)
     result += karaoke_note + emph_note
     if isinstance(caps, list) and ({"dynamic", "highlight_color"}
@@ -12267,10 +12464,10 @@ def render_preview(ctx):
     if strip:
         return strip
     if not getattr(ctx, "autorendering", False):
-        if ctx.preview_requests >= config.AGENT_MAX_PREVIEWS_PER_TURN:
+        if ctx.preview_requests >= ctx.preview_limit():
             return (
-                "REJECTED: this turn already used its candidate preview and "
-                "repair preview. Do not render or keep polishing again. "
+                "REJECTED: this turn already used every preview justified by "
+                "its quality reviews. Do not render or keep polishing again. "
                 "Preserve the best valid version and reply honestly about "
                 "anything that remains."
             )
@@ -12300,6 +12497,12 @@ def render_preview(ctx):
             result = j.get("result") or {}
             ctx.last_preview = result
             ctx.rendered_versions.add(version)
+            # Review state is evidence about one exact render.  Never let a
+            # prior version's PASS/FIX survive when this reviewer is
+            # unavailable or the new EDL no longer has designed audio.
+            ctx.last_visual_critic = None
+            ctx.last_audio_review = None
+            ctx.quality_recovery_version = None
             out_dur = result.get("duration_s")
             if result.get("cached"):
                 # Nothing new was encoded and no new file appeared — saying
@@ -12440,7 +12643,10 @@ def render_preview(ctx):
             # editor HEARS what it shipped instead of trusting gain numbers.
             aq = result.get("audio_qc") or {}
             aqf = aq.get("findings") or []
+            ctx.last_audio_qc_findings = list(aqf[:4])
             if aqf:
+                ctx.last_taste.extend(
+                    f"audio QC: {finding}" for finding in aqf[:4])
                 note += (" AUDIO CHECK: " + "; ".join(aqf[:4])
                          + " — fix these, or keep one deliberately and say "
                            "why in one clause.")
@@ -12472,6 +12678,14 @@ def render_preview(ctx):
                         ctx.last_audio_review = review
                         ctx.audio_reviewed_versions.add(version)
                         note += " AUDIO LISTEN: " + review
+                        if review.strip().upper().startswith("FIX"):
+                            ctx.last_taste.append(
+                                "audio review: " + review.strip()[:300])
+            # Recomputed on every proof. This is the only thing that can earn
+            # a third candidate: the model cannot request it through prose or
+            # a tool argument.
+            ctx.quality_repair_required = bool(ctx.last_taste)
+            ctx.quality_repair_version = version
             return note
         if j["state"] == "failed":
             failure = dict(((j.get("result") or {}).get("failure") or {}))
@@ -13082,6 +13296,13 @@ RECIPE_TOOLS = frozenset({
     "add_zoom", "remove_zoom", "add_zoom_path", "remove_zoom_path",
     "punch_in_on_emphasis", "set_fades",
     "set_volume", "set_speed", "remove_speed",
+    # Pure timeline objects. These all stage solely through ctx.write_edl;
+    # asset resolution and analysis are reads, so an aborted recipe leaves no
+    # externally visible side effect. Keeping them out caused valid text,
+    # insert and overlay repair plans to lose their entire batch.
+    "set_insert_window", "move_insert", "remove_insert",
+    "add_overlay", "move_overlay", "remove_overlay",
+    "add_text", "remove_text",
     # These mutate only the in-memory EDL and reference an asset that already
     # exists. They are transaction-safe; search/fetch/listen remain separate
     # evidence/side-effect calls. Excluding them made the agent try a correct
@@ -13089,6 +13310,8 @@ RECIPE_TOOLS = frozenset({
     "add_music", "remove_music", "swap_music", "set_music_fit",
     "set_audio_gain",
     "add_stylize", "remove_stylize", "set_master_loudness",
+    "enhance_video", "add_custom_filter", "remove_custom_filter",
+    "beat_align_cuts",
 })
 
 
@@ -13898,7 +14121,7 @@ def _emphasis_candidates(ctx):
 
     def _add(tok):
         t = str(tok or "").strip("\"'.,!?;:").strip()
-        k = _norm_token(t)
+        k = _caption_token_key(t)
         if not k or k in seen:
             return False
         seen.add(k)
@@ -13933,14 +14156,14 @@ def _emphasis_candidates(ctx):
                      "still worth listing): " + ", ".join(digits[:12]))
     freq = {}
     for w in words:
-        k = _norm_token(w["w"])
+        k = _caption_token_key(w["w"])
         if k:
             freq[k] = freq.get(k, 0) + 1
     rare = []
     for w in words:
         if len(out) >= 25:
             break
-        k = _norm_token(w["w"])
+        k = _caption_token_key(w["w"])
         if k and len(k) >= 6 and freq[k] == 1 and _add(w["w"]):
             rare.append(w["w"].strip("\"'.,!?;:"))
     if rare:
@@ -13973,7 +14196,8 @@ LOOKS = {
     "hype": {"captions": {"preset": "beast", "size": "xl"},
              "grade": "vibrant", "transition": ("zoom_punch", 0.25),
              "fade_out_s": 0.6, "sound_design": "medium"},
-    "clean": {"captions": {"preset": "podcast"}, "grade": None,
+    "clean": {"captions": {"preset": "clean", "emphasis": "big"},
+              "grade": None,
               "fade_in_s": 0.5, "fade_out_s": 0.5, "smooth_duck": True},
     "cinematic": {"captions": {"preset": "elegant"}, "grade": "cinematic",
                   "grade_custom": {"temperature": 0.1},
@@ -14091,7 +14315,8 @@ def _seg_schema():
 # agent would then be told a field does not exist on the very tool it uses to
 # restyle EXISTING captions. Keep in step with captions.STYLE_KEYS,
 # schemas.CaptionStyle and _parse_partial_style's allowlist.
-CAPTION_PRESETS = ["podcast", "beast", "karaoke", "elegant", "spotlight",
+CAPTION_PRESETS = ["clean", "documentary", "broadcast", "retro", "neon",
+                   "podcast", "beast", "karaoke", "elegant", "spotlight",
                    "stacked", "iridescent", "chrome", "editorial",
                    "fashion", "luxe", "impact", "lyric", "classic"]
 def make_shorts(ctx, count=None, style_note=None):
@@ -14117,10 +14342,15 @@ def make_shorts(ctx, count=None, style_note=None):
                 "auto_reframe for 9:16 when requested, then the normal "
                 "caption/effect/audio tools. This is a routing instruction, "
                 "not a failure — do the edit now.")
-    if not (ctx.index.get("words") or []):
-        return ("REJECTED: this video has no transcribed speech, and the "
-                "shorts planner picks moments from the transcript. Tell the "
-                "user honestly that shorts need a talking video for now.")
+    has_speech = bool(ctx.index.get("words") or [])
+    has_visual_plan = bool(ctx.index.get("tile_keys") or []) \
+        and llm.vision_available()
+    if not has_speech and not has_visual_plan:
+        return ("REJECTED: this video has neither usable speech nor a "
+                "visual filmstrip reviewer available, so there is no honest "
+                "evidence for choosing highlight windows. The user can edit "
+                "this video directly, or retry shorts when visual review is "
+                "available.")
     if ctx.db.run(dbx.has_active_job, ctx.project_id, "shorts_plan"):
         return ("A shorts run is ALREADY working on this project — tell the "
                 "user their clips are on the way on the Shorts board; do "
@@ -14136,8 +14366,10 @@ def make_shorts(ctx, count=None, style_note=None):
         payload["style_note"] = str(style_note)[:400]
     job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id,
                         ctx.job["user_id"], "shorts_plan", payload)
-    return (f"Shorts run started as job {job_id}. It reads the whole "
-            "transcript, picks the "
+    evidence = ("whole transcript" if has_speech else
+                "full-video visual filmstrips")
+    return (f"Shorts run started as job {job_id}. It reviews the {evidence}, "
+            "picks the "
             "strongest self-contained moments, and builds each one as its "
             "own project — reframed to 9:16, captioned, with emphasis "
             "punch-ins — then renders them. The user watches it happen on "
@@ -14332,7 +14564,8 @@ def edit_shorts(ctx, instruction, shorts=None):
 CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
                  "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
                  "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
-                 "Instrument Serif", "DM Serif Display", "Montserrat"]
+                 "Instrument Serif", "DM Serif Display", "Montserrat",
+                 "Plus Jakarta Sans"]
 CAPTION_ANIMS = ["none", "fade", "pop", "slide_up", "punch", "blur_in",
                  "whip", "flash", "rise", "drop"]
 _STYLE_PROPS = {
@@ -14353,6 +14586,14 @@ _STYLE_PROPS = {
                  "enum": ["big", "huge", "accent", "pop", "box", "serif",
                           "script", "chrome", "glow", "chroma", "none"]},
     "emphasis_scale": {"type": "number"},
+    "outline_color": {"type": "string"},
+    "outline_width": {"type": "number"},
+    "shadow": {"type": "number"},
+    "background_color": {"type": "string"},
+    "background_opacity": {"type": "number"},
+    "tracking": {"type": "number"},
+    "text_align": {"type": "string",
+                   "enum": ["left", "center", "right"]},
 }
 
 TOOLS = {
@@ -14432,7 +14673,10 @@ TOOLS = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "tool": {"type": "string"},
+                    # Reject invented recipe names at generation time instead
+                    # of spending a model/tool round to discover the list.
+                    "tool": {"type": "string",
+                             "enum": sorted(RECIPE_TOOLS)},
                     "args": {"type": "object"},
                 },
                 "required": ["tool", "args"],
@@ -14583,13 +14827,16 @@ TOOLS = {
                      "(word-timed from the real transcript, recommended) or "
                      "mode='off', or items=[{text,start,end,style?}] (source "
                      "seconds) for text the user dictates. "
-                     "PREMIUM PRESETS (style.preset) are the headline "
-                     "feature — professionally designed looks with real "
-                     "fonts: 'podcast' (the viral podcast-reel look: bold "
+                     "PREMIUM PRESETS (style.preset) are professionally "
+                     "designed looks with real fonts. SAFE DEFAULTS: "
+                     "'clean' (white Plus Jakarta Sans, complete short "
+                     "phrases, size-only hierarchy), 'documentary' "
+                     "(restrained subtitles on a translucent contrast "
+                     "panel), and 'broadcast' (left-aligned news/explainer "
+                     "lower third). SOCIAL/CREATIVE: 'podcast' (bold "
                      "white words land on screen as spoken, keywords light "
                      "up in the accent color, get a highlight box or serif "
-                     "italics, numbers render HUGE — the default choice for "
-                     "premium/viral/TikTok captions), 'beast' (loud "
+                     "italics, numbers render HUGE), 'beast' (loud "
                      "MrBeast-style: ALL-CAPS impact font, centered, the "
                      "spoken word pops in the accent color), 'karaoke' (an "
                      "accent box follows each spoken word), 'spotlight' "
@@ -14599,19 +14846,19 @@ TOOLS = {
                      "'elegant' (calm lower-third, serif-italic accents — "
                      "interviews/luxury), 'lyric' (phrase-led music/quote "
                      "typography), plus stacked/iridescent/chrome/editorial/"
-                     "fashion/luxe/impact composed looks; 'classic' is the "
+                     "fashion/luxe/impact/retro/neon composed looks; "
+                     "'classic' is the "
                      "plain legacy look. If style is omitted, the tool "
-                     "chooses a coherent preset and accent deterministically "
+                     "chooses a coherent preset deterministically "
                      "from the measured format, speech pace and brief — it "
                      "does not make every project wear the same caption skin. "
                      "PLACEMENT: multi-word presets default to the BOTTOM, "
                      "clear of the face — do not move them to 'middle'; "
                      "only a single-word-at-a-time look may sit centred. "
-                     "With a preset, ALSO pass emphasis_words: 10-25 "
-                     "impact words picked from the REAL transcript (money "
-                     "words: numbers, outcomes, emotional peaks, names — "
-                     "1-2 per sentence, verbatim as spoken); they get the "
-                     "emphasis treatments wherever they appear. "
+                     "With a preset, semantic emphasis is AUTO-SELECTED from "
+                     "the KEPT transcript when emphasis_words is omitted; "
+                     "pass a verbatim list only when specific words are "
+                     "required, or [] to explicitly disable hierarchy. "
                      "highlight_color sets the accent (default warm "
                      "yellow); uppercase overrides the preset's casing; "
                      "position bottom/top/middle overrides its placement. "
@@ -14630,7 +14877,10 @@ TOOLS = {
                      "the phrase across lines of very different SIZES; font "
                      "picks a bundled family, emphasis 'big' enlarges keywords "
                      "WITHOUT recolouring them, leading below 1.0 overlaps "
-                     "the lines, effect adds chroma/chrome/glow.",
+                     "the lines, effect adds chroma/chrome/glow. Production "
+                     "controls include outline_color/outline_width, shadow, "
+                     "background_color/background_opacity, tracking and "
+                     "text_align.",
                      {"mode": {"type": "string"},
                       "style": {"type": "object",
                                  "properties": _STYLE_PROPS},
@@ -14818,8 +15068,9 @@ TOOLS = {
                           "LOOK without touching their text or timing. Pass "
                           "only the fields to change: 'make the captions "
                           "premium/viral' -> {\"style\":{\"preset\":"
-                          "\"podcast\"}} (see add_captions for the preset "
-                          "menu: podcast/beast/karaoke/spotlight/elegant/"
+                          "\"clean\"}} (see add_captions for the preset "
+                          "menu: clean/documentary/broadcast/podcast/beast/"
+                          "karaoke/spotlight/elegant/"
                           "stacked/.../classic), "
                           "'make it red' -> {\"style\":{\"color\":"
                           "\"#FF0000\"}}, 'center the captions' -> "
@@ -14834,7 +15085,9 @@ TOOLS = {
                           "preset) replaces the emphasized keyword list. "
                           "For fine size control that the s|m|l|xl buckets "
                           "can't hit pass size_scale (0.5-3.0; 1.5 = 50% "
-                          "bigger). Works for from_transcript and manual "
+                          "bigger). Outline, shadow, backing panel, tracking "
+                          "and text alignment are independently editable. "
+                          "Works for from_transcript and manual "
                           "captions; errors helpfully if no captions exist "
                           "yet.",
                           {"style": {"type": "object",
@@ -16072,7 +16325,7 @@ TOOLS = {
                    "stylize in a single EDL version and reports every "
                    "component it set. Looks: 'hype' (beast xl captions, "
                    "vibrant grade, zoom_punch cuts, closing fade), 'clean' "
-                   "(podcast captions, ungraded, gentle fades), "
+                   "(clean white size-led captions, ungraded, gentle fades), "
                    "'cinematic' (elegant captions, cinematic grade + "
                    "slight warmth, 1s fades, dip_black), 'luxury' (luxe "
                    "captions, warm grade + temperature lift, long fades), "
@@ -16424,6 +16677,18 @@ def execute(ctx, name, args):
         _count_tool_outcome(ctx, "tool_refused")
         return (f"Unknown tool '{name}'. Available: "
                 + ", ".join(TOOLS))
+    args = dict(args or {})
+    # Recover the small, unambiguous dialect mistakes seen repeatedly in real
+    # turns. These are aliases, not guesses: every target tool has exactly one
+    # duration parameter, and "main/source/original" means omission on the
+    # three tools whose omitted asset_key is explicitly the main footage.
+    if name in {"add_overlay", "insert_media", "set_insert_window"} \
+            and "duration" in args and "duration_s" not in args:
+        args["duration_s"] = args.pop("duration")
+    if name in {"get_transcript", "listen_to", "get_audio_analysis"}:
+        key = str(args.get("asset_key") or "").strip().lower()
+        if key in {"main", "source", "original", "main_video"}:
+            args.pop("asset_key", None)
     # A latest-message correction such as "字幕なしに戻して" is not a taste
     # decision. Project 481 asked for captions removed while its queued turn
     # re-added them from an older brief. Block the contradiction at dispatch;
@@ -16431,7 +16696,7 @@ def execute(ctx, name, args):
     if request_intent.no_captions(getattr(ctx, "user_message", "")):
         adding_captions = (name == "set_caption_style" or
                            (name == "add_captions" and
-                            str((args or {}).get("mode") or "") != "off"))
+                            str(args.get("mode") or "") != "off"))
         if adding_captions:
             return (
                 "REJECTED: the latest user request explicitly requires no "
@@ -16440,7 +16705,7 @@ def execute(ctx, name, args):
             )
     fn = entry[0]
     try:
-        out = fn(ctx, **(args or {}))
+        out = fn(ctx, **args)
     except AskUser:
         raise
     except TypeError as e:

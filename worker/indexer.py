@@ -319,6 +319,15 @@ def run_index_job(worker_db, job):
                           cached["json"], job["user_id"],
                           reindex=bool(job["payload"].get("reindex")),
                           asset_id=asset["id"])
+            try:
+                worker_db.run(
+                    dbx.record_client_event, job["user_id"], project_id,
+                    "project_ready",
+                    {"job_id": job_id, "duration_s": info["duration"],
+                     "cached": True})
+            except Exception as exc:
+                print(f"[index {job_id}] project-ready event dropped: {exc}",
+                      flush=True)
             _mark("cache_hit_s")
             return {"sha256": sha, "cached": True,
                     "from_client_proxy": from_client_proxy,
@@ -530,6 +539,15 @@ def run_index_job(worker_db, job):
                       job["user_id"],
                       reindex=bool(job["payload"].get("reindex")),
                       asset_id=asset["id"])
+        try:
+            worker_db.run(
+                dbx.record_client_event, job["user_id"], project_id,
+                "project_ready",
+                {"job_id": job_id, "duration_s": info["duration"],
+                 "cached": False})
+        except Exception as exc:
+            print(f"[index {job_id}] project-ready event dropped: {exc}",
+                  flush=True)
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,

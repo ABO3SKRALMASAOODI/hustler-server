@@ -2981,6 +2981,7 @@ def post_message(user_id, project_id):
     if len(text) > 4000:
         return jsonify({"error": "Message too long (4000 chars max)"}), 400
 
+    is_first_prompt = False
     with vdb() as conn:
         cur = conn.cursor()
         p = _project_for_user(cur, project_id, user_id)
@@ -3205,6 +3206,10 @@ def post_message(user_id, project_id):
                         (p["chat_session_id"], text,
                          Json(meta) if meta else None))
             message_id = cur.fetchone()["id"]
+            cur.execute("""SELECT COUNT(*) AS n FROM chat_messages
+                           WHERE session_id = %s AND role = 'user'""",
+                        (p["chat_session_id"],))
+            is_first_prompt = (cur.fetchone() or {}).get("n", 0) == 1
         except psycopg2.errors.UniqueViolation:
             # Raced with an identical retransmit — the unique index on
             # (session_id, client_msg_id) makes exactly one insert win.
@@ -3303,6 +3308,13 @@ def post_message(user_id, project_id):
                                   {"message_id": message_id})
                 _queue_depth_notice(cur, p["chat_session_id"], user_id,
                                     job_id)
+
+    if is_first_prompt:
+        record_client_event(
+            user_id, project_id, "first_prompt_sent",
+            detail={"message_id": message_id, "indexed": indexed,
+                    "stacked": stacked, "message_chars": len(text)},
+            origin="server")
 
     if concierge is not None:
         # The model call runs in a thread with its own DB connection — the
@@ -4860,6 +4872,10 @@ def render_final(user_id, project_id):
         meta = (original or {}).get("meta") or {}
         if meta.get("upload_state") == "pending":
             pct = int(round(float(meta.get("upload_progress") or 0) * 100))
+            record_client_event(
+                user_id, project_id, "export_blocked",
+                detail={"code": "original_uploading", "version": version,
+                        "upload_progress": pct}, origin="server")
             return jsonify({
                 "error": "Your original video is still uploading in the "
                          f"background ({pct}% done). Exports render from the "
@@ -4871,12 +4887,23 @@ def render_final(user_id, project_id):
                        WHERE project_id = %s AND type = 'final'
                          AND state IN ('queued','running')""", (project_id,))
         if cur.fetchone():
+            record_client_event(
+                user_id, project_id, "export_blocked",
+                detail={"code": "already_running", "version": version},
+                origin="server")
             return jsonify({"error": "A final render is already in progress"}), 409
         if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
+            record_client_event(
+                user_id, project_id, "export_blocked",
+                detail={"code": "capacity", "version": version},
+                origin="server")
             return jsonify({"error": "Too many jobs running. "
                                      "Wait for one to finish."}), 429
         job_id = _enqueue(cur, project_id, user_id, "final",
                           {"edl_version": version})
+    record_client_event(
+        user_id, project_id, "export_job_started",
+        detail={"job_id": job_id, "version": version}, origin="server")
     return jsonify({"job_id": job_id})
 
 
@@ -5012,6 +5039,7 @@ def render_preview_endpoint(user_id, project_id):
 CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       "player_recovered", "attach_failed",
                       "upload_started", "upload_rejected", "upload_failed",
+                      "upload_deduped",
                       # Proxy-first upload: the browser built a 540p proxy and
                       # sent that first. Recorded as its own kind so the split
                       # between the fast path and the legacy whole-file path is
@@ -5037,6 +5065,14 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe",
                       # upload_started says what was attempted, this says what
                       # the link actually delivered.
                       "upload_transfer",
+                      # Complete edit-to-file funnel. Server-origin rows cover
+                      # authoritative render/presign boundaries; client rows
+                      # cover the final browser download handoff.
+                      "project_ready", "first_prompt_sent",
+                      "export_clicked", "export_blocked",
+                      "export_job_started", "export_render_done",
+                      "download_url_ready", "download_triggered",
+                      "download_failed",
                       # The trial wall was SHOWN (round 101): a free account
                       # past its first edited video sent a prompt and got the
                       # cards instead of a turn. Server-recorded on every 402,
@@ -5631,4 +5667,8 @@ def asset_url(user_id, asset_id):
         meta = a.get("meta") or {}
         name = meta.get("filename") or f"valmera_{a['kind']}_{a['id']}.mp4"
     url = storage.presign_get(a["storage_key"], download_name=name)
+    if download:
+        record_client_event(
+            user_id, a["project_id"], "download_url_ready", asset_id=asset_id,
+            detail={"asset_kind": a["kind"]}, origin="server")
     return jsonify({"url": url, "expires_in": storage.PRESIGN_GET_EXPIRY})

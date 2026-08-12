@@ -131,7 +131,11 @@ Use blocker only for unusable output; major for a defect likely to make a user
 reject the edit; minor for real polish that does not block delivery. A clean
 result is {{"verdict":"pass","findings":[]}}."""
     answer = llm.ask_vision(
-        prompt, image_paths, max_tokens=700,
+        # 700 tokens starved 22% of production reviews before their JSON was
+        # emitted (reasoning consumed the allowance first). The schema still
+        # caps findings at six; this is completion room, not permission for a
+        # longer review.
+        prompt, image_paths, max_tokens=1100,
         purpose="independent_preview_critic", image_names=image_labels,
         reasoning_effort="low")
     return parse_report(answer)

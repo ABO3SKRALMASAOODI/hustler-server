@@ -397,6 +397,27 @@ def test_two_successful_previews_freeze_the_last_proven_edl():
     assert fake.inserts == 0
 
 
+def test_major_review_earns_exactly_one_third_repair_candidate():
+    ctx, fake = _real_ctx()
+    ctx.rendered_versions.update({1, 2})
+    ctx.quality_repair_required = True
+    ctx.quality_repair_version = 1
+    changed = dict(ctx.latest_edl()["json"])
+    changed["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
+    result = ctx.write_edl(changed, "repair critic composition finding")
+    assert result.startswith("EDL v1 -> v2")
+    assert ctx.quality_recovery_version == 2
+    assert ctx.preview_limit() == 3
+
+    # The recovery candidate still has to be proved, then the ceiling is hard.
+    ctx.rendered_versions.add(3)
+    again = dict(ctx.latest_edl()["json"])
+    again["effects"] = {"grade": "warm"}
+    result = ctx.write_edl(again, "unreviewed fourth candidate")
+    assert result.startswith("REJECTED")
+    assert fake.inserts == 1
+
+
 def test_add_zoom_rejects_the_old_center_default_before_writing():
     class Ctx:
         duration = 20.0
@@ -463,6 +484,30 @@ def test_existing_audio_gain_is_transaction_safe_recipe_work():
     assert "set_audio_gain" in agent_tools.RECIPE_TOOLS
 
 
+def test_common_repair_moves_are_transaction_safe_recipe_work():
+    for name in ("add_text", "remove_text", "set_insert_window",
+                 "remove_insert", "add_overlay", "remove_overlay",
+                 "enhance_video", "add_custom_filter", "beat_align_cuts"):
+        assert name in agent_tools.RECIPE_TOOLS
+
+
+def test_dispatch_normalizes_obvious_tool_argument_aliases(monkeypatch):
+    seen = {}
+
+    def fake_overlay(_ctx, **kwargs):
+        seen.update(kwargs)
+        return "ok"
+
+    original = agent_tools.TOOLS["add_overlay"]
+    monkeypatch.setitem(agent_tools.TOOLS, "add_overlay",
+                        (fake_overlay, original[1], original[2]))
+    ctx, _fake = _real_ctx()
+    assert agent_tools.execute(
+        ctx, "add_overlay", {"asset_key": "x", "start": 1,
+                             "duration": 2}) == "ok"
+    assert seen["duration_s"] == 2 and "duration" not in seen
+
+
 def test_structured_edit_brief_survives_atomic_execution():
     ctx, _fake = _real_ctx()
     planned = agent_tools.set_edit_plan(
@@ -520,6 +565,9 @@ def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
     assert "apply_edit_recipe" in tools
     schema = tools["apply_edit_recipe"]["function"]["parameters"]
     assert schema["required"] == ["operations"]
+    names = schema["properties"]["operations"]["items"]["properties"] \
+        ["tool"]["enum"]
+    assert set(names) == set(agent_tools.RECIPE_TOOLS)
     assert "apply_edit_recipe" in agent_tools.WRITE_TOOLS
 
 

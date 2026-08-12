@@ -49,7 +49,9 @@ from schemas import GRADE_PRESETS
 CLIP_MIN_S = 10.0          # below this a "short" is a jump cut, not a clip
 CLIP_MAX_S = 75.0          # above this it stops being a short at all
 REF_WAIT_S = 180           # how long to wait for the reference's own index
-CAPTION_PRESETS = ("classic", "podcast", "beast", "karaoke", "elegant")
+CAPTION_PRESETS = ("classic", "clean", "documentary", "broadcast", "retro",
+                   "neon", "podcast", "beast", "karaoke", "elegant",
+                   "spotlight", "stacked", "impact", "lyric")
 
 
 # ------------------------------------------------------------------ helpers
@@ -152,6 +154,12 @@ def _pick_caption_preset(vis):
     if any(k in words for k in ("script", "italic serif", "cursive",
                                 "lyric", "handwritten")):
         return "lyric"
+    if any(k in words for k in ("neon", "glow", "cyber", "electric")):
+        return "neon"
+    if any(k in words for k in ("news", "broadcast", "lower third")):
+        return "broadcast"
+    if any(k in words for k in ("retro", "vintage", "outlined", "poster")):
+        return "retro"
     # A reference NAMED as karaoke wins over the generic one-word phrases:
     # karaoke is a visible phrase whose SPOKEN word lights up, and vision
     # often describes it as "word-by-word karaoke".
@@ -167,10 +175,15 @@ def _pick_caption_preset(vis):
     if any(k in words for k in ("bold", "heavy", "thick", "yellow", "hype",
                                 "beast", "impact")):
         return "beast"
-    if any(k in words for k in ("serif", "elegant", "minimal", "thin",
+    if any(k in words for k in ("serif", "elegant", "thin",
                                 "classy")):
         return "elegant"
-    return "karaoke"
+    if any(k in words for k in ("subtitle", "closed caption", "boxed",
+                                "documentary")):
+        return "documentary"
+    # The safe fallback is coherent white typography, not a moving yellow
+    # box. Reference analysis is uncertain by definition; default restraint.
+    return "clean"
 
 
 def _pick_grade(vis):
@@ -306,6 +319,13 @@ Reply with STRICT JSON only:
 
 Rules: start and end MUST be sentence boundaries taken from the transcript timestamps. Never start mid-sentence. Prefer clips that need no context. Do not overlap clips. Titles are written like social hooks (curiosity, stakes, numbers), never clickbait lies about the content."""
 
+_VISUAL_PLAN_SYSTEM = """You are Valmera's shorts producer reviewing labeled filmstrip sheets from a video with little or no usable speech. Select visually self-contained highlight windows for vertical shorts. Read the timestamps printed under every frame. Prefer clear action, reactions, reveals, skill, movement, before/after changes, wins, near misses, or visually coherent sequences; avoid loading screens, menus, static dead time, repeated moments, and windows whose subject is too small to understand.
+
+Reply with STRICT JSON only:
+{"clips": [{"start": <seconds>, "end": <seconds>, "title": "<truthful hook title, max 55 chars>", "hook": "<short description of the opening visual>", "score": <0-100>, "music": <true|false>}]}
+
+The sheets sample the full video rather than every frame. Use their timestamps to choose an approximate continuous window around each visible highlight. Do not overlap clips and do not invent events that are not visible."""
+
 
 def _transcript_block(index, max_chars=180000):
     lines = []
@@ -323,9 +343,97 @@ def _transcript_block(index, max_chars=180000):
     return block
 
 
+def _validated_clips(raw, duration, want, index=None, visual=False):
+    """Normalize one transcript or visual planner answer."""
+    starts = [float(s.get("start")) for s in (index or {}).get("shots") or []
+              if s.get("start") is not None]
+    ends = [float(s.get("end")) for s in (index or {}).get("shots") or []
+            if s.get("end") is not None]
+    clips = []
+    for c in raw:
+        try:
+            s = max(0.0, float(c["start"]))
+            e = min(duration, float(c["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        # Visual estimates come from sparse labeled sheets. Snap nearby edges
+        # to detected shot boundaries so a highlight does not begin/end on a
+        # random action frame.
+        if visual and starts:
+            near = min(starts, key=lambda x: abs(x - s))
+            if abs(near - s) <= 5.0:
+                s = near
+        if visual and ends:
+            near = min(ends, key=lambda x: abs(x - e))
+            if abs(near - e) <= 5.0:
+                e = near
+        if e - s < CLIP_MIN_S:
+            continue
+        if e - s > CLIP_MAX_S:
+            e = s + CLIP_MAX_S
+        title = re.sub(r"\s+", " ", str(c.get("title") or "")).strip()[:55]
+        clips.append({
+            "start": round(s, 2), "end": round(e, 2),
+            "title": title or f"Short from {s:.0f}s",
+            "hook": str(c.get("hook") or "").strip()[:160],
+            "score": max(0, min(100, int(c.get("score") or 50))),
+            "music": bool(c.get("music")),
+        })
+    clips.sort(key=lambda c: -c["score"])
+    chosen = []
+    for c in clips:
+        if len(chosen) >= (want or config.SHORTS_MAX_CLIPS):
+            break
+        overlap = any(min(c["end"], k["end"]) - max(c["start"], k["start"])
+                      > 0.3 * (c["end"] - c["start"]) for k in chosen)
+        if not overlap:
+            chosen.append(c)
+    for i, c in enumerate(chosen):
+        c["order"] = i
+    return chosen
+
+
+def _visual_plan_clips(index, duration, n_target, want, note, workdir):
+    """Vision fallback for gameplay, sports, training and music footage."""
+    keys = list(index.get("tile_keys") or [])
+    if not keys or not llm.vision_available():
+        raise dbx.PermanentJobError(
+            "this video has no transcribed speech or visual filmstrip to "
+            "select shorts from")
+    max_sheets = 18
+    if len(keys) > max_sheets:
+        stride = len(keys) / float(max_sheets)
+        keys = [keys[min(len(keys) - 1, int(i * stride))]
+                for i in range(max_sheets)]
+    paths, labels = [], []
+    for i, key in enumerate(keys):
+        path = os.path.join(workdir, f"visual_plan_{i:02d}.jpg")
+        try:
+            storage.download_to(key, path)
+        except Exception:
+            continue
+        paths.append(path)
+        labels.append(f"source filmstrip {i + 1} (timestamps printed in image)")
+    if not paths:
+        raise dbx.PermanentJobError(
+            "this video has no transcribed speech and its visual filmstrip "
+            "could not be read")
+    context = (f"Video duration: {duration:.1f}s. Select about {n_target} "
+               f"clips, never more than {config.SHORTS_MAX_CLIPS}; each "
+               "should be 15-60 seconds."
+               + (f" User direction: {note}" if note else ""))
+    answer = llm.ask_vision(
+        _VISUAL_PLAN_SYSTEM + "\n\n" + context, paths,
+        max_tokens=1800, purpose="shorts_visual_plan",
+        image_names=labels, reasoning_effort="low")
+    out = _json_from(answer) if answer else None
+    return _validated_clips((out or {}).get("clips") or [], duration, want,
+                            index=index, visual=True)
+
+
 def _plan_clips(worker_db, job, index, duration, style, payload,
-                subscribed, plan):
-    """One LLM call over the transcript → validated clip windows."""
+                subscribed, plan, workdir=None):
+    """Plan validated clip windows from speech, or visually when speechless."""
     want = payload.get("count")
     try:
         want = int(want) if want else None
@@ -348,10 +456,10 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
 
     transcript = _transcript_block(index)
     if not transcript.strip():
-        # No speech at all: shorts from a music/gameplay video would need
-        # shot-based selection, which v1 does not do — fail honestly.
-        raise dbx.PermanentJobError("this video has no transcribed speech "
-                                    "to cut shorts from")
+        wd = workdir or os.path.join(
+            config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
+        os.makedirs(wd, exist_ok=True)
+        return _visual_plan_clips(index, duration, n_target, want, note, wd)
     user = (f"Video duration: {duration:.1f}s. "
             f"Aim for {n_target} clips (fewer if the material is thin, "
             f"never more than {config.SHORTS_MAX_CLIPS}). {len_hint}\n"
@@ -359,39 +467,7 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
             + f"\nTRANSCRIPT:\n{transcript}")
     out = _ask_json(worker_db, job, subscribed, plan, _PLAN_SYSTEM, user,
                     "shorts_plan", max_tokens=3500)
-    raw = (out or {}).get("clips") or []
-    clips = []
-    for c in raw:
-        try:
-            s = max(0.0, float(c["start"]))
-            e = min(duration, float(c["end"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if e - s < CLIP_MIN_S:
-            continue
-        if e - s > CLIP_MAX_S:
-            e = s + CLIP_MAX_S
-        title = re.sub(r"\s+", " ", str(c.get("title") or "")).strip()[:55]
-        clips.append({
-            "start": round(s, 2), "end": round(e, 2),
-            "title": title or f"Short from {s:.0f}s",
-            "hook": str(c.get("hook") or "").strip()[:160],
-            "score": max(0, min(100, int(c.get("score") or 50))),
-            "music": bool(c.get("music")),
-        })
-    # Drop overlaps, best score first, then present best-first.
-    clips.sort(key=lambda c: -c["score"])
-    chosen = []
-    for c in clips:
-        if len(chosen) >= (want or config.SHORTS_MAX_CLIPS):
-            break
-        overlap = any(min(c["end"], k["end"]) - max(c["start"], k["start"])
-                      > 0.3 * (c["end"] - c["start"]) for k in chosen)
-        if not overlap:
-            chosen.append(c)
-    for i, c in enumerate(chosen):
-        c["order"] = i
-    return chosen
+    return _validated_clips((out or {}).get("clips") or [], duration, want)
 
 
 # ------------------------------------------------------------------ children
@@ -469,7 +545,7 @@ def _seed_child(worker_db, job, child_id, index, clip, style, workdir,
         # often off — captions are the read, not a garnish. 'm' (the Aug 8
         # run) read like a broadcast subtitle; modern reels set them big.
         cap_style = {"preset": (style or {}).get("captions_preset")
-                     or "karaoke", "size": "l"}
+                     or "clean", "size": "l"}
         if (style or {}).get("uppercase"):
             cap_style["uppercase"] = True
         if (style or {}).get("captions", True):
@@ -643,7 +719,7 @@ def run_shorts_plan(worker_db, job):
             if shorts_meta.get("plan_job_id") == job_id else []
         if not clips:
             clips = _plan_clips(worker_db, job, index, duration, style,
-                                payload, subscribed, plan)
+                                payload, subscribed, plan, workdir=workdir)
         if not clips:
             # NOT permanent: this is an LLM planning answer, and a retry can
             # genuinely land clips where the first pass came back empty.

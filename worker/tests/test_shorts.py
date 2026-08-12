@@ -38,13 +38,11 @@ def test_caption_preset_mapping():
         == "beast"
     assert pick({"captions": {"style_words": "thin elegant serif"}}) \
         == "elegant"
-    # Round 100: the unrecognized/no-vision default is the modern karaoke
-    # reel look, not the left-stacked podcast layout — shorts are watched on
-    # phones with the sound off, and the Aug 8 feedback on the podcast-style
-    # default was "the captions were very bad".
+    # Uncertain reference analysis defaults to coherent white typography,
+    # not a moving yellow box or a novelty mixed-font treatment.
     assert pick({"captions": {"style_words": "clean white phrases"}}) \
-        == "karaoke"
-    assert pick(None) == "karaoke"                  # no vision -> reel default
+        == "clean"
+    assert pick(None) == "clean"                    # no vision -> safe default
     assert pick({"captions": {"style_words": "one word at a time, huge"}}) \
         == "spotlight"
 
@@ -116,6 +114,28 @@ def test_plan_without_speech_fails_honestly(monkeypatch):
         assert False, "should have raised"
     except RuntimeError as e:
         assert "no transcribed speech" in str(e)
+
+
+def test_plan_without_speech_uses_visual_filmstrips(monkeypatch, tmp_path):
+    monkeypatch.setattr(shorts.llm, "vision_available", lambda: True)
+    monkeypatch.setattr(shorts.storage, "download_to", lambda *_a: None)
+    monkeypatch.setattr(
+        shorts.llm, "ask_vision",
+        lambda *_a, **_k: '{"clips":[{"start":31,"end":58,'
+        '"title":"Clean knockout sequence","hook":"fighter closes in",'
+        '"score":92,"music":true}]}')
+    index = _index([])
+    index.update({
+        "tile_keys": ["tiles/a.jpg", "tiles/b.jpg"],
+        "shots": [{"start": 30.0, "end": 60.0}],
+    })
+    out = shorts._plan_clips(
+        None, {"id": 9, "user_id": 1}, index, 600.0, None,
+        {"count": 1, "style_note": "prioritize decisive action"},
+        False, "free", workdir=str(tmp_path))
+    assert len(out) == 1
+    assert out[0]["start"] == 30.0 and out[0]["end"] == 60.0
+    assert out[0]["title"] == "Clean knockout sequence"
 
 
 def test_transcript_block_truncates():
@@ -190,6 +210,32 @@ def test_make_shorts_returns_the_background_job_id():
     assert "job 321" in result
     assert "wait_for_job(job_id=321)" in result
     assert "shorts_status" in result
+
+
+def test_make_shorts_can_queue_a_speechless_visual_plan(monkeypatch):
+    """The chat tool must expose the worker's visual fallback, not reject it
+    at the dispatcher with the old talking-video-only contract."""
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.has_active_job:
+                return False
+            if fn is dbx.enqueue_job:
+                return 654
+            raise AssertionError(fn)
+
+    monkeypatch.setattr(agent_tools.llm, "vision_available", lambda: True)
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=180.0,
+        index={"words": [], "tile_keys": ["tiles/full-video.jpg"]},
+        db=FakeDb(), project_id=7, job={"user_id": 60})
+    result = agent_tools.make_shorts(ctx, count=2)
+    assert "job 654" in result
+    assert "visual filmstrips" in result
+    assert not result.startswith("REJECTED")
 
 
 def test_flat_clip_charge_rides_the_turn_charge():

@@ -224,9 +224,9 @@ def test_caption_direction_varies_by_editorial_format_not_randomly():
         Ctx("two-person interview", speakers=2), edl)
     assert sports["preset"] == "impact"
     assert luxury["preset"] == "luxe"
-    assert podcast["preset"] == "podcast"
-    assert len({sports["highlight_color"], luxury["highlight_color"],
-                podcast["highlight_color"]}) == 3
+    assert podcast["preset"] == "clean"
+    assert podcast["emphasis"] == "big"
+    assert sports["highlight_color"] != luxury["highlight_color"]
 
 
 def test_long_form_defaults_to_restrained_subtitles():
@@ -238,7 +238,7 @@ def test_long_form_defaults_to_restrained_subtitles():
                  "speakers": 1, "words": []}
 
     style, why = agent_tools._direct_caption_style(Ctx(), default_edl(600.0))
-    assert style == {"preset": "classic", "size": "m"}
+    assert style == {"preset": "documentary"}
     assert "long-form" in why
 
 

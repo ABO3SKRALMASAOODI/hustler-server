@@ -17,6 +17,7 @@ import db as dbx
 import grammar
 import llm
 import music_search
+import preview_critic
 import remote
 import request_intent
 import sfx_search
@@ -1369,7 +1370,8 @@ EDIT_CLAIM = re.compile(
     r"(?:red|blue|green|yellow|white|black|orange|purple|pink|"
     r"#[0-9A-Fa-f]{6}|top|bottom|middle|cent(?:er|re)|bigger|smaller|"
     r"karaoke|dynamic|pops?|light(?:s|ing)? up|word.by.word|highlight|"
-    r"premium|presets?|podcast|beast|elegant|serif|uppercase|all.caps|"
+    r"premium|presets?|clean|documentary|broadcast|retro|neon|podcast|"
+    r"beast|elegant|serif|uppercase|all.caps|"
     r"emphasi[sz])"
     r"|\bis now (?:red|blue|green|yellow|white|black|orange|purple|pink|"
     r"#[0-9A-Fa-f]{6}|at the top|at the bottom|in the middle|centered|"
@@ -1584,6 +1586,53 @@ def _assets_made_note(ctx):
         return ""
     return (" — but " + " and ".join(made)
             + " is saved to your project and ready to use")
+
+
+def _quality_handoff(ctx):
+    """Small, deterministic quality contract for the reply and studio CTA."""
+    try:
+        latest = ctx.latest_edl()["version"]
+    except Exception:
+        return {"quality_status": "unchecked", "export_ready": False}
+    preview = getattr(ctx, "last_preview", None) or {}
+    if preview.get("edl_version") != latest:
+        return {"quality_status": "unchecked", "export_ready": False}
+
+    findings = []
+    report = getattr(ctx, "last_visual_critic", None) or {}
+    for line in preview_critic.repair_lines(report)[:3]:
+        findings.append(line)
+    for line in (getattr(ctx, "last_audio_qc_findings", None) or [])[:2]:
+        findings.append("audio QC: " + str(line))
+    audio_review = str(getattr(ctx, "last_audio_review", None) or "").strip()
+    if audio_review.upper().startswith("FIX"):
+        findings.append("audio review: " + audio_review[:240])
+    # Deterministic taste findings (dead air, excessive devices, invalid mix)
+    # count too, but only for the exact latest version.
+    if getattr(ctx, "last_taste_version", None) == latest:
+        for line in (getattr(ctx, "last_taste", None) or []):
+            if line not in findings:
+                findings.append(str(line))
+            if len(findings) >= 4:
+                break
+    findings = findings[:4]
+    if findings:
+        return {"quality_status": "repair", "quality_findings": findings,
+                "export_ready": False}
+    status = "pass" if report.get("verdict") == "pass" else "unchecked"
+    return {"quality_status": status, "quality_findings": [],
+            "export_ready": True}
+
+
+def _disclose_outstanding_quality(ctx, text):
+    """Never let a known-bad preview be described as a finished handoff."""
+    quality = _quality_handoff(ctx)
+    if quality.get("quality_status") != "repair":
+        return text
+    first = quality.get("quality_findings", ["a quality issue remains"])[0]
+    return (text.rstrip() +
+            "\n\nQuality check: this preview still needs another repair "
+            "pass before I can call it export-ready — " + first[:360] + ".")
 
 
 def _turn_facts(ctx, start_version):
@@ -2042,7 +2091,9 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
                                                timings)
     if fail_note:
         final_text += fail_note
-    meta = {"edl_version": latest["version"], "preview": ctx.last_preview}
+    final_text = _disclose_outstanding_quality(ctx, final_text)
+    meta = {"edl_version": latest["version"], "preview": ctx.last_preview,
+            **_quality_handoff(ctx)}
     if extra_meta:
         meta.update(extra_meta)
     worker_db.run(dbx.add_message, session_id, "assistant", final_text, meta)
@@ -2103,7 +2154,7 @@ What you may not do is reply as though the preview came back clean. \
 handed over as finished.]"""
 
 
-def _taste_pushback(ctx, messages, t_start, pushed):
+def _taste_pushback(ctx, messages, t_start, pushed_versions):
     """Refuse to let a turn end on an edit its own audit objected to.
 
     Round 55. The audit was already right about this exact edit — it reported
@@ -2113,11 +2164,14 @@ def _taste_pushback(ctx, messages, t_start, pushed):
     that the reviewed party may silently decline is not a review; it is a
     comment. So the findings come back once, as work to be done.
 
-    Once per turn, and never when there is no time left to act on it — a
-    pushback that cannot be answered before the turn times out would trade a
-    flawed edit for no edit, which is a worse deal for the user.
+    Once per reviewed version, and never when there is no time or proof budget
+    left to act on it — a pushback that cannot be answered would trade a flawed
+    edit for a rejected repair loop, which is a worse deal for the user.
     """
-    if pushed or not ctx.last_taste:
+    version = getattr(ctx, "last_taste_version", None)
+    if version in pushed_versions or not ctx.last_taste:
+        return False
+    if len(ctx.rendered_versions) >= ctx.preview_limit():
         return False
     left = config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start)
     if left < config.AGENT_TURN_TIMEOUT_S * 0.25:
@@ -2291,7 +2345,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     max_tokens = config.AGENT_MAX_TOKENS
     truncated_retries = 0
     truncated_out = False          # last step died at the ceiling, saying nothing
-    taste_pushed = False           # the craft audit was handed back once
+    taste_pushed_versions = set(
+        _cont.get("taste_pushed_versions") or [])
     preview_repair_pushed = bool(_cont.get("preview_repair_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
@@ -2345,7 +2400,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                               "edit is untouched. Please send that again.",
                               {"edl_version": ctx.latest_edl()["version"]})
             return {"status": "shutdown", "steps": total_steps,
-                    "timings": timings}
+                    "timings": timings, "billable": False}
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
             # This is an INACTIVITY wall, never a total-edit wall. A complex
             # turn that is still landing EDL versions or successful previews
@@ -2377,6 +2432,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "t_start": time.monotonic(),
                            "timings": timings, "honesty": honesty,
                            "preview_repair_pushed": preview_repair_pushed,
+                           "taste_pushed_versions":
+                               sorted(taste_pushed_versions),
                            "warned": None,
                            "writes0": len(ctx.versions_written),
                            "renders0": len(ctx.rendered_versions),
@@ -2760,8 +2817,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # Before anything else: if the preview this turn rendered came
             # back with craft findings, the turn is not finished. Send them
             # back once as work rather than as commentary.
-            if _taste_pushback(ctx, messages, t_start, taste_pushed):
-                taste_pushed = True
+            if _taste_pushback(ctx, messages, t_start,
+                               taste_pushed_versions):
+                taste_pushed_versions.add(ctx.last_taste_version)
                 print(f"[job {job['id']}] taste audit outstanding "
                       f"({len(ctx.last_taste)} finding(s)) — pushing back "
                       "before the reply", flush=True)
@@ -2800,15 +2858,20 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final = _enforce_honesty(ctx, client, messages, tools, draft,
                                      start_version, honesty,
                                      user_text=user_message["content"] or "")
+            final = _disclose_outstanding_quality(ctx, final)
             final = _enforce_reply_language(
                 ctx, client, messages, tools, final,
                 user_text=user_message["content"] or "", honesty=honesty)
             if fail_note:
                 final += fail_note
             honesty["auto_render"] = ctx.autorendered
+            message_meta = {
+                "edl_version": latest["version"],
+                "preview": ctx.last_preview,
+                **_quality_handoff(ctx),
+            }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
-                          {"edl_version": latest["version"],
-                           "preview": ctx.last_preview})
+                          message_meta)
             return {"status": "replied", "edl_version": latest["version"],
                     "steps": total_steps, "auto_render": ctx.autorendered,
                     "honesty": honesty, "timings": timings,
@@ -3046,6 +3109,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                    "steps": total_steps, "t_start": t_start,
                    "timings": timings, "honesty": honesty, "warned": warned,
                    "preview_repair_pushed": preview_repair_pushed,
+                   "taste_pushed_versions": sorted(taste_pushed_versions),
                    "writes0": len(ctx.versions_written),
                    "renders0": len(ctx.rendered_versions)})
     return _finalize(

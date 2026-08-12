@@ -76,7 +76,13 @@ DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
                  # composer fields (premium presets only; see the composer
                  # section below). None everywhere = "use the preset's own".
                  "font": None, "effect": None, "layout": None,
-                 "leading": None, "emphasis": None, "emphasis_scale": None}
+                 "leading": None, "emphasis": None, "emphasis_scale": None,
+                 # Independent production controls. None means the preset's
+                 # authored value (or the byte-compatible legacy default).
+                 "outline_color": None, "outline_width": None,
+                 "shadow": None, "background_color": None,
+                 "background_opacity": None, "tracking": None,
+                 "text_align": None}
 
 # Every style key that flows from the EDL into a render. Kept as ONE tuple
 # because it has to be applied in three places (_norm_style, write_ass's
@@ -88,10 +94,14 @@ DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
 # DEFAULT_STYLE, then to schemas.CaptionStyle and the tool allowlist.
 STYLE_KEYS = ("color", "size", "position", "highlight_color", "animation",
               "size_scale", "preset", "font", "effect", "layout", "leading",
-              "emphasis", "emphasis_scale")
+              "emphasis", "emphasis_scale", "outline_color", "outline_width",
+              "shadow", "background_color", "background_opacity", "tracking",
+              "text_align")
 # Keys whose value is meaningful when falsy (0, 0.0) and so must NOT be copied
 # with a truthiness test.
-STYLE_KEYS_NUMERIC = ("leading", "emphasis_scale", "size_scale")
+STYLE_KEYS_NUMERIC = ("leading", "emphasis_scale", "size_scale",
+                      "outline_width", "shadow", "background_opacity",
+                      "tracking")
 
 # ── Premium presets ──────────────────────────────────────────────────────
 # Every preset is one coherent, opinionated look. base_size is the 'm'
@@ -239,6 +249,76 @@ PRESETS = {
         "active": None, "position": "bottom", "animation": "fade",
     },
 
+    # ── Coherent production families ────────────────────────────────
+    # These cover the common briefs that previously got forced through a
+    # novelty social preset. Each has one visual grammar; none rotates among
+    # unrelated boxes, serif faces and colours inside the same sentence.
+    "clean": {
+        # Safe creator default: the whole short phrase is readable at once,
+        # with hierarchy carried by size only. White, mixed-case, no gimmick.
+        "font": "Plus Jakarta Sans", "char_w": 0.55, "base_size": 36,
+        "mode": "static", "align": "center", "uppercase": False,
+        "max_words": 5, "wpl": 3, "outline": 1.5, "shadow": 2.0,
+        "emph_scale": 1.22, "num_scale": 1.45,
+        "treatments": ("big",), "emphasis": "big",
+        "number_treatment": "num_plain",
+        "active": None, "position": "bottom", "animation": "fade",
+        "layout": "stack", "leading": 1.02, "stagger": 0.0,
+        "word_anim": "fade",
+    },
+    "documentary": {
+        # Long-form/readability family: restrained two-line subtitles on a
+        # translucent charcoal plate, suitable for interviews, education and
+        # footage with changing/bright backgrounds.
+        "font": "Plus Jakarta Sans", "char_w": 0.53, "base_size": 32,
+        "mode": "static", "align": "center", "uppercase": False,
+        "max_words": 12, "wpl": 6, "outline": 0.0, "shadow": 0.0,
+        "emph_scale": 1.12, "num_scale": 1.2,
+        "treatments": ("big",), "emphasis": "big",
+        "number_treatment": "num_plain",
+        "active": None, "position": "bottom", "animation": "fade",
+        "background_color": "#111318", "background_opacity": 0.72,
+        "box_pad": 8.0, "tracking": 0.0, "anchor_y": 0.76,
+    },
+    "broadcast": {
+        # News/explainer lower-third: confident left alignment and an opaque
+        # enough plate to survive B-roll, charts and newsroom footage.
+        "font": "Plus Jakarta Sans", "char_w": 0.55, "base_size": 30,
+        "mode": "static", "align": "left", "uppercase": False,
+        "max_words": 8, "wpl": 4, "outline": 0.0, "shadow": 0.0,
+        "emph_scale": 1.18, "num_scale": 1.32,
+        "treatments": ("accent",), "emphasis": "accent",
+        "active": None, "position": "bottom", "animation": "slide_up",
+        "background_color": "#0A0D14", "background_opacity": 0.82,
+        "box_pad": 9.0, "tracking": 0.25, "anchor_y": 0.76,
+    },
+    "retro": {
+        # Condensed poster type with a deliberate thick keyline. Useful for
+        # sports/history/comedy without the constant word-colour churn of a
+        # karaoke preset.
+        "font": "Bebas Neue", "char_w": 0.40, "base_size": 56,
+        "mode": "static", "align": "center", "uppercase": True,
+        "max_words": 5, "wpl": 3, "outline": 3.2, "shadow": 2.4,
+        "emph_scale": 1.38, "num_scale": 1.6,
+        "treatments": ("big",), "emphasis": "big",
+        "number_treatment": "num_plain",
+        "active": None, "position": "bottom", "animation": "pop",
+        "tracking": 1.1,
+    },
+    "neon": {
+        # A focused glow family rather than generic rainbow/chroma: two-word
+        # groups, one cool accent, heavy Syne display type.
+        "font": "Syne ExtraBold", "char_w": 0.58, "base_size": 50,
+        "mode": "karaoke", "align": "center", "uppercase": True,
+        "max_words": 2, "wpl": 2, "outline": 0.8, "shadow": 2.0,
+        "emph_scale": 1.18, "num_scale": 1.4,
+        "treatments": ("glow",), "emphasis": "glow",
+        "active": "glow", "position": "bottom",
+        "layout": "stack", "leading": 1.0, "stagger": 0.0,
+        "effect": "glow", "word_anim": "punch",
+        "highlight": "#7DEBFF", "tracking": -0.4,
+    },
+
     # ── Composed looks (layout "stack") ──────────────────────────────
     # These use the per-line composer: every line is its own Dialogue with
     # its own \pos, which is what makes tight/overlapping leading and
@@ -254,6 +334,7 @@ PRESETS = {
         "max_words": 4, "wpl": 2, "outline": 0.0, "shadow": 2.4,
         "emph_scale": 2.05, "num_scale": 2.2,
         "treatments": ("big",), "emphasis": "big",
+        "number_treatment": "num_plain",
         "active": "pop", "position": "bottom",
         "layout": "stack", "leading": 0.86, "stagger": 0.055,
         "word_anim": "punch",
@@ -291,6 +372,7 @@ PRESETS = {
         "max_words": 5, "wpl": 3, "outline": 0.0, "shadow": 1.4,
         "emph_scale": 1.5, "num_scale": 1.7,
         "treatments": ("big",), "emphasis": "big",
+        "number_treatment": "num_plain",
         "active": "fade", "position": "bottom",
         "layout": "stack", "leading": 1.06, "stagger": 0.0,
         "word_anim": "fade",
@@ -361,7 +443,15 @@ def _pget(p, key):
 # Block-center anchor as a fraction of frame height, per position.
 PREMIUM_ANCHOR_Y = {"top": 0.16, "middle": 0.50, "bottom": 0.80}
 # Side margin as a fraction of frame width (left-aligned vs centered).
-PREMIUM_MARGIN_X = {"left": 0.085, "center": 0.10}
+PREMIUM_MARGIN_X = {"left": 0.085, "center": 0.10, "right": 0.085}
+
+
+def _premium_anchor(p, position):
+    """Preset-aware vertical anchor; panel subtitles sit slightly higher so
+    their backing block also clears a vertical platform's bottom UI band."""
+    if position == "bottom" and p.get("anchor_y") is not None:
+        return float(p["anchor_y"])
+    return PREMIUM_ANCHOR_Y.get(position, 0.5)
 
 # Karaoke (dynamic) captions: groups of up to N words; the word being
 # spoken pops and lights up in the highlight color. Groups larger than
@@ -400,6 +490,22 @@ def ass_color(hex_rgb):
     return f"&H00{b}{g}{r}".upper()
 
 
+def ass_color_alpha(hex_rgb, opacity=1.0):
+    """#RRGGBB + human opacity -> ASS &HAABBGGRR.
+
+    ASS alpha runs backwards (00 opaque, FF invisible), which is easy to get
+    wrong and previously made a reusable caption panel impossible.
+    """
+    h = (hex_rgb or "#000000").lstrip("#")
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    try:
+        op = min(max(float(opacity), 0.0), 1.0)
+    except (TypeError, ValueError):
+        op = 1.0
+    alpha = round((1.0 - op) * 255)
+    return f"&H{alpha:02X}{b}{g}{r}".upper()
+
+
 def _norm_style(style):
     s = dict(DEFAULT_STYLE)
     s["_pos_set"] = False
@@ -430,6 +536,43 @@ def _preset_of(style):
     s = style if isinstance(style, dict) and "_pos_set" in style \
         else _norm_style(style)
     return PRESETS.get(s.get("preset") or "")
+
+
+def _align_of(p, s):
+    return (s or {}).get("text_align") or p.get("align", "center")
+
+
+def _outline_of(p, s):
+    v = (s or {}).get("outline_width")
+    return p.get("outline", 0.0) if v is None else float(v)
+
+
+def _shadow_of(p, s):
+    v = (s or {}).get("shadow")
+    return p.get("shadow", 0.0) if v is None else float(v)
+
+
+def _tracking_of(p, s):
+    v = (s or {}).get("tracking")
+    return p.get("tracking", 0.0) if v is None else float(v)
+
+
+def _background_of(p, s):
+    """(colour, opacity, padding) for the event-level backing plate."""
+    color = (s or {}).get("background_color") or p.get("background_color")
+    opacity = (s or {}).get("background_opacity")
+    if opacity is None:
+        opacity = p.get("background_opacity", 0.0)
+    try:
+        opacity = min(max(float(opacity or 0.0), 0.0), 1.0)
+    except (TypeError, ValueError):
+        opacity = 0.0
+    return color or "#000000", opacity, float(p.get("box_pad", 7.0))
+
+
+def _highlight_of(p, s):
+    return (s or {}).get("highlight_color") or p.get("highlight") \
+        or DEFAULT_HIGHLIGHT
 
 
 def _size_scale(style):
@@ -482,16 +625,44 @@ def style_line(name, style, play_res=BASE_PLAY_RES):
     font = max(10, round(FONT_SIZES.get(s["size"], 40) * f * _size_scale(s)))
     margin_lr = max(10, round(60 * fx))
     margin_v = bottom_margin_v(s["position"], play_res)
-    outline = max(1.2, round(2.4 * f, 1))
+    raw_outline = 2.4 if s.get("outline_width") is None \
+        else float(s["outline_width"])
+    outline = max(0.0, round(raw_outline * f, 1))
+    raw_shadow = 0.0 if s.get("shadow") is None else float(s["shadow"])
+    shadow = max(0.0, round(raw_shadow * f, 1))
+    tracking = round(float(s.get("tracking") or 0.0) * f, 2)
+    if abs(tracking) < 0.001:
+        tracking = 0
+    bg_color = s.get("background_color") or "#000000"
+    bg_opacity = float(s.get("background_opacity") or 0.0)
+    border_style = 3 if bg_opacity > 0.001 else 1
+    back_ass = ass_color_alpha(bg_color, bg_opacity) \
+        if border_style == 3 else "&H96000000"
+    outline_ass = ass_color_alpha(bg_color, bg_opacity) \
+        if border_style == 3 \
+        else ass_color(s.get("outline_color") or "#101010")
+    if border_style == 3:
+        # In BorderStyle 3 ASS uses Outline as the plate padding. Preserve a
+        # useful panel even when the caller requested no text outline.
+        outline = max(outline, round(7.0 * f, 1))
+    align_name = s.get("text_align") or "center"
+    align_map = {
+        "bottom": {"left": 1, "center": 2, "right": 3},
+        "middle": {"left": 4, "center": 5, "right": 6},
+        "top": {"left": 7, "center": 8, "right": 9},
+    }
     # Honour an explicit font on the plain (non-preset) path too. Without this
     # a bare `font` override rendered DejaVu Sans while the agent reported the
     # requested family — a silent font-drop. Montserrat's only application path
     # is a bare override (no preset uses it), so this closes a real honesty gap.
     fam = s.get("font") or "DejaVu Sans"
     return (f"Style: {name},{fam},{font},"
-            f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
-            f"-1,0,0,0,100,100,0,0,1,{outline},0,"
-            f"{ALIGNMENTS.get(s['position'], 2)},{margin_lr},{margin_lr},"
+            f"{ass_color(s['color'])},&H00FFFFFF,"
+            f"{outline_ass},"
+            f"{back_ass},"
+            f"-1,0,0,0,100,100,{tracking},0,{border_style},{outline},{shadow},"
+            f"{align_map.get(s['position'], align_map['bottom']).get(align_name, 2)},"
+            f"{margin_lr},{margin_lr},"
             f"{margin_v},-1")
 
 
@@ -792,7 +963,7 @@ def _premium_font_px(p, s, play_res):
 
 def _premium_line_chars(p, s, play_res):
     px = _premium_font_px(p, s, play_res)
-    margin = PREMIUM_MARGIN_X[p["align"]] * play_res[0]
+    margin = PREMIUM_MARGIN_X[_align_of(p, s)] * play_res[0]
     usable = play_res[0] - 2 * margin
     return max(6, int(usable / (p["char_w"] * px)))
 
@@ -805,12 +976,25 @@ def _premium_style_line(name, s, play_res):
     fy = play_res[1] / BASE_PLAY_RES[1]
     f = max(fx, fy)
     px = _premium_font_px(p, s, play_res)
-    margin = round(PREMIUM_MARGIN_X[p["align"]] * play_res[0])
-    outline = round(p["outline"] * f, 1)
-    shadow = round(p["shadow"] * f, 1)
+    align_name = _align_of(p, s)
+    margin = round(PREMIUM_MARGIN_X[align_name] * play_res[0])
+    outline = round(_outline_of(p, s) * f, 1)
+    shadow = round(_shadow_of(p, s) * f, 1)
+    tracking = round(_tracking_of(p, s) * f, 2)
+    if abs(tracking) < 0.001:
+        tracking = 0
+    # Premium panels are a single vector layer behind the WHOLE block (see
+    # _premium_panel). BorderStyle 3 cannot be used here: every inline-styled
+    # word becomes its own opaque rectangle, creating an ugly patchwork.
+    border_style = 1
+    outline_color = s.get("outline_color") or "#101010"
+    back_ass = "&H96000000"
+    outline_ass = ass_color(outline_color)
     return (f"Style: {name},{_font_of(p, s)},{px},"
-            f"{ass_color(s['color'])},&H00FFFFFF,&H00101010,&H96000000,"
-            f"0,0,0,0,100,100,0,0,1,{outline},{shadow},5,{margin},{margin},"
+            f"{ass_color(s['color'])},&H00FFFFFF,{outline_ass},"
+            f"{back_ass},"
+            f"0,0,0,0,100,100,{tracking},0,{border_style},{outline},{shadow},"
+            f"5,{margin},{margin},"
             f"0,-1")
 
 
@@ -818,10 +1002,15 @@ def _base_tags(p, s, px, f):
     """Full per-word reset: every word segment restates ALL varying
     properties, so treatments never leak between words (safer than \\r,
     which also resets alignment in some renderers)."""
-    outline = round(p["outline"] * f, 1)
-    shadow = round(p["shadow"] * f, 1)
+    outline = round(_outline_of(p, s) * f, 1)
+    shadow = round(_shadow_of(p, s) * f, 1)
+    tracking = round(_tracking_of(p, s) * f, 2)
+    spacing = rf"\fsp{tracking}" if abs(tracking) >= 0.001 else ""
+    outline_color = _inline_hl(s.get("outline_color") or "#101010")
     return (rf"\fn{_font_of(p, s)}\fs{px}\b0\i0\1c{_inline_hl(s['color'])}"
-            rf"\3c&H101010&\bord{outline}\shad{shadow}\fscx100\fscy100")
+            rf"\3c{outline_color}\bord{outline}"
+            rf"\shad{shadow}{spacing}"
+            rf"\fscx100\fscy100")
 
 
 def _emph_scale(s, p):
@@ -925,20 +1114,38 @@ def _premium_anim_prefix(anim):
     return ""
 
 
-def _assign_treatments(chunk, emph, p, rot):
+def _assign_treatments(chunk, emph, p, s=None, rot=None):
     """Per-word emphasis treatment. Digits are always emphasized (the huge
     '22' of the reference style — one per chunk, extras get the accent).
     Agent-chosen emphasis words rotate through the preset's treatments,
     with the counter carried ACROSS chunks so the look varies; at most one
     highlight box per chunk. Returns (treatments, rot)."""
+    # Backward compatibility for the original internal signature
+    # _assign_treatments(chunk, emph, preset, rotation). Tests, diagnostics and
+    # any warm worker importing the helper keep working across the deploy.
+    if rot is None and isinstance(s, (int, float)):
+        rot, s = int(s), {}
+    elif rot is None:
+        rot = 0
+    s = s or {}
+    # The explicit style override used to validate, persist and appear in the
+    # EDL diff but was never read here — so "make emphasis size-only" could be
+    # reported as applied while the renderer kept drawing boxes/serif/color.
+    # One concrete treatment replaces the preset rotation when supplied.
+    chosen = (s or {}).get("emphasis")
+    palette = (chosen,) if chosen is not None else p["treatments"]
     treats, num_used, box_used = [], False, False
     for w in chunk:
         token = w["w"]
         if _word_has_digit(token):
-            treats.append("accent" if num_used else "num")
+            number_kind = p.get("number_treatment", "num")
+            extra_kind = p.get("extra_number_treatment",
+                               "num_plain" if number_kind == "num_plain"
+                               else "accent")
+            treats.append(extra_kind if num_used else number_kind)
             num_used = True
         elif _norm_word(token) in emph:
-            t = p["treatments"][rot % len(p["treatments"])]
+            t = palette[rot % len(palette)]
             rot += 1
             if t == "box":
                 if box_used:
@@ -994,7 +1201,7 @@ def _geom_prefix(p, s, play_res, lines, treats, px):
     FINAL chunk layout, then clamped on-frame."""
     W, H = play_res
     pos_name = s["position"] if s.get("_pos_set") else p["position"]
-    anchor = PREMIUM_ANCHOR_Y.get(pos_name, 0.5) * H
+    anchor = _premium_anchor(p, pos_name) * H
     scale_of = {"num": p["num_scale"], "num_plain": p["num_scale"],
                 "accent": p["emph_scale"], "serif": p["emph_scale"],
                 "box": 1.0}
@@ -1002,13 +1209,66 @@ def _geom_prefix(p, s, play_res, lines, treats, px):
                                default=1.0) for ln in lines]
     block_h = sum(line_hs)
     edge = 0.03 * H
-    if p["align"] == "left":
+    align = _align_of(p, s)
+    if align == "left":
         x = round(PREMIUM_MARGIN_X["left"] * W)
         y = max(edge, min(anchor - block_h / 2, H - block_h - edge))
         return rf"{{\an7\pos({x},{round(y)})}}"
+    if align == "right":
+        x = round(W - PREMIUM_MARGIN_X["right"] * W)
+        y = max(edge, min(anchor - block_h / 2, H - block_h - edge))
+        return rf"{{\an9\pos({x},{round(y)})}}"
     x = round(W / 2)
     y = max(block_h / 2 + edge, min(anchor, H - block_h / 2 - edge))
     return rf"{{\an5\pos({x},{round(y)})}}"
+
+
+def _premium_panel(p, s, play_res, disp, treats, lines, px):
+    """One translucent vector rectangle behind the complete caption block.
+
+    ASS BorderStyle 3 looks acceptable only when an event has no inline word
+    styling. Premium events reset font/size/colour on every word, so libass
+    otherwise paints one overlapping box PER WORD. A dedicated drawing layer
+    produces the stable documentary/news panel users actually expect.
+    """
+    bg, opacity, base_pad = _background_of(p, s)
+    if opacity <= 0.001 or not lines:
+        return None
+    W, H = play_res
+    f = max(W / BASE_PLAY_RES[0], H / BASE_PLAY_RES[1])
+    pad_x = max(8.0, base_pad * f * 1.25)
+    pad_y = max(6.0, base_pad * f * 0.72)
+    char_w = p["char_w"] * px
+    mults = [_treat_props(treats[i], p, s).get("mult", 1.0)
+             for i in range(len(disp))]
+    line_widths, line_heights = [], []
+    for line in lines:
+        width = sum(max(1, len(disp[i])) * char_w * mults[i] for i in line)
+        width += max(0, len(line) - 1) * char_w * 0.4
+        line_widths.append(width)
+        line_heights.append(px * 1.28 * max((mults[i] for i in line),
+                                            default=1.0))
+    panel_w = min(W * 0.90, max(W * 0.42, max(line_widths) + 2 * pad_x))
+    panel_h = min(H * 0.34, sum(line_heights) + 2 * pad_y)
+    pos_name = s["position"] if s.get("_pos_set") else p["position"]
+    anchor_y = _premium_anchor(p, pos_name) * H
+    edge = 0.03 * H
+    y0 = max(edge, min(anchor_y - panel_h / 2, H - panel_h - edge))
+    y1 = y0 + panel_h
+    align = _align_of(p, s)
+    margin = PREMIUM_MARGIN_X[align] * W
+    if align == "left":
+        x0, x1 = margin - pad_x * 0.35, margin - pad_x * 0.35 + panel_w
+    elif align == "right":
+        x1, x0 = W - margin + pad_x * 0.35, W - margin + pad_x * 0.35 - panel_w
+    else:
+        x0, x1 = (W - panel_w) / 2, (W + panel_w) / 2
+    x0, x1 = max(0, x0), min(W, x1)
+    alpha = round((1.0 - opacity) * 255)
+    return (rf"{{\an7\pos(0,0)\p1\1c{_inline_hl(bg)}"
+            rf"\1a&H{alpha:02X}&\bord0\shad0}}"
+            rf"m {round(x0)} {round(y0)} l {round(x1)} {round(y0)} "
+            rf"l {round(x1)} {round(y1)} l {round(x0)} {round(y1)}")
 
 
 # \clip takes absolute frame coords. The composer only ever bands horizontally
@@ -1070,11 +1330,16 @@ def _stack_positions(p, s, play_res, lines, mults, px, anim):
     line_hs = [lead * px * m for m in lmults]
     block_h = sum(line_hs)
     pos_name = s["position"] if s.get("_pos_set") else p["position"]
-    anchor = PREMIUM_ANCHOR_Y.get(pos_name, 0.5) * H
+    anchor = _premium_anchor(p, pos_name) * H
     edge = 0.03 * H
     y0 = max(edge, min(anchor - block_h / 2, H - block_h - edge))
     stag = (_pget(p, "stagger") or 0.0) * W
     big = max(lmults) if lmults else 1.0
+    align = _align_of(p, s)
+    base_x = (PREMIUM_MARGIN_X["left"] * W if align == "left"
+              else W - PREMIUM_MARGIN_X["right"] * W if align == "right"
+              else W / 2)
+    an = 4 if align == "left" else 6 if align == "right" else 5
     out, acc = [], 0.0
     for i in range(len(lines)):
         y = y0 + acc + line_hs[i] / 2
@@ -1085,13 +1350,13 @@ def _stack_positions(p, s, play_res, lines, mults, px, anim):
         # on the big word instead of scattering the whole block.
         dx = stag * (-1 if i % 2 == 0 else 1) \
             if (stag and lmults[i] < big - 0.01) else 0.0
-        x = round(W / 2 + dx)
+        x = round(base_x + dx)
         if anim in LINE_ANIMS:
             off = max(10, int(0.045 * H)) * (1 if anim == "rise" else -1)
-            out.append(rf"{{\an5\move({x},{round(y + off)},{x},{round(y)}"
+            out.append(rf"{{\an{an}\move({x},{round(y + off)},{x},{round(y)}"
                        rf",0,180)\fad(120,0)}}")
         else:
-            out.append(rf"{{\an5\pos({x},{round(y)})}}")
+            out.append(rf"{{\an{an}\pos({x},{round(y)})}}")
     return out
 
 
@@ -1226,7 +1491,7 @@ def events_premium(out_words, style=None, max_words=None,
     fy = play_res[1] / BASE_PLAY_RES[1]
     f = max(fx, fy)
     px = _premium_font_px(p, s, play_res)
-    accent = _inline_hl(s.get("highlight_color") or DEFAULT_HIGHLIGHT)
+    accent = _inline_hl(_highlight_of(p, s))
     upper = s["uppercase"] if s["uppercase"] is not None else p["uppercase"]
     emph = {n for n in (_norm_word(w) for w in (emphasis_words or [])) if n}
     # Clamped to the schema-wide max (16): the schema/tools advertise 1-16,
@@ -1259,7 +1524,7 @@ def events_premium(out_words, style=None, max_words=None,
     segs, ctx, rot = [], [], 0
     for ci, chunk in enumerate(chunks):
         disp = [_display_word(w["w"], upper) for w in chunk]
-        treats, rot = _assign_treatments(chunk, emph, p, rot)
+        treats, rot = _assign_treatments(chunk, emph, p, s, rot)
         if mode == "karaoke":
             # only the SPOKEN word carries the accent in karaoke modes;
             # persistent keyword coloring would bury the highlight.
@@ -1269,7 +1534,8 @@ def events_premium(out_words, style=None, max_words=None,
         if stack:
             # Lay out by REAL rendered width so libass never re-wraps a line
             # behind the composer's back (see _stack_mults / _stack_layout).
-            usable = play_res[0] - 2 * PREMIUM_MARGIN_X[p["align"]] * play_res[0]
+            usable = play_res[0] - 2 * PREMIUM_MARGIN_X[_align_of(p, s)] \
+                * play_res[0]
             mults = _stack_mults(disp, treats, p, s, px, usable)
             lines = _stack_layout(disp, mults, p, px, usable)
             geom = _stack_positions(p, s, play_res, lines, mults, px,
@@ -1278,8 +1544,9 @@ def events_premium(out_words, style=None, max_words=None,
             mults = None
             lines = _premium_layout(disp, p["wpl"], line_chars)
             geom = _geom_prefix(p, s, play_res, lines, treats, px)
+        panel = _premium_panel(p, s, play_res, disp, treats, lines, px)
         ctx.append({"disp": disp, "treats": treats, "lines": lines,
-                    "geom": geom, "mults": mults})
+                    "geom": geom, "mults": mults, "panel": panel})
         nxt_t0 = chunks[ci + 1][0]["t0"] if ci + 1 < len(chunks) else None
 
         def hold_end(w):
@@ -1342,6 +1609,10 @@ def events_premium(out_words, style=None, max_words=None,
     events = []
     for sg in kept:
         c = ctx[sg["ci"]]
+        if c.get("panel"):
+            events.append({"start": sg["start"], "end": sg["end"],
+                           "text": c["panel"], "layer": 0,
+                           "premium": True})
         if stack:
             for layer, text in _stack_state_events(
                     c["disp"], c["treats"], c["mults"], c["lines"], c["geom"],
@@ -1364,7 +1635,7 @@ def events_premium(out_words, style=None, max_words=None,
                 out_lines.append(" ".join(parts))
         events.append({"start": sg["start"], "end": sg["end"],
                        "text": c["geom"] + anim + r"\N".join(out_lines),
-                       "premium": True})
+                       "layer": 5, "premium": True})
     return events
 
 
@@ -1399,11 +1670,25 @@ def events_from_items(items, tl, play_res=BASE_PLAY_RES):
                                 [[0]] * len(lines), [None], px)
             anim = _premium_anim_prefix(ns.get("animation")
                                         or p.get("animation"))
+            # Manual/translated captions use the same single vector panel as
+            # transcript captions. Without this, a documentary style applied
+            # successfully to translated items but its contrast panel was
+            # silently absent.
+            disp = [_display_word(x, upper) for x in text.split()]
+            panel_lines = _premium_layout(disp, p["wpl"], item_chars)
+            panel = _premium_panel(
+                p, ns, play_res, disp, [None] * len(disp), panel_lines, px)
+            if panel:
+                events.append({"start": start,
+                               "end": max(end, start + MIN_EVENT_S),
+                               "text": panel, "item_style": get("style"),
+                               "layer": 0, "premium": True})
             events.append({"start": start,
                            "end": max(end, start + MIN_EVENT_S),
                            "text": geom + anim +
                            r"\N".join(_esc(l) for l in lines),
-                           "item_style": get("style"), "premium": True})
+                           "item_style": get("style"), "layer": 5,
+                           "premium": True})
             continue
         lines = _wrap(get("text"), item_chars)[:MAX_LINES]
         events.append({"start": start, "end": max(end, start + MIN_EVENT_S),

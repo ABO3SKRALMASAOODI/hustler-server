@@ -290,3 +290,25 @@ def test_the_slow_rescue_and_transfer_beacons_are_accepted():
     from routes import video
     assert "upload_slow_rescue" in video.CLIENT_EVENT_KINDS
     assert "upload_transfer" in video.CLIENT_EVENT_KINDS
+
+
+def test_upload_dedup_and_export_funnel_events_are_accepted():
+    from routes import video
+    expected = {
+        "upload_deduped", "project_ready", "first_prompt_sent",
+        "export_clicked", "export_blocked", "export_job_started",
+        "export_render_done", "download_url_ready", "download_triggered",
+        "download_failed",
+    }
+    assert expected <= video.CLIENT_EVENT_KINDS
+
+
+def test_admin_export_funnel_preserves_the_real_stage_order():
+    from routes import admin_video
+    assert [kind for kind, _label in admin_video.EXPORT_FUNNEL_STAGES] == [
+        "project_ready", "first_prompt_sent", "export_clicked",
+        "export_job_started", "export_render_done", "download_url_ready",
+        "download_triggered",
+    ]
+    assert set(admin_video.EXPORT_FAILURE_KINDS) == {
+        "export_blocked", "download_failed"}

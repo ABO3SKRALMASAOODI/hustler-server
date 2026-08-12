@@ -221,6 +221,10 @@ class CaptionStyle(BaseModel):
     preset: Optional[Literal[
         # original four (single-Dialogue "flow" emission)
         "podcast", "beast", "karaoke", "elegant",
+        # coherent production families added after the first visual audit:
+        # clean creator text, long-form subtitles, a boxed news lower-third,
+        # outlined retro display, and a restrained neon/glow treatment.
+        "clean", "documentary", "broadcast", "retro", "neon",
         # round 67: one word at a time, centred, glowing (the modern
         # single-word look — the only preset that defaults position middle)
         "spotlight",
@@ -262,7 +266,7 @@ class CaptionStyle(BaseModel):
         "Inter Display Black", "Inter Display ExtraBold", "Inter Display Bold",
         "Anton", "Bebas Neue", "Archivo Black", "Poppins Black",
         "Syne ExtraBold", "Playfair Display Black", "Instrument Serif",
-        "DM Serif Display", "Montserrat"]] = None
+        "DM Serif Display", "Montserrat", "Plus Jakarta Sans"]] = None
     # Layered text effect applied to emphasised words (or all words when the
     # preset sets it globally).
     effect: Optional[Literal["chroma", "chrome", "glow"]] = None
@@ -278,6 +282,20 @@ class CaptionStyle(BaseModel):
                                "none"]] = None
     # How much larger an emphasised word renders, 1.0-3.0.
     emphasis_scale: Optional[float] = None
+
+    # ── Production controls (work with presets and classic captions) ─────
+    # These are deliberately orthogonal. A user can ask for a documentary
+    # subtitle panel without inheriting a loud font, or a thicker outline
+    # without also changing the caption colour/animation.
+    outline_color: Optional[str] = None
+    outline_width: Optional[float] = None
+    shadow: Optional[float] = None
+    background_color: Optional[str] = None
+    background_opacity: Optional[float] = None
+    # ASS spacing in reference-frame pixels. Negative values tighten display
+    # type; positive values create airy editorial/news typography.
+    tracking: Optional[float] = None
+    text_align: Optional[Literal["left", "center", "right"]] = None
 
     @field_validator("effect", mode="before")
     @classmethod
@@ -311,6 +329,46 @@ class CaptionStyle(BaseModel):
                 f"emphasis_scale {v} must be between 1.0 and 3.0")
         return float(v)
 
+    @field_validator("outline_width", "shadow")
+    @classmethod
+    def _caption_edge_range(cls, v, info):
+        if v is None:
+            return v
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{info.field_name} must be a number between 0 and 12")
+        if not (0.0 <= v <= 12.0):
+            raise ValueError(f"{info.field_name} {v} must be between 0 and 12")
+        return v
+
+    @field_validator("background_opacity")
+    @classmethod
+    def _caption_background_opacity(cls, v):
+        if v is None:
+            return v
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("background_opacity must be a number between 0 and 1")
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(
+                f"background_opacity {v} must be between 0 and 1")
+        return v
+
+    @field_validator("tracking")
+    @classmethod
+    def _caption_tracking_range(cls, v):
+        if v is None:
+            return v
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("tracking must be a number between -8 and 24")
+        if not (-8.0 <= v <= 24.0):
+            raise ValueError(f"tracking {v} must be between -8 and 24")
+        return v
+
     @field_validator("color")
     @classmethod
     def _color_hex(cls, v):
@@ -329,6 +387,17 @@ class CaptionStyle(BaseModel):
         if not HEX_COLOR.match(v):
             raise ValueError(
                 f"highlight_color '{v}' must be #RRGGBB hex, e.g. #FFE14D")
+        return v.upper()
+
+    @field_validator("outline_color", "background_color")
+    @classmethod
+    def _optional_caption_hex(cls, v, info):
+        if v is None:
+            return v
+        v = v.strip()
+        if not HEX_COLOR.match(v):
+            raise ValueError(
+                f"{info.field_name} '{v}' must be #RRGGBB hex")
         return v.upper()
 
     @field_validator("size_scale")

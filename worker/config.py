@@ -1451,12 +1451,14 @@ PREVIEW_MAX_LONG_EDGE = int(os.getenv("PREVIEW_MAX_LONG_EDGE", "1280"))
 # stitching keeps each one cheap, but not free.
 # Intermediate speculative encodes produced 52 previews across five projects,
 # most obsolete before completion. Batch first; prove the candidate once and
-# allow one repair proof.
+# allow one ordinary repair proof. A third proof is available only when the
+# latest independent review still reports a concrete defect; agent_tools owns
+# that gate, so this ceiling is not permission for another polish pass.
 SPECULATIVE_PREVIEWS = os.getenv("SPECULATIVE_PREVIEWS", "0") == "1"
 SPECULATIVE_PREVIEWS_MAX = min(
     1, max(0, int(os.getenv("SPECULATIVE_PREVIEWS_MAX", "1"))))
 AGENT_MAX_PREVIEWS_PER_TURN = min(
-    2, max(1, int(os.getenv("AGENT_MAX_PREVIEWS_PER_TURN", "2"))))
+    3, max(2, int(os.getenv("AGENT_MAX_PREVIEWS_PER_TURN", "3"))))
 # The height a preview is actually WRITTEN at. This number is not new — the
 # graph has always ended with `scale=-2:min(480,...)` — but it lived as a
 # literal at the end of the filter chain, which meant every filter before it

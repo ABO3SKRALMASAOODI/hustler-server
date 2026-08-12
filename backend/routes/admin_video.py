@@ -1115,6 +1115,110 @@ def video_upload_failures():
     })
 
 
+# The edit-to-file funnel has two client-only boundaries that video_jobs can
+# never answer: did the person press Export, and did the browser receive/use
+# the download URL? Keep the authoritative worker/server boundaries beside
+# them so the exact drop-off is visible on the first admin screen.
+EXPORT_FUNNEL_STAGES = (
+    ("project_ready", "Project ready"),
+    ("first_prompt_sent", "First prompt"),
+    ("export_clicked", "Export clicked"),
+    ("export_job_started", "Render started"),
+    ("export_render_done", "Render finished"),
+    ("download_url_ready", "Download URL ready"),
+    ("download_triggered", "Browser download triggered"),
+)
+EXPORT_FAILURE_KINDS = ("export_blocked", "download_failed")
+
+
+@admin_video_bp.route("/admin/video/export_funnel", methods=["GET"])
+@admin_required
+def video_export_funnel():
+    """Recent edit-to-download stages plus ranked blockers.
+
+    Counts are deliberately returned as events, projects and users. Repeated
+    download clicks are useful reliability evidence but must not masquerade
+    as additional people converting.
+    """
+    try:
+        days = min(max(int(request.args.get("days", 30)), 1), 365)
+        limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+    except (TypeError, ValueError):
+        days, limit = 30, 50
+    stage_kinds = [kind for kind, _label in EXPORT_FUNNEL_STAGES]
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT kind, COUNT(*) AS events,
+                              COUNT(DISTINCT project_id) FILTER
+                                  (WHERE project_id IS NOT NULL) AS projects,
+                              COUNT(DISTINCT user_id) AS users,
+                              MIN(created_at) AS first_seen,
+                              MAX(created_at) AS last_seen
+                       FROM client_events
+                       WHERE kind = ANY(%s)
+                         AND created_at > NOW() - (%s || ' days')::interval
+                       GROUP BY kind""",
+                    (stage_kinds, str(days)))
+        counts = {row["kind"]: row for row in cur.fetchall()}
+
+        cur.execute("""SELECT kind,
+                              COALESCE(NULLIF(detail->>'code', ''),
+                                       NULLIF(detail->>'reason', ''),
+                                       '(unspecified)') AS reason,
+                              COUNT(*) AS events,
+                              COUNT(DISTINCT project_id) FILTER
+                                  (WHERE project_id IS NOT NULL) AS projects,
+                              COUNT(DISTINCT user_id) AS users
+                       FROM client_events
+                       WHERE kind = ANY(%s)
+                         AND created_at > NOW() - (%s || ' days')::interval
+                       GROUP BY kind, 2
+                       ORDER BY events DESC LIMIT 20""",
+                    (list(EXPORT_FAILURE_KINDS), str(days)))
+        reasons = cur.fetchall()
+
+        cur.execute("""SELECT e.id, e.kind, e.detail, e.created_at,
+                              e.project_id, e.user_id, u.email, p.title
+                       FROM client_events e
+                       LEFT JOIN users u ON u.id = e.user_id
+                       LEFT JOIN projects p ON p.id = e.project_id
+                       WHERE e.kind = ANY(%s)
+                         AND e.created_at > NOW() - (%s || ' days')::interval
+                       ORDER BY e.id DESC LIMIT %s""",
+                    (list(EXPORT_FAILURE_KINDS), str(days), limit))
+        failures = cur.fetchall()
+
+    stages = []
+    for kind, label in EXPORT_FUNNEL_STAGES:
+        row = counts.get(kind) or {}
+        stages.append({
+            "kind": kind, "label": label,
+            "events": int(row.get("events") or 0),
+            "projects": int(row.get("projects") or 0),
+            "users": int(row.get("users") or 0),
+            "first_seen": row.get("first_seen").isoformat()
+                if row.get("first_seen") else None,
+            "last_seen": row.get("last_seen").isoformat()
+                if row.get("last_seen") else None,
+        })
+    return jsonify({
+        "days": days,
+        "stages": stages,
+        "by_reason": [{"kind": r["kind"], "reason": r["reason"],
+                       "events": int(r["events"] or 0),
+                       "projects": int(r["projects"] or 0),
+                       "users": int(r["users"] or 0)} for r in reasons],
+        "failures": [{
+            "id": e["id"], "kind": e["kind"],
+            "detail": e.get("detail") or {},
+            "created_at": e["created_at"].isoformat(),
+            "project_id": e.get("project_id"),
+            "project_title": e.get("title"),
+            "user_id": e.get("user_id"), "email": e.get("email"),
+        } for e in failures],
+    })
+
+
 @admin_video_bp.route("/admin/video/projects/<int:project_id>/index",
                       methods=["GET"])
 @admin_required

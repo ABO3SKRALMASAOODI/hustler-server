@@ -39,5 +39,20 @@ def finalize_success(worker_db, job, result, lease_claim):
               f"usable ({result.get('truncated') and 'truncated'})",
               flush=True)
 
-    return worker_db.run(
+    committed = worker_db.run(
         dbx.finish_job, job["id"], "done", None, result, lease_claim)
+    if committed and job["type"] == "final":
+        try:
+            asset_id = (result.get("render_asset_id")
+                        or result.get("asset_id"))
+            worker_db.run(
+                dbx.record_client_event, job["user_id"], job["project_id"],
+                "export_render_done",
+                {"job_id": job["id"],
+                 "version": (job.get("payload") or {}).get("edl_version"),
+                 "duration_s": result.get("duration_s")},
+                asset_id)
+        except Exception as exc:
+            print(f"[job {job['id']}] export event dropped: {exc}",
+                  flush=True)
+    return committed

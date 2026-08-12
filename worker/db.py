@@ -1269,6 +1269,24 @@ def add_message(conn, session_id, role, content, meta=None):
         return cur.fetchone()["id"]
 
 
+def record_client_event(conn, user_id, project_id, kind, detail=None,
+                        asset_id=None):
+    """Server-authoritative funnel event emitted by the worker.
+
+    The backend validates browser-authored events. Worker events already come
+    from a leased project/job, so this deliberately stays a small INSERT and
+    lets the caller treat observability as best effort.
+    """
+    with conn.cursor() as cur:
+        payload = dict(detail or {})
+        payload["origin"] = "worker"
+        cur.execute("""INSERT INTO client_events
+                           (user_id, project_id, kind, asset_id, detail)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (user_id, project_id, str(kind)[:40], asset_id,
+                     Json(payload)))
+
+
 def has_index_greet(conn, session_id, greet_key):
     """Has this chat already been greeted for this asset? The greet must be
     idempotent against the CHAT, not against job flags: an index job that is
