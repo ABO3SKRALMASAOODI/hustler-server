@@ -1465,7 +1465,7 @@ _ROW_COST_SQL = model_prices.row_cost_sql(config.PRICE_FALLBACK)
 
 
 def video_settings(conn):
-    """Operator toggles from the admin panel: {'enabled', 'force'}.
+    """Operator toggles: {'enabled', 'force', 'scene_top'}.
 
     Falls back to the config defaults when the table does not exist yet (the
     backend creates it lazily, and the worker must not depend on having been
@@ -1474,19 +1474,27 @@ def video_settings(conn):
     transaction — a missing table would take the render down with it, which
     is a spectacular way for a cosmetic toggle to break exports.
     """
-    default = {"enabled": config.WATERMARK_ENABLED, "force": False}
+    default = {"enabled": config.WATERMARK_ENABLED, "force": False,
+               "scene_top": False}
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT to_regclass('public.video_settings') AS t")
             if not (cur.fetchone() or {}).get("t"):
                 return default
-            cur.execute("SELECT watermark_enabled, watermark_force "
+            # Read the new key through the row's JSON so an executor deployed
+            # before the admin endpoint has migrated the live table still
+            # honours the existing enabled/force switches.
+            cur.execute("SELECT watermark_enabled, watermark_force, "
+                        "COALESCE((to_jsonb(video_settings)->>"
+                        "'watermark_scene_top')::boolean, FALSE) "
+                        "AS watermark_scene_top "
                         "FROM video_settings WHERE id = 1")
             row = cur.fetchone()
         if not row:
             return default
         return {"enabled": bool(row["watermark_enabled"]),
-                "force": bool(row["watermark_force"])}
+                "force": bool(row["watermark_force"]),
+                "scene_top": bool(row["watermark_scene_top"])}
     except Exception:
         # A toggle lookup must never be the reason an export fails.
         return default

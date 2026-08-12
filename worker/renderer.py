@@ -1110,7 +1110,8 @@ def wants_watermark(variant, is_paid, settings=None):
     When settings is None the config default stands, so a worker that cannot
     reach the table still behaves sensibly.
     """
-    s = settings or {"enabled": config.WATERMARK_ENABLED, "force": False}
+    s = settings or {"enabled": config.WATERMARK_ENABLED, "force": False,
+                     "scene_top": False}
     if variant != "final" or not s.get("enabled"):
         return False
     if is_paid and not s.get("force"):
@@ -1123,6 +1124,17 @@ def watermark_version(variant, is_paid, settings=None):
     0 is a real answer ("this file carries no mark"), never "unknown"."""
     return (config.WATERMARK_VERSION
             if wants_watermark(variant, is_paid, settings) else 0)
+
+
+def watermark_position(settings=None):
+    """The cache stamp for the admin-selected placement.
+
+    "scene" means scene-aware when the render has an eligible horizontal
+    picture inside a 9:16 padded frame; every other layout falls back to the
+    normal frame corner. Keeping the selected mode in metadata makes a live
+    admin flip invalidate the previously rendered final in either direction.
+    """
+    return "scene" if (settings or {}).get("scene_top") else "frame"
 
 
 def watermark_current(meta, variant, is_paid, settings=None):
@@ -1138,11 +1150,50 @@ def watermark_current(meta, variant, is_paid, settings=None):
     feature carry no mark, which is correct for a paid user and stale for a
     free one, so only free users re-encode.
     """
-    return ((meta or {}).get("wm_v") or 0) == watermark_version(
-        variant, is_paid, settings)
+    want = watermark_version(variant, is_paid, settings)
+    if ((meta or {}).get("wm_v") or 0) != want:
+        return False
+    if not want:
+        return True
+    return ((meta or {}).get("wm_p") or "frame") == \
+        watermark_position(settings)
 
 
-def watermark_geometry(W, H):
+def watermark_scene_anchor_y(edl, src_w, src_h, W, H, settings=None):
+    """Top edge for the scene-aware mark, or None for the normal corner.
+
+    The requested alternate position is intentionally narrow: a horizontal
+    main picture contained inside a 9:16 `pad`/`pad_blur` output. In that
+    layout fit_fractions gives the exact foreground rectangle emitted by
+    frame_fit_filter, so the robot sits just inside the scene's top edge rather
+    than high in the portrait bars/backdrop. Crop layouts already fill the
+    frame and all other ratios retain the established position.
+    """
+    if not (settings or {}).get("scene_top"):
+        return None
+    frame = (edl or {}).get("frame") or {}
+    if frame.get("ratio") != "9:16" or \
+            frame.get("mode") not in ("pad", "pad_blur"):
+        return None
+    try:
+        if float(src_w) <= float(src_h):
+            return None
+        kind, _x0, y0, _x1, y1 = fit_fractions(
+            src_w, src_h, W, H, frame.get("mode"))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if kind != "pad" or y0 <= 0.0 or y1 >= 1.0:
+        return None
+    content_top = int(round(y0 * H))
+    content_bottom = int(round(y1 * H))
+    content_h = max(1, content_bottom - content_top)
+    rh = max(24, _even(H * config.WATERMARK_ROBOT_H_FRAC))
+    inset = max(10, int(round(content_h * config.WATERMARK_MARGIN_Y_FRAC)))
+    return max(content_top, min(content_top + inset,
+                                content_bottom - rh - 10))
+
+
+def watermark_geometry(W, H, anchor_y=None):
     """Pixel geometry of the mark for an output frame: the robot's box, and
     where the text sits relative to it. One function so the ffmpeg overlay
     and the ASS text agree on where the robot ends and the words begin —
@@ -1157,7 +1208,8 @@ def watermark_geometry(W, H):
     rw = max(16, _even(rh * config.WATERMARK_ROBOT_ASPECT))
     margin_x = max(10, int(round(min(W, H)
                                  * config.WATERMARK_MARGIN_X_FRAC)))
-    margin_y = max(10, int(round(H * config.WATERMARK_MARGIN_Y_FRAC)))
+    margin_y = (max(10, int(round(H * config.WATERMARK_MARGIN_Y_FRAC)))
+                if anchor_y is None else max(0, int(round(anchor_y))))
     fs = max(9, int(round(H * config.WATERMARK_TEXT_H_FRAC)))
     gap = max(6, int(round(fs * 0.72)))
     slide = max(4, int(round(W * config.WATERMARK_SLIDE_FRAC)))
@@ -1169,16 +1221,18 @@ def watermark_geometry(W, H):
             "y": margin_y + max(0, (rh - fs) // 2)}
 
 
-def build_watermark_ass(path, out_duration_s, W, H):
-    g = watermark_geometry(W, H)
+def build_watermark_ass(path, out_duration_s, W, H, anchor_y=None):
+    g = watermark_geometry(W, H, anchor_y)
     return graphics.build_watermark_ass(
         path, out_duration_s, (W, H), config.WATERMARK_TEXT,
+        config.WATERMARK_URL_TEXT,
         g["x_in"], g["x_out"], g["y"], g["fontsize"],
         config.WATERMARK_FONT_NAME, config.WATERMARK_PERIOD_S,
         config.WATERMARK_SHOW_S, config.WATERMARK_FADE_S)
 
 
-def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H):
+def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H,
+                     anchor_y=None):
     """Filtergraph for the corner mark: the robot pinned top-left, then the
     wordmark burned over it from its own .ass layer.
 
@@ -1191,7 +1245,7 @@ def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H):
     gives \\move/\\fad for free; drawtext would need ffmpeg built with
     libfreetype, which is not guaranteed.
     """
-    g = watermark_geometry(W, H)
+    g = watermark_geometry(W, H, anchor_y)
     parts = [f"[{robot_idx}:v]scale={g['rw']}:{g['rh']}[wmbot]"]
     tail = out_label if not wm_ass_path else "wmv"
     # shortest=1 is load-bearing: the robot is a LOOPED still, so with
@@ -1240,6 +1294,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       src_sar=1.0, src_fps=None,
                       overlay_inputs=None, gfx_ass_path=None,
                       frame_focus=None, robot_idx=None, wm_ass_path=None,
+                      wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
                       patch_inputs=None, cap_burn_offset=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
@@ -2440,7 +2495,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # two logos on one frame.
     if robot_idx is not None:
         parts.extend(_watermark_parts(vlabel, "vwm", robot_idx,
-                                      wm_ass_path, W, H))
+                                      wm_ass_path, W, H, wm_anchor_y))
         vlabel = "vwm"
 
     outro_here = outro_s > 0.0 and card_idx is not None
@@ -2992,7 +3047,8 @@ def _repair_legacy_insert_boundaries(edl_dict):
 
 
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
-               progress_cb=None, want_wm=False, cancelled_cb=None,
+               progress_cb=None, want_wm=False, wm_settings=None,
+               cancelled_cb=None,
                patch_locals=None, cap_ass_override=None,
                suppress_outro=False, cap_burn_offset=None,
                audio_only=False, asset_locals=None):
@@ -3035,6 +3091,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
     if preview:
         W, H, fps = preview_geometry(W, H, fps)
+    wm_anchor_y = watermark_scene_anchor_y(
+        edl, info["width"], info["height"], W, H, wm_settings)
 
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []
@@ -3243,7 +3301,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         robot_idx = next_idx
         next_idx += 1
         wm_ass_path = build_watermark_ass(
-            os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H)
+            os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H,
+            wm_anchor_y)
 
     plate_idx, plate_box = _screen_frame_input(
         edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx)
@@ -3309,6 +3368,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                               gfx_ass_path=gfx_path,
                               frame_focus=frame_focus, robot_idx=robot_idx,
                               wm_ass_path=wm_ass_path,
+                              wm_anchor_y=wm_anchor_y,
                               plate_idx=plate_idx, plate_box=plate_box,
                               behind_inputs=behind_inputs,
                               patch_inputs=patch_inputs,
@@ -4217,6 +4277,7 @@ def run_render_job(worker_db, job):
                                  out_local, workdir,
                                  preview=(variant == "preview"),
                                  progress_cb=_prog, want_wm=want_wm,
+                                 wm_settings=wm_settings,
                                  cancelled_cb=lambda: _abandoned[0],
                                  patch_locals=patch_locals,
                                  asset_locals=asset_locals)
@@ -4254,6 +4315,7 @@ def run_render_job(worker_db, job):
                                  out_local, workdir,
                                  preview=(variant == "preview"),
                                  progress_cb=_prog, want_wm=want_wm,
+                                 wm_settings=wm_settings,
                                  cancelled_cb=lambda: _abandoned[0],
                                  patch_locals=patch_locals,
                                  asset_locals=asset_locals)
@@ -4387,7 +4449,9 @@ def run_render_job(worker_db, job):
                   "trans_v": config.TRANSITION_VERSION,
                   "tail_v": config.MUSIC_TAIL_VERSION,
                   "wm_v": watermark_version(variant, is_paid,
-                                            wm_settings)})
+                                            wm_settings),
+                  "wm_p": (watermark_position(wm_settings)
+                           if want_wm else None)})
         # Reclaim the renders this one just replaced. Unique-per-render keys
         # made recovery possible but left every superseded object in the bucket
         # forever; only this exact (variant, version) is pruned, so pinned older

@@ -255,6 +255,22 @@ def test_a_paid_users_marked_export_re_exports_after_upgrade():
                   version=3)
 
 
+def test_a_watermark_position_change_re_exports_the_marked_final():
+    meta = {"wm_v": video.WATERMARK_VERSION, "wm_p": "frame"}
+    scene = {"enabled": True, "force": False, "scene_top": True}
+    assert not video._watermark_is_current(meta, is_paid=False,
+                                           settings=scene)
+    assert video._watermark_is_current(
+        {"wm_v": video.WATERMARK_VERSION, "wm_p": "scene"},
+        is_paid=False, settings=scene)
+
+
+def test_watermark_position_never_reencodes_a_clean_paid_final():
+    scene = {"enabled": True, "force": False, "scene_top": True}
+    assert video._watermark_is_current({"wm_v": 0, "wm_p": "frame"},
+                                       is_paid=True, settings=scene)
+
+
 # ── the two halves must not drift again ─────────────────────────────────────
 
 def test_the_backend_and_worker_transition_rules_are_the_same_rule():

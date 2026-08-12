@@ -4663,7 +4663,7 @@ def _worker_confirmed_current(cur, project_id):
 # Mirrors worker/config.WATERMARK_VERSION — a worker test asserts they match.
 # The free-tier mark is burned into FINAL renders only (see the worker's
 # renderer.wants_watermark), so this is the backend half of the same rule.
-WATERMARK_VERSION = 3
+WATERMARK_VERSION = 4
 
 
 def _user_is_paid(cur, user_id):
@@ -4691,19 +4691,26 @@ def _watermark_settings(cur):
     postgres a failed statement poisons the whole transaction — and this runs
     inside /state, which is polled every 2s for every open studio.
     """
-    default = {"enabled": True, "force": False}
+    default = {"enabled": True, "force": False, "scene_top": False}
     try:
         cur.execute("SELECT to_regclass('public.video_settings') AS t")
         row = cur.fetchone()
         if not row or not (row.get("t") if isinstance(row, dict) else row["t"]):
             return default
-        cur.execute("SELECT watermark_enabled, watermark_force "
+        # The admin GET lazily adds watermark_scene_top. Reading it via the
+        # row JSON preserves the existing master/force values during deploy
+        # skew, before anyone has opened that page to run the migration.
+        cur.execute("SELECT watermark_enabled, watermark_force, "
+                    "COALESCE((to_jsonb(video_settings)->>"
+                    "'watermark_scene_top')::boolean, FALSE) "
+                    "AS watermark_scene_top "
                     "FROM video_settings WHERE id = 1")
         row = cur.fetchone()
         if not row:
             return default
         return {"enabled": bool(row["watermark_enabled"]),
-                "force": bool(row["watermark_force"])}
+                "force": bool(row["watermark_force"]),
+                "scene_top": bool(row["watermark_scene_top"])}
     except Exception:
         return default
 
@@ -4738,9 +4745,16 @@ def _watermark_is_current(meta, is_paid, settings=None):
     Absent stamp means 0 (no mark): correct for a paid user, stale for a free
     one, so only free users re-encode their pre-feature exports.
     """
-    want = _watermark_wanted(is_paid, settings or {"enabled": True,
-                                                   "force": False})
-    return ((meta or {}).get("wm_v") or 0) == want
+    settings = settings or {"enabled": True, "force": False,
+                            "scene_top": False}
+    want = _watermark_wanted(is_paid, settings)
+    if ((meta or {}).get("wm_v") or 0) != want:
+        return False
+    if not want:
+        return True
+    stored_position = (meta or {}).get("wm_p") or "frame"
+    wanted_position = "scene" if settings.get("scene_top") else "frame"
+    return stored_position == wanted_position
 
 
 def _final_gate(cur, project_id, user_id):

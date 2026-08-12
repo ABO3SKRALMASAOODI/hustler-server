@@ -5135,6 +5135,15 @@ check("watermark: a paid user's clean final is served from cache",
 check("watermark: previews ignore the mark entirely (no re-render storm)",
       renderer.watermark_current({}, "preview", is_paid=False)
       and renderer.watermark_current(None, "preview", is_paid=True))
+check("watermark: changing the admin position invalidates a marked final",
+      not renderer.watermark_current(
+          {"wm_v": wconfig.WATERMARK_VERSION, "wm_p": "frame"},
+          "final", is_paid=False,
+          settings={"enabled": True, "force": False, "scene_top": True})
+      and renderer.watermark_current(
+          {"wm_v": wconfig.WATERMARK_VERSION, "wm_p": "scene"},
+          "final", is_paid=False,
+          settings={"enabled": True, "force": False, "scene_top": True}))
 
 # The backend half must agree, or the studio serves a stale final forever.
 _bev2 = open(os.path.join(os.path.dirname(__file__),
@@ -5160,7 +5169,8 @@ exec(compile(ast.Module(
 check("watermark: the backend exposes the toggle rule as its own function",
       "_watermark_wanted" in _wm_ns and "_watermark_is_current" in _wm_ns)
 check("watermark: the backend actually READS video_settings",
-      "_watermark_settings" in _bev2 and "watermark_force" in _bev2)
+      "_watermark_settings" in _bev2 and "watermark_force" in _bev2
+      and "watermark_scene_top" in _bev2)
 
 for _paid in (False, True):
     for _en in (False, True):
@@ -5178,6 +5188,13 @@ for _paid in (False, True):
                   f"force={_force}",
                   _wm_ns["_watermark_is_current"]({"wm_v": _worker_v},
                                                   _paid, _s))
+
+for _scene_top, _position in ((False, "frame"), (True, "scene")):
+    _s = {"enabled": True, "force": False, "scene_top": _scene_top}
+    _meta = {"wm_v": wconfig.WATERMARK_VERSION, "wm_p": _position}
+    check(f"watermark position agree: {_position}",
+          renderer.watermark_current(_meta, "final", False, _s)
+          and _wm_ns["_watermark_is_current"](_meta, False, _s))
 
 # Geometry: the text must start clear of the robot, or the words sit on it.
 for _W, _H in ((1080, 1920), (1920, 1080), (1080, 1080), (864, 1080)):
@@ -5206,6 +5223,28 @@ check("watermark 9:16: robot clears Instagram's ~9% side-crop",
       _g916["margin_x"] >= int(1080 * 0.095))
 check("watermark 9:16: robot sits below the top UI band (>=4.5% of H)",
       _g916["margin_y"] >= int(1920 * 0.045))
+
+_scene_edl = {"frame": {"ratio": "9:16", "mode": "pad_blur"}}
+_scene_y = renderer.watermark_scene_anchor_y(
+    _scene_edl, 1920, 1080, 1080, 1920,
+    {"enabled": True, "force": False, "scene_top": True})
+_scene_fit = renderer.fit_fractions(1920, 1080, 1080, 1920, "pad_blur")
+_scene_top = int(round(_scene_fit[2] * 1920))
+_scene_bottom = int(round(_scene_fit[4] * 1920))
+check("watermark scene-top: horizontal footage in a padded 9:16 frame "
+      "moves the mark onto the visible scene",
+      _scene_y is not None and _scene_top < _scene_y < _scene_bottom
+      and _scene_y > _g916["margin_y"])
+check("watermark scene-top: current corner and ineligible layouts stay put",
+      renderer.watermark_scene_anchor_y(
+          _scene_edl, 1920, 1080, 1080, 1920,
+          {"scene_top": False}) is None
+      and renderer.watermark_scene_anchor_y(
+          {"frame": {"ratio": "9:16", "mode": "crop"}},
+          1920, 1080, 1080, 1920, {"scene_top": True}) is None
+      and renderer.watermark_scene_anchor_y(
+          {"frame": {"ratio": "16:9", "mode": "pad"}},
+          1920, 1080, 1920, 1080, {"scene_top": True}) is None)
 
 # Font drift: a family-name mismatch falls back to DejaVu SILENTLY, which is
 # exactly how a bare font override once shipped the wrong face.
@@ -5245,15 +5284,23 @@ try:
 except ImportError:
     pass
 
-# The ASS layer: two events per cycle (out-and-back needs one \move each way).
+# The ASS layer: the product line has two events per cycle (out-and-back), and
+# the URL fills the old empty interval until the next cycle starts.
 _ass_p = os.path.join(tempfile.mkdtemp(), "wm.ass")
 _res = renderer.build_watermark_ass(_ass_p, 25.0, 1080, 1920)
 _body = open(_ass_p).read()
 _dialogs = [l for l in _body.splitlines() if l.startswith("Dialogue:")]
+_primary_dialogs = [l for l in _dialogs if wconfig.WATERMARK_TEXT in l]
+_url_dialogs = [l for l in _dialogs if wconfig.WATERMARK_URL_TEXT in l]
 _cycles = int(25.0 // wconfig.WATERMARK_PERIOD_S) + 1
 check("watermark: the ass layer is written", _res == _ass_p)
-check("watermark: two events per cycle (slide out, slide back)",
-      len(_dialogs) == 2 * _cycles)
+check("watermark: the product line says VALMERA AI AGENT",
+      "VALMERA AI AGENT" in wconfig.WATERMARK_TEXT
+      and wconfig.WATERMARK_TEXT in _body)
+check("watermark: two product events per cycle (slide out, slide back)",
+      len(_primary_dialogs) == 2 * _cycles)
+check("watermark: valmera.io fills the former empty interval",
+      bool(_url_dialogs) and wconfig.WATERMARK_URL_TEXT == "valmera.io")
 check("watermark: it slides BOTH ways", _body.count("\\move") == len(_dialogs))
 check("watermark: it fades in and out", "\\fad(" in _body)
 check("watermark: it is anchored top-left", "\\an7" in _body)
@@ -5270,6 +5317,9 @@ check("watermark: no event runs past the end of the program",
       max(_ends) <= 25.0 + 1e-6)
 check("watermark: events are ordered and non-overlapping",
       all(_starts[i] >= _ends[i - 1] - 1e-6 for i in range(1, len(_dialogs))))
+check("watermark: there is no textless gap between alternating events",
+      all(_starts[i] <= _ends[i - 1] + 0.02
+          for i in range(1, len(_dialogs))))
 # The overlay MUST end with the programme. The robot is a looped still, so
 # with overlay's default shortest=0 the filter emits frames forever after the
 # video ends and ffmpeg encodes into the void -- this hung a real export at
@@ -5322,6 +5372,9 @@ _bav = open(os.path.join(os.path.dirname(__file__),
                          "../../backend/routes/admin_video.py")).read()
 check("toggle: the backend creates video_settings lazily (not in models.py)",
       "CREATE TABLE IF NOT EXISTS video_settings" in _bav)
+check("toggle: the backend migrates the scene-top choice on the live table",
+      "ADD COLUMN IF NOT EXISTS" in _bav
+      and "watermark_scene_top BOOLEAN DEFAULT FALSE" in _bav)
 check("toggle: the worker checks to_regclass before reading the table "
       "(a failed statement would poison the render's transaction)",
       "to_regclass('public.video_settings')" in

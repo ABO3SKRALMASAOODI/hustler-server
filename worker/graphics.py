@@ -751,14 +751,16 @@ def build_gfx_ass(edl, out_duration_s, path, play_res=BASE_PLAY_RES):
 WATERMARK_STYLE = "WM"
 
 
-def build_watermark_ass(path, out_duration_s, play_res, text, x_in, x_out,
-                        y, fontsize, font, period_s, show_s, fade_s):
+def build_watermark_ass(path, out_duration_s, play_res, text, alternate_text,
+                        x_in, x_out, y, fontsize, font, period_s, show_s,
+                        fade_s):
     """Write the watermark's text layer: it slides out from beside the robot,
-    holds, then slides back and is gone until the next cycle.
+    holds, then slides back. The site address replaces it for the rest of the
+    cycle, so the robot is never left beside an empty space.
 
-    Two events per cycle rather than one, because \\move is a single linear
-    tween — out-and-back needs one event each way. The pair is seamless: the
-    second starts exactly where the first ended, at the same x.
+    The product line uses two events per cycle because \\move is a single
+    linear tween — out-and-back needs one event each way. The pair is
+    seamless; the alternate line is a third event filling the former gap.
 
     Returns path, or None when the program is too short to show the mark
     once (an empty .ass would still cost a subtitles pass for nothing).
@@ -780,6 +782,16 @@ def build_watermark_ass(path, out_duration_s, play_res, text, x_in, x_out,
             events.append(
                 (b0, b1, rf"{{\an7\move({x_out},{y},{x_in},{y},0,{fade_ms})"
                          rf"\fad(0,{fade_ms})}}{text}"))
+        c0, c1 = t + show_s, min(t + period_s, out_duration_s)
+        if alternate_text and c1 - c0 > 0.05:
+            # Keep very short tail fragments visible: an ASS fade longer than
+            # half the event would make the replacement effectively vanish.
+            alt_fade_ms = min(
+                fade_ms, max(40, int(round((c1 - c0) * 500))))
+            events.append(
+                (c0, c1, rf"{{\an7\move({x_in},{y},{x_out},{y},0,{alt_fade_ms})"
+                         rf"\fad({alt_fade_ms},{alt_fade_ms})}}"
+                         f"{alternate_text}"))
         t += period_s
     if not events:
         return None

@@ -1450,15 +1450,12 @@ PREVIEW_MAX_LONG_EDGE = int(os.getenv("PREVIEW_MAX_LONG_EDGE", "1280"))
 # wasted encodes on a turn that keeps writing version after version —
 # stitching keeps each one cheap, but not free.
 # Intermediate speculative encodes produced 52 previews across five projects,
-# most obsolete before completion. Batch first; prove the candidate once and
-# allow one ordinary repair proof. A third proof is available only when the
-# latest independent review still reports a concrete defect; agent_tools owns
-# that gate, so this ceiling is not permission for another polish pass.
+# most obsolete before completion. Batch first; speculative work remains
+# capped because obsolete background encodes are waste, while explicit writes
+# and requested previews remain available for the whole turn.
 SPECULATIVE_PREVIEWS = os.getenv("SPECULATIVE_PREVIEWS", "0") == "1"
 SPECULATIVE_PREVIEWS_MAX = min(
     1, max(0, int(os.getenv("SPECULATIVE_PREVIEWS_MAX", "1"))))
-AGENT_MAX_PREVIEWS_PER_TURN = min(
-    3, max(2, int(os.getenv("AGENT_MAX_PREVIEWS_PER_TURN", "3"))))
 # The height a preview is actually WRITTEN at. This number is not new — the
 # graph has always ended with `scale=-2:min(480,...)` — but it lived as a
 # literal at the end of the filter chain, which meant every filter before it
@@ -1627,7 +1624,9 @@ MUSIC_TAIL_VERSION = 1
 # side, and the top strip sits under the status bar / Reels header — at the
 # old 3% corner the robot and the first words were being eaten. The bump
 # re-encodes every cached free-tier final at the new position.
-WATERMARK_VERSION = 3
+# 4 = the copy alternates continuously between the fuller product name and
+# valmera.io. The bump re-encodes cached marked finals with the new text.
+WATERMARK_VERSION = 4
 # ON by owner's decision (the tradeoff was raised and taken deliberately).
 #
 # KNOWN OUTSTANDING: 44 public pages (58 occurrences) plus public/llms.txt and
@@ -1641,7 +1640,9 @@ WATERMARK_ENABLED = os.getenv("WATERMARK_ENABLED", "1") == "1"
 # Capitalised at the owner's request. Set as a literal rather than .upper()'d
 # at render time so an operator overriding WATERMARK_TEXT gets exactly the
 # casing they typed instead of having it silently rewritten.
-WATERMARK_TEXT = os.getenv("WATERMARK_TEXT", "EDITED BY VALMERA AGENT")
+WATERMARK_TEXT = os.getenv("WATERMARK_TEXT",
+                           "EDITED BY VALMERA AI AGENT")
+WATERMARK_URL_TEXT = os.getenv("WATERMARK_URL_TEXT", "valmera.io")
 # The site's wordmark face (frontend navbar uses Plus Jakarta Sans 800), so
 # the mark on the video and the logo on the page are the same type. This is
 # the font's FULL name — libass resolves it out of the bundled fonts dir the
@@ -1665,9 +1666,10 @@ WATERMARK_TEXT_H_FRAC = float(os.getenv("WATERMARK_TEXT_H_FRAC", "0.0175"))
 # asset with a different aspect would silently overlap the two. A worker test
 # asserts this matches the bundled file.
 WATERMARK_ROBOT_ASPECT = 1467.0 / 2157.0
-# Timing of one cycle: hidden, slide out + fade in, hold, slide back + fade
-# out. Long period and short reveal on purpose — "easy to notice but not
-# annoying" means it must not be reading as a banner.
+# Timing of one cycle: the product line slides out + fades in, holds, then
+# slides back while valmera.io takes its place for the rest of the cycle.
+# The robot and one of the two text lines are therefore always branding the
+# programme without either line reading as a permanent banner.
 WATERMARK_PERIOD_S = float(os.getenv("WATERMARK_PERIOD_S", "11.0"))
 WATERMARK_SHOW_S = float(os.getenv("WATERMARK_SHOW_S", "3.4"))
 WATERMARK_FADE_S = float(os.getenv("WATERMARK_FADE_S", "0.5"))

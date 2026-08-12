@@ -1903,9 +1903,13 @@ def _ensure_video_settings(cur):
             id INTEGER PRIMARY KEY,
             watermark_enabled BOOLEAN DEFAULT TRUE,
             watermark_force BOOLEAN DEFAULT FALSE,
+            watermark_scene_top BOOLEAN DEFAULT FALSE,
             updated_at TIMESTAMP DEFAULT NOW()
         )
     """)
+    # CREATE TABLE IF NOT EXISTS does not add fields to the live table.
+    cur.execute("ALTER TABLE video_settings ADD COLUMN IF NOT EXISTS "
+                "watermark_scene_top BOOLEAN DEFAULT FALSE")
     cur.execute("INSERT INTO video_settings (id) VALUES (1) "
                 "ON CONFLICT (id) DO NOTHING")
 
@@ -1917,12 +1921,14 @@ def video_settings_get():
         cur = conn.cursor()
         _ensure_video_settings(cur)
         conn.commit()
-        cur.execute("SELECT watermark_enabled, watermark_force, updated_at "
+        cur.execute("SELECT watermark_enabled, watermark_force, "
+                    "watermark_scene_top, updated_at "
                     "FROM video_settings WHERE id = 1")
         row = cur.fetchone() or {}
     return jsonify({
         "watermark_enabled": bool(row.get("watermark_enabled", True)),
         "watermark_force": bool(row.get("watermark_force", False)),
+        "watermark_scene_top": bool(row.get("watermark_scene_top", False)),
         "updated_at": (row.get("updated_at").isoformat()
                        if row.get("updated_at") else None),
     })
@@ -1939,7 +1945,8 @@ def video_settings_set():
         # flipped independently without one clobbering the other.
         sets, vals = [], []
         for key, col in (("watermark_enabled", "watermark_enabled"),
-                         ("watermark_force", "watermark_force")):
+                         ("watermark_force", "watermark_force"),
+                         ("watermark_scene_top", "watermark_scene_top")):
             if key in body:
                 sets.append(f"{col} = %s")
                 vals.append(bool(body[key]))
@@ -1948,12 +1955,15 @@ def video_settings_set():
         cur.execute(f"UPDATE video_settings SET {', '.join(sets)}, "
                     "updated_at = NOW() WHERE id = 1", vals)
         conn.commit()
-        cur.execute("SELECT watermark_enabled, watermark_force "
+        cur.execute("SELECT watermark_enabled, watermark_force, "
+                    "watermark_scene_top "
                     "FROM video_settings WHERE id = 1")
         row = cur.fetchone() or {}
     return jsonify({"ok": True,
                     "watermark_enabled": bool(row.get("watermark_enabled")),
-                    "watermark_force": bool(row.get("watermark_force"))})
+                    "watermark_force": bool(row.get("watermark_force")),
+                    "watermark_scene_top": bool(
+                        row.get("watermark_scene_top"))})
 
 
 # ─────────────────────────────────────────────────────────────────────────
