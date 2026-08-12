@@ -31,6 +31,11 @@ from schemas import MAX_WORDS_PER_CAPTION
 
 FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
+# Stored on every newly authored transcript-caption track.  Historical EDLs
+# omit it and deliberately stay on the frozen v1 grouping/layout path; never
+# infer an engine version from a preset at render time.
+CAPTION_DESIGN_VERSION = 2
+
 MAX_LINE_CHARS = 42
 MAX_LINES = 2
 MIN_EVENT_S = 0.6
@@ -82,7 +87,7 @@ DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
                  "outline_color": None, "outline_width": None,
                  "shadow": None, "background_color": None,
                  "background_opacity": None, "tracking": None,
-                 "text_align": None}
+                 "text_align": None, "anchor_y": None}
 
 # Every style key that flows from the EDL into a render. Kept as ONE tuple
 # because it has to be applied in three places (_norm_style, write_ass's
@@ -96,12 +101,12 @@ STYLE_KEYS = ("color", "size", "position", "highlight_color", "animation",
               "size_scale", "preset", "font", "effect", "layout", "leading",
               "emphasis", "emphasis_scale", "outline_color", "outline_width",
               "shadow", "background_color", "background_opacity", "tracking",
-              "text_align")
+              "text_align", "anchor_y")
 # Keys whose value is meaningful when falsy (0, 0.0) and so must NOT be copied
 # with a truthiness test.
 STYLE_KEYS_NUMERIC = ("leading", "emphasis_scale", "size_scale",
                       "outline_width", "shadow", "background_opacity",
-                      "tracking")
+                      "tracking", "anchor_y")
 
 # ── Premium presets ──────────────────────────────────────────────────────
 # Every preset is one coherent, opinionated look. base_size is the 'm'
@@ -247,6 +252,7 @@ PRESETS = {
         "emph_scale": 1.2, "num_scale": 1.45,
         "treatments": ("serif", "accent"),
         "active": None, "position": "bottom", "animation": "fade",
+        "punctuation": "full", "target_words": 6,
     },
 
     # ── Coherent production families ────────────────────────────────
@@ -265,6 +271,7 @@ PRESETS = {
         "active": None, "position": "bottom", "animation": "fade",
         "layout": "stack", "leading": 1.02, "stagger": 0.0,
         "word_anim": "fade",
+        "punctuation": "expressive", "target_words": 4,
     },
     "documentary": {
         # Long-form/readability family: restrained two-line subtitles on a
@@ -279,6 +286,7 @@ PRESETS = {
         "active": None, "position": "bottom", "animation": "fade",
         "background_color": "#111318", "background_opacity": 0.72,
         "box_pad": 8.0, "tracking": 0.0, "anchor_y": 0.76,
+        "punctuation": "full", "target_words": 8,
     },
     "broadcast": {
         # News/explainer lower-third: confident left alignment and an opaque
@@ -291,6 +299,7 @@ PRESETS = {
         "active": None, "position": "bottom", "animation": "slide_up",
         "background_color": "#0A0D14", "background_opacity": 0.82,
         "box_pad": 9.0, "tracking": 0.25, "anchor_y": 0.76,
+        "punctuation": "full", "target_words": 6,
     },
     "retro": {
         # Condensed poster type with a deliberate thick keyline. Useful for
@@ -376,6 +385,7 @@ PRESETS = {
         "active": "fade", "position": "bottom",
         "layout": "stack", "leading": 1.06, "stagger": 0.0,
         "word_anim": "fade",
+        "punctuation": "full", "target_words": 4,
     },
     "fashion": {
         # Wide, editorial, all-caps — magazine cover energy.
@@ -399,6 +409,7 @@ PRESETS = {
         "active": "fade", "position": "bottom",
         "layout": "stack", "leading": 1.0, "stagger": 0.0,
         "word_anim": "fade",
+        "punctuation": "full", "target_words": 4,
     },
     "impact": {
         # Bebas condensed caps, stacked tight — sports/hype without Anton's
@@ -446,9 +457,11 @@ PREMIUM_ANCHOR_Y = {"top": 0.16, "middle": 0.50, "bottom": 0.80}
 PREMIUM_MARGIN_X = {"left": 0.085, "center": 0.10, "right": 0.085}
 
 
-def _premium_anchor(p, position):
+def _premium_anchor(p, position, style=None):
     """Preset-aware vertical anchor; panel subtitles sit slightly higher so
     their backing block also clears a vertical platform's bottom UI band."""
+    if (style or {}).get("anchor_y") is not None:
+        return min(max(float(style["anchor_y"]), 0.05), 0.95)
     if position == "bottom" and p.get("anchor_y") is not None:
         return float(p["anchor_y"])
     return PREMIUM_ANCHOR_Y.get(position, 0.5)
@@ -599,16 +612,28 @@ def _anim_prefix(anim, style, play_res):
         # \move needs the real anchor point: derive it from the alignment
         # + margins exactly as style_line computes them.
         s = _norm_style(style)
-        cx = int(play_res[0] / 2)
-        margin_v = bottom_margin_v(s["position"], play_res)
-        if s["position"] == "top":
-            y = margin_v
-        elif s["position"] == "middle":
-            y = int(play_res[1] / 2)
+        align = {"left": 4, "center": 5, "right": 6}.get(
+            s.get("text_align") or "center", 5)
+        margin_x = max(10, round(60 * play_res[0] / BASE_PLAY_RES[0]))
+        if align == 4:
+            cx = margin_x
+        elif align == 6:
+            cx = int(play_res[0]) - margin_x
         else:
-            y = int(play_res[1]) - margin_v
+            cx = int(play_res[0] / 2)
+        if s.get("anchor_y") is not None:
+            y = int(float(s["anchor_y"]) * play_res[1])
+        else:
+            margin_v = bottom_margin_v(s["position"], play_res)
+            if s["position"] == "top":
+                y = margin_v
+            elif s["position"] == "middle":
+                y = int(play_res[1] / 2)
+            else:
+                y = int(play_res[1]) - margin_v
         off = max(12, int(0.04 * play_res[1]))
-        return rf"{{\move({cx},{y + off},{cx},{y},0,160)\fad(120,0)}}"
+        return (rf"{{\an{align}\move({cx},{y + off},{cx},{y},0,160)"
+                r"\fad(120,0)}}")
     return ""
 
 
@@ -813,8 +838,14 @@ def events_dynamic(out_words, style=None, max_words=None,
     else:
         group_n = min(int(max_words), KARAOKE_HARD_MAX) if max_words \
             else KARAOKE_MAX_WORDS
-    active_pre = (r"{\1c" + hl + r"\fscx62\fscy62"
-                  r"\t(0,90,\fscx114\fscy114)\t(90,170,\fscx106\fscy106)}")
+    # `animation=none` means exactly no motion. The active word still changes
+    # colour—otherwise karaoke would stop communicating which word is being
+    # spoken—but it never scales or eases. This branch used to ignore the
+    # setting even though the tool reported it as accepted.
+    active_pre = ((r"{\1c" + hl + "}") if s.get("animation") == "none" else
+                  (r"{\1c" + hl + r"\fscx62\fscy62"
+                   r"\t(0,90,\fscx114\fscy114)"
+                   r"\t(90,170,\fscx106\fscy106)}"))
     chunks, cur, chars = [], [], 0
     for w in out_words:
         would = chars + (1 if chars else 0) + len(w["w"])
@@ -952,6 +983,34 @@ def _display_word(w, upper):
     if upper:
         t = t.upper()
     return t or (w or "").strip()
+
+
+def _display_word_v2(w, upper, punctuation="expressive"):
+    """Presentation form for newly-authored caption tracks.
+
+    V1 removed every punctuation mark from every premium family.  That works
+    for poster-like hype text, but it makes interviews and explainers harder
+    to parse and erases the speaker's question/exclamation intent.  V2 keeps
+    full punctuation for subtitle/editorial families and at least expressive
+    ``?``/``!`` marks for creator looks.  Quotes are stripped only when they
+    wrap a token; apostrophes inside words remain untouched.
+    """
+    raw = (w or "").strip().strip("\"'“”‘’")
+    if punctuation == "full":
+        t = raw
+    elif punctuation == "none":
+        t = raw.rstrip(".,!?;:…")
+    else:
+        # Social captions look cleaner without commas/full stops, while ?/!
+        # materially change the read and should survive.
+        expressive = ""
+        m = re.search(r"([!?]+)[\"'”’]*$", raw)
+        if m:
+            expressive = m.group(1)
+        t = raw.rstrip(".,!?;:…") + expressive
+    if upper:
+        t = t.upper()
+    return t or raw or (w or "").strip()
 
 
 def _premium_font_px(p, s, play_res):
@@ -1178,6 +1237,144 @@ def _premium_chunks(out_words, max_w, chunk_chars):
     return chunks
 
 
+# Words that should not be stranded at a phrase boundary.  Timing and
+# punctuation remain the primary signals, so languages absent from this small
+# list still segment correctly; the list only prevents conspicuously amateur
+# English/Spanish/French orphans such as "the / result" and "because / it".
+_WEAK_BOUNDARY_WORDS = {
+    "a", "an", "and", "as", "at", "because", "but", "by", "for", "from",
+    "if", "in", "is", "of", "on", "or", "that", "the", "to", "with",
+    "your", "my", "our", "their", "un", "una", "el", "la", "los", "las",
+    "de", "del", "en", "por", "para", "que", "y", "et", "le", "les",
+    "des", "du", "avec", "pour",
+}
+_STRONG_END = ".!?…"
+_SOFT_END = ",;:—–"
+
+
+def _chunk_word_key(word):
+    return _norm_word((word or {}).get("w") or "")
+
+
+def _hard_phrase_break(prev, nxt):
+    """Whether two consecutive timed words may never share one card."""
+    if nxt.get("brk"):
+        return True
+    try:
+        gap = float(nxt["t0"]) - float(prev["t1"])
+    except (KeyError, TypeError, ValueError):
+        gap = 0.0
+    token = str(prev.get("w") or "").rstrip("\"'”’ ")
+    # 620 ms is a real breath/beat in speech.  V1 waited 1.2 s, long enough
+    # to glue separate thoughts into the same visual sentence.
+    return gap >= 0.62 or token[-1:] in _STRONG_END
+
+
+def _chunk_duration_cap(p):
+    """Longest spoken span one v2 caption card should cover."""
+    if p.get("max_chunk_s") is not None:
+        return float(p["max_chunk_s"])
+    if p["mode"] == "karaoke":
+        return 1.85
+    if p["mode"] == "reveal":
+        return 2.45
+    if p.get("max_words", 0) >= 10:       # documentary/accessibility
+        return 4.6
+    return 3.2
+
+
+def _chunk_region_v2(words, max_w, chunk_chars, p):
+    """Globally optimize phrase boundaries inside one breath/sentence.
+
+    The old greedy splitter always filled to the cap.  A human editor instead
+    balances card length, breath timing, punctuation and grammar, and will
+    rebalance the previous card to avoid leaving a one-word widow.  Dynamic
+    programming gives that result deterministically in O(words * max_w).
+    """
+    n_words = len(words)
+    if not words:
+        return []
+    target = int(p.get("target_words") or (
+        min(max_w, 2) if p["mode"] == "karaoke" else
+        min(max_w, 3) if p["mode"] == "reveal" else
+        min(max_w, 6 if max_w >= 8 else 4)))
+    target = max(1, min(target, max_w))
+    duration_cap = _chunk_duration_cap(p)
+    # dp[i] = (cost from i onward, tuple of exclusive end indexes).
+    dp = [(float("inf"), ()) for _ in range(n_words + 1)]
+    dp[n_words] = (0.0, ())
+    for i in range(n_words - 1, -1, -1):
+        chars = 0
+        for j in range(i, min(n_words, i + max_w)):
+            token = str(words[j].get("w") or "")
+            chars += len(token) + (1 if j > i else 0)
+            if chars > chunk_chars and j > i:
+                break
+            span = max(0.0, float(words[j].get("t1", 0)) -
+                       float(words[i].get("t0", 0)))
+            if span > duration_cap and j > i:
+                break
+            rest_cost, rest_path = dp[j + 1]
+            if rest_cost == float("inf"):
+                continue
+            count = j - i + 1
+            # Prefer the authored target, but make a one-word card expensive
+            # unless the preset itself is one-word (spotlight).
+            cost = 0.34 * (count - target) ** 2
+            if count == 1 and max_w > 1:
+                cost += 2.4
+            # Very short multi-word flashes read as flicker; excessively long
+            # cards feel like subtitles pasted over a reel.
+            ideal_s = (1.35 if p["mode"] == "karaoke" else
+                       1.75 if p["mode"] == "reveal" else
+                       2.7 if max_w >= 8 else 2.05)
+            cost += 0.10 * (span - ideal_s) ** 2
+            if count > 1 and span < 0.55:
+                cost += 0.45
+            if j + 1 < n_words:
+                prev_raw = str(words[j].get("w") or "").rstrip("\"'”’ ")
+                gap = max(0.0, float(words[j + 1].get("t0", 0)) -
+                          float(words[j].get("t1", 0)))
+                # Reward a natural micro-pause or clause mark.
+                cost -= min(gap, 0.55) * 1.8
+                if prev_raw[-1:] in _SOFT_END:
+                    cost -= 0.85
+                # Never willingly strand a connector/determiner on either
+                # side of the card change when another valid split exists.
+                if _chunk_word_key(words[j]) in _WEAK_BOUNDARY_WORDS:
+                    cost += 2.1
+                if _chunk_word_key(words[j + 1]) in _WEAK_BOUNDARY_WORDS:
+                    cost += 0.8
+            total = cost + rest_cost
+            candidate = (total, (j + 1,) + rest_path)
+            if candidate < dp[i]:
+                dp[i] = candidate
+    path = dp[0][1]
+    if not path:
+        return [words]
+    out, start = [], 0
+    for end in path:
+        out.append(words[start:end])
+        start = end
+    return out
+
+
+def _premium_chunks_v2(out_words, max_w, chunk_chars, p):
+    """Prosody-aware caption cards for design_version 2."""
+    regions, current = [], []
+    for word in out_words:
+        if current and _hard_phrase_break(current[-1], word):
+            regions.append(current)
+            current = []
+        current.append(word)
+    if current:
+        regions.append(current)
+    chunks = []
+    for region in regions:
+        chunks.extend(_chunk_region_v2(region, max_w, chunk_chars, p))
+    return chunks
+
+
 def _premium_layout(disp, wpl, line_chars):
     """Word indices -> lines (word-count AND width capped)."""
     lines, cur, chars = [], [], 0
@@ -1201,7 +1398,7 @@ def _geom_prefix(p, s, play_res, lines, treats, px):
     FINAL chunk layout, then clamped on-frame."""
     W, H = play_res
     pos_name = s["position"] if s.get("_pos_set") else p["position"]
-    anchor = _premium_anchor(p, pos_name) * H
+    anchor = _premium_anchor(p, pos_name, s) * H
     scale_of = {"num": p["num_scale"], "num_plain": p["num_scale"],
                 "accent": p["emph_scale"], "serif": p["emph_scale"],
                 "box": 1.0}
@@ -1223,7 +1420,30 @@ def _geom_prefix(p, s, play_res, lines, treats, px):
     return rf"{{\an5\pos({x},{round(y)})}}"
 
 
-def _premium_panel(p, s, play_res, disp, treats, lines, px):
+def _rounded_rect_path(x0, y0, x1, y1, radius):
+    """ASS vector path for a rounded rectangle (cubic corner curves)."""
+    r = max(0.0, min(float(radius), (x1 - x0) / 2.0, (y1 - y0) / 2.0))
+    if r < 1.0:
+        return (f"m {round(x0)} {round(y0)} l {round(x1)} {round(y0)} "
+                f"l {round(x1)} {round(y1)} l {round(x0)} {round(y1)} "
+                f"l {round(x0)} {round(y0)}")
+    # kappa gives a close cubic approximation of a quarter circle.
+    k = r * 0.55228475
+    q = lambda value: int(round(value))
+    return (
+        f"m {q(x0 + r)} {q(y0)} l {q(x1 - r)} {q(y0)} "
+        f"b {q(x1 - r + k)} {q(y0)} {q(x1)} {q(y0 + r - k)} "
+        f"{q(x1)} {q(y0 + r)} l {q(x1)} {q(y1 - r)} "
+        f"b {q(x1)} {q(y1 - r + k)} {q(x1 - r + k)} {q(y1)} "
+        f"{q(x1 - r)} {q(y1)} l {q(x0 + r)} {q(y1)} "
+        f"b {q(x0 + r - k)} {q(y1)} {q(x0)} {q(y1 - r + k)} "
+        f"{q(x0)} {q(y1 - r)} l {q(x0)} {q(y0 + r)} "
+        f"b {q(x0)} {q(y0 + r - k)} {q(x0 + r - k)} {q(y0)} "
+        f"{q(x0 + r)} {q(y0)}")
+
+
+def _premium_panel(p, s, play_res, disp, treats, lines, px,
+                   design_version=None):
     """One translucent vector rectangle behind the complete caption block.
 
     ASS BorderStyle 3 looks acceptable only when an event has no inline word
@@ -1265,10 +1485,15 @@ def _premium_panel(p, s, play_res, disp, treats, lines, px):
         x0, x1 = (W - panel_w) / 2, (W + panel_w) / 2
     x0, x1 = max(0, x0), min(W, x1)
     alpha = round((1.0 - opacity) * 255)
+    if design_version == CAPTION_DESIGN_VERSION:
+        path = _rounded_rect_path(x0, y0, x1, y1,
+                                  max(8.0, min(panel_h * 0.16, 18.0 * f)))
+    else:
+        # Frozen v1 geometry for historical EDL reproducibility.
+        path = (f"m {round(x0)} {round(y0)} l {round(x1)} {round(y0)} "
+                f"l {round(x1)} {round(y1)} l {round(x0)} {round(y1)}")
     return (rf"{{\an7\pos(0,0)\p1\1c{_inline_hl(bg)}"
-            rf"\1a&H{alpha:02X}&\bord0\shad0}}"
-            rf"m {round(x0)} {round(y0)} l {round(x1)} {round(y0)} "
-            rf"l {round(x1)} {round(y1)} l {round(x0)} {round(y1)}")
+            rf"\1a&H{alpha:02X}&\bord0\shad0}}" + path)
 
 
 # \clip takes absolute frame coords. The composer only ever bands horizontally
@@ -1330,7 +1555,7 @@ def _stack_positions(p, s, play_res, lines, mults, px, anim):
     line_hs = [lead * px * m for m in lmults]
     block_h = sum(line_hs)
     pos_name = s["position"] if s.get("_pos_set") else p["position"]
-    anchor = _premium_anchor(p, pos_name) * H
+    anchor = _premium_anchor(p, pos_name, s) * H
     edge = 0.03 * H
     y0 = max(edge, min(anchor - block_h / 2, H - block_h - edge))
     stag = (_pget(p, "stagger") or 0.0) * W
@@ -1360,7 +1585,8 @@ def _stack_positions(p, s, play_res, lines, mults, px, anim):
     return out
 
 
-def _stack_mults(disp, treats, p, s, px, usable):
+def _stack_mults(disp, treats, p, s, px, usable,
+                 preserve_hierarchy=False):
     """Per-word size multipliers, clamped so no single word can overflow.
 
     A word wide enough to exceed the usable width makes libass WRAP the line
@@ -1369,13 +1595,30 @@ def _stack_mults(disp, treats, p, s, px, usable):
     applying to it. Shrinking the offending word instead keeps the composer
     authoritative over its own layout.
     """
-    out = []
+    out, requested = [], []
     for i, t in enumerate(disp):
         m = _treat_props(treats[i], p, s).get("mult", 1.0)
+        requested.append(m)
         w = max(1, len(t)) * p["char_w"] * px
         if w * m > usable:
             m = max(1.0, usable / w) if w <= usable else usable / w
         out.append(m)
+    if preserve_hierarchy:
+        # A long hero word cannot physically grow past the frame width.  V1
+        # shrank only that word, perversely making the intended hero SMALLER
+        # than its connector words.  V2 preserves the relative hierarchy by
+        # stepping the untreated support words down whenever a treated hero
+        # is width-capped near/below the base size.  The card still fits, but
+        # the eye lands where the editor intended.
+        capped_heroes = [i for i, (want, got) in enumerate(zip(requested, out))
+                         if treats[i] is not None and want > 1.05
+                         and got < min(want * 0.82, 1.30)]
+        if capped_heroes:
+            hero = max(out[i] for i in capped_heroes)
+            support_cap = max(0.34, hero / 1.34)
+            for i in range(len(out)):
+                if treats[i] is None:
+                    out[i] = min(out[i], support_cap)
     return out
 
 
@@ -1395,6 +1638,77 @@ def _stack_layout(disp, mults, p, px, usable):
     if cur:
         lines.append(cur)
     return lines
+
+
+def _stack_layout_v2(disp, mults, p, px, usable):
+    """Optically balanced line breaks for newly-authored stack captions.
+
+    Greedy wrapping makes the last line inherit whatever words were left,
+    which is how otherwise polished cards end up as a broad first line over a
+    lonely connector.  Caption groups are deliberately small, so enumerate
+    every legal 1-3 line partition and score the complete block: width balance,
+    grammatical edges, widows, and intentional hero-word isolation.
+    """
+    n = len(disp)
+    if n <= 1:
+        return [list(range(n))] if n else []
+    space = p["char_w"] * px * 0.4
+    widths = [max(1, len(t)) * p["char_w"] * px * mults[i]
+              for i, t in enumerate(disp)]
+
+    def line_width(a, b):
+        return sum(widths[a:b]) + max(0, b - a - 1) * space
+
+    candidates = []
+
+    def visit(start, lines):
+        if start == n:
+            candidates.append(lines)
+            return
+        if len(lines) >= PREMIUM_MAX_LINES:
+            return
+        max_end = min(n, start + int(p.get("wpl") or n))
+        for end in range(start + 1, max_end + 1):
+            if line_width(start, end) > usable + 1e-6:
+                break
+            visit(end, lines + [list(range(start, end))])
+
+    visit(0, [])
+    if not candidates:
+        return _stack_layout(disp, mults, p, px, usable)
+
+    align = p.get("align", "center")
+
+    def score(lines):
+        ws = [line_width(line[0], line[-1] + 1) for line in lines]
+        mean = sum(ws) / len(ws)
+        # Centred blocks expose ragged widths more than left-aligned ones.
+        balance = sum(((w - mean) / max(usable, 1.0)) ** 2 for w in ws)
+        cost = balance * (3.2 if align == "center" else 1.5)
+        cost += 0.11 * (len(lines) - 1)
+        for li, line in enumerate(lines):
+            first, last = line[0], line[-1]
+            one = len(line) == 1
+            hero = mults[first] >= 1.38
+            if one:
+                # A large hero word on its own line is editorial intent; an
+                # ordinary one-word widow is a layout accident.
+                cost += -0.45 if hero else 1.65
+                if li == len(lines) - 1 and not hero:
+                    cost += 0.75
+            if _norm_word(disp[last]) in _WEAK_BOUNDARY_WORDS:
+                cost += 1.45
+            if li > 0 and _norm_word(disp[first]) in _WEAK_BOUNDARY_WORDS:
+                cost += 0.55
+            fill = ws[li] / max(usable, 1.0)
+            if fill > 0.96:
+                cost += 0.35
+        # Stable deterministic tie-break: prefer fewer lines, then later
+        # breaks (a slightly fuller first line).
+        breaks = tuple(line[-1] + 1 for line in lines)
+        return cost, len(lines), tuple(-b for b in breaks)
+
+    return min(candidates, key=score)
 
 
 def _effect_of(name, p, s, global_effect):
@@ -1481,7 +1795,8 @@ def _stack_state_events(disp, treats, mults, lines, geoms, p, s, px, accent, bas
 
 
 def events_premium(out_words, style=None, max_words=None,
-                   play_res=BASE_PLAY_RES, emphasis_words=None):
+                   play_res=BASE_PLAY_RES, emphasis_words=None,
+                   design_version=None):
     """from_transcript events for a premium preset. Timing comes ONLY from
     the real word timestamps; layout and treatments are deterministic, so
     the same EDL always renders the same frame."""
@@ -1501,8 +1816,12 @@ def events_premium(out_words, style=None, max_words=None,
     max_w = min(int(max_words), MAX_WORDS_PER_CAPTION) if max_words \
         else p["max_words"]
     line_chars = _premium_line_chars(p, s, play_res)
-    chunks = _premium_chunks(out_words, max_w,
-                             line_chars * PREMIUM_MAX_LINES)
+    modern = design_version == CAPTION_DESIGN_VERSION
+    chunks = (_premium_chunks_v2(out_words, max_w,
+                                  line_chars * PREMIUM_MAX_LINES, p)
+              if modern else
+              _premium_chunks(out_words, max_w,
+                              line_chars * PREMIUM_MAX_LINES))
     base = _base_tags(p, s, px, f)
     mode = p["mode"]
     anim = _premium_anim_prefix(s.get("animation") or p.get("animation")) \
@@ -1515,6 +1834,7 @@ def events_premium(out_words, style=None, max_words=None,
     stack = layout == "stack"
     global_effect = s.get("effect") or _pget(p, "effect")
     word_anim = s.get("animation") or _pget(p, "word_anim")
+    motionless = s.get("animation") == "none"
 
     # Build the timeline of VISUAL STATES first, emit pixels second. The
     # no-overlap rule has to hold over states, not over Dialogue lines: in
@@ -1523,7 +1843,10 @@ def events_premium(out_words, style=None, max_words=None,
     # delete parts of a caption instead of resolving an overlap.
     segs, ctx, rot = [], [], 0
     for ci, chunk in enumerate(chunks):
-        disp = [_display_word(w["w"], upper) for w in chunk]
+        disp = [(_display_word_v2(w["w"], upper,
+                                  p.get("punctuation", "expressive"))
+                 if modern else _display_word(w["w"], upper))
+                for w in chunk]
         treats, rot = _assign_treatments(chunk, emph, p, s, rot)
         if mode == "karaoke":
             # only the SPOKEN word carries the accent in karaoke modes;
@@ -1536,20 +1859,35 @@ def events_premium(out_words, style=None, max_words=None,
             # behind the composer's back (see _stack_mults / _stack_layout).
             usable = play_res[0] - 2 * PREMIUM_MARGIN_X[_align_of(p, s)] \
                 * play_res[0]
-            mults = _stack_mults(disp, treats, p, s, px, usable)
-            lines = _stack_layout(disp, mults, p, px, usable)
+            mults = _stack_mults(disp, treats, p, s, px, usable,
+                                  preserve_hierarchy=modern)
+            lines = (_stack_layout_v2(disp, mults, p, px, usable)
+                     if modern else
+                     _stack_layout(disp, mults, p, px, usable))
             geom = _stack_positions(p, s, play_res, lines, mults, px,
                                     word_anim)
         else:
             mults = None
             lines = _premium_layout(disp, p["wpl"], line_chars)
             geom = _geom_prefix(p, s, play_res, lines, treats, px)
-        panel = _premium_panel(p, s, play_res, disp, treats, lines, px)
+        panel = _premium_panel(p, s, play_res, disp, treats, lines, px,
+                               design_version=design_version)
         ctx.append({"disp": disp, "treats": treats, "lines": lines,
                     "geom": geom, "mults": mults, "panel": panel})
         nxt_t0 = chunks[ci + 1][0]["t0"] if ci + 1 < len(chunks) else None
 
         def hold_end(w):
+            if modern:
+                # Keep continuous delivery visually continuous, but clear the
+                # card promptly on a breath.  V1 could hold a completed phrase
+                # through 1.2 s of silence, making the captions feel late even
+                # though every word timestamp was technically correct.
+                tail = 0.42 if mode == "static" else 0.30
+                if nxt_t0 is not None:
+                    gap = nxt_t0 - w["t1"]
+                    return nxt_t0 if gap <= 0.28 else min(w["t1"] + tail,
+                                                         nxt_t0)
+                return w["t1"] + tail
             if nxt_t0 is not None:
                 return nxt_t0 if nxt_t0 - w["t1"] <= 1.2 \
                     else min(w["t1"] + 0.9, nxt_t0)
@@ -1575,7 +1913,8 @@ def events_premium(out_words, style=None, max_words=None,
             if end <= start:
                 end = start + 0.12
             if mode == "reveal":
-                act = _word_anim_tags(word_anim, px) if stack else _POP_IN
+                act = ("" if motionless else
+                       _word_anim_tags(word_anim, px) if stack else _POP_IN)
                 segs.append({"ci": ci, "start": start, "end": end,
                              "last_i": i, "active_i": i, "active": act})
             else:  # karaoke: whole chunk visible, spoken word lights up
@@ -1585,9 +1924,10 @@ def events_premium(out_words, style=None, max_words=None,
                     act = (rf"\1c{DARK_TEXT}\3c{accent}\xbord{bx}"
                            rf"\ybord{by}\shad0")
                 elif treats[i] == "box":
-                    act = _POP_ACTIVE
+                    act = "" if motionless else _POP_ACTIVE
                 else:
-                    act = rf"\1c{accent}" + _POP_ACTIVE
+                    act = rf"\1c{accent}" + ("" if motionless else
+                                              _POP_ACTIVE)
                 segs.append({"ci": ci, "start": start, "end": end,
                              "last_i": len(chunk) - 1, "active_i": i,
                              "active": act})
@@ -1680,18 +2020,18 @@ def events_from_items(items, tl, play_res=BASE_PLAY_RES):
                 p, ns, play_res, disp, [None] * len(disp), panel_lines, px)
             if panel:
                 events.append({"start": start,
-                               "end": max(end, start + MIN_EVENT_S),
+                               "end": end,
                                "text": panel, "item_style": get("style"),
                                "layer": 0, "premium": True})
             events.append({"start": start,
-                           "end": max(end, start + MIN_EVENT_S),
+                           "end": end,
                            "text": geom + anim +
                            r"\N".join(_esc(l) for l in lines),
                            "item_style": get("style"), "layer": 5,
                            "premium": True})
             continue
         lines = _wrap(get("text"), item_chars)[:MAX_LINES]
-        events.append({"start": start, "end": max(end, start + MIN_EVENT_S),
+        events.append({"start": start, "end": end,
                        "text": r"\N".join(_esc(l) for l in lines),
                        "item_style": get("style")})
     events.sort(key=lambda ev: ev["start"])
@@ -1739,6 +2079,21 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
                 and not ev.get("premium"):
             ev["text"] = _anim_prefix(eff["animation"], eff,
                                       play_res) + ev["text"]
+        # Placement analysis can choose a precise safe vertical anchor, not
+        # just top/middle/bottom. Premium captions already emit explicit
+        # geometry. Give classic/static/dynamic captions the same promise.
+        # slide_up's \move above owns the target position and already carries
+        # the alignment, so adding \pos beside it would be contradictory ASS.
+        if eff.get("anchor_y") is not None and not ev.get("premium") \
+                and eff.get("animation") != "slide_up":
+            align = {"left": 4, "center": 5, "right": 6}.get(
+                eff.get("text_align") or "center", 5)
+            margin_x = max(10, round(60 * play_res[0] / BASE_PLAY_RES[0]))
+            x = (margin_x if align == 4 else
+                 int(play_res[0]) - margin_x if align == 6 else
+                 int(play_res[0] / 2))
+            y = int(float(eff["anchor_y"]) * play_res[1])
+            ev["text"] = rf"{{\an{align}\pos({x},{y})}}" + ev["text"]
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(ASS_HEADER_TOP.format(resx=int(play_res[0]),
@@ -1827,49 +2182,65 @@ def _clamp_event_ends_to_mutes(events, mutes):
             if float(ev["end"]) - float(ev["start"]) > 0.04]
 
 
-def _placement_runs(out_words, track):
+def _placement_runs(out_words, track, fallback_position=None,
+                    fallback_anchor_y=None):
     """Contiguous word runs sharing one measured caption position.
 
-    Words in an uncovered span are intentionally omitted: the compiler left
-    that source window uncovered because every candidate band was occupied.
-    Showing fewer captions is preferable to printing them across a face/UI.
+    A modern track always has a least-obstructed fallback. Historical EDLs
+    preserve their original omission behaviour, while design-v2 never loses
+    spoken words merely because every band carried some visual content.
     """
     if not track:
         return []
-    spans = [(float(x.get("t0", 0)), float(x.get("t1", 0)), x.get("position"))
+    spans = [(float(x.get("t0", 0)), float(x.get("t1", 0)),
+              x.get("position"), x.get("anchor_y"))
              for x in track]
-    runs, current, current_pos = [], [], None
+    runs, current, current_key = [], [], None
     for raw in out_words:
         word = dict(raw)
         smid = (float(word.get("src_t0", 0)) +
                 float(word.get("src_t1", 0))) / 2.0
-        pos = next((p for a, b, p in spans if a <= smid <= b), None)
-        if pos != current_pos or word.get("brk"):
-            if current and current_pos:
-                runs.append((current_pos, current))
-            current, current_pos = [], pos
-        if pos:
+        placed = next(((p, ay) for a, b, p, ay in spans if a <= smid <= b),
+                      None)
+        key = placed or ((fallback_position, fallback_anchor_y)
+                         if fallback_position else None)
+        if key != current_key or word.get("brk"):
+            if current and current_key:
+                runs.append((current_key[0], current_key[1], current))
+            current, current_key = [], key
+        if key:
             if not current:
                 word["brk"] = True
             current.append(word)
-    if current and current_pos:
-        runs.append((current_pos, current))
+    if current and current_key:
+        runs.append((current_key[0], current_key[1], current))
     return runs
 
 
 def _positioned_events(out_words, captions, global_style, play_res):
     """Build transcript events per measured placement run."""
-    runs = _placement_runs(out_words, captions.get("placement_track") or [])
+    modern = captions.get("design_version") == CAPTION_DESIGN_VERSION
+    normalized = _norm_style(global_style)
+    p = _preset_of(normalized)
+    fallback = (normalized.get("position") if normalized.get("_pos_set") else
+                p.get("position") if p else normalized.get("position"))
+    runs = _placement_runs(
+        out_words, captions.get("placement_track") or [],
+        fallback_position=fallback if modern else None,
+        fallback_anchor_y=normalized.get("anchor_y") if modern else None)
     events = []
-    for pos, words in runs:
+    for pos, anchor_y, words in runs:
         run_style = dict(global_style or {})
         run_style["position"] = pos
+        if anchor_y is not None:
+            run_style["anchor_y"] = anchor_y
         if _preset_of(_norm_style(run_style)):
             made = events_premium(
                 words, style=run_style,
                 max_words=captions.get("max_words_per_caption"),
                 play_res=play_res,
-                emphasis_words=captions.get("emphasis_words"))
+                emphasis_words=captions.get("emphasis_words"),
+                design_version=captions.get("design_version"))
         elif _norm_style(run_style)["dynamic"]:
             made = events_dynamic(
                 words, style=run_style,
@@ -1878,12 +2249,16 @@ def _positioned_events(out_words, captions, global_style, play_res):
                 karaoke_group_n=captions.get("karaoke_group_n"))
             for ev in made:
                 ev["item_style"] = {"position": pos}
+                if anchor_y is not None:
+                    ev["item_style"]["anchor_y"] = anchor_y
         else:
             made = events_from_transcript(
                 words, max_words=captions.get("max_words_per_caption"),
                 line_chars=line_chars_for(run_style, play_res))
             for ev in made:
                 ev["item_style"] = {"position": pos}
+                if anchor_y is not None:
+                    ev["item_style"]["anchor_y"] = anchor_y
         events.extend(made)
     events.sort(key=lambda x: (float(x.get("start", 0)),
                                int(x.get("layer", 0))))
@@ -1934,7 +2309,8 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
                 out_words, style=global_style,
                 max_words=captions.get("max_words_per_caption"),
                 play_res=play_res,
-                emphasis_words=captions.get("emphasis_words"))
+                emphasis_words=captions.get("emphasis_words"),
+                design_version=captions.get("design_version"))
         elif _norm_style(global_style)["dynamic"]:
             events = events_dynamic(
                 out_words, style=global_style,

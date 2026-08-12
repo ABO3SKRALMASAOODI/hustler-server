@@ -15,13 +15,13 @@ thinking; Valmera does the editing. That is exactly the trade the `mcp` plan
 was always written around ("brings its own model").
 
 **There is no second editor.** The tools are not re-declared for MCP. The
-worker publishes its live registry on boot and the backend serves it verbatim,
-so every tool the in-house agent has, your model has: same names, same JSON
-schemas, same descriptions, same honest-off gating (a tool whose backing
-service has no key is hidden from both). Execution happens in the worker, in
-the same `ToolContext` an agent turn uses. There is nothing to keep in sync
-because there is no copy — `worker/tests/test_mcp_surface.py` fails if one
-ever appears.
+worker publishes its live registry on boot; the backend clones each live
+schema only to add the transport-level required `project_id`, title and MCP
+behavior hints. Every actual editor argument, description and honest-off gate
+still comes from the same registry (a tool whose backing service has no key is
+hidden from both). Execution happens in the worker, in the same `ToolContext`
+an agent turn uses. There is no capability copy to keep in sync —
+`worker/tests/test_mcp_surface.py` fails if one appears.
 
 On top of that, thirteen **session tools** the studio UI normally covers and a
 headless model cannot: `list_projects`, `open_project`, `open_short`,
@@ -127,15 +127,20 @@ Properties worth knowing:
 
 ```
 list_projects  →  open_project(3)  →  (the whole project state comes back)
-  →  cut_silences() / add_captions() / add_music() / ...
-  →  render_preview()  →  download_url()
-  →  export_final()    →  wait_for_job(N)  →  download_url(kind="final")
+  →  cut_silences(project_id=3) / add_captions(project_id=3) / ...
+  →  render_preview(project_id=3)  →  download_url(project_id=3)
+  →  export_final(project_id=3) → wait_for_job(N)
+  →  download_url(project_id=3, kind="final")
 ```
 
-`open_project` is the one thing to remember: editing tools do not take a
-project id, they act on the connection's active project. That pointer is stored
-server-side (on the OAuth grant, or on the static token), so it survives a
-reconnect, a token refresh and a client restart.
+`open_project` loads the state and preserves a navigation pointer for legacy
+clients. Every normal editor tool—and every project-targeting session tool such
+as upload, status, watch, download, and export—requires an explicit
+`project_id`. The backend verifies account ownership and echoes the id/title in
+results, including delayed `wait_for_job` replies. It never guesses an editing
+or review target from mutable connection state. This is intentionally
+redundant: a long session can hop among a parent and many shorts without one
+missed switch sending a valid edit, review, or export to the wrong project.
 
 ### Podcast to Shorts over MCP
 
@@ -144,10 +149,10 @@ approximate with individual cut calls:
 
 ```
 create_project(title="My podcast", kind="shorts")
-  → upload_start / upload_finish
-  → index_status() until done
-  → shorts_status() until the child projects are ready
-  → open_short(card) → edit directly / render_preview / watch_video / export_final
+  → upload_start(project_id=ID) / upload_finish(project_id=ID)
+  → index_status(project_id=ID) until done
+  → shorts_status(project_id=ID) until the child projects are ready
+  → open_short(parent_project_id=ID, card=N) → edit/render/watch/export with its child ID
 ```
 
 The Shorts planner starts automatically after a `kind="shorts"` project's
@@ -158,7 +163,8 @@ short with its parent so a caller never has to guess which new project belongs
 to which podcast. A source under one minute is already a direct short and is
 edited normally rather than rejected by the multi-clip extractor.
 
-`open_short(card)` is the explicit direct-edit path: it switches the MCP
+`open_short(parent_project_id=BOARD, card=N)` (or
+`open_short(child_project_id=ID)`) is the explicit direct-edit path: it switches the MCP
 connection to that generated child, after which the complete live editor tool
 registry operates on the child's EDL. No Valmera agent is called. By contrast,
 `edit_shorts` is deliberately a delegation tool: it forwards one prompt into
@@ -198,11 +204,11 @@ written by a smaller model is standing between the editor and the material.
 `watch_video` hands over the **file**. Pixels, audio, timing.
 
 ```
-watch_video()                                  the current edit, whole
-watch_video(kind="source")                     the raw uploaded footage
-watch_video(start=12, end=30)                  just that window of the program
-watch_video(delivery="inline", max_mb=8)       shrunk until it fits in the reply
-watch_video(kind="asset", asset_key="clips/…") one uploaded clip
+watch_video(project_id=3)                                  the current edit, whole
+watch_video(project_id=3, kind="source")                   the raw uploaded footage
+watch_video(project_id=3, start=12, end=30)                just that program window
+watch_video(project_id=3, delivery="inline", max_mb=8)     shrunk for the reply
+watch_video(project_id=3, kind="asset", asset_key="clips/…") one uploaded clip
 ```
 
 **It usually costs nothing.** The artifacts already exist and are already the
@@ -303,6 +309,10 @@ encode settings, so asking for the same window twice encodes once.
   in-house agent turn is live on that project, and a studio chat message is
   rejected while an MCP call is in flight. Racing EDL writes are how you get
   an edit that contains half of each idea.
+- **Editor calls are immutable-project scoped.** Every catalog schema requires
+  `project_id`, ownership is checked before enqueueing, and every result starts
+  with `PROJECT <id> — <title>`. A stale active-project pointer cannot redirect
+  a caption, cut, render, or read call.
 - **Nothing is charged.** An MCP call runs none of our agent model, so no
   credits are deducted. But vision (`look_at`), image/video generation and
   stock fetches are real money on real providers, recorded to `llm_calls`

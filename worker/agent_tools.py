@@ -14,6 +14,7 @@ import uuid
 
 import audio_qc
 import audit
+import captions as caplib
 import config
 import db as dbx
 import inpaint
@@ -55,7 +56,7 @@ import request_intent
 import ytaccess
 import visual
 import webrecord
-from captions import KARAOKE_HARD_MAX
+from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      custom_chain_error, patch_fingerprint,
                      EDLValidationError, Frame,
@@ -345,20 +346,33 @@ class ToolContext:
                 self.running_credits() >= self.credit_budget)
 
     def preview_limit(self):
-        """Candidate + repair, plus one critic-authorized recovery proof."""
+        """Candidate + repair, then one more proof per verified defect.
+
+        Optional polishing stays capped. A deterministic/independent finding
+        on the latest immutable render is different: it authorizes exactly one
+        corrective version and proof. If that proof still has a concrete
+        defect, it can authorize the next one. This prevents both infinite
+        taste loops and the previous failure mode where Valmera identified a
+        bad third candidate and then refused to fix it.
+        """
         ordinary = min(2, config.AGENT_MAX_PREVIEWS_PER_TURN)
         try:
             latest_version = self.latest_edl()["version"]
         except Exception:
             latest_version = None
-        earned_recovery = (
-            config.AGENT_MAX_PREVIEWS_PER_TURN > ordinary
-            and ((self.quality_repair_required
-                  and self.quality_repair_version == latest_version)
-                 or self.quality_recovery_version == latest_version)
-        )
-        return config.AGENT_MAX_PREVIEWS_PER_TURN if earned_recovery \
-            else ordinary
+        finding_on_latest = (self.quality_repair_required and
+                             self.quality_repair_version == latest_version)
+        recovery_bridge = self.quality_recovery_version == latest_version
+        # A finding on the newest proof earns ONE next proof, even if that is
+        # the fourth/fifth recovery in a genuinely defective sequence. The
+        # bridge exists only between writing that correction and proving it;
+        # it must never grow with every rendered version or silently mint an
+        # extra optional candidate after the earned proof.
+        if finding_on_latest:
+            return max(ordinary, len(self.rendered_versions) + 1)
+        if recovery_bridge:
+            return ordinary + 1
+        return ordinary
 
     def clamp(self, t):
         try:
@@ -398,18 +412,16 @@ class ToolContext:
         version (no version row is created), or a REJECTED message on
         validation failure."""
         prev = self.latest_edl()
-        # The turn normally owns a candidate proof and one repair proof. A
-        # third write is allowed only when the latest proof itself earned a
-        # recovery pass by returning a concrete quality defect. This keeps the
-        # optional-polish freeze while no longer trapping a known-bad version.
+        # The turn normally owns a candidate proof and one repair proof. Every
+        # later write must be earned by a concrete defect on the latest proof.
         limit = self.preview_limit()
         if len(self.rendered_versions) >= limit:
-            reason = ("the critic-authorized recovery preview has also "
-                      "rendered" if limit > 2 else
+            reason = ("the latest critic-authorized recovery has no remaining "
+                      "verified defect" if limit > 2 else
                       "the candidate preview and repair preview have already "
-                      "rendered successfully")
-            candidate = ("unreviewed fourth candidate" if limit > 2 else
-                         "unreviewed third candidate")
+                      "rendered without a defect that authorizes another pass")
+            candidate = ("unreviewed third candidate" if limit == 2 else
+                         "unreviewed optional candidate")
             return (
                 f"REJECTED (EDL v{prev['version']} unchanged): {reason} "
                 f"this turn. Any further write would be an {candidate}. "
@@ -453,11 +465,12 @@ class ToolContext:
         version = self.db.run(dbx.insert_edl, self.project_id, normalized,
                               "agent")
         self.versions_written.append(version)
-        # The third proof is earned by a concrete finding on the SECOND
-        # rendered candidate.  Keep that permission attached to the newly
-        # written recovery version; otherwise latest_edl changed here and
-        # render_preview immediately fell back to the ordinary limit of two.
-        if limit > 2 and len(self.rendered_versions) >= 2:
+        # Keep one defect-linked proof permission attached to the newly written
+        # version; latest_edl changes here, so the finding's old version id no
+        # longer matches until this bridge is set.
+        if limit > min(2, config.AGENT_MAX_PREVIEWS_PER_TURN) and \
+                len(self.rendered_versions) >= min(
+                    2, config.AGENT_MAX_PREVIEWS_PER_TURN):
             self.quality_recovery_version = version
         chg = edl_diff.change_ranges(prev["json"], normalized)
         self.last_change = dict(chg, edl_version=version) if chg else None
@@ -686,6 +699,42 @@ def find_repeated_phrases(out_words, shingle=4):
     return [(t, times) for t, times in phrases.items() if len(times) > 1]
 
 
+def classify_repeated_phrases(out_words, shingle=4):
+    """Separate edit duplication from words the speaker actually repeated.
+
+    Timeline.kept_words carries the original source clock. If the same phrase
+    appears twice in program time with the same source start, an EDL segment
+    was duplicated. Distinct source starts mean the speaker said it twice;
+    that may be rhetorical, a stutter, or two takes and is not proof of an
+    editing bug.
+    """
+    rows = [( _norm_token(w.get("w")), w) for w in out_words]
+    rows = [(token, word) for token, word in rows if token]
+    results = []
+    for phrase, _times in find_repeated_phrases(out_words, shingle=shingle):
+        needle = phrase.split()
+        occ = []
+        for i in range(len(rows) - len(needle) + 1):
+            if [token for token, _word in rows[i:i + len(needle)]] != needle:
+                continue
+            word = rows[i][1]
+            occ.append({"program_s": round(float(word.get("t0", 0.0)), 3),
+                        "source_s": (round(float(word["src_t0"]), 3)
+                                     if word.get("src_t0") is not None
+                                     else None)})
+        source_times = [x["source_s"] for x in occ if x["source_s"] is not None]
+        duplicated_source = any(
+            abs(a - b) <= 0.08
+            for i, a in enumerate(source_times)
+            for b in source_times[i + 1:])
+        kind = ("edit_duplicate" if duplicated_source else
+                "spoken_repetition" if len(source_times) >= 2 else
+                "ambiguous")
+        results.append({"phrase": phrase, "kind": kind,
+                        "occurrences": occ})
+    return results
+
+
 def get_kept_transcript(ctx):
     """The transcript of what the CURRENT edit actually keeps — program
     time — with repeated-phrase detection. THE tool for verifying that a
@@ -720,14 +769,26 @@ def get_kept_transcript(ctx):
     header = (f"Program transcript of EDL v{latest['version']} "
               f"({tl.out_duration:.1f}s output — program time, with the "
               "matching source spans):")
-    reps = find_repeated_phrases(out_words)
+    reps = classify_repeated_phrases(out_words)
     if reps:
-        rep_lines = [f"  '{text}' at " + ", ".join(f"{t}s" for t in times)
-                     for text, times in reps[:6]]
-        note = ("\nPOSSIBLE REPETITIONS still in the output:\n"
-                + "\n".join(rep_lines)
-                + "\nIf these are true repeats, cut the weaker take using "
-                  "the src spans above.")
+        duplicate = [r for r in reps if r["kind"] == "edit_duplicate"]
+        spoken = [r for r in reps if r["kind"] == "spoken_repetition"]
+        parts = []
+        if duplicate:
+            parts.append("\nEDIT DUPLICATIONS (same source phrase used more "
+                         "than once—repair the EDL):\n" + "\n".join(
+                f"  '{r['phrase']}' at " + ", ".join(
+                    f"{o['program_s']}s" for o in r["occurrences"])
+                for r in duplicate[:6]))
+        if spoken:
+            parts.append("\nSPOKEN REPETITIONS (distinct source moments—not "
+                         "proof of an edit bug; preserve rhetorical repeats "
+                         "unless the brief asks to tighten them):\n" + "\n".join(
+                f"  '{r['phrase']}' at " + ", ".join(
+                    f"{o['program_s']}s" for o in r["occurrences"])
+                for r in spoken[:6]))
+        note = ("\nPOSSIBLE REPETITIONS (classified by source provenance):"
+                + "".join(parts))
     else:
         note = "\nNo repeated phrases detected in the output."
     return _cap(header + "\n" + "\n".join(lines) + note,
@@ -1278,12 +1339,36 @@ def _look_at_output(ctx, output_times, question):
 
 
 def look_at(ctx, times=None, question="", start=None, end=None,
-            output_times=None):
+            output_times=None, rendered=False):
     """Round 67: the agent's own eyes. Pass `times` (1-8 source seconds) and
     the exact frames at those moments come back as ONE labeled picture in the
     agent's own context. start/end still work as a range and sample evenly.
     Round 71: `output_times` samples the ASSEMBLED PROGRAM instead — output
     seconds of the current edit, inserts included."""
+    # The assembled-program path deliberately omits effects that only exist
+    # after ffmpeg composition. rendered=true resolves the preview for the
+    # CURRENT immutable EDL version and inspects those real pixels instead,
+    # including captions, overlays, grades and designed text.
+    if rendered:
+        row = ctx.latest_edl()
+        asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
+                           row["version"])
+        if not asset:
+            return (f"REJECTED: EDL v{row['version']} has no completed preview "
+                    "to inspect. Call render_preview, then call "
+                    "look_at(rendered=true, output_times=[...]). A past "
+                    "version is not accepted as evidence for the current edit.")
+        wants = output_times or times
+        if wants:
+            if not isinstance(wants, (list, tuple)):
+                return "REJECTED: output_times must be an array of seconds."
+            return look_at_asset(
+                ctx, asset["storage_key"], question=question,
+                times=list(wants)[:16])
+        return look_at_asset(
+            ctx, asset["storage_key"], question=question,
+            start=0 if start is None else start, end=end)
+
     # An empty array is "not asked", not a request: the model fills every
     # schema field, and `times=[2, 6], output_times=[]` burned nine straight
     # rejections in one session (project 382, 2026-08-07) under the old
@@ -1492,8 +1577,9 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
             return ("REJECTED: times must be a non-empty array of seconds "
                     "into the clip, e.g. times=[3.2, 17.8].")
         try:
+            max_samples = 16 if asset["kind"] == "render" else 8
             times = sorted(round(min(max(float(t), 0.0), dur), 3)
-                           for t in times)[:8]
+                           for t in times)[:max_samples]
         except (TypeError, ValueError):
             return "REJECTED: times must be numbers of seconds."
     else:
@@ -1915,7 +2001,45 @@ def _box_zone_overlap(box, zone):
     return inter / area
 
 
-def _safe_caption_position(faces, text, dense_ui, preferred="bottom"):
+def _caption_picture_bounds(ctx, edl, source_t):
+    """Visible foreground-picture bounds in output-frame fractions.
+
+    A pad/pad_blur render has a full output canvas but only part of it is the
+    actual shot.  Caption composition must stay attached to that foreground
+    picture instead of selecting an apparently empty blurred band.
+    """
+    video = ctx.index.get("video") or {}
+    try:
+        sw, sh = float(video["width"]), float(video["height"])
+    except (KeyError, TypeError, ValueError):
+        return (0.0, 1.0)
+    frame = edl.get("frame") or {}
+    W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
+    kind, _x0, y0, _x1, y1 = renderer.fit_fractions(
+        sw, sh, W, H, _frame_mode_at_source(edl, source_t),
+        _frame_focus_at_source(edl, source_t))
+    return (float(y0), float(y1)) if kind == "pad" else (0.0, 1.0)
+
+
+def _caption_zones_for_bounds(bounds):
+    y0, y1 = bounds
+    height = max(0.05, y1 - y0)
+    return {
+        "top": (y0 + 0.04 * height, y0 + 0.31 * height),
+        "middle": (y0 + 0.31 * height, y0 + 0.68 * height),
+        "bottom": (y0 + 0.66 * height, y0 + 0.88 * height),
+    }
+
+
+def _caption_anchor_for(position, bounds):
+    y0, y1 = bounds
+    height = max(0.05, y1 - y0)
+    rel = {"top": 0.16, "middle": 0.50, "bottom": 0.80}.get(position, 0.80)
+    return round(min(max(y0 + rel * height, 0.05), 0.95), 4)
+
+
+def _safe_caption_position(faces, text, dense_ui, preferred="bottom",
+                           zones=None):
     """Pick a clean vertical band, or None when every band is occupied."""
     base = {"bottom": 0.0, "top": 0.25, "middle": 0.8}
     # Honor the visual grammar as a preference, not as permission to write on
@@ -1923,7 +2047,7 @@ def _safe_caption_position(faces, text, dense_ui, preferred="bottom"):
     if preferred in base:
         base[preferred] -= 0.2
     score = dict(base)
-    for pos, zone in _CAPTION_ZONES.items():
+    for pos, zone in (zones or _CAPTION_ZONES).items():
         for box in faces:
             ov = _box_zone_overlap(box, zone)
             cy = (box[1] + box[3]) / 2.0
@@ -1934,6 +2058,73 @@ def _safe_caption_position(faces, text, dense_ui, preferred="bottom"):
             score[pos] += 0.8
     winner = min(score, key=score.get)
     return (winner, score) if score[winner] <= 2.6 else (None, score)
+
+
+def _stabilize_caption_positions(picks, switch_cost=1.15):
+    """Viterbi smoothing for measured caption bands, per kept source span.
+
+    A band remains forbidden whenever its collision score is unsafe.  Among
+    safe bands, however, the caption pays a small cost to jump top↔bottom, so
+    one noisy sample cannot make typography bounce while a materially safer
+    shot still overrides the inertia.  The final track is baked into the EDL;
+    the renderer performs no visual inference.
+    """
+    if not picks:
+        return picks
+    start = 0
+    while start < len(picks):
+        span = picks[start]["span"]
+        end = start + 1
+        while end < len(picks) and picks[end]["span"] == span:
+            end += 1
+        group = picks[start:end]
+        history = []
+        costs = {}
+        for ri, row in enumerate(group):
+            safe = {band: float(score) for band, score in row["scores"].items()
+                    if float(score) <= 2.6}
+            if not safe:
+                history.append({None: (0.0, None)})
+                costs = {}
+                row["position"] = None
+                continue
+            step = {}
+            if not costs:
+                for band, score in safe.items():
+                    step[band] = (score, None)
+            else:
+                for band, score in safe.items():
+                    options = [(prev_cost + (0.0 if prev == band else switch_cost),
+                                prev)
+                               for prev, (prev_cost, _back) in costs.items()]
+                    best_cost, best_prev = min(options)
+                    step[band] = (score + best_cost, best_prev)
+            history.append(step)
+            costs = step
+        # Backtrack each contiguous safe run (unsafe rows reset the chain).
+        cursor = len(group) - 1
+        while cursor >= 0:
+            if group[cursor].get("position") is None and \
+                    not any(float(v) <= 2.6
+                            for v in group[cursor]["scores"].values()):
+                cursor -= 1
+                continue
+            run_end = cursor
+            while cursor >= 0 and any(float(v) <= 2.6
+                                      for v in group[cursor]["scores"].values()):
+                cursor -= 1
+            run_start = cursor + 1
+            state = min(history[run_end], key=lambda b: history[run_end][b][0])
+            for idx in range(run_end, run_start - 1, -1):
+                group[idx]["position"] = state
+                state = history[idx][state][1]
+                if state is None and idx > run_start:
+                    # Defensive fallback for a malformed/reset history; the
+                    # independently safest choice is still collision-safe.
+                    state = min(history[idx - 1],
+                                key=lambda b: history[idx - 1][b][0])
+        start = end
+    return picks
 
 
 def _caption_placement_track(ctx, edl, sidecar, preferred="bottom"):
@@ -1949,13 +2140,16 @@ def _caption_placement_track(ctx, edl, sidecar, preferred="bottom"):
                  if (m := _source_box_to_output(ctx, edl, t, box))]
         text_boxes = [m for box in _caption_source_text_boxes(sample)
                       if (m := _source_box_to_output(ctx, edl, t, box))]
+        bounds = _caption_picture_bounds(ctx, edl, t)
         pos, scores = _safe_caption_position(
-            faces, text_boxes, bool(sample.get("dense_ui")), preferred)
+            faces, text_boxes, bool(sample.get("dense_ui")), preferred,
+            zones=_caption_zones_for_bounds(bounds))
         picks.append({"t": t, "span": span, "position": pos,
                       "face": bool(faces), "text": bool(text_boxes),
-                      "scores": scores})
+                      "scores": scores, "picture_bounds": bounds})
     if not picks:
         return [], 0, 0
+    picks = _stabilize_caption_positions(picks)
     out, unsafe = [], 0
     for i, pick in enumerate(picks):
         a, b = pick["span"]
@@ -1968,16 +2162,27 @@ def _caption_placement_track(ctx, edl, sidecar, preferred="bottom"):
                  if i + 1 < len(picks) else b)
         if t1 - t0 < 0.05:
             continue
-        if pick["position"] is None:
+        measured_unsafe = pick["position"] is None
+        if measured_unsafe:
             unsafe += 1
-            continue
-        reason = ("avoids face and source text" if pick["face"] and pick["text"]
+            # Never turn a difficult frame into missing words.  The least
+            # obstructed measured band remains more honest than silently
+            # deleting the caption; callers are told it was a fallback and
+            # the rendered-caption contact sheet makes it visually auditable.
+            pick["position"] = min(pick["scores"], key=pick["scores"].get)
+        reason = ("least-obstructed fallback; all bands occupied"
+                  if measured_unsafe else
+                  "avoids face and source text" if pick["face"] and pick["text"]
                   else "avoids face" if pick["face"]
                   else "avoids source text" if pick["text"]
                   else "clean frame band")
         row = {"t0": round(t0, 2), "t1": round(t1, 2),
-               "position": pick["position"], "reason": reason}
+               "position": pick["position"],
+               "anchor_y": _caption_anchor_for(
+                   pick["position"], pick.get("picture_bounds") or (0.0, 1.0)),
+               "reason": reason}
         if out and out[-1]["position"] == row["position"] and \
+                out[-1].get("anchor_y") == row.get("anchor_y") and \
                 out[-1]["reason"] == row["reason"] and \
                 row["t0"] - out[-1]["t1"] <= 0.08:
             out[-1]["t1"] = row["t1"]
@@ -2225,8 +2430,30 @@ def _auto_caption_emphasis(ctx, edl, limit=25):
     returns transcript spelling verbatim so matching remains honest.
     """
     keep = edl.get("keep") or []
+    index_words = list(ctx.index.get("words") or [])
+    stress_scores = [0.0] * len(index_words)
+    # The audio sidecar is already the authority for emphasis punch-ins.  Use
+    # the same measured vocal landing for typography instead of letting a
+    # merely long/rare word beat what the speaker actually stressed.  The
+    # chosen words are stored in the EDL, so rendering remains deterministic;
+    # unavailable perception falls back to the lexical scorer below.
+    try:
+        if isinstance(ctx, ToolContext):
+            cached = (getattr(ctx, "_perception", None)
+                      or (ctx.index.get("perception")
+                          if isinstance(ctx.index.get("perception"), dict)
+                          else None))
+            # Computing a one-hour sidecar merely to choose type hierarchy is
+            # the wrong latency trade.  Short-form—the place dynamic caption
+            # stress matters most—earns the one-time analysis; long footage
+            # uses a sidecar only when another edit already cached it.
+            if cached is not None or float(getattr(ctx, "duration", 0) or 0) <= 180:
+                stress_scores = perception.word_stress(
+                    cached or _get_perception(ctx), index_words)
+    except Exception:
+        stress_scores = [0.0] * len(index_words)
     visible = []
-    for w in (ctx.index.get("words") or []):
+    for wi, w in enumerate(index_words):
         if w.get("filler"):
             continue
         try:
@@ -2242,6 +2469,7 @@ def _auto_caption_emphasis(ctx, edl, limit=25):
             visible.append({"raw": raw.strip("\"'.,!?;:…()[]"),
                             "key": key, "t0": float(w["t0"]),
                             "t1": float(w["t1"]),
+                            "stress": float(stress_scores[wi] or 0.0),
                             "sentence_end": raw.rstrip().endswith(
                                 (".", "!", "?", "…"))})
     if not visible:
@@ -2266,6 +2494,13 @@ def _auto_caption_emphasis(ctx, edl, limit=25):
             s += 1.0
         else:
             s -= min(1.5, (freq[key] - 1) * 0.35)
+        # Vocal stress is the strongest non-numeric signal.  A value around
+        # 0.65 is a clearly landed word under perception.word_stress; quieter
+        # words still receive a gentle tie-break rather than a binary jump.
+        stress = min(max(float(w.get("stress") or 0.0), 0.0), 1.0)
+        s += stress * 6.0
+        if stress >= 0.65:
+            s += 1.5
         if index == len(group) - 1:
             s += 1.0  # phrase-ending outcome/verb often carries the landing
         return s
@@ -2398,7 +2633,7 @@ def add_captions(ctx, mode=None, items=None, style=None,
                             f"using {KARAOKE_TOOL_MAX} instead of {mw}.")
             mw = KARAOKE_TOOL_MAX
         if not premium and (parsed_style or {}).get("dynamic") \
-                and (parsed_style or {}).get("animation"):
+                and (parsed_style or {}).get("animation") not in (None, "none"):
             karaoke_note += ("\nNote: dynamic karaoke captions animate "
                              "word-by-word already — the 'animation' "
                              "entrance style only applies to static "
@@ -2408,7 +2643,7 @@ def add_captions(ctx, mode=None, items=None, style=None,
                              "word-by-word animation — the 'dynamic' flag "
                              "is ignored while a preset is set.")
         if premium and (parsed_style or {}).get("animation") \
-                and preset != "elegant":
+                not in (None, "none") and preset != "elegant":
             karaoke_note += (f"\nNote: preset '{preset}' animates word-by-"
                              "word — the 'animation' entrance style only "
                              "applies to static looks and is ignored here.")
@@ -2460,23 +2695,30 @@ def add_captions(ctx, mode=None, items=None, style=None,
                 "kept footage, so captions will be very sparse — if this "
                 "video is mostly music, say so to the user.")
         auto_emphasis = False
+        emphasis_mode = None
         if premium and emphasis_words is None:
             # A premium preset without hierarchy was the dominant production
             # failure: the model omitted an optional argument, so the most
             # important part of the design simply never activated. Make the
             # product own the default; an explicit [] still means "none".
             emphasis_words = _auto_caption_emphasis(ctx, edl)
+            emphasis_mode = "auto"
             auto_emphasis = bool(emphasis_words)
             if auto_emphasis:
                 karaoke_note += (f"\nAutomatically selected "
                                   f"{len(emphasis_words)} semantic emphasis "
                                   "word(s) from the kept transcript.")
+        elif premium:
+            emphasis_mode = "manual" if emphasis_words else "off"
         cfg = {"mode": "from_transcript",
+               "design_version": CAPTION_DESIGN_VERSION,
                "max_words_per_caption": mw,
                "style": parsed_style,
                "placement_track": placement or None}
         if emphasis_words:
             cfg["emphasis_words"] = emphasis_words
+        if emphasis_mode:
+            cfg["emphasis_mode"] = emphasis_mode
         edl["captions"] = _bake_karaoke_group(cfg)
         desc = "captions from transcript enabled"
         if premium:
@@ -2515,7 +2757,8 @@ def _parse_partial_style(style):
                 '"emphasis_scale":1.0-3.0,"outline_color":"#RRGGBB",'
                 '"outline_width":0-12,"shadow":0-12,'
                 '"background_color":"#RRGGBB","background_opacity":0-1,'
-                '"tracking":-8-24,"text_align":"left|center|right"}')
+                '"tracking":-8-24,"text_align":"left|center|right",'
+                '"anchor_y":0.05-0.95}')
     # Mirrors captions.STYLE_KEYS (+ dynamic/uppercase, which are booleans
     # handled separately there). A field missing HERE is rejected outright;
     # a field missing from STYLE_KEYS is accepted and then silently ignored.
@@ -2526,14 +2769,16 @@ def _parse_partial_style(style):
                                    "emphasis_scale", "outline_color",
                                    "outline_width", "shadow",
                                    "background_color", "background_opacity",
-                                   "tracking", "text_align"})
+                                   "tracking", "text_align", "anchor_y"})
     if unknown:
         return (f"ERR: unknown style field(s) {unknown} — the style fields are "
                 "preset, color, size, size_scale, position, uppercase, "
                 "dynamic, highlight_color, animation, font, effect, layout, "
                 "leading, emphasis, emphasis_scale, outline_color, "
                 "outline_width, shadow, background_color, "
-                "background_opacity, tracking and text_align. preset picks "
+                "background_opacity, tracking, text_align and anchor_y. "
+                "anchor_y is the exact vertical output-frame fraction. "
+                "preset picks "
                 "a look (clean/documentary/broadcast/retro/neon/podcast/"
                 "beast/karaoke/elegant/stacked/iridescent/chrome/editorial/"
                 "fashion/luxe/impact/lyric/classic); "
@@ -2702,6 +2947,12 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
                 "add_captions(mode='from_transcript') first (you can pass "
                 "a style there directly).")
     merged = merge_caption_style(caps, partial)
+    # A style write is the migration boundary: the historical EDL stays on
+    # its frozen renderer, while this newly-created version opts into the
+    # prosody-aware phrase and optical-layout engine.  Manual caption items
+    # have authored text/timings and therefore no transcript design version.
+    if isinstance(merged, dict):
+        merged["design_version"] = CAPTION_DESIGN_VERSION
     # the EFFECTIVE premium preset after the patch ('classic' = legacy)
     eff_preset = None
     if isinstance(merged, dict):
@@ -2711,8 +2962,10 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
     emph_note = ""
     auto_emphasis = False
     if emphasis_words is None and eff_preset and isinstance(merged, dict) \
-            and not merged.get("emphasis_words"):
+            and not merged.get("emphasis_words") \
+            and merged.get("emphasis_mode") != "off":
         auto = _auto_caption_emphasis(ctx, edl)
+        merged["emphasis_mode"] = "auto"
         if auto:
             merged["emphasis_words"] = auto
             auto_emphasis = True
@@ -2721,6 +2974,7 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
     if emphasis_words is not None:
         if isinstance(merged, dict):
             merged["emphasis_words"] = emphasis_words or None
+            merged["emphasis_mode"] = "manual" if emphasis_words else "off"
             if emphasis_words and not eff_preset:
                 emph_note = ("\nNote: emphasis_words only take effect with "
                              "a premium preset — set style "
@@ -2744,10 +2998,15 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
                         f"{merged['max_words_per_caption']} to "
                         f"{KARAOKE_TOOL_MAX}.")
         merged["max_words_per_caption"] = KARAOKE_TOOL_MAX
-    if partial.get("animation"):
+    if "animation" in partial:
         eff_style = (merged.get("style") or {}) if isinstance(merged, dict) \
             else {}
-        if eff_preset and eff_preset != "elegant":
+        if partial["animation"] == "none" and eff_preset:
+            karaoke_note += (f"\nAnimation is OFF for preset '{eff_preset}': "
+                              "no fades, pops, slides or scale punches are "
+                              "rendered. Karaoke/reveal word state can still "
+                              "change exactly when each spoken word begins.")
+        elif eff_preset and eff_preset != "elegant":
             karaoke_note += (f"\nNote: preset '{eff_preset}' animates "
                              "word-by-word — the 'animation' entrance "
                              "style only applies to static looks and is "
@@ -3164,7 +3423,10 @@ def find_song(ctx, query):
     except song_find.SongFindError:
         sc = []
     sc_lines = "\n- ".join(song_find.describe(h) for h in sc)
-    _tail = ("Prefer the artist's own/'- Topic' channel or 'Official "
+    _tail = ("These search results establish identity/authenticity only; "
+             "they do NOT verify a usage license. A downloadable public "
+             "upload is not automatically licensed for republication. "
+             "Prefer the artist's own/'- Topic' channel or 'Official "
              "Audio'; avoid lyric/sped-up/loop/cover versions UNLESS their "
              "words asked for one, and NEVER a full album/mix — ONE track "
              "only (huge files are refused after minutes of download). "
@@ -3211,8 +3473,14 @@ def _queue_candidate_thumbs(ctx, hits, limit=5):
     thumbnail just misses the sheet, and a blind deployment skips the
     downloads entirely (the text lines remain the whole story there).
     Returns how many pictures were queued."""
-    can_see = (getattr(ctx, "direct_sight", False)
-               and llm.agent_sees(getattr(ctx, "agent_model", None)))
+    # Native agent turns consume pending_images directly. MCP turns cannot
+    # put binary image content into the model call, but sight_out drains the
+    # same queue into the tool response as a labeled contact sheet. The old
+    # direct_sight-only gate made MCP stock selection text-blind even though
+    # its transport was fully capable of returning the thumbnails.
+    can_see = (getattr(ctx, "sight_out", False) or
+               (getattr(ctx, "direct_sight", False)
+                and llm.agent_sees(getattr(ctx, "agent_model", None))))
     if not can_see:
         return 0
     queued = 0
@@ -3228,6 +3496,10 @@ def _queue_candidate_thumbs(ctx, hits, limit=5):
             # Stock hits are addressed by id; footage hits by their URL —
             # the label must be the exact string the model passes onward.
             ctx.pending_images.append((h.get("id") or h.get("url"), local))
+            # Evidence provenance for the follow-up selector. Some providers
+            # return no description at all; in that case this thumbnail is the
+            # only factual basis for saying what the shot depicts.
+            h["_thumbnail_delivered"] = True
             queued += 1
         except Exception:
             continue
@@ -6646,6 +6918,32 @@ INSERT_NEEDS_WINDOW_S = 15.0    # clips longer than this need an explicit window
 INSERT_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 
 
+def _visual_asset_uses(edl, asset_key, exclude_ids=()):
+    """Existing visual uses of one exact project asset.
+
+    Different source windows are still the same footage.  Editors may repeat
+    a motif intentionally, but it must be an explicit override rather than an
+    unnoticed result of search/provider reuse.
+    """
+    excluded = set(exclude_ids or ())
+    uses = []
+    for item in edl.get("inserts") or []:
+        if item.get("asset_key") == asset_key and item.get("id") not in excluded:
+            uses.append(f"insert {item.get('id', '?')}")
+    for item in edl.get("overlays") or []:
+        if item.get("asset_key") == asset_key and item.get("id") not in excluded:
+            label = "screen takeover" if item.get("screen") else "overlay"
+            uses.append(f"{label} {item.get('id', '?')}")
+    return uses
+
+
+def _repeat_visual_rejection(name, uses, tool_name):
+    return (f"REJECTED: '{name}' is already used as {', '.join(uses)}. "
+            "Changing the source window does not make it new footage. Pick a "
+            "different asset for visual variety, or pass allow_repeat=true "
+            f"to {tool_name} only when the repetition is intentional.")
+
+
 def _dropped_motion_note(motion, at=None, dur=None):
     """The one line that replaces a rejection when `motion` rode a VIDEO
     insert. Names the tool that DOES move a clip, with the window already
@@ -6662,7 +6960,8 @@ def _dropped_motion_note(motion, at=None, dur=None):
 
 
 def insert_media(ctx, asset_key, at_output_s, duration_s=None,
-                 clip_start_s=None, motion=None, fit="auto"):
+                 clip_start_s=None, motion=None, fit="auto",
+                 allow_repeat=False):
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
@@ -6745,6 +7044,9 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                     "look_at_asset, or do not insert this clip.")
 
     edl = dict(ctx.latest_edl()["json"])
+    uses = _visual_asset_uses(edl, asset_key)
+    if uses and not allow_repeat:
+        return _repeat_visual_rejection(name, uses, "insert_media")
     if fitv == "crop" and (isinstance(ctx, ToolContext) or
                             getattr(ctx, "enforce_spatial", False)):
         asset_ar = _ensure_asset_dims(ctx, asset)
@@ -7348,7 +7650,7 @@ def _resolve_audio_upload(ctx, asset_key):
 
 
 def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
-                  duck_others=True):
+                  duck_others=True, source_offset_s=None):
     asset, extract_note, err = _resolve_audio_upload(ctx, asset_key)
     if err:
         return err
@@ -7359,18 +7661,28 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
         start = round(min(max(float(start_output_s), 0.0),
                           max(0.0, prog - 0.1)), 2)
         g = float(gain_db)
+        off = round(max(0.0, float(source_offset_s or 0.0)), 2)
     except (TypeError, ValueError):
-        return ("REJECTED: start_output_s and gain_db must be numbers "
+        return ("REJECTED: start_output_s, source_offset_s and gain_db must "
+                "be numbers "
                 "(start is a position in the FINAL edited video).")
+    asset_dur = _asset_media_duration(ctx, asset)
+    if off >= asset_dur - 0.05:
+        return (f"REJECTED: source_offset_s {off}s is at/past the end of "
+                f"'{_asset_name(asset)}' ({asset_dur:.2f}s). Pick an offset "
+                "inside the file; no external trim is needed.")
     vos = [dict(v) for v in (edl.get("voiceover") or [])]
     item = {"id": _next_item_id(vos, "vo"), "asset_key": asset_key,
             "start_output_s": start, "gain_db": g,
             "duck_others": bool(duck_others)}
+    if off:
+        item["source_offset_s"] = off
     edl["voiceover"] = vos + [item]
     name = (asset.get("meta") or {}).get("filename") or \
         os.path.basename(asset_key)
     res = ctx.write_edl(
-        edl, f"voiceover '{name}' from {start}s (output time), {g:+.1f}dB, "
+        edl, f"voiceover '{name}' from {start}s (output time), "
+             f"source offset {off:g}s, {g:+.1f}dB, "
              f"ducking other audio {DUCK_NOTE if bool(duck_others) else 'off'}"
              f" [{item['id']}]")
     dup_mus = [m.get("id") or "?" for m in (edl.get("music") or [])
@@ -7519,7 +7831,7 @@ def _parse_anim_float(v, name):
 
 def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
                 scale=0.4, opacity=None, entrance=None, exit=None,
-                source_start_s=None, fit=None):
+                source_start_s=None, fit=None, allow_repeat=False):
     """Draw an asset OVER the program picture for a program-time window —
     picture-in-picture, a corner logo, or (fit='cover') a full-frame B-ROLL
     cutaway while the program's audio keeps playing."""
@@ -7531,6 +7843,9 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
     name = (asset.get("meta") or {}).get("filename") or \
         os.path.basename(asset_key)
     edl = dict(ctx.latest_edl()["json"])
+    uses = _visual_asset_uses(edl, asset_key)
+    if uses and not allow_repeat:
+        return _repeat_visual_rejection(name, uses, "add_overlay")
     prog = program_duration(edl)
     if prog <= 0.4:
         return ("REJECTED: there is no program yet to overlay onto — place "
@@ -8405,7 +8720,8 @@ def _detect_screen(ctx, edl, src_t, content_aspect=None, content=None):
 
 def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=None,
                         corners=None, clip_start_s=None, hold_s=None,
-                        push=None, ease=None, settle=None):
+                        push=None, ease=None, settle=None,
+                        allow_repeat=False):
     """Push into a device screen in the footage and let an asset playing ON
     that screen become the whole video, in one continuous move.
 
@@ -8457,6 +8773,18 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=None,
             push = prev_scr.get("push")
         if settle is None:
             settle = prev_scr.get("land") is not False
+    # A takeover deliberately uses the same asset as its destination insert:
+    # the overlay pins the opening of that clip onto the device, then hands
+    # off to the full-screen inserted clip at the arrival frame. That is one
+    # continuous use, not repeated B-roll. Ignore those destination inserts
+    # here; ordinary insert/overlay tools still reject real reuse globally.
+    continuity_ids = [i.get("id") for i in (edl.get("inserts") or [])
+                      if i.get("asset_key") == asset_key]
+    if prev_tk:
+        continuity_ids.append(prev_tk.get("id"))
+    uses = _visual_asset_uses(edl, asset_key, exclude_ids=continuity_ids)
+    if uses and not allow_repeat:
+        return _repeat_visual_rejection(name, uses, "add_screen_takeover")
     try:
         dur = round(float(duration_s if duration_s is not None else 1.2), 2)
     except (TypeError, ValueError):
@@ -10905,8 +11233,8 @@ def set_master_loudness(ctx, enabled):
                  "level)")
     res = ctx.write_edl(edl, "master loudness: social (-14 LUFS)")
     if res.startswith("EDL v"):
-        res += ("\nThe final mix is normalized to -14 LUFS / -1.5 dBTP (the "
-                "social/streaming loudness target) on PREVIEW and EXPORT — "
+        res += ("\nThe final mix is normalized to -14 LUFS with a codec-safe "
+                "-2.0 dBTP ceiling on PREVIEW and EXPORT — "
                 "what the user approves is what ships. It changes loudness, "
                 "not the balance between voice/music/sfx.")
     return res
@@ -11490,7 +11818,12 @@ def fetch_url(ctx, url, as_kind=None):
                      "source_url": got["source_url"],
                      "extractor": got.get("extractor"),
                      "title": got.get("title"),
-                     "uploader": got.get("uploader")})
+                     "uploader": got.get("uploader"),
+                     "license": None,
+                     "license_status": "unverified",
+                     "license_note": ("No usage license was verified for "
+                                      "this URL; downloading does not grant "
+                                      "republication rights.")})
     ctx.urls_fetched.append({"storage_key": key, "kind": kind,
                              "url": got["source_url"],
                              "filename": got["filename"]})
@@ -11506,7 +11839,10 @@ def fetch_url(ctx, url, as_kind=None):
     nxt = _FETCH_NEXT_STEP[kind].format(key=key)
     return (f"Downloaded \"{got['filename']}\"{detail} as a "
             f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
-            f"the project but NOT in the video yet — {nxt}.")
+            f"the project but NOT in the video yet — {nxt}. RIGHTS CHECK: "
+            "source title/uploader identify the file, but no usage license "
+            "was verified; downloading it does not grant republication "
+            "rights. Use it only when the user has the needed rights.")
 
 
 # ── Stock b-roll ─────────────────────────────────────────────────────────────
@@ -11602,6 +11938,15 @@ def add_stock_media(ctx, id):
     if len(ctx.stock_added) >= config.MAX_STOCK_PER_TURN:
         return (f"REJECTED: {config.MAX_STOCK_PER_TURN} stock clips already "
                 "added this turn, which is the limit. Place what you have.")
+    if not (item.get("description") or "").strip() and \
+            not item.get("_thumbnail_delivered"):
+        return (
+            "REJECTED: this provider returned no description for that result "
+            "and its thumbnail could not be delivered, so there is no "
+            "evidence of what the shot actually depicts. Pick a candidate "
+            "whose thumbnail you can inspect or run a more specific search; "
+            "do not infer the footage from its search rank."
+        )
 
     _, want_w, want_h = _project_frame(ctx)
     is_video = item.get("kind") == stock.KIND_VIDEO
@@ -12261,17 +12606,265 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
 #  META tools                                                          #
 # ------------------------------------------------------------------ #
 
-def get_edl(ctx):
+def _compact_edl(row, ctx):
+    edl = row["json"]
+    collection_names = (
+        "keep", "inserts", "music", "voiceover", "sfx", "overlays",
+        "texts", "speed", "volume")
+    duplicates = {}
+    for coll in ("inserts", "overlays"):
+        for item in edl.get(coll) or []:
+            key = item.get("asset_key")
+            if key:
+                duplicates.setdefault(key, []).append(
+                    f"{coll}:{item.get('id', '?')}")
+    duplicates = {k: uses for k, uses in duplicates.items() if len(uses) > 1}
+    caps = edl.get("captions")
+    if isinstance(caps, dict):
+        cap_summary = {
+            "mode": caps.get("mode"),
+            "design_version": caps.get("design_version"),
+            "style": caps.get("style"),
+            "max_words_per_caption": caps.get("max_words_per_caption"),
+            "placement_spans": len(caps.get("placement_track") or []),
+            "emphasis_words": caps.get("emphasis_words"),
+        }
+    elif isinstance(caps, list):
+        cap_summary = {"mode": "manual", "items": len(caps)}
+    else:
+        cap_summary = None
+    return {
+        "version": row["version"],
+        "description": describe_edl(edl, ctx.duration),
+        "program_map": _program_map(ctx, edl) or None,
+        "program_duration_s": round(program_duration(edl), 3),
+        "frame": edl.get("frame"),
+        "master": edl.get("master"),
+        "captions": cap_summary,
+        "collection_counts": {
+            name: len(edl.get(name) or []) for name in collection_names
+        },
+        "visual_asset_duplicates": duplicates,
+        "available_sections": sorted(edl.keys()),
+    }
+
+
+def _ass_clock_seconds(value):
+    try:
+        h, m, s = str(value).strip().split(":")
+        return round(int(h) * 3600 + int(m) * 60 + float(s), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def audit_captions(ctx, offset=0, limit=80):
+    """Compile and mechanically audit the caption track before/after render.
+
+    This is deliberately independent of the vision critic. It reads the same
+    ASS artifact ffmpeg burns, so event starts/ends, overlaps and transcript
+    coverage are evidence—not a visual model's impression from nine tiles.
+    """
     row = ctx.latest_edl()
-    prog = _program_map(ctx, row["json"])
-    # 20000 chars (was 8000): the EDL now carries overlays/texts/speed/
-    # stylize too, and the old cap silently amputated exactly the
-    # collections a v2 edit needs to see. The explicit budget matters —
-    # _cap's default (TOOL_OUTPUT_CHAR_BUDGET) would undo the raise.
-    return _cap(f"EDL v{row['version']} "
-                f"({describe_edl(row['json'], ctx.duration)}):\n"
-                + (f"{prog}\n" if prog else "")
-                + json.dumps(row["json"], indent=1)[:20000], budget=22000)
+    edl = row["json"]
+    if not edl.get("captions"):
+        return json.dumps({"version": row["version"],
+                           "status": "no captions"}, indent=1)
+    try:
+        off = max(0, int(offset or 0))
+        lim = min(200, max(1, int(limit or 80)))
+    except (TypeError, ValueError):
+        return "REJECTED: offset and limit must be integers."
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    video = ctx.index.get("video") or {}
+    try:
+        sw, sh = float(video.get("width") or 1920), \
+                 float(video.get("height") or 1080)
+    except (TypeError, ValueError):
+        sw, sh = 1920.0, 1080.0
+    frame = edl.get("frame") or {}
+    play_res = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
+    ass_path = os.path.join(ctx.workdir, f"caption_audit_v{row['version']}.ass")
+    try:
+        built = caplib.build_ass(edl, ctx.index, tl, ass_path,
+                                 play_res=play_res)
+    except Exception as exc:
+        return json.dumps({"version": row["version"],
+                           "status": "compile failed",
+                           "error": str(exc)[:300]}, indent=1)
+    if not built:
+        return json.dumps({"version": row["version"],
+                           "status": "caption config produced no events"},
+                          indent=1)
+    events = []
+    with open(ass_path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.startswith("Dialogue:"):
+                continue
+            fields = line.split(",", 9)
+            if len(fields) < 10:
+                continue
+            start = _ass_clock_seconds(fields[1])
+            end = _ass_clock_seconds(fields[2])
+            if start is None or end is None:
+                continue
+            try:
+                layer = int(fields[0].split(":", 1)[1].strip())
+            except (TypeError, ValueError, IndexError):
+                layer = 0
+            events.append({"start": start, "end": end, "layer": layer})
+    grouped = {}
+    for event in events:
+        key = (event["start"], event["end"])
+        grouped.setdefault(key, []).append(event["layer"])
+    states = [{"start": s, "end": e, "duration_s": round(e - s, 3),
+               "layers": sorted(layers)}
+              for (s, e), layers in sorted(grouped.items())]
+    overlaps = []
+    for previous, current in zip(states, states[1:]):
+        amount = round(previous["end"] - current["start"], 3)
+        if amount > 0.015:
+            overlaps.append({"first": [previous["start"], previous["end"]],
+                             "second": [current["start"], current["end"]],
+                             "overlap_s": amount})
+    caps = edl.get("captions")
+    warnings = []
+    uncovered = []
+    first_late = None
+    if isinstance(caps, dict) and caps.get("mode") == "from_transcript":
+        words = [w for w in tl.kept_words(ctx.index.get("words") or [])
+                 if not (w.get("filler") if isinstance(w, dict) else False)]
+        mutes = [(float(a), float(b)) for a, b in
+                 (edl.get("caption_mutes") or [])]
+        for word in words:
+            mid = (float(word["t0"]) + float(word["t1"])) / 2.0
+            if any(a <= mid <= b for a, b in mutes):
+                continue
+            if not any(state["start"] - 0.011 <= mid <= state["end"] + 0.011
+                       for state in states):
+                uncovered.append({"word": word.get("w"),
+                                  "at": round(mid, 3)})
+        if words and states:
+            first_late = round(max(0.0, states[0]["start"] -
+                                   float(words[0]["t0"])), 3)
+            if first_late > 0.08:
+                warnings.append(
+                    f"first caption starts {first_late:.3f}s after first kept word")
+        if uncovered:
+            warnings.append(f"{len(uncovered)} spoken word(s) lack caption coverage")
+    if overlaps:
+        warnings.append(f"{len(overlaps)} distinct visual caption state overlap(s)")
+    zero_or_negative = [s for s in states if s["duration_s"] <= 0.01]
+    if zero_or_negative:
+        warnings.append(f"{len(zero_or_negative)} zero/negative caption state(s)")
+    # Exact pixels at state changes are the high-information caption review,
+    # unlike a uniform 3x3 overview. The current preview is accepted only if
+    # it belongs to this exact immutable EDL version.
+    candidates = []
+    if states:
+        stride = max(1, len(states) // 12)
+        candidates.extend(s["start"] + min(0.06, s["duration_s"] / 2)
+                          for s in states[::stride])
+        candidates.extend((o["second"][0] + 0.01) for o in overlaps[:4])
+    qa_times = sorted({round(min(max(t, 0.0), tl.out_duration), 3)
+                       for t in candidates})[:16]
+    render_asset = ctx.db.run(dbx.find_render_asset, ctx.project_id,
+                              "preview", row["version"])
+    result = {
+        "version": row["version"],
+        "status": "pass" if not warnings else "warnings",
+        "compiler": "same ASS artifact used by ffmpeg",
+        "caption_design_version": (caps.get("design_version")
+                                   if isinstance(caps, dict) else None),
+        "visual_state_count": len(states),
+        "first_state": states[0] if states else None,
+        "last_state": states[-1] if states else None,
+        "first_caption_late_by_s": first_late,
+        "uncovered_words": uncovered[:20],
+        "uncovered_word_count": len(uncovered),
+        "overlaps": overlaps[:20],
+        "warnings": warnings,
+        "qa_output_times": qa_times,
+        "rendered_preview_available": bool(render_asset),
+        "next": ("Call look_at(rendered=true, output_times=qa_output_times) "
+                 "to inspect the actual caption pixels at phrase/word changes."
+                 if render_asset else
+                 "Call render_preview, then audit_captions again and inspect "
+                 "qa_output_times with look_at(rendered=true, ...)."),
+        "event_page": states[off:off + lim],
+        "pagination": {"offset": off, "returned": len(states[off:off + lim]),
+                       "total": len(states),
+                       "next_offset": (off + len(states[off:off + lim])
+                                       if off + len(states[off:off + lim]) < len(states)
+                                       else None)},
+    }
+    return json.dumps(result, indent=1)
+
+
+def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
+    """Current EDL without ever returning amputated/invalid JSON.
+
+    Large timelines default to a compact index. Callers can then request one
+    or more top-level sections, with list pagination. This replaces the old
+    character slice that often cut the JSON in the middle of the exact
+    captions/overlays collection an MCP caller needed to repair.
+    """
+    row = ctx.latest_edl()
+    edl = row["json"]
+    try:
+        off = max(0, int(offset or 0))
+        lim = min(200, max(1, int(limit or 100)))
+    except (TypeError, ValueError):
+        return "REJECTED: offset and limit must be integers."
+    if sections is not None and not isinstance(sections, (list, tuple, str)):
+        return ("REJECTED: sections must be a section name or array of names "
+                f"from {sorted(edl.keys())}.")
+    wanted = ([sections] if isinstance(sections, str) else list(sections or []))
+    unknown = sorted({str(name) for name in wanted if str(name) not in edl})
+    if unknown:
+        return (f"REJECTED: unknown EDL section(s) {unknown}. Available: "
+                f"{sorted(edl.keys())}.")
+    if compact:
+        return json.dumps(_compact_edl(row, ctx), indent=1)
+    if wanted:
+        selected, pages = {}, {}
+        for raw_name in wanted:
+            name = str(raw_name)
+            value = edl.get(name)
+            if isinstance(value, list):
+                selected[name] = value[off:off + lim]
+                pages[name] = {"offset": off,
+                               "returned": len(selected[name]),
+                               "total": len(value),
+                               "next_offset": (off + len(selected[name])
+                                               if off + len(selected[name]) < len(value)
+                                               else None)}
+            else:
+                selected[name] = value
+        payload = {"version": row["version"], "sections": selected,
+                   "pagination": pages}
+        rendered = json.dumps(payload, indent=1)
+        if len(rendered) > 21000:
+            return json.dumps({
+                "version": row["version"],
+                "error": ("Requested page is too large for a reliable tool "
+                          "response; request fewer sections or a smaller limit."),
+                "requested_sections": wanted,
+                "suggested_limit": max(1, lim // 2),
+            }, indent=1)
+        return rendered
+    rendered = json.dumps(edl, indent=1)
+    if len(rendered) <= 19000:
+        header = {"version": row["version"],
+                  "description": describe_edl(edl, ctx.duration),
+                  "edl": edl}
+        return json.dumps(header, indent=1)
+    compact_payload = _compact_edl(row, ctx)
+    compact_payload["notice"] = (
+        "Full EDL is large, so this is a complete compact index—not truncated "
+        "JSON. Call get_edl(sections=['captions']) or another named section; "
+        "use offset/limit for long list sections.")
+    return json.dumps(compact_payload, indent=1)
 
 
 def _grade_chain_of(edl_json):
@@ -12437,9 +13030,25 @@ def _render_audio_review_prompt(edl):
         expected.append("sound effects")
     if edl.get("voiceover"):
         expected.append("voiceover")
+    declared = {
+        "music": [{"id": x.get("id"), "gain_db": x.get("gain_db"),
+                   "offset_s": x.get("offset_s") or 0,
+                   "window": [x.get("start"), x.get("end")]}
+                  for x in (edl.get("music") or [])],
+        "voiceover": [{"id": x.get("id"), "gain_db": x.get("gain_db"),
+                       "source_offset_s": x.get("source_offset_s") or 0,
+                       "start_output_s": x.get("start_output_s")}
+                      for x in (edl.get("voiceover") or [])],
+        "sfx": [{"id": x.get("id"), "at": x.get("at")}
+                for x in (edl.get("sfx") or [])],
+    }
     return (
         "You are the final audio QC editor. Listen to this rendered PROGRAM "
         "mix. The edit is REQUIRED to contain " + ", ".join(expected) + ". "
+        "These authored role labels are deterministic ground truth: "
+        + json.dumps(declared, separators=(",", ":")) + ". Do not call an "
+        "authored music layer voiceover or vice versa; if it is not audible, "
+        "say declared-but-inaudible rather than absent from the EDL. "
         "In at most 100 words start with PASS or FIX, then say whether added "
         "music/SFX/voiceover is truly audible, whether speech is clear, and "
         "whether there is pumping, clipping, clicks, dead air, or a cheap/"
@@ -12596,20 +13205,30 @@ def render_preview(ctx):
                 pass
             # Repetition audit on what actually survived the cut — the agent
             # must not tell the user repetitions are gone when they are not.
+            repetition_repairs = []
             try:
                 edl = row["json"]
                 tl = Timeline(edl["keep"], edl.get("inserts") or [],
                               edl.get("speed") or [])
-                reps = find_repeated_phrases(
+                reps = classify_repeated_phrases(
                     tl.kept_words(ctx.index.get("words", [])))
-                if reps:
+                dupes = [r for r in reps if r["kind"] == "edit_duplicate"]
+                spoken = [r for r in reps if r["kind"] == "spoken_repetition"]
+                if dupes:
                     flagged = "; ".join(
-                        f"'{t}' at " + ", ".join(f"{x}s" for x in times)
-                        for t, times in reps[:4])
-                    note += (f" REPETITION AUDIT: the output still repeats "
+                        f"'{r['phrase']}' at " + ", ".join(
+                            f"{o['program_s']}s" for o in r["occurrences"])
+                        for r in dupes[:4])
+                    note += (f" EDIT-DUPLICATION AUDIT: the output reuses "
                              f"{flagged} — verify with get_kept_transcript "
-                             "and cut the weaker take if these are true "
-                             "repeats.")
+                             "and remove the duplicated source segment.")
+                    repetition_repairs.append(
+                        "edit duplication: same source phrase appears twice")
+                if spoken:
+                    note += (f" SPOKEN-REPETITION NOTE: {len(spoken)} phrase(s) "
+                             "repeat at distinct source moments; this is not "
+                             "an edit-duplication defect and should not be cut "
+                             "automatically.")
             except Exception:
                 pass
             # Taste audit (round 52): the craft reviewer. Everything above
@@ -12628,13 +13247,14 @@ def render_preview(ctx):
                     user_asked=ctx.user_message or "")
                 # Published to the loop as well as printed here: a finding the
                 # model can read and skip past is not a review.
-                ctx.last_taste = list(findings) + critic_repairs
+                ctx.last_taste = (list(findings) + critic_repairs +
+                                  repetition_repairs)
                 ctx.last_taste_version = row.get("version")
                 note += taste.audit_line(findings)
             except Exception:
                 # Visual review must still block a bad handoff when a
                 # deterministic taste rule itself happens to fail.
-                ctx.last_taste = list(critic_repairs)
+                ctx.last_taste = list(critic_repairs) + repetition_repairs
                 ctx.last_taste_version = row.get("version")
             # Round 98 — the SOUND side of the self-check. Deterministic mix
             # measurements from the render job (audio_qc): findings are WORK,
@@ -12682,8 +13302,8 @@ def render_preview(ctx):
                             ctx.last_taste.append(
                                 "audio review: " + review.strip()[:300])
             # Recomputed on every proof. This is the only thing that can earn
-            # a third candidate: the model cannot request it through prose or
-            # a tool argument.
+            # another candidate after the ordinary repair; the model cannot
+            # request permission through prose or a tool argument.
             ctx.quality_repair_required = bool(ctx.last_taste)
             ctx.quality_repair_version = version
             return note
@@ -12789,6 +13409,19 @@ def _queue_check_frames(ctx, result, plan=None):
             queued += 1
         except Exception as e:
             print(f"[render] verify sheet fetch failed: {e}", flush=True)
+    ckey = result.get("caption_sheet_key")
+    if ckey:
+        clocal = os.path.join(ctx.workdir,
+                              f"caption_own_{uuid.uuid4().hex[:8]}.jpg")
+        try:
+            storage.download_to(ckey, clocal)
+            ctx.pending_images.append(
+                ("CAPTION QA — up to 16 real rendered caption-state changes "
+                 "sampled across the edit; inspect timing, clipping, placement "
+                 "and missing/overlapping words", clocal))
+            queued += 1
+        except Exception as e:
+            print(f"[render] caption sheet fetch failed: {e}", flush=True)
     skey = result.get("sheet_key")
     if skey:
         slocal = os.path.join(ctx.workdir,
@@ -12834,6 +13467,8 @@ def _independent_preview_review(ctx, result, plan=None):
     if plan:
         _download(result.get("verify_sheet_key"), "changed",
                   "EDITED RENDER changed moments, one numbered tile per claim")
+    _download(result.get("caption_sheet_key"), "captions",
+              "EDITED RENDER caption QA, up to 16 exact caption-state changes")
 
     # Compare changed moments to their corresponding RAW source tiles. First
     # and last tiles are useful for a generic overview, but on an 85-minute
@@ -12877,6 +13512,10 @@ def _independent_preview_review(ctx, result, plan=None):
     except Exception:
         edl = {}
     lines = [
+        "The rendered file completed and passed deterministic duration and "
+        "broad black-frame verification before these sheets were created. "
+        "A black/missing/continuity claim still needs an exact tile/time and "
+        "high confidence; sparse-sheet uncertainty is not a repair order.",
         f"User request: {(ctx.user_message or '')[:1000]}",
         f"Output duration: {result.get('duration_s')}s; raw source: "
         f"{getattr(ctx, 'duration', None)}s.",
@@ -13419,6 +14058,80 @@ _HEARING_OFF_NOTE = (
     "this exact track, still add it instead of refusing their choice.")
 
 
+def _declared_mix_state(ctx, edl):
+    """Deterministic authored roles; no perceptual model can relabel these."""
+    if not isinstance(edl, dict):
+        return None
+
+    def asset_label(key):
+        try:
+            asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
+        except Exception:
+            asset = None
+        meta = (asset or {}).get("meta") or {}
+        return (meta.get("filename") or meta.get("title") or
+                os.path.basename(key or "?"))[:80]
+
+    return {
+        "music": [{"id": item.get("id"),
+                   "file": asset_label(item.get("storage_key")),
+                   "window": [item.get("start"), item.get("end")],
+                   "source_offset_s": item.get("offset_s") or 0,
+                   "gain_db": item.get("gain_db"),
+                   "duck": item.get("duck")}
+                  for item in (edl.get("music") or [])],
+        "voiceover": [{"id": item.get("id"),
+                       "file": asset_label(item.get("asset_key")),
+                       "start_output_s": item.get("start_output_s"),
+                       "source_offset_s": item.get("source_offset_s") or 0,
+                       "gain_db": item.get("gain_db"),
+                       "duck_others": item.get("duck_others")}
+                      for item in (edl.get("voiceover") or [])],
+        "sfx": [{"id": item.get("id"), "at": item.get("at"),
+                 "gain_db": item.get("gain_db")}
+                for item in (edl.get("sfx") or [])],
+        "master_loudness": (edl.get("master") or {}).get("loudness"),
+    }
+
+
+def audit_audio_mix(ctx):
+    """Authored audio roles and offsets, separate from subjective listening."""
+    row = ctx.latest_edl()
+    edl = row["json"]
+    state = _declared_mix_state(ctx, edl) or {}
+    music_keys = {m.get("storage_key"): m.get("id")
+                  for m in (edl.get("music") or [])}
+    vo_keys = {v.get("asset_key"): v.get("id")
+               for v in (edl.get("voiceover") or [])}
+    doubled = [{"asset_key": key, "music_id": music_keys[key],
+                "voiceover_id": vo_keys[key]}
+               for key in sorted(set(music_keys) & set(vo_keys))]
+    warnings = []
+    if doubled:
+        warnings.append("same audio asset is active as both music and voiceover")
+    if not state.get("music") and state.get("voiceover"):
+        warnings.append(
+            "EDL has voiceover but no music; if this file is actually a song, "
+            "remove_voiceover and add_music instead—the roles mix differently")
+    if not any(state.get(k) for k in ("music", "voiceover", "sfx")):
+        warnings.append("no designed audio layers are authored")
+    preview = ctx.last_preview or {}
+    result = {
+        "version": row["version"],
+        "authored_roles_are_ground_truth": True,
+        "mix": state,
+        "duplicate_cross_role_assets": doubled,
+        "warnings": warnings,
+        "latest_preview_matches_version": preview.get("edl_version") == row["version"],
+        "latest_preview_audio_qc": (preview.get("audio_qc")
+                                    if preview.get("edl_version") == row["version"]
+                                    else None),
+        "next": ("Use listen_to(output_times=[...]) for perceptual audibility; "
+                 "never use a listener's role label to overwrite this EDL state."),
+    }
+    return json.dumps(result, indent=1)
+
+
 def listen_to(ctx, times=None, output_times=None, asset_key=None,
               span_s=4.0):
     """READ: real audio judgment over bounded source/asset/program clips."""
@@ -13449,6 +14162,7 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
 
     made = []          # (label, local_path)
     attempted_asset_keys = set()
+    program_edl = None
 
     def _cut(local_src, wins, label_fmt):
         for i, (s, e) in enumerate(wins):
@@ -13476,6 +14190,7 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
             render_program = asset["kind"] == "render"
             if render_program:
                 row = ctx.latest_edl()
+                program_edl = row["json"]
                 preview = ctx.last_preview or {}
                 asset_version = (asset.get("meta") or {}).get("edl_version")
                 if asset_version != row["version"]:
@@ -13521,6 +14236,7 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
                     str(asset.get("storage_key") or asset_key)))
         elif output_times:
             row = ctx.latest_edl()
+            program_edl = row["json"]
             lp = ctx.last_preview or {}
             if lp.get("edl_version") != row["version"] \
                     or not lp.get("render_asset_id"):
@@ -13568,6 +14284,8 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
 
     labels = [label for label, _ in made]
     if reviewer:
+        declared = (_declared_mix_state(ctx, program_edl)
+                    if program_edl is not None else None)
         prompt = (
             "You are a senior music editor and audio post-production mixer. "
             "Listen to the attached labeled clip(s), not their filenames. "
@@ -13577,7 +14295,13 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
             "placement recommendation. If this is a rendered PROGRAM mix, "
             "explicitly say whether the music/SFX is genuinely audible under "
             "the speech and whether dialogue remains intelligible. Never "
-            "pretend to hear something absent.")
+            "pretend to hear something absent. "
+            + (("The EDL below is deterministic ground truth for which roles "
+                "were authored. Do not rename an authored music layer as "
+                "voiceover (or vice versa). If a declared layer cannot be "
+                "heard, call it inaudible—not absent from the EDL. DECLARED "
+                "MIX: " + json.dumps(declared, separators=(",", ":")))
+               if declared else ""))
         assessment = llm.ask_audio(
             prompt, [path for _, path in made], labels,
             purpose="audio_listen")
@@ -13590,6 +14314,9 @@ def listen_to(ctx, times=None, output_times=None, asset_key=None,
             ctx.last_audio_review = assessment
             return ("Listening delivered and reviewed: "
                     + "; ".join(labels)
+                    + ((". DECLARED MIX STATE (EDL ground truth): " +
+                        json.dumps(declared, separators=(",", ":")))
+                       if declared else "")
                     + ". AUDIO REVIEW: " + assessment)
         return ("Listening extraction succeeded for " + "; ".join(labels)
                 + ", but the dedicated audio reviewer did not answer. Use "
@@ -14230,22 +14957,36 @@ def apply_look(ctx, name):
                          "there is nothing to caption.")
         else:
             caps = edl.get("captions")
-            if isinstance(caps, dict) and caps.get("emphasis_words"):
+            emphasis_off = (isinstance(caps, dict)
+                            and caps.get("emphasis_mode") == "off")
+            if emphasis_off:
+                emphasis, emph_src = [], "kept explicitly disabled"
+            elif isinstance(caps, dict) and caps.get("emphasis_words"):
                 emphasis, emph_src = caps["emphasis_words"], "kept existing"
             else:
                 emphasis = _emphasis_candidates(ctx)[0]
                 emph_src = "picked from the transcript"
             merged = (merge_caption_style(caps, dict(cap_patch)) if caps
                       else {"mode": "from_transcript",
+                            "design_version": CAPTION_DESIGN_VERSION,
                             "max_words_per_caption": None,
                             "style": dict(cap_patch)})
             bit = f"captions preset '{cap_patch['preset']}'"
             if cap_patch.get("size"):
                 bit += f" size {cap_patch['size']}"
             if isinstance(merged, dict):
+                merged["design_version"] = CAPTION_DESIGN_VERSION
                 if emphasis:
                     merged["emphasis_words"] = emphasis
+                    merged["emphasis_mode"] = (caps.get("emphasis_mode")
+                                               if isinstance(caps, dict)
+                                               and caps.get("emphasis_mode")
+                                               else "auto")
                     bit += f", {len(emphasis)} emphasis words ({emph_src})"
+                elif emphasis_off:
+                    merged["emphasis_words"] = None
+                    merged["emphasis_mode"] = "off"
+                    bit += ", keyword hierarchy kept off"
             else:
                 bit += (" (manual caption items restyled; emphasis words "
                         "apply to transcript captions only)")
@@ -14594,6 +15335,7 @@ _STYLE_PROPS = {
     "tracking": {"type": "number"},
     "text_align": {"type": "string",
                    "enum": ["left", "center", "right"]},
+    "anchor_y": {"type": "number", "minimum": 0.05, "maximum": 0.95},
 }
 
 TOOLS = {
@@ -14720,13 +15462,19 @@ TOOLS = {
                 "text, a precise instant. The transcript is accurate, so "
                 "read speech from "
                 "get_words / the transcript — never look to lip-read or "
-                "guess a word.",
+                "guess a word. IMPORTANT: the assembled geometry view omits "
+                "burn-ins. Set rendered=true after render_preview to inspect "
+                "the CURRENT preview's real pixels—including captions, text, "
+                "overlays and grade. In rendered mode output_times (or times) "
+                "are output seconds and up to 16 can be batched for caption "
+                "QA.",
                 {"times": {"type": "array", "items": {"type": "number"}},
                  "output_times": {"type": "array",
                                   "items": {"type": "number"}},
                  "question": {"type": "string"},
                  "start": {"type": "number"},
-                 "end": {"type": "number"}}),
+                 "end": {"type": "number"},
+                 "rendered": {"type": "boolean"}}),
     "look_at_asset": (look_at_asset, "YOUR OWN EYES on an UPLOADED clip or "
                       "image, or a finished RENDER (storage_key from "
                       "list_assets; kind='render' lists past previews/"
@@ -14855,8 +15603,10 @@ TOOLS = {
                      "PLACEMENT: multi-word presets default to the BOTTOM, "
                      "clear of the face — do not move them to 'middle'; "
                      "only a single-word-at-a-time look may sit centred. "
-                     "With a preset, semantic emphasis is AUTO-SELECTED from "
+                     "With a preset, sparse emphasis is AUTO-SELECTED from "
                      "the KEPT transcript when emphasis_words is omitted; "
+                     "measured vocal stress leads on short-form/cached audio, "
+                     "with numbers and semantic outcome words as fallback. "
                      "pass a verbatim list only when specific words are "
                      "required, or [] to explicitly disable hierarchy. "
                      "highlight_color sets the accent (default warm "
@@ -14924,7 +15674,10 @@ TOOLS = {
                   "lyric/sped-up/loop/cover versions unless asked; never "
                   "a full album/mix — one track only), then "
                   "fetch_url(url, as_kind='music') downloads the pick. "
-                  "Always tell the user which version you grabbed. For a "
+                  "Always tell the user which version you grabbed. Search "
+                  "can verify the likely recording, NOT a usage license; a "
+                  "public/downloadable upload does not grant republication "
+                  "rights, so disclose that. For a "
                   "genre/vibe request use search_music instead; for a "
                   "trending platform sound only the user can provide the "
                   "file.",
@@ -15162,7 +15915,10 @@ TOOLS = {
                      "a portrait card cannot be center-cropped into an empty "
                      "middle band. fit='crop' fills edge-to-edge but is "
                      "allowed only as a deliberate choice after "
-                     "look_at_asset confirms the content survives.",
+                     "look_at_asset confirms the content survives. The same "
+                     "asset cannot be used twice by accident—even with a "
+                     "different clip window; pass allow_repeat=true only for "
+                     "an intentional visual callback.",
                      {"asset_key": {"type": "string"},
                       "at_output_s": {"type": "number"},
                       "duration_s": {"type": "number"},
@@ -15171,7 +15927,8 @@ TOOLS = {
                               "enum": ["auto", "crop", "pad", "pad_blur"]},
                       "motion": {"type": "string",
                                  "enum": ["zoom_in", "zoom_out",
-                                          "pan_left", "pan_right"]}}),
+                                          "pan_left", "pan_right"]},
+                      "allow_repeat": {"type": "boolean"}}),
     "set_insert_window": (set_insert_window, "Change which part of an "
                           "already-spliced clip plays, IN PLACE — duration_s "
                           "for how long it runs, clip_start_s for where in the "
@@ -15287,7 +16044,9 @@ TOOLS = {
                   "to force audio-only from a video page ('music'). The "
                   "result is saved to the project but is NOT in the video "
                   "until you add it with insert_media (clip/image) or "
-                  "add_music (audio).",
+                  "add_music (audio). Fetching verifies neither ownership "
+                  "nor license: the returned RIGHTS CHECK must be relayed; "
+                  "a downloadable file is not permission to republish.",
                   {"url": {"type": "string"},
                    "as_kind": {"type": "string",
                                "enum": ["clip", "music", "image"]}}),
@@ -15730,9 +16489,13 @@ TOOLS = {
                       "whole program from start_output_s (a position in the "
                       "FINAL edited video, default 0). duck_others (default "
                       "true) lowers all other audio 12dB while it plays. "
-                      "Use a storage_key from list_assets(kind='music').",
+                      "source_offset_s seeks into the file in place (use it "
+                      "to start a narration/song excerpt at the right moment; "
+                      "never create an externally trimmed workaround). Use a "
+                      "storage_key from list_assets(kind='music').",
                       {"asset_key": {"type": "string"},
                        "start_output_s": {"type": "number"},
+                       "source_offset_s": {"type": "number"},
                        "gain_db": {"type": "number"},
                        "duck_others": {"type": "boolean"}}),
     "remove_voiceover": (remove_voiceover, "Remove one voiceover by its id "
@@ -15780,7 +16543,9 @@ TOOLS = {
                     "they do NOT track objects in the footage. "
                     "insert_media PAUSES the talk and adds time; "
                     "fit='cover' does not — pick by whether the speech "
-                    "should continue.",
+                    "should continue. Duplicate asset use is rejected by "
+                    "default even with a different source_start_s; pass "
+                    "allow_repeat=true only for an intentional callback.",
                     {"asset_key": {"type": "string"},
                      "start": {"type": "number"},
                      "duration_s": {"type": "number"},
@@ -15793,7 +16558,8 @@ TOOLS = {
                                   "enum": list(OVERLAY_ANIMS)},
                      "exit": {"type": "string",
                               "enum": list(OVERLAY_ANIMS)},
-                     "source_start_s": {"type": "number"}}),
+                     "source_start_s": {"type": "number"},
+                     "allow_repeat": {"type": "boolean"}}),
     "move_overlay": (move_overlay, "Reposition/retime/resize an EXISTING "
                      "overlay — 'move the logo to the other corner', 'make "
                      "the PIP smaller'. Only the fields you pass change. id "
@@ -15874,7 +16640,8 @@ TOOLS = {
          "push": {"type": "number"},
          "ease": {"type": "string",
                   "enum": ["smooth", "accelerate", "linear"]},
-         "settle": {"type": "boolean"}}),
+         "settle": {"type": "boolean"},
+         "allow_repeat": {"type": "boolean"}}),
     "remove_screen_takeover": (
         remove_screen_takeover,
         "Undo a screen takeover by its id (see get_edl): the corner pin, the "
@@ -16251,8 +17018,9 @@ TOOLS = {
     "remove_stem_mix": (remove_stem_mix, "Restore the original mixed "
                         "soundtrack (undo separate_music).", {}),
     "set_master_loudness": (set_master_loudness, "enabled=true normalizes "
-                            "the FINAL MIX to -14 LUFS / -1.5 dBTP (the "
-                            "social/streaming loudness target) on preview "
+                            "the FINAL MIX to -14 LUFS with a codec-safe "
+                            "-2 dBTP target plus a latency-compensated hard "
+                            "ceiling on preview "
                             "AND export — the fix for 'the export sounds "
                             "quiet on TikTok/YouTube'. It changes loudness, "
                             "not the voice/music/sfx balance. false removes "
@@ -16273,6 +17041,14 @@ TOOLS = {
                            "analyze that instead — e.g. to find the drop "
                            "for add_music offset_s.",
                            {"asset_key": {"type": "string"}}),
+    "audit_audio_mix": (audit_audio_mix, "Deterministic audit of the CURRENT "
+                        "EDL's authored music, voiceover and SFX roles, files, "
+                        "program windows, source offsets, gains, ducking and "
+                        "mastering. Detects the same asset playing twice or a "
+                        "likely song misfiled as voiceover. This state is "
+                        "ground truth; use listen_to for audibility, but never "
+                        "let a subjective reviewer relabel the authored role.",
+                        {}),
     "punch_in_on_emphasis": (punch_in_on_emphasis, "ONE-CALL emphasis "
                              "zooms: writes punch zooms on the N most "
                              "vocally STRESSED words that survive the "
@@ -16337,7 +17113,26 @@ TOOLS = {
                    "with its own tool.",
                    {"name": {"type": "string",
                              "enum": sorted(LOOKS)}}),
-    "get_edl": (get_edl, "Current EDL JSON and version.", {}),
+    "get_edl": (get_edl, "Current EDL JSON and version. Large timelines "
+                "return a compact index instead of invalid truncated JSON. "
+                "Request top-level sections such as ['captions','overlays'] "
+                "and paginate list sections with offset/limit. compact=true "
+                "always returns counts, caption state and duplicate assets.",
+                {"sections": {"type": ["array", "string"],
+                              "items": {"type": "string"}},
+                 "compact": {"type": "boolean"},
+                 "offset": {"type": "integer"},
+                 "limit": {"type": "integer"}}),
+    "audit_captions": (audit_captions, "Mechanically compile and audit the "
+                       "CURRENT caption track using the exact ASS artifact "
+                       "ffmpeg burns. Reports first-caption lateness, missing "
+                       "spoken-word coverage, true distinct-state overlaps, "
+                       "exact event pages and up to 16 high-information "
+                       "output times for rendered pixel QA. Call after adding "
+                       "or restyling captions and after render_preview; this "
+                       "is stronger timing evidence than a visual critic.",
+                       {"offset": {"type": "integer"},
+                        "limit": {"type": "integer"}}),
     "render_preview": (render_preview, "Render the current EDL as a fast "
                        "480p preview from the proxy, attach it to chat, and "
                        "get a visual self-check. ALWAYS call this before "

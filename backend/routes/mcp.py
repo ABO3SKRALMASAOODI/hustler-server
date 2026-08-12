@@ -327,11 +327,33 @@ def _editor_tools(catalog):
     for t in (catalog or {}).get("tools", []):
         fn = t.get("function") or {}
         name = fn.get("name")
+        # Never let a mutable connection-wide pointer choose the timeline for
+        # an editor call. Long MCP sessions hop among a parent and many shorts;
+        # one missed open_project previously sent a valid operation to the
+        # wrong EDL. Every editor tool now names its project in the call, and
+        # the backend verifies ownership before queueing. Copy the schema so
+        # the cached worker catalog remains byte-for-byte untouched.
+        original = fn.get("parameters") or {"type": "object", "properties": {}}
+        schema = json.loads(json.dumps(original))
+        schema.setdefault("type", "object")
+        props = schema.setdefault("properties", {})
+        props["project_id"] = {
+            "type": "integer",
+            "description": ("Required immutable scope for this call. Copy the "
+                            "id from list_projects/open_project/project_state; "
+                            "the active-project pointer is never used to guess."),
+        }
+        required = list(schema.get("required") or [])
+        if "project_id" not in required:
+            required.append("project_id")
+        schema["required"] = required
+        desc = ("PROJECT-SCOPED: this call acts only on the explicit "
+                "project_id and returns the project identity with its result. "
+                + (fn.get("description") or ""))
         out.append({"name": name,
                     "title": _title_for(name),
-                    "description": fn.get("description"),
-                    "inputSchema": fn.get("parameters")
-                    or {"type": "object", "properties": {}},
+                    "description": desc,
+                    "inputSchema": schema,
                     "annotations": _annotations_for(name)})
     return out
 
@@ -346,37 +368,41 @@ SESSION_TOOLS = [
     {"name": "list_projects",
      "description": "List this account's video projects, newest first, with "
                     "whether each has a video, its project kind, its podcast-"
-                    "shorts status, and which parent generated a short. "
-                    "Start here.",
+                    "shorts status, and which parent generated a short. The "
+                    "navigation-pointer label is informational only; every "
+                    "project-targeting call still requires project_id. Start "
+                    "here.",
      "inputSchema": _NO_ARGS},
     {"name": "open_project",
-     "description": "Make a project the active one — every editing tool acts "
-                    "on it until you open another. Returns the full project "
+     "description": "Open a project for navigation and return its full "
                     "state: the video, its transcript and shots, the current "
-                    "EDL and what is available to place. Call this before any "
-                    "editing tool.",
+                    "EDL and what is available to place. Copy this project_id "
+                    "into every later project-scoped call; no edit or review "
+                    "tool guesses from the active pointer.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer"}}, "required": ["project_id"]}},
     {"name": "open_short",
      "description": "Open one generated short for DIRECT editing by this "
                     "MCP caller. Select it by its 1-based board card number "
-                    "or child project ID; every normal editor tool then acts "
-                    "on that short's EDL with exactly the same capabilities "
+                    "or child project ID; copy the returned child project ID "
+                    "into every normal editor tool for exactly the same capabilities "
                     "as Valmera's own agent. This does NOT call or delegate "
                     "to Valmera's agent. Use this, then watch_video and the "
                     "normal editing tools, when the user says YOU should "
-                    "edit a short. If parent_project_id is omitted, the "
-                    "active parent or generated child determines the board.",
+                    "edit a short. card requires parent_project_id; a direct "
+                    "child_project_id resolves its own parent and never trusts "
+                    "the active-project pointer.",
      "inputSchema": {"type": "object", "properties": {
          "card": {"type": "integer", "minimum": 1,
                   "description": "1-based card number from shorts_status."},
          "child_project_id": {"type": "integer",
                               "description": "Generated child project ID."},
          "parent_project_id": {"type": "integer",
-                               "description": "Optional Shorts board project "
-                                              "when it is not active."}}}},
+                               "description": "Shorts board project; required "
+                                              "when selecting by card."}}}},
     {"name": "create_project",
-     "description": "Create an empty project and make it active. Upload a "
+     "description": "Create an empty project and select it for navigation. "
+                    "Copy the returned project_id into every later call. Upload a "
                     "video into it with upload_start, or build a canvas "
                     "program from generated/uploaded assets. kind='shorts' "
                     "creates the Podcast to Shorts workflow: after its main "
@@ -389,12 +415,13 @@ SESSION_TOOLS = [
                                  "podcast/video that should fan out into "
                                  "multiple generated short projects."}}}},
     {"name": "project_state",
-     "description": "Re-read the active project's state (video, transcript, "
+     "description": "Re-read one explicit project's state (video, transcript, "
                     "shots, current EDL, assets). Cheap — call it whenever "
                     "you are unsure what the edit currently looks like.",
-     "inputSchema": _NO_ARGS},
+     "inputSchema": {"type": "object", "properties": {
+         "project_id": {"type": "integer"}}, "required": ["project_id"]}},
     {"name": "upload_start",
-     "description": "Begin uploading a LOCAL file into the active project. "
+     "description": "Begin uploading a LOCAL file into an explicit project. "
                     "Returns presigned URL(s) you upload the bytes to "
                     "yourself (curl), then call upload_finish. kind: "
                     "'original' the main video, 'clip' b-roll, 'music' audio, "
@@ -405,8 +432,9 @@ SESSION_TOOLS = [
          "size_bytes": {"type": "integer",
                         "description": "Exact size of the local file"},
          "kind": {"type": "string",
-                  "enum": ["original", "clip", "music", "image"]}},
-         "required": ["filename", "size_bytes"]}},
+                  "enum": ["original", "clip", "music", "image"]},
+         "project_id": {"type": "integer"}},
+         "required": ["project_id", "filename", "size_bytes"]}},
     {"name": "upload_finish",
      "description": "Finish an upload once every byte is in storage. For a "
                     "main video this starts the analysis (transcript, shots, "
@@ -423,21 +451,24 @@ SESSION_TOOLS = [
                                   "[{part_number, etag}] in order",
                    "items": {"type": "object", "properties": {
                        "part_number": {"type": "integer"},
-                       "etag": {"type": "string"}}}}},
-         "required": ["storage_key"]}},
+                       "etag": {"type": "string"}}}},
+         "project_id": {"type": "integer"}},
+         "required": ["project_id", "storage_key"]}},
     {"name": "index_status",
-     "description": "Progress of the active project's video analysis. The "
+     "description": "Progress of an explicit project's video analysis. The "
                     "editing tools cannot read a transcript, shots or "
                     "silences until this reaches 'done'.",
-     "inputSchema": _NO_ARGS},
+     "inputSchema": {"type": "object", "properties": {
+         "project_id": {"type": "integer"}}, "required": ["project_id"]}},
     {"name": "shorts_status",
-     "description": "Read the active project's Podcast to Shorts progress, "
+     "description": "Read an explicit project's Podcast to Shorts progress, "
                     "planner job, generated child project IDs, edit versions, "
                     "and final-render states. Safe to poll while clips are "
-                    "being built. If the active project is a generated short, "
-                    "this reports its parent run and explains how to keep "
-                    "editing the active clip.",
-     "inputSchema": _NO_ARGS},
+                    "being built. If project_id names a generated short, this "
+                    "reports its parent run and preserves that explicit child "
+                    "identity in the answer.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_id": {"type": "integer"}}, "required": ["project_id"]}},
     {"name": "export_final",
      "description": "Render the FINAL export of an EDL version — full "
                     "resolution, from the original file. This is the user's "
@@ -445,8 +476,10 @@ SESSION_TOOLS = [
                     "Returns a job id; poll with wait_for_job, then "
                     "download_url.",
      "inputSchema": {"type": "object", "properties": {
+         "project_id": {"type": "integer"},
          "edl_version": {"type": "integer",
-                         "description": "Defaults to the latest version"}}}},
+                         "description": "Defaults to the latest version"}},
+         "required": ["project_id"]}},
     {"name": "wait_for_job",
      "description": "Wait for a background job (a render, or a tool call that "
                     "outran its reply) and return its result. Safe to call "
@@ -456,11 +489,13 @@ SESSION_TOOLS = [
          "job_id": {"type": "integer"}}, "required": ["job_id"]}},
     {"name": "download_url",
      "description": "A temporary URL for watching or downloading a render of "
-                    "the active project. kind 'preview' (fast, 540p) or "
+                    "an explicit project. kind 'preview' (fast, 540p) or "
                     "'final' (the export).",
      "inputSchema": {"type": "object", "properties": {
+         "project_id": {"type": "integer"},
          "kind": {"type": "string", "enum": ["preview", "final"]},
-         "edl_version": {"type": "integer"}}}},
+         "edl_version": {"type": "integer"}},
+         "required": ["project_id"]}},
     {"name": "watch_video",
      "description":
         "WATCH THE VIDEO YOURSELF — the real file, pixels and audio, not a "
@@ -475,6 +510,8 @@ SESSION_TOOLS = [
         "plain MP4 you fetch and watch. Cheap: normally it hands over a file "
         "that already exists, untouched.",
      "inputSchema": {"type": "object", "properties": {
+         "project_id": {"type": "integer",
+                        "description": "Required immutable project scope."},
          "kind": {"type": "string", "enum": ["timeline", "source", "asset"],
                   "description": "Default 'timeline' — the current edit."},
          "asset_key": {"type": "string",
@@ -493,9 +530,10 @@ SESSION_TOOLS = [
                                        "Never up-scales."},
          "render": {"type": "boolean",
                     "description": "kind='timeline': false watches the last "
-                                   "render that exists instead of rendering "
-                                   "the current edit, and says how stale it "
-                                   "is. Default true."}}}},
+                                  "render that exists instead of rendering "
+                                  "the current edit, and says how stale it "
+                                   "is. Default true."}},
+         "required": ["project_id"]}},
 ]
 
 # Titles + behaviour hints for the session tools — the same treatment
@@ -510,10 +548,10 @@ SESSION_TOOLS = [
 _SESSION_META = {
     #  name: (title, readOnlyHint, idempotentHint)
     "list_projects":  ("List this account's projects", True, False),
-    "open_project":   ("Open a project (switch the active one)", True, True),
+    "open_project":   ("Open a project for navigation", True, True),
     "open_short":     ("Open a short for direct editing", True, True),
     "create_project": ("Create a project", False, False),
-    "project_state":  ("Read the active project's state", True, False),
+    "project_state":  ("Read an explicit project's state", True, False),
     "upload_start":   ("Start uploading a local file", False, False),
     "upload_finish":  ("Finish an upload", False, False),
     "index_status":   ("Check video analysis progress", True, False),
@@ -543,15 +581,20 @@ operating doctrine. Follow it.
 
 Two things are different from a normal tool session, and both matter:
 
-1. ONE ACTIVE PROJECT — AND YOU CONTROL IT. Editing tools do not take a
-   project id. Call list_projects, then open_project(id) — that returns the
+1. EVERY EDITOR CALL IS EXPLICITLY PROJECT-SCOPED. Call list_projects, then
+   open_project(id) — that returns the
    whole project state (footage, transcript, shots, current EDL). Do that
-   before you edit anything, and again with project_state() whenever you are
-   unsure. open_project works at ANY moment and is the ONLY thing that moves
-   this connection between projects: the project open in the user's studio
+   before you edit anything, and again with project_state(project_id=id) whenever you are
+   unsure. Then pass that exact project_id on EVERY normal editing tool call.
+   The backend checks ownership and echoes the project id/title in every
+   result; project_state, uploads, render delivery and exports require the same
+   explicit id too. open_project still moves a navigation pointer for legacy
+   clients, but no project-changing or project-reviewing call trusts it:
+   the project open in the user's studio
    app is a separate pointer that neither constrains you nor follows you, so
    NEVER tell the user to open a project in the app on your behalf — switch
-   it yourself. Generated shorts are ordinary projects. open_short(card) or
+   it yourself. Generated shorts are ordinary projects.
+   open_short(parent_project_id=BOARD, card=N) or
    open_project(child_id) puts that child's timeline under ALL the same editor
    tools as Valmera's own agent; watch it, make the EDL changes yourself,
    render it, and inspect the result. Never say MCP can only send instructions
@@ -561,7 +604,7 @@ Two things are different from a normal tool session, and both matter:
    It forwards a text prompt to Valmera's separate in-house agent on every
    selected child. Do not use edit_shorts when the user asks YOU, the outside
    MCP model, to do the edit or rejects agent delegation. In that case call
-   shorts_status, open_short for each requested card, and use the normal editor
+   shorts_status, open_short with the board/card or child id, and use the normal editor
    tools directly. Use edit_shorts only when the user explicitly wants the
    batch delegated to Valmera's agents and understands that distinction.
 
@@ -586,7 +629,8 @@ Two things are different from a normal tool session, and both matter:
    create_project(title, kind="shorts"), upload the long main video, and poll
    index_status. The shorts planner starts automatically after analysis. Poll
    shorts_status to get the parent run, every generated child project ID and
-   its render state. Open each ready child with open_short and refine it
+   its render state. Open each ready child with open_short(child_project_id=ID)
+   and refine it
    YOURSELF with the same editor tools, then render_preview, watch_video and
    export_final. On an
    existing normal long-video project, make_shorts starts the same workflow
@@ -664,7 +708,7 @@ def _still_running(row, what):
             f"wait_for_job(job_id={row['id']}) to pick the result up.")
 
 
-def _run_tool_job(tok, name, args, raw=False):
+def _run_tool_job(tok, name, args, raw=False, project_id=None):
     """Enqueue one editor tool call for the worker and wait for its answer.
 
     `raw=True` returns the worker's whole result dict instead of just its
@@ -674,16 +718,19 @@ def _run_tool_job(tok, name, args, raw=False):
         return (result if raw and result is not None
                 else ({"text": text} if raw else text))
 
-    project_id = tok["active_project_id"]
+    # Internal callers must also be explicit. Keeping an active-pointer
+    # fallback here would let one future session tool accidentally reopen the
+    # exact wrong-project class this layer is meant to eliminate.
     if not project_id:
-        return _out("No project is open. Call list_projects and then "
-                    "open_project(project_id) — every editing tool acts on "
+        return _out("No explicit project_id was supplied. Call list_projects "
+                    "and copy the intended id; Valmera will not guess from "
                     "the active project.")
     with vdb() as conn:
         cur = conn.cursor()
-        if not _project_for_user(cur, project_id, tok["user_id"]):
-            return _out("The active project no longer exists. Call "
-                        "list_projects and open another.")
+        project = _project_for_user(cur, project_id, tok["user_id"])
+        if not project:
+            return _out(f"Project {project_id} does not exist on this account. "
+                        "Call list_projects and copy the intended id.")
         # Two editors on one timeline write conflicting EDL versions and each
         # reads state the other is halfway through changing. The studio's own
         # agent owns the project while its turn runs.
@@ -703,18 +750,59 @@ def _run_tool_job(tok, name, args, raw=False):
     row = _wait(job_id, tok["user_id"])
     if not row:
         return _out(f"Tool call {name} vanished from the queue — try it again.")
+    identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
     if row["state"] == "failed":
-        return _out(f"{label} failed: {row.get('error') or 'unknown error'}. "
+        return _out(f"{identity}\n{label} failed: {row.get('error') or 'unknown error'}. "
                     "Nothing was changed by it.")
     if row["state"] in ("queued", "running"):
-        return _out(_still_running(row, label))
+        return _out(identity + "\n" + _still_running(row, label))
     result = row.get("result") or {}
-    return _out(result.get("text") or json.dumps(result), result)
+    text = identity + "\n" + (result.get("text") or json.dumps(result))
+    if raw:
+        result = dict(result)
+        result.update(text=text, project_id=project_id,
+                      project_title=project.get("title"))
+    return _out(text, result)
 
 
 # ------------------------------------------------------------------ #
 #  Session tool implementations                                        #
 # ------------------------------------------------------------------ #
+
+def _required_project_id(args):
+    """Return (project_id, error) for a session call that touches a project.
+
+    The MCP token still remembers an active project for navigation and older
+    clients, but it is never an authority boundary or a routing decision.
+    Long-running callers routinely switch among a Shorts board and several
+    children; an explicit id makes every operation locally auditable.
+    """
+    try:
+        project_id = int((args or {}).get("project_id"))
+    except (TypeError, ValueError):
+        return None, ("project_id must be an explicit integer from "
+                      "list_projects/open_project; this call will not guess "
+                      "from the active project.")
+    return project_id, None
+
+
+_PROJECT_SCOPED_SESSION_TOOLS = {
+    "project_state", "upload_start", "upload_finish", "index_status",
+    "shorts_status", "export_final", "download_url", "watch_video",
+}
+
+
+def _session_project_identity(tok, project_id):
+    try:
+        with vdb() as conn:
+            project = _project_for_user(conn.cursor(), int(project_id),
+                                        tok["user_id"])
+    except Exception:
+        return ""
+    if not project:
+        return ""
+    return (f"PROJECT {int(project_id)} — "
+            f"\"{project.get('title') or 'Untitled'}\"")
 
 def _t_list_projects(tok, args):
     with vdb() as conn:
@@ -737,7 +825,8 @@ def _t_list_projects(tok, args):
                 what = "indexed" if cur.fetchone() else "video not analyzed yet"
             else:
                 what = "no video (canvas project)"
-            active = " [ACTIVE]" if r["id"] == tok["active_project_id"] else ""
+            active = (" [NAVIGATION POINTER ONLY]"
+                      if r["id"] == tok["active_project_id"] else "")
             kind = r.get("kind") or "edit"
             if kind == "short":
                 kind_label = ("generated short from project "
@@ -751,7 +840,7 @@ def _t_list_projects(tok, args):
                          f" — created {r['created_at']:%Y-%m-%d}{active}")
     if not lines:
         return ("No projects yet. create_project(title) makes one, then "
-                "upload_start puts a video in it.")
+                "upload_start(project_id=ID, ...) puts a video in it.")
     return ("Projects (open one with open_project(project_id)):\n"
             + "\n".join(lines))
 
@@ -767,24 +856,28 @@ def _t_open_project(tok, args):
         if not p:
             return f"Project {project_id} does not exist on this account."
     _set_active_project(tok, project_id)
-    state = _run_tool_job(tok, "__state__", {})
+    state = _run_tool_job(tok, "__state__", {}, project_id=project_id)
     return f"Opened project {project_id} — \"{p['title']}\".\n\n{state}"
 
 
 def _t_open_short(tok, args):
-    """Resolve a board card to its child and put that EDL under MCP control.
+    """Resolve a board card to its child and return its exact edit identity.
 
     This is session plumbing, not an agent tool: it changes only the caller's
-    active-project pointer. Every edit after it still goes through the live
-    agent_tools registry, so there is no second or reduced editor.
+    navigation pointer. Every edit still goes through the live agent_tools
+    registry and must carry the returned child project_id, so there is no
+    second editor and no implicit routing decision.
     """
     raw_parent = args.get("parent_project_id")
-    active_id = tok.get("active_project_id")
+    raw_child = args.get("child_project_id")
+    if raw_parent is None and raw_child is None:
+        return ("card selection requires parent_project_id. Alternatively "
+                "pass child_project_id directly; open_short never guesses a "
+                "board from the active-project pointer.")
     try:
-        lookup_id = int(raw_parent) if raw_parent is not None else int(active_id)
+        lookup_id = int(raw_parent if raw_parent is not None else raw_child)
     except (TypeError, ValueError):
-        return ("No Shorts board is selected. Open its parent or any generated "
-                "child first, or pass parent_project_id.")
+        return "parent_project_id/child_project_id must be an integer."
 
     with vdb() as conn:
         cur = conn.cursor()
@@ -817,7 +910,6 @@ def _t_open_short(tok, args):
                     "Call shorts_status to check the planner.")
 
         raw_card = args.get("card")
-        raw_child = args.get("child_project_id")
         if (raw_card is None) == (raw_child is None):
             return ("Pass exactly one selector: card (the 1-based number from "
                     "shorts_status) or child_project_id.")
@@ -850,12 +942,13 @@ def _t_open_short(tok, args):
             return f"Generated short project {child_id} no longer exists."
 
     _set_active_project(tok, child_id)
-    state = _run_tool_job(tok, "__state__", {})
+    state = _run_tool_job(tok, "__state__", {}, project_id=child_id)
     return (f"Opened short project {child_id} — "
             f"\"{clip.get('title') or child.get('title') or 'Untitled short'}\" "
             f"from board {parent['id']} for DIRECT MCP editing. No Valmera "
-            "agent was called. Every normal editor tool now acts on this "
-            f"short's EDL.\n\n{state}")
+            "agent was called. Pass "
+            f"project_id={child_id} on every normal editor tool to act on "
+            f"this short's EDL.\n\n{state}")
 
 
 def _t_create_project(tok, args):
@@ -877,24 +970,28 @@ def _t_create_project(tok, args):
     _set_active_project(tok, pid)
     if kind == "shorts":
         return (f"Created Podcast to Shorts project {pid} (\"{title}\") and "
-                "made it active. Upload the long main video with upload_start "
+                "selected it for navigation. Pass that project_id to "
+                "upload_start for the long main video "
                 "and upload_finish. After index_status reaches done, the "
                 "shorts run starts automatically; poll shorts_status to see "
                 "each generated child project and open_project(child_id) to "
                 "refine it.")
-    return (f"Created editor project {pid} (\"{title}\") and made it active. "
-            "Add a video with upload_start, or start placing generated / "
-            "uploaded assets for a canvas program.")
+    return (f"Created editor project {pid} (\"{title}\") and selected it for "
+            "navigation. Pass that project_id to upload_start, or use it on "
+            "every editor call while building a canvas program.")
 
 
 def _t_project_state(tok, args):
-    return _run_tool_job(tok, "__state__", {})
+    project_id, error = _required_project_id(args)
+    if error:
+        return error
+    return _run_tool_job(tok, "__state__", {}, project_id=project_id)
 
 
 def _t_upload_start(tok, args):
-    project_id = tok["active_project_id"]
-    if not project_id:
-        return "No project is open — call create_project or open_project."
+    project_id, error = _required_project_id(args)
+    if error:
+        return error
     if not storage.is_configured():
         return "Storage is not configured on this deployment."
     filename = args.get("filename") or ""
@@ -912,7 +1009,7 @@ def _t_upload_start(tok, args):
         return str(e)
     with vdb() as conn:
         if not _project_for_user(conn.cursor(), project_id, tok["user_id"]):
-            return "The active project no longer exists."
+            return f"Project {project_id} does not exist on this account."
     key = storage.new_original_key(project_id, ext, kind)
     try:
         out = storage.presign_upload(key, nbytes, content_type)
@@ -922,7 +1019,8 @@ def _t_upload_start(tok, args):
     if out.get("mode") == "single":
         return (
             f"Upload the file with this exact command, then call "
-            f"upload_finish(storage_key=\"{key}\", filename=\"{filename}\", "
+            f"upload_finish(project_id={project_id}, storage_key=\"{key}\", "
+            f"filename=\"{filename}\", "
             f"kind=\"{kind}\").\n\n"
             f"curl -sS -f -X PUT -H 'Content-Type: {content_type}' "
             f"--upload-file '<LOCAL PATH>' '{out['url']}'\n\n"
@@ -937,11 +1035,12 @@ def _t_upload_start(tok, args):
     return (
         f"This file needs a MULTIPART upload: {len(parts)} parts of "
         f"{out.get('part_size')} bytes (the last part is whatever remains). "
-        f"Run `python3 scripts/valmera_upload.py <LOCAL PATH>` if you have "
+        f"Run `python3 scripts/valmera_upload.py <LOCAL PATH> --project "
+        f"{project_id}` if you have "
         f"the repo — it does all of this, including the retries — or PUT each "
         f"part yourself with `curl -D-` and keep the ETag header from every "
         f"response.\n\n"
-        f"Then call upload_finish(storage_key=\"{key}\", "
+        f"Then call upload_finish(project_id={project_id}, storage_key=\"{key}\", "
         f"filename=\"{filename}\", kind=\"{kind}\", "
         f"upload_id=\"{out.get('upload_id')}\", "
         f"parts=[{{\"part_number\": 1, \"etag\": \"...\"}}, ...]).\n\n"
@@ -951,9 +1050,9 @@ def _t_upload_start(tok, args):
 
 
 def _t_upload_finish(tok, args):
-    project_id = tok["active_project_id"]
-    if not project_id:
-        return "No project is open."
+    project_id, error = _required_project_id(args)
+    if error:
+        return error
     payload, status = complete_upload_core(
         tok["user_id"], project_id,
         {"storage_key": args.get("storage_key"),
@@ -974,13 +1073,13 @@ def _t_upload_finish(tok, args):
 
 
 def _t_index_status(tok, args):
-    project_id = tok["active_project_id"]
-    if not project_id:
-        return "No project is open."
+    project_id, error = _required_project_id(args)
+    if error:
+        return error
     with vdb() as conn:
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, tok["user_id"]):
-            return "The active project no longer exists."
+            return f"Project {project_id} does not exist on this account."
         original = _active_original(cur, project_id)
         if not original:
             return ("No main video in this project — it is a canvas program. "
@@ -1004,9 +1103,9 @@ def _t_index_status(tok, args):
 
 def _t_shorts_status(tok, args):
     """Return the Shorts board in words, including IDs an MCP model can open."""
-    project_id = tok["active_project_id"]
-    if not project_id:
-        return "No project is open — call list_projects and open_project."
+    project_id, error = _required_project_id(args)
+    if error:
+        return error
 
     with vdb() as conn:
         cur = conn.cursor()
@@ -1014,22 +1113,23 @@ def _t_shorts_status(tok, args):
                        FROM projects
                        WHERE id = %s AND user_id = %s""",
                     (project_id, int(tok["user_id"])))
-        active = cur.fetchone()
-        if not active:
-            return "The active project no longer exists."
+        selected = cur.fetchone()
+        if not selected:
+            return f"Project {project_id} does not exist on this account."
 
         parent_note = ""
-        parent = active
-        if active.get("parent_project_id"):
+        parent = selected
+        if selected.get("parent_project_id"):
             cur.execute("""SELECT id, title, kind, parent_project_id, meta
                            FROM projects
                            WHERE id = %s AND user_id = %s""",
-                        (active["parent_project_id"], int(tok["user_id"])))
-            parent = cur.fetchone() or active
+                        (selected["parent_project_id"], int(tok["user_id"])))
+            parent = cur.fetchone() or selected
             parent_note = (
-                f"Active project {active['id']} is a generated short from "
+                f"Selected project {selected['id']} is a generated short from "
                 f"parent {parent['id']}. Keep this project open to edit this "
-                "clip; open another child ID below to edit that clip instead.\n\n")
+                "clip by passing its project_id on every editor call; choose "
+                "another child ID below to edit that clip instead.\n\n")
 
         parent_id = parent["id"]
         meta = parent.get("meta") or {}
@@ -1096,7 +1196,9 @@ def _t_shorts_status(tok, args):
             bits.append(fb)
         lines.append("  " + " — ".join(bits))
 
-    tail = ("For DIRECT editing by this MCP model: open_short(card), use the "
+    tail = (f"For DIRECT editing by this MCP model: "
+            f"open_short(parent_project_id={parent_id}, card=N) or "
+            "open_short(child_project_id=ID), use the "
             "normal editor tools on that child EDL, render_preview and "
             "watch_video to verify it, then export_final when ready. "
             "edit_shorts is different: it delegates a prompt to Valmera's "
@@ -1106,13 +1208,13 @@ def _t_shorts_status(tok, args):
 
 
 def _t_export_final(tok, args):
-    project_id = tok["active_project_id"]
-    if not project_id:
-        return "No project is open."
+    project_id, error = _required_project_id(args)
+    if error:
+        return error
     with vdb() as conn:
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, tok["user_id"]):
-            return "The active project no longer exists."
+            return f"Project {project_id} does not exist on this account."
         version = args.get("edl_version")
         if version is None:
             edl = _latest_edl(cur, project_id)
@@ -1159,33 +1261,44 @@ def _t_wait_for_job(tok, args):
     row = _wait(job_id, tok["user_id"])
     if not row:
         return f"No job {job_id} on this account."
+    identity = ""
+    if row.get("project_id") is not None:
+        with vdb() as conn:
+            project = _project_for_user(conn.cursor(), row["project_id"],
+                                        tok["user_id"])
+        identity = (f"PROJECT {row['project_id']} — "
+                    f"\"{(project or {}).get('title') or 'Untitled'}\"\n")
     if row["state"] == "failed":
-        return f"Job {job_id} ({row['type']}) FAILED: {row.get('error')}"
+        return (identity +
+                f"Job {job_id} ({row['type']}) FAILED: {row.get('error')}")
     if row["state"] in ("queued", "running"):
-        return _still_running(row, f"job {job_id} ({row['type']})")
+        return identity + _still_running(row, f"job {job_id} ({row['type']})")
     result = row.get("result") or {}
     if row["type"] == "mcp_tool":
-        return result.get("text") or json.dumps(result)
+        return identity + (result.get("text") or json.dumps(result))
     if row["type"] == "final":
-        return ("The final export is rendered. Call "
-                "download_url(kind=\"final\") for the link.")
+        return (identity + "The final export is rendered. Call "
+                f"download_url(project_id={row['project_id']}, "
+                "kind=\"final\") for the link.")
     if row["type"] == "index":
-        return ("Analysis finished — the transcript, shots and silences are "
-                "ready. project_state() shows them.")
-    return f"Job {job_id} ({row['type']}) finished: {json.dumps(result)[:800]}"
+        return (identity +
+                "Analysis finished — the transcript, shots and silences are "
+                f"ready. project_state(project_id={row['project_id']}) shows them.")
+    return (identity +
+            f"Job {job_id} ({row['type']}) finished: {json.dumps(result)[:800]}")
 
 
 def _t_download_url(tok, args):
-    project_id = tok["active_project_id"]
-    if not project_id:
-        return "No project is open."
+    project_id, error = _required_project_id(args)
+    if error:
+        return error
     kind = args.get("kind") or "preview"
     if kind not in ("preview", "final"):
         return "kind must be 'preview' or 'final'."
     with vdb() as conn:
         cur = conn.cursor()
         if not _project_for_user(cur, project_id, tok["user_id"]):
-            return "The active project no longer exists."
+            return f"Project {project_id} does not exist on this account."
         # Renders are assets of kind 'render'; the variant and the EDL version
         # they were made from live in meta.
         sql = """SELECT storage_key, meta FROM assets
@@ -1220,6 +1333,10 @@ def _t_watch_video(tok, args):
     permanent row in Postgres for a file that is already in object storage,
     and the row would be written whether or not the caller could use it."""
     args = dict(args)
+    project_id, error = _required_project_id(args)
+    if error:
+        return _text(error, True)
+    args.pop("project_id", None)
     delivery = (args.get("delivery") or VIDEO_DELIVERY).strip().lower()
     if delivery not in ("auto", "inline", "url"):
         return _text("delivery must be 'auto', 'inline' or 'url'.", True)
@@ -1236,7 +1353,8 @@ def _t_watch_video(tok, args):
     # deployment refuses is how a model wastes a turn discovering it.
     args["_inline_max_bytes"] = inline_max if VIDEO_ALLOW_INLINE else 0
 
-    result = _run_tool_job(tok, "__media__", args, raw=True)
+    result = _run_tool_job(tok, "__media__", args, raw=True,
+                           project_id=project_id)
     text = result.get("text") or "Could not fetch the video."
     video = result.get("video")
     if not video:
@@ -1422,6 +1540,14 @@ def _handle(tok, msg):
                 # Almost every session tool answers with a string. watch_video
                 # answers with a whole tools/call result, because a video
                 # cannot be a sentence.
+                if isinstance(out, str) and \
+                        name in _PROJECT_SCOPED_SESSION_TOOLS and \
+                        args.get("project_id") is not None and \
+                        not out.startswith("PROJECT "):
+                    identity = _session_project_identity(
+                        tok, args.get("project_id"))
+                    if identity:
+                        out = identity + "\n" + out
                 return _result(req_id, out if isinstance(out, dict)
                                else _text(out))
             catalog = _catalog()
@@ -1436,10 +1562,20 @@ def _handle(tok, msg):
                     "Call tools/list for what is actually available — a tool "
                     "whose backing service is unconfigured is hidden rather "
                     "than failing at call time.", True))
+            raw_project_id = args.pop("project_id", None)
+            try:
+                project_id = int(raw_project_id)
+            except (TypeError, ValueError):
+                return _result(req_id, _text(
+                    f"{name} requires an explicit integer project_id. Call "
+                    "list_projects/open_project, then pass that same id on "
+                    "every editor tool call; Valmera will not guess from the "
+                    "active project.", True))
             # raw, because a look tool now answers with PICTURES as well as
             # words — the outside model reads them itself instead of being
             # told what our vision model saw in them.
-            out = _run_tool_job(tok, name, args, raw=True)
+            out = _run_tool_job(tok, name, args, raw=True,
+                                project_id=project_id)
             body = out.get("text") or json.dumps(out)
             content = [{"type": "text", "text": body}] \
                 + _image_blocks(out.get("images"))
@@ -1627,8 +1763,9 @@ def _respond(payload):
 
 @mcp_bp.route("/mcp", methods=["GET", "DELETE"])
 def mcp_stream():
-    """This server keeps no stream and no session state — the active project
-    lives on the grant, so a reconnect resumes exactly where it left off.
+    """This server keeps no stream. The grant remembers a navigation pointer,
+    but all project reads, edits, renders, and downloads require an explicit
+    project_id and never route from that mutable value.
 
     Still authenticated: a client that probes with GET before POSTing must get
     the same 401 challenge, or it never discovers the authorization server."""

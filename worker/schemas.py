@@ -296,6 +296,11 @@ class CaptionStyle(BaseModel):
     # type; positive values create airy editorial/news typography.
     tracking: Optional[float] = None
     text_align: Optional[Literal["left", "center", "right"]] = None
+    # Exact output-frame vertical anchor, as a fraction of frame height.
+    # Normally written by the shot-aware placement compiler so captions on a
+    # letterboxed 9:16 edit sit on the actual foreground picture rather than
+    # in detached blurred padding. Users may also request a precise safe band.
+    anchor_y: Optional[float] = None
 
     @field_validator("effect", mode="before")
     @classmethod
@@ -369,6 +374,19 @@ class CaptionStyle(BaseModel):
             raise ValueError(f"tracking {v} must be between -8 and 24")
         return v
 
+    @field_validator("anchor_y")
+    @classmethod
+    def _caption_anchor_y_range(cls, v):
+        if v is None:
+            return v
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("anchor_y must be a frame fraction between 0.05 and 0.95")
+        if not (0.05 <= v <= 0.95):
+            raise ValueError(f"anchor_y {v} must be between 0.05 and 0.95")
+        return round(v, 4)
+
     @field_validator("color")
     @classmethod
     def _color_hex(cls, v):
@@ -437,6 +455,12 @@ class CaptionItem(BaseModel):
 
 class CaptionsFromTranscript(BaseModel):
     mode: Literal["from_transcript"] = "from_transcript"
+    # Caption composition is versioned independently from the EDL schema.
+    # None freezes every historical EDL on the original greedy phrase/layout
+    # engine; new authoring tools bake v2 so old cached versions remain
+    # reproducible while new captions gain prosodic grouping, balanced lines
+    # and punctuation-aware presentation.  Never infer this at render time.
+    design_version: Optional[Literal[2]] = None
     # Chunk word-timed captions into groups of at most N words. Timing always
     # comes from the real word timestamps in the index — never invented.
     max_words_per_caption: Optional[int] = None
@@ -454,6 +478,12 @@ class CaptionsFromTranscript(BaseModel):
     # agent from the REAL transcript; words containing digits are always
     # emphasized. Ignored without a preset. None/[] = no keyword emphasis.
     emphasis_words: Optional[List[str]] = None
+    # Why emphasis_words has its current value.  In particular, "off" makes
+    # an explicit emphasis_words=[] durable across later style-only edits;
+    # without this sentinel the list validator collapses [] to None and a
+    # subsequent restyle mistakes the user's restraint for "not chosen yet"
+    # and auto-adds hierarchy again.  None preserves historical behavior.
+    emphasis_mode: Optional[Literal["auto", "manual", "off"]] = None
     # Round 52 — spelling/capitalization corrections for the burned words,
     # [[from, to], ...]. TEXT ONLY: word timings are never touched, so a fix
     # cannot desync a karaoke preset. None (never []) so an EDL written before
@@ -498,7 +528,23 @@ class CaptionPlacementSpan(BaseModel):
     t0: float
     t1: float
     position: Literal["bottom", "top", "middle"]
+    # Output-frame fraction. None preserves every historical placement track.
+    anchor_y: Optional[float] = None
     reason: Optional[str] = None
+
+    @field_validator("anchor_y")
+    @classmethod
+    def _placement_anchor_y_range(cls, v):
+        if v is None:
+            return v
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "anchor_y must be a frame fraction between 0.05 and 0.95")
+        if not (0.05 <= v <= 0.95):
+            raise ValueError(f"anchor_y {v} must be between 0.05 and 0.95")
+        return round(v, 4)
 
 
 class MusicItem(BaseModel):
@@ -709,6 +755,9 @@ class VoiceoverItem(BaseModel):
     id: str
     asset_key: str
     start_output_s: float
+    # Seek into the source narration/audio without forcing an external trim.
+    # Optional-None keeps historical EDL signatures and renders unchanged.
+    source_offset_s: Optional[float] = None
     gain_db: float = 0.0
     duck_others: bool = True
 
@@ -1387,7 +1436,7 @@ class SpeedSpan(BaseModel):
 
 class Master(BaseModel):
     """Output mastering. loudness 'social' normalizes the final mix to
-    -14 LUFS / -1.5 dBTP (the streaming/social target) via loudnorm —
+    -14 LUFS with a codec-safe -2.0 dBTP ceiling via loudnorm + limiter —
     applied to preview AND final so what the user approves is what ships."""
     loudness: Optional[Literal["social"]] = None
 
@@ -1709,9 +1758,16 @@ def _check_span(name, s, e, max_end, min_len=MIN_SPAN_S, clamp_slack=0.0):
         else:
             raise EDLValidationError(
                 f"{name}: end {e} exceeds the limit {round(max_end, 2)}s.")
-    if e - s < min_len:
+    # `s` and `e` are canonical centiseconds. Comparing their binary-float
+    # subtraction directly made [1577.83, 1577.88] evaluate just below 0.05,
+    # so a valid word was rejected while the error printed the same rounded
+    # values and claimed they were shorter. Compare centisecond ticks instead.
+    span_ticks = round((e - s) * 100)
+    min_ticks = round(float(min_len) * 100)
+    if span_ticks < min_ticks:
         raise EDLValidationError(
-            f"{name}: span [{s}, {e}] is shorter than {min_len}s.")
+            f"{name}: span [{s}, {e}] is {max(0.0, e - s):.3f}s, shorter "
+            f"than {min_len}s.")
     return e
 
 
@@ -1977,6 +2033,7 @@ def validate_edl(data, duration=None):
             _check_span(f"captions.placement_track[{i}]", s, e, duration)
             track.append(CaptionPlacementSpan(
                 t0=s, t1=e, position=span.position,
+                anchor_y=span.anchor_y,
                 reason=(span.reason or "")[:80] or None))
         track.sort(key=lambda x: x.t0)
         for a, b in zip(track, track[1:]):
@@ -2047,6 +2104,11 @@ def validate_edl(data, duration=None):
     seen_ids = set()
     for i, vo in enumerate(edl.voiceover):
         vo.start_output_s = _r(vo.start_output_s)
+        if vo.source_offset_s is not None:
+            vo.source_offset_s = _r(vo.source_offset_s)
+            if vo.source_offset_s < 0:
+                raise EDLValidationError(
+                    f"voiceover[{i}].source_offset_s must be >= 0.")
         if not vo.id or vo.id in seen_ids:
             raise EDLValidationError(
                 f"voiceover[{i}].id must be non-empty and unique.")

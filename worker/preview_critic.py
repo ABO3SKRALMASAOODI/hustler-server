@@ -147,8 +147,18 @@ def repair_lines(report, min_confidence=0.72):
         return []
     out = []
     for finding in report.get("findings") or []:
-        if finding["severity"] not in {"blocker", "major"} or \
-                finding["confidence"] < min_confidence:
+        if finding["severity"] not in {"blocker", "major"}:
+            continue
+        # Sparse sheets can make a deliberate dark shot, a repeated-looking
+        # angle, or a tile decode miss look like a broken render. The file has
+        # already passed deterministic duration/black-frame verification.
+        # Require exact timing and very high confidence for these categories
+        # before they authorize another EDL write.
+        high_risk = finding["category"] in {
+            "black_frame", "continuity", "insert"}
+        threshold = max(min_confidence, 0.90) if high_risk else min_confidence
+        if finding["confidence"] < threshold or \
+                (high_risk and finding.get("time_s") is None):
             continue
         where = (f" at {finding['time_s']:.1f}s"
                  if finding.get("time_s") is not None else "")
@@ -168,6 +178,10 @@ def summary_line(report, limit=4):
     for finding in findings[:limit]:
         where = (f" @{finding['time_s']:.1f}s"
                  if finding.get("time_s") is not None else "")
-        bits.append(f"{finding['severity']}/{finding['category']}{where}: "
+        needs_confirmation = (finding["category"] in {
+            "black_frame", "continuity", "insert"} and
+            (finding["confidence"] < 0.90 or finding.get("time_s") is None))
+        status = "unconfirmed " if needs_confirmation else ""
+        bits.append(f"{status}{finding['severity']}/{finding['category']}{where}: "
                     f"{finding['evidence']} Repair: {finding['repair']}")
     return " INDEPENDENT VISUAL REVIEW: " + "; ".join(bits)

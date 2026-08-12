@@ -229,7 +229,7 @@ def build_timestamp_sheet(frames, out_path):
     return out_path
 
 
-def build_frames_sheet(video_path, out_path, times, cols=3):
+def build_frames_sheet(video_path, out_path, times, cols=3, max_tiles=9):
     """Numbered tiles at EXPLICIT times — round 81's verify sheet.
 
     build_result_sheet samples the whole render evenly, which is the right
@@ -239,7 +239,7 @@ def build_frames_sheet(video_path, out_path, times, cols=3):
     claims list can address it ("tile 2 at 3.6s should show ...")."""
     import media
     font = _font()
-    times = [float(t) for t in (times or [])][:9]
+    times = [float(t) for t in (times or [])][:max(1, int(max_tiles))]
     if not times:
         raise ValueError("no times")
     tmp_frames = []

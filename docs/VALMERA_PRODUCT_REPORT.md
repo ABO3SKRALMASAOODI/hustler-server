@@ -283,7 +283,7 @@ The corollary is a hard cultural rule visible all over the code: **the render-ti
 
 **SpeedSpan** — `{id, start, end (SOURCE time, ≥0.2s), factor ∈ [0.25, 4.0]}`; audio is pitch-preserved via chained `atempo`; slow-mo **duplicates frames** (no optical-flow interpolation on this hardware — tools warn below 0.6×); factors within 0.01 of 1.0 rejected as no-ops; spans non-overlapping.
 
-**Master** — `{loudness: "social" | None}` → loudnorm to −14 LUFS / −1.5 dBTP on preview AND final.
+**Master** — `{loudness: "social" | None}` → −14 LUFS with a codec-safe −2.0 dBTP ceiling on preview AND final.
 
 ## 5.4 The keyframe primitive: AnimFloat
 
@@ -430,7 +430,7 @@ The shared tail does: optional outward word-snapping, drops sub-0.05s slivers, r
 - `list_sfx_library(category)` / `add_sfx(storage_key, at, gain_db=-6)` / `move_sfx(id, at)` / `remove_sfx(id)`. The SFX resolver is "a structural twin of the music resolver, deliberately just as strict… a loose check here is a read primitive over the whole bucket."
 - `add_voiceover(asset_key, start_output_s=0, gain_db=0, duck_others=true)` / `remove_voiceover(id)`.
 - `set_volume(start, end, gain_db)` — source-time automation on the speaker track. `set_audio_gain(kind, id, gain_db)` — retune an existing music/sfx/voiceover item ("NEVER set_volume" for those).
-- `set_master_loudness(enabled)` — −14 LUFS / −1.5 dBTP mastering toggle.
+- `set_master_loudness(enabled)` — −14 LUFS / −2.0 dBTP codec-safe mastering toggle.
 
 ## Visual tools
 
@@ -613,7 +613,7 @@ The product's audio architecture, as taught to the agent verbatim ("four layers,
 3. **SFX** — `sfx[]` point events. Default −6 dB. Never loops, never ducks ("an accent that dips under the very word it is punctuating is not an accent").
 4. **Voiceover** — `voiceover[]` items at 0 dB, ducking everything else −12 dB while active.
 
-The final mix: `amix=inputs=N:duration=first:normalize=0`. **Deliberately no limiter** — alimiter's 5ms lookahead measurably delayed the whole program audio against picture; headroom is engineered instead via pack normalization (−16 LUFS) plus conservative defaults. Optional mastering (`master.loudness="social"`) applies `loudnorm=I=-14:TP=-1.5:LRA=11` to the program only, before the end-card concat (so the card's silence never drags the integrated measurement). Everything runs 48 kHz stereo fltp.
+The final mix: `amix=inputs=N:duration=first:normalize=0`. Ordinary unmastered mixes deliberately add no limiter; headroom comes from pack normalization (−16 LUFS) plus conservative defaults. Optional mastering (`master.loudness="social"`) applies `loudnorm=I=-14:TP=-2.0:LRA=11` followed by a latency-compensated hard ceiling (`alimiter ... latency=1`) to the program only, before the end-card concat (so the card's silence never drags the integrated measurement). This guards AAC/inter-sample overs without shifting audio against picture. Everything returns to 48 kHz stereo fltp.
 
 **Ducking, two generations**: legacy items use a hard −12 dB `volume` step enabled over transcript speech spans (merged until ≤80 enable-expressions); new music items get `duck_mode: "smooth"` — `sidechaincompress=threshold=0.03:ratio=12:attack=180:release=550` keyed off the program feed (threshold ≈ −30 dBFS: real speech, not room tone), so the bed breathes with the voice.
 

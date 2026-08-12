@@ -50,6 +50,37 @@ AUDIO_NORM = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 class RenderVerificationError(media.MediaError, dbx.PermanentJobError):
     """The same bytes and EDL will fail identically; a retry only rebills it."""
 
+
+def caption_review_times(edl, index, workdir, duration, max_times=16):
+    """High-information output times at real compiled caption state changes.
+
+    Uniform overview sampling routinely misses short words. Compile the same
+    ASS source as the renderer, deduplicate its drawing layers into visual
+    states, then sample across those exact state boundaries.
+    """
+    if not edl.get("captions"):
+        return []
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        path = caplib.build_ass(
+            edl, index, tl, os.path.join(workdir, "caption_review.ass"))
+        states = sorted(set(stitch.ass_events(path))) if path else []
+    except Exception:
+        return []
+    if not states:
+        return []
+    count = min(max(1, int(max_times)), len(states))
+    if count == 1:
+        picks = [states[0]]
+    else:
+        indexes = sorted({round(i * (len(states) - 1) / (count - 1))
+                          for i in range(count)})
+        picks = [states[i] for i in indexes]
+    return [round(min(max(s + min(0.06, max(0.01, (e - s) / 2.0)), 0.0),
+                      max(0.0, float(duration) - 0.01)), 3)
+            for s, e in picks]
+
 # Color-grade presets (EDL.effects.grade). Applied to all footage after
 # concat, BEFORE captions burn — text never gets graded.
 GRADE_FILTERS = {
@@ -2548,7 +2579,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     for j, (input_idx, vo, vd) in enumerate(vo_inputs):
         delay_ms = int(max(0.0, float(vo["start_output_s"])) * 1000)
         delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""
-        parts.append(f"[{input_idx}:a]volume={vo.get('gain_db', 0.0)}dB,"
+        off = max(0.0, float(vo.get("source_offset_s") or 0.0))
+        trim = f"atrim=start={off:.3f},asetpts=PTS-STARTPTS," if off else ""
+        parts.append(f"[{input_idx}:a]{trim}"
+                     f"volume={vo.get('gain_db', 0.0)}dB,"
                      f"aresample=48000{delay}[vo{j}]")
         mix_labels.append(f"[vo{j}]")
     for j, (input_idx, item, _sdur) in enumerate(sfx_inputs or []):
@@ -2600,13 +2634,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[apre]{','.join(chain) or 'anull'}[{a_prog}]")
 
     if loud:
-        # Master loudness: -14 LUFS / -1.5 dBTP (the social/streaming
-        # target), single-pass dynamic loudnorm on the PROGRAM only — the
+        # Master loudness: -14 LUFS with codec-safe true-peak headroom.
+        # loudnorm's single pass can miss short nonlinear mixes and AAC can
+        # add inter-sample overs. A latency-compensated hard ceiling follows
+        # it, so QC cannot report positive dBTP while picture/audio stay in
+        # sync. The limiter does not auto-level back to 0 dBFS (`level=0`).
+        # Apply this to the PROGRAM only — the
         # end card's silence must not drag the integrated measurement, and
         # normalizing before the concat keeps it out. loudnorm internally
         # resamples to 192k, so the format is pinned back after.
         nxt = "amst" if outro_on else "aout"
-        parts.append(f"[{a_prog}]loudnorm=I=-14:TP=-1.5:LRA=11,"
+        parts.append(f"[{a_prog}]loudnorm=I=-14:TP=-2.0:LRA=11,"
+                     "alimiter=limit=0.75:attack=5:release=50:level=0:"
+                     "latency=1,"
                      f"{AUDIO_NORM}[{nxt}]")
         a_prog = nxt
 
@@ -2728,7 +2768,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     for item in voiceover:
         local = _fetch(item["asset_key"], "vo", next_idx)
         extra_inputs += ["-i", local]
-        vo_dur = media.probe_audio_duration(local)
+        vo_dur = max(0.0, media.probe_audio_duration(local) -
+                     float(item.get("source_offset_s") or 0.0))
         vo_inputs.append((next_idx, item, vo_dur))
         next_idx += 1
 
@@ -3152,7 +3193,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     for item in voiceover:
         local = _fetch(item["asset_key"], "vo", next_idx)
         extra_inputs += ["-i", local]
-        vo_dur = media.probe_audio_duration(local)
+        vo_dur = max(0.0, media.probe_audio_duration(local) -
+                     float(item.get("source_offset_s") or 0.0))
         vo_inputs.append((next_idx, item, vo_dur))
         next_idx += 1
 
@@ -3936,6 +3978,8 @@ def run_render_job(worker_db, job):
                                       wm_settings):
             return {"render_asset_id": cached["id"],
                     "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
+                    "caption_sheet_key": ((cached.get("meta") or {})
+                                          .get("caption_sheet_key")),
                     "duration_s": cached["duration_s"], "edl_version": version,
                     "variant": variant, "cached": True}
     if is_canvas:
@@ -4245,6 +4289,21 @@ def run_render_job(worker_db, job):
                 sheets.build_frames_sheet(out_local, verify_local, vtimes)
             except Exception:
                 verify_local = None
+        caption_local = None
+        caption_times = []
+        if variant == "preview" and edl_row["json"].get("captions"):
+            try:
+                caption_times = caption_review_times(
+                    edl_row["json"], index, workdir, out_dur, max_times=16)
+                if caption_times:
+                    caption_local = os.path.join(workdir,
+                                                 "caption_sheet.jpg")
+                    sheets.build_frames_sheet(
+                        out_local, caption_local, caption_times,
+                        cols=4, max_tiles=16)
+            except Exception:
+                caption_local = None
+                caption_times = []
         _mark("sheet_s")
 
         # The render itself can finish in the narrow window between progress
@@ -4265,8 +4324,13 @@ def run_render_job(worker_db, job):
         if verify_local and os.path.exists(verify_local):
             verify_sheet_key = f"media/{project_id}/{stamp}_vf.jpg"
             storage.upload_file(verify_local, verify_sheet_key, "image/jpeg")
+        caption_sheet_key = None
+        if caption_local and os.path.exists(caption_local):
+            caption_sheet_key = f"media/{project_id}/{stamp}_cap.jpg"
+            storage.upload_file(caption_local, caption_sheet_key, "image/jpeg")
         if not _still_ours(96):
-            storage.delete_keys([render_key, sheet_key, verify_sheet_key])
+            storage.delete_keys([render_key, sheet_key, verify_sheet_key,
+                                 caption_sheet_key])
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
         _mark("upload_s")
@@ -4299,7 +4363,7 @@ def run_render_job(worker_db, job):
                 listen_keys = []
         if not _still_ours(98):
             storage.delete_keys(
-                [render_key, sheet_key, verify_sheet_key]
+                [render_key, sheet_key, verify_sheet_key, caption_sheet_key]
                 + [item["key"] for item in listen_keys])
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
@@ -4310,6 +4374,8 @@ def run_render_job(worker_db, job):
             fps=out_info["fps"],
             meta={"variant": variant, "edl_version": version,
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
+                  "caption_sheet_key": caption_sheet_key,
+                  "caption_review_times": caption_times,
                   "listen_keys": [k["key"] for k in listen_keys],
                   "src_sha256": src_sha,
                   **({"stitched_from": stitched_from}
@@ -4336,6 +4402,7 @@ def run_render_job(worker_db, job):
                     keys.append(a["storage_key"])
                     keys.append((a.get("meta") or {}).get("sheet_key"))
                     keys.append((a.get("meta") or {}).get("verify_sheet_key"))
+                    keys.append((a.get("meta") or {}).get("caption_sheet_key"))
                     keys.extend((a.get("meta") or {}).get("listen_keys")
                                 or [])
                 storage.delete_keys(keys)
@@ -4356,6 +4423,8 @@ def run_render_job(worker_db, job):
                   flush=True)
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
                 "verify_sheet_key": verify_sheet_key,
+                "caption_sheet_key": caption_sheet_key,
+                "caption_review_times": caption_times,
                 "duration_s": out_dur, "edl_version": version,
                 "variant": variant, "timings": timings,
                 "midword_audit": mw,

@@ -70,7 +70,10 @@ def _reset():
                           "clips": [{"order": 0, "title": "Strong hook",
                                      "start": 12.0, "end": 38.0,
                                      "child_project_id": 9,
-                                     "edl_version": 6}]}}}},
+                                     "edl_version": 6}]}}},
+                  9: {"id": 9, "title": "Strong hook", "kind": "short",
+                      "parent_project_id": 3, "meta": {}},
+              },
               shorts_job={"id": 8, "state": "done", "progress": 100,
                           "error": None, "result": {"clips": 1}},
               final_rows=[{"project_id": 9, "id": 10, "state": "done",
@@ -252,7 +255,8 @@ def test_initialize_carries_the_editing_doctrine(client):
             {"protocolVersion": "2025-06-18"}).get_json()
     assert b["result"]["protocolVersion"] == "2025-06-18"
     assert "DOCTRINE." in b["result"]["instructions"]
-    assert "ONE ACTIVE PROJECT" in b["result"]["instructions"]
+    assert "EVERY EDITOR CALL IS EXPLICITLY PROJECT-SCOPED" in \
+        b["result"]["instructions"]
     assert "Never say MCP can only send instructions" in \
         b["result"]["instructions"]
     assert "Do not use edit_shorts when the user asks YOU" in \
@@ -278,10 +282,11 @@ def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     names = [t["name"] for t in tools]
     assert "open_project" in names and "get_transcript" in names
     editor = [t for t in tools if t["name"] == "get_transcript"][0]
-    # The schema must arrive exactly as the worker published it — a rewrite
-    # here is how the two tool surfaces would start to differ.
-    assert editor["inputSchema"] == \
-        CATALOG["tools"][0]["function"]["parameters"]
+    # MCP adds only its transport-level immutable project scope; the worker's
+    # arguments otherwise remain untouched.
+    assert editor["inputSchema"]["properties"]["start"] == {"type": "number"}
+    assert editor["inputSchema"]["properties"]["project_id"]["type"] == "integer"
+    assert "project_id" in editor["inputSchema"]["required"]
 
 
 def test_podcast_shorts_are_first_class_session_tools(client):
@@ -292,6 +297,10 @@ def test_podcast_shorts_are_first_class_session_tools(client):
     assert by_name["open_short"]["annotations"]["readOnlyHint"] is True
     assert by_name["create_project"]["inputSchema"]["properties"]["kind"] \
         ["enum"] == ["edit", "shorts"]
+    for name in ("project_state", "upload_start", "upload_finish",
+                 "index_status", "shorts_status", "export_final",
+                 "download_url", "watch_video"):
+        assert "project_id" in by_name[name]["inputSchema"]["required"]
 
 
 def test_create_podcast_shorts_project_persists_its_kind(client):
@@ -307,40 +316,54 @@ def test_create_podcast_shorts_project_persists_its_kind(client):
 
 def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
-                       {"name": "shorts_status", "arguments": {}}))
+                       {"name": "shorts_status",
+                        "arguments": {"project_id": 3}}))
     assert "status: ready" in body
     assert "Planner job 8: done" in body
     assert "card 1, project [9] Strong hook" in body
     assert "edit v6" in body and "final done (job 10)" in body
-    assert "open_short(card)" in body
+    assert "open_short(parent_project_id=3, card=N)" in body
     assert "delegates a prompt" in body
 
 
 def test_open_short_puts_the_child_edl_under_direct_mcp_control(client):
+    DB["static_project"] = None  # explicit board, never the stale pointer
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
-                       {"name": "open_short", "arguments": {"card": 1}}))
+                       {"name": "open_short",
+                        "arguments": {"parent_project_id": 3, "card": 1}}))
     assert DB["static_project"] == 9
     assert "DIRECT MCP editing" in body
     assert "No Valmera agent was called" in body
-    assert "Every normal editor tool" in body
+    assert "project_id=9 on every normal editor tool" in body
 
 
-def test_open_short_rejects_a_child_outside_the_active_board(client):
+def test_open_short_resolves_an_explicit_child_without_active_pointer(client):
+    DB["static_project"] = None
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "open_short",
+                        "arguments": {"child_project_id": 9}}))
+    assert DB["static_project"] == 9
+    assert "DIRECT MCP editing" in body
+
+
+def test_open_short_rejects_an_unknown_explicit_child(client):
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
                        {"name": "open_short",
                         "arguments": {"child_project_id": 999}}))
     assert DB["static_project"] == 3
-    assert "is not a generated short" in body
+    assert "does not exist on this account" in body
 
 
 def test_open_short_card_numbers_match_status_while_earlier_card_builds(client):
     DB["project_rows"][3]["meta"]["shorts"]["clips"].insert(
         0, {"order": -1, "title": "Building", "start": 0, "end": 20})
     waiting = text_of(rpc(client, "tools/call", STATIC_TOKEN,
-                          {"name": "open_short", "arguments": {"card": 1}}))
+                          {"name": "open_short", "arguments": {
+                              "parent_project_id": 3, "card": 1}}))
     assert "still building" in waiting
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
-                       {"name": "open_short", "arguments": {"card": 2}}))
+                       {"name": "open_short", "arguments": {
+                           "parent_project_id": 3, "card": 2}}))
     assert DB["static_project"] == 9
     assert "DIRECT MCP editing" in body
 
@@ -361,9 +384,18 @@ def test_json_preferring_client_gets_json(client):
 
 def test_editor_tool_returns_the_workers_own_text(client):
     r = rpc(client, "tools/call", STATIC_TOKEN,
-            {"name": "get_transcript", "arguments": {}})
-    assert text_of(r) == "12 sentences."
+            {"name": "get_transcript", "arguments": {"project_id": 3}})
+    assert text_of(r).endswith("12 sentences.")
+    assert "PROJECT 3" in text_of(r)
     assert r.get_json()["result"].get("isError") is not True
+
+
+def test_delayed_tool_result_repeats_immutable_project_identity(client):
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "wait_for_job",
+                        "arguments": {"job_id": 5}}))
+    assert body.startswith('PROJECT 3 — "P"')
+    assert body.endswith("12 sentences.")
 
 
 def test_a_look_tool_returns_the_PICTURES_not_a_paragraph(client, monkeypatch):
@@ -378,7 +410,8 @@ def test_a_look_tool_returns_the_PICTURES_not_a_paragraph(client, monkeypatch):
     monkeypatch.setattr(mcpmod.storage, "get_object_whole",
                         lambda key, cap: b"\xff\xd8jpegbytes")
     res = rpc(client, "tools/call", STATIC_TOKEN,
-              {"name": "get_transcript", "arguments": {}}).get_json()["result"]
+              {"name": "get_transcript",
+               "arguments": {"project_id": 3}}).get_json()["result"]
     kinds = [c["type"] for c in res["content"]]
     assert kinds == ["text", "text", "image"]     # body, label, picture
     img = res["content"][2]
@@ -394,7 +427,8 @@ def test_an_unreadable_frame_never_costs_the_answer(client, monkeypatch):
     monkeypatch.setattr(mcpmod.storage, "get_object_whole",
                         lambda key, cap: None)
     res = rpc(client, "tools/call", STATIC_TOKEN,
-              {"name": "get_transcript", "arguments": {}}).get_json()["result"]
+              {"name": "get_transcript",
+               "arguments": {"project_id": 3}}).get_json()["result"]
     assert [c["type"] for c in res["content"]] == ["text"]
     assert res.get("isError") is not True
 
@@ -406,11 +440,12 @@ def test_unknown_tool_explains_the_likely_reason(client):
     assert "hidden rather than failing" in text_of(r)
 
 
-def test_editing_without_an_open_project_says_what_to_do(client):
+def test_editing_without_an_explicit_project_says_what_to_do(client):
     DB["static_project"] = None
-    assert "open_project" in text_of(rpc(
+    body = text_of(rpc(
         client, "tools/call", STATIC_TOKEN,
         {"name": "get_transcript", "arguments": {}}))
+    assert "project_id" in body and "will not guess" in body
 
 
 def test_unknown_method_is_a_jsonrpc_error(client):
@@ -442,6 +477,7 @@ def _served(monkeypatch, *, inline=True, nbytes=len(MOVIE)):
 
 
 def _call_watch(client, **args):
+    args.setdefault("project_id", 3)
     return rpc(client, "tools/call", STATIC_TOKEN,
                {"name": "watch_video", "arguments": args}
                ).get_json()["result"]
@@ -680,8 +716,9 @@ def test_claude_ai_connector_flow(client):
         {"name": "open_project", "arguments": {"project_id": 3}})
     assert DB["grants"][grant_id]["active_project_id"] == 3
     assert text_of(rpc(client, "tools/call", access,
-                       {"name": "get_transcript", "arguments": {}})) \
-        == "12 sentences."
+                       {"name": "get_transcript",
+                        "arguments": {"project_id": 3}})) \
+        .endswith("12 sentences.")
 
     # 7. Refresh rotates, and the open project survives it — the whole reason
     #    that pointer lives on the grant and not on the token.

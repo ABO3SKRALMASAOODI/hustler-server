@@ -312,12 +312,12 @@ def _reference_profile(worker_db, job, ref, workdir):
 
 
 # ------------------------------------------------------------------ the plan
-_PLAN_SYSTEM = """You are Valmera's shorts producer. You are given the timed sentence transcript of a long video. Choose the moments that will work as standalone vertical shorts: self-contained (no dangling "as I said before"), opening on a strong hook line, one idea per clip, ending on a resolution or punchline.
+_PLAN_SYSTEM = """You are Valmera's shorts producer. You are given the timed sentence transcript of a long video. Choose complete story/conversation arcs that work as standalone vertical shorts: a setup or question, development/answer, and a resolution or punchline. Self-contained does NOT mean extracting an isolated quotable answer. In interviews/podcasts, a question that makes the answer intelligible belongs in the clip even when the answer contains the flashier hook; preserve the question-and-answer exchange and speaker turn.
 
 Reply with STRICT JSON only:
 {"clips": [{"start": <seconds>, "end": <seconds>, "title": "<hook-style title, max 55 chars, no quotes inside>", "hook": "<the first spoken words of the clip, verbatim>", "score": <0-100 how likely to hold attention>, "music": <true|false would background music help this clip>}]}
 
-Rules: start and end MUST be sentence boundaries taken from the transcript timestamps. Never start mid-sentence. Prefer clips that need no context. Do not overlap clips. Titles are written like social hooks (curiosity, stakes, numbers), never clickbait lies about the content."""
+Rules: start and end MUST be sentence boundaries taken from the transcript timestamps. Never start mid-sentence. Prefer clips that contain their own necessary context. For multi-speaker material, never open on an answer whose preceding nearby question/setup is required to understand it; include the question. Do not cut away before the answer resolves. Do not overlap clips. Titles are written like social hooks (curiosity, stakes, numbers), never clickbait lies about the content."""
 
 _VISUAL_PLAN_SYSTEM = """You are Valmera's shorts producer reviewing labeled filmstrip sheets from a video with little or no usable speech. Select visually self-contained highlight windows for vertical shorts. Read the timestamps printed under every frame. Prefer clear action, reactions, reveals, skill, movement, before/after changes, wins, near misses, or visually coherent sequences; avoid loading screens, menus, static dead time, repeated moments, and windows whose subject is too small to understand.
 
@@ -372,13 +372,16 @@ def _validated_clips(raw, duration, want, index=None, visual=False):
         if e - s > CLIP_MAX_S:
             e = s + CLIP_MAX_S
         title = re.sub(r"\s+", " ", str(c.get("title") or "")).strip()[:55]
-        clips.append({
+        normalized = {
             "start": round(s, 2), "end": round(e, 2),
             "title": title or f"Short from {s:.0f}s",
             "hook": str(c.get("hook") or "").strip()[:160],
             "score": max(0, min(100, int(c.get("score") or 50))),
             "music": bool(c.get("music")),
-        })
+        }
+        if c.get("context_restored"):
+            normalized["context_restored"] = str(c["context_restored"])[:80]
+        clips.append(normalized)
     clips.sort(key=lambda c: -c["score"])
     chosen = []
     for c in clips:
@@ -391,6 +394,58 @@ def _validated_clips(raw, duration, want, index=None, visual=False):
     for i, c in enumerate(chosen):
         c["order"] = i
     return chosen
+
+
+def _complete_conversation_arcs(raw, index, duration):
+    """Deterministically restore a nearby question before an isolated answer.
+
+    The LLM is still responsible for editorial selection, but diarized
+    sentence timestamps can catch its common shorts mistake without another
+    model call: starting exactly on speaker B's answer while speaker A's
+    immediately preceding question is just outside the window.
+    """
+    sents = [s for s in (index or {}).get("sentences") or []
+             if (s.get("text") or "").strip()]
+    speakers = {s.get("speaker") for s in sents
+                if s.get("speaker") is not None}
+    if len(speakers) < 2:
+        return raw
+    answer_cues = ("yes", "no", "well", "because", "i think", "i would",
+                   "it is", "that's", "that is", "the reason")
+    out = []
+    for original in raw:
+        clip = dict(original)
+        try:
+            start, end = float(clip["start"]), float(clip["end"])
+        except (KeyError, TypeError, ValueError):
+            out.append(clip)
+            continue
+        current = next((s for s in sents
+                        if float(s["t0"]) - 0.15 <= start <=
+                        float(s["t1"]) + 0.15), None)
+        previous = next((s for s in reversed(sents)
+                         if float(s["t1"]) <= start + 0.15), None)
+        if current and previous and \
+                current.get("speaker") is not None and \
+                previous.get("speaker") is not None and \
+                current.get("speaker") != previous.get("speaker"):
+            gap = start - float(previous["t1"])
+            prev_text = (previous.get("text") or "").strip()
+            cur_text = (current.get("text") or "").strip().lower()
+            looks_like_question = prev_text.endswith("?") or any(
+                prev_text.lower().startswith(q) for q in
+                ("what ", "why ", "how ", "when ", "where ", "who ",
+                 "do ", "does ", "did ", "can ", "could ", "would ",
+                 "is ", "are ", "tell me"))
+            answer_like = cur_text.startswith(answer_cues)
+            extension = start - float(previous["t0"])
+            if gap <= 2.5 and extension <= 14.0 and \
+                    end - float(previous["t0"]) <= CLIP_MAX_S and \
+                    (looks_like_question or answer_like):
+                clip["start"] = float(previous["t0"])
+                clip["context_restored"] = "preceding question/setup"
+        out.append(clip)
+    return out
 
 
 def _visual_plan_clips(index, duration, n_target, want, note, workdir):
@@ -463,11 +518,16 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
     user = (f"Video duration: {duration:.1f}s. "
             f"Aim for {n_target} clips (fewer if the material is thin, "
             f"never more than {config.SHORTS_MAX_CLIPS}). {len_hint}\n"
+            f"Detected speakers: {int(index.get('speakers') or 0)}. "
+            "When there are multiple speakers, preserve complete nearby "
+            "question-and-answer turns rather than isolated quotes.\n"
             + (f"User's direction: {note}\n" if note else "")
             + f"\nTRANSCRIPT:\n{transcript}")
     out = _ask_json(worker_db, job, subscribed, plan, _PLAN_SYSTEM, user,
                     "shorts_plan", max_tokens=3500)
-    return _validated_clips((out or {}).get("clips") or [], duration, want)
+    raw_clips = _complete_conversation_arcs(
+        (out or {}).get("clips") or [], index, duration)
+    return _validated_clips(raw_clips, duration, want, index=index)
 
 
 # ------------------------------------------------------------------ children

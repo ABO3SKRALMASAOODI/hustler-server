@@ -8,10 +8,10 @@ machine to storage, and only the pointers travel over MCP. For a file under
 upload with an ETag per part, which is what this script is for.
 
     export VALMERA_MCP_TOKEN=vlm_mcp_...
-    python3 scripts/valmera_upload.py ~/Movies/talk.mp4 [--kind original]
+    python3 scripts/valmera_upload.py ~/Movies/talk.mp4 --project 3 [--kind original]
 
-It uploads into whatever project the token currently has open (open_project
-over MCP, or --project N here), then finishes the upload — which for a main
+It uploads into the explicit --project N (the MCP surface never guesses from
+a mutable active-project pointer), then finishes the upload — which for a main
 video starts the analysis. Prints what the model should do next.
 
 Stdlib only, so it runs anywhere python3 does.
@@ -86,8 +86,8 @@ def main():
     ap.add_argument("path")
     ap.add_argument("--kind", default="original",
                     choices=["original", "clip", "music", "image"])
-    ap.add_argument("--project", type=int, default=None,
-                    help="Open this project first (else the token's current one)")
+    ap.add_argument("--project", type=int, required=True,
+                    help="Required immutable Valmera project id")
     ap.add_argument("--url", default=DEFAULT_URL)
     args = ap.parse_args()
 
@@ -103,15 +103,15 @@ def main():
     rpc(args.url, token, "initialize",
         {"protocolVersion": "2025-06-18", "capabilities": {},
          "clientInfo": {"name": "valmera_upload", "version": "1"}})
-    if args.project:
-        print(call_tool(args.url, token, "open_project",
-                        {"project_id": args.project}).split("\n")[0])
+    print(call_tool(args.url, token, "open_project",
+                    {"project_id": args.project}).split("\n")[0])
 
     print(f"Preparing {name} ({size / 1e6:.1f} MB)…")
     # ONE upload_start call — a second one would mint a second storage key and
     # leave the first as an orphan half-upload.
     text = call_tool(args.url, token, "upload_start",
-                     {"filename": name, "size_bytes": size,
+                     {"project_id": args.project,
+                      "filename": name, "size_bytes": size,
                       "kind": args.kind})
     plan = embedded_json(text)
     if plan is None:
@@ -120,7 +120,8 @@ def main():
     if plan["mode"] == "single":
         with open(path, "rb") as f:
             put(plan["url"], f.read(), plan.get("content_type"))
-        finish = {"storage_key": plan["storage_key"], "filename": name,
+        finish = {"project_id": args.project,
+                  "storage_key": plan["storage_key"], "filename": name,
                   "kind": args.kind}
     else:
         part_size = plan["part_size"]
@@ -132,7 +133,8 @@ def main():
                 parts.append({"part_number": p["part_number"], "etag": etag})
                 print(f"  part {p['part_number']}/{len(plan['parts'])} "
                       f"uploaded", flush=True)
-        finish = {"storage_key": plan["storage_key"], "filename": name,
+        finish = {"project_id": args.project,
+                  "storage_key": plan["storage_key"], "filename": name,
                   "kind": args.kind, "upload_id": plan["upload_id"],
                   "parts": parts}
 

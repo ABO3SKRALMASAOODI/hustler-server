@@ -22,10 +22,11 @@ import re
 import subprocess
 
 # The social/streaming loudness target the renderer itself masters to when
-# asked (renderer loudnorm I=-14:TP=-1.5). QC judges against the same
+# asked (renderer loudnorm I=-14:TP=-2.0 plus a hard ceiling). QC judges
+# against the same
 # numbers so the check and the fix can never disagree.
 TARGET_I = -14.0
-TARGET_TP = -1.5
+TARGET_TP = -2.0
 
 # Louder/quieter than this from target = worth a finding. ±4 LU is far past
 # taste differences — it is "phone speakers at max still quiet" territory.
@@ -45,7 +46,7 @@ def _run_ffmpeg(path):
     cmd = ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
            "-map", "0:a:0", "-af",
            "silencedetect=n=-50dB:d=1.0,"
-           "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+           "loudnorm=I=-14:TP=-2.0:LRA=11:print_format=json",
            "-f", "null", "-"]
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=180)
@@ -126,7 +127,7 @@ def measure(path, duration_s=None):
             findings.append(
                 f"true peak {tp:.1f} dBTP — effectively clipping; "
                 "upload transcodes will distort the loud moments "
-                "(set_master_loudness caps it at -1.5)")
+                "(set_master_loudness caps it at -2.0)")
     dead = []
     dur = float(duration_s or 0.0)
     for s, e in silences:
