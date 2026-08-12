@@ -261,6 +261,8 @@ def test_initialize_carries_the_editing_doctrine(client):
         b["result"]["instructions"]
     assert "Do not use edit_shorts when the user asks YOU" in \
         b["result"]["instructions"]
+    assert "Final export is deliberately Studio-only" in \
+        b["result"]["instructions"]
 
 
 def test_unknown_protocol_version_falls_back_to_ours(client):
@@ -281,6 +283,7 @@ def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
     names = [t["name"] for t in tools]
     assert "open_project" in names and "get_transcript" in names
+    assert "export_final" not in names
     editor = [t for t in tools if t["name"] == "get_transcript"][0]
     # MCP adds only its transport-level immutable project scope; the worker's
     # arguments otherwise remain untouched.
@@ -298,8 +301,8 @@ def test_podcast_shorts_are_first_class_session_tools(client):
     assert by_name["create_project"]["inputSchema"]["properties"]["kind"] \
         ["enum"] == ["edit", "shorts"]
     for name in ("project_state", "upload_start", "upload_finish",
-                 "index_status", "shorts_status", "export_final",
-                 "download_url", "watch_video"):
+                 "index_status", "shorts_status", "download_url",
+                 "watch_video"):
         assert "project_id" in by_name[name]["inputSchema"]["required"]
 
 
@@ -324,6 +327,7 @@ def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
     assert "edit v6" in body and "final done (job 10)" in body
     assert "open_short(parent_project_id=3, card=N)" in body
     assert "delegates a prompt" in body
+    assert "Final export is Studio-only" in body
 
 
 def test_open_short_puts_the_child_edl_under_direct_mcp_control(client):
@@ -438,6 +442,33 @@ def test_unknown_tool_explains_the_likely_reason(client):
             {"name": "nope", "arguments": {}})
     assert r.get_json()["result"]["isError"] is True
     assert "hidden rather than failing" in text_of(r)
+
+
+def test_stale_client_cannot_call_final_export(client):
+    """Removing a tool from tools/list is not a security boundary: connected
+    clients cache schemas. The server must refuse the old name before it can
+    reach either a session implementation or the worker queue."""
+    r = rpc(client, "tools/call", STATIC_TOKEN,
+            {"name": "export_final",
+             "arguments": {"project_id": 3, "edl_version": 9}})
+    assert r.get_json()["result"]["isError"] is True
+    assert "unavailable over MCP" in text_of(r)
+    assert "Valmera Studio" in text_of(r)
+    assert not DB["enqueued"]
+
+
+def test_worker_catalog_cannot_reintroduce_final_export(client, monkeypatch):
+    """A future editor-registry change must not punch through the explicit
+    MCP delivery boundary."""
+    stale = dict(CATALOG)
+    stale["tools"] = list(CATALOG["tools"]) + [{
+        "type": "function", "function": {
+            "name": "export_final", "description": "stale",
+            "parameters": {"type": "object", "properties": {}}}}]
+    monkeypatch.setattr(mcpmod, "_catalog", lambda: stale)
+    names = [t["name"] for t in
+             rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]]
+    assert "export_final" not in names
 
 
 def test_editing_without_an_explicit_project_says_what_to_do(client):

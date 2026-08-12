@@ -23,11 +23,12 @@ hidden from both). Execution happens in the worker, in the same `ToolContext`
 an agent turn uses. There is no capability copy to keep in sync —
 `worker/tests/test_mcp_surface.py` fails if one appears.
 
-On top of that, thirteen **session tools** the studio UI normally covers and a
+On top of that, twelve **session tools** the studio UI normally covers and a
 headless model cannot: `list_projects`, `open_project`, `open_short`,
 `create_project`, `project_state`, `upload_start`, `upload_finish`,
-`index_status`, `shorts_status`, `export_final`, `wait_for_job`, `download_url`,
-`watch_video`.
+`index_status`, `shorts_status`, `wait_for_job`, `download_url`, `watch_video`.
+Final export is intentionally absent: MCP prepares and verifies the edit, and
+the user creates the deliverable from Valmera Studio.
 
 ## Turning it on (once)
 
@@ -47,8 +48,8 @@ adds the four OAuth tables claude.ai needs.
 **2. Deploy** backend + worker (push to `main`) — DONE. The worker publishes
 its tool catalog on boot and, if that fails (migration not applied yet), keeps
 retrying from the reaper until it lands: look for `[mcp] published tool
-catalog`. Verified live on 2026-07-27 serving **87 tools** (10 session + 77
-editor).
+catalog`. The backend adds the session tools above and explicitly filters final
+export even if an old worker catalog or connected client still remembers it.
 
 **Capabilities currently OFF on the worker**, so they are hidden from the
 connector rather than failing when called: `search_stock` / `add_stock_media`
@@ -129,18 +130,17 @@ Properties worth knowing:
 list_projects  →  open_project(3)  →  (the whole project state comes back)
   →  cut_silences(project_id=3) / add_captions(project_id=3) / ...
   →  render_preview(project_id=3)  →  download_url(project_id=3)
-  →  export_final(project_id=3) → wait_for_job(N)
-  →  download_url(project_id=3, kind="final")
+  →  tell the user the verified edit is ready to export in Valmera Studio
 ```
 
 `open_project` loads the state and preserves a navigation pointer for legacy
 clients. Every normal editor tool—and every project-targeting session tool such
-as upload, status, watch, download, and export—requires an explicit
+as upload, status, watch, and download—requires an explicit
 `project_id`. The backend verifies account ownership and echoes the id/title in
 results, including delayed `wait_for_job` replies. It never guesses an editing
 or review target from mutable connection state. This is intentionally
 redundant: a long session can hop among a parent and many shorts without one
-missed switch sending a valid edit, review, or export to the wrong project.
+missed switch sending a valid edit or review to the wrong project.
 
 ### Podcast to Shorts over MCP
 
@@ -152,7 +152,8 @@ create_project(title="My podcast", kind="shorts")
   → upload_start(project_id=ID) / upload_finish(project_id=ID)
   → index_status(project_id=ID) until done
   → shorts_status(project_id=ID) until the child projects are ready
-  → open_short(parent_project_id=ID, card=N) → edit/render/watch/export with its child ID
+  → open_short(parent_project_id=ID, card=N) → edit/render/watch with its child ID
+  → tell the user which verified edits are ready for Studio export
 ```
 
 The Shorts planner starts automatically after a `kind="shorts"` project's

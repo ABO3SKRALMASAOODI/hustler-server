@@ -139,11 +139,12 @@ use the product, and Valmera is absent from every one of them. Competitors here
 > filler words against a word-level transcript, add word-accurate captions, mix
 > music that ducks under speech, apply speed spans, zooms, colour grades and
 > transitions, reframe to 9:16, erase burned-in captions or objects by
-> repainting the pixels, render a preview and export a full-quality MP4.
+> repainting the pixels, and render a verified preview. Final export remains
+> an explicit action in Valmera Studio.
 >
-> It serves the same tool registry Valmera's own agent uses — around 88 editing
-> tools plus 10 session tools — with no separate MCP tool list that can drift.
-> Slow operations (renders, exports, pixel repainting) return a job id and a
+> It serves the same editing registry Valmera's own agent uses plus a small set
+> of session tools, with final export explicitly filtered at the MCP boundary.
+> Slow operations (renders and pixel repainting) return a job id and a
 > `wait_for_job` tool rather than a fabricated completion, and a tool whose
 > backing service is unconfigured is hidden from the registry rather than
 > failing on call. Nothing modifies your original upload: tools mutate an edit

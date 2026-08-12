@@ -1,10 +1,12 @@
 """Remote MCP server (round 49) — Valmera's editor, driven by an outside model.
 
 WHAT THIS IS. A Model Context Protocol endpoint at POST /mcp that hands the
-*complete* editor tool registry to whatever model the caller is running —
+the editor tool registry to whatever model the caller is running —
 Claude Opus or Fable inside the user's own Claude Code session, paid for by
 their Anthropic subscription, not by our credits. The model does the thinking;
-Valmera does the editing. It is the same trade the `mcp` plan was always
+Valmera does the editing. Final exports are deliberately not part of this
+surface: MCP prepares and verifies the edit, while the user creates the
+deliverable in Valmera Studio. It is the same trade the `mcp` plan was always
 written around ("brings its own model").
 
 THE ONE INVARIANT: NO SECOND EDITOR. The tools are not re-declared here. The
@@ -16,9 +18,10 @@ backing service this deployment has no key for. Execution runs in the worker
 too, in the same ToolContext the agent uses. There is nothing to keep in sync
 because there is no copy.
 
-WHAT IS DECLARED HERE: only the things the studio's UI normally does and a
-headless model cannot — pick a project, upload a file, watch the render,
-download the result. Those are session tools; the 80 editing tools are not.
+WHAT IS DECLARED HERE: only the things a headless model needs to prepare and
+review an edit — pick a project, upload a file, watch a preview, download an
+existing render. Those are session tools; the 80 editing tools are not. Final
+export stays behind the Studio's explicit user action.
 
 HOW A CALL FLOWS.
     Claude Code --HTTP JSON-RPC--> this endpoint
@@ -59,9 +62,7 @@ import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
 from routes.video import (complete_upload_core, vdb, _enqueue,
-                          _project_for_user, _active_original, _index_row,
-                          _latest_edl, _running_jobs_count,
-                          MAX_CONCURRENT_JOBS_PER_USER)
+                          _project_for_user, _active_original, _index_row)
 
 mcp_bp = Blueprint("mcp", __name__)
 
@@ -291,6 +292,13 @@ _TITLE_OVERRIDES = {
     "edit_shorts": "Delegate batch edits to Valmera agents",
 }
 
+# A delivery boundary, not ordinary feature gating. The outside model may
+# prepare and verify an edit, but it must never create the full-resolution
+# deliverable. Keep this filter even though export_final is not currently an
+# editor-registry tool: it prevents a future worker catalog or a stale client
+# from silently restoring the expensive capability.
+MCP_DENIED_TOOLS = frozenset({"export_final"})
+
 
 def _title_for(name):
     if name in _TITLE_OVERRIDES:
@@ -327,6 +335,8 @@ def _editor_tools(catalog):
     for t in (catalog or {}).get("tools", []):
         fn = t.get("function") or {}
         name = fn.get("name")
+        if name in MCP_DENIED_TOOLS:
+            continue
         # Never let a mutable connection-wide pointer choose the timeline for
         # an editor call. Long MCP sessions hop among a parent and many shorts;
         # one missed open_project previously sent a valid operation to the
@@ -469,17 +479,6 @@ SESSION_TOOLS = [
                     "identity in the answer.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer"}}, "required": ["project_id"]}},
-    {"name": "export_final",
-     "description": "Render the FINAL export of an EDL version — full "
-                    "resolution, from the original file. This is the user's "
-                    "deliverable, so only call it when they asked for it. "
-                    "Returns a job id; poll with wait_for_job, then "
-                    "download_url.",
-     "inputSchema": {"type": "object", "properties": {
-         "project_id": {"type": "integer"},
-         "edl_version": {"type": "integer",
-                         "description": "Defaults to the latest version"}},
-         "required": ["project_id"]}},
     {"name": "wait_for_job",
      "description": "Wait for a background job (a render, or a tool call that "
                     "outran its reply) and return its result. Safe to call "
@@ -490,7 +489,8 @@ SESSION_TOOLS = [
     {"name": "download_url",
      "description": "A temporary URL for watching or downloading a render of "
                     "an explicit project. kind 'preview' (fast, 540p) or "
-                    "'final' (the export).",
+                    "'final' (an existing Studio or Shorts export). This tool "
+                    "cannot create a final export.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer"},
          "kind": {"type": "string", "enum": ["preview", "final"]},
@@ -538,7 +538,7 @@ SESSION_TOOLS = [
 
 # Titles + behaviour hints for the session tools — the same treatment
 # _annotations_for gives the editor registry. Without them a connector must
-# treat list_projects exactly like export_final and confirm every call, and
+# treat list_projects exactly like a write tool and confirm every call, and
 # in practice that is how "navigate to the parent project" got stuck on
 # 2026-08-10: each hop needed an approval, one bounced, and the model
 # concluded projects could only be switched in the studio app.
@@ -556,7 +556,6 @@ _SESSION_META = {
     "upload_finish":  ("Finish an upload", False, False),
     "index_status":   ("Check video analysis progress", True, False),
     "shorts_status":  ("Check podcast shorts progress", True, False),
-    "export_final":   ("Render the final export", False, False),
     "wait_for_job":   ("Wait for a running job", True, False),
     "download_url":   ("Get a download link for a render", True, False),
     "watch_video":    ("Watch the video itself", True, False),
@@ -587,7 +586,7 @@ Two things are different from a normal tool session, and both matter:
    before you edit anything, and again with project_state(project_id=id) whenever you are
    unsure. Then pass that exact project_id on EVERY normal editing tool call.
    The backend checks ownership and echoes the project id/title in every
-   result; project_state, uploads, render delivery and exports require the same
+   result; project_state, uploads and render delivery require the same
    explicit id too. open_project still moves a navigation pointer for legacy
    clients, but no project-changing or project-reviewing call trusts it:
    the project open in the user's studio
@@ -631,8 +630,9 @@ Two things are different from a normal tool session, and both matter:
    shorts_status to get the parent run, every generated child project ID and
    its render state. Open each ready child with open_short(child_project_id=ID)
    and refine it
-   YOURSELF with the same editor tools, then render_preview, watch_video and
-   export_final. On an
+   YOURSELF with the same editor tools, then render_preview and watch_video to
+   verify it. Final export is deliberately Studio-only; tell the user the edit
+   is ready for them to export. On an
    existing normal long-video project, make_shorts starts the same workflow
    and returns a planner job ID. A source under one minute is already a direct
    short: edit that project normally instead of trying to extract clips.
@@ -788,7 +788,7 @@ def _required_project_id(args):
 
 _PROJECT_SCOPED_SESSION_TOOLS = {
     "project_state", "upload_start", "upload_finish", "index_status",
-    "shorts_status", "export_final", "download_url", "watch_video",
+    "shorts_status", "download_url", "watch_video",
 }
 
 
@@ -1200,57 +1200,12 @@ def _t_shorts_status(tok, args):
             f"open_short(parent_project_id={parent_id}, card=N) or "
             "open_short(child_project_id=ID), use the "
             "normal editor tools on that child EDL, render_preview and "
-            "watch_video to verify it, then export_final when ready. "
+            "watch_video to verify it. Final export is Studio-only; tell the "
+            "user when the edit is ready to export. "
             "edit_shorts is different: it delegates a prompt to Valmera's "
             "in-house agents instead of editing directly.")
     return parent_note + head + f" {len(clips)} clip(s):\n" + \
         "\n".join(lines) + "\n\n" + tail
-
-
-def _t_export_final(tok, args):
-    project_id, error = _required_project_id(args)
-    if error:
-        return error
-    with vdb() as conn:
-        cur = conn.cursor()
-        if not _project_for_user(cur, project_id, tok["user_id"]):
-            return f"Project {project_id} does not exist on this account."
-        version = args.get("edl_version")
-        if version is None:
-            edl = _latest_edl(cur, project_id)
-            if not edl:
-                return "This project has no edit yet — nothing to export."
-            version = edl["version"]
-        else:
-            try:
-                version = int(version)
-            except (TypeError, ValueError):
-                return "edl_version must be an integer."
-            cur.execute("""SELECT 1 FROM edls
-                           WHERE project_id = %s AND version = %s""",
-                        (project_id, version))
-            if not cur.fetchone():
-                return f"EDL v{version} does not exist in this project."
-        cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'final'
-                         AND state IN ('queued','running')""", (project_id,))
-        running = cur.fetchone()
-        if running:
-            return (f"A final export is already running (job {running['id']})."
-                    f" Call wait_for_job(job_id={running['id']}).")
-        if _running_jobs_count(cur, tok["user_id"]) >= MAX_CONCURRENT_JOBS_PER_USER:
-            return ("Too much is already running on this account — wait for "
-                    "it to finish and try again.")
-        job_id = _enqueue(cur, project_id, tok["user_id"], "final",
-                          {"edl_version": version})
-    row = _wait(job_id, tok["user_id"])
-    if row and row["state"] == "done":
-        return (f"Final export of v{version} is rendered (job {job_id}). "
-                "Call download_url(kind=\"final\") for the link.")
-    if row and row["state"] == "failed":
-        return f"The final export failed: {row.get('error')}"
-    return _still_running(row or {"id": job_id, "state": "queued",
-                                  "progress": 0}, f"the final export of v{version}")
 
 
 def _t_wait_for_job(tok, args):
@@ -1314,7 +1269,7 @@ def _t_download_url(tok, args):
     if not row:
         return (f"No {kind} has been rendered yet"
                 + (" — call render_preview." if kind == "preview"
-                   else " — call export_final."))
+                   else " — final export is created in Valmera Studio."))
     try:
         url = storage.presign_get(row["storage_key"])
     except Exception as e:
@@ -1417,7 +1372,6 @@ SESSION_IMPL = {
     "upload_finish": _t_upload_finish,
     "index_status": _t_index_status,
     "shorts_status": _t_shorts_status,
-    "export_final": _t_export_final,
     "wait_for_job": _t_wait_for_job,
     "download_url": _t_download_url,
     "watch_video": _t_watch_video,
@@ -1534,6 +1488,11 @@ def _handle(tok, msg):
         args = params.get("arguments") or {}
         if not isinstance(args, dict):
             return _result(req_id, _text("arguments must be an object.", True))
+        if name in MCP_DENIED_TOOLS:
+            return _result(req_id, _text(
+                "Final export is deliberately unavailable over MCP. Finish "
+                "and verify the edit with render_preview/watch_video, then "
+                "ask the user to export it from Valmera Studio.", True))
         try:
             if name in SESSION_IMPL:
                 out = SESSION_IMPL[name](tok, args)
@@ -1641,9 +1600,10 @@ def server_card():
             "Edit real video from inside an AI conversation. Upload footage, "
             "describe the edit in plain English, and the agent cuts silences "
             "and filler words, adds word-timed captions, reframes to 9:16, "
-            "mixes music, grades the picture, renders a preview, looks at the "
-            "frames it produced, and exports a full-quality MP4 from the "
-            "ORIGINAL file. It edits footage you already have — it is not a "
+            "mixes music, grades the picture, renders a preview, and looks at "
+            "the frames it produced. The user creates the full-quality MP4 "
+            "from the ORIGINAL file in Valmera Studio. It edits footage you "
+            "already have — it is not a "
             "text-to-video generator.",
         "version": SERVER_INFO["version"],
         "websiteUrl": "https://valmera.io",
@@ -1664,7 +1624,7 @@ def server_card():
         "toolGroups": {k: sorted(v) for k, v in sorted(groups.items())},
         "sessionTools": sorted(t["name"] for t in SESSION_TOOLS),
         "notes": [
-            "Slow work (renders, exports, pixel repainting) returns a job id "
+            "Slow work (renders and pixel repainting) returns a job id "
             "and a wait_for_job tool rather than a fabricated completion.",
             "Tools edit a versioned edit decision list. The uploaded file is "
             "never modified and any cut can be restored.",
@@ -1677,6 +1637,7 @@ def server_card():
             "time is refused in both directions.",
         ],
         "notSupported": [
+            "creating final exports (final delivery is Studio-only)",
             "text-to-video generation of a whole video",
             "SRT/VTT import or export (captions are burned in)",
             "team seats or collaboration",
