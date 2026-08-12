@@ -246,23 +246,25 @@ def test_same_failed_preview_version_is_not_enqueued_again():
     assert "NEW EDL version" in result
 
 
-def test_speculative_preview_remembers_the_exact_adopted_job(monkeypatch):
-    """A terminal speculative failure must be read, not inserted again."""
+def test_speculative_preview_only_enqueues_changed_section_proof(monkeypatch):
+    """Speculation must never buy an intermediate complete preview."""
     class FakeDb:
         calls = []
 
         def run(self, fn, *_args):
             self.calls.append(fn)
-            if fn is agent_tools.dbx.pending_preview_job:
-                return 77
-            raise AssertionError("an existing speculative row was duplicated")
+            if fn is agent_tools.dbx.get_or_enqueue_preview_check_job:
+                return 77, True
+            raise AssertionError(f"unexpected speculative call: {fn}")
 
     class Ctx:
         write_calls = []
         rendered_versions = set()
         spec_enqueued = set()
         spec_preview_jobs = {}
+        spec_preview_check_jobs = {}
         project_id = 12
+        job = {"id": 9, "user_id": 4}
         db = FakeDb()
 
         @staticmethod
@@ -271,6 +273,12 @@ def test_speculative_preview_remembers_the_exact_adopted_job(monkeypatch):
 
     monkeypatch.setattr(agent_tools.config, "SPECULATIVE_PREVIEWS", True)
     monkeypatch.setattr(agent_tools.config, "SPECULATIVE_PREVIEWS_MAX", 2)
+    monkeypatch.setattr(agent_tools, "_verify_plan_for",
+                        lambda _ctx, _row: [])
+    monkeypatch.setattr(agent_tools, "_change_check_ranges",
+                        lambda _ctx, _row, _plan: ([[1.0, 2.0]], object()))
     agent_tools.speculative_preview(Ctx())
-    assert Ctx.spec_preview_jobs == {4: 77}
+    assert Ctx.spec_preview_jobs == {}
+    assert Ctx.spec_preview_check_jobs == {4: 77}
     assert Ctx.spec_enqueued == {4}
+    assert Ctx.db.calls == [agent_tools.dbx.get_or_enqueue_preview_check_job]

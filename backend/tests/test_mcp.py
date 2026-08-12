@@ -263,6 +263,9 @@ def test_initialize_carries_the_editing_doctrine(client):
         b["result"]["instructions"]
     assert "Final export is deliberately Studio-only" in \
         b["result"]["instructions"]
+    assert "render_preview(complete=false)" in b["result"]["instructions"]
+    assert "render_preview(complete=true) exactly once" in \
+        b["result"]["instructions"]
 
 
 def test_unknown_protocol_version_falls_back_to_ours(client):

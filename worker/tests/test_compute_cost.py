@@ -17,10 +17,10 @@ def test_batch_profile_is_cheaper_than_identical_heavy_request():
 
 def test_preview_and_agent_profiles_are_named_from_service():
     assert compute_cost.request_profile(
-        "executor", "valmera-executor-preview")[0] == "preview-8cpu-8g"
+        "executor", "valmera-executor-preview")[0] == "preview-4cpu-8g"
     assert compute_cost.request_profile(
         "agent_executor", "valmera-agent")[0] \
-        == "agent-1cpu-2g-concurrency2"
+        == "agent-1cpu-2g-concurrency4"
     assert compute_cost.request_profile(
         "executor", "valmera-executor-batch")[0] \
         == "request-batch-8cpu-16g"

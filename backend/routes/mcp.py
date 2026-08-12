@@ -609,9 +609,12 @@ Two things are different from a normal tool session, and both matter:
 
 2. YOU ARE THE ONE TALKING TO THE USER. The ask_user tool exists for the
    in-house agent to suspend a turn; here, just ask them yourself. And nothing
-   auto-renders when you stop: call render_preview yourself before you tell
-   the user what you did, so what you claim is something you have actually
-   seen. Then hand them download_url so they can watch it.
+   auto-renders when you stop. During iteration call
+   render_preview(complete=false) to encode only the seconds changed since the
+   last complete preview. Once the EDL is genuinely ready, call
+   render_preview(complete=true) exactly once before you tell the user what
+   you did, then watch_video/download_url so what you claim is something you
+   have actually seen. Do not produce a complete preview after every edit.
 
 3. IF YOU CAN WATCH VIDEO, WATCH IT. The doctrine above tells you to look
    before you claim, and describes look_at as your eyes — that is written for
@@ -630,8 +633,9 @@ Two things are different from a normal tool session, and both matter:
    shorts_status to get the parent run, every generated child project ID and
    its render state. Open each ready child with open_short(child_project_id=ID)
    and refine it
-   YOURSELF with the same editor tools, then render_preview and watch_video to
-   verify it. Final export is deliberately Studio-only; tell the user the edit
+   YOURSELF with the same editor tools. Use changed-section proofs while
+   iterating, then render_preview(complete=true) once and watch_video to verify
+   the ready edit. Final export is deliberately Studio-only; tell the user the edit
    is ready for them to export. On an
    existing normal long-video project, make_shorts starts the same workflow
    and returns a planner job ID. A source under one minute is already a direct

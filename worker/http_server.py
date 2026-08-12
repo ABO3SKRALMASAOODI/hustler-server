@@ -59,6 +59,7 @@ from storage import WorkdirTooSmall
 COMPUTE_RUNNERS = {
     "index": indexer.run_index_job,
     "preview": renderer.run_render_job,
+    "preview_check": renderer.run_render_job,
     "final": renderer.run_render_job,
     "capture": webrecord.run_capture_job,
     # Same shape as capture (round 62): one tool call inside an agent turn,

@@ -190,6 +190,15 @@ class ToolContext:
         # EDL write and therefore a new version/job/cache key.
         self.failed_preview_versions = {}
         self.last_preview_failure = None
+        # Short proof reels cover only the output seconds changed since the
+        # last complete preview. They are evidence for the editor and must not
+        # masquerade as the complete preview the Studio player adopts.
+        self.checked_versions = set()
+        self.last_preview_check = None
+        # A speculative changed-section proof may finish during the model's
+        # next reasoning call. Keep its exact row so render_preview adopts it
+        # instead of paying for the same proof twice.
+        self.spec_preview_check_jobs = {}
         # A speculative preview may become terminal before the model reaches
         # render_preview. Remember its row, not merely that it was enqueued,
         # so the later tool call adopts the success/failure instead of
@@ -12541,18 +12550,192 @@ def _grade_strip_shortcut(ctx, row):
 
 GRADE_ONLY_TOOLS = ("set_color_grade", "apply_look", "set_grade_custom")
 
+_CHANGE_CHECK_PAD_S = 0.75
+_CHANGE_CHECK_POINT_S = 2.5
+_CHANGE_CHECK_MAX_WINDOW_S = 8.0
+_CHANGE_CHECK_MAX_TOTAL_S = 24.0
+_CHANGE_CHECK_MAX_WINDOWS = 6
+
+
+def _preview_baseline(ctx, row):
+    """Last proof/complete state, then immediate prior EDL as first fallback.
+
+    This makes each proof cover the latest unchecked EDL changes rather than
+    accumulating everything since the last complete file. A brand-new project
+    can still make a cheap first proof from v1 -> v2; it does not need to buy a
+    full preview merely to establish a visual baseline.
+    """
+    try:
+        candidates = [
+            (getattr(ctx, "last_preview_check", None) or {}).get(
+                "edl_version"),
+            (getattr(ctx, "last_preview", None) or {}).get("edl_version"),
+            ctx.db.run(dbx.latest_render_version, ctx.project_id, "preview"),
+        ]
+        candidates = [int(v) for v in candidates if v is not None]
+        prev_v = max(candidates) if candidates else None
+        if prev_v is not None:
+            if int(prev_v) == int(row["version"]):
+                return None
+            previous = ctx.db.run(dbx.get_edl_version, ctx.project_id,
+                                  int(prev_v))
+            if previous:
+                return previous
+        return ctx.db.run(dbx.previous_edl_version, ctx.project_id,
+                          int(row["version"]))
+    except Exception:
+        return None
+
+
+def _merge_check_ranges(ranges, duration):
+    merged = []
+    for a, b in sorted(ranges):
+        a = max(0.0, min(float(a), duration))
+        b = max(a, min(float(b), duration))
+        if b - a < 0.1:
+            continue
+        if merged and a <= merged[-1][1] + 0.2:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return merged
+
+
+def _sample_long_check_range(a, b):
+    """Bound a broad changed span without pretending one tile proves it all."""
+    length = b - a
+    if length <= _CHANGE_CHECK_MAX_WINDOW_S:
+        return [[a, b]]
+    width = min(3.0, _CHANGE_CHECK_MAX_WINDOW_S)
+    centers = [a + width / 2.0, (a + b) / 2.0, b - width / 2.0]
+    return [[max(a, c - width / 2.0), min(b, c + width / 2.0)]
+            for c in centers]
+
+
+def _change_check_ranges(ctx, row, plan=None):
+    """Bounded NEW-output windows affected since the last complete preview.
+
+    Global changes (caption style, grade, master settings) technically affect
+    the whole program; iteration still needs evidence, not another full file,
+    so sample representative windows plus any exact verify-plan moments. The
+    complete turn-end/readiness preview remains the exhaustive proof.
+    """
+    prev = _preview_baseline(ctx, row)
+    if not prev:
+        return [], None
+    try:
+        edl = row["json"]
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        duration = float(tl.out_duration)
+        if duration <= 0.15:
+            return [], prev
+        changed = edl_diff.change_ranges(prev["json"], edl) or {}
+        raw = []
+        for pair in (changed.get("out_ranges") or []):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            a, b = float(pair[0]), float(pair[1])
+            if b - a < 0.05:
+                half = _CHANGE_CHECK_POINT_S / 2.0
+                raw.append([a - half, a + half])
+            else:
+                raw.extend(_sample_long_check_range(
+                    a - _CHANGE_CHECK_PAD_S, b + _CHANGE_CHECK_PAD_S))
+        if changed.get("global") or not raw:
+            exact = [float(t) for t, _claim in (plan or [])]
+            if not exact:
+                n = min(4, max(1, int(round(duration / 6.0))))
+                exact = [duration * (i + 0.5) / n for i in range(n)]
+            half = min(1.25, max(0.5, duration / 12.0))
+            raw.extend([[t - half, t + half] for t in exact])
+        merged = _merge_check_ranges(raw, duration)
+        # Prefer exact changed moments first and keep the proof reel bounded.
+        selected, spent = [], 0.0
+        for a, b in merged:
+            if len(selected) >= _CHANGE_CHECK_MAX_WINDOWS:
+                break
+            room = _CHANGE_CHECK_MAX_TOTAL_S - spent
+            if room < 0.5:
+                break
+            if b - a > room:
+                mid = (a + b) / 2.0
+                a, b = max(0.0, mid - room / 2.0), \
+                    min(duration, mid + room / 2.0)
+            selected.append([round(a, 3), round(b, 3)])
+            spent += b - a
+        return selected, prev
+    except Exception:
+        return [], prev
+
+
+def _run_changed_preview_check(ctx, row, plan, ranges):
+    """Render/wait for a short proof reel without replacing Studio preview."""
+    version = int(row["version"])
+    if version in ctx.checked_versions:
+        return (f"Changed sections of EDL v{version} were already rendered "
+                "and checked. Keep editing, or call "
+                "render_preview(complete=true) once the edit is ready.")
+    payload = {"edl_version": version, "check_ranges": ranges,
+               "source": "agent_preview_check",
+               "agent_job_id": ctx.job["id"]}
+    if plan:
+        payload["verify_times"] = [t for t, _ in plan]
+    job_id = getattr(ctx, "spec_preview_check_jobs", {}).get(version)
+    if not job_id:
+        job_id, _created = ctx.db.run(
+            dbx.get_or_enqueue_preview_check_job, ctx.project_id,
+            ctx.job["user_id"], payload)
+    deadline = time.time() + min(config.PREVIEW_WAIT_TIMEOUT_S, 300.0)
+    while time.time() < deadline:
+        time.sleep(1)
+        job = ctx.db.run(dbx.get_job, job_id)
+        if job["state"] == "done":
+            result = job.get("result") or {}
+            if result.get("superseded_by"):
+                return ("Changed-section proof was superseded by a newer EDL "
+                        "version. Check that newer edit instead.")
+            ctx.last_preview_check = result
+            ctx.checked_versions.add(version)
+            delivered = _queue_check_frames(ctx, result, plan)
+            critic = _preview_critic_report(ctx, result, plan)
+            if critic is not None:
+                ctx.last_visual_critic = critic
+            covered = result.get("changed_ranges") or ranges
+            note = (f"Changed-section proof for EDL v{version} rendered "
+                    f"{result.get('duration_s')}s across {covered}. Only "
+                    "the affected seconds were encoded; this proof reel did "
+                    "NOT replace the complete Studio preview.")
+            if delivered:
+                note += (" Inspect the attached changed-moment frames now. "
+                         "If anything is wrong, repair the EDL and check the "
+                         "new version; do not repeat the unchanged render.")
+            if critic is not None:
+                note += preview_critic.summary_line(critic)
+            note += (" Continue iterating cheaply. When the edit is ready, "
+                     "call render_preview(complete=true) exactly once to "
+                     "produce the complete user preview.")
+            return note
+        if job["state"] == "failed":
+            failure = dict(((job.get("result") or {}).get("failure") or {}))
+            err = str(failure.get("error") or job.get("error")
+                      or "unknown check error")[:500]
+            return (f"Changed-section proof FAILED for v{version}: {err}. "
+                    "The EDL remains saved. Use another inspection route or "
+                    "repair a genuinely wrong edit; do not retry this same "
+                    "proof unchanged.")
+    return ("Changed-section proof is still running. Continue with work that "
+            "does not depend on it; do not enqueue the same proof again.")
+
 
 def speculative_preview(ctx):
-    """Start the encode of the newest EDL version NOW, before the model asks
-    (round 98). Called by the agent loop after a step that landed writes:
-    the render runs DURING the next ~13s model call instead of after it,
-    and render_preview adopts the queued/running job for the same version
-    (dbx.pending_preview_job) rather than encoding twice.
+    """Start a changed-section proof during the next model call.
 
-    Best-effort by contract — every skip is silent and every failure is the
-    caller's `except: pass`, because the worst case must be exactly the old
-    timeline (the render starts when asked). Grade-only steps are skipped:
-    the contact-strip shortcut serves those cheaper than any render."""
+    Speculation used to enqueue a complete preview for every intermediate EDL
+    and merely bounded the waste to one version.  The cheap proof is now the
+    only work allowed ahead of explicit readiness; the complete preview is
+    produced once by the turn-end honesty pass.
+    """
     if not config.SPECULATIVE_PREVIEWS:
         return
     if ctx.write_calls and ctx.write_calls[-1] in GRADE_ONLY_TOOLS:
@@ -12563,30 +12746,29 @@ def speculative_preview(ctx):
         return
     if len(ctx.spec_enqueued) >= config.SPECULATIVE_PREVIEWS_MAX:
         return
-    pending = ctx.db.run(dbx.pending_preview_job, ctx.project_id, version)
-    if pending:
-        ctx.spec_preview_jobs[version] = pending
-        ctx.spec_enqueued.add(version)
+    plan = _verify_plan_for(ctx, row)
+    ranges, _baseline = _change_check_ranges(ctx, row, plan)
+    if not ranges:
         return
-    payload = {"edl_version": version}
-    try:
-        plan = _verify_plan_for(ctx, row)
-        if plan:
-            payload["verify_times"] = [t for t, _ in plan]
-    except Exception:
-        pass
-    payload.update({"source": "agent_preview", "agent_job_id": ctx.job["id"]})
+    payload = {"edl_version": version, "check_ranges": ranges,
+               "source": "agent_preview_check",
+               "agent_job_id": ctx.job["id"]}
+    if plan:
+        payload["verify_times"] = [t for t, _ in plan]
     job_id, _created = ctx.db.run(
-        dbx.get_or_enqueue_preview_job, ctx.project_id,
+        dbx.get_or_enqueue_preview_check_job, ctx.project_id,
         ctx.job["user_id"], payload)
-    ctx.spec_preview_jobs[version] = job_id
+    if not hasattr(ctx, "spec_preview_check_jobs"):
+        ctx.spec_preview_check_jobs = {}
+    ctx.spec_preview_check_jobs[version] = job_id
     ctx.spec_enqueued.add(version)
 
 
 
-def render_preview(ctx):
+def render_preview(ctx, complete=False):
     row = ctx.latest_edl()
     version = row["version"]
+    complete = bool(complete) or bool(getattr(ctx, "autorendering", False))
     if version in ctx.rendered_versions and \
             (ctx.last_preview or {}).get("edl_version") == version:
         return (f"Preview v{version} is already rendered and attached — "
@@ -12594,7 +12776,7 @@ def render_preview(ctx):
     prior_failure = ctx.failed_preview_versions.get(version)
     if prior_failure:
         return _failed_preview_message(version, prior_failure, repeated=True)
-    strip = _grade_strip_shortcut(ctx, row)
+    strip = None if complete else _grade_strip_shortcut(ctx, row)
     if strip:
         return strip
     # Round 81: name the output seconds this edit changed, so the render job
@@ -12602,6 +12784,10 @@ def render_preview(ctx):
     # ("this should read X, behind the person") instead of nine even samples
     # of the whole programme that the edit may not even appear in.
     plan = _verify_plan_for(ctx, row)
+    if not complete:
+        ranges, _baseline = _change_check_ranges(ctx, row, plan)
+        if ranges:
+            return _run_changed_preview_check(ctx, row, plan, ranges)
     # Adopt the speculative encode of this exact version when one is already
     # queued/running (round 98) — same payload shape, same verify plan,
     # half the wait and none of the double cost.
@@ -16473,15 +16659,21 @@ TOOLS = {
                        "is stronger timing evidence than a visual critic.",
                        {"offset": {"type": "integer"},
                         "limit": {"type": "integer"}}),
-    "render_preview": (render_preview, "Render the current EDL as a fast "
-                       "480p preview from the proxy, attach it to chat, and "
-                       "get a visual self-check. Call it whenever proof or "
-                       "iteration will help. When only the COLOR changed "
+    "render_preview": (render_preview, "Verify the current EDL efficiently. "
+                       "During iteration (default complete=false), render "
+                       "only the output seconds affected since the last "
+                       "complete preview and inspect their proof frames; the "
+                       "short proof reel never replaces the Studio player. "
+                       "When the entire edit is ready, call ONCE with "
+                       "complete=true to render and attach the complete 480p "
+                       "preview. Valmera's in-house agent automatically does "
+                       "that complete render at turn end. When only COLOR changed "
                        "since the last render, this returns a ~2s grade "
                        "contact strip instead of re-encoding the program — "
-                       "iterate the look against the strip, then call again "
-                       "without changing the color to render for real (turn "
-                       "end auto-renders anyway).", {}),
+                       "iterate the look against the strip; the complete "
+                       "readiness render still happens exactly once.",
+                       {"complete": {"type": "boolean",
+                                     "description": "False/default: changed sections only. True: one complete readiness preview."}}),
     "ask_user": (ask_user, "Ask the user a specific question and wait for "
                  "their reply (ends this turn). Use whenever a material "
                  "choice genuinely belongs to the user.",

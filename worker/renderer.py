@@ -3973,6 +3973,170 @@ def _render_stamp(job_id):
     return f"{job_id}-{uuid.uuid4().hex[:12]}"
 
 
+def _validated_check_ranges(raw, duration):
+    """Clamp an untrusted proof request to a small, ordered output budget."""
+    ranges = []
+    for pair in raw or []:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        try:
+            a, b = float(pair[0]), float(pair[1])
+        except (TypeError, ValueError):
+            continue
+        a, b = max(0.0, min(a, duration)), max(0.0, min(b, duration))
+        if b - a < 0.1:
+            continue
+        ranges.append([a, b])
+    merged = []
+    for a, b in sorted(ranges):
+        if merged and a <= merged[-1][1] + 0.2:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    if len(merged) > 6 or sum(b - a for a, b in merged) > 25.0:
+        raise dbx.PermanentJobError(
+            "changed-section proof exceeds its 6-window/25-second budget")
+    if not merged:
+        raise dbx.PermanentJobError("changed-section proof has no valid range")
+    return merged
+
+
+def _contain_check_items(edl, tl, ranges, duration, index):
+    """Grow proof windows so a composited item is never cut mid-element."""
+    spans = [(a, b) for a, b, _kind in
+             stitch._item_windows(edl, tl, duration)]
+    spans += list(timeline_mod.insert_windows(
+        edl.get("inserts") or [], tl).values())
+    # Behind-subject text is intentionally absent from stitch._item_windows
+    # (full-preview stitching refuses it). A standalone proof can render it,
+    # but still needs its whole authored window.
+    spans += [(float(t.get("start") or 0.0),
+               float(t.get("end") or 0.0))
+              for t in (edl.get("texts") or []) if t.get("behind")]
+    fx = edl.get("effects") or {}
+    tr = fx.get("transition") or None
+    if tr:
+        blocks = timeline_mod.program_blocks(edl)
+        zone = float(tr.get("duration_s") or 0.5) + 0.2
+        for idx in transition_junctions(edl, index, n_blocks=len(blocks)):
+            if 0 <= idx < len(blocks) - 1:
+                t = blocks[idx]["out_end"]
+                spans.append((max(0.0, t - zone), min(duration, t + zone)))
+    windows = [list(w) for w in ranges]
+    for _ in range(24):
+        grew = False
+        for w in windows:
+            for a, b in spans:
+                if a < w[1] and b > w[0]:
+                    new = [max(0.0, min(w[0], a - 0.05)),
+                           min(duration, max(w[1], b + 0.05))]
+                    if new != w:
+                        w[:] = new
+                        grew = True
+        joined = []
+        for a, b in sorted(windows):
+            if joined and a <= joined[-1][1] + 0.2:
+                joined[-1][1] = max(joined[-1][1], b)
+                grew = True
+            else:
+                joined.append([a, b])
+        windows = joined
+        if not grew:
+            break
+    return [(round(a, 3), round(b, 3)) for a, b in windows]
+
+
+def _concat_check_pieces(pieces, out_path, workdir):
+    if len(pieces) == 1:
+        shutil.copy2(pieces[0], out_path)
+        return
+    listing = os.path.join(workdir, "check_concat.txt")
+    with open(listing, "w", encoding="utf-8") as handle:
+        for piece in pieces:
+            handle.write(f"file '{piece}'\n")
+    media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe",
+               "0", "-i", listing, "-c", "copy", "-movflags",
+               "+faststart", out_path], timeout=180)
+
+
+def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
+                             patch_locals, out_path, raw_ranges,
+                             verify_times, progress_cb=None):
+    """Render only affected output windows into one short proof reel."""
+    duration0 = float((index.get("video") or {}).get("duration") or 0.0)
+    keep_end = max((float(e) for _s, e in
+                    (edl_row["json"].get("keep") or [])), default=0.0)
+    edl = validate_edl(edl_row["json"], max(duration0, keep_end)).model_dump()
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    duration = float(tl.out_duration)
+    ranges = _validated_check_ranges(raw_ranges, duration)
+    ranges = _contain_check_items(edl, tl, ranges, duration, index)
+    # Containment may grow a small requested window around a long overlay or
+    # transition. Re-apply the physical budget after that expansion so one
+    # oversized authored item cannot smuggle a full render into the cheap lane.
+    ranges = _validated_check_ranges(ranges, duration)
+
+    if src_local:
+        info = media.probe(src_local)
+        W, H = frame_dims(info["width"], info["height"],
+                          (edl.get("frame") or {}).get("ratio"))
+        W, H, _fps = preview_geometry(W, H, info.get("fps") or 30.0)
+    else:
+        W, H = frame_dims(1920, 1080,
+                          (edl.get("frame") or {}).get("ratio"))
+        W, H, _fps = preview_geometry(W, H, 30.0)
+    cap_path = caplib.build_ass(
+        edl, index, tl, os.path.join(workdir, "check_full_cap.ass"),
+        play_res=(W, H)) if edl.get("captions") else ""
+
+    pieces, offsets = [], []
+    elapsed = 0.0
+    for i, (a, b) in enumerate(ranges):
+        window = stitch.window_edl(edl, tl, a, b, keep_audio=True)
+        # Fades belong to the actual program ends. window_edl clears them for
+        # stitched pieces; restore only the end a proof window truly contains.
+        wfx = dict(window.get("effects") or {})
+        ofx = edl.get("effects") or {}
+        if a <= 0.001:
+            wfx["fade_in_s"] = ofx.get("fade_in_s")
+        if b >= duration - 0.001:
+            wfx["fade_out_s"] = ofx.get("fade_out_s")
+        window["effects"] = wfx
+        piece = os.path.join(workdir, f"check_piece_{i}.mp4")
+        pdur = render_edl(
+            window, index, src_local, piece, workdir, preview=True,
+            progress_cb=progress_cb, want_wm=False,
+            patch_locals=patch_locals, cap_ass_override=(cap_path or ""),
+            cap_burn_offset=(a if cap_path else None), suppress_outro=True)
+        expected = b - a
+        if abs(pdur - expected) > max(0.2, expected * 0.03):
+            raise RenderVerificationError(
+                f"changed-section piece {i} rendered {pdur:.2f}s, expected "
+                f"{expected:.2f}s")
+        offsets.append((a, b, elapsed))
+        elapsed += pdur
+        pieces.append(piece)
+    _concat_check_pieces(pieces, out_path, workdir)
+    out_dur = media.duration_of(out_path)
+    if abs(out_dur - elapsed) > max(0.25, elapsed * 0.03):
+        raise RenderVerificationError(
+            f"changed-section reel rendered {out_dur:.2f}s, expected "
+            f"{elapsed:.2f}s")
+    mapped = []
+    for raw_t in verify_times or []:
+        try:
+            t = float(raw_t)
+        except (TypeError, ValueError):
+            continue
+        for a, b, offset in offsets:
+            if a - 0.001 <= t <= b + 0.001:
+                mapped.append(round(offset + min(max(t - a, 0.01),
+                                                 max(0.01, b - a - 0.01)), 3))
+                break
+    return out_dur, ranges, mapped
+
+
 def run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     # Which run of this job we are. The dispatcher ships it (remote._job_payload)
@@ -3980,7 +4144,10 @@ def run_render_job(worker_db, job):
     # claimed it and I am rendering for nobody". See _still_ours below.
     my_attempt = job.get("attempts")
     my_claim = job.get("total_claims")
-    variant = "preview" if job["type"] == "preview" else "final"
+    proof_only = job["type"] == "preview_check"
+    variant = "preview" if job["type"] in ("preview", "preview_check") \
+        else "final"
+    asset_variant = "preview_check" if proof_only else variant
     version = int(job["payload"].get("edl_version"))
     # A render the USER could not play is the one case where re-encoding the
     # same EDL is the point: the stored object is what failed them, so serving
@@ -3992,7 +4159,8 @@ def run_render_job(worker_db, job):
     # clean file for this export, and a lapsed one must get the mark back.
     is_paid = bool(worker_db.run(dbx.user_is_paid, job.get("user_id")))
     wm_settings = worker_db.run(dbx.video_settings)
-    want_wm = wants_watermark(variant, is_paid, wm_settings)
+    want_wm = False if proof_only else \
+        wants_watermark(variant, is_paid, wm_settings)
 
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
@@ -4012,7 +4180,7 @@ def run_render_job(worker_db, job):
     # burned TEXT also depends on the mutable index, so a caption fingerprint
     # must match too (see _caption_index_fp) — otherwise a caption-less render
     # is served forever after the transcript gains words.
-    cached = (None if force else
+    cached = (None if force or proof_only else
               worker_db.run(dbx.find_render_asset, project_id, variant, version))
     if cached and (cached.get("meta") or {}).get("src_sha256") == \
             src_sha and storage.exists(cached["storage_key"]):
@@ -4154,7 +4322,7 @@ def run_render_job(worker_db, job):
                 "job was cancelled or handed to another worker")
         _mark("download_s")
 
-        out_local = os.path.join(workdir, f"{variant}_v{version}.mp4")
+        out_local = os.path.join(workdir, f"{asset_variant}_v{version}.mp4")
 
         # Repainted windows (round 92). Previews composite the proxy-res
         # patch clips as stored; a FINAL needs each patch's full-resolution
@@ -4231,6 +4399,8 @@ def run_render_job(worker_db, job):
         # guard agrees is still a true render of its EDL.
         out_dur = None
         stitched_from = None
+        changed_ranges = None
+        mapped_verify_times = None
         # A tray upload can appear twice in assets under different storage
         # keys (main original + reusable video clip) while carrying the exact
         # same sha256.  On a final the original is already local; let every
@@ -4243,7 +4413,16 @@ def run_render_job(worker_db, job):
             for key in worker_db.run(dbx.project_asset_keys_by_sha,
                                      project_id, src_sha):
                 asset_locals[key] = src_local
-        if variant == "preview" and not force and not want_wm \
+        if proof_only:
+            out_dur, changed_ranges, mapped_verify_times = \
+                _render_changed_sections(
+                    job_id, edl_row, index, src_local, workdir,
+                    patch_locals, out_local,
+                    job["payload"].get("check_ranges") or [],
+                    job["payload"].get("verify_times") or [],
+                    progress_cb=_prog)
+        if not proof_only and variant == "preview" \
+                and not force and not want_wm \
                 and not is_canvas:
             try:
                 prev_asset = worker_db.run(dbx.latest_render_asset,
@@ -4305,8 +4484,9 @@ def run_render_job(worker_db, job):
         except Exception:
             src_dur = None
         try:
-            _verify_render(edl_row["json"], out_local, out_dur, job_id,
-                           variant, src_path=src_local, src_dur=src_dur)
+            if not proof_only:
+                _verify_render(edl_row["json"], out_local, out_dur, job_id,
+                               variant, src_path=src_local, src_dur=src_dur)
         except media.MediaError as ve:
             # Round 97 (#3): a STITCHED preview that fails verification must
             # never surface — the full render is the always-correct fallback
@@ -4343,7 +4523,8 @@ def run_render_job(worker_db, job):
             # and the agent would tell the user their video is broken.
             sheets.build_result_sheet(
                 out_local, sheet_local,
-                max(0.1, out_dur - outro_seconds(variant == "preview")))
+                max(0.1, out_dur - (0.0 if proof_only else
+                                    outro_seconds(variant == "preview"))))
         except Exception:
             sheet_local = None
         # Round 81: the dispatcher may name the exact output seconds its edit
@@ -4354,7 +4535,8 @@ def run_render_job(worker_db, job):
         # own review artwork, and an executor that predates this field simply
         # ignores it.
         verify_local = None
-        vtimes = (job["payload"].get("verify_times") or [])
+        vtimes = (mapped_verify_times if proof_only else
+                  (job["payload"].get("verify_times") or []))
         if vtimes:
             try:
                 verify_local = os.path.join(workdir, "verify_sheet.jpg")
@@ -4363,7 +4545,8 @@ def run_render_job(worker_db, job):
                 verify_local = None
         caption_local = None
         caption_times = []
-        if variant == "preview" and edl_row["json"].get("captions"):
+        if not proof_only and variant == "preview" \
+                and edl_row["json"].get("captions"):
             try:
                 caption_times = caption_review_times(
                     edl_row["json"], index, workdir, out_dur, max_times=16)
@@ -4412,7 +4595,7 @@ def run_render_job(worker_db, job):
         # air) stay local and model-free. Do not cut or upload subjective
         # listening clips: no second model should hear on the editor's behalf.
         audio_qc_res = None
-        if variant == "preview":
+        if variant == "preview" and not proof_only:
             try:
                 audio_qc_res = audio_qc.measure(out_local, duration_s=out_dur)
             except Exception:
@@ -4427,7 +4610,7 @@ def run_render_job(worker_db, job):
             bytes_=os.path.getsize(out_local), duration_s=out_dur,
             width=out_info["width"], height=out_info["height"],
             fps=out_info["fps"],
-            meta={"variant": variant, "edl_version": version,
+            meta={"variant": asset_variant, "edl_version": version,
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
                   "caption_sheet_key": caption_sheet_key,
                   "caption_review_times": caption_times,
@@ -4435,13 +4618,16 @@ def run_render_job(worker_db, job):
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
+                  **({"changed_ranges": changed_ranges}
+                     if proof_only else {}),
                   "outro_v": (config.OUTRO_VERSION
-                              if outro_seconds(variant == "preview") else 0),
+                              if not proof_only and
+                              outro_seconds(variant == "preview") else 0),
                   "gfx_shape_v": config.GFX_SHAPING_VERSION,
                   "trans_v": config.TRANSITION_VERSION,
                   "tail_v": config.MUSIC_TAIL_VERSION,
-                  "wm_v": watermark_version(variant, is_paid,
-                                            wm_settings),
+                  "wm_v": (0 if proof_only else
+                           watermark_version(variant, is_paid, wm_settings)),
                   "wm_p": (watermark_position(wm_settings)
                            if want_wm else None)})
         # Reclaim the renders this one just replaced. Unique-per-render keys
@@ -4450,8 +4636,11 @@ def run_render_job(worker_db, job):
         # VERSIONS still play. Best-effort — never fail a finished render over
         # cleanup.
         try:
-            old = worker_db.run(dbx.superseded_renders, project_id, variant,
-                                version, asset_id)
+            old = worker_db.run(
+                dbx.stale_preview_checks, project_id, asset_id) \
+                if proof_only else worker_db.run(
+                    dbx.superseded_renders, project_id, asset_variant,
+                    version, asset_id)
             if old:
                 keys = []
                 for a in old:
@@ -4482,7 +4671,9 @@ def run_render_job(worker_db, job):
                 "caption_sheet_key": caption_sheet_key,
                 "caption_review_times": caption_times,
                 "duration_s": out_dur, "edl_version": version,
-                "variant": variant, "timings": timings,
+                "variant": asset_variant, "timings": timings,
+                **({"changed_ranges": changed_ranges,
+                    "scope": "changes"} if proof_only else {}),
                 "midword_audit": mw,
                 "audio_qc": audio_qc_res}
     finally:

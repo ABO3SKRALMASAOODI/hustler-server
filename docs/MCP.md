@@ -129,7 +129,9 @@ Properties worth knowing:
 ```
 list_projects  →  open_project(3)  →  (the whole project state comes back)
   →  cut_silences(project_id=3) / add_captions(project_id=3) / ...
-  →  render_preview(project_id=3)  →  download_url(project_id=3)
+  →  render_preview(project_id=3, complete=false) while iterating
+  →  render_preview(project_id=3, complete=true) once when ready
+  →  download_url(project_id=3)
   →  tell the user the verified edit is ready to export in Valmera Studio
 ```
 

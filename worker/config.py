@@ -975,13 +975,14 @@ REMOTE_BATCH_JOB_NAME = os.getenv(
     "REMOTE_BATCH_JOB_NAME", "valmera-batch").strip()
 BATCH_POLL_INTERVAL_S = max(
     0.5, float(os.getenv("BATCH_POLL_INTERVAL_S", "2")))
-# Once the turn itself is remote these are cheap HTTP-waiting threads, not five
-# copies of native audio/video state in the Render process. Match Cloud Run's
-# max-instances so the dispatcher no longer recreates a smaller queue in front
-# of an idle autoscaler. Explicit empty REMOTE_AGENT_EXECUTOR_URL restores the
-# memory-safe local AGENT_SLOTS value immediately.
+# Once the turn itself is remote these are cheap HTTP-waiting threads, not ten
+# copies of native audio/video state in the Render process. Ten is enough to
+# feed multiple requests into each concurrency-4 Cloud Run instance without
+# opening twenty extra Postgres lane connections on the dispatcher. Explicit
+# empty REMOTE_AGENT_EXECUTOR_URL restores the memory-safe local AGENT_SLOTS
+# value immediately.
 REMOTE_AGENT_DISPATCH_SLOTS = max(
-    1, int(os.getenv("REMOTE_AGENT_DISPATCH_SLOTS", "5")))
+    1, int(os.getenv("REMOTE_AGENT_DISPATCH_SLOTS", "10")))
 # Shared bearer secret checked by the executor (constant-time). MUST be long and
 # random; the executor refuses every /run without it. Set the SAME value on both
 # services. The executor still reads the job's real data from the DB — the body
@@ -1051,6 +1052,10 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # A preview is deliberately the impatient one: it renders from the 540p
     # proxy and a user is watching a spinner while it runs.
     "preview": int(os.getenv("REMOTE_TIMEOUT_PREVIEW_S", "1500")),
+    # Changed-section proof reels are bounded to a few seconds of output and
+    # should fail fast enough that the agent can choose another verification
+    # route instead of occupying an interactive executor for 25 minutes.
+    "preview_check": int(os.getenv("REMOTE_TIMEOUT_PREVIEW_CHECK_S", "300")),
     # Stem separation (round 97): demucs on CPU runs near realtime, the
     # source is capped at STEMS_MAX_SOURCE_S, and the result is cached per
     # source forever — so this bounds ONE first-ever separation per video.

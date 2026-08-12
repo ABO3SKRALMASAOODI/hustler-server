@@ -2929,13 +2929,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # but reduce each description to a short reminder.
             tools = agent_tools.openai_tools(model, compact=True)
 
-        # Round 98: speculative preview. A step that landed writes is almost
-        # always followed by render_preview one model call (~13s) later —
-        # start the encode NOW so it runs DURING that call instead of after
-        # it. render_preview adopts the queued/running job for the same
-        # version (dbx.pending_preview_job) rather than encoding twice, and
-        # the helper itself skips grade-only writes (the contact-strip
-        # shortcut is cheaper than any render). Best-effort by contract.
+        # Speculative verification is a bounded changed-section proof only.
+        # A complete preview is reserved for the turn-end honesty pass, so an
+        # edit that takes five model steps cannot buy five full-length files.
         if ctx.versions_written and not SHUTDOWN.is_set():
             try:
                 agent_tools.speculative_preview(ctx)

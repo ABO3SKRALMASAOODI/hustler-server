@@ -11,8 +11,8 @@
 > repair pass and must write a new EDL version before rendering again.
 >
 > `valmera-agent` now uses the agent-only image and 1 vCPU / 2 GiB at
-> concurrency 2. It omits executor-only browser/model payloads, reducing cold
-> start time and letting two network-bound LLM turns share an instance. All
+> concurrency 4. It omits executor-only browser/model payloads, reducing cold
+> start time and letting four network-bound LLM turns share an instance. All
 > services and the Job still scale to zero.
 
 > **ROUND 97: DEPLOYS ARE AUTOMATIC.** `.github/workflows/deploy-executor.yml`
@@ -60,7 +60,7 @@ agent image built by `Dockerfile.agent-base` / `Dockerfile.agent-runtime`.
 |---|---|---|---|
 | dispatcher (default) | existing Render worker | `worker` (or unset) | polls queue and ships work to request-based executors |
 | executor | Cloud Run services | `executor` | preview/tool/final/index compute per request, right-sized by job, scales to zero |
-| agent executor | Cloud Run service | `agent_executor` | runs isolated agent turns with concurrency 2, scales to zero |
+| agent executor | Cloud Run service | `agent_executor` | runs isolated agent turns with concurrency 4, scales to zero |
 | batch executor | Cloud Run Job | `batch_executor` | owns one final/index through terminal DB commit; platform retries are zero |
 
 `valmera-batch-launcher` is a tiny authenticated scale-to-zero bridge retained
@@ -118,11 +118,18 @@ gcloud run services describe valmera-executor --region us-central1 \
   --format 'value(status.url)'      # -> https://valmera-executor-xxxx.a.run.app
 ```
 
-Smoke-test it:
+Do not smoke-test this 32-GiB service with a routine HTTP request: that would
+cold-start the most expensive request executor just to ask whether it is
+healthy. Verify its control-plane state without starting a container:
 
 ```bash
-curl https://valmera-executor-xxxx.a.run.app/health      # -> {"status":"ok",...}
+gcloud run services describe valmera-executor --region us-central1 \
+  --format 'value(status.conditions[0].status)'          # -> True
 ```
+
+Runtime fingerprint and feature checks go to the right-sized
+`valmera-executor-preview` sibling described below. Both services run the
+same immutable application image.
 
 ### Why these flags
 
@@ -200,9 +207,10 @@ REMOTE_EXECUTOR_URL     = https://valmera-executor-xxxx.a.run.app
 REMOTE_EXECUTOR_SECRET  = <the same $EXEC_SECRET>
 ```
 
-Production also has a right-sized preview service. It keeps the same 8 vCPU
-but uses 8 GiB because previews read the 540p proxy rather than staging the
-full-resolution original. For the standard Cloud Run service names, the worker
+Production also has a right-sized preview service. It uses 4 vCPU / 8 GiB
+because previews read and encode a 480p result from the proxy; 8 vCPU spent
+nearly twice the CPU allocation without halving that small encode's wall time.
+Changed-section proof jobs use this service too. For the standard Cloud Run service names, the worker
 derives this sibling URL automatically from `REMOTE_EXECUTOR_URL`; no Render
 dashboard change is required. The optional explicit override is:
 

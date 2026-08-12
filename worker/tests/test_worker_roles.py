@@ -41,7 +41,7 @@ def _topology(role, **values):
 
 def test_legacy_worker_role_keeps_every_lane():
     assert _topology("worker") == {
-        "agent": 5, "filmstrip": 1, "index": 4, "mcp": 2,
+        "agent": 10, "filmstrip": 1, "index": 4, "mcp": 2,
         "media": 4, "shorts": 2,
     }
 
@@ -57,7 +57,7 @@ def test_dispatcher_cannot_claim_stateful_editor_work():
 def test_agent_worker_cannot_claim_render_or_index_work():
     lanes = _topology("agent")
     assert lanes == {
-        "agent": 5, "filmstrip": 0, "index": 0, "mcp": 2,
+        "agent": 10, "filmstrip": 0, "index": 0, "mcp": 2,
         "media": 0, "shorts": 2,
     }
 

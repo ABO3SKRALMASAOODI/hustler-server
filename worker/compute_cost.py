@@ -19,9 +19,9 @@ def request_profile(role=None, service=None):
     role = role or os.getenv("WORKER_ROLE", "executor")
     service = service or os.getenv("K_SERVICE", "")
     if role == "agent_executor" or service == "valmera-agent":
-        return "agent-1cpu-2g-concurrency2", 1, 2
+        return "agent-1cpu-2g-concurrency4", 1, 2
     if "preview" in service:
-        return "preview-8cpu-8g", 8, 8
+        return "preview-4cpu-8g", 4, 8
     if "executor-batch" in service:
         return "request-batch-8cpu-16g", 8, 16
     return "request-heavy-8cpu-32g", 8, 32

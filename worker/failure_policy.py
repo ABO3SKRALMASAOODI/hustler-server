@@ -64,7 +64,7 @@ def _base_attempts(job_type):
 def classify(error, job_type=None):
     """Return whether running the *unchanged* physical job again is useful."""
     text = str(error).lower()
-    media_edit = job_type in ("preview", "final")
+    media_edit = job_type in ("preview", "preview_check", "final")
 
     if isinstance(error, dbx.JobLeaseLost):
         return FailureDecision("lease_lost", False, 0, False)
@@ -87,13 +87,13 @@ def classify(error, job_type=None):
             or "runaway encode" in text \
             or re.search(r"timed out after\s+[0-9.]+s", text):
         return FailureDecision("render_budget_exceeded", False, 0,
-                               job_type == "preview")
+                               job_type in ("preview", "preview_check"))
 
     if any(x in text for x in _INVALID_EDL):
         return FailureDecision("invalid_edl", False, 0, media_edit)
     if any(x in text for x in _DETERMINISTIC_FFMPEG):
         return FailureDecision("deterministic_ffmpeg", False, 0,
-                               job_type == "preview")
+                               job_type in ("preview", "preview_check"))
     if "no video stream found" in text \
             or "could not determine video duration" in text:
         return FailureDecision("invalid_media", False, 0, False)
@@ -103,7 +103,7 @@ def classify(error, job_type=None):
     if "no progress" in text or "stalled" in text:
         return FailureDecision("stalled_io", True,
                                min(_base_attempts(job_type), 2),
-                               job_type == "preview")
+                               job_type in ("preview", "preview_check"))
     if any(x in text for x in _TRANSIENT):
         return FailureDecision("transient_infrastructure", True,
                                min(_base_attempts(job_type), 2), False)
@@ -111,7 +111,7 @@ def classify(error, job_type=None):
     if isinstance(error, media.MediaError):
         return FailureDecision("media_command", True,
                                min(_base_attempts(job_type), 2),
-                               job_type == "preview")
+                               job_type in ("preview", "preview_check"))
 
     # Unknown failures retain a bounded second chance.  The old default was
     # three physical runs for every media exception, including deterministic

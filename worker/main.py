@@ -49,10 +49,10 @@ import ytaccess
 # A failed one is deliberately absent from FAIL_NOTES/REAPER_NOTES — a missing
 # strip is a cosmetic degradation, not something to put in a user's chat.
 if config.REMOTE_EXECUTOR_URL:
-    MEDIA_TYPES = ("preview", "final")
+    MEDIA_TYPES = ("preview", "preview_check", "final")
     FILMSTRIP_TYPES = ("filmstrip",)
 else:
-    MEDIA_TYPES = ("preview", "final", "filmstrip")
+    MEDIA_TYPES = ("preview", "preview_check", "final", "filmstrip")
     FILMSTRIP_TYPES = ()
 INDEX_TYPES = ("index",)
 # A normal agent turn is intentionally single-attempt because replaying its
@@ -84,6 +84,7 @@ def _build_runners():
         return {
             "index": remote.run_index_remote,
             "preview": remote.run_render_remote,
+            "preview_check": remote.run_render_remote,
             "final": remote.run_render_remote,
             "agent_turn": (remote.run_agent_remote
                            if config.REMOTE_AGENT_EXECUTOR_URL
@@ -98,6 +99,7 @@ def _build_runners():
     return {
         "index": indexer.run_index_job,
         "preview": renderer.run_render_job,
+        "preview_check": renderer.run_render_job,
         "final": renderer.run_render_job,
         "agent_turn": agent_loop.run_agent_job,
         "shorts_plan": shorts.run_shorts_plan,

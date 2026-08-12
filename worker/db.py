@@ -595,6 +595,45 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
         return cur.fetchone()["id"], True
 
 
+def get_or_enqueue_preview_check_job(conn, project_id, user_id, payload):
+    """Atomically join one changed-section proof for an immutable EDL.
+
+    Proof reels are intentionally a separate job type from ``preview``: their
+    short file is evidence for the editor, not the complete file the Studio
+    player should adopt.  The ranges are part of the identity so a broader
+    later check of the same EDL cannot accidentally join a narrower one.
+    """
+    version = int((payload or {}).get("edl_version"))
+    ranges = (payload or {}).get("check_ranges") or []
+    with conn.cursor() as cur:
+        # Negative version gives proof jobs their own advisory-lock namespace
+        # without introducing a schema migration.
+        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                    (int(project_id), -version))
+        cur.execute("""UPDATE video_jobs
+                       SET state = 'done', result = %s, updated_at = NOW()
+                       WHERE project_id = %s AND type = 'preview_check'
+                         AND state IN ('queued', 'running')
+                         AND payload->>'edl_version' ~ '^[0-9]+$'
+                         AND (payload->>'edl_version')::int < %s""",
+                    (Json({"superseded_by": version}), project_id, version))
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'preview_check'
+                         AND state IN ('queued', 'running')
+                         AND payload->>'edl_version' = %s
+                         AND payload->'check_ranges' = %s::jsonb
+                       ORDER BY id DESC LIMIT 1""",
+                    (project_id, str(version), Json(ranges)))
+        row = cur.fetchone()
+        if row:
+            return row["id"], False
+        cur.execute("""INSERT INTO video_jobs
+                          (project_id, user_id, type, payload)
+                       VALUES (%s, %s, 'preview_check', %s) RETURNING id""",
+                    (project_id, user_id, Json(payload)))
+        return cur.fetchone()["id"], True
+
+
 def reserve_batch_launch(conn, job_id, total_claims):
     """Persist an idempotency key before asking Cloud Run to start a Job."""
     with conn.cursor() as cur:
@@ -1068,6 +1107,23 @@ def superseded_renders(conn, project_id, variant, edl_version, keep_asset_id):
         return cur.fetchall()
 
 
+def stale_preview_checks(conn, project_id, keep_asset_id):
+    """Disposable proof reels older than the newest one for this project.
+
+    Complete previews are timeline history and must survive. A preview_check
+    is an editor's short-lived scratch proof, never linked by the Studio
+    player, so retaining one per EDL version would turn compute savings into
+    permanent object-storage churn.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id, storage_key, meta FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = 'preview_check'
+                         AND id < %s""",
+                    (project_id, int(keep_asset_id)))
+        return cur.fetchall()
+
+
 def delete_assets(conn, asset_ids):
     if not asset_ids:
         return 0
@@ -1175,6 +1231,16 @@ def get_edl_version(conn, project_id, version):
         cur.execute("""SELECT * FROM edls
                        WHERE project_id = %s AND version = %s""",
                     (project_id, version))
+        return cur.fetchone()
+
+
+def previous_edl_version(conn, project_id, before_version):
+    """Newest immutable EDL before ``before_version`` for delta proofs."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM edls
+                       WHERE project_id = %s AND version < %s
+                       ORDER BY version DESC LIMIT 1""",
+                    (project_id, int(before_version)))
         return cur.fetchone()
 
 

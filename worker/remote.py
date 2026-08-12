@@ -50,22 +50,42 @@ class RemoteBatchDetached(RuntimeError):
 _skew_note = ""
 _skew_lock = threading.Lock()
 
+# Capability/version probes are advisory and several callers ask the same
+# question in one turn.  A cold /health request is still a billable Cloud Run
+# request, so cache successful answers per service. Failures are never cached.
+_health_cache = {}
+_health_lock = threading.Lock()
+_HEALTH_CACHE_S = 300.0
+
 
 def executor_health(timeout=20, job_type=None):
     """GET /health on the executor. Returns the parsed body, or raises."""
-    url = _executor_url(job_type)
+    # A generic capability/version probe uses the preview sibling. It runs the
+    # same application image as the 32-GiB fallback, but costs a quarter of the
+    # vCPU allocation to cold-start. Heavy capacity is tested by real heavy
+    # work, never by a diagnostic ping.
+    url = _executor_url("preview" if job_type is None else job_type)
     if not url:
         raise RemoteExecutorError("remote executor URL is not set")
+    now = time.monotonic()
+    with _health_lock:
+        cached = _health_cache.get(url)
+        if cached and now - cached[0] < _HEALTH_CACHE_S:
+            return cached[1]
     resp = requests.get(f"{url}/health", timeout=timeout)
     resp.raise_for_status()
-    return resp.json()
+    body = resp.json()
+    with _health_lock:
+        _health_cache[url] = (now, body)
+    return body
 
 
 def _executor_url(job_type=None):
     """Choose a right-sized service without ever losing the heavy fallback."""
     if job_type == "agent_turn" and config.REMOTE_AGENT_EXECUTOR_URL:
         return config.REMOTE_AGENT_EXECUTOR_URL
-    if job_type == "preview" and config.REMOTE_EXECUTOR_PREVIEW_URL:
+    if job_type in ("preview", "preview_check") \
+            and config.REMOTE_EXECUTOR_PREVIEW_URL:
         return config.REMOTE_EXECUTOR_PREVIEW_URL
     if job_type in ("final", "index") \
             and config.REMOTE_EXECUTOR_BATCH_URL:

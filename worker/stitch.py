@@ -228,7 +228,7 @@ def expand(windows, all_item_spans, event_spans, junction_zones, fade_zones,
 
 # ------------------------------------------------------------------ pieces --
 
-def window_edl(edl, tl, w0, w1):
+def window_edl(edl, tl, w0, w1, keep_audio=False):
     """The EDL that renders output [w0, w1] of `edl`, standalone.
 
     Only called under plan()'s gate, and only with windows expand() grew to
@@ -312,10 +312,51 @@ def window_edl(edl, tl, w0, w1):
     if isinstance(fx, dict):
         fx["fade_in_s"] = 0.0
         fx["fade_out_s"] = 0.0
-    # music/sfx/voiceover: the piece's audio is discarded (the stitched file
-    # keeps the previous preview's audio track) — drop them so no music
-    # fetch/loop work happens per piece.
-    e["music"], e["sfx"], e["voiceover"] = [], [], []
+    # Stitched pieces discard their audio and keep the previous preview's
+    # track. Changed-section proof reels are different: the changed seconds
+    # must sound like the current EDL, so shift output-anchored audio into the
+    # local window. Voiceover has no stored duration; starting it before the
+    # window is represented by advancing its source offset.
+    if keep_audio:
+        music = []
+        for item in e.get("music") or []:
+            a, b = float(item.get("start") or 0.0), \
+                float(item.get("end") or 0.0)
+            if b <= w0 + 0.001 or a >= w1 - 0.001:
+                continue
+            clipped_a, clipped_b = max(a, w0), min(b, w1)
+            shifted = dict(item, start=round(clipped_a - w0, 3),
+                           end=round(clipped_b - w0, 3))
+            if clipped_a > a:
+                shifted["offset_s"] = round(
+                    float(item.get("offset_s") or 0.0) + clipped_a - a, 3)
+                shifted["fade_in_s"] = None
+            if clipped_b < b:
+                shifted["fade_out_s"] = None
+            music.append(shifted)
+        e["music"] = music
+        e["sfx"] = [dict(item, at=round(float(item.get("at") or 0.0)
+                                        - w0, 3))
+                    for item in (e.get("sfx") or [])
+                    if w0 - 0.001 <= float(item.get("at") or 0.0)
+                    < w1 - 0.001]
+        voiceovers = []
+        for item in e.get("voiceover") or []:
+            start = float(item.get("start_output_s") or 0.0)
+            if start >= w1 - 0.001:
+                continue
+            shifted = dict(item)
+            if start < w0:
+                shifted["source_offset_s"] = round(
+                    float(item.get("source_offset_s") or 0.0) + w0 - start,
+                    3)
+                shifted["start_output_s"] = 0.0
+            else:
+                shifted["start_output_s"] = round(start - w0, 3)
+            voiceovers.append(shifted)
+        e["voiceover"] = voiceovers
+    else:
+        e["music"], e["sfx"], e["voiceover"] = [], [], []
     e["effects"] = fx
     return e
 
