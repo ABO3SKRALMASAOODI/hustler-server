@@ -215,6 +215,8 @@ def test_deploy_workflow_right_sizes_and_coalesces():
     assert "coalesce rapid pushes" in workflow
     assert 'git diff --quiet "$GITHUB_SHA" "$latest" -- worker/' in workflow
     assert "src-${launcher_hash}" in workflow
+    assert '"$current_launcher" != "$LAUNCHER_IMAGE"' in workflow
+    assert "desired_launcher=" not in workflow
     heavy_health = "valmera-executor-950454325677.us-central1.run.app/health"
     assert heavy_health not in workflow
     assert config.REMOTE_AGENT_DISPATCH_SLOTS >= 10

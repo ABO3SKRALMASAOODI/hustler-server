@@ -212,16 +212,14 @@ jobs:
           fi
           if gcloud run services describe valmera-batch-launcher \
               --region us-central1 --project valmera >/dev/null 2>&1; then
-            launcher_digest=$(gcloud artifacts docker images describe \
-              "$LAUNCHER_IMAGE" --project valmera \
-              --format='value(image_summary.digest)')
-            launcher_repo=${LAUNCHER_IMAGE%:*}
-            desired_launcher="${launcher_repo}@${launcher_digest}"
             current_launcher=$(gcloud run services describe \
               valmera-batch-launcher --region us-central1 --project valmera \
               --format='value(spec.template.spec.containers[0].image)')
-            if [ -z "$launcher_digest" ] \
-                || [ "$current_launcher" != "$desired_launcher" ]; then
+            # LAUNCHER_IMAGE is itself content-addressed (src-<hash>) and is
+            # never overwritten. Cloud Run reports the submitted tag here,
+            # not the registry digest, so comparing tag-to-digest would
+            # manufacture a new launcher revision on every worker deploy.
+            if [ "$current_launcher" != "$LAUNCHER_IMAGE" ]; then
               gcloud run deploy valmera-batch-launcher \
                 --image "$LAUNCHER_IMAGE" \
                 --region us-central1 --project valmera \
