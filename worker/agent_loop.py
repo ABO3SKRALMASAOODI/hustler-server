@@ -2164,14 +2164,12 @@ def _taste_pushback(ctx, messages, t_start, pushed_versions):
     that the reviewed party may silently decline is not a review; it is a
     comment. So the findings come back once, as work to be done.
 
-    Once per reviewed version, and never when there is no time or proof budget
-    left to act on it — a pushback that cannot be answered would trade a flawed
-    edit for a rejected repair loop, which is a worse deal for the user.
+    Once per reviewed version, and never when there is too little time left to
+    act on it. Preview count is deliberately not a lock: a concrete requested
+    change must remain writable and reviewable in the same user turn.
     """
     version = getattr(ctx, "last_taste_version", None)
     if version in pushed_versions or not ctx.last_taste:
-        return False
-    if len(ctx.rendered_versions) >= ctx.preview_limit():
         return False
     left = config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start)
     if left < config.AGENT_TURN_TIMEOUT_S * 0.25:

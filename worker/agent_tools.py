@@ -194,15 +194,6 @@ class ToolContext:
         self.last_taste = []
         self.last_taste_version = None
         self.last_visual_critic = None
-        # Candidate + one ordinary repair remains the default. A third proof
-        # is earned only when the latest rendered version still has a concrete
-        # independent or deterministic defect. The model cannot set this.
-        self.quality_repair_required = False
-        self.quality_repair_version = None
-        # Set only on the new EDL created after two reviewed candidates.  It
-        # carries the critic's one-time third-preview permission across the
-        # write (where ``latest_edl`` changes versions) to render_preview.
-        self.quality_recovery_version = None
         # What the user asked for THIS turn, verbatim. Read only to SUPPRESS
         # taste findings (round 52): a fade from black is a defect on a reel
         # right up until the moment somebody asks for one, and a critic that
@@ -230,7 +221,6 @@ class ToolContext:
         # so the later tool call adopts the success/failure instead of
         # creating a second physical job for the same immutable version.
         self.spec_preview_jobs = {}
-        self.preview_requests = 0      # candidate proof + one repair proof
         self.autorendered = False     # loop set: model skipped render_preview
         # Round 91 grade contact strips: iterating a color against ~2s strips
         # instead of full renders. last_strip_chain is the grade chain the
@@ -345,35 +335,6 @@ class ToolContext:
         return (self.credit_budget is not None and
                 self.running_credits() >= self.credit_budget)
 
-    def preview_limit(self):
-        """Candidate + repair, then one more proof per verified defect.
-
-        Optional polishing stays capped. A deterministic/independent finding
-        on the latest immutable render is different: it authorizes exactly one
-        corrective version and proof. If that proof still has a concrete
-        defect, it can authorize the next one. This prevents both infinite
-        taste loops and the previous failure mode where Valmera identified a
-        bad third candidate and then refused to fix it.
-        """
-        ordinary = min(2, config.AGENT_MAX_PREVIEWS_PER_TURN)
-        try:
-            latest_version = self.latest_edl()["version"]
-        except Exception:
-            latest_version = None
-        finding_on_latest = (self.quality_repair_required and
-                             self.quality_repair_version == latest_version)
-        recovery_bridge = self.quality_recovery_version == latest_version
-        # A finding on the newest proof earns ONE next proof, even if that is
-        # the fourth/fifth recovery in a genuinely defective sequence. The
-        # bridge exists only between writing that correction and proving it;
-        # it must never grow with every rendered version or silently mint an
-        # extra optional candidate after the earned proof.
-        if finding_on_latest:
-            return max(ordinary, len(self.rendered_versions) + 1)
-        if recovery_bridge:
-            return ordinary + 1
-        return ordinary
-
     def clamp(self, t):
         try:
             t = float(t)
@@ -412,23 +373,6 @@ class ToolContext:
         version (no version row is created), or a REJECTED message on
         validation failure."""
         prev = self.latest_edl()
-        # The turn normally owns a candidate proof and one repair proof. Every
-        # later write must be earned by a concrete defect on the latest proof.
-        limit = self.preview_limit()
-        if len(self.rendered_versions) >= limit:
-            reason = ("the latest critic-authorized recovery has no remaining "
-                      "verified defect" if limit > 2 else
-                      "the candidate preview and repair preview have already "
-                      "rendered without a defect that authorizes another pass")
-            candidate = ("unreviewed third candidate" if limit == 2 else
-                         "unreviewed optional candidate")
-            return (
-                f"REJECTED (EDL v{prev['version']} unchanged): {reason} "
-                f"this turn. Any further write would be an {candidate}. "
-                "Preserve this last proven "
-                "version and reply; make additional optional polish only in "
-                "a new user turn."
-            )
         if not self._states_seen:
             # Seed with the state the turn STARTED in, or undoing every edit
             # back to the beginning would read as progress.
@@ -465,13 +409,6 @@ class ToolContext:
         version = self.db.run(dbx.insert_edl, self.project_id, normalized,
                               "agent")
         self.versions_written.append(version)
-        # Keep one defect-linked proof permission attached to the newly written
-        # version; latest_edl changes here, so the finding's old version id no
-        # longer matches until this bridge is set.
-        if limit > min(2, config.AGENT_MAX_PREVIEWS_PER_TURN) and \
-                len(self.rendered_versions) >= min(
-                    2, config.AGENT_MAX_PREVIEWS_PER_TURN):
-            self.quality_recovery_version = version
         chg = edl_diff.change_ranges(prev["json"], normalized)
         self.last_change = dict(chg, edl_version=version) if chg else None
         before = describe_edl(prev["json"])
@@ -13072,15 +13009,6 @@ def render_preview(ctx):
     strip = _grade_strip_shortcut(ctx, row)
     if strip:
         return strip
-    if not getattr(ctx, "autorendering", False):
-        if ctx.preview_requests >= ctx.preview_limit():
-            return (
-                "REJECTED: this turn already used every preview justified by "
-                "its quality reviews. Do not render or keep polishing again. "
-                "Preserve the best valid version and reply honestly about "
-                "anything that remains."
-            )
-        ctx.preview_requests += 1
     # Round 81: name the output seconds this edit changed, so the render job
     # can pull a frame at each and the self-check can review the CLAIM
     # ("this should read X, behind the person") instead of nine even samples
@@ -13111,7 +13039,6 @@ def render_preview(ctx):
             # unavailable or the new EDL no longer has designed audio.
             ctx.last_visual_critic = None
             ctx.last_audio_review = None
-            ctx.quality_recovery_version = None
             out_dur = result.get("duration_s")
             if result.get("cached"):
                 # Nothing new was encoded and no new file appeared — saying
@@ -13301,11 +13228,6 @@ def render_preview(ctx):
                         if review.strip().upper().startswith("FIX"):
                             ctx.last_taste.append(
                                 "audio review: " + review.strip()[:300])
-            # Recomputed on every proof. This is the only thing that can earn
-            # another candidate after the ordinary repair; the model cannot
-            # request permission through prose or a tool argument.
-            ctx.quality_repair_required = bool(ctx.last_taste)
-            ctx.quality_repair_version = version
             return note
         if j["state"] == "failed":
             failure = dict(((j.get("result") or {}).get("failure") or {}))

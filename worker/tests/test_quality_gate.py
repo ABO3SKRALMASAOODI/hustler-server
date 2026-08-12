@@ -386,36 +386,84 @@ def test_quality_gate_is_enforced_at_the_single_commit_boundary():
     assert fake.inserts == 1
 
 
-def test_two_successful_previews_freeze_the_last_proven_edl():
+def test_successful_previews_never_freeze_a_requested_edl_write():
     ctx, fake = _real_ctx()
-    ctx.rendered_versions.update({1, 2})
+    ctx.rendered_versions.update({1, 2, 3, 4})
     changed = dict(ctx.latest_edl()["json"])
     changed["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
-    result = ctx.write_edl(changed, "optional third-candidate polish")
-    assert result.startswith("REJECTED")
-    assert "unreviewed third candidate" in result
-    assert fake.inserts == 0
-
-
-def test_major_review_earns_exactly_one_third_repair_candidate():
-    ctx, fake = _real_ctx()
-    ctx.rendered_versions.update({1, 2})
-    ctx.quality_repair_required = True
-    ctx.quality_repair_version = 1
-    changed = dict(ctx.latest_edl()["json"])
-    changed["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
-    result = ctx.write_edl(changed, "repair critic composition finding")
+    result = ctx.write_edl(changed, "requested direct replacement")
     assert result.startswith("EDL v1 -> v2")
-    assert ctx.quality_recovery_version == 2
-    assert ctx.preview_limit() == 3
+    assert fake.inserts == 1
 
-    # The recovery candidate still has to be proved, then the ceiling is hard.
-    ctx.rendered_versions.add(3)
+
+def test_additional_writes_do_not_need_reviewer_permission():
+    ctx, fake = _real_ctx()
+    ctx.rendered_versions.update({1, 2, 3})
+    ctx.last_taste = []
+    changed = dict(ctx.latest_edl()["json"])
+    changed["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
+    result = ctx.write_edl(changed, "direct user-requested replacement")
+    assert result.startswith("EDL v1 -> v2")
     again = dict(ctx.latest_edl()["json"])
     again["effects"] = {"grade": "warm"}
-    result = ctx.write_edl(again, "unreviewed fourth candidate")
-    assert result.startswith("REJECTED")
-    assert fake.inserts == 1
+    result = ctx.write_edl(again, "follow-up requested adjustment")
+    assert result.startswith("EDL v2 -> v3")
+    assert fake.inserts == 2
+
+
+def test_manual_preview_has_no_fixed_per_turn_candidate_ceiling(
+        monkeypatch, tmp_path):
+    class PreviewDb:
+        def run(self, fn, *_args):
+            if fn is dbx.get_or_enqueue_preview_job:
+                return 71, True
+            if fn is dbx.get_job:
+                return {"state": "done", "result": {
+                    "duration_s": 20.0, "audio_qc": {}}}
+            raise AssertionError(f"unexpected DB call: {fn}")
+
+    class Ctx:
+        project_id = 9
+        job = {"id": 70, "user_id": 3}
+        duration = 20.0
+        db = PreviewDb()
+        workdir = str(tmp_path)
+        index = {"video": {"width": 1920, "height": 1080}, "words": []}
+        user_message = "replace that zoom directly"
+        rendered_versions = set(range(1, 22))
+        failed_preview_versions = {}
+        spec_preview_jobs = {}
+        last_preview = None
+        last_visual_critic = None
+        last_audio_review = None
+        last_audio_qc_findings = []
+        last_taste = []
+        last_taste_version = None
+        last_selfcheck = None
+        audio_reviewed_versions = set()
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 22, "json": default_edl(20.0)}
+
+        @staticmethod
+        def preview_limit():
+            raise AssertionError("the removed preview lock was consulted")
+
+    monkeypatch.setattr(agent_tools, "_grade_strip_shortcut",
+                        lambda *_args: None)
+    monkeypatch.setattr(agent_tools, "_verify_plan_for", lambda *_args: None)
+    monkeypatch.setattr(agent_tools, "_queue_check_frames",
+                        lambda *_args: False)
+    monkeypatch.setattr(agent_tools, "_independent_preview_review",
+                        lambda *_args: None)
+    monkeypatch.setattr(agent_tools, "_self_check", lambda *_args: None)
+    monkeypatch.setattr(agent_tools.taste, "critique", lambda *_args, **_kw: [])
+    monkeypatch.setattr(agent_tools.time, "sleep", lambda *_args: None)
+
+    result = agent_tools.render_preview(Ctx())
+    assert result.startswith("Preview v22 rendered:")
+    assert 22 in Ctx.rendered_versions
 
 
 def test_add_zoom_rejects_the_old_center_default_before_writing():
