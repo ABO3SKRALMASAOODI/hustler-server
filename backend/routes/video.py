@@ -4722,26 +4722,31 @@ def _watermark_settings(cur):
     postgres a failed statement poisons the whole transaction — and this runs
     inside /state, which is polled every 2s for every open studio.
     """
-    default = {"enabled": True, "force": False, "scene_top": False}
+    default = {"enabled": True, "force": False, "scene_top": False,
+               "lower": False}
     try:
         cur.execute("SELECT to_regclass('public.video_settings') AS t")
         row = cur.fetchone()
         if not row or not (row.get("t") if isinstance(row, dict) else row["t"]):
             return default
-        # The admin GET lazily adds watermark_scene_top. Reading it via the
+        # The admin GET lazily adds placement columns. Reading them via the
         # row JSON preserves the existing master/force values during deploy
         # skew, before anyone has opened that page to run the migration.
         cur.execute("SELECT watermark_enabled, watermark_force, "
                     "COALESCE((to_jsonb(video_settings)->>"
                     "'watermark_scene_top')::boolean, FALSE) "
-                    "AS watermark_scene_top "
+                    "AS watermark_scene_top, "
+                    "COALESCE((to_jsonb(video_settings)->>"
+                    "'watermark_lower')::boolean, FALSE) "
+                    "AS watermark_lower "
                     "FROM video_settings WHERE id = 1")
         row = cur.fetchone()
         if not row:
             return default
         return {"enabled": bool(row["watermark_enabled"]),
                 "force": bool(row["watermark_force"]),
-                "scene_top": bool(row["watermark_scene_top"])}
+                "scene_top": bool(row["watermark_scene_top"]),
+                "lower": bool(row["watermark_lower"])}
     except Exception:
         return default
 
@@ -4777,14 +4782,15 @@ def _watermark_is_current(meta, is_paid, settings=None):
     one, so only free users re-encode their pre-feature exports.
     """
     settings = settings or {"enabled": True, "force": False,
-                            "scene_top": False}
+                            "scene_top": False, "lower": False}
     want = _watermark_wanted(is_paid, settings)
     if ((meta or {}).get("wm_v") or 0) != want:
         return False
     if not want:
         return True
     stored_position = (meta or {}).get("wm_p") or "frame"
-    wanted_position = "scene" if settings.get("scene_top") else "frame"
+    wanted_position = ("scene" if settings.get("scene_top") else
+                       "lower" if settings.get("lower") else "frame")
     return stored_position == wanted_position
 
 

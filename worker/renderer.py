@@ -1111,7 +1111,7 @@ def wants_watermark(variant, is_paid, settings=None):
     reach the table still behaves sensibly.
     """
     s = settings or {"enabled": config.WATERMARK_ENABLED, "force": False,
-                     "scene_top": False}
+                     "scene_top": False, "lower": False}
     if variant != "final" or not s.get("enabled"):
         return False
     if is_paid and not s.get("force"):
@@ -1131,10 +1131,17 @@ def watermark_position(settings=None):
 
     "scene" means scene-aware when the render has an eligible horizontal
     picture inside a 9:16 padded frame; every other layout falls back to the
-    normal frame corner. Keeping the selected mode in metadata makes a live
-    admin flip invalidate the previously rendered final in either direction.
+    normal frame corner. "lower" keeps the same horizontal alignment as that
+    corner and adds a little vertical space. Keeping the selected mode in
+    metadata makes a live admin flip invalidate the previously rendered final
+    in either direction.
     """
-    return "scene" if (settings or {}).get("scene_top") else "frame"
+    s = settings or {}
+    if s.get("scene_top"):
+        return "scene"
+    if s.get("lower"):
+        return "lower"
+    return "frame"
 
 
 def watermark_current(meta, variant, is_paid, settings=None):
@@ -1159,17 +1166,21 @@ def watermark_current(meta, variant, is_paid, settings=None):
         watermark_position(settings)
 
 
-def watermark_scene_anchor_y(edl, src_w, src_h, W, H, settings=None):
-    """Top edge for the scene-aware mark, or None for the normal corner.
+def watermark_anchor_y(edl, src_w, src_h, W, H, settings=None):
+    """Optional top edge for lower/scene placement; None is the normal corner.
 
-    The requested alternate position is intentionally narrow: a horizontal
+    Lower is a pure Y-axis move, preserving the established X. The scene-aware
+    position is intentionally narrow: a horizontal
     main picture contained inside a 9:16 `pad`/`pad_blur` output. In that
     layout fit_fractions gives the exact foreground rectangle emitted by
     frame_fit_filter, so the robot sits just inside the scene's top edge rather
     than high in the portrait bars/backdrop. Crop layouts already fill the
     frame and all other ratios retain the established position.
     """
-    if not (settings or {}).get("scene_top"):
+    position = watermark_position(settings)
+    if position == "lower":
+        return max(10, int(round(H * config.WATERMARK_LOWER_MARGIN_Y_FRAC)))
+    if position != "scene":
         return None
     frame = (edl or {}).get("frame") or {}
     if frame.get("ratio") != "9:16" or \
@@ -2733,7 +2744,7 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
-                       want_wm=False, cancelled_cb=None):
+                       want_wm=False, wm_settings=None, cancelled_cb=None):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
@@ -2746,6 +2757,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     fps = max(1.0, min(float(canvas.get("fps") or 30.0), 60.0))
     if preview:
         W, H, fps = preview_geometry(W, H, fps)
+    wm_anchor_y = watermark_anchor_y(edl, W, H, W, H, wm_settings)
 
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []
@@ -2865,7 +2877,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         robot_idx = next_idx
         next_idx += 1
         wm_ass_path = build_watermark_ass(
-            os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H)
+            os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H,
+            wm_anchor_y)
 
     plate_idx, plate_box = _screen_frame_input(
         edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx)
@@ -2883,6 +2896,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                               overlay_inputs=overlay_inputs,
                               gfx_ass_path=gfx_path, robot_idx=robot_idx,
                               wm_ass_path=wm_ass_path,
+                              wm_anchor_y=wm_anchor_y,
                               plate_idx=plate_idx, plate_box=plate_box)
 
     if preview:
@@ -3083,6 +3097,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # No main video: the program is built on the canvas from inserts alone.
         return _render_canvas_edl(edl_dict, out_path, workdir, preview,
                                   progress_cb, want_wm=want_wm,
+                                  wm_settings=wm_settings,
                                   cancelled_cb=cancelled_cb)
     info = media.probe(src_path)
     src_dur = info["duration"]
@@ -3101,7 +3116,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
     if preview:
         W, H, fps = preview_geometry(W, H, fps)
-    wm_anchor_y = watermark_scene_anchor_y(
+    wm_anchor_y = watermark_anchor_y(
         edl, info["width"], info["height"], W, H, wm_settings)
 
     inserts = edl.get("inserts") or []

@@ -1541,7 +1541,7 @@ _ROW_COST_SQL = model_prices.row_cost_sql(config.PRICE_FALLBACK)
 
 
 def video_settings(conn):
-    """Operator toggles: {'enabled', 'force', 'scene_top'}.
+    """Operator toggles: {'enabled', 'force', 'scene_top', 'lower'}.
 
     Falls back to the config defaults when the table does not exist yet (the
     backend creates it lazily, and the worker must not depend on having been
@@ -1551,7 +1551,7 @@ def video_settings(conn):
     is a spectacular way for a cosmetic toggle to break exports.
     """
     default = {"enabled": config.WATERMARK_ENABLED, "force": False,
-               "scene_top": False}
+               "scene_top": False, "lower": False}
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT to_regclass('public.video_settings') AS t")
@@ -1563,14 +1563,18 @@ def video_settings(conn):
             cur.execute("SELECT watermark_enabled, watermark_force, "
                         "COALESCE((to_jsonb(video_settings)->>"
                         "'watermark_scene_top')::boolean, FALSE) "
-                        "AS watermark_scene_top "
+                        "AS watermark_scene_top, "
+                        "COALESCE((to_jsonb(video_settings)->>"
+                        "'watermark_lower')::boolean, FALSE) "
+                        "AS watermark_lower "
                         "FROM video_settings WHERE id = 1")
             row = cur.fetchone()
         if not row:
             return default
         return {"enabled": bool(row["watermark_enabled"]),
                 "force": bool(row["watermark_force"]),
-                "scene_top": bool(row["watermark_scene_top"])}
+                "scene_top": bool(row["watermark_scene_top"]),
+                "lower": bool(row["watermark_lower"])}
     except Exception:
         # A toggle lookup must never be the reason an export fails.
         return default

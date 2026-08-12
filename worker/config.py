@@ -1619,6 +1619,10 @@ WATERMARK_ROBOT_H_FRAC = float(os.getenv("WATERMARK_ROBOT_H_FRAC", "0.058"))
 # landscape.
 WATERMARK_MARGIN_X_FRAC = float(os.getenv("WATERMARK_MARGIN_X_FRAC", "0.10"))
 WATERMARK_MARGIN_Y_FRAC = float(os.getenv("WATERMARK_MARGIN_Y_FRAC", "0.06"))
+# The third admin position preserves the established horizontal alignment and
+# only lowers the mark by another 5% of frame height.
+WATERMARK_LOWER_MARGIN_Y_FRAC = float(os.getenv(
+    "WATERMARK_LOWER_MARGIN_Y_FRAC", "0.11"))
 WATERMARK_TEXT_H_FRAC = float(os.getenv("WATERMARK_TEXT_H_FRAC", "0.0175"))
 # Aspect of brand/robot.png (1467x2157). Pinned as a constant because the
 # text's x position is computed from the robot's WIDTH, and a regenerated

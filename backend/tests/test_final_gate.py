@@ -264,6 +264,13 @@ def test_a_watermark_position_change_re_exports_the_marked_final():
         {"wm_v": video.WATERMARK_VERSION, "wm_p": "scene"},
         is_paid=False, settings=scene)
 
+    lower = {"enabled": True, "force": False, "lower": True}
+    assert not video._watermark_is_current(meta, is_paid=False,
+                                           settings=lower)
+    assert video._watermark_is_current(
+        {"wm_v": video.WATERMARK_VERSION, "wm_p": "lower"},
+        is_paid=False, settings=lower)
+
 
 def test_watermark_position_never_reencodes_a_clean_paid_final():
     scene = {"enabled": True, "force": False, "scene_top": True}

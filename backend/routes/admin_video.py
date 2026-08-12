@@ -1904,14 +1904,26 @@ def _ensure_video_settings(cur):
             watermark_enabled BOOLEAN DEFAULT TRUE,
             watermark_force BOOLEAN DEFAULT FALSE,
             watermark_scene_top BOOLEAN DEFAULT FALSE,
+            watermark_lower BOOLEAN DEFAULT FALSE,
             updated_at TIMESTAMP DEFAULT NOW()
         )
     """)
     # CREATE TABLE IF NOT EXISTS does not add fields to the live table.
     cur.execute("ALTER TABLE video_settings ADD COLUMN IF NOT EXISTS "
                 "watermark_scene_top BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE video_settings ADD COLUMN IF NOT EXISTS "
+                "watermark_lower BOOLEAN DEFAULT FALSE")
     cur.execute("INSERT INTO video_settings (id) VALUES (1) "
                 "ON CONFLICT (id) DO NOTHING")
+
+
+def _watermark_position(row):
+    """Collapse the compatibility booleans into the admin's one choice."""
+    if bool(row.get("watermark_scene_top", False)):
+        return "scene"
+    if bool(row.get("watermark_lower", False)):
+        return "lower"
+    return "frame"
 
 
 @admin_video_bp.route("/admin/video/settings", methods=["GET"])
@@ -1922,13 +1934,15 @@ def video_settings_get():
         _ensure_video_settings(cur)
         conn.commit()
         cur.execute("SELECT watermark_enabled, watermark_force, "
-                    "watermark_scene_top, updated_at "
+                    "watermark_scene_top, watermark_lower, updated_at "
                     "FROM video_settings WHERE id = 1")
         row = cur.fetchone() or {}
     return jsonify({
         "watermark_enabled": bool(row.get("watermark_enabled", True)),
         "watermark_force": bool(row.get("watermark_force", False)),
         "watermark_scene_top": bool(row.get("watermark_scene_top", False)),
+        "watermark_lower": bool(row.get("watermark_lower", False)),
+        "watermark_position": _watermark_position(row),
         "updated_at": (row.get("updated_at").isoformat()
                        if row.get("updated_at") else None),
     })
@@ -1938,32 +1952,49 @@ def video_settings_get():
 @admin_required
 def video_settings_set():
     body = request.get_json(silent=True) or {}
+    position = body.get("watermark_position")
+    if position is not None and position not in ("frame", "lower", "scene"):
+        return jsonify({"error": "invalid watermark_position"}), 400
     with adb() as conn:
         cur = conn.cursor()
         _ensure_video_settings(cur)
-        # Only the keys actually sent are written, so the two switches can be
-        # flipped independently without one clobbering the other.
+        # Enabled/force remain independent switches. Placement is one of
+        # three mutually-exclusive choices, stored as booleans so executors
+        # deployed before this change continue to understand scene-top.
         sets, vals = [], []
         for key, col in (("watermark_enabled", "watermark_enabled"),
-                         ("watermark_force", "watermark_force"),
-                         ("watermark_scene_top", "watermark_scene_top")):
+                         ("watermark_force", "watermark_force")):
             if key in body:
                 sets.append(f"{col} = %s")
                 vals.append(bool(body[key]))
+        if position is None:
+            # Compatibility for the previous two-state admin and any older
+            # callers: switching either legacy boolean off means frame mode.
+            if "watermark_scene_top" in body:
+                position = ("scene" if bool(body["watermark_scene_top"])
+                            else "frame")
+            elif "watermark_lower" in body:
+                position = ("lower" if bool(body["watermark_lower"])
+                            else "frame")
+        if position is not None:
+            sets.extend(("watermark_scene_top = %s", "watermark_lower = %s"))
+            vals.extend((position == "scene", position == "lower"))
         if not sets:
             return jsonify({"error": "nothing to update"}), 400
         cur.execute(f"UPDATE video_settings SET {', '.join(sets)}, "
                     "updated_at = NOW() WHERE id = 1", vals)
         conn.commit()
         cur.execute("SELECT watermark_enabled, watermark_force, "
-                    "watermark_scene_top "
+                    "watermark_scene_top, watermark_lower "
                     "FROM video_settings WHERE id = 1")
         row = cur.fetchone() or {}
     return jsonify({"ok": True,
                     "watermark_enabled": bool(row.get("watermark_enabled")),
                     "watermark_force": bool(row.get("watermark_force")),
                     "watermark_scene_top": bool(
-                        row.get("watermark_scene_top"))})
+                        row.get("watermark_scene_top")),
+                    "watermark_lower": bool(row.get("watermark_lower")),
+                    "watermark_position": _watermark_position(row)})
 
 
 # ─────────────────────────────────────────────────────────────────────────

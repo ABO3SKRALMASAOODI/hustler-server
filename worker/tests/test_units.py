@@ -5143,6 +5143,15 @@ check("watermark: changing the admin position invalidates a marked final",
           {"wm_v": wconfig.WATERMARK_VERSION, "wm_p": "scene"},
           "final", is_paid=False,
           settings={"enabled": True, "force": False, "scene_top": True}))
+check("watermark: lower position has its own cache identity",
+      not renderer.watermark_current(
+          {"wm_v": wconfig.WATERMARK_VERSION, "wm_p": "frame"},
+          "final", is_paid=False,
+          settings={"enabled": True, "force": False, "lower": True})
+      and renderer.watermark_current(
+          {"wm_v": wconfig.WATERMARK_VERSION, "wm_p": "lower"},
+          "final", is_paid=False,
+          settings={"enabled": True, "force": False, "lower": True}))
 
 # The backend half must agree, or the studio serves a stale final forever.
 _bev2 = open(os.path.join(os.path.dirname(__file__),
@@ -5169,7 +5178,7 @@ check("watermark: the backend exposes the toggle rule as its own function",
       "_watermark_wanted" in _wm_ns and "_watermark_is_current" in _wm_ns)
 check("watermark: the backend actually READS video_settings",
       "_watermark_settings" in _bev2 and "watermark_force" in _bev2
-      and "watermark_scene_top" in _bev2)
+      and "watermark_scene_top" in _bev2 and "watermark_lower" in _bev2)
 
 for _paid in (False, True):
     for _en in (False, True):
@@ -5188,8 +5197,11 @@ for _paid in (False, True):
                   _wm_ns["_watermark_is_current"]({"wm_v": _worker_v},
                                                   _paid, _s))
 
-for _scene_top, _position in ((False, "frame"), (True, "scene")):
-    _s = {"enabled": True, "force": False, "scene_top": _scene_top}
+for _position, _placement in (
+        ("frame", {"scene_top": False, "lower": False}),
+        ("lower", {"scene_top": False, "lower": True}),
+        ("scene", {"scene_top": True, "lower": False})):
+    _s = {"enabled": True, "force": False, **_placement}
     _meta = {"wm_v": wconfig.WATERMARK_VERSION, "wm_p": _position}
     check(f"watermark position agree: {_position}",
           renderer.watermark_current(_meta, "final", False, _s)
@@ -5223,8 +5235,21 @@ check("watermark 9:16: robot clears Instagram's ~9% side-crop",
 check("watermark 9:16: robot sits below the top UI band (>=4.5% of H)",
       _g916["margin_y"] >= int(1920 * 0.045))
 
+_lower_y = renderer.watermark_anchor_y(
+    {}, 1080, 1920, 1080, 1920,
+    {"enabled": True, "force": False, "lower": True})
+_glower = renderer.watermark_geometry(1080, 1920, _lower_y)
+check("watermark lower: preserves the original horizontal alignment",
+      _glower["margin_x"] == _g916["margin_x"]
+      and _glower["x_in"] == _g916["x_in"]
+      and _glower["x_out"] == _g916["x_out"])
+check("watermark lower: moves down from 6% to 11% of frame height",
+      _glower["margin_y"] == int(round(1920 * 0.11))
+      and _glower["margin_y"] > _g916["margin_y"]
+      and _glower["margin_y"] + _glower["rh"] < 1920)
+
 _scene_edl = {"frame": {"ratio": "9:16", "mode": "pad_blur"}}
-_scene_y = renderer.watermark_scene_anchor_y(
+_scene_y = renderer.watermark_anchor_y(
     _scene_edl, 1920, 1080, 1080, 1920,
     {"enabled": True, "force": False, "scene_top": True})
 _scene_fit = renderer.fit_fractions(1920, 1080, 1080, 1920, "pad_blur")
@@ -5235,13 +5260,13 @@ check("watermark scene-top: horizontal footage in a padded 9:16 frame "
       _scene_y is not None and _scene_top < _scene_y < _scene_bottom
       and _scene_y > _g916["margin_y"])
 check("watermark scene-top: current corner and ineligible layouts stay put",
-      renderer.watermark_scene_anchor_y(
+      renderer.watermark_anchor_y(
           _scene_edl, 1920, 1080, 1080, 1920,
           {"scene_top": False}) is None
-      and renderer.watermark_scene_anchor_y(
+      and renderer.watermark_anchor_y(
           {"frame": {"ratio": "9:16", "mode": "crop"}},
           1920, 1080, 1080, 1920, {"scene_top": True}) is None
-      and renderer.watermark_scene_anchor_y(
+      and renderer.watermark_anchor_y(
           {"frame": {"ratio": "16:9", "mode": "pad"}},
           1920, 1080, 1920, 1080, {"scene_top": True}) is None)
 
@@ -5374,6 +5399,9 @@ check("toggle: the backend creates video_settings lazily (not in models.py)",
 check("toggle: the backend migrates the scene-top choice on the live table",
       "ADD COLUMN IF NOT EXISTS" in _bav
       and "watermark_scene_top BOOLEAN DEFAULT FALSE" in _bav)
+check("toggle: the backend migrates the lower choice on the live table",
+      "ADD COLUMN IF NOT EXISTS" in _bav
+      and "watermark_lower BOOLEAN DEFAULT FALSE" in _bav)
 check("toggle: the worker checks to_regclass before reading the table "
       "(a failed statement would poison the render's transaction)",
       "to_regclass('public.video_settings')" in
