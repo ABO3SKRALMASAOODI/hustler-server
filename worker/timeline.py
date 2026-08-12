@@ -600,11 +600,6 @@ def remap_program_items(edl, old_tl, new_tl):
             return None
         raise _CannotReason()
 
-    # travel.PATH_MAX_POINTS, restated: this module is loaded standalone by
-    # the backend (importlib, with only schemas registered as
-    # worker_schemas), so it cannot import travel. Keep the two in sync.
-    _PATH_MAX = 24
-
     def _remap_path_zoom(z):
         """Round 77. A travelling zoom's KEYFRAMES are program-time points
         stored as fractions of the window — and remapping only the window
@@ -695,10 +690,6 @@ def remap_program_items(edl, old_tl, new_tl):
                 inj.append(_kf(nw0 - 0.05, a[1], sa))
             if not _near(nw1 - 0.05):       # stay wide to the far cut
                 inj.append(_kf(nw1 - 0.05, b[1], 0.0))
-            if len(aug) + len(inj) > _PATH_MAX:
-                if len(aug) + 1 > _PATH_MAX:
-                    continue
-                inj = [_kf((nw0 + nw1) / 2.0, b[1], 0.0)]
             aug += inj
             wide_notes.append(
                 f"note: new scene [{nid}] landed inside zoom {zid}'s move — "
@@ -715,8 +706,6 @@ def remap_program_items(edl, old_tl, new_tl):
                 continue
             if any(tn + 0.02 < t < tn2 - 0.02 for t, _p in aug):
                 continue
-            if len(aug) >= _PATH_MAX:
-                break
             aug.append((round(tn2 - 0.15, 3), dict(p)))
         aug.sort(key=lambda ap: ap[0])
         new_s, new_e = aug[0][0], aug[-1][0]

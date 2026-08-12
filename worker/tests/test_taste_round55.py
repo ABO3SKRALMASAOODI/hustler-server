@@ -211,15 +211,13 @@ def _critique(edl, ask="", index=None):
     return taste.critique(edl, idx, tl, src_w=1600, src_h=720, user_asked=ask)
 
 
-def test_unrequested_sfx_is_a_finding_and_asking_suppresses_it():
-    """Round 98: the consent rule became a JUSTIFICATION rule — unrequested
-    sfx still surface a finding (each must sit on a nameable visible
-    moment), and an explicit ask still suppresses it entirely."""
+def test_sfx_taste_does_not_depend_on_a_keyword_permission_check():
     edl = _edl(sfx=[{"at": t, "storage_key": "sfx:boom"}
                     for t in (5.0, 10.0, 15.3, 20.0, 28.8)])
-    assert any("without the user asking" in f for f in _critique(edl))
-    assert not any("without the user asking" in f
-                   for f in _critique(edl, ask="add some sound effects"))
+    generic = _critique(edl)
+    requested = _critique(edl, ask="add some sound effects")
+    assert generic == requested
+    assert not any("without the user asking" in f for f in generic)
 
 
 def test_transition_cadence_fires_even_at_scene_scope():

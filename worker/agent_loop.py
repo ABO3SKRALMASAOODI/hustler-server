@@ -1314,7 +1314,7 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings):
 
 
 def _preview_repair_pushback(ctx, messages, t_start, already_pushed):
-    """Give one invalid EDL a corrective model pass, never a blind retry."""
+    """Surface one failed immutable preview as repair evidence."""
     failure = getattr(ctx, "last_preview_failure", None) or {}
     if already_pushed or not failure.get("agent_repairable"):
         return False
@@ -1331,9 +1331,9 @@ def _preview_repair_pushback(ctx, messages, t_start, already_pushed):
             f"{str(failure.get('error') or 'unknown error')[:500]}. "
             "Do NOT call render_preview on that same version and do NOT "
             "repeat the exact tool call that produced it. Inspect get_edl, "
-            "diagnose the smallest invalid/over-expensive part, and make ONE "
-            "corrective edit that creates a new EDL version while preserving "
-            "the user's intent. Render the new version once. If no honest "
+            "diagnose the invalid/over-expensive part, and make whatever "
+            "corrective edits create a valid new EDL version while preserving "
+            "the user's intent. Preview new versions as useful. If no honest "
             "EDL correction can address this failure, make no speculative "
             "change and tell the user the saved edit needs an infrastructure "
             "retry later."
@@ -1533,29 +1533,6 @@ def _reply_violations(draft, wrote, previewed, acted=None):
     return v
 
 
-_AUDIO_DENIAL = re.compile(
-    r"(?i)(audio playback (?:was|is) unavailable|"
-    r"(?:this )?environment (?:does not|doesn't) provide (?:separate )?"
-    r"listen(?:ing)?|(?:i |we )?(?:cannot|can't|could not|couldn't) "
-    r"(?:personally )?(?:hear|listen)|cannot confirm[^.\n]{0,80}heard by ear|"
-    r"listening is unavailable)")
-
-
-def _audio_denial_violation(ctx, draft):
-    """Catch a false 'I cannot hear' after the rendered mix was reviewed."""
-    try:
-        latest = ctx.latest_edl()["version"]
-    except Exception:
-        return None
-    if latest not in (getattr(ctx, "audio_reviewed_versions", None) or set()):
-        return None
-    match = _AUDIO_DENIAL.search(draft or "")
-    if not match:
-        return None
-    return (f'denies listening ("{match.group(0).strip()}"), but the '
-            "dedicated audio reviewer DID hear this rendered EDL version")
-
-
 def _assets_made_note(ctx):
     """', but <what> was saved to your project' — or '' when nothing was.
 
@@ -1589,14 +1566,14 @@ def _assets_made_note(ctx):
 
 
 def _quality_handoff(ctx):
-    """Small, deterministic quality contract for the reply and studio CTA."""
+    """Expose quality evidence without withholding the studio export CTA."""
     try:
         latest = ctx.latest_edl()["version"]
     except Exception:
-        return {"quality_status": "unchecked", "export_ready": False}
+        return {"quality_status": "unchecked", "export_ready": True}
     preview = getattr(ctx, "last_preview", None) or {}
     if preview.get("edl_version") != latest:
-        return {"quality_status": "unchecked", "export_ready": False}
+        return {"quality_status": "unchecked", "export_ready": True}
 
     findings = []
     report = getattr(ctx, "last_visual_critic", None) or {}
@@ -1604,9 +1581,6 @@ def _quality_handoff(ctx):
         findings.append(line)
     for line in (getattr(ctx, "last_audio_qc_findings", None) or [])[:2]:
         findings.append("audio QC: " + str(line))
-    audio_review = str(getattr(ctx, "last_audio_review", None) or "").strip()
-    if audio_review.upper().startswith("FIX"):
-        findings.append("audio review: " + audio_review[:240])
     # Deterministic taste findings (dead air, excessive devices, invalid mix)
     # count too, but only for the exact latest version.
     if getattr(ctx, "last_taste_version", None) == latest:
@@ -1617,22 +1591,22 @@ def _quality_handoff(ctx):
                 break
     findings = findings[:4]
     if findings:
-        return {"quality_status": "repair", "quality_findings": findings,
-                "export_ready": False}
+        return {"quality_status": "advisory", "quality_findings": findings,
+                "export_ready": True}
     status = "pass" if report.get("verdict") == "pass" else "unchecked"
     return {"quality_status": status, "quality_findings": [],
             "export_ready": True}
 
 
 def _disclose_outstanding_quality(ctx, text):
-    """Never let a known-bad preview be described as a finished handoff."""
+    """Disclose quality evidence without turning it into an export lock."""
     quality = _quality_handoff(ctx)
-    if quality.get("quality_status") != "repair":
+    if quality.get("quality_status") != "advisory":
         return text
     first = quality.get("quality_findings", ["a quality issue remains"])[0]
     return (text.rstrip() +
-            "\n\nQuality check: this preview still needs another repair "
-            "pass before I can call it export-ready — " + first[:360] + ".")
+            "\n\nQuality advisory (export remains available): "
+            + first[:360] + ".")
 
 
 def _turn_facts(ctx, start_version):
@@ -1678,18 +1652,12 @@ def _turn_facts(ctx, start_version):
             pv += f"; self-check: {ctx.last_selfcheck[:120]}"
     else:
         pv = "none"
-    heard_versions = getattr(ctx, "audio_reviewed_versions", None) or set()
-    audio_review = ("rendered v" + ", v".join(str(v)
-                    for v in sorted(heard_versions))) if heard_versions \
-        else "none"
     return ("TURN FACTS (system-verified):\n"
             f"- {edl_line}\n"
             f"- Successful write tools this turn: {writes}\n"
             f"- Images generated this turn: {images}\n"
             f"- Media downloaded from links this turn: {fetched}\n"
             f"- Preview: {pv}\n"
-            f"- Program audio reviewed by the dedicated listener: "
-            f"{audio_review}\n"
             "Rules: your reply may not claim any change, render, or setting "
             "that is not present in these facts. If no writes occurred, say "
             "plainly that nothing was changed and why, or what you need "
@@ -1883,9 +1851,6 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
                  or getattr(ctx, "audio_extracted", None))
     previewed = ctx.last_preview is not None
     viol = _reply_violations(draft, wrote, previewed, acted)
-    audio_denial = _audio_denial_violation(ctx, draft)
-    if audio_denial:
-        viol.append(audio_denial)
     # Echo detection only polices turns that DID nothing: a working turn's
     # summary may legitimately resemble the last one (same request repeated),
     # and its content claims are already checked against the turn facts.
@@ -1922,7 +1887,6 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     except Exception as e:
         print(f"[honesty] regeneration failed: {e}", flush=True)
     if redraft and not _reply_violations(redraft, wrote, previewed, acted) \
-            and not _audio_denial_violation(ctx, redraft) \
             and (acted or previewed
                  or not _echo_violation(redraft, messages)):
         return redraft
@@ -1952,15 +1916,6 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
                             "uploaded")
             note = ("this turn did NOT change the edit, but "
                     + " and ".join(made) + " and saved to the project")
-        if _audio_denial_violation(ctx, redraft or draft):
-            # Do not preserve the false sentence underneath a corrective note.
-            # The language guard that follows can translate this system-authored
-            # fact when the user is not writing in English.
-            changed = ("modified the edit and " if wrote else "")
-            return ("Done — this turn " + changed + "rendered the preview. "
-                    "The dedicated audio reviewer listened to the rendered "
-                    "program mix; see the verified steps above for the exact "
-                    "changes and audio judgment.")
         print(f"[honesty] job {ctx.job['id']}: regeneration still misreports "
               "real work — posting a corrective note", flush=True)
         return f"*(system: {note})*\n\n" + (redraft or draft)
@@ -2102,84 +2057,6 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
             "honesty": honesty, "timings": timings}
 
 
-# Fractions of AGENT_TURN_TIMEOUT_S at which the loop tells the model how much
-# of the turn is gone. Without this the model has NO clock: it plans as if time
-# were free, and the timeout lands mid-rebuild — the user gets "that took longer
-# than I allow myself" with a half-finished edit instead of a landed one. The
-# note is information, not a cap; the model decides what to drop.
-TIME_PRESSURE_MARKS = (0.55, 0.8)
-
-
-def _time_pressure_note(result, t_start, warned):
-    """Append a one-line budget warning to a tool result, once per mark. A
-    render_preview still has to fit in what's left, so the last mark says to
-    render NOW rather than to keep editing."""
-    frac = (time.monotonic() - t_start) / max(1.0, config.AGENT_TURN_TIMEOUT_S)
-    for mark in TIME_PRESSURE_MARKS:
-        if frac >= mark and mark not in warned:
-            warned.add(mark)
-            left = max(0, int(config.AGENT_TURN_TIMEOUT_S * (1.0 - frac)))
-            if mark == TIME_PRESSURE_MARKS[-1]:
-                return result + (
-                    f"\n\n[system: ~{left}s left in this turn, and a preview "
-                    "render needs a good chunk of it. Stop editing now — "
-                    "render_preview and reply with what you changed. Anything "
-                    "unfinished belongs in your reply as the next step, not in "
-                    "more tool calls.]")
-            return result + (
-                f"\n\n[system: about half this turn's time is gone (~{left}s "
-                "left, render included). Finish the highest-value part of the "
-                "request and land it. Do NOT tear down work you already did to "
-                "rebuild it a different way — refine in place, or leave it and "
-                "say so.]")
-    return result
-
-
-_TASTE_PUSHBACK = """[system: the INDEPENDENT QUALITY REVIEW on the preview you just \
-rendered is still outstanding. These are visible or measured craft defects in YOUR edit — things \
-the user did not ask for — and the turn does not end with them unanswered:
-
-{findings}
-
-Do ONE of two things now, not neither:
-  1. FIX them — remove the devices that are not earning their place, then \
-render_preview again. Removing is a normal edit: remove_sfx, remove_zoom, \
-remove_stylize, set_transitions('none'), set_fades(0, 0). An edit gets good by \
-having things taken OUT of it.
-  2. KEEP one deliberately — only when the user's own request requires it — \
-and say which one and why, in one clause, in your reply.
-
-What you may not do is reply as though the preview came back clean. \
-"Preview is ready" over a review like this is how an edit nobody wants gets \
-handed over as finished.]"""
-
-
-def _taste_pushback(ctx, messages, t_start, pushed_versions):
-    """Refuse to let a turn end on an edit its own audit objected to.
-
-    Round 55. The audit was already right about this exact edit — it reported
-    the dead air at the open, three zooms in thirty seconds and five sound
-    effects nobody asked for — and the agent read all of it, changed nothing,
-    and told the user "Preview is ready at 30s. Here's the edit:". A review
-    that the reviewed party may silently decline is not a review; it is a
-    comment. So the findings come back once, as work to be done.
-
-    Once per reviewed version, and never when there is too little time left to
-    act on it. Preview count is deliberately not a lock: a concrete requested
-    change must remain writable and reviewable in the same user turn.
-    """
-    version = getattr(ctx, "last_taste_version", None)
-    if version in pushed_versions or not ctx.last_taste:
-        return False
-    left = config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start)
-    if left < config.AGENT_TURN_TIMEOUT_S * 0.25:
-        return False
-    lines = "\n".join(f"  - {f}" for f in ctx.last_taste[:6])
-    messages.append({"role": "system",
-                     "content": _TASTE_PUSHBACK.format(findings=lines)})
-    return True
-
-
 def _messages_for_record(messages):
     """What gets written to llm_calls: the image PARTS are replaced by a
     marker. ask_vision has always recorded image names, never bytes — a
@@ -2195,10 +2072,6 @@ def _messages_for_record(messages):
         for p in content:
             if isinstance(p, dict) and p.get("type") == "image_url":
                 parts.append({"type": "text", "text": "[image attached]"})
-            elif isinstance(p, dict) and p.get("type") == "input_audio":
-                # Same rule as frames: base64 sound in the recorded request
-                # would put megabytes into llm_calls per listening turn.
-                parts.append({"type": "text", "text": "[audio attached]"})
             else:
                 parts.append(p)
         out.append({**m, "content": parts})
@@ -2227,63 +2100,25 @@ def _strip_image_parts(messages):
     return changed
 
 
-def _strip_audio_parts(messages):
-    """Remove every input_audio content part in place — the deaf-provider
-    twin of _strip_image_parts (round 98). Returns True when anything was
-    removed, so the caller can tell 'this model has no ears' apart from an
-    unrelated 400 that merely mentioned audio."""
-    changed = False
-    for m in messages:
-        content = m.get("content")
-        if not isinstance(content, list):
-            continue
-        kept = [p for p in content
-                if not (isinstance(p, dict)
-                        and p.get("type") == "input_audio")]
-        if len(kept) != len(content):
-            changed = True
-            kept.append({"type": "text", "text":
-                         "(the sound clips could not be played to you — "
-                         "this model does not take audio; decide from "
-                         "get_audio_analysis and the AUDIO CHECK "
-                         "measurements instead)"})
-            m["content"] = kept
-    return changed
-
-
-def _continue_decision(n_cont, progressed, seconds_left, over_budget):
-    """May a pass that spent its iteration budget resume itself? Every gate
-    is one of the REAL walls: the continuation allowance, forward progress
-    (a pass that moved nothing is a runaway, not an unfinished edit), enough
-    wall clock for the next pass to land anything (a continuation that the
-    timeout kills 40s in only trades one apology for a later one), and the
-    spend cap."""
-    return (n_cont < config.AGENT_AUTO_CONTINUES and progressed
-            and seconds_left > 120 and not over_budget)
-
-
 _CONTINUATION_NOTE = (
-    "[system: CONTINUATION — you hit the per-pass {why} on this SAME "
-    "request and were resumed automatically. The user has NOT seen any reply "
+    "[system: CONTINUATION — this SAME request was resumed after {why}. "
+    "The user has NOT seen any reply "
     "and has NOT sent anything new; the message above is the request you "
-    "were already working on. Everything you already changed is in the "
-    "PROJECT STATE and program map above — trust them: do NOT redo finished "
-    "work, do NOT re-read skills, do NOT re-verify what you already saw "
-    "land. Already ran this turn: {done}.{plan} Finish ONLY what remains of "
-    "the request, render once, and reply.]")
+    "were already working on. Current PROJECT STATE and version history are "
+    "authoritative. Already ran this turn: {done}.{plan} Continue exercising "
+    "your own judgment: use, repeat, inspect, write, and preview with any "
+    "tools needed to finish the request.]")
 
 
 def _run_loop(ctx, worker_db, job, session_id, user_message,
               attachment_note="", _cont=None):
-    """One tool-calling pass over the request. When the pass spends all its
-    iterations while still landing edits, it hands its clocks and counters to
-    a recursive continuation pass (_cont) instead of asking the user to say
-    "continue" — the wall clock (AGENT_TURN_TIMEOUT_S), the spend cap and
-    AGENT_AUTO_CONTINUES bound the whole chain, so the iteration ceiling is
-    back to being what it was meant to be: a runaway-loop breaker, not a
-    mid-edit stop sign (project 383: 30 productive calls in 7.5 min, then
-    'tell me to continue' in English at a Portuguese-speaking user with half
-    the time budget unspent)."""
+    """Run an uncapped tool-calling loop over the request.
+
+    There is no model-call, iteration, preview, or write quota. Real external
+    boundaries still apply: shutdown, available credits, provider capacity,
+    and a progress-sensitive stall window. Productive work refreshes that
+    window with the same context and counters.
+    """
     # Resolved from the user's plan in run_agent_job. _build_messages and the
     # tool schemas are model-agnostic and do not change with it.
     client = ctx.llm_client or llm.client()
@@ -2335,16 +2170,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     honesty = _cont.get("honesty") or \
         {"false_claims": 0, "corrective_note": False}
     start_version = ctx.latest_edl()["version"]
-    # time-pressure marks already delivered (carried across continuations —
-    # the clock they describe is the same one)
-    warned = _cont.get("warned") if _cont.get("warned") is not None else set()
     # Completion budget for this step, and how many times a truncated step has
     # already been retried with a bigger one. See _TRUNCATED_NUDGE.
     max_tokens = config.AGENT_MAX_TOKENS
     truncated_retries = 0
     truncated_out = False          # last step died at the ceiling, saying nothing
-    taste_pushed_versions = set(
-        _cont.get("taste_pushed_versions") or [])
     preview_repair_pushed = bool(_cont.get("preview_repair_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
@@ -2369,7 +2199,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                   flush=True)
             time.sleep(20)
 
-    for iteration in range(config.AGENT_MAX_ITERATIONS):
+    while True:
+        iteration = timings["llm_calls"]
         if SHUTDOWN.is_set():
             # Render SIGTERMs the worker before every deploy, and an agent
             # turn is deliberately never retried (replaying re-applies EDL
@@ -2402,8 +2233,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
             # This is an INACTIVITY wall, never a total-edit wall. A complex
             # turn that is still landing EDL versions or successful previews
-            # gets another window with no fixed count. The model-call/spend
-            # guards still stop churn; the clock only catches a genuinely
+            # gets another window with no fixed count. Spend/credit guards
+            # still stop unaffordable work; the clock only catches a genuinely
             # stalled turn. Tool calls are synchronous, so a long render is
             # not interrupted mid-call either — its completed preview counts
             # as progress when control returns here.
@@ -2430,9 +2261,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "t_start": time.monotonic(),
                            "timings": timings, "honesty": honesty,
                            "preview_repair_pushed": preview_repair_pushed,
-                           "taste_pushed_versions":
-                               sorted(taste_pushed_versions),
-                           "warned": None,
                            "writes0": len(ctx.versions_written),
                            "renders0": len(ctx.rendered_versions),
                            "assets0": asset_progress})
@@ -2540,18 +2368,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             return {"status": "budget", "steps": total_steps,
                     "timings": timings}
 
-        if timings["llm_calls"] >= config.AGENT_MAX_MODEL_CALLS:
-            print(f"[job {job['id']}] model-call ceiling hit: "
-                  f"{timings['llm_calls']}", flush=True)
-            return _finalize(
-                ctx, worker_db, session_id,
-                "I stopped at the editing-pass limit instead of continuing "
-                "to churn on this video. The valid work completed so far is "
-                "saved and previewed; anything not visible there is not done.",
-                "model_call_limit", total_steps, timings, honesty)
-
-        worker_db.run(dbx.set_progress, job["id"],
-                      int(100 * iteration / config.AGENT_MAX_ITERATIONS))
+        progress = (85 if ctx.rendered_versions else
+                    55 if ctx.versions_written else
+                    20 if getattr(ctx, "edit_plan", None) else 5)
+        worker_db.run(dbx.set_progress, job["id"], progress)
         t0 = time.monotonic()
         # TIERED reasoning (round 100). Iteration 0 is where the model reads
         # the project state and plans the edit — that is the thinking worth
@@ -2703,18 +2523,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     if adapted is not None:
                         kw = adapted
                         continue
-                    # Checked BEFORE the blind branch: 'input_audio' in the
-                    # error is the audio part's own field name, so a deaf
-                    # rejection must never latch the EYES off.
-                    if llm.looks_like_deaf_model(e) \
-                            and _strip_audio_parts(messages):
-                        llm.mark_agent_deaf(model)
-                        print(f"[agent {job['id']}] {model} rejected an "
-                              "audio part — agent hearing DISABLED for "
-                              "this process; listening degrades to "
-                              "get_audio_analysis + the audio QC",
-                              flush=True)
-                        continue
                     if llm.looks_like_blind_model(e) \
                             and _strip_image_parts(messages):
                         llm.mark_agent_blind(model)
@@ -2812,19 +2620,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                               body.rfind("?"))
                     if cut > 40:
                         body = body[:cut + 1]
-            # Before anything else: if the preview this turn rendered came
-            # back with craft findings, the turn is not finished. Send them
-            # back once as work rather than as commentary.
-            if _taste_pushback(ctx, messages, t_start,
-                               taste_pushed_versions):
-                taste_pushed_versions.add(ctx.last_taste_version)
-                print(f"[job {job['id']}] taste audit outstanding "
-                      f"({len(ctx.last_taste)} finding(s)) — pushing back "
-                      "before the reply", flush=True)
-                if body:
-                    messages.append({"role": "assistant",
-                                     "content": msg.content})
-                continue
             # Auto-render first so the turn facts include the real preview.
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings)
@@ -2962,29 +2757,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                    if ctx.versions_written
                                    else start_version),
                       change=chg)
-            result = _time_pressure_note(result, t_start, warned)
-            remaining_calls = (config.AGENT_MAX_MODEL_CALLS
-                               - timings["llm_calls"])
-            if remaining_calls <= 2:
-                result += (
-                    "\n\n[system: the request has "
-                    f"{max(0, remaining_calls)} model call(s) left. Stop "
-                    "exploring or adding polish. If the latest version is "
-                    "not proved, render it once; then reply with exactly "
-                    "what is complete.]"
-                )
-            # Step pressure, only once the continuation budget is spent —
-            # earlier passes are auto-resumed, so rushing them would only
-            # produce premature "done" replies. Same shape as the time
-            # marks: information, the model decides what to drop.
-            if _cont.get("n", 0) >= config.AGENT_AUTO_CONTINUES \
-                    and iteration >= config.AGENT_MAX_ITERATIONS - 5 \
-                    and "steps" not in warned:
-                warned.add("steps")
-                result += (
-                    "\n\n[system: only a few model calls remain for this "
-                    "request — stop exploring, land the essential remainder "
-                    "now, render_preview once, and write your reply.]")
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
 
@@ -3027,40 +2799,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             ctx._pending_looked_output_times = set()
             ctx._pending_looked_asset_times = {}
 
-        # Round 98 — direct HEARING, the exact pending_images contract for
-        # sound: a listen tool (or render_preview) queued short clips this
-        # step; deliver them as input_audio parts in a user message. Only
-        # when the model has ears — a deaf lane's clips are dropped here
-        # (the tools already answered honestly in text).
-        if getattr(ctx, "pending_audio", None):
-            clips, model_hears = ctx.pending_audio, llm.agent_hears(model)
-            ctx.pending_audio = []
-            if model_hears:
-                content = []
-                for label, path in clips:
-                    try:
-                        part = llm.audio_part(path)
-                    except Exception as ex:
-                        print(f"[job {job['id']}] could not attach sound "
-                              f"clip ({ex})", flush=True)
-                        continue
-                    content.append({"type": "text", "text": f"[{label}]"})
-                    content.append(part)
-                if content:
-                    content.insert(0, {"type": "text", "text":
-                                       "Sound for your own ears (each clip "
-                                       "is labeled with its clock and "
-                                       "span):"})
-                    messages.append({"role": "user", "content": content})
-                    # Promotion happens after the audio part is attached, so
-                    # listen_to + add_music in one parallel tool batch cannot
-                    # masquerade as an audition the model never heard.
-                    ctx._listened_asset_keys.update(getattr(
-                        ctx, "_pending_listened_asset_keys", set()))
-            ctx._pending_listened_asset_keys = set()
-
         # The broad contact sheets did their job on the planning call. Keep
-        # exact look/listen evidence added above, but do not pay to resend all
+        # exact look evidence added above, but do not pay to resend all
         # project pixels on every subsequent model dispatch.
         if getattr(ctx, "edit_plan", None) or ctx.versions_written:
             _compact_initial_filmstrip(messages)
@@ -3083,35 +2823,3 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 agent_tools.speculative_preview(ctx)
             except Exception:
                 pass
-
-    # The iteration ceiling. A pass that is still landing edits continues on
-    # its own — the user cannot tell step 30 from step 31, and "tell me to
-    # continue" spends their patience on OUR internal counter. The real
-    # resource walls stay exactly where they were: the shared wall clock
-    # (t_start rides through _cont), the spend cap (checked at the top of
-    # every iteration) and AGENT_AUTO_CONTINUES. A pass that moved NOTHING
-    # is the runaway the ceiling was built for — that one still stops.
-    n_cont = _cont.get("n", 0)
-    progressed = (len(ctx.versions_written) > _cont.get("writes0", 0)
-                  or len(ctx.rendered_versions) > _cont.get("renders0", 0))
-    seconds_left = config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start)
-    if _continue_decision(n_cont, progressed, seconds_left,
-                          ctx.over_budget()):
-        print(f"[job {job['id']}] iteration ceiling after {total_steps} "
-              f"step(s), work landing — auto-continuing "
-              f"(pass {n_cont + 2}, {seconds_left:.0f}s left)", flush=True)
-        return _run_loop(
-            ctx, worker_db, job, session_id, user_message, attachment_note,
-            _cont={"n": n_cont + 1, "clock": _cont.get("clock", 0),
-                   "why": "step ceiling",
-                   "steps": total_steps, "t_start": t_start,
-                   "timings": timings, "honesty": honesty, "warned": warned,
-                   "preview_repair_pushed": preview_repair_pushed,
-                   "taste_pushed_versions": sorted(taste_pushed_versions),
-                   "writes0": len(ctx.versions_written),
-                   "renders0": len(ctx.rendered_versions)})
-    return _finalize(
-        ctx, worker_db, session_id,
-        "I hit my step limit for one request. The edits so far are saved — "
-        "tell me to continue, or narrow the request.",
-        "step_limit", total_steps, timings, honesty)

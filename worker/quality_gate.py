@@ -1,14 +1,13 @@
-"""Non-negotiable edit-safety checks at the EDL commit boundary.
+"""Advisory edit-quality checks at the EDL commit boundary.
 
 The renderer can faithfully execute a technically valid but visually absurd
-EDL. Schema validation therefore is not a quality gate: a zoom aimed at
-nothing and nine unrequested sound effects are both perfectly valid data.
+EDL. Schema validation therefore is not a craft review: a zoom aimed at
+nothing and tightly stacked sound effects are both perfectly valid data.
 
 This module deliberately checks the *delta*. Old projects may already carry
-legacy edits which violate today's rules; removing or otherwise repairing
-those edits must remain possible. Only newly introduced hazards block a
-write. The checks here are objective invariants, not a second taste prompt:
-subjective judgement remains in ``taste.py`` and the preview critic.
+legacy edits which violate today's rules, so findings describe only newly
+introduced risks. They never veto a structurally valid write: the editing
+agent owns the creative decision and the preview remains the proof.
 """
 
 from __future__ import annotations
@@ -17,14 +16,6 @@ from collections import Counter
 import json
 from typing import Any, Dict, Iterable, List
 
-
-SFX_REQUEST_HINTS = (
-    "sfx", "sound effect", "sound fx", "soundeffect", "whoosh", "swoosh",
-    "impact", "boom", "riser", "sound design", "sounddesign",
-    "add sound", "sounds on", "punchy sound", "hit sound", "click sound",
-    "efecto de sonido", "efectos de sonido", "efek suara", "مؤثرات",
-    "مؤثر صوتي",
-)
 
 SFX_MIN_SPACING_S = 0.35
 
@@ -64,11 +55,6 @@ def _new_items(previous: Dict[str, Any], proposed: Dict[str, Any],
     return out
 
 
-def _sfx_requested(message: str) -> bool:
-    ask = (message or "").casefold()
-    return any(h.casefold() in ask for h in SFX_REQUEST_HINTS)
-
-
 def _overlap(a: Dict[str, Any], b: Dict[str, Any]) -> float:
     try:
         return min(float(a["end"]), float(b["end"])) - max(
@@ -77,9 +63,9 @@ def _overlap(a: Dict[str, Any], b: Dict[str, Any]) -> float:
         return 0.0
 
 
-def blocking_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
+def advisory_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
                       user_message: str = "") -> List[str]:
-    """Return human/actionable reasons this EDL delta must not be committed."""
+    """Return human/actionable risks without blocking the EDL delta."""
     findings: List[str] = []
 
     new_zooms = _new_items(previous, proposed, "zooms")
@@ -111,12 +97,6 @@ def blocking_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
                 break
 
     new_sfx = _new_items(previous, proposed, "sfx")
-    if new_sfx and not _sfx_requested(user_message):
-        ids = ", ".join(str(x.get("id") or "?") for x in new_sfx[:4])
-        findings.append(
-            f"sound effects {ids} were added without an explicit sound-design "
-            "request. SFX are opt-in; do not invent them as decoration.")
-
     if new_sfx:
         all_sfx = sorted(_items(proposed, "sfx"),
                          key=lambda x: float(x.get("at") or 0.0))
@@ -170,9 +150,9 @@ def blocking_findings(previous: Dict[str, Any], proposed: Dict[str, Any],
     return findings
 
 
-def rejection_message(version: int, findings: Iterable[str]) -> str:
+def advisory_message(version: int, findings: Iterable[str]) -> str:
     rows = list(findings)
-    return (f"REJECTED BY QUALITY GATE (EDL v{version} unchanged):\n- "
+    return (f"QUALITY ADVISORY FOR EDL v{version}:\n- "
             + "\n- ".join(rows)
-            + "\nFix the plan from measured visual/audio evidence; do not "
-              "retry by merely filling a missing field with a guess.")
+            + "\nThe write was committed. Review these risks in the preview "
+              "and keep, revise, or remove them using editorial judgment.")

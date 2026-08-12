@@ -79,10 +79,11 @@ MODEL_PRICES = {
         "in": 0.20, "cached_in": 0.02, "out": 1.20,
         "reasoning_separate": False,
     },
-    # Dedicated bounded-clip listener. Official gpt-audio-1.5 model page,
-    # checked Aug 11 2026: text $2.50 in / $10 out; audio $32 in / $64 out
-    # per 1M tokens. No cached-input price is published, so a cache hit must
-    # conservatively cost the miss rate rather than invent a discount.
+    # Retired bounded-clip listener. Keep its historical price so existing
+    # llm_calls remain correctly costed in admin reports. Official
+    # gpt-audio-1.5 model page, checked Aug 11 2026: text $2.50 in / $10 out;
+    # audio $32 in / $64 out per 1M tokens. No cached-input price is published,
+    # so a cache hit conservatively costs the miss rate.
     "gpt-audio-1.5": {
         "in": 2.50, "cached_in": 2.50, "out": 10.00,
         "audio_in": 32.00, "audio_out": 64.00,

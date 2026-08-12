@@ -28,11 +28,11 @@ class _Ctx:
         return "EDL v26 -> v27"
 
 
-def test_rephrased_brief_cannot_destroy_a_valid_edit():
+def test_invoking_reset_is_sufficient_authority():
     ctx = _Ctx("Make this a premium 30-50 second startup documentary reel")
     result = agent_tools.reset_edit(ctx)
-    assert result.startswith("REJECTED: reset_edit would throw away")
-    assert ctx.writes == []
+    assert result.startswith("EDL v26 -> v27")
+    assert len(ctx.writes) == 1
 
 
 def test_explicit_reset_still_works():
@@ -49,8 +49,8 @@ def test_direct_mcp_reset_is_itself_explicit():
     assert len(ctx.writes) == 1
 
 
-def test_core_contract_preserves_work_and_bans_caption_stacking():
+def test_core_contract_makes_reset_and_caption_composition_editorial_choices():
     prompt = agent_prompt.CORE_PROMPT
     assert "PRESERVE WORK BETWEEN MESSAGES" in prompt
-    assert "Never stack new transcript captions" in prompt
-    assert "filmstrip itself" in prompt
+    assert "Invoking the tool is sufficient authority" in prompt
+    assert "intentionally layer typography" in prompt

@@ -85,6 +85,33 @@ def test_independent_review_sees_edited_output_and_raw_source(monkeypatch,
     assert all(os.path.exists(path) for path in seen["paths"])
 
 
+def test_mcp_render_frames_skip_valmera_funded_second_critic(monkeypatch):
+    class Ctx:
+        sight_out = True
+
+    def should_not_run(*_args, **_kwargs):
+        raise AssertionError("MCP frames must be reviewed by the outside model")
+
+    monkeypatch.setattr(agent_tools, "_independent_preview_review",
+                        should_not_run)
+    assert agent_tools._preview_critic_report(Ctx(), {}, []) is None
+
+    monkeypatch.setattr(agent_tools, "_self_check", should_not_run)
+    assert agent_tools._preview_fallback_check(
+        Ctx(), {}, [], delivered=False, critic_report=None) is None
+
+
+def test_in_house_render_keeps_independent_critic(monkeypatch):
+    expected = {"verdict": "pass", "findings": []}
+
+    class Ctx:
+        sight_out = False
+
+    monkeypatch.setattr(agent_tools, "_independent_preview_review",
+                        lambda *_args: expected)
+    assert agent_tools._preview_critic_report(Ctx(), {}, []) is expected
+
+
 def test_critic_compares_framing_treatment_across_shots(monkeypatch):
     seen = {}
     monkeypatch.setattr(preview_critic.llm, "vision_available", lambda: True)

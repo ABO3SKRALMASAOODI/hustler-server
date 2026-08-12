@@ -32,7 +32,7 @@ def test_clean_current_preview_is_export_ready():
     }
 
 
-def test_major_current_finding_blocks_ready_and_is_disclosed():
+def test_major_current_finding_is_advisory_and_export_stays_available():
     report = {
         "verdict": "repair",
         "findings": [{
@@ -43,22 +43,22 @@ def test_major_current_finding_blocks_ready_and_is_disclosed():
     }
     ctx = _ctx(last_visual_critic=report)
     quality = agent_loop._quality_handoff(ctx)
-    assert quality["quality_status"] == "repair"
-    assert quality["export_ready"] is False
+    assert quality["quality_status"] == "advisory"
+    assert quality["export_ready"] is True
     assert "move the crop left" in quality["quality_findings"][0]
     reply = agent_loop._disclose_outstanding_quality(ctx, "Done.")
-    assert "still needs another repair pass" in reply
+    assert "export remains available" in reply
 
 
-def test_stale_preview_never_unlocks_the_export_handoff():
+def test_stale_preview_is_unchecked_but_does_not_lock_export():
     quality = agent_loop._quality_handoff(
         _ctx(last_preview={"edl_version": 2}))
-    assert quality == {"quality_status": "unchecked", "export_ready": False}
+    assert quality == {"quality_status": "unchecked", "export_ready": True}
 
 
-def test_audio_qc_finding_blocks_ready_even_after_visual_pass():
+def test_audio_qc_finding_is_advisory_even_after_visual_pass():
     quality = agent_loop._quality_handoff(
         _ctx(last_audio_qc_findings=["integrated loudness is clipping"]))
-    assert quality["quality_status"] == "repair"
-    assert quality["export_ready"] is False
+    assert quality["quality_status"] == "advisory"
+    assert quality["export_ready"] is True
     assert quality["quality_findings"][0].startswith("audio QC:")

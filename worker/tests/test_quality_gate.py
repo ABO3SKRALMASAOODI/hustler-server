@@ -26,14 +26,14 @@ def _with_zooms(*items):
 def test_new_zoom_needs_a_real_target_but_legacy_zoom_can_be_repaired():
     previous = _with_zooms(_zoom("legacy"))
     proposed = _with_zooms(_zoom("legacy"), _zoom("new", 5.0, 6.0))
-    findings = quality_gate.blocking_findings(previous, proposed)
+    findings = quality_gate.advisory_findings(previous, proposed)
     assert any("new" in x and "no measured visual target" in x
                for x in findings)
 
     # Delta-based: deleting an old blind zoom must never be blocked by the
     # fact that the saved EDL predates the rule.
     repaired = _with_zooms()
-    assert quality_gate.blocking_findings(previous, repaired) == []
+    assert quality_gate.advisory_findings(previous, repaired) == []
 
 
 def test_unchanged_idless_legacy_hazard_does_not_block_unrelated_repair():
@@ -41,27 +41,27 @@ def test_unchanged_idless_legacy_hazard_does_not_block_unrelated_repair():
     previous = _with_zooms(legacy)
     proposed = _with_zooms(dict(legacy))
     proposed["effects"]["grade"] = "warm"
-    assert quality_gate.blocking_findings(previous, proposed) == []
+    assert quality_gate.advisory_findings(previous, proposed) == []
 
     # A newly added id-less hazard is still a delta and must be refused.
     proposed["effects"]["zooms"].append(_zoom(None, 6.0, 7.0))
     assert any("no measured visual target" in finding for finding in
-               quality_gate.blocking_findings(previous, proposed))
+               quality_gate.advisory_findings(previous, proposed))
 
 
 def test_aimed_zoom_passes_and_overlapping_magnification_does_not():
     previous = _with_zooms(_zoom("old", 2.0, 4.0, cx=0.4, cy=0.4))
     safe = _with_zooms(_zoom("old", 2.0, 4.0, cx=0.4, cy=0.4),
                        _zoom("new", 6.0, 7.0, cx=0.7, cy=0.4))
-    assert quality_gate.blocking_findings(previous, safe) == []
+    assert quality_gate.advisory_findings(previous, safe) == []
 
     stacked = _with_zooms(_zoom("old", 2.0, 4.0, cx=0.4, cy=0.4),
                           _zoom("new", 3.0, 5.0, cx=0.7, cy=0.4))
     assert any("overlaps zoom old" in x
-               for x in quality_gate.blocking_findings(previous, stacked))
+               for x in quality_gate.advisory_findings(previous, stacked))
 
 
-def test_sfx_are_opt_in_and_cannot_be_stacked_into_one_muddy_hit():
+def test_sfx_permission_is_unrestricted_and_spacing_is_advisory():
     previous = default_edl(20.0)
     proposed = default_edl(20.0)
     proposed["sfx"] = [
@@ -70,228 +70,20 @@ def test_sfx_are_opt_in_and_cannot_be_stacked_into_one_muddy_hit():
         {"id": "sx2", "storage_key": "b.wav", "at": 5.2,
          "gain_db": -10.0},
     ]
-    unasked = quality_gate.blocking_findings(previous, proposed,
+    unasked = quality_gate.advisory_findings(previous, proposed,
                                               "make this edit nice")
-    assert any("without an explicit sound-design request" in x for x in unasked)
+    assert not any("explicit sound-design request" in x for x in unasked)
     assert any("only 0.20s apart" in x for x in unasked)
 
     spaced = default_edl(20.0)
     spaced["sfx"] = [dict(proposed["sfx"][0]),
                      dict(proposed["sfx"][1], at=7.0)]
-    assert quality_gate.blocking_findings(
+    assert quality_gate.advisory_findings(
         previous, spaced, "add sound effects to both visible clicks") == []
 
 
-def test_selected_audio_requires_real_audition_unless_user_chose_it():
-    class Ctx:
-        enforce_spatial = True
-        user_message = "add cinematic background music"
-        _listened_asset_keys = set()
-
-    ctx = Ctx()
-    assert not agent_tools._audio_was_auditioned(
-        ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
-    ctx._pending_listened_asset_keys = {"music/1/pick.mp3"}
-    assert not agent_tools._audio_was_auditioned(
-        ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
-    ctx._listened_asset_keys.add("music/1/pick.mp3")
-    assert agent_tools._audio_was_auditioned(
-        ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
-
-    ctx.user_message = "go bring it and add it"
-    assert agent_tools._audio_was_auditioned(
-        ctx, "music/1/remix.mp3", "music/1/remix.mp3",
-        "Drake - National Treasures (remix).mp3")
-
-    ctx._listened_asset_keys.clear()
-    ctx.user_message = "use this music I attached"
-    assert agent_tools._audio_was_auditioned(
-        ctx, "music/1/pick.mp3", "music/1/pick.mp3", "Good Track.mp3")
-
-    ctx.user_message = "add a remix, it's fine"
-    assert agent_tools._audio_was_auditioned(
-        ctx, "music/1/remix.mp3", "music/1/remix.mp3",
-        "Drake - National Treasures (remix).mp3")
-
-    # Approval bypasses the editor's taste veto, not the user's literal order
-    # to listen first. One real reviewer attempt then prevents an impossible
-    # retry loop if the reviewer itself is temporarily unavailable.
-    ctx.user_message = "listen to this exact remix first, then add it"
-    assert not agent_tools._audio_was_auditioned(
-        ctx, "music/1/remix.mp3", "music/1/remix.mp3",
-        "Drake - National Treasures (remix).mp3")
-    ctx._audio_review_attempted_asset_keys = {"music/1/remix.mp3"}
-    assert agent_tools._audio_was_auditioned(
-        ctx, "music/1/remix.mp3", "music/1/remix.mp3",
-        "Drake - National Treasures (remix).mp3")
-
-
-def test_asset_listen_wins_over_empty_optional_clock_arrays(monkeypatch,
-                                                             tmp_path):
-    """Regression for project 622's impossible audition loop.
-
-    The model correctly supplied asset_key, but also emitted the optional
-    output_times=[] schema field. Empty output_times must not route a project
-    MP3 into the rendered-program branch.
-    """
-    class Ctx:
-        agent_model = "hearing-model"
-        direct_sight = True
-        project_id = 622
-        workdir = str(tmp_path)
-        pending_audio = []
-        _pending_listened_asset_keys = set()
-        _asset_locals = {}
-
-    asset = {
-        "id": 41, "kind": "music", "storage_key": "fetched/622/remix.mp3",
-        "duration_s": 120.0, "bytes": 1024,
-        "meta": {"filename": "National Treasures remix.mp3"},
-    }
-    monkeypatch.setattr(agent_tools, "_hearing_on", lambda _ctx: True)
-    monkeypatch.setattr(
-        agent_tools, "_resolve_media_asset",
-        lambda _ctx, _key, _kinds: (asset, None))
-    monkeypatch.setattr(
-        agent_tools, "_asset_local_path", lambda _ctx, _asset: "source.mp3")
-
-    def fake_extract(_src, _start, _end, dest):
-        with open(dest, "wb") as handle:
-            handle.write(b"audition")
-
-    monkeypatch.setattr(agent_tools.media, "extract_audio_clip", fake_extract)
-    result = agent_tools.listen_to(
-        Ctx(), times=[], output_times=[], asset_key=asset["storage_key"])
-    assert result.startswith("Listening delivered:")
-    assert "ASSET 'National Treasures remix.mp3'" in result
-
-
-def test_dedicated_audio_reviewer_returns_real_judgment(monkeypatch,
-                                                         tmp_path):
-    class Ctx:
-        agent_model = "text-image-only-model"
-        direct_sight = True
-        project_id = 622
-        workdir = str(tmp_path)
-        pending_audio = []
-        _pending_listened_asset_keys = set()
-        _listened_asset_keys = set()
-        _audio_review_attempted_asset_keys = set()
-        _asset_locals = {}
-        last_audio_review = None
-
-    asset = {
-        "id": 42, "kind": "music", "storage_key": "music/622/remix.mp3",
-        "duration_s": 120.0, "bytes": 1024,
-        "meta": {"filename": "Approved remix.mp3"},
-    }
-    monkeypatch.setattr(agent_tools, "_hearing_on", lambda _ctx: False)
-    monkeypatch.setattr(agent_tools.llm, "audio_review_available", lambda: True)
-    monkeypatch.setattr(
-        agent_tools, "_resolve_media_asset",
-        lambda _ctx, _key, _kinds: (asset, None))
-    monkeypatch.setattr(
-        agent_tools, "_asset_local_path", lambda _ctx, _asset: "source.mp3")
-
-    def fake_extract(_src, _start, _end, dest):
-        with open(dest, "wb") as handle:
-            handle.write(b"review-me")
-
-    seen = {}
-
-    def fake_review(prompt, paths, labels, purpose):
-        seen.update(prompt=prompt, paths=paths, labels=labels, purpose=purpose)
-        return ("The remix is clean and energetic; start it at -18 dB with "
-                "smooth speech ducking.")
-
-    monkeypatch.setattr(agent_tools.media, "extract_audio_clip", fake_extract)
-    monkeypatch.setattr(agent_tools.llm, "ask_audio", fake_review)
-    ctx = Ctx()
-    result = agent_tools.listen_to(
-        ctx, times=[], output_times=[], asset_key=asset["storage_key"])
-    assert result.startswith("Listening delivered and reviewed:")
-    assert "clean and energetic" in result
-    assert asset["storage_key"] in ctx._listened_asset_keys
-    assert ctx.pending_audio == []
-    assert seen["purpose"] == "audio_listen"
-
-
-def test_program_listen_rebinds_a_stale_render_key_to_current_preview(
-        monkeypatch, tmp_path):
-    stale = {
-        "id": 70, "kind": "render", "storage_key": "media/p/v2.mp4",
-        "duration_s": 6.2, "bytes": 1024,
-        "meta": {"edl_version": 2},
-    }
-    current = {
-        "id": 71, "kind": "render", "storage_key": "media/p/v3.mp4",
-        "duration_s": 6.2, "bytes": 1024,
-        "meta": {"edl_version": 3},
-    }
-
-    class DB:
-        def run(self, fn, *args):
-            assert fn is dbx.get_asset and args == (71,)
-            return current
-
-    class Ctx:
-        agent_model = "text-image-only-model"
-        direct_sight = True
-        project_id = 652
-        workdir = str(tmp_path)
-        pending_audio = []
-        _pending_listened_asset_keys = set()
-        _listened_asset_keys = set()
-        _audio_review_attempted_asset_keys = set()
-        _asset_locals = {}
-        last_audio_review = None
-        last_preview = {"edl_version": 3, "render_asset_id": 71,
-                        "duration_s": 6.2}
-        db = DB()
-
-        def latest_edl(self):
-            return {"version": 3, "json": default_edl(6.1)}
-
-    used_assets = []
-    monkeypatch.setattr(agent_tools, "_hearing_on", lambda _ctx: False)
-    monkeypatch.setattr(agent_tools.llm, "audio_review_available", lambda: True)
-    monkeypatch.setattr(
-        agent_tools, "_resolve_media_asset",
-        lambda _ctx, _key, _kinds: (stale, None))
-
-    def fake_local(_ctx, asset):
-        used_assets.append(asset["id"])
-        return "current-preview.mp4"
-
-    def fake_extract(_src, _start, _end, dest):
-        with open(dest, "wb") as handle:
-            handle.write(b"current-mix")
-
-    monkeypatch.setattr(agent_tools, "_asset_local_path", fake_local)
-    monkeypatch.setattr(agent_tools.media, "extract_audio_clip", fake_extract)
-    monkeypatch.setattr(
-        agent_tools.llm, "ask_audio",
-        lambda *_args, **_kwargs: "Music is audible and speech is clear.")
-
-    result = agent_tools.listen_to(
-        Ctx(), times=[0.5], output_times=[3.0],
-        asset_key=stale["storage_key"], span_s=2.0)
-
-    assert result.startswith("Listening delivered and reviewed:")
-    assert "PROGRAM sound" in result
-    assert "ASSET" not in result
-    assert used_assets == [71]
-
-
-def test_render_audio_review_cannot_pass_when_required_music_is_absent():
-    edl = default_edl(6.1)
-    edl["music"] = [{"id": "mus1", "storage_key": "music/x.mp3",
-                     "start": 0.0, "end": 6.1, "gain_db": -18.0,
-                     "duck": True}]
-    prompt = agent_tools._render_audio_review_prompt(edl)
-    assert "REQUIRED to contain music" in prompt
-    assert "absent or effectively inaudible" in prompt
-    assert "start with FIX, never PASS" in prompt
+def test_audio_audition_is_not_a_permission_helper():
+    assert not hasattr(agent_tools, "_audio_was_auditioned")
 
 
 def test_user_approved_music_can_be_part_of_an_atomic_recipe(monkeypatch):
@@ -300,8 +92,6 @@ def test_user_approved_music_can_be_part_of_an_atomic_recipe(monkeypatch):
         agent_tools, "_resolve_music",
         lambda _ctx, key: ({"name": "Approved remix.mp3",
                             "duration_s": 120.0, "storage_key": key}, None))
-    monkeypatch.setattr(
-        agent_tools, "_audio_was_auditioned", lambda *_args, **_kwargs: True)
     result = agent_tools.apply_edit_recipe(ctx, [
         {"tool": "set_frame",
          "args": {"ratio": "9:16", "mode": "pad_blur"}},
@@ -323,7 +113,7 @@ def test_independent_text_layers_cannot_stack_but_title_hierarchy_can():
         {"id": "tx2", "text": "NEW", "start": 3.0, "end": 4.0,
          "template": "big_number"}]
     assert any("Two independent word layers" in finding for finding in
-               quality_gate.blocking_findings(previous, stacked))
+               quality_gate.advisory_findings(previous, stacked))
 
     hierarchy = default_edl(20.0)
     hierarchy["texts"] = [
@@ -332,7 +122,7 @@ def test_independent_text_layers_cannot_stack_but_title_hierarchy_can():
         {"id": "tx2", "text": "SUBTITLE", "start": 2.0, "end": 5.0,
          "template": "subtitle"},
     ]
-    assert quality_gate.blocking_findings(
+    assert quality_gate.advisory_findings(
         default_edl(20.0), hierarchy) == []
 
 
@@ -371,19 +161,20 @@ def _real_ctx(message="make it engaging"):
     return ctx, fake
 
 
-def test_quality_gate_is_enforced_at_the_single_commit_boundary():
+def test_quality_findings_are_reported_after_the_single_commit_boundary():
     ctx, fake = _real_ctx()
     edl = ctx.latest_edl()["json"]
     edl = {**edl, "effects": {"zooms": [_zoom("zm1")]}}
     result = ctx.write_edl(edl, "blind center punch")
-    assert result.startswith("REJECTED BY QUALITY GATE")
-    assert fake.inserts == 0 and ctx.latest_edl()["version"] == 1
+    assert result.startswith("EDL v1 -> v2")
+    assert "QUALITY ADVISORY" in result
+    assert fake.inserts == 1 and ctx.latest_edl()["version"] == 2
 
     aimed = {**edl, "effects": {"zooms": [
         _zoom("zm1", cx=0.35, cy=0.42)]}}
     result = ctx.write_edl(aimed, "measured face punch")
-    assert result.startswith("EDL v1 -> v2")
-    assert fake.inserts == 1
+    assert result.startswith("EDL v2 -> v3")
+    assert fake.inserts == 2
 
 
 def test_successful_previews_never_freeze_a_requested_edl_write():
@@ -466,37 +257,28 @@ def test_manual_preview_has_no_fixed_per_turn_candidate_ceiling(
     assert 22 in Ctx.rendered_versions
 
 
-def test_add_zoom_rejects_the_old_center_default_before_writing():
+def test_add_zoom_uses_center_default_and_advises_after_writing():
     class Ctx:
         duration = 20.0
 
         def latest_edl(self):
             return {"json": default_edl(20.0)}
 
-        def write_edl(self, *_args):
-            raise AssertionError("unsafe zoom reached write_edl")
+        def write_edl(self, edl, _desc):
+            self.written = edl
+            return "EDL v1 -> v2"
 
     result = agent_tools.add_zoom(Ctx(), 2.0, 3.0)
-    assert result.startswith("REJECTED") and "no visual target" in result
+    assert result.startswith("EDL v1 -> v2")
+    assert "QUALITY ADVISORY" in result
 
 
-def test_real_agent_cannot_claim_guessed_zoom_coordinates_as_evidence():
+def test_real_agent_can_commit_zoom_coordinates_without_look_evidence():
     ctx, fake = _real_ctx()
     ctx._looked_output_times.clear()
     result = agent_tools.add_zoom(ctx, 8.0, 9.0, cx=0.5, cy=0.5)
-    assert result.startswith("REJECTED")
-    assert "look_at evidence" in result
-    assert fake.inserts == 0
-
-    # A look call in the same parallel tool batch is only pending; the model
-    # has not received those pixels yet, so it still cannot aim from them.
-    ctx._pending_looked_output_times.add(8.5)
-    result = agent_tools.add_zoom(ctx, 8.0, 9.0, cx=0.5, cy=0.5)
-    assert result.startswith("REJECTED") and fake.inserts == 0
-
-    ctx._looked_output_times.add(8.5)
-    result = agent_tools.add_zoom(ctx, 8.0, 9.0, cx=0.5, cy=0.5)
     assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
 
 
 def test_source_face_target_maps_through_a_vertical_crop():
@@ -589,14 +371,14 @@ def test_edit_recipe_aborts_every_staged_move_on_late_rejection():
     ctx, fake = _real_ctx()
     result = agent_tools.apply_edit_recipe(ctx, [
         {"tool": "set_color_grade", "args": {"preset": "warm"}},
-        {"tool": "add_zoom", "args": {"start": 2.0, "end": 3.0}},
+        {"tool": "set_color_grade", "args": {"preset": "not-a-grade"}},
     ])
     assert result.startswith("RECIPE ABORTED")
     assert fake.inserts == 0
     assert fake.rows[-1]["json"].get("effects") is None
 
 
-def test_edit_recipe_final_quality_gate_is_atomic():
+def test_edit_recipe_quality_advisories_do_not_abort_atomic_commit():
     ctx, fake = _real_ctx()
     result = agent_tools.apply_edit_recipe(ctx, [
         {"tool": "add_zoom",
@@ -604,8 +386,9 @@ def test_edit_recipe_final_quality_gate_is_atomic():
         {"tool": "add_zoom",
          "args": {"start": 3.0, "end": 5.0, "cx": .7, "cy": .4}},
     ])
-    assert result.startswith("REJECTED BY QUALITY GATE")
-    assert fake.inserts == 0
+    assert result.startswith("EDL v1 -> v2")
+    assert "QUALITY ADVISORY" in result
+    assert fake.inserts == 1
 
 
 def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
@@ -619,12 +402,11 @@ def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
     assert "apply_edit_recipe" in agent_tools.WRITE_TOOLS
 
 
-def test_severe_dimension_change_cannot_guess_a_center_crop():
+def test_severe_dimension_change_can_use_editor_chosen_center_crop():
     ctx, fake = _real_ctx("make this vertical")
     result = agent_tools.set_frame(ctx, "9:16", "crop")
-    assert result.startswith("REJECTED")
-    assert "auto_reframe" in result and "discard" in result
-    assert fake.inserts == 0
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
 
     # Literal intent is allowed; the safety rule must not argue with someone
     # who specifically chose the center rather than merely requesting 9:16.
@@ -634,7 +416,7 @@ def test_severe_dimension_change_cannot_guess_a_center_crop():
     assert centered_db.inserts == 1
 
 
-def test_binding_subject_aware_plan_cannot_collapse_to_uniform_fit():
+def test_recorded_plan_does_not_block_uniform_fit():
     ctx, fake = _real_ctx(
         "Keep the wide two-person shot visible, then intentionally frame "
         "the close-up for a vertical social clip.")
@@ -646,13 +428,12 @@ def test_binding_subject_aware_plan_cannot_collapse_to_uniform_fit():
         intent="A deliberate composition for each shot",
     )
 
-    rejected = agent_tools.set_frame(ctx, "9:16", "pad_blur")
-    assert rejected.startswith("REJECTED")
-    assert "auto_reframe" in rejected and "uniform fit" in rejected
-    assert fake.inserts == 0
+    result = agent_tools.set_frame(ctx, "9:16", "pad_blur")
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
 
 
-def test_wide_then_closeup_request_cannot_use_uniform_frame_plus_zoom():
+def test_wide_then_closeup_request_does_not_withhold_uniform_frame_tool():
     """Production project 641: measured zoom did not repair global padding."""
     ctx, fake = _real_ctx(
         "Keep the wide two-person shot fully visible, then make the close-up "
@@ -665,10 +446,9 @@ def test_wide_then_closeup_request_cannot_use_uniform_frame_plus_zoom():
         intent="Full context first, intentional close-up finish",
     )
 
-    rejected = agent_tools.set_frame(ctx, "9:16", "pad_blur", 0.5, 0.5)
-    assert rejected.startswith("REJECTED")
-    assert "shot-specific" in rejected and "auto_reframe" in rejected
-    assert fake.inserts == 0
+    result = agent_tools.set_frame(ctx, "9:16", "pad_blur", 0.5, 0.5)
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
 
 
 def test_literal_whole_program_fit_overrides_subject_aware_plan_guard():
@@ -694,7 +474,7 @@ def test_literal_whole_program_fit_overrides_subject_aware_plan_guard():
     assert fake.inserts == 1
 
 
-def test_unrelated_repair_cannot_erase_measured_per_shot_framing():
+def test_editor_can_replace_measured_per_shot_framing():
     ctx, fake = _real_ctx("make the captions more consistent")
     fake.rows[-1]["json"]["frame"] = {
         "ratio": "9:16", "mode": "crop", "focus_x": 0.55,
@@ -708,6 +488,6 @@ def test_unrelated_repair_cannot_erase_measured_per_shot_framing():
     }
 
     result = agent_tools.set_frame(ctx, "9:16", "pad_blur")
-    assert result.startswith("REJECTED")
-    assert "discard the existing measured per-shot focus_track" in result
-    assert fake.inserts == 0
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
+    assert not fake.rows[-1]["json"]["frame"].get("focus_track")

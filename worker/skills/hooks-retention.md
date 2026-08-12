@@ -14,4 +14,4 @@ MIDDLE DISCIPLINE: every sentence earns its place or dies. The test is not "is i
 
 END ON THE LOOP. Short-form replays: land the last cut ON the last word or the beat, no fade, no dead tail, no "thanks for watching" — the harder the ending cuts, the cleaner the loop back to your (strong) first frame. The best endings make replay seamless: final frame visually rhymes with the first. Long-form earns a real outro and a fade; reels never.
 
-CTA: only when the user asked for one, and then ONE short line (caption or spoken), placed just before the end — never covering the payoff moment.
+CTA: use when the brief or your editorial judgment benefits from one; a single short line just before the end is usually cleaner than a stack, and it should not cover the payoff moment.

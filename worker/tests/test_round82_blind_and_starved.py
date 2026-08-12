@@ -316,7 +316,7 @@ def test_erase_region_single_rect_form_still_works(monkeypatch):
     assert r.startswith("EDL v")
 
 
-def test_erase_region_rejects_mixed_and_oversized_batches(monkeypatch):
+def test_erase_region_rejects_mixed_or_invalid_but_not_large_batches(monkeypatch):
     monkeypatch.setattr(agent_tools, "_apply_patches",
                         lambda ctx, items, what, drop=None: f"EDL v3 -> v4: {what}")
     r = agent_tools.erase_region(
@@ -325,7 +325,8 @@ def test_erase_region_rejects_mixed_and_oversized_batches(monkeypatch):
     assert r.startswith("REJECTED")
     r = agent_tools.erase_region(_EraseCtx(), regions=[
         {"x": 0, "y": 0, "w": 0.1, "h": 0.1}] * 9)
-    assert r.startswith("REJECTED")
+    assert r.startswith("EDL v")
+    assert "[er10]" in r
     r = agent_tools.erase_region(_EraseCtx(), regions=[
         {"x": 0, "y": 0, "w": 0.1, "h": 0.1},
         {"x": "wide", "y": 0, "w": 0.1, "h": 0.1}])

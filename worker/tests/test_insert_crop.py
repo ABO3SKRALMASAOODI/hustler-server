@@ -82,11 +82,13 @@ def test_crop_composes_with_rate():
     assert "[insvc0]" in g and "atempo=2.0000" in g
 
 
-def test_schema_validates_and_clamps_crop():
+def test_schema_validates_clamps_and_allows_any_positive_crop():
     e = _edl(_ins(crop=[0.27, 0.51, 1.2, 1.0]))     # x1 clamps to 1.0
     assert e["inserts"][0]["crop"] == [0.27, 0.51, 1.0, 1.0]
+    sliver = _edl(_ins(crop=[0.2, 0.5, 0.25, 1.0]))
+    assert sliver["inserts"][0]["crop"] == [0.2, 0.5, 0.25, 1.0]
     with pytest.raises(Exception):
-        validate_edl(_edl(_ins(crop=[0.2, 0.5, 0.25, 1.0])), SRC)
+        _edl(_ins(crop=[0.25, 0.5, 0.2, 1.0]))
 
 
 def test_program_blocks_and_scene_map_carry_crop():
@@ -172,13 +174,17 @@ def test_set_crop_as_a_json_string_survives_a_stale_mcp_schema():
     assert ctx.latest_edl()["json"]["inserts"][0]["crop"] == STRIP
 
 
-def test_crop_rejections_are_actionable():
+def test_crop_accepts_slivers_but_rejects_malformed_input():
     ctx = _Ctx(_studio())
+    result = agent_tools.set_insert_window(
+        ctx, "ins6", crop=[0.5, 0.5, 0.55, 1.0])        # intentional sliver
+    assert result.startswith("EDL v")
+    assert ctx.latest_edl()["json"]["inserts"][0]["crop"] == [0.5, 0.5, 0.55, 1.0]
+
+    bad = _Ctx(_studio())
     assert "REJECTED" in agent_tools.set_insert_window(
-        ctx, "ins6", crop=[0.5, 0.5, 0.55, 1.0])        # sliver
-    assert "REJECTED" in agent_tools.set_insert_window(
-        ctx, "ins6", crop="not json")
-    assert not ctx.written
+        bad, "ins6", crop="not json")
+    assert not bad.written
 
 
 def test_cut_output_range_split_carries_the_crop_to_both_halves():

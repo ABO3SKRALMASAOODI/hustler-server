@@ -673,9 +673,6 @@ class Frame(BaseModel):
         return round(min(max(float(v), 0.0), 1.0), 3)
 
 
-MAX_INSERT_DURATION_S = 600.0
-
-
 class InsertItem(BaseModel):
     """A clip or image spliced into the program at a keep-segment boundary
     (insert_media splits a keep segment when asked to land mid-segment, so
@@ -742,9 +739,8 @@ class InsertItem(BaseModel):
             raise ValueError("crop must be [x0, y0, x1, y1] fractions of "
                              "the source frame")
         x0, y0, x1, y1 = (min(max(float(a), 0.0), 1.0) for a in v)
-        if x1 - x0 < 0.1 or y1 - y0 < 0.1:
-            raise ValueError("crop region must span at least 10% of the "
-                             "frame on each axis")
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("crop region must have x0<x1 and y0<y1")
         return [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
 
 
@@ -787,9 +783,6 @@ FADE_MAX_S = 10.0
 # be silently stranded by that move (or would need a second, parallel remap
 # that could disagree with the first). Fractions ride along for free — a
 # window that moves or is trimmed carries its whole path with it, exactly.
-ZOOM_PATH_MAX_POINTS = 24
-
-
 class ZoomPathPoint(BaseModel):
     """One waypoint of a traveling zoom: at `f` (0 = window start, 1 = window
     end) the zoom is centred on (cx, cy) in output-frame fractions.
@@ -1567,9 +1560,6 @@ class CleanRegion(BaseModel):
 # derived source, which every kept segment reads through).
 CURSOR_SCALE_MIN = 1.0
 CURSOR_SCALE_MAX = 4.0
-CURSOR_MAX_CLICKS = 60
-
-
 class CursorPass(BaseModel):
     """scale: how many times bigger the redrawn pointer is. smoothing: 0 = the
     detected path untouched, 1 = heavily filtered (a one-euro filter, so fast
@@ -2062,10 +2052,9 @@ def validate_edl(data, duration=None):
         seen_ids.add(ins.id)
         if not ins.asset_key:
             raise EDLValidationError(f"inserts[{i}].asset_key is empty.")
-        if not (0.2 <= ins.duration_s <= MAX_INSERT_DURATION_S):
+        if ins.duration_s < 0.2:
             raise EDLValidationError(
-                f"inserts[{i}].duration_s {ins.duration_s} outside "
-                f"[0.2, {MAX_INSERT_DURATION_S:.0f}].")
+                f"inserts[{i}].duration_s {ins.duration_s} is below 0.2.")
         if ins.source_start_s is not None:
             ins.source_start_s = _r(ins.source_start_s)
             if ins.source_start_s < 0:
@@ -2390,10 +2379,6 @@ def validate_edl(data, duration=None):
                     raise EDLValidationError(
                         f"effects.zooms[{i}]: mode '{z.mode}' needs a path of "
                         "at least 2 points.")
-                if len(pts) > ZOOM_PATH_MAX_POINTS:
-                    raise EDLValidationError(
-                        f"effects.zooms[{i}]: a travelling path is limited to "
-                        f"{ZOOM_PATH_MAX_POINTS} points.")
                 last_f = None
                 for j, pt in enumerate(pts):
                     pt.f = round(min(max(float(pt.f), 0.0), 1.0), 4)
@@ -2635,10 +2620,6 @@ def validate_edl(data, duration=None):
             cu.smoothing = round(min(max(float(cu.smoothing), 0.0), 1.0), 3)
             times = sorted({_r(max(0.0, float(t)))
                             for t in (cu.click_times or [])})
-            if len(times) > CURSOR_MAX_CLICKS:
-                raise EDLValidationError(
-                    f"source_clean.cursor: at most {CURSOR_MAX_CLICKS} click "
-                    f"times ({len(times)} given).")
             cu.click_times = times
             if cu.found_frac is not None:
                 cu.found_frac = round(min(max(float(cu.found_frac), 0.0),

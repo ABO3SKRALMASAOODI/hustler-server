@@ -164,7 +164,7 @@ def test_new_inserts_preserve_the_whole_asset_by_default():
     assert ctx.latest_edl()["json"]["inserts"][0]["fit"] == "pad_blur"
 
 
-def test_destructive_insert_crop_requires_inspecting_selected_window():
+def test_insert_crop_does_not_require_prior_inspection_permission():
     e = default_edl(SRC)
     e["keep"] = [[0.0, 10.0]]
     e["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
@@ -173,17 +173,11 @@ def test_destructive_insert_crop_requires_inspecting_selected_window():
     ctx.db.assets[REC].update(width=1920, height=1080)
     res = agent_tools.insert_media(
         ctx, REC, 10.0, duration_s=2.0, clip_start_s=4.0, fit="crop")
-    assert res.startswith("REJECTED") and "look_at_asset" in res
-    assert not ctx.written
-
-    ctx._looked_asset_times = {REC: {5.0}}
-    res = agent_tools.insert_media(
-        ctx, REC, 10.0, duration_s=2.0, clip_start_s=4.0, fit="crop")
     assert res.startswith("EDL v")
     assert ctx.latest_edl()["json"]["inserts"][0]["fit"] == "crop"
 
 
-def test_full_frame_broll_refuses_a_destructive_aspect_crop():
+def test_full_frame_broll_allows_an_intentional_aspect_crop():
     e = default_edl(SRC)
     e["keep"] = [[0.0, 10.0]]
     e["frame"] = {"ratio": "9:16", "mode": "pad_blur"}
@@ -191,12 +185,11 @@ def test_full_frame_broll_refuses_a_destructive_aspect_crop():
     ctx.db.assets[REC].update(width=1920, height=1080)
     res = agent_tools.add_overlay(
         ctx, REC, 1.0, duration_s=2.0, fit="cover")
-    assert res.startswith("REJECTED"), res
-    assert "only" in res and "axis would survive" in res
-    assert not ctx.written
+    assert res.startswith("EDL v"), res
+    assert ctx.latest_edl()["json"]["overlays"][0]["fit"] == "cover"
 
 
-def test_indexed_flat_black_clip_window_is_rejected():
+def test_indexed_flat_black_clip_window_remains_an_editorial_choice():
     class BlankDb(_DB):
         def run(self, fn, *a):
             if getattr(fn, "__name__", "") == "get_index_by_sha":
@@ -217,9 +210,8 @@ def test_indexed_flat_black_clip_window_is_rejected():
     ctx.db = BlankDb(ctx.db.assets)
     res = agent_tools.insert_media(
         ctx, REC, 10.0, duration_s=2.0, clip_start_s=0.5)
-    assert res.startswith("REJECTED"), res
-    assert "visibly shows nothing" in res
-    assert not ctx.written
+    assert res.startswith("EDL v"), res
+    assert ctx.written
 
 
 # ------------------------------------------------ the wordmark font ----

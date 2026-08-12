@@ -150,13 +150,13 @@ def test_kinetic_text_rejects_honestly():
     assert "no kept speech" in r
 
 
-def test_kinetic_text_caps_and_offers_continuation():
+def test_kinetic_text_writes_every_requested_moment_without_a_cap():
     words = _words([(f"w{i}", i * 2.0, i * 2.0 + 0.4) for i in range(120)])
     ctx = _KCtx(words, keep=[[0.0, 250.0]])
     r = agent_tools.add_kinetic_text(ctx)
     assert r.startswith("EDL v")
-    assert len(ctx.written["texts"]) == 48
-    assert "continue with start=" in r
+    assert len(ctx.written["texts"]) == 120
+    assert "continue with start=" not in r
 
 
 def test_kinetic_text_is_registered_as_a_write_tool():

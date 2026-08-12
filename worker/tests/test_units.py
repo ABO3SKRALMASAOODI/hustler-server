@@ -1069,9 +1069,10 @@ check("the split EDL passes full validation (boundary backstop)",
 
 ictx2 = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
 r = agent_tools.insert_media(ictx2, "clips/1/rec.mp4", 3.0)
-check("long clips without a window are refused with guidance",
-      r.startswith("REJECTED") and "look_at_asset" in r
-      and "clip_start_s" in r and ictx2.written is None)
+check("long clips can be inserted whole without a keyword gate",
+      r.startswith("EDL v1 -> v2")
+      and ictx2.written["inserts"][0]["duration_s"] == 522.5
+      and ictx2.written["inserts"][0].get("source_start_s") is None)
 r = agent_tools.insert_media(ictx2, "clips/1/rec.mp4", 3.0,
                              duration_s=5.0, clip_start_s=520.0)
 check("window past the end of the clip is refused with the max offset",
@@ -2026,10 +2027,8 @@ check("both sources rejected",
 check("bad aspect rejected",
       at.generate_image(GenCtx(), "x", aspect="21:9")
       .startswith("REJECTED"))
-_full = GenCtx()
-_full.images_generated = [{}] * cfg.MAX_GENERATED_IMAGES_PER_TURN
-check("per-turn image cap enforced",
-      at.generate_image(_full, "x").startswith("REJECTED"))
+check("image generation has no fixed per-turn count cap",
+      not hasattr(cfg, "MAX_GENERATED_IMAGES_PER_TURN"))
 cfg.IMAGE_GEN_MODEL = ""
 check("honest unavailable message when disabled",
       "unavailable" in at.generate_image(GenCtx(), "x"))

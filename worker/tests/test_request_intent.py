@@ -1,4 +1,4 @@
-"""Deterministic contracts for a user's latest correction."""
+"""The chat text informs judgment but never derives tool permissions."""
 
 import os
 import sys
@@ -10,83 +10,40 @@ import agent_tools                                             # noqa: E402
 import request_intent                                          # noqa: E402
 
 
-def test_no_captions_is_multilingual_and_blocks_caption_tools():
-    for text in ("No captions please", "sin subtítulos",
-                 "sem legendas", "字幕なしに戻して"):
-        assert request_intent.no_captions(text)
-
-    ctx = SimpleNamespace(user_message="字幕なしに戻して")
-    blocked = agent_tools.execute(ctx, "set_caption_style", {"preset": "beast"})
-    assert blocked.startswith("REJECTED:")
-
-    blocked = agent_tools.execute(ctx, "add_captions", {"mode": "auto"})
-    assert blocked.startswith("REJECTED:")
-
-
-def test_caption_removal_remains_allowed(monkeypatch):
-    ctx = SimpleNamespace(user_message="no subtitles")
-    monkeypatch.setitem(agent_tools.TOOLS, "add_captions",
-                        (lambda _ctx, **kwargs: kwargs["mode"], None))
-    assert agent_tools.execute(ctx, "add_captions", {"mode": "off"}) == "off"
-
-
-def test_preservation_reset_and_source_reference_contracts():
-    preserve = request_intent.request_contract(
-        "Keep the original voice and timing unchanged; only fix brightness")
-    assert "PRESERVATION LOCK" in preserve
-    assert "generic polish" in preserve
-
-    reset = request_intent.request_contract("Reset everything and start over")
-    assert "RESET FIRST" in reset
-
-    source = request_intent.request_contract(
-        "Create this from scratch using my uploaded source clips")
-    assert "SOURCE-MATERIAL CHECK" in source
-    assert "STYLE REFERENCE" in source
-
-    reference = request_intent.request_contract(
-        "Usando el video que subí como referencia, crea un nuevo edit")
-    assert "SOURCE-MATERIAL CHECK" in reference
-    assert "never counts as source footage" in reference
-
-
-def test_latest_message_always_has_priority():
-    contract = request_intent.request_contract("make the text blue")
+def test_request_contract_is_language_and_keyword_invariant():
+    messages = (
+        "No captions please",
+        "Reset everything and start over",
+        "Make a professional branded promo",
+        "字幕なしに戻して",
+        "",
+    )
+    contracts = {request_intent.request_contract(text) for text in messages}
+    assert len(contracts) == 1
+    contract = contracts.pop()
     assert "final user message has highest priority" in contract
+    assert "use any available editing tool" in contract
+    assert "no keyword or regex grants or withholds" in contract
 
 
-def test_broad_polish_is_an_outcome_request_but_a_local_nice_tweak_is_not():
-    assert request_intent.broad_polish_requested(
-        "Turn this into a polished vertical social clip")
-    assert request_intent.broad_polish_requested(
-        "Make a professional podcast edit from this")
-    assert not request_intent.broad_polish_requested(
-        "Make this caption color nice")
+def test_regex_permission_helpers_are_gone():
+    for name in ("no_captions", "preservation_requested",
+                 "broad_polish_requested", "commercial_use",
+                 "explicit_reset_requested"):
+        assert not hasattr(request_intent, name)
 
 
-def test_broad_speech_polish_frontloads_cleanup_and_mastering():
-    contract = request_intent.request_contract(
-        "Turn this into a polished vertical social clip")
-    assert "BROAD-POLISH CONTRACT" in contract
-    assert "remove indexed timed filler" in contract
-    assert "social loudness mastering" in contract
-    assert "FIRST atomic recipe" in contract
-    assert "Never infer music, SFX, transitions or extra zooms" in contract
+def test_dispatch_does_not_block_tools_from_chat_keywords(monkeypatch):
+    called = []
 
+    def fake_caption(_ctx, **kwargs):
+        called.append(kwargs)
+        return "dispatched"
 
-def test_preservation_lock_wins_over_broad_polish_defaults():
-    contract = request_intent.request_contract(
-        "Polish this social video but keep the original timing unchanged")
-    assert "PRESERVATION LOCK" in contract
-    assert "BROAD-POLISH CONTRACT" not in contract
-
-
-def test_business_briefs_are_commercial_music_contexts():
-    for text in (
-        "Turn this into a premium Instagram ad for our startup",
-        "Make a corporate documentary about the company",
-        "This is a branded product promo for a client",
-    ):
-        assert request_intent.commercial_use(text)
-    assert not request_intent.commercial_use(
-        "Make a cozy personal birthday montage for my family")
+    original = agent_tools.TOOLS["add_captions"]
+    monkeypatch.setitem(agent_tools.TOOLS, "add_captions",
+                        (fake_caption, original[1], original[2]))
+    ctx = SimpleNamespace(user_message="no captions; reset nothing")
+    assert agent_tools.execute(ctx, "add_captions", {"mode": "auto"}) == \
+        "dispatched"
+    assert called == [{"mode": "auto"}]

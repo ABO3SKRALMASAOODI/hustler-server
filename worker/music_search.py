@@ -28,7 +28,7 @@ license only inside their own apps.
 
 Downloads go through net_fetch (SSRF policy, byte cap, wall clock) and land
 as ordinary project assets (kind 'music'), so add_music, swap_music,
-set_music_fit, get_audio_analysis and listen_to all work on them unchanged.
+set_music_fit and get_audio_analysis all work on them unchanged.
 """
 
 import re

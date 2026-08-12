@@ -20,8 +20,8 @@ Two things this module owns, and why they are separated:
 
   path_value_expr() / strength_expr()  — the per-frame ffmpeg expressions.
       Emitted as ONE expression per axis (not a filter per segment) because
-      zoompan evaluates them per frame and the whole point is that a 24-point
-      path costs the same as a 2-point one.
+      zoompan evaluates them per frame, so the editor may use as many
+      keyframes as the motion requires.
 
 BYTE-IDENTITY: mode 'follow' (ease None) emits character-for-character what
 round 45 emitted. Renders are cached by EDL fingerprint, and a cosmetic change
@@ -34,9 +34,8 @@ to a legacy expression would silently re-encode every demo ever made.
 # keyframe, so the frame arrives at a button, settles, and leaves again —
 # which is what "smooth" means to the eye. It is written as u*u*(3-2*u) with
 # three references to u rather than the piecewise penner form (four references
-# plus a pow() per segment): with 24 keyframes on three axes that difference is
-# kilobytes of filtergraph and a pow per segment per frame, for a curve nobody
-# can tell apart.
+# plus a pow() per segment), keeping large paths' filtergraphs and per-frame
+# work smaller without limiting how many keyframes the editor may use.
 #
 # 'linear' is constant velocity through the keyframes — right for a steady
 # scan across a wide screenshot, wrong for a cursor stopping at a button.
@@ -44,10 +43,8 @@ EASES = ("cubic_in_out", "linear")
 DEFAULT_EASE = "cubic_in_out"
 
 # A path is a keyframe track, not a spline: two points minimum (a single point
-# is a fixed target, which is add_zoom's job), and bounded so one expression
-# can never grow past what the eval parser should be asked to hold.
+# is a fixed target, which is add_zoom's job). There is no arbitrary maximum.
 PATH_MIN_POINTS = 2
-PATH_MAX_POINTS = 24
 # Two keyframes closer together than this in window-fraction terms are the
 # same instant at any sane window length; keeping both would emit a segment
 # with a near-zero denominator.
@@ -121,9 +118,6 @@ def waypoints_to_path(waypoints, start, end, *, with_strength=False,
         return None, ("a path needs at least two keyframes at different "
                       "times — one position is a fixed target, which is "
                       "add_zoom's job.")
-    if len(out) > PATH_MAX_POINTS:
-        return None, (f"a path is limited to {PATH_MAX_POINTS} keyframes; "
-                      f"you passed {len(out)}.")
     # Pin the ends to the window so the move starts and finishes ON the
     # positions the caller named, rather than a fraction of a frame inside.
     out[0] = dict(out[0], f=0.0)

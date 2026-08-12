@@ -38,26 +38,7 @@ AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
 # editing agent — its own eyes — instead of asking the separate VISION_*
 # provider to describe them second-hand.
 AGENT_MULTIMODAL = os.getenv("AGENT_MULTIMODAL", "1") == "1"
-# Whether AGENT_MODEL itself accepts input_audio content parts. GPT-5.6 Luna
-# explicitly does NOT (text + image only), so defaulting this on advertised
-# ears that could only produce a provider 400. Keep the direct path for a
-# future audio-capable agent lane, but require an explicit operator opt-in.
-AGENT_AUDIO = os.getenv("AGENT_AUDIO", "0") == "1"
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
-
-# Audio judgment runs on its own small, bounded reviewer call. The editing
-# model remains Luna (reasoning + tools + images); gpt-audio-1.5 hears the
-# candidate or rendered mix and returns a concise professional assessment as
-# text to the editor. Same-provider inheritance means production needs no new
-# secret, while an empty AUDIO_REVIEW_MODEL disables the reviewer honestly.
-AUDIO_REVIEW_BASE_URL = os.getenv(
-    "AUDIO_REVIEW_BASE_URL", "https://api.openai.com/v1").strip()
-AUDIO_REVIEW_MODEL = os.getenv(
-    "AUDIO_REVIEW_MODEL", "gpt-audio-1.5").strip()
-AUDIO_REVIEW_API_KEY = (
-    os.getenv("AUDIO_REVIEW_API_KEY", "").strip()
-    or (OPENAI_API_KEY if AUDIO_REVIEW_BASE_URL == OPENAI_BASE_URL else ""))
-AUDIO_REVIEW_TIMEOUT_S = float(os.getenv("AUDIO_REVIEW_TIMEOUT_S", "45"))
 
 # THE NUMBER THAT TURNS A FIVE-SECOND WAIT INTO A DEAD TURN (round 80).
 #
@@ -367,8 +348,6 @@ VISION_TIMEOUT_S = float(os.getenv("VISION_TIMEOUT_S", "120"))
 # 8 (was 4): the real bound is the user's credit budget (_gen_budget_reject
 # prices every image before spending); this stays only as a backstop against
 # a runaway generation loop.
-MAX_GENERATED_IMAGES_PER_TURN = int(
-    os.getenv("MAX_GENERATED_IMAGES_PER_TURN", "8"))
 
 # ── AI video generation (fal.ai aggregator) ──────────────────────────────────
 # NOT OpenAI-compatible — its own REST (queue.fal.run/{model}). One FAL_KEY,
@@ -388,8 +367,6 @@ VIDEO_MAX_SECONDS = float(os.getenv("VIDEO_MAX_SECONDS", "10"))
 # video model, keeping it under AGENT_TURN_TIMEOUT_S.
 VIDEO_POLL_TIMEOUT_S = float(os.getenv("VIDEO_POLL_TIMEOUT_S", "240"))
 VIDEO_POLL_INTERVAL_S = float(os.getenv("VIDEO_POLL_INTERVAL_S", "6"))
-MAX_GENERATED_VIDEOS_PER_TURN = int(
-    os.getenv("MAX_GENERATED_VIDEOS_PER_TURN", "3"))
 
 # The index pipeline version is a CODE CONSTANT in schemas.py, shared with
 # the backend (which loads worker/schemas.py directly) — bump it there, by
@@ -627,15 +604,6 @@ FETCH_MAX_DURATION_S = float(os.getenv("FETCH_MAX_DURATION_S", "3600"))
 # Resolution cap for extracted video. A 4K source is a ~10x bigger download
 # and a slower render for a clip that gets composited into a 1080p timeline.
 FETCH_MAX_HEIGHT = int(os.getenv("FETCH_MAX_HEIGHT", "1080"))
-# 8 (was 4): fetches are size/duration-capped individually and cleaned up
-# per attempt; the constant is a runaway-loop backstop, not the real bound.
-MAX_FETCHED_URLS_PER_TURN = int(os.getenv("MAX_FETCHED_URLS_PER_TURN", "8"))
-# Runaway backstop for stock b-roll, same contract as the URL cap above: each
-# download is individually byte- and time-bounded, so this only stops a loop
-# that would fill the worker's ephemeral disk. Taste, not capacity, is the
-# real limit — 1-3 cutaways a minute beat wall-to-wall b-roll.
-MAX_STOCK_PER_TURN = int(os.getenv("MAX_STOCK_PER_TURN", "6"))
-
 # Recording a live web page as video (worker/webrecord.py) — headless
 # Chromium capture of a scrolling page. WEB_RECORD_ENABLED is the kill
 # switch (the tool + prompt claims vanish, same contract as URL_FETCH);
@@ -1176,27 +1144,6 @@ MAX_CLAIMS_ABSOLUTE = int(os.getenv("MAX_CLAIMS_ABSOLUTE", "6"))
 # than never. Only ever fires on a project that has no working state to lose.
 TRAY_RESCUE_AFTER_S = int(os.getenv("TRAY_RESCUE_AFTER_S", "300"))
 
-AGENT_MAX_ITERATIONS = 30
-# A model-call ceiling is only an emergency runaway backstop. It must not be a
-# normal editing limit: project 501 reached the old 16-call wall while still
-# making valid documentary edits, auto-rendered a partial rebuild, and told the
-# user to ask again. Progress, the user's spend budget, the inactivity window,
-# cycle detection and the 3 x 30 iteration walls already bound real work. Keep
-# this at least as large as all three productive passes so a stale Render env
-# cannot silently restore the customer-visible 16-call cutoff; 180 is still a
-# hard poison-pill ceiling if every other guard fails.
-AGENT_MAX_MODEL_CALLS = min(
-    180, max(90, int(os.getenv("AGENT_MAX_MODEL_CALLS", "90"))))
-# How many times a turn that hits the iteration ceiling MID-WORK may resume
-# itself (round 96b, project 383: 30 productive calls in 7.5 min, then a
-# canned English "tell me to continue" at a Portuguese-speaking user with
-# half the 900s time budget unspent). Each continuation is a fresh pass —
-# rebuilt state, small context — over the SAME user message, sharing the
-# turn's wall clock and spend cap, and it only happens when the ending pass
-# actually landed edits or renders; a pass that moved nothing is a runaway
-# and still stops at the wall. 2 -> at most 90 iterations, inside the same
-# one shared model-call ceiling / credit bounds that always apply.
-AGENT_AUTO_CONTINUES = int(os.getenv("AGENT_AUTO_CONTINUES", "2"))
 AGENT_TEMPERATURE = 0.2
 # Completion ceiling for ONE agent step. 8000 (was a hardcoded 2000).
 #
@@ -1208,8 +1155,9 @@ AGENT_TEMPERATURE = 0.2
 # it". He asked "Why not" and got the same line again. 0 of 703 grok-4.5 calls
 # ever hit the cap; 3 of 113 deepseek-v4-pro calls did, and all 3 killed the
 # turn. You pay only for tokens actually generated, so a high ceiling costs
-# nothing on a normal step — the turn budget and AGENT_MAX_ITERATIONS are what
-# bound spend. AGENT_MAX_TOKENS_CEILING is the retry's second, larger try.
+# nothing on a normal step — credits, the progress-sensitive stall window and
+# cycle detection bound the turn. AGENT_MAX_TOKENS_CEILING is the retry's
+# second, larger try.
 AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "8000"))
 # 32000 (was 16000): reasoning tokens spend from the same budget, and at
 # effort=max a planning step can out-think 16k before reaching content. The

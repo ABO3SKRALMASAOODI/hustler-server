@@ -14,10 +14,9 @@ and nothing telling it so.
 So this module is the reviewer for craft, in the same shape as audit.py: pure
 functions over plain data, no LLM, no network, no I/O. render_preview stamps
 the findings into the tool result, exactly like the mid-word and repetition
-audits, and the system prompt makes acting on them non-optional. A finding is
-never a hard block — the user's own instruction always wins, and every finding
-says what to do instead in one clause, so the agent can fix it in one call or
-tell the user why it kept it.
+audits. A finding is advisory evidence, never a hard block — the user's own
+instruction and the editor's judgment win, and every finding says what to do
+instead in one clause so it can be fixed, investigated, or deliberately kept.
 
 Each check earns its place by having actually shipped as a defect:
 
@@ -69,18 +68,6 @@ TRANSITION_MIN_SPACING_S = 5.0
 # individual rule was either satisfied or only mildly over. Users do not
 # experience the categories separately; they experience the rate.
 DEVICE_MIN_SPACING_S = 2.5
-
-# Words that mean the user actually wants sound effects. Sfx are OPT-IN: they
-# are the loudest unrequested thing an edit can do, they are what people
-# notice first when they are wrong, and an editor who adds them uninvited to
-# someone's footage is not showing taste.
-SFX_REQUEST_HINTS = (
-    "sfx", "sound effect", "sound fx", "soundeffect", "whoosh", "swoosh",
-    "impact", "boom", "riser", "sound design", "sounddesign", "efecto de "
-    "sonido", "efectos de sonido", "efek suara", "sonido", "sfx-", "swoosh",
-    "add sound", "sounds on", "punchy sound", "hit sound", "click sound",
-    "مؤثرات", "مؤثر صوتي",
-)
 
 # More than this many whole-programme finishing effects and the footage is
 # wearing the look rather than the look serving the footage.
@@ -331,23 +318,9 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
 
     # ── sound ────────────────────────────────────────────────────────────
     sfx = sorted((edl.get("sfx") or []), key=lambda s: _num(s.get("at")))
-    # SFX WITHOUT A REQUEST DEMAND JUSTIFICATION, not removal (round 98).
-    # Round 55 made them strictly opt-in after five mistimed whooshes — a
-    # consent rule standing in for a placement problem. With event-bound
-    # placement, the listen check and the audio QC, the rule returns to
-    # what a pro would say: an unrequested sound is fine EXACTLY when it
-    # lands on a moment the viewer can see and the format calls for it —
-    # and the burden of proof sits on the editor, per sound.
-    if sfx and not any(h in ask for h in SFX_REQUEST_HINTS):
-        add(f"{len(sfx)} sound effect{'s' if len(sfx) != 1 else ''} "
-            "placed without the user asking. That is allowed ONLY when the "
-            "format calls for sound design (hype/montage/gaming/promo — "
-            "never podcast/interview/calm) AND every single one lands on a "
-            "moment the viewer can SEE (a cut, a reveal, a punch-in, a "
-            "drop). Verify each against the preview (listen when you can); "
-            "remove_sfx any that are not on a nameable moment, and NAME "
-            "the ones you keep in your reply so the user can strip them "
-            "with one word.")
+    # Whether sound design serves the cut is an editorial judgment, not a
+    # keyword permission check. Mechanical density and collision findings
+    # below remain useful evidence regardless of how the request was phrased.
     if out_dur > 0 and len(sfx) > max(3, int(out_dur / SFX_PER_S)):
         add(f"{len(sfx)} sound effects in {out_dur:.0f}s — accents stop being "
             "accents when they are constant. 3-6 placed on the real moments "

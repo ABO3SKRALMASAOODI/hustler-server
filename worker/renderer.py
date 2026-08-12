@@ -4398,35 +4398,18 @@ def run_render_job(worker_db, job):
         _mark("upload_s")
 
         out_info = media.probe(out_local)
-        # Round 98 — the render reviews its own SOUND. One ffmpeg pass
-        # measures the mix (LUFS / true peak / dead air -> plain findings the
-        # agent must act on, exactly like the taste audit), and the changed
-        # seconds are cut as tiny mono mp3s the agent LISTENS to when its
-        # model has ears (llm.agent_hears). Both best-effort: a preview never
-        # fails over its own review, and an executor that predates the fields
-        # simply returns neither.
+        # Deterministic preview sound measurements (LUFS / true peak / dead
+        # air) stay local and model-free. Do not cut or upload subjective
+        # listening clips: no second model should hear on the editor's behalf.
         audio_qc_res = None
-        listen_keys = []
         if variant == "preview":
             try:
                 audio_qc_res = audio_qc.measure(out_local, duration_s=out_dur)
             except Exception:
                 audio_qc_res = None
-            try:
-                for i, (ls, le) in enumerate(
-                        audio_qc.listen_windows(vtimes, out_dur)):
-                    lp = os.path.join(workdir, f"listen_{i}.mp3")
-                    media.extract_audio_clip(out_local, ls, le, lp)
-                    lk = f"media/{project_id}/{stamp}_l{i}.mp3"
-                    storage.upload_file(lp, lk, "audio/mpeg")
-                    listen_keys.append({"key": lk, "t0": round(ls, 2),
-                                        "t1": round(le, 2)})
-            except Exception:
-                listen_keys = []
         if not _still_ours(98):
             storage.delete_keys(
-                [render_key, sheet_key, verify_sheet_key, caption_sheet_key]
-                + [item["key"] for item in listen_keys])
+                [render_key, sheet_key, verify_sheet_key, caption_sheet_key])
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
         asset_id = worker_db.run(
@@ -4438,7 +4421,6 @@ def run_render_job(worker_db, job):
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
                   "caption_sheet_key": caption_sheet_key,
                   "caption_review_times": caption_times,
-                  "listen_keys": [k["key"] for k in listen_keys],
                   "src_sha256": src_sha,
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),
@@ -4492,6 +4474,6 @@ def run_render_job(worker_db, job):
                 "duration_s": out_dur, "edl_version": version,
                 "variant": variant, "timings": timings,
                 "midword_audit": mw,
-                "audio_qc": audio_qc_res, "listen_keys": listen_keys}
+                "audio_qc": audio_qc_res}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

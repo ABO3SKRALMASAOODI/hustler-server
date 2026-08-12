@@ -221,15 +221,15 @@ def test_deleted_tools_are_unregistered_and_search_advertised():
     assert "music library" not in state
 
 
-# ── failed repairs are bounded without hiding incomplete work ───────────
+# ── repairs stay autonomous without hiding incomplete work ─────────────
 
-def test_the_prompt_allows_one_repair_then_stops_churn_honestly():
+def test_the_prompt_does_not_impose_an_arbitrary_repair_allowance():
     p = agent_prompt.system_prompt()
     assert "fails twice" not in p
     assert "stop retrying" not in p
-    assert "ONE focused repair batch" in p
-    assert "preserve the best valid version" in p
-    assert "say plainly what remains" in p
+    assert "There is no one-preview, one-repair" in p
+    assert "as many tool calls and previews as genuinely help" in p
+    assert "preserve the best valid version" in p.lower()
 
 
 # ── round 91b: a short reply must not disable the language check ─────────
