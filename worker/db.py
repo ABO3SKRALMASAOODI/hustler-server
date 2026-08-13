@@ -7,6 +7,7 @@ attempts are exhausted.
 """
 
 import json
+import math
 import os
 import threading
 import time
@@ -436,7 +437,8 @@ def finish_job(conn, job_id, state, error=None, result=None,
     with conn.cursor() as cur:
         lease_where = " AND total_claims = %s" if total_claims is not None else ""
         params = [state, (error or None) and str(error)[:2000],
-                  Json(result) if result is not None else None, state, job_id]
+                  Json(_json_safe(result)) if result is not None else None,
+                  state, job_id]
         if total_claims is not None:
             params.append(total_claims)
         cur.execute(f"""UPDATE video_jobs
@@ -446,6 +448,22 @@ def finish_job(conn, job_id, state, error=None, result=None,
                         WHERE id = %s AND state = 'running'{lease_where}""",
                     tuple(params))
         return cur.rowcount > 0
+
+
+def _json_safe(value):
+    """Return strict-JSON data without mutating the runner's result.
+
+    PostgreSQL rejects NaN and +/-Infinity. Media analyzers can legitimately
+    emit those for silence or missing measurements, and a terminal metadata
+    quirk must never turn a completed encode into another executor attempt.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def requeue_job(conn, job_id, error, total_claims=None):

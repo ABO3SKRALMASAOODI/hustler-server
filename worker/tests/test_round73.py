@@ -14,6 +14,8 @@ Reconstructed from the first Cloud Run invoice — $14 for 7 days, of which
 So: one counter that is never refunded, and one signal that already existed
 (set_progress' rowcount) finally being read.
 """
+import json
+import math
 import os
 import shutil
 import subprocess
@@ -234,6 +236,22 @@ def test_total_claims_is_the_non_refundable_execution_lease():
     assert wdb.requeue_job(retried, 42, RuntimeError("temporary"),
                            total_claims=7) is True
     assert "total_claims = %s" in retried.sql[0][0]
+
+
+def test_terminal_result_strips_non_finite_metadata_without_mutating_runner():
+    """A finished encode must not retry because ffmpeg measured silence."""
+    result = {"audio_qc": {"i": -math.inf, "tp": math.nan},
+              "nested": [1.0, math.inf]}
+    done = _Conn(rowcount=1)
+
+    assert wdb.finish_job(done, 42, "done", result=result,
+                          total_claims=7) is True
+    adapted = done.sql[0][1][2].adapted
+    assert adapted == {"audio_qc": {"i": None, "tp": None},
+                       "nested": [1.0, None]}
+    json.dumps(adapted, allow_nan=False)
+    assert math.isinf(result["audio_qc"]["i"]), \
+        "the persistence guard must not rewrite the runner's live result"
 
 
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg")

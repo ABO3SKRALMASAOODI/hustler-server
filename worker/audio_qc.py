@@ -18,6 +18,7 @@ Failure returns None — a render never fails over its own review.
 """
 
 import json
+import math
 import re
 import subprocess
 
@@ -108,6 +109,19 @@ def measure(path, duration_s=None):
             lra = float(loud.get("input_lra"))
         except (TypeError, ValueError):
             i = tp = lra = None
+        # ffmpeg reports a perfectly silent program as ``-inf``. Python's
+        # JSON encoder accepts that extension, but PostgreSQL JSON correctly
+        # rejects it; the completed render then gets retried even though its
+        # bytes are already valid. Preserve the useful silence verdict with a
+        # finite sentinel and omit the measurements that have no finite
+        # meaning. The terminal DB boundary also sanitizes defensively, but
+        # keeping this record finite makes the agent's audio review truthful.
+        if i is not None and not math.isfinite(i):
+            i = -100.0 if i < 0 else None
+        if tp is not None and not math.isfinite(tp):
+            tp = None
+        if lra is not None and not math.isfinite(lra):
+            lra = None
     if i is not None and i < -70.0:
         findings.append("the mix is essentially SILENT (integrated "
                         f"{i:.1f} LUFS) — every audio layer is muted or "
