@@ -1,10 +1,10 @@
 # reframe-aspect — vertical/square conversion, screen frames, erasing pixels, blurs
 
-CHANGING ASPECT MUST RE-FIT THE VIDEO, NOT TRUNCATE IT.
-- "Make it 9:16 / vertical / for TikTok" on real footage → auto_reframe("9:16") and let it decide HOW. It measures faces AND how much picture detail would survive: it crops footage with a subject to follow, and FITS everything else (gameplay + HUD, screen recordings, wide scenes) into the frame over a blurred copy — losing nothing. Read what the tool reports and repeat THAT: if it fitted, say the soft bands are their own footage blurred; never claim subject-aware framing when it used a center crop.
-- A bare set_frame crop is a DEAD-CENTER window — on an off-center speaker it looks "cut down the middle". set_frame(ratio, mode, focus_x, focus_y) is the manual control (focus from a look); "1:1", "4:5"; pad/pad_blur letterbox instead of cropping — pad_blur is the right default for screen recordings, gameplay and wide landscapes.
-- HONEST LIMIT: the focus is one fixed point for the whole video; it does not track a moving subject — say so and offer pad_blur when the subject moves across shots.
-- Gameplay is the footage most often ruined by a vertical CROP: HUD, minimap, kill feed and score live at the edges — fit it, don't crop two thirds away.
+CHANGING ASPECT — TWO DIFFERENT ASKS.
+- "Make it 9:16 / vertical / for TikTok / Shorts / Reels / crop it" → FILL THE PHONE. auto_reframe("9:16", mode="crop") or set_frame("9:16", "crop"). A postage-stamp of gameplay in blurred bars is the wrong conversion for a Short. Aim the crop at the action (focus from a look, or auto_reframe) so the fight/subject fills the frame.
+- "Fit the whole picture / keep the HUD / letterbox / don't crop" → pad_blur. auto_reframe("9:16", mode="pad_blur") or set_frame("9:16", "pad_blur"). Screen recordings and "don't lose the UI" briefs live here.
+- A bare set_frame crop is a DEAD-CENTER window — on an off-center speaker it looks "cut down the middle". set_frame(ratio, mode, focus_x, focus_y) is the manual aim (focus from a look).
+- HONEST LIMIT: the focus is one fixed point for the whole video; it does not track a moving subject — say so. On a Short, still crop-fill; don't fall back to pad_blur just because the subject moves.
 
 MID-VIDEO ASPECT CHANGE (add_aspect_shift): the frame morphs to another ratio mid-video and back (ratio='source'), timing untouched. Remove with remove_aspect_shift.
 

@@ -203,8 +203,13 @@ def critique(edl, index, tl, src_w=None, src_h=None, user_asked=""):
             "on the picture, unless the user asked for the fade.")
 
     speech_at = _speech_starts_at(index, tl) if fmt["n_words"] else None
+    # Spoken-hook dead air is a talking-head / narrated-piece rule.
+    # A gameplay VOD with three leftover "Thanks for watching!" words is
+    # not a reel that forgot its hook — flagging it blocks export on
+    # music-led montages (Aug 12, project 727).
+    speech_led = fmt["kind"] in ("talking head", "narrated piece")
     if speech_at is not None and speech_at > HOOK_DEAD_AIR_S \
-            and fmt["short_form"]:
+            and fmt["short_form"] and speech_led:
         add(f"the first words land at {speech_at:.1f}s — everything before "
             "that is dead air at the most expensive moment of the video. "
             "Cut into the strongest line, or move it to the front.")

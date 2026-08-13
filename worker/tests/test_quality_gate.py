@@ -467,6 +467,8 @@ def test_recorded_plan_does_not_block_uniform_fit():
     result = agent_tools.set_frame(ctx, "9:16", "pad_blur")
     assert result.startswith("EDL v1 -> v2")
     assert fake.inserts == 1
+    assert "FILL the phone" in result
+    assert "mode='crop'" in result or 'mode="crop"' in result
 
 
 def test_wide_then_closeup_request_does_not_withhold_uniform_frame_tool():

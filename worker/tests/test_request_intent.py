@@ -24,6 +24,7 @@ def test_request_contract_is_language_and_keyword_invariant():
     assert "final user message has highest priority" in contract
     assert "use any available editing tool" in contract
     assert "no keyword or regex grants or withholds" in contract
+    assert "permission to write the EDL" in contract
 
 
 def test_regex_permission_helpers_are_gone():

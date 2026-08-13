@@ -319,6 +319,7 @@ def test_a_walled_candidate_says_try_the_next_not_give_up(monkeypatch,
                                 as_kind="music")
     assert "not a bot" in out
     assert "suggest they upload" not in out     # no give-up script
+    assert "Continue the current edit" in out   # do not freeze the picture
     # A REAL failure (private video) keeps the honest full stop.
     def private(*a, **k):
         raise agent_tools.url_media.FetchMediaError("Private video")

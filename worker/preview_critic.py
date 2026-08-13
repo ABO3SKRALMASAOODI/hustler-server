@@ -117,9 +117,13 @@ compare treatment ACROSS SHOTS: if a wide composition appropriately fits and a
 later clear close-up/product shot stays unnecessarily tiny in the same inset,
 flag that uniform treatment when the edit brief asks for deliberate or
 shot-specific framing. The close shot should normally fill cleanly while the
-wide shot remains preserved. Do not invent audio defects. Do not approve
+wide shot remains preserved. Do not invent audio defects. Do not flag a
+music-led / gameplay / montage edit for "dead air" or a missing spoken hook
+— leftover VOD words are not a talking-head open. Do not approve
 merely because a requested operation is technically visible: decide whether
-the frame looks deliberately composed.
+the frame looks deliberately composed. On a Short / 9:16 / TikTok crop-fill
+brief, letterboxed postage-stamp gameplay (tiny picture in blurred bars)
+IS a major composition defect.
 Report only defects visible in the images; uncertainty lowers confidence.
 
 Return ONLY this JSON shape, with at most 6 findings:

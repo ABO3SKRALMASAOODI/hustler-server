@@ -232,4 +232,25 @@ check("asking for the mix suppresses it",
       not fired(_crit(deck, ask="use a different template for each line"),
                 "slide deck"))
 
+print("== speech-led hook vs gameplay leftover words ==")
+# 605-shaped: 26s 9:16, three leftover VOD words + music. Not a talking head.
+game_idx = {
+    "words": [{"w": "Thanks", "t0": 5.3, "t1": 5.6},
+              {"w": "for", "t0": 5.6, "t1": 5.8},
+              {"w": "watching!", "t0": 5.8, "t1": 6.2}],
+    "video": {"width": 1080, "height": 1920},
+    "shots": [{"t0": 0.0, "t1": 26.0}],
+}
+game_edl = {"keep": [[0.0, 26.0]], "effects": {},
+            "music": [{"id": "m1", "start": 0, "end": 26,
+                       "storage_key": "x"}]}
+check("gameplay leftover words are not dead-air",
+      not fired(_crit(game_edl, game_idx), "dead air"))
+talk_idx = _index(words=80)
+for w in talk_idx["words"]:
+    w["t0"] += 4.8
+    w["t1"] += 4.8
+check("talking-head late hook is still dead-air",
+      fired(_crit(base, talk_idx), "dead air"))
+
 print(f"\n{PASS} checks passed")

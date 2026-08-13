@@ -15,5 +15,7 @@ def request_contract(_text):
         "the latest message removes, reverses or narrows is superseded. "
         "Interpret the request from the full conversation and use any "
         "available editing tool needed to complete it; no keyword or regex "
-        "grants or withholds tool permission."
+        "grants or withholds tool permission. A concrete make/edit brief "
+        "is permission to write the EDL this turn — do not stop at a "
+        "proposed plan and wait for approval."
     )

@@ -56,6 +56,22 @@ def test_stale_preview_is_unchecked_but_does_not_lock_export():
     assert quality == {"quality_status": "unchecked", "export_ready": True}
 
 
+def test_plan_without_write_is_pushed_once():
+    ctx = SimpleNamespace(edit_plan={"steps": ["cut the kills", "add music"]},
+                          versions_written=[])
+    messages = []
+    assert agent_loop._plan_without_write_pushback(ctx, messages, False)
+    assert "permission to cut" in messages[0]["content"]
+    assert not agent_loop._plan_without_write_pushback(ctx, messages, True)
+
+
+def test_plan_pushback_skips_once_the_edl_moved():
+    ctx = SimpleNamespace(edit_plan={"steps": ["cut"]},
+                          versions_written=[3])
+    messages = []
+    assert not agent_loop._plan_without_write_pushback(ctx, messages, False)
+
+
 def test_audio_qc_finding_is_advisory_even_after_visual_pass():
     quality = agent_loop._quality_handoff(
         _ctx(last_audio_qc_findings=["integrated loudness is clipping"]))

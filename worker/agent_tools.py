@@ -929,8 +929,13 @@ def list_assets(ctx, kind=None):
         m = a.get("meta") or {}
         dur = f", {a['duration_s']:.1f}s" if a.get("duration_s") else ""
         cap = f" — {m['caption'][:120]}" if m.get("caption") else ""
+        role = m.get("role") or ""
+        role_bit = (f" ROLE={role} — STYLE REFERENCE, not footage: "
+                    "look_at_asset / extract_audio, never insert_media"
+                    if role in ("edit_reference", "shorts_reference")
+                    else "")
         lines.append(f"[{a['kind']}] storage_key={a['storage_key']} "
-                     f"\"{m.get('filename', '?')}\"{dur}{cap}")
+                     f"\"{m.get('filename', '?')}\"{dur}{cap}{role_bit}")
     out = "\n".join(lines)
     # The commonest way a user delivers a SONG is as the video they found it
     # in — a TikTok/Reel download. Say here that this works, at the moment the
@@ -4080,15 +4085,21 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                 if lost > 0.3:
                     res += (f" It also DISCARDS {lost * 100:.0f}% of the "
                             f"source picture ({int(sw)}x{int(sh)} -> "
-                            f"{frame.ratio}). That is correct for footage "
-                            "with one subject and wrong for footage whose "
-                            "content fills the frame (gameplay and its HUD, a "
-                            "screen recording, a wide scene) — there, fitting "
-                            "the whole picture in with mode='pad_blur' is the "
-                            "honest conversion. auto_reframe measures which "
-                            "case this is instead of guessing.")
+                            f"{frame.ratio}). That is the RIGHT conversion "
+                            "when they asked for a Short / TikTok / Reel / "
+                            "crop-fill. If they asked to KEEP the HUD / "
+                            "whole frame / letterbox, switch to "
+                            "mode='pad_blur' instead.")
         except (TypeError, ValueError, AttributeError):
             pass
+    if (res.startswith("EDL v") and frame.mode in ("pad", "pad_blur")
+            and frame.ratio in ("9:16", "1:1", "4:5")):
+        res += ("\nNote: pad/pad_blur LETTERBOXES the picture. If the user "
+                "asked for a Short / TikTok / Reel / crop / 9:16 fill, they "
+                "wanted the footage to FILL the phone — call set_frame "
+                f"(\"{frame.ratio}\", \"crop\") or auto_reframe("
+                f"\"{frame.ratio}\", mode=\"crop\"). pad_blur is only when "
+                "they asked to keep the whole frame (HUD, letterbox, fit).")
     return res
 
 
@@ -11344,7 +11355,10 @@ def fetch_url(ctx, url, as_kind=None):
         # give-up script — which is how one unlucky pick used to end the
         # whole request.
         if ytaccess.bot_walled(str(e)):
-            return f"Could not download that link — {e}"
+            return (f"Could not download that link — {e} "
+                    "Continue the current edit NOW with any already-attached "
+                    "music or clips. Do not freeze the picture waiting for "
+                    "this file.")
         # DRM / premium-locked uploads are per-ITEM too, not a dead end for
         # the SONG. The official master of a chart hit is DRM-locked on
         # SoundCloud and walled on YouTube (Aug 9: "Blinding Lights" was
@@ -11363,7 +11377,9 @@ def fetch_url(ctx, url, as_kind=None):
                     "cover/remix as if it were the original.")
         return (f"Could not download that link — {e}. Tell the user that "
                 "plainly and suggest they upload the file instead. Do NOT "
-                "claim anything was added.")
+                "claim anything was added. Continue the current edit NOW "
+                "with any already-attached music or clips — a failed fetch "
+                "is not a reason to leave the picture unchanged.")
     except Exception as e:
         shutil.rmtree(workdir, ignore_errors=True)
         return (f"Could not download that link ({str(e)[:200]}). Tell the "
@@ -14949,17 +14965,19 @@ TOOLS = {
                    "batch it with your other reading calls.",
                    {"name": {"type": "string"}}),
     "set_edit_plan": (set_edit_plan, "Record YOUR edit plan for this "
-                      "request before executing it — one short line per "
-                      "move, in order. Record format, intent, style_family, "
-                      "must_keep and must_avoid as structured anchors — not "
-                      "only a vague 'make it engaging' brief. Call it in "
-                      "the same batch as your reads on any multi-step "
-                      "edit: the plan survives auto-continuations (a "
-                      "resumed pass finishes what was PLANNED instead of "
-                      "re-deciding), and the user sees it as your "
-                      "statement of intent. Re-call to replace when the "
-                      "edit legitimately changes course. Not an EDL "
-                      "write.",
+                      "request, then EXECUTE it in the SAME turn — one "
+                      "short line per move, in order. This is a note to "
+                      "yourself, not a proposal for the user to approve. "
+                      "A concrete brief is already permission to cut; do "
+                      "not stop after recording the plan. Record format, "
+                      "intent, style_family, must_keep and must_avoid as "
+                      "structured anchors — not only a vague 'make it "
+                      "engaging' brief. Call it in the same batch as your "
+                      "reads on any multi-step edit: the plan survives "
+                      "auto-continuations (a resumed pass finishes what "
+                      "was PLANNED instead of re-deciding). Re-call to "
+                      "replace when the edit legitimately changes course. "
+                      "Not an EDL write.",
                       {"steps": {"type": "array",
                                  "items": {"type": "string"}},
                        "brief": {"type": "string"},
@@ -15452,9 +15470,13 @@ TOOLS = {
                      "video — mid-take positions split the take cleanly at a "
                      "word edge, so 'in the middle of the talk' works "
                      "exactly. NEVER splice a clip the user sent as a STYLE "
-                     "REFERENCE ('make it like this', 'recreate this') — "
-                     "study that with look_at_asset and rebuild the look "
-                     "from the main footage instead. "
+                     "REFERENCE ('watch this', 'make it like this', 'use "
+                     "this as reference', 'recreate this', a YouTube they "
+                     "asked you to study) — look_at_asset it, extract_audio "
+                     "/ add_music if they want THAT song, and rebuild the "
+                     "look from the MAIN gameplay/footage. If the studio "
+                     "already placed a reference on the timeline, "
+                     "remove_insert it. "
                      "Call list_assets(kind='clip') or kind='image' "
                      "first and pass the exact storage_key. duration_s: how "
                      "long the insert plays (image default 3.0s; a video "

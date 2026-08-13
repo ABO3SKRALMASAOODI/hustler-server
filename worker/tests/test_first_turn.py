@@ -243,6 +243,16 @@ def test_the_footage_language_cannot_be_read_as_an_instruction():
 
 # ── 2. the dead end ──────────────────────────────────────────────────────
 
+def test_a_concrete_brief_is_permission_to_cut():
+    p = agent_prompt.SYSTEM_PROMPT
+    assert "A CONCRETE BRIEF IS PERMISSION TO CUT" in p
+    assert "Never end by asking them to approve a clip order" in p
+    assert "REFERENCE ≠ FOOTAGE" in p
+    assert "FILLS THE PHONE" in p
+    assert "A FAILED FETCH IS NOT A STOP" in p
+    assert "NEVER tell the user a preview is not export-ready" in p
+
+
 def test_the_prompt_forbids_ending_on_a_bare_refusal():
     p = agent_prompt.SYSTEM_PROMPT
     assert "NEVER END A TURN ON A BARE" in p

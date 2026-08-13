@@ -1347,6 +1347,28 @@ def _preview_repair_pushback(ctx, messages, t_start, already_pushed):
     return True
 
 
+_PLAN_WITHOUT_WRITE_NUDGE = (
+    "You recorded an edit plan but have not written the EDL. A concrete "
+    "brief is permission to cut — execute the plan NOW in this same turn. "
+    "Do not ask the user to approve a clip order. Stop before writing only "
+    "if a required asset is missing or a listed capability does not exist; "
+    "otherwise apply_edit_recipe / the write tools and render_preview."
+)
+
+
+def _plan_without_write_pushback(ctx, messages, already_pushed):
+    """A recorded plan with no EDL write is not a finished turn."""
+    if already_pushed:
+        return False
+    plan = getattr(ctx, "edit_plan", None) or {}
+    if not plan.get("steps"):
+        return False
+    if getattr(ctx, "versions_written", None):
+        return False
+    messages.append({"role": "system", "content": _PLAN_WITHOUT_WRITE_NUDGE})
+    return True
+
+
 # ── TURN FACTS: the reply must match what the tools actually did ──────
 
 EDIT_CLAIM = re.compile(
@@ -2256,6 +2278,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     truncated_retries = 0
     truncated_out = False          # last step died at the ceiling, saying nothing
     preview_repair_pushed = bool(_cont.get("preview_repair_pushed", False))
+    plan_write_pushed = bool(_cont.get("plan_write_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
     # TPM admission (Aug 10): the provider's tokens-per-minute ceiling is
@@ -2346,6 +2369,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "t_start": time.monotonic(),
                            "timings": timings, "honesty": honesty,
                            "preview_repair_pushed": preview_repair_pushed,
+                           "plan_write_pushed": plan_write_pushed,
                            "writes0": len(ctx.versions_written),
                            "renders0": len(ctx.rendered_versions),
                            "assets0": asset_progress})
@@ -2722,6 +2746,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 print(f"[job {job['id']}] preview v{latest['version']} "
                       "failed deterministically — requesting one corrected "
                       "EDL version instead of retrying it", flush=True)
+                if body:
+                    messages.append({"role": "assistant", "content": body})
+                continue
+            if _plan_without_write_pushback(
+                    ctx, messages, plan_write_pushed):
+                plan_write_pushed = True
+                print(f"[job {job['id']}] plan recorded with no EDL write "
+                      "— requesting execution instead of a propose-only "
+                      "reply", flush=True)
                 if body:
                     messages.append({"role": "assistant", "content": body})
                 continue
