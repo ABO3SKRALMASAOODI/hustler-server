@@ -182,16 +182,28 @@ def test_modal_warm_path_boots_real_runner_stack(monkeypatch):
 
 
 def test_modal_agent_boot_routes_nested_compute_back_to_modal(monkeypatch):
-    monkeypatch.delenv("MODAL_EXECUTOR_ENABLED", raising=False)
-    monkeypatch.delenv("MODAL_EXECUTOR_PERCENT", raising=False)
+    keys = ("WORKER_ROLE", "EXECUTOR_PROVIDER", "MODAL_EXECUTOR_PROFILE",
+            "MODAL_EXECUTOR_ENABLED", "MODAL_EXECUTOR_PERCENT")
+    before = {key: os.environ.get(key) for key in keys}
     try:
+        os.environ.pop("MODAL_EXECUTOR_ENABLED", None)
+        os.environ.pop("MODAL_EXECUTOR_PERCENT", None)
         modal_app._boot("agent", role="agent_executor")
         assert os.environ["MODAL_EXECUTOR_ENABLED"] == "1"
         assert os.environ["MODAL_EXECUTOR_PERCENT"] == "100"
     finally:
-        os.environ.pop("MODAL_EXECUTOR_ENABLED", None)
-        os.environ.pop("MODAL_EXECUTOR_PERCENT", None)
+        for key, value in before.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_modal_dependency_context_excludes_ordinary_source():
     assert modal_app.DEPENDENCY_CONTEXT_IGNORE == ["**", "!requirements.txt"]
+
+
+def test_modal_render_cpu_is_hard_capped_at_costed_profiles():
+    assert modal_app.PREVIEW_CPU == (2.0, 2.0)
+    assert modal_app.BATCH_CPU == (4.0, 4.0)
+    assert modal_app.HEAVY_CPU == (4.0, 4.0)

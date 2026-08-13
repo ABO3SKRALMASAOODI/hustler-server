@@ -57,6 +57,14 @@ COMMON = {
     "startup_timeout": 300,
 }
 
+# Modal CPU floats are reservations, not limits: an uncapped ffmpeg process
+# may burst into spare host cores and is billed for that actual usage. Pairing
+# request=limit preserves the benchmarked Cloud Run-equivalent shape and makes
+# the per-second ceiling in compute_cost.py a real ceiling.
+PREVIEW_CPU = (2.0, 2.0)   # physical cores = about 4 vCPU
+BATCH_CPU = (4.0, 4.0)     # physical cores = about 8 vCPU
+HEAVY_CPU = (4.0, 4.0)
+
 
 def _boot(profile, role="executor"):
     os.environ["WORKER_ROLE"] = role
@@ -113,17 +121,17 @@ def _run(job, profile, role="executor"):
     return executor_runtime.execute(job or {}, http_server.RUNNERS)
 
 
-@app.function(name="preview", cpu=2.0, memory=8192, **COMMON)
+@app.function(name="preview", cpu=PREVIEW_CPU, memory=8192, **COMMON)
 def preview(job):
     return _run(job, "preview")
 
 
-@app.function(name="batch", cpu=4.0, memory=16384, **COMMON)
+@app.function(name="batch", cpu=BATCH_CPU, memory=16384, **COMMON)
 def batch(job):
     return _run(job, "batch")
 
 
-@app.function(name="heavy", cpu=4.0, memory=32768, **COMMON)
+@app.function(name="heavy", cpu=HEAVY_CPU, memory=32768, **COMMON)
 def heavy(job):
     return _run(job, "heavy")
 
