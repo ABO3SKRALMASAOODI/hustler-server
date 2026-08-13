@@ -589,6 +589,27 @@ def fetch_available():
     return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
 
 
+def fetch_bytes_available():
+    """Whether any configured alternate has not failed a real-byte probe.
+
+    Unknown is allowed during rollout; a diagnostic outage never disables a
+    capability.  Once every configured provider has an explicit failed byte
+    verdict, however, making the user wait through the same known wall is not
+    resilience. A successful post-proxy probe turns this back on by itself.
+    """
+    import ytaccess
+
+    states = []
+    if config.REMOTE_EXECUTOR_URL:
+        states.append(ytaccess.provider_youtube_ok("cloud_run"))
+    if config.MODAL_EXECUTOR_ENABLED:
+        states.append(ytaccess.provider_youtube_ok("modal"))
+    if not states:
+        return False
+    return True if any(s is True for s in states) else any(s is None
+                                                            for s in states)
+
+
 def _run_across_media_egress(job):
     """Run a safe stateless media operation through independent providers.
 

@@ -3338,9 +3338,6 @@ def find_song(ctx, query):
     q = (query or "").strip()
     if not q:
         return "REJECTED: find_song needs the song name (artist helps)."
-    used_alternate_egress = bool(
-        ytaccess.youtube_walled() and remote.fetch_available() and
-        getattr(ctx, "project_id", None))
     search_error = None
     try:
         hits = _search_named_youtube(ctx, q, "song")
@@ -3386,7 +3383,7 @@ def find_song(ctx, query):
                 f"discovery was unavailable: {str(search_error)[:120]}):\n- "
                 + sc_lines + "\nPick the one that IS the song the user named. "
                 + _tail)
-    if sc and ytaccess.youtube_walled() and not used_alternate_egress:
+    if sc and ytaccess.youtube_walled():
         body = (f"{len(sc)} SoundCloud track(s) for \"{q}\" (this server "
                 "downloads these reliably; YouTube is currently blocking "
                 "this server's IP for music, so start here):\n- " + sc_lines)
@@ -11558,10 +11555,17 @@ def fetch_url(ctx, url, as_kind=None):
         # A positive boot probe means local extraction is known to be doomed:
         # skip several identical bot-wall attempts and use the independent
         # egress immediately. Unknown/healthy keeps the proven local path.
-        if is_youtube and remote.fetch_available() \
-                and ytaccess.youtube_walled():
-            got = _fetch_remote()
-            remote_fetch = True
+        if is_youtube and ytaccess.youtube_walled():
+            if remote.fetch_available() and remote.fetch_bytes_available():
+                got = _fetch_remote()
+                remote_fetch = True
+            else:
+                raise url_media.FetchMediaError(
+                    "YouTube blocked every configured server egress "
+                    "(sign in to confirm you're not a bot). Discovery still "
+                    "works, but the media-byte gate needs residential proxy "
+                    "egress; try a SoundCloud/other-web candidate or ask for "
+                    "an upload rather than waiting on a known failed route")
         else:
             try:
                 got = url_media.fetch(url, workdir, prefer=prefer)
@@ -11570,6 +11574,7 @@ def fetch_url(ctx, url, as_kind=None):
                 # measured access failure earns the executor path; private,
                 # removed, DRM and every non-YouTube failure remain unchanged.
                 if not (is_youtube and remote.fetch_available() and
+                        remote.fetch_bytes_available() and
                         ytaccess.access_blocked(str(local_error))):
                     raise
                 got = _fetch_remote()

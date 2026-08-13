@@ -162,7 +162,17 @@ jobs:
 
       - name: deploy request, agent, launcher, and batch executors
         if: steps.coalesce.outputs.should_deploy == 'true'
+        env:
+          # Optional authenticated residential proxy URL. YouTube rejects
+          # Render and tested Cloud Run regions before media-byte delivery;
+          # adding this repo secret makes the heavy fetch/search runner use a
+          # durable non-datacenter exit on the very next deploy.
+          YTDLP_PROXY: ${{ secrets.YTDLP_PROXY }}
         run: |
+          proxy_args=()
+          if [ -n "$YTDLP_PROXY" ]; then
+            proxy_args=(--update-env-vars "YTDLP_PROXY=$YTDLP_PROXY")
+          fi
           gcloud run deploy valmera-executor \
             --image "$APP_IMAGE" \
             --region us-central1 \
@@ -170,6 +180,7 @@ jobs:
             --cpu 8 --memory 32Gi --concurrency 1 \
             --min-instances 0 --max-instances 5 --timeout 3600 \
             --execution-environment gen2 --no-cpu-boost \
+            "${proxy_args[@]}" \
             --quiet
           if gcloud run services describe valmera-executor-preview \
               --region us-central1 --project valmera >/dev/null 2>&1; then
@@ -318,3 +329,22 @@ jobs:
             curl -fsS --max-time 30 "$launcher_url/health" \
               | python3 -c "import json,sys; h=json.load(sys.stdin); assert h.get('status') == 'ok', h; print('batch launcher:', h.get('job'))"
           fi
+
+      - name: record Cloud Run YouTube byte health
+        if: steps.coalesce.outputs.should_deploy == 'true'
+        run: |
+          service_url=$(gcloud run services describe valmera-executor \
+            --region us-central1 --project valmera \
+            --format='value(status.url)')
+          executor_secret=$(gcloud run services describe valmera-executor \
+            --region us-central1 --project valmera --format=json \
+            | python3 -c "import json,sys; e=json.load(sys.stdin)['spec']['template']['spec']['containers'][0].get('env',[]); print(next((x.get('value','') for x in e if x.get('name') == 'REMOTE_EXECUTOR_SECRET'),''))")
+          response=$(curl -fsS --max-time 600 \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $executor_secret" \
+            -d '{"job":{"id":null,"type":"ytprobe","project_id":"provider-health","user_id":null,"attempts":0,"payload":{"timeout_s":120}}}' \
+            "$service_url/run") || {
+              echo "::warning::Cloud Run YouTube byte probe request failed"
+              exit 0
+            }
+          printf '%s' "$response" | python3 -c "import json,sys; v=(json.load(sys.stdin).get('result') or {}); print(json.dumps({'ok':v.get('ok'),'strategy':v.get('strategy'),'why':v.get('why'),'code':v.get('code')}))"

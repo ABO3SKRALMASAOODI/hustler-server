@@ -111,6 +111,7 @@ def test_walled_youtube_routes_remote_without_a_doomed_local_attempt(
     ctx = _Ctx(tmp_path)
     monkeypatch.setattr(agent_tools.ytaccess, "youtube_walled", lambda: True)
     monkeypatch.setattr(agent_tools.remote, "fetch_available", lambda: True)
+    monkeypatch.setattr(agent_tools.remote, "fetch_bytes_available", lambda: True)
     monkeypatch.setattr(
         agent_tools.url_media, "fetch",
         lambda *a, **k: (_ for _ in ()).throw(
@@ -185,6 +186,21 @@ def test_walled_footage_discovery_uses_remote_search(monkeypatch, tmp_path):
     out = agent_tools.find_footage(ctx, "starship launch")
     assert "youtube.com/watch?v=flight" in out
     assert "as_kind='clip'" in out
+
+
+def test_explicitly_failed_provider_probe_skips_known_doomed_download(
+        monkeypatch, tmp_path):
+    ctx = _Ctx(tmp_path)
+    monkeypatch.setattr(agent_tools.ytaccess, "youtube_walled", lambda: True)
+    monkeypatch.setattr(agent_tools.remote, "fetch_available", lambda: True)
+    monkeypatch.setattr(agent_tools.remote, "fetch_bytes_available", lambda: False)
+    monkeypatch.setattr(
+        agent_tools.remote, "run_fetch_remote",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("failed provider health must stop the retry")))
+    out = agent_tools.fetch_url(
+        ctx, "https://youtube.com/watch?v=x", as_kind="music")
+    assert "residential proxy" in out and "Do not freeze" in out
 
 
 def test_search_runner_returns_access_wall_as_provider_fallback_data(

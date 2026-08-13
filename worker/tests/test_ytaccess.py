@@ -174,6 +174,22 @@ def test_youtube_walled_is_false_when_unknown(monkeypatch):
     assert ytaccess.youtube_walled() is False
 
 
+def test_provider_health_requires_real_download_bytes(monkeypatch):
+    monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
+    state = {"row": None}
+
+    class FakeDb:
+        def run(self, fn, *a, **k):
+            return state["row"]
+
+    monkeypatch.setattr(ytaccess.db, "Db", FakeDb)
+    assert ytaccess.provider_youtube_ok("cloud_run") is None
+    state["row"] = json.dumps({"ok": True, "download_ok": False})
+    assert ytaccess.provider_youtube_ok("cloud_run") is False
+    state["row"] = json.dumps({"ok": True, "download_ok": True})
+    assert ytaccess.provider_youtube_ok("cloud_run") is True
+
+
 def test_db_trouble_degrades_to_anonymous(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
     monkeypatch.setattr(config, "YTDLP_COOKIES_KV_KEY", "ytdlp_cookies")

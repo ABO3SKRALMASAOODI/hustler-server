@@ -245,6 +245,23 @@ def _health_cache_reset():
     _health_cache.update(at=0.0, walled=None)
 
 
+def provider_youtube_ok(provider):
+    """True/False for a provider's last real-byte probe, None if unknown."""
+    if not config.DATABASE_URL:
+        return None
+    provider = re.sub(r"[^a-z0-9_]+", "_", str(provider or "").lower())
+    if not provider:
+        return None
+    try:
+        raw = db.Db().run(db.kv_get, f"ytdlp_probe_{provider}")
+        if not raw:
+            return None
+        verdict = json.loads(raw)
+        return bool(verdict.get("ok") and verdict.get("download_ok"))
+    except Exception:
+        return None
+
+
 def resolve_cookies():
     """The jar content and which door it came through, or (None, source).
 
