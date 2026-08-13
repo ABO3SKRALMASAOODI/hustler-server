@@ -436,18 +436,44 @@ def _recover_modal_result(call_id, job, deadline):
         except TimeoutError as exc:
             last = exc
         except Exception as exc:
+            if not _modal_transport_error(exc):
+                raise RemoteExecutorError(
+                    f"Modal call {call_id} failed: {exc}") from exc
             last = exc
             time.sleep(2)
         if job.get("id") is not None:
+            probe = dbx.Db()
             try:
-                current = dbx.Db().run(dbx.get_job, job["id"])
+                current = probe.run(dbx.get_job, job["id"])
                 if current and current.get("state") == "done":
                     return {"result": current.get("result"),
                             "job_completed": True}
             except Exception:
                 pass
+            finally:
+                probe.reset()
     raise RemoteExecutorError(
         f"Modal call {call_id} could not be recovered: {last}") from last
+
+
+def _modal_transport_error(exc):
+    """True only when asking the same durable call again can help.
+
+    Function failures and timeouts are terminal results. Retrying ``get`` for
+    an hour cannot change them; it only delays the user's repair path. Modal's
+    connection/service failures are different: the paid input may still be
+    running, so reconnect to its call id instead of launching a duplicate.
+    """
+    try:
+        from modal import exception as modal_exc
+        transient = (
+            modal_exc.ConnectionError,
+            modal_exc.InternalError,
+            modal_exc.ServiceError,
+        )
+    except Exception:
+        transient = ()
+    return isinstance(exc, (ConnectionError, OSError) + transient)
 
 
 def _run_modal(job, function_override=None):
@@ -472,9 +498,14 @@ def _run_modal(job, function_override=None):
         raise RemoteExecutorError(
             f"Modal {name} call {call_id} exceeded its dispatcher deadline") \
             from exc
-    except Exception:
+    except Exception as exc:
         # The call id proves submission happened. Never fall back and buy a
-        # duplicate render; reconnect to the durable call instead.
+        # duplicate render. Reconnect only for a transport failure; a remote
+        # function failure is already terminal and must reach repair/reaper
+        # policy immediately rather than being polled for the next hour.
+        if not _modal_transport_error(exc):
+            raise RemoteExecutorError(
+                f"Modal {name} call {call_id} failed: {exc}") from exc
         data = _recover_modal_result(call_id, job, deadline)
     return _interpret_executor_data(data, job)
 

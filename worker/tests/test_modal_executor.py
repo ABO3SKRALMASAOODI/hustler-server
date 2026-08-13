@@ -105,6 +105,24 @@ def test_postlaunch_transport_failure_reconnects_without_cloud_fallback(
     assert cloud == []
 
 
+def test_postlaunch_terminal_failure_surfaces_without_hour_long_recovery(
+        monkeypatch):
+    _enable(monkeypatch)
+    function = _Function(_Call(error=ValueError("container failed to boot")))
+    monkeypatch.setattr(remote, "_modal_function", lambda name: function)
+    recovered = []
+    monkeypatch.setattr(
+        remote, "_recover_modal_result",
+        lambda *args: recovered.append(True) or {"result": {"wrong": True}})
+
+    try:
+        remote._run_remote(JOB)
+        assert False, "terminal Modal failure should be raised"
+    except remote.RemoteExecutorError as exc:
+        assert "container failed to boot" in str(exc)
+    assert recovered == []
+
+
 def test_postlaunch_wait_outlasts_short_dispatch_deadline(monkeypatch):
     """A durable render is never requeued while the same paid call runs."""
     _enable(monkeypatch)
