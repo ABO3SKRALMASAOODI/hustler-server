@@ -25,6 +25,8 @@ on:
       - "worker/**"
       - "!worker/tests/**"
       - "!worker/**/*.md"
+      - "!worker/modal_app.py"
+      - "!worker/setup_modal_executor.py"
   workflow_dispatch: {}
 
 concurrency:

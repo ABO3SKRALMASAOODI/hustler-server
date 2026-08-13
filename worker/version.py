@@ -28,13 +28,11 @@ are not the kind of change anyone thinks to stamp. A hash over the source needs
 no discipline at all: if the two services are running different bytes, they
 report different fingerprints, whatever changed.
 
-Scope is the worker package's TOP-LEVEL `*.py` — the program itself. Not
-`tests/`, not `tools/`, not the asset directories: those are the files whose
-presence can legitimately differ between a Docker build context and a
-`gcloud run deploy --source` upload, and a fingerprint that cries skew when
-nothing is wrong is worse than no fingerprint, because the next real one gets
-ignored. Every top-level module here is imported by one role or the other, so
-nothing that changes behaviour is outside the window.
+Scope is the worker package's TOP-LEVEL runtime `*.py` — the shared program
+itself. Not tests, tools, assets, or provider deployment adapters: those can
+legitimately differ between Cloud Run and Modal, and a fingerprint that cries
+skew when the shared renderer is identical is worse than no fingerprint. Each
+provider reports its adapter separately.
 
 The fingerprint is NEVER a gate. It does not refuse a job, hold back a render
 or withhold a result — that is precisely the round-53 mistake, where a version
@@ -46,6 +44,7 @@ import hashlib
 import os
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
+_PROVIDER_ADAPTERS = frozenset({"modal_app.py", "setup_modal_executor.py"})
 
 _cached = None
 
@@ -54,7 +53,8 @@ def _source_files():
     """The top-level modules, sorted — a stable list on any filesystem."""
     try:
         names = sorted(n for n in os.listdir(_DIR)
-                       if n.endswith(".py") and not n.startswith("."))
+                       if n.endswith(".py") and not n.startswith(".")
+                       and n not in _PROVIDER_ADAPTERS)
     except OSError:
         return []
     return [os.path.join(_DIR, n) for n in names]

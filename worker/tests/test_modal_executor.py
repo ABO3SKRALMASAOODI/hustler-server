@@ -168,10 +168,30 @@ def test_unconfigured_job_type_keeps_cloud_run(monkeypatch):
 
 def test_modal_warm_path_boots_real_runner_stack(monkeypatch):
     monkeypatch.setattr(modal_app, "_boot", lambda profile, role="executor": None)
-    monkeypatch.setattr(config, "require_core", lambda: None)
+    monkeypatch.setattr(
+        config, "require_core",
+        lambda: (_ for _ in ()).throw(AssertionError(
+            "warm-up must not apply a role-specific launch guard")))
     result = modal_app._run({"type": "__warm"}, "preview")
     report = result["result"]
     assert report["warmed"] is True
     assert report["profile"] == "preview"
+    assert report["adapter_version"] == modal_app.adapter_version()
     assert "preview" in report["runners"]
     assert report["ffmpeg"].startswith("ffmpeg version")
+
+
+def test_modal_agent_boot_routes_nested_compute_back_to_modal(monkeypatch):
+    monkeypatch.delenv("MODAL_EXECUTOR_ENABLED", raising=False)
+    monkeypatch.delenv("MODAL_EXECUTOR_PERCENT", raising=False)
+    try:
+        modal_app._boot("agent", role="agent_executor")
+        assert os.environ["MODAL_EXECUTOR_ENABLED"] == "1"
+        assert os.environ["MODAL_EXECUTOR_PERCENT"] == "100"
+    finally:
+        os.environ.pop("MODAL_EXECUTOR_ENABLED", None)
+        os.environ.pop("MODAL_EXECUTOR_PERCENT", None)
+
+
+def test_modal_dependency_context_excludes_ordinary_source():
+    assert modal_app.DEPENDENCY_CONTEXT_IGNORE == ["**", "!requirements.txt"]

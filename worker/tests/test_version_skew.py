@@ -39,6 +39,12 @@ def test_fingerprint_covers_the_files_that_broke_production():
         assert required in names, f"{required} is outside the fingerprint"
 
 
+def test_provider_deployment_adapters_do_not_create_false_shared_code_skew():
+    names = {os.path.basename(p) for p in version._source_files()}
+    assert "modal_app.py" not in names
+    assert "setup_modal_executor.py" not in names
+
+
 def test_report_carries_the_paired_constants():
     rep = version.version_report()
     assert rep["code_version"] == version.code_version()

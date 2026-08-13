@@ -9,6 +9,7 @@ Functions. A returned call id is an unambiguous launch boundary and lets the
 dispatcher reconnect instead of starting a duplicate paid render.
 """
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -21,17 +22,23 @@ APP_NAME = "valmera-executor"
 SECRET_NAME = "valmera-executor-production"
 
 # The dependency image is intentionally identical to the proven Cloud Run
-# executor image. Modal caches Dockerfile layers, and add_local_dir adds only
-# source on ordinary deploys. This avoids provider-specific ffmpeg/model drift.
+# executor image. Keep ordinary source out of the Docker build context: the
+# Dockerfiles' final ``COPY . .`` then copies only requirements.txt, and the
+# add_local_dir layer below supplies the current source. Without this ignore a
+# one-line Python change invalidates Chromium, Whisper and Demucs and turns
+# every release into a multi-minute full image rebuild.
+DEPENDENCY_CONTEXT_IGNORE = ["**", "!requirements.txt"]
 image = modal.Image.from_dockerfile(
     ROOT / "Dockerfile",
     context_dir=ROOT,
     build_args={"STEMS": "1", "FFMPEG_STATIC": "1"},
+    ignore=DEPENDENCY_CONTEXT_IGNORE,
 ).add_local_dir(ROOT, "/app", copy=True)
 
 agent_image = modal.Image.from_dockerfile(
     ROOT / "Dockerfile.agent-base",
     context_dir=ROOT,
+    ignore=DEPENDENCY_CONTEXT_IGNORE,
 ).add_local_dir(ROOT, "/app", copy=True)
 
 secret = modal.Secret.from_name(SECRET_NAME)
@@ -55,9 +62,23 @@ def _boot(profile, role="executor"):
     os.environ["WORKER_ROLE"] = role
     os.environ["EXECUTOR_PROVIDER"] = "modal"
     os.environ["MODAL_EXECUTOR_PROFILE"] = profile
+    # A Modal agent turn must offload any render tools to the compute
+    # functions, exactly as the Render dispatcher does. Set this before
+    # importing config/http_server so their module-level routing is correct.
+    if role == "agent_executor":
+        os.environ["MODAL_EXECUTOR_ENABLED"] = "1"
+        os.environ["MODAL_EXECUTOR_PERCENT"] = "100"
     os.environ.setdefault("WORKER_TMP_DIR", "/tmp/valmera")
     if "/app" not in sys.path:
         sys.path.insert(0, "/app")
+
+
+def adapter_version():
+    """Fingerprint the Modal-only transport/configuration adapter."""
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "unknown"
 
 
 def _run(job, profile, role="executor"):
@@ -65,7 +86,6 @@ def _run(job, profile, role="executor"):
     import config
     import http_server
     import executor_runtime
-    config.require_core()
     if (job or {}).get("type") == "__warm":
         import subprocess
         import version
@@ -78,6 +98,7 @@ def _run(job, profile, role="executor"):
                 "profile": profile,
                 "role": role,
                 "code_version": version.code_version(),
+                "adapter_version": adapter_version(),
                 "features": version.version_report().get("features", []),
                 "runners": sorted(http_server.RUNNERS),
                 "ffmpeg": ffmpeg,
@@ -87,6 +108,7 @@ def _run(job, profile, role="executor"):
             },
             "job_completed": False,
         }
+    config.require_core()
     executor_runtime.ensure_heartbeat()
     return executor_runtime.execute(job or {}, http_server.RUNNERS)
 
@@ -129,6 +151,7 @@ def health():
     report.update({
         "status": "ok",
         "provider": "modal",
+        "adapter_version": adapter_version(),
         "compute_region": os.getenv("MODAL_REGION", "unknown"),
         "compute_cloud_provider": os.getenv(
             "MODAL_CLOUD_PROVIDER", "unknown"),

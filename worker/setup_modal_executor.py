@@ -38,6 +38,12 @@ def _service_env():
             continue
         if "value" in item:
             env[name] = str(item["value"])
+    # Agent turns running on Modal can launch nested render-tool calls. Keep
+    # Cloud Run's public service URL available as a pre-launch fallback; the
+    # existing shared bearer secret still authenticates every request.
+    service_url = ((service.get("status") or {}).get("url") or "").strip()
+    if service_url:
+        env.setdefault("REMOTE_EXECUTOR_URL", service_url)
     required = {"DATABASE_URL", "S3_ENDPOINT", "S3_ACCESS_KEY_ID",
                 "S3_SECRET_ACCESS_KEY", "S3_BUCKET"}
     missing = sorted(required - env.keys())

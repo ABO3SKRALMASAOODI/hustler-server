@@ -58,20 +58,29 @@ jobs:
       - name: verify deployed code and provider
         run: |
           want=$(cd worker && python -c "import version; print(version.code_version())")
-          got=$(python - <<'PY'
+          want_adapter=$(python - <<'PY'
+          import hashlib
+          print(hashlib.sha256(open("worker/modal_app.py", "rb").read()).hexdigest()[:12])
+          PY
+          )
+          read -r got got_adapter < <(python - <<'PY'
           import json
           import modal
           health = modal.Function.from_name(
               "valmera-executor", "health", environment_name="main").remote()
           assert health.get("provider") == "modal", health
-          print(health["code_version"])
+          print(health["code_version"], health["adapter_version"])
           PY
           )
           test "$want" = "$got" || {
             echo "::error::Modal executor reports $got, expected $want"
             exit 1
           }
-          echo "Modal executor code=$got provider=modal"
+          test "$want_adapter" = "$got_adapter" || {
+            echo "::error::Modal adapter reports $got_adapter, expected $want_adapter"
+            exit 1
+          }
+          echo "Modal executor code=$got adapter=$got_adapter provider=modal"
 
       - name: record Modal YouTube byte health
         run: |
