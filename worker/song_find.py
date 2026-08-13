@@ -291,6 +291,29 @@ def _candidates(engine, query, count, what="a search query"):
     return out
 
 
+def run_search_job(worker_db, job):
+    """Search YouTube on an executor egress; no media bytes move here."""
+    del worker_db
+    payload = job.get("payload") or {}
+    query = str(payload.get("query") or "").strip()
+    mode = payload.get("mode") or "footage"
+    try:
+        count = max(1, min(8, int(payload.get("count") or SEARCH_COUNT)))
+    except (TypeError, ValueError):
+        count = SEARCH_COUNT
+    if not query or mode not in ("song", "footage"):
+        return {"ok": False, "error": "search job needs a query and mode",
+                "access_blocked": False}
+    try:
+        hits = (search(query, count=count) if mode == "song" else
+                search_footage(query, count=count))
+    except SongFindError as exc:
+        detail = str(exc)
+        return {"ok": False, "error": detail,
+                "access_blocked": ytaccess.access_blocked(detail)}
+    return {"ok": True, "hits": hits, "mode": mode}
+
+
 def describe(c):
     bits = []
     if c.get("uploader"):

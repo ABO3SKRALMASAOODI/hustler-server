@@ -41,6 +41,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -620,6 +621,91 @@ def fetch(url, workdir, prefer=None):
            "uploader": (info or {}).get("uploader")}
     out.update(probed)
     return out
+
+
+def run_fetch_job(worker_db, job):
+    """Fetch one URL on an executor egress and upload it there.
+
+    Render's fixed datacenter IP can be rejected by YouTube before yt-dlp is
+    given a single format.  This stateless runner gives the dispatcher two
+    genuinely different network exits (Cloud Run and Modal) without hauling
+    a potentially 500 MB file through the /run response.  It also extracts
+    review frames from the exact downloaded rendition before deleting it, so
+    a remote fetch preserves the same look-before-placement contract as a
+    local one.
+
+    Expected media failures are returned as data rather than raised.  That is
+    important: remote.run_fetch_remote can distinguish an access wall (try
+    the next provider) from a private/removed/oversize item (stop honestly).
+    """
+    del worker_db                         # stateless, no executor-side DB rows
+    import storage
+
+    payload = job.get("payload") or {}
+    project_id = job.get("project_id")
+    url = str(payload.get("url") or "").strip()
+    prefer = payload.get("prefer")
+    if not project_id or not url:
+        return {"ok": False, "error": "fetch job needs project_id and url",
+                "access_blocked": False}
+    if prefer not in (None, KIND_VIDEO, KIND_AUDIO, KIND_IMAGE):
+        return {"ok": False, "error": "invalid fetch media kind",
+                "access_blocked": False}
+
+    workdir = os.path.join(config.TMP_DIR, f"fetch_{uuid.uuid4().hex[:8]}")
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        try:
+            got = fetch(url, workdir, prefer=prefer)
+        except FetchMediaError as exc:
+            detail = str(exc)
+            return {"ok": False, "error": detail,
+                    "access_blocked": (is_youtube :=
+                                       ytaccess.is_youtube_url(url)) and
+                                      ytaccess.access_blocked(detail),
+                    "youtube": is_youtube}
+
+        path, kind = got["path"], got["kind"]
+        key = storage_key(project_id, kind, path)
+        storage.upload_file(path, key, content_type(path))
+
+        review_keys, review_labels = [], []
+        if payload.get("review", True) and kind in (KIND_VIDEO, KIND_IMAGE):
+            if kind == KIND_IMAGE:
+                samples = [(0.0, "full image")]
+            else:
+                try:
+                    duration = float(got.get("duration_s") or 0.0)
+                except (TypeError, ValueError):
+                    duration = 0.0
+                fractions = (0.08, 0.34, 0.61, 0.87)
+                samples = [(min(max(duration * f, 0.0),
+                                max(0.0, duration - 0.04)),
+                            f"{duration * f:g}s") for f in fractions]
+                if duration <= 0.08:
+                    samples = [(0.0, "0s")]
+            for i, (at, label) in enumerate(samples):
+                frame = os.path.join(workdir, f"review_{i}.jpg")
+                try:
+                    media.frame_at(path, at, frame, width=768)
+                except Exception:
+                    continue
+                frame_key = (f"scratch/{project_id}/fetch-review/"
+                             f"{uuid.uuid4().hex[:12]}_{i}.jpg")
+                try:
+                    storage.upload_file(frame, frame_key, "image/jpeg")
+                except Exception:
+                    continue              # review is evidence, not a gate
+                review_keys.append(frame_key)
+                review_labels.append(label)
+
+        result = {k: v for k, v in got.items() if k != "path"}
+        result.update(ok=True, storage_key=key,
+                      review_keys=review_keys,
+                      review_labels=review_labels)
+        return result
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def storage_key(project_id, kind, path):

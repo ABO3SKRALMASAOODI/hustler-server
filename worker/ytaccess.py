@@ -221,8 +221,19 @@ def youtube_walled():
         raw = db.Db().run(db.kv_get, "ytdlp_probe")
         if raw:
             v = json.loads(raw)
-            walled = (str(v.get("why", "")).startswith("bot_wall")
-                      or str(v.get("download_why", "")).startswith("bot_wall"))
+            # The current probe names this family ``access_blocked`` because
+            # it now includes the media-CDN 403 gate as well as the older
+            # player-response bot wall. Read both spellings so a rolling
+            # deploy also understands the previous probe schema. Individual
+            # attempts are checked too: the useful evidence can live there
+            # when a later non-access error becomes the top-level verdict.
+            reasons = [str(v.get("why", "")),
+                       str(v.get("download_why", ""))]
+            reasons.extend(str(a.get("why", ""))
+                           for a in (v.get("attempts") or [])
+                           if isinstance(a, dict))
+            walled = any(r.startswith(("bot_wall", "access_blocked"))
+                         for r in reasons)
     except Exception:
         walled = False
     _health_cache.update(at=now, walled=walled)

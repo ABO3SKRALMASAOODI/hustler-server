@@ -584,6 +584,68 @@ def run_capture_remote(project_id, payload, user_id=None):
                         "attempts": 0, "payload": payload})
 
 
+def fetch_available():
+    """Whether a different executor egress can acquire a blocked URL."""
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
+
+
+def _run_across_media_egress(job):
+    """Run a safe stateless media operation through independent providers.
+
+    Cloud Run and Modal use the same stateless runner but leave the internet
+    through different networks. An explicit YouTube access wall advances to
+    the next provider; a content verdict such as private/removed does not.
+    Transport failure also earns the other provider, because no successful
+    response means the caller has no usable storage key (a possible orphan is
+    reclaimed with ordinary scratch/fetched-object lifecycle cleanup).
+    """
+    providers = []
+    if config.REMOTE_EXECUTOR_URL:
+        providers.append(("cloud_run", lambda: _run_cloud(job)))
+    if config.MODAL_EXECUTOR_ENABLED:
+        providers.append(("modal", lambda: _run_modal(
+            job, function_override="heavy")))
+    if not providers:
+        raise RemoteExecutorError("no alternate media-fetch executor is set")
+
+    last_result, errors = None, []
+    for name, invoke in providers:
+        try:
+            result = invoke()
+        except Exception as exc:
+            errors.append(f"{name}: {str(exc)[:220]}")
+            continue
+        if not isinstance(result, dict):
+            errors.append(f"{name}: invalid fetch response")
+            continue
+        result["fetch_provider"] = name
+        if result.get("ok"):
+            return result
+        last_result = result
+        if not result.get("access_blocked"):
+            return result
+    if last_result is not None:
+        if errors:
+            last_result["provider_errors"] = errors
+        return last_result
+    raise RemoteExecutorError("; ".join(errors) or
+                              "all alternate media executors failed")
+
+
+def run_fetch_remote(project_id, payload, user_id=None):
+    """Fetch and store media through the first egress that can reach it."""
+    return _run_across_media_egress({
+        "id": None, "type": "fetch", "project_id": project_id,
+        "user_id": user_id, "attempts": 0, "payload": payload})
+
+
+def run_search_remote(project_id, payload, user_id=None):
+    """Discover named YouTube media through alternate egress providers."""
+    return _run_across_media_egress({
+        "id": None, "type": "search", "project_id": project_id,
+        "user_id": user_id, "attempts": 0, "payload": payload})
+
+
 def frames_available():
     """Is there an executor to decode a stored original on? (round 62)
 

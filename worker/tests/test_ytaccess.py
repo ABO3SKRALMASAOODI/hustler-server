@@ -158,6 +158,13 @@ def test_youtube_walled_reads_the_probe_row(monkeypatch):
     ytaccess._health_cache_reset()
     state["row"] = json.dumps({"ok": False, "why": "bot_wall: Sign in"})
     assert ytaccess.youtube_walled() is True
+    ytaccess._health_cache_reset()
+    state["row"] = json.dumps({
+        "ok": False,
+        "why": "access_blocked: Sign in to confirm you're not a bot",
+        "attempts": [{"why": "access_blocked: HTTP Error 403"}],
+    })
+    assert ytaccess.youtube_walled() is True
 
 
 def test_youtube_walled_is_false_when_unknown(monkeypatch):

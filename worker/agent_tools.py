@@ -3305,6 +3305,24 @@ def fetch_music(ctx, id):
             "beat_align_cuts.")
 
 
+def _search_named_youtube(ctx, query, mode):
+    """Search locally when healthy, otherwise through independent egress."""
+    project_id = getattr(ctx, "project_id", None)
+    if ytaccess.youtube_walled() and remote.fetch_available() and project_id:
+        try:
+            got = remote.run_search_remote(
+                project_id, {"query": query, "mode": mode, "count": 6},
+                user_id=(getattr(ctx, "job", None) or {}).get("user_id"))
+        except Exception as exc:
+            raise song_find.SongFindError(str(exc)[:240]) from exc
+        if not isinstance(got, dict) or not got.get("ok"):
+            raise song_find.SongFindError(
+                str((got or {}).get("error") or "alternate search failed")[:240])
+        return list(got.get("hits") or [])
+    return (song_find.search(query) if mode == "song" else
+            song_find.search_footage(query))
+
+
 def find_song(ctx, query):
     """READ: candidate web links for a song the user named. The pick is
     downloaded by fetch_url, so this tool moves no bytes itself."""
@@ -3320,13 +3338,15 @@ def find_song(ctx, query):
     q = (query or "").strip()
     if not q:
         return "REJECTED: find_song needs the song name (artist helps)."
+    used_alternate_egress = bool(
+        ytaccess.youtube_walled() and remote.fetch_available() and
+        getattr(ctx, "project_id", None))
+    search_error = None
     try:
-        hits = song_find.search(q)
+        hits = _search_named_youtube(ctx, q, "song")
     except song_find.SongFindError as e:
-        return (f"Song search failed ({e}). Tell the user plainly and ask "
-                "them to paste a link instead — do NOT claim anything was "
-                "found or added.")
-    if not hits:
+        hits, search_error = [], e
+    if not hits and search_error is None:
         return (f"No results for \"{q}\". Check the spelling with the "
                 "user, or ask them to paste a link to the track "
                 "(fetch_url downloads it).")
@@ -3357,7 +3377,16 @@ def find_song(ctx, query):
     # a source the datacenter IP cannot reach just buys a guaranteed failed
     # download first. Self-healing: add YTDLP_PROXY and the next probe clears
     # the wall, so YouTube (better masters) leads again with no code change.
-    if sc and ytaccess.youtube_walled():
+    if search_error is not None and not sc:
+        return (f"Song search failed ({search_error}). Tell the user plainly "
+                "and ask them to paste a link instead — do NOT claim "
+                "anything was found or added.")
+    if search_error is not None and sc:
+        return (f"{len(sc)} SoundCloud track(s) for \"{q}\" (YouTube "
+                f"discovery was unavailable: {str(search_error)[:120]}):\n- "
+                + sc_lines + "\nPick the one that IS the song the user named. "
+                + _tail)
+    if sc and ytaccess.youtube_walled() and not used_alternate_egress:
         body = (f"{len(sc)} SoundCloud track(s) for \"{q}\" (this server "
                 "downloads these reliably; YouTube is currently blocking "
                 "this server's IP for music, so start here):\n- " + sc_lines)
@@ -3495,6 +3524,41 @@ def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
         return 0
 
 
+def _queue_remote_download_review(ctx, got, label="media"):
+    """Deliver executor-produced review frames and reclaim their objects."""
+    keys = list(got.get("review_keys") or [])
+    labels = list(got.get("review_labels") or [])
+    frames, used_labels = [], []
+    try:
+        if not keys or not _can_receive_images(ctx):
+            return 0
+        for i, key in enumerate(keys):
+            if not key:
+                continue
+            local = os.path.join(
+                ctx.workdir, f"review_remote_{uuid.uuid4().hex[:8]}.jpg")
+            try:
+                storage.download_to(key, local)
+            except Exception:
+                continue
+            frames.append(local)
+            used_labels.append(labels[i] if i < len(labels) else
+                               f"sample {i + 1}")
+        if not frames:
+            return 0
+        _deliver_frames(
+            ctx, frames, used_labels,
+            "Verify subject, visual quality, relevance, logos/watermarks and "
+            "the exact useful moment before placing this asset in the edit.",
+            f"Automatic review of the downloaded {label}")
+        return len(frames)
+    finally:
+        try:
+            storage.delete_keys([k for k in keys if k])
+        except Exception:
+            pass
+
+
 def find_footage(ctx, query):
     """READ: candidate web links for real footage of a NAMED topic. The
     pick is downloaded by fetch_url, so this tool moves no bytes itself."""
@@ -3513,7 +3577,7 @@ def find_footage(ctx, query):
                 "('spacex starship launch', 'tesla factory robots'), not "
                 "a mood.")
     try:
-        hits = song_find.search_footage(q)
+        hits = _search_named_youtube(ctx, q, "footage")
     except song_find.SongFindError as e:
         return (f"Footage search failed ({e}). Tell the user plainly — do "
                 "NOT claim footage was found. search_stock and their own "
@@ -11475,7 +11539,41 @@ def fetch_url(ctx, url, as_kind=None):
     workdir = os.path.join(ctx.workdir, f"fetch_{uuid.uuid4().hex[:8]}")
     os.makedirs(workdir, exist_ok=True)
     try:
-        got = url_media.fetch(url, workdir, prefer=prefer)
+        remote_fetch = False
+        is_youtube = ytaccess.is_youtube_url(url)
+
+        def _fetch_remote():
+            result = remote.run_fetch_remote(
+                ctx.project_id,
+                {"url": url, "prefer": prefer,
+                 "review": _can_receive_images(ctx)},
+                user_id=(getattr(ctx, "job", None) or {}).get("user_id"))
+            if (not isinstance(result, dict) or not result.get("ok") or
+                    not result.get("storage_key")):
+                raise url_media.FetchMediaError(
+                    str((result or {}).get("error") or
+                        "the alternate fetch services could not acquire it"))
+            return result
+
+        # A positive boot probe means local extraction is known to be doomed:
+        # skip several identical bot-wall attempts and use the independent
+        # egress immediately. Unknown/healthy keeps the proven local path.
+        if is_youtube and remote.fetch_available() \
+                and ytaccess.youtube_walled():
+            got = _fetch_remote()
+            remote_fetch = True
+        else:
+            try:
+                got = url_media.fetch(url, workdir, prefer=prefer)
+            except url_media.FetchMediaError as local_error:
+                # The wall may appear after boot, or only on this upload. One
+                # measured access failure earns the executor path; private,
+                # removed, DRM and every non-YouTube failure remain unchanged.
+                if not (is_youtube and remote.fetch_available() and
+                        ytaccess.access_blocked(str(local_error))):
+                    raise
+                got = _fetch_remote()
+                remote_fetch = True
     except url_media.FetchMediaError as e:
         # Every failure here is a sentence written to be shown to a user
         # ("Private video", "over the 50 MB limit"). The instruction to not
@@ -11494,7 +11592,8 @@ def fetch_url(ctx, url, as_kind=None):
         # suggest an upload" coda onto that would bury the retry in a
         # give-up script — which is how one unlucky pick used to end the
         # whole request.
-        if ytaccess.bot_walled(str(e)):
+        if ytaccess.access_blocked(str(e)) and \
+                ytaccess.is_youtube_url(url):
             return (f"Could not download that link — {e} "
                     "Continue the current edit NOW with any already-attached "
                     "music or clips. Do not freeze the picture waiting for "
@@ -11525,14 +11624,20 @@ def fetch_url(ctx, url, as_kind=None):
         return (f"Could not download that link ({str(e)[:200]}). Tell the "
                 "user it did not work. Do NOT claim anything was added.")
 
-    kind, path = got["kind"], got["path"]
-    key = url_media.storage_key(ctx.project_id, kind, path)
+    kind = got["kind"]
+    path = got.get("path")
+    key = (got.get("storage_key") if remote_fetch else
+           url_media.storage_key(ctx.project_id, kind, path))
     reviewed = 0
     try:
-        storage.upload_file(path, key, url_media.content_type(path))
-        reviewed = _queue_download_review(
-            ctx, path, kind, got.get("duration_s"), got.get("filename") or
-            url_media.KIND_LABEL[kind])
+        if remote_fetch:
+            reviewed = _queue_remote_download_review(
+                ctx, got, got.get("filename") or url_media.KIND_LABEL[kind])
+        else:
+            storage.upload_file(path, key, url_media.content_type(path))
+            reviewed = _queue_download_review(
+                ctx, path, kind, got.get("duration_s"),
+                got.get("filename") or url_media.KIND_LABEL[kind])
     except Exception as e:
         return (f"Downloaded that {url_media.KIND_LABEL[kind]} but could not "
                 f"save it to storage ({str(e)[:160]}). Do NOT claim it was "
@@ -11555,6 +11660,7 @@ def fetch_url(ctx, url, as_kind=None):
                      "fetched": True,
                      "source_url": got["source_url"],
                      "extractor": got.get("extractor"),
+                     "fetch_provider": got.get("fetch_provider", "worker"),
                      "title": got.get("title"),
                      "uploader": got.get("uploader"),
                      "license": None,
@@ -11564,7 +11670,9 @@ def fetch_url(ctx, url, as_kind=None):
                                       "republication rights.")})
     ctx.urls_fetched.append({"storage_key": key, "kind": kind,
                              "url": got["source_url"],
-                             "filename": got["filename"]})
+                             "filename": got["filename"],
+                             "fetch_provider": got.get("fetch_provider",
+                                                       "worker")})
 
     bits = []
     if got.get("duration_s"):

@@ -909,7 +909,7 @@ MODAL_EXECUTOR_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "MODAL_EXECUTOR_TYPES",
         "preview,preview_check,final,index,capture,frames,track,matte,"
-        "smatch,clean,stems,agent_turn").split(",") if part.strip())
+        "smatch,clean,stems,fetch,search,agent_turn").split(",") if part.strip())
 MODAL_CLOUD_RUN_FALLBACK = os.getenv(
     "MODAL_CLOUD_RUN_FALLBACK", "1") == "1"
 
@@ -1093,6 +1093,11 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # agent turn, so it must stay far below AGENT_TURN_TIMEOUT_S rather than
     # near the executor's own ceiling.
     "capture": int(os.getenv("REMOTE_TIMEOUT_CAPTURE_S", "180")),
+    # Executor-side URL acquisition: bounded by FETCH_TIMEOUT_S per yt-dlp
+    # attempt plus a cold start and upload. It still sits below the agent turn
+    # wall because the editor is synchronously waiting for this tool call.
+    "fetch": int(os.getenv("REMOTE_TIMEOUT_FETCH_S", "600")),
+    "search": int(os.getenv("REMOTE_TIMEOUT_SEARCH_S", "180")),
     # Frame extraction from a stored original (round 62): dominated by the
     # executor pulling the source object from storage — a few hundred MB on
     # Cloud Run's own pipe — plus a handful of single-frame seeks. Like

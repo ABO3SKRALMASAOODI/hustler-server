@@ -34,8 +34,10 @@ import inpaint
 import matte
 import renderer
 import screenmatch
+import song_find
 import stems
 import tracker
+import url_media
 import version
 import webrecord
 
@@ -79,6 +81,11 @@ COMPUTE_RUNNERS = {
     # whole soundtrack. Model compute by definition; the dependency only
     # exists in this image (see /health features and stems.available).
     "stems": stems.run_stems_job,
+    # YouTube blocks Render's fixed egress before returning formats. A fetch
+    # here uses an independent Cloud Run/Modal exit, uploads the large media
+    # directly to object storage, and returns only metadata + review frames.
+    "fetch": url_media.run_fetch_job,
+    "search": song_find.run_search_job,
 }
 
 # A separate Cloud Run service uses the same authenticated HTTP contract but
