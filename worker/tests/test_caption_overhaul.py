@@ -84,6 +84,35 @@ def test_every_registered_preset_has_a_renderer_definition():
         assert CaptionStyle(preset=name).preset == name
 
 
+def test_flagship_reels_preset_has_elastic_hierarchy_and_clean_states():
+    assert CaptionStyle(preset="reels", animation="elastic").preset == "reels"
+    evs = captions.events_premium(
+        _words("make every frame impossible to ignore", 0.34),
+        style={"preset": "reels"}, emphasis_words=["impossible"],
+        play_res=(1080, 1920),
+        design_version=captions.CAPTION_DESIGN_VERSION)
+    body = "\n".join(e["text"] for e in evs)
+    # A three-stage overshoot/rebound/settle curve, not a binary scale pop.
+    assert r"\fscx126\fscy126" in body
+    assert r"\fscx94\fscy94" in body
+    assert r"\1c&H5AE1FF&" in body       # #FFE15A in ASS BGR order
+    states = sorted(set((e["start"], e["end"]) for e in evs))
+    assert all(a[1] <= b[0] + 1e-6 for a, b in zip(states, states[1:]))
+
+
+def test_every_new_caption_motion_validates_and_emits_real_tags(tmp_path):
+    motions = ("elastic", "bounce", "swing", "zoom_blur")
+    for motion in motions:
+        assert CaptionStyle(animation=motion).animation == motion
+        out = tmp_path / f"{motion}.ass"
+        captions.write_ass(
+            [{"start": 0, "end": 1, "text": "LAND"}], str(out),
+            {"animation": motion}, play_res=(1080, 1920))
+        body = out.read_text(encoding="utf-8")
+        assert r"\t(" in body
+    assert r"\blur" in (tmp_path / "zoom_blur.ass").read_text(encoding="utf-8")
+
+
 def test_design_v2_is_explicit_and_historical_edls_stay_unversioned():
     old = validate_edl({"keep": [[0, 10]], "captions": {
         "mode": "from_transcript", "style": {"preset": "clean"}}}, 10)

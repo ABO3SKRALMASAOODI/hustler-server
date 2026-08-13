@@ -18,6 +18,9 @@ project assets. One sfx-specific twist: results are duration-capped —
 a "click" that runs four minutes is a field recording, not an accent.
 """
 
+import math
+import re
+
 import config
 import net_fetch
 import music_search
@@ -43,6 +46,53 @@ def available():
     return bool(config.SFX_SEARCH_ENABLED)
 
 
+_NOISY_WORDS = {
+    "ambience", "ambient", "atmosphere", "background", "compilation",
+    "extended", "field recording", "full track", "loop", "music", "pack",
+    "song", "soundscape", "ten minutes", "theme",
+}
+_ONE_SHOT_WORDS = {
+    "clean", "dry", "foley", "hit", "impact", "one shot", "oneshot",
+    "single", "sting", "transition",
+}
+
+
+def _rank_score(item, query, cap):
+    """Editorial relevance score for a one-shot picker.
+
+    Openverse's text rank is broad-audio rank: a search for "camera shutter"
+    can put a four-minute ambience loop above a clean shutter transient. This
+    second pass rewards literal physical matches and useful one-shot duration,
+    while keeping provider order as a small tiebreaker rather than trusting it
+    as the entire edit decision.
+    """
+    q = " ".join(re.findall(r"[\w]+", str(query or "").lower()))
+    title = str(item.get("title") or "").lower()
+    hay = " ".join(str(x or "") for x in (
+        title, item.get("description"), item.get("tags"))).lower()
+    qwords = [w for w in q.split() if len(w) > 1]
+    score = 0.0
+    if q and q in title:
+        score += 12.0
+    score += 3.0 * sum(1 for w in qwords if w in title)
+    score += 1.0 * sum(1 for w in qwords if w in hay and w not in title)
+    score += 2.5 * sum(1 for w in _ONE_SHOT_WORDS if w in hay)
+    score -= 7.0 * sum(1 for w in _NOISY_WORDS if w in hay)
+
+    dur = item.get("duration_s")
+    if dur:
+        # Physical transients should be tight; risers/whooshes need room.
+        target = (3.0 if any(w in q for w in ("riser", "build", "swell"))
+                  else 1.6 if any(w in q for w in ("whoosh", "swoosh"))
+                  else 0.7 if any(w in q for w in
+                                  ("click", "tap", "snap", "beep", "shutter"))
+                  else 1.1)
+        score += max(-5.0, 4.0 - abs(math.log(max(dur, 0.05) / target)) * 2.2)
+        if dur > min(cap, 8.0):
+            score -= 3.0
+    return score
+
+
 def search(query, max_s=None, count=MAX_RESULTS):
     query = (query or "").strip()
     if not query:
@@ -55,8 +105,8 @@ def search(query, max_s=None, count=MAX_RESULTS):
     params = {"q": query, "license_type": "modification",
               "page_size": max(count * 2, 10)}
     data = music_search._openverse_get_json(OPENVERSE_API, params=params)
-    out = []
-    for t in (data.get("results") or []):
+    ranked = []
+    for provider_i, t in enumerate(data.get("results") or []):
         if not _license_ok(t.get("license") or ""):
             continue
         url = t.get("url")
@@ -71,17 +121,23 @@ def search(query, max_s=None, count=MAX_RESULTS):
             continue
         lic = "-".join(x for x in (t.get("license"),
                                    t.get("license_version")) if x)
-        out.append({
+        item = {
             "provider": "openverse", "id": f"openverse:{t.get('id')}",
             "title": (t.get("title") or "").strip() or "untitled",
             "author": (t.get("creator") or "").strip() or None,
             "duration_s": dur, "license": lic,
             "page_url": t.get("foreign_landing_url"),
             "_url": url,
-        })
-        if len(out) >= count:
-            break
-    return out
+        }
+        # Search-only evidence is retained for ranking and intentionally not
+        # exposed to the EDL or storage metadata.
+        rank_item = dict(item, description=t.get("description"),
+                         tags=t.get("tags"))
+        ranked.append((_rank_score(rank_item, query, cap), -provider_i, item))
+    ranked.sort(key=lambda row: (-row[0], -row[1],
+                                 (row[2].get("title") or "").lower(),
+                                 row[2].get("id") or ""))
+    return [row[2] for row in ranked[:count]]
 
 
 def resolve(result_id):

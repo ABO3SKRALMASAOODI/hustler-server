@@ -205,6 +205,31 @@ def test_pot_args_engage_only_when_the_script_dir_exists(monkeypatch,
     assert args[1].startswith("youtubepot-bgutilscript:server_home=")
 
 
+def test_public_youtube_leads_verified_adaptive_and_cookies_are_last(monkeypatch):
+    monkeypatch.setattr(config, "YTDLP_FALLBACK_CLIENTS",
+                        ["tv,mweb", "android_vr", "web_safari", "tv_embedded"])
+    rows = ytaccess.extraction_strategies(have_cookies=True)
+    assert rows[0] == {"name": "anonymous-web-embedded",
+                       "client": "web_embedded",
+                       "cookies": False, "format": "adaptive"}
+    assert rows[1] == {"name": "anonymous-mweb-pot", "client": "mweb",
+                       "cookies": False, "format": "adaptive"}
+    assert rows[2] == {"name": "anonymous-mweb-progressive",
+                       "client": "mweb", "cookies": False,
+                       "format": "progressive"}
+    assert rows[-1] == {"name": "cookies-default", "client": None,
+                        "cookies": True, "format": "adaptive"}
+    assert all(not r["cookies"] for r in rows[:-2])
+    assert rows[-2]["client"] == "tv_embedded" and rows[-2]["cookies"]
+
+
+def test_non_youtube_hosts_never_enter_the_youtube_strategy_ladder():
+    assert ytaccess.is_youtube_url("https://youtu.be/abc")
+    assert ytaccess.is_youtube_url("https://www.youtube.com/watch?v=abc")
+    assert not ytaccess.is_youtube_url("https://api.soundcloud.com/tracks/1")
+    assert not ytaccess.is_youtube_url("https://evil-youtube.com/watch?v=x")
+
+
 # ── the probe reads its own tea leaves correctly ─────────────────────────
 
 def _fake_probe_run(monkeypatch, stdout="", stderr="", rc=0):
@@ -214,6 +239,10 @@ def _fake_probe_run(monkeypatch, stdout="", stderr="", rc=0):
     def run(cmd, **kw):
         r = R()
         r.stdout, r.stderr, r.returncode = stdout, stderr, rc
+        if "--test" in cmd and rc == 0 and "-o" in cmd:
+            path = cmd[cmd.index("-o") + 1].replace("%(ext)s", "bin")
+            with open(path, "wb") as fh:
+                fh.write(b"media bytes")
         return r
     monkeypatch.setattr(ytaccess.subprocess, "run", run)
 
@@ -222,13 +251,18 @@ def test_probe_ok(monkeypatch):
     _fake_probe_run(monkeypatch, stdout="probe_ok id=x fmt=251\n")
     v = ytaccess.probe()
     assert v["ok"] and "stale_cookies" not in v
+    assert v["strategy"] == "anonymous-web-embedded"
+    assert v["attempts"] == [{"strategy": "anonymous-web-embedded",
+                              "extract_ok": True, "download_ok": True,
+                              "ok": True, "why": ""}]
 
 
 def test_probe_names_the_bot_wall(monkeypatch):
     _fake_probe_run(monkeypatch, stderr="ERROR: Sign in to confirm you're "
                     "not a bot. Use --cookies", rc=1)
     v = ytaccess.probe()
-    assert not v["ok"] and v["why"].startswith("bot_wall")
+    assert not v["ok"] and v["why"].startswith("access_blocked")
+    assert len(v["attempts"]) >= 2
 
 
 def test_probe_flags_a_rotted_jar_even_on_success(monkeypatch):
@@ -257,8 +291,42 @@ def test_probe_downloads_only_after_extraction_passes(monkeypatch):
     v = ytaccess.probe()
     assert len(calls) == 2
     assert "--simulate" in calls[0] and "--simulate" not in calls[1]
-    assert v["ok"] and not v["download_ok"]    # the fake wrote no file
+    assert not v["ok"] and not v["download_ok"]  # the fake wrote no file
     assert v["download_why"]
+
+
+def test_probe_retries_progressive_when_adaptive_cdn_returns_403(
+        monkeypatch):
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(list(cmd))
+
+        class R:
+            stdout = "probe_ok id=x fmt=251\n"
+            stderr = ""
+            returncode = 0
+
+        r = R()
+        # First strategy's real byte request: manifest succeeded, CDN denied.
+        if len(calls) in (2, 4):
+            r.stdout = ""
+            r.stderr = "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+            r.returncode = 1
+        elif "--test" in cmd and "-o" in cmd:
+            path = cmd[cmd.index("-o") + 1].replace("%(ext)s", "mp4")
+            with open(path, "wb") as fh:
+                fh.write(b"real bytes")
+        return r
+
+    monkeypatch.setattr(ytaccess.subprocess, "run", run)
+    v = ytaccess.probe()
+    assert v["ok"] and v["download_ok"]
+    assert v["strategy"] == "anonymous-mweb-progressive"
+    assert [a["strategy"] for a in v["attempts"][:3]] == [
+        "anonymous-web-embedded", "anonymous-mweb-pot",
+        "anonymous-mweb-progressive"]
+    assert v["attempts"][0]["why"].startswith("access_blocked")
 
 
 def test_probe_verdict_is_json_ready(monkeypatch):

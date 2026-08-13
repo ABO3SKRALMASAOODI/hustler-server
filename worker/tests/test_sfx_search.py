@@ -114,3 +114,54 @@ def test_search_hit_cache_survives_the_agent_turn():
         CacheCtx(), "sfx", hit["id"],
         lambda _rid: (_ for _ in ()).throw(AssertionError("no API call")))
     assert err is None and got["title"] == "Camera Shutter"
+
+
+def test_editorial_ranking_prefers_clean_one_shot_over_music_and_loops(
+        monkeypatch):
+    rows = [
+        {"id": "noisy", "title": "Cinematic Whoosh Music Loop Pack",
+         "duration": 1400, "license": "cc0", "url": "https://cdn/noisy.mp3",
+         "creator": "A"},
+        {"id": "clean", "title": "Clean Cinematic Whoosh One Shot",
+         "duration": 1200, "license": "cc0", "url": "https://cdn/clean.mp3",
+         "creator": "B", "description": "dry transition foley"},
+        {"id": "long", "title": "Whoosh ambience background",
+         "duration": 12000, "license": "cc0", "url": "https://cdn/long.mp3",
+         "creator": "C"},
+    ]
+    monkeypatch.setattr(sfx_search.net_fetch, "get_json",
+                        lambda *a, **k: {"results": rows})
+    hits = sfx_search.search("cinematic whoosh", count=3)
+    assert hits[0]["id"] == "openverse:clean"
+    assert hits[-1]["id"] != "openverse:clean"
+
+
+def test_one_call_web_sfx_searches_fetches_and_places(monkeypatch, tmp_path):
+    hit = _hit("Clean Cinematic Whoosh", 1.2)
+    monkeypatch.setattr(sfx_search, "search",
+                        lambda query, max_s=None, count=6: [hit])
+    fetched = {"title": hit["title"], "duration_s": 1.2,
+               "storage_key": "sfx/3/real.mp3", "license_note": "CC0",
+               "hit": hit}
+    monkeypatch.setattr(agent_tools, "_download_sfx_hit",
+                        lambda ctx, selected: (fetched, None))
+    placed = {}
+
+    def fake_add(_ctx, storage_key, at, gain_db):
+        placed.update(storage_key=storage_key, at=at, gain_db=gain_db)
+        return "EDL v1 -> v2: sfx placed"
+
+    monkeypatch.setattr(agent_tools, "add_sfx", fake_add)
+
+    class Ctx(_Ctx):
+        workdir = str(tmp_path)
+
+        @staticmethod
+        def latest_edl():
+            return {"json": {"keep": [[0, 10]]}}
+
+    out = agent_tools.add_web_sfx(Ctx(), "cinematic whoosh", 3.2, -7)
+    assert out.startswith("EDL v1 -> v2")
+    assert placed == {"storage_key": "sfx/3/real.mp3", "at": 3.2,
+                      "gain_db": -7.0}
+    assert "Clean Cinematic Whoosh" in out and "license: CC0" in out

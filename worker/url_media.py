@@ -254,7 +254,8 @@ def _ytdlp_available():
 _bot_walled = ytaccess.bot_walled
 
 
-def _extract(url, workdir, prefer=None, client_override=None):
+def _extract(url, workdir, prefer=None, client_override=None,
+             use_cookies=True, format_mode="adaptive"):
     """Pull media out of a page with yt-dlp. Returns (path, info dict).
 
     Runs as a subprocess rather than through the python API so a hung or
@@ -308,7 +309,7 @@ def _extract(url, workdir, prefer=None, client_override=None):
     # Operator cookies, resolved and normalized by ytaccess (five delivery
     # doors, one normalizer) — always a WRITABLE per-run copy that dies
     # with the workdir, never a mounted or shared file.
-    run_cookies = ytaccess.prepare_run_jar(workdir)
+    run_cookies = ytaccess.prepare_run_jar(workdir) if use_cookies else None
     if run_cookies:
         cmd += ["--cookies", run_cookies]
     # Operator-supplied proxy (config.YTDLP_PROXY): the no-account route
@@ -323,12 +324,18 @@ def _extract(url, workdir, prefer=None, client_override=None):
     # PO tokens (ytaccess.pot_args): anonymous proof-of-origin from the
     # baked bgutil script — the door past the wall that needs no account.
     cmd += ytaccess.pot_args()
+    progressive = format_mode == "progressive"
     if prefer == KIND_AUDIO:
         # The user asked for a song. Pulling the video track and throwing it
-        # away wastes the bulk of the download.
-        cmd += ["-f", "ba/b", "--extract-audio", "--audio-format", "mp3"]
+        # away wastes the bulk of the download — except on the progressive
+        # availability rung, where the combined stream is intentionally the
+        # path around a CDN 403 on adaptive audio.
+        audio_fmt = "b[height<=480]/b" if progressive else "ba/b"
+        cmd += ["-f", audio_fmt, "--extract-audio", "--audio-format", "mp3"]
     else:
-        cmd += ["-f", fmt, "--merge-output-format", "mp4"]
+        video_fmt = (f"b[height<={config.FETCH_MAX_HEIGHT}]/b"
+                     if progressive else fmt)
+        cmd += ["-f", video_fmt, "--merge-output-format", "mp4"]
     cmd += ["--", url]
 
     try:
@@ -419,35 +426,41 @@ def _extract_with_fallback(url, workdir, prefer=None):
     every time.
 
     Two things to be honest about:
-      - No client is a fix. The challenge is an IP-reputation check, so the
-        chain is a real improvement (each client is challenged at a
-        different rate) and NOT a guarantee. config.YTDLP_COOKIES_FILE is
-        the only reliable answer, and it is an operator decision.
+      - No client alone is a guarantee. The preferred path is anonymous mweb
+        plus the bgutil PO-token provider; alternate clients, an operator
+        proxy, and cookies are independent fallbacks. Cookies are LAST because
+        a rotated jar was the thing poisoning public production requests.
       - Bot-wall failures are fast — they come back during extraction,
         before any media is downloaded — so walking several clients costs
         seconds. The deadline below exists for the pathological case where
         an attempt starts downloading and then fails, which could otherwise
         stack full FETCH_TIMEOUT_S waits and eat the agent's whole turn.
     """
-    try:
+    # Every non-YouTube extractor keeps the exact proven call it had before.
+    # This matters for SoundCloud in particular: it is the working music
+    # fallback and a YouTube repair must never perturb it.
+    if not ytaccess.is_youtube_url(url):
         return _extract(url, workdir, prefer=prefer)
-    except FetchMediaError as e:
-        if not _bot_walled(str(e)):
-            raise
-        deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
-        for client in config.YTDLP_FALLBACK_CLIENTS:
-            if time.monotonic() >= deadline:
-                break
-            _clear_partials(workdir)
-            try:
-                return _extract(url, workdir, prefer=prefer,
-                                client_override=client)
-            except FetchMediaError as retry_err:
-                # A DIFFERENT failure means this client got past the wall and
-                # hit something real (private, region-locked, removed). That
-                # is the useful error — stop cycling and report it.
-                if not _bot_walled(str(retry_err)):
-                    raise
+
+    deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
+    last_wall = None
+    for attempt in ytaccess.extraction_strategies():
+        if time.monotonic() >= deadline:
+            break
+        _clear_partials(workdir)
+        try:
+            return _extract(url, workdir, prefer=prefer,
+                            client_override=attempt.get("client"),
+                            use_cookies=attempt.get("cookies", False),
+                            format_mode=attempt.get("format", "adaptive"))
+        except FetchMediaError as retry_err:
+            # A DIFFERENT failure means this client got past the wall and hit
+            # something real (private, region-locked, removed). That is the
+            # useful error — stop cycling and report it.
+            if not ytaccess.access_blocked(str(retry_err)):
+                raise
+            last_wall = retry_err
+    if last_wall is not None:
         _clear_partials(workdir)
         # The wall is PER-UPLOAD, not per-song: Aug 9, the same box that
         # fetched an official upload fine was challenged on two small
@@ -466,6 +479,7 @@ def _extract_with_fallback(url, workdir, prefer=None):
             "tell the user: the link plays fine in a browser, so they can "
             "download the file and attach it with the paperclip in chat "
             "(mp3/wav/m4a for audio, mp4/mov for video).")
+    raise FetchMediaError("YouTube extraction ran out of retry budget")
 
 
 def _download_direct(url, workdir):

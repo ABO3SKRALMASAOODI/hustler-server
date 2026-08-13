@@ -4,7 +4,7 @@ The agent can already cut, caption and grade what the user uploaded. What it
 could not do is ADD footage the user does not have — "show a shot of a busy
 city" needed a clip from somewhere. This module is that somewhere.
 
-Three providers, tried in order:
+Three providers, searched together:
 
   Pexels    (PEXELS_API_KEY)  — video + photo, the better-curated library
   Pixabay   (PIXABAY_API_KEY) — video + photo, the fallback library
@@ -39,6 +39,8 @@ more trusted than any other host.
 """
 
 import os
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 import net_fetch
@@ -122,6 +124,65 @@ def available():
 
 def video_available():
     return available() and bool(PEXELS_KEY or PIXABAY_KEY)
+
+
+def _quality_score(item, query, orientation):
+    """Provider-neutral score for professional, usable B-roll candidates."""
+    qwords = {w for w in re.findall(r"[a-z0-9]+", (query or "").lower())
+              if len(w) > 2}
+    desc = (item.get("description") or "").lower()
+    score = 2.5 * sum(1 for w in qwords if w in desc)
+    try:
+        w, h = float(item.get("width") or 0), float(item.get("height") or 0)
+    except (TypeError, ValueError):
+        w = h = 0
+    if w and h:
+        score += min(5.0, (w * h) / (1920 * 1080) * 2.0)
+        if orientation == orientation_for(w, h):
+            score += 3.0
+    dur = item.get("duration_s")
+    try:
+        dur = float(dur or 0)
+    except (TypeError, ValueError):
+        dur = 0
+    if item.get("kind") == KIND_VIDEO and dur:
+        score += 3.0 if 4 <= dur <= 25 else 1.0 if dur <= 45 else -2.0
+    # These titles frequently signal wallpaper/SEO filler rather than a shot
+    # with a clear subject and editorial purpose.
+    score -= 2.5 * sum(1 for term in
+                       ("background", "wallpaper", "loop", "abstract",
+                        "compilation", "template") if term in desc)
+    return score
+
+
+def _diverse_rank(provider_hits, query, orientation, count):
+    """Quality-sort within each library, then interleave the libraries.
+
+    Returning the first non-empty provider made every result grid Pexels when
+    that key existed — exactly the homogeneous stock look users recognize.
+    Interleaving preserves quality while guaranteeing the sighted agent sees
+    genuinely different libraries before choosing by thumbnail.
+    """
+    buckets = {}
+    for name, hits in provider_hits:
+        ranked = sorted(hits, key=lambda h: (
+            -_quality_score(h, query, orientation),
+            str(h.get("id") or "")))
+        if ranked:
+            buckets[name] = ranked
+    out = []
+    while buckets and len(out) < count:
+        # The provider whose current best is strongest leads this round; each
+        # other live provider still contributes one before anyone gets two.
+        order = sorted(buckets, key=lambda name: (
+            -_quality_score(buckets[name][0], query, orientation), name))
+        for name in order:
+            if len(out) >= count:
+                break
+            out.append(buckets[name].pop(0))
+            if not buckets[name]:
+                del buckets[name]
+    return out
 
 
 def providers():
@@ -267,9 +328,9 @@ def _pixabay_search(query, kind, orientation, count):
 def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
     """Search the configured providers. Returns [] when nothing matched.
 
-    Providers are tried in order and the FIRST one that returns anything wins
-    rather than merging — merged result sets from two libraries with different
-    curation read as noise, and the agent then picks worse.
+    Every configured provider is searched in parallel. Results are quality-
+    scored within each library and interleaved across libraries so the agent's
+    visual contact sheet is not a wall of one provider's house style.
     """
     if not available():
         raise StockError("stock search is disabled on this deployment")
@@ -290,16 +351,20 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
               ("pixabay", _pixabay_search, PIXABAY_KEY)) if key]
     if kind == KIND_PHOTO:
         lanes.append(("openverse", _openverse_search))
-    errors = []
-    for name, fn in lanes:
-        try:
-            hits = fn(query, kind, orientation, count)
-        except Exception as e:
-            # One provider being down must not take the capability with it.
-            errors.append(f"{name}: {str(e)[:120]}")
-            continue
-        if hits:
-            return hits[:count]
+    errors, got = [], {}
+    with ThreadPoolExecutor(max_workers=max(1, len(lanes))) as pool:
+        futures = {pool.submit(fn, query, kind, orientation, count): name
+                   for name, fn in lanes}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                got[name] = future.result()
+            except Exception as e:
+                # One provider being down must not take the capability with it.
+                errors.append(f"{name}: {str(e)[:120]}")
+    provider_hits = [(name, got.get(name) or []) for name, _fn in lanes]
+    if any(hits for _name, hits in provider_hits):
+        return _diverse_rank(provider_hits, query, orientation, count)
     if errors and len(errors) == len(lanes):
         raise StockError("; ".join(errors))
     return []

@@ -189,39 +189,62 @@ def _candidates(engine, query, count, what="a search query"):
     query = (query or "").strip()
     if not query:
         raise SongFindError(f"{what} is required")
-    cmd = [sys.executable, "-m", "yt_dlp",
-           # Same no-on-disk-config rule as the extractor: nothing outside
-           # this argv may inject flags into a process holding our env.
-           "--ignore-config",
-           "--no-warnings", "--quiet",
-           "--socket-timeout", "20",
-           "--flat-playlist", "--dump-json",
-           f"{engine}{int(count)}:{query}"]
-    # Operator cookies via ytaccess: a writable, NORMALIZED per-run copy,
-    # never the mounted secret — yt-dlp writes rotated cookies back on
-    # every run and /etc/secrets is read-only (url_media documents the
-    # crash). The old raw copyfile here skipped the tab restoration the
-    # fetch path had, so a dashboard-pasted jar rode along unreadable.
-    run_cookies = ytaccess.prepare_run_jar()
-    if run_cookies:
-        cmd += ["--cookies", run_cookies]
-    if config.YTDLP_PROXY:
-        cmd += ["--proxy", config.YTDLP_PROXY]
-    if config.YTDLP_REMOTE_COMPONENTS:
-        cmd += ["--remote-components", config.YTDLP_REMOTE_COMPONENTS]
-    cmd += ytaccess.pot_args()
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=SEARCH_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        raise SongFindError("the web search timed out — try again, or ask "
-                            "the user for a link")
-    finally:
+    # YouTube search follows the same isolation rule as downloading: a stale
+    # account jar must not poison a public query. Anonymous mweb+POT leads;
+    # the historical cookie-default path is retained as one bounded fallback.
+    # SoundCloud keeps its byte-for-byte argument behavior (including the jar)
+    # because it is the production-proven named-song escape route.
+    if engine == "ytsearch":
+        all_strategies = ytaccess.extraction_strategies()
+        search_first = next((s for s in all_strategies
+                             if s["name"] == "anonymous-mweb-pot"),
+                            all_strategies[0])
+        strategies = [search_first]
+        cookie_last = next((s for s in reversed(all_strategies)
+                            if s.get("cookies")), None)
+        if cookie_last:
+            strategies.append(cookie_last)
+    else:
+        strategies = [{"name": "original", "client": None,
+                       "cookies": True}]
+
+    proc = None
+    for strategy in strategies:
+        cmd = [sys.executable, "-m", "yt_dlp",
+               # Same no-on-disk-config rule as the extractor: nothing outside
+               # this argv may inject flags into a process holding our env.
+               "--ignore-config",
+               "--no-warnings", "--quiet",
+               "--socket-timeout", "20",
+               "--flat-playlist", "--dump-json",
+               f"{engine}{int(count)}:{query}"]
+        run_cookies = (ytaccess.prepare_run_jar()
+                       if strategy.get("cookies") else None)
         if run_cookies:
-            try:
-                os.unlink(run_cookies)
-            except OSError:
-                pass
+            cmd += ["--cookies", run_cookies]
+        if strategy.get("client"):
+            cmd += ["--extractor-args",
+                    f"youtube:player_client={strategy['client']}"]
+        if config.YTDLP_PROXY:
+            cmd += ["--proxy", config.YTDLP_PROXY]
+        if config.YTDLP_REMOTE_COMPONENTS:
+            cmd += ["--remote-components", config.YTDLP_REMOTE_COMPONENTS]
+        cmd += ytaccess.pot_args()
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=SEARCH_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise SongFindError("the web search timed out — try again, or ask "
+                                "the user for a link")
+        finally:
+            if run_cookies:
+                try:
+                    os.unlink(run_cookies)
+                except OSError:
+                    pass
+        if (proc.stdout or "").strip() or proc.returncode == 0 \
+                or not ytaccess.bot_walled(proc.stderr or ""):
+            break
     out = []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()

@@ -220,7 +220,7 @@ class CaptionStyle(BaseModel):
     # 'classic' = the legacy look explicitly. None = legacy (signature-safe).
     preset: Optional[Literal[
         # original four (single-Dialogue "flow" emission)
-        "podcast", "beast", "karaoke", "elegant",
+        "podcast", "reels", "beast", "karaoke", "elegant",
         # coherent production families added after the first visual audit:
         # clean creator text, long-form subtitles, a boxed news lower-third,
         # outlined retro display, and a restrained neon/glow treatment.
@@ -251,7 +251,8 @@ class CaptionStyle(BaseModel):
     # from None, which lets the preset's own animation apply.
     animation: Optional[Literal["none", "fade", "pop", "slide_up", "punch",
                                 "blur_in", "whip", "flash", "rise",
-                                "drop"]] = None
+                                "drop", "elastic", "bounce", "swing",
+                                "zoom_blur"]] = None
 
     # ── Composer fields (premium presets only) ───────────────────────────
     # Each MUST also appear in captions.STYLE_KEYS and in agent_tools'
@@ -965,14 +966,14 @@ class RegionItem(BaseModel):
 # without pretending to add resolution); motion_blur is the real thing the
 # montage briefs meant, which had been faked with dream_blur — a soft dreamy
 # haze over the WHOLE frame, the opposite of motion.
-STYLIZE_KINDS = ("grain", "vignette", "glow", "chromatic", "dream_blur",
+STYLIZE_KINDS = ("grain", "vignette", "glow", "halation", "chromatic", "dream_blur",
                  "vhs", "flash", "shake", "sharpen", "denoise", "motion_blur",
                  "stabilize")
 
 
 class StylizeItem(BaseModel):
     id: str
-    kind: Literal["grain", "vignette", "glow", "chromatic", "dream_blur",
+    kind: Literal["grain", "vignette", "glow", "halation", "chromatic", "dream_blur",
                   "vhs", "flash", "shake", "sharpen", "denoise", "motion_blur",
                   "stabilize"]
     start: Optional[float] = None
@@ -1342,7 +1343,8 @@ class OverlayItem(BaseModel):
 TEXT_TEMPLATES = ("title", "subtitle", "lower_third", "callout",
                   "big_number", "quote", "chapter")
 TEXT_ANIMS = ("none", "fade", "pop", "slide_up", "blur_in", "whip", "rise",
-              "drop", "typewriter")
+              "drop", "elastic", "bounce", "swing", "zoom_blur",
+              "typewriter")
 TEXT_FONTS = ("Inter Display Black", "Inter Display ExtraBold",
               "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
               "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
@@ -1373,9 +1375,11 @@ class TextItem(BaseModel):
                            "Plus Jakarta Sans ExtraBold"]] = None
     # "none" = instant: full opacity at frame one, gone at the last frame.
     entrance: Optional[Literal["none", "fade", "pop", "slide_up", "blur_in",
-                               "whip", "rise", "drop", "typewriter"]] = None
+                               "whip", "rise", "drop", "elastic", "bounce",
+                               "swing", "zoom_blur", "typewriter"]] = None
     exit: Optional[Literal["none", "fade", "pop", "slide_up", "blur_in",
-                           "whip", "rise", "drop"]] = None
+                           "whip", "rise", "drop", "elastic", "bounce",
+                           "swing", "zoom_blur"]] = None
     uppercase: Optional[bool] = None
     box: Optional[bool] = None      # backing panel behind the text
     # Round 40 — the text OWNS a spliced card rather than a span of the edit.
@@ -2453,6 +2457,11 @@ def validate_edl(data, duration=None):
                         f"effects.stylize[{i}]: pass both start and end "
                         "(program seconds), or neither for the whole video.")
                 if st.start is not None:
+                    if st.kind == "stabilize":
+                        raise EDLValidationError(
+                            f"effects.stylize[{i}]: stabilize is a temporal "
+                            "analysis pass and must cover the whole video; "
+                            "omit start/end.")
                     st.start, st.end = _r(st.start), _r(st.end)
                     _check_span(f"effects.stylize[{i}]", st.start, st.end,
                                 prog_dur)

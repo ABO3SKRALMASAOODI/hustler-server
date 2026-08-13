@@ -246,6 +246,25 @@ def _entrance_extra(anim, px):
     if anim == "whip":
         return (r"\frz14\fscx66\fscy66"
                 r"\t(0,150,\frz0\fscx104\fscy104)\t(150,220,\fscx100\fscy100)")
+    if anim == "elastic":
+        return (r"\fscx34\fscy34"
+                r"\t(0,90,0.45,\fscx126\fscy126)"
+                r"\t(90,175,1.6,\fscx94\fscy94)"
+                r"\t(175,250,\fscx100\fscy100)")
+    if anim == "bounce":
+        return (r"\fscx76\fscy42"
+                r"\t(0,95,0.55,\fscx106\fscy122)"
+                r"\t(95,175,1.4,\fscx98\fscy92)"
+                r"\t(175,245,\fscx100\fscy100)")
+    if anim == "swing":
+        return (r"\frz-13\fscx78\fscy78"
+                r"\t(0,105,0.6,\frz5\fscx104\fscy104)"
+                r"\t(105,190,1.5,\frz-2\fscx99\fscy99)"
+                r"\t(190,255,\frz0\fscx100\fscy100)")
+    if anim == "zoom_blur":
+        b = max(2, round(px * 0.13))
+        return (rf"\alpha&H88&\blur{b}\fscx165\fscy165"
+                r"\t(0,210,0.7,\alpha&H00&\blur0\fscx100\fscy100)")
     return ""
 
 
@@ -259,6 +278,18 @@ def _exit_extra(anim, px, o0, o1):
         return rf"\t({o0},{o1},\blur{b}\alpha&HFF&)"
     if anim == "whip":
         return rf"\t({o0},{o1},\frz-14\fscx70\fscy70\alpha&HFF&)"
+    if anim == "elastic":
+        mid = o0 + max(1, (o1 - o0) // 3)
+        return (rf"\t({o0},{mid},\fscx112\fscy112)"
+                rf"\t({mid},{o1},\fscx30\fscy30\alpha&HFF&)")
+    if anim == "bounce":
+        return rf"\t({o0},{o1},\fscx78\fscy35\alpha&HFF&)"
+    if anim == "swing":
+        return rf"\t({o0},{o1},\frz14\fscx72\fscy72\alpha&HFF&)"
+    if anim == "zoom_blur":
+        b = max(2, round(px * 0.13))
+        return (rf"\t({o0},{o1},\blur{b}\fscx155\fscy155"
+                r"\alpha&HFF&)")
     return ""
 
 

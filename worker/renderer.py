@@ -2014,6 +2014,22 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[glA{si}][glG{si}]blend=all_mode=screen"
                          f":all_opacity={0.25 + 0.4 * i_:.2f}{en}"
                          f"[{out_lab}]")
+        elif kind == "halation":
+            # Film halation is not generic white glow: only highlights bleed,
+            # and the bloom is warm/red because light reflects through the
+            # emulsion. Isolate high luma, neutralize its chroma, tint it,
+            # diffuse it, then screen it back over the untouched base.
+            threshold = int(205 - 45 * i_)
+            parts.append(f"[{vlabel}]split[halA{si}][halB{si}]")
+            parts.append(
+                f"[halB{si}]lutyuv=y='if(gte(val,{threshold}),val,16)'"
+                f":u=128:v=128,gblur=sigma={8 + 24 * i_:.1f},"
+                f"colorbalance=rs={0.18 + 0.24 * i_:.2f}:"
+                f"gs={0.01 + 0.05 * i_:.2f}:bs=-{0.08 + 0.12 * i_:.2f}"
+                f"[halG{si}]")
+            parts.append(
+                f"[halA{si}][halG{si}]blend=all_mode=screen:"
+                f"all_opacity={0.16 + 0.28 * i_:.2f}{en}[{out_lab}]")
         elif kind == "sharpen":
             # unsharp with a 5x5 kernel: the honest answer to "make it
             # clearer". It recovers apparent detail a phone's encoder smeared;
@@ -2053,6 +2069,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f":y='ih/2-(ih/zoom/2)+{amp * 0.7:.1f}*cos({T}*{11 + 6 * i_:.1f})"
                 f"*({winT})'"
                 f":d=1:s={W}x{H}:fps={fps:.3f}[{out_lab}]")
+        elif kind == "stabilize":
+            # deshake performs temporal block matching and has no timeline
+            # `enable`; schema/tool validation therefore make it whole-video
+            # only instead of silently pretending a window works. `mirror`
+            # hides the small transformed borders without a permanent crop.
+            radius = 8 + int(round(40 * i_))
+            parts.append(
+                f"[{vlabel}]deshake=rx={radius}:ry={radius}:edge=mirror:"
+                f"blocksize=8:search=less[{out_lab}]")
         else:
             continue
         vlabel = out_lab

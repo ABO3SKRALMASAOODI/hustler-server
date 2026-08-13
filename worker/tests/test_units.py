@@ -4725,8 +4725,9 @@ _real_extract = url_media._extract
 try:
     _tried = []
 
-    def _walled(url, workdir, prefer=None, client_override=None):
-        _tried.append(client_override)
+    def _walled(url, workdir, prefer=None, client_override=None,
+                use_cookies=True, format_mode="adaptive"):
+        _tried.append((client_override, use_cookies, format_mode))
         raise url_media.FetchMediaError("Sign in to confirm you're not a bot")
 
     url_media._extract = _walled
@@ -4735,8 +4736,10 @@ try:
         _msg = ""
     except url_media.FetchMediaError as _e:
         _msg = str(_e)
-    check("every fallback client is tried on a bot wall",
-          _tried == [None] + wconfig.YTDLP_FALLBACK_CLIENTS)
+    _expected = [(x["client"], x["cookies"], x["format"])
+                 for x in url_media.ytaccess.extraction_strategies()]
+    check("every isolated YouTube strategy is tried on a bot wall",
+          _tried == _expected)
     check("...then the user is told to attach the file, not just 'failed'",
           "paperclip" in _msg and "not a problem with the link" in _msg)
 
@@ -4744,10 +4747,11 @@ try:
     # something real — that is the useful error, so stop cycling.
     _tried.clear()
 
-    def _private(url, workdir, prefer=None, client_override=None):
-        _tried.append(client_override)
+    def _private(url, workdir, prefer=None, client_override=None,
+                 use_cookies=True, format_mode="adaptive"):
+        _tried.append((client_override, use_cookies, format_mode))
         raise url_media.FetchMediaError(
-            "Sign in to confirm you're not a bot" if client_override is None
+            "Sign in to confirm you're not a bot" if len(_tried) == 1
             else "Private video")
 
     url_media._extract = _private
@@ -4757,14 +4761,15 @@ try:
     except url_media.FetchMediaError as _e:
         _msg2 = str(_e)
     check("a real error behind the wall stops the chain and is reported",
-          _tried == [None, wconfig.YTDLP_FALLBACK_CLIENTS[0]]
+          _tried == _expected[:2]
           and "Private video" in _msg2)
 
     # A non-bot-wall first failure must not burn retries at all.
     _tried.clear()
 
-    def _404(url, workdir, prefer=None, client_override=None):
-        _tried.append(client_override)
+    def _404(url, workdir, prefer=None, client_override=None,
+             use_cookies=True, format_mode="adaptive"):
+        _tried.append((client_override, use_cookies, format_mode))
         raise url_media.FetchMediaError("HTTP Error 404")
 
     url_media._extract = _404
@@ -4772,14 +4777,16 @@ try:
         url_media._extract_with_fallback("https://x.com/y", "/tmp")
     except url_media.FetchMediaError:
         pass
-    check("a non-bot-wall failure retries nothing", _tried == [None])
+    check("a non-YouTube failure keeps the original extraction path",
+          _tried == [(None, True, "adaptive")])
 
     # And a client that gets through returns immediately.
     _tried.clear()
 
-    def _recovers(url, workdir, prefer=None, client_override=None):
-        _tried.append(client_override)
-        if client_override == wconfig.YTDLP_FALLBACK_CLIENTS[1]:
+    def _recovers(url, workdir, prefer=None, client_override=None,
+                  use_cookies=True, format_mode="adaptive"):
+        _tried.append((client_override, use_cookies, format_mode))
+        if len(_tried) == 2:
             return ("/tmp/dl.mp4", {"title": "ok"})
         raise url_media.FetchMediaError("Sign in to confirm you're not a bot")
 
@@ -4787,7 +4794,7 @@ try:
     _p, _i = url_media._extract_with_fallback("https://youtu.be/x", "/tmp")
     check("a client that gets through wins and stops the chain",
           _p == "/tmp/dl.mp4"
-          and _tried == [None] + wconfig.YTDLP_FALLBACK_CLIENTS[:2])
+          and _tried == _expected[:2])
 finally:
     url_media._extract = _real_extract
 

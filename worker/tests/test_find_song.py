@@ -263,8 +263,8 @@ def test_blind_deployment_degrades_to_text_only(monkeypatch, tmp_path):
 
 # ── the bot wall's two escape hatches ride every yt-dlp call ─────────────
 
-def test_search_carries_cookies_and_proxy_when_configured(monkeypatch,
-                                                          tmp_path):
+def test_youtube_search_leads_anonymous_mweb_and_keeps_proxy(monkeypatch,
+                                                             tmp_path):
     ck = tmp_path / "yt.txt"
     ck.write_text("# Netscape HTTP Cookie File\n")
     monkeypatch.setattr(config, "YTDLP_COOKIES_FILE", str(ck))
@@ -281,10 +281,35 @@ def test_search_carries_cookies_and_proxy_when_configured(monkeypatch,
         return R()
     monkeypatch.setattr(song_find.subprocess, "run", fake_run)
     song_find.search("song")
-    # Cookies ride as a writable COPY (see the read-only-secret test below).
-    assert "--cookies" in seen["cmd"]
+    assert "--cookies" not in seen["cmd"]
+    i = seen["cmd"].index("--extractor-args")
+    assert seen["cmd"][i + 1] == "youtube:player_client=mweb"
     assert "--proxy" in seen["cmd"]
     assert "http://u:p@proxy:8080" in seen["cmd"]
+
+
+def test_youtube_search_uses_cookie_default_only_after_anonymous_wall(
+        monkeypatch, tmp_path):
+    ck = tmp_path / "yt.txt"
+    ck.write_text("# Netscape HTTP Cookie File\n")
+    monkeypatch.setattr(config, "YTDLP_COOKIES_FILE", str(ck))
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+
+        class R:
+            stdout = ""
+            stderr = ("Sign in to confirm you're not a bot"
+                      if len(calls) == 1 else "")
+            returncode = 1 if len(calls) == 1 else 0
+        return R()
+
+    monkeypatch.setattr(song_find.subprocess, "run", fake_run)
+    assert song_find.search("song") == []
+    assert len(calls) == 2
+    assert "--cookies" not in calls[0]
+    assert "--cookies" in calls[1]
 
 
 def test_a_full_album_never_outranks_the_single_track():
@@ -361,7 +386,9 @@ def test_cookie_jar_is_copied_never_the_mounted_secret(monkeypatch,
             returncode = 0
         return R()
     monkeypatch.setattr(song_find.subprocess, "run", fake_run)
-    song_find.search("song")
+    # SoundCloud is deliberately unchanged by the YouTube repair: its
+    # production-proven path still gets the normalized writable cookie copy.
+    song_find.search_soundcloud("song")
     assert str(secret) not in seen["cmd"]
     i = seen["cmd"].index("--cookies")
     copy_path = seen["cmd"][i + 1]

@@ -203,6 +203,22 @@ PRESETS = {
         "treatments": ("accent", "box", "serif"),
         "active": "pop", "position": "bottom",
     },
+    "reels": {
+        # Flagship short-form system: tight two-line composition, elastic
+        # word landings and one high-contrast hero word per phrase. The
+        # grammar stays coherent (one face, one accent, one motion curve),
+        # which makes it feel designed rather than like a random effects pack.
+        "font": "Inter Display Black", "char_w": 0.56, "base_size": 50,
+        "mode": "reveal", "align": "center", "uppercase": False,
+        "max_words": 4, "wpl": 2, "outline": 0.8, "shadow": 2.5,
+        "emph_scale": 1.72, "num_scale": 2.05,
+        "treatments": ("accent",), "emphasis": "accent",
+        "number_treatment": "num_plain",
+        "active": "pop", "position": "bottom",
+        "layout": "stack", "leading": 0.88, "stagger": 0.045,
+        "word_anim": "elastic", "highlight": "#FFE15A",
+        "punctuation": "expressive", "target_words": 3,
+    },
     "beast": {
         # Loud creator style: Anton caps, centered, spoken word pops in the
         # accent color. Big by default — 'm' here reads like legacy 'l/xl'.
@@ -608,7 +624,7 @@ def _anim_prefix(anim, style, play_res):
     if anim == "pop":
         return (r"{\fscx70\fscy70\t(0,120,\fscx106\fscy106)"
                 r"\t(120,200,\fscx100\fscy100)}")
-    if anim == "slide_up":
+    if anim in ("slide_up", "rise", "drop"):
         # \move needs the real anchor point: derive it from the alignment
         # + margins exactly as style_line computes them.
         s = _norm_style(style)
@@ -632,8 +648,18 @@ def _anim_prefix(anim, style, play_res):
             else:
                 y = int(play_res[1]) - margin_v
         off = max(12, int(0.04 * play_res[1]))
-        return (rf"{{\an{align}\move({cx},{y + off},{cx},{y},0,160)"
+        source_y = y - off if anim == "drop" else y + off
+        move_ms = 160 if anim == "slide_up" else 180
+        return (rf"{{\an{align}\move({cx},{source_y},{cx},{y},0,{move_ms})"
                 r"\fad(120,0)}}")
+    if anim in WORD_ANIMS:
+        s = _norm_style(style)
+        f = max(play_res[0] / BASE_PLAY_RES[0],
+                play_res[1] / BASE_PLAY_RES[1])
+        px = max(10, round(FONT_SIZES.get(s["size"], 40) * f
+                           * _size_scale(s)))
+        tags = _word_anim_tags(anim, px)
+        return "{" + tags + "}" if tags else ""
     return ""
 
 
@@ -1143,6 +1169,24 @@ WORD_ANIMS = {
     "whip": (r"\frz14\fscx66\fscy66"
              r"\t(0,150,\frz0\fscx104\fscy104)\t(150,220,\fscx100\fscy100)"),
     "flash": r"\1c&HFFFFFF&\fscx70\fscy70\t(0,110,\fscx100\fscy100)",
+    # Multi-stage easing is the difference between "text got bigger" and a
+    # designed landing. These remain pure libass geometry, so they are crisp
+    # at every output size and cost no intermediate raster pass.
+    "elastic": (r"\fscx34\fscy34"
+                r"\t(0,90,0.45,\fscx126\fscy126)"
+                r"\t(90,175,1.6,\fscx94\fscy94)"
+                r"\t(175,250,\fscx100\fscy100)"),
+    "bounce": (r"\fscx76\fscy42"
+               r"\t(0,95,0.55,\fscx106\fscy122)"
+               r"\t(95,175,1.4,\fscx98\fscy92)"
+               r"\t(175,245,\fscx100\fscy100)"),
+    "swing": (r"\frz-13\fscx78\fscy78"
+              r"\t(0,105,0.6,\frz5\fscx104\fscy104)"
+              r"\t(105,190,1.5,\frz-2\fscx99\fscy99)"
+              r"\t(190,255,\frz0\fscx100\fscy100)"),
+    "zoom_blur": (r"\alpha&H88&\blur{b}\fscx165\fscy165"
+                  r"\t(0,210,0.7,\alpha&H00&\blur0"
+                  r"\fscx100\fscy100)"),
 }
 LINE_ANIMS = ("rise", "drop")
 
@@ -1161,7 +1205,7 @@ _POP_ACTIVE = (r"\fscx58\fscy58\t(0,90,\fscx116\fscy116)"
                r"\t(90,170,\fscx104\fscy104)")
 
 
-def _premium_anim_prefix(anim):
+def _premium_anim_prefix(anim, px=48):
     """Entrance animation for premium STATIC events. slide_up would need
     \\move, which conflicts with the explicit \\pos geometry — it renders
     as a fade instead."""
@@ -1170,6 +1214,9 @@ def _premium_anim_prefix(anim):
                 r"\t(120,200,\fscx100\fscy100)}")
     if anim in ("fade", "slide_up"):
         return r"{\fad(180,140)}"
+    if anim in WORD_ANIMS:
+        tags = _word_anim_tags(anim, px)
+        return "{" + tags + "}" if tags else ""
     return ""
 
 
@@ -1824,7 +1871,7 @@ def events_premium(out_words, style=None, max_words=None,
                               line_chars * PREMIUM_MAX_LINES))
     base = _base_tags(p, s, px, f)
     mode = p["mode"]
-    anim = _premium_anim_prefix(s.get("animation") or p.get("animation")) \
+    anim = _premium_anim_prefix(s.get("animation") or p.get("animation"), px) \
         if mode == "static" else ""
 
     # The composed looks place every LINE independently; the original four
@@ -1914,20 +1961,23 @@ def events_premium(out_words, style=None, max_words=None,
                 end = start + 0.12
             if mode == "reveal":
                 act = ("" if motionless else
-                       _word_anim_tags(word_anim, px) if stack else _POP_IN)
+                       _word_anim_tags(word_anim, px)
+                       if word_anim in WORD_ANIMS else _POP_IN)
                 segs.append({"ci": ci, "start": start, "end": end,
                              "last_i": i, "active_i": i, "active": act})
             else:  # karaoke: whole chunk visible, spoken word lights up
+                active_motion = (_word_anim_tags(word_anim, px)
+                                 if word_anim in WORD_ANIMS else _POP_ACTIVE)
                 if p["active"] == "box" and treats[i] != "box":
                     bx = max(2, round(0.22 * px))
                     by = max(2, round(0.13 * px))
                     act = (rf"\1c{DARK_TEXT}\3c{accent}\xbord{bx}"
                            rf"\ybord{by}\shad0")
                 elif treats[i] == "box":
-                    act = "" if motionless else _POP_ACTIVE
+                    act = "" if motionless else active_motion
                 else:
                     act = rf"\1c{accent}" + ("" if motionless else
-                                              _POP_ACTIVE)
+                                              active_motion)
                 segs.append({"ci": ci, "start": start, "end": end,
                              "last_i": len(chunk) - 1, "active_i": i,
                              "active": act})
@@ -2009,7 +2059,7 @@ def events_from_items(items, tl, play_res=BASE_PLAY_RES):
             geom = _geom_prefix(p, ns, play_res,
                                 [[0]] * len(lines), [None], px)
             anim = _premium_anim_prefix(ns.get("animation")
-                                        or p.get("animation"))
+                                        or p.get("animation"), px)
             # Manual/translated captions use the same single vector panel as
             # transcript captions. Without this, a documentary style applied
             # successfully to translated items but its contrast panel was
@@ -2085,7 +2135,7 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
         # slide_up's \move above owns the target position and already carries
         # the alignment, so adding \pos beside it would be contradictory ASS.
         if eff.get("anchor_y") is not None and not ev.get("premium") \
-                and eff.get("animation") != "slide_up":
+                and eff.get("animation") not in ("slide_up", "rise", "drop"):
             align = {"left": 4, "center": 5, "right": 6}.get(
                 eff.get("text_align") or "center", 5)
             margin_x = max(10, round(60 * play_res[0] / BASE_PLAY_RES[0]))

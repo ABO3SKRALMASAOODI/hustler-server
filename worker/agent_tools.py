@@ -2686,11 +2686,11 @@ def _parse_partial_style(style):
     fills defaults, so merging cannot reset fields the user didn't mention."""
     if not isinstance(style, dict) or not style:
         return ('ERR: style must be a non-empty object with any of '
-                '{"preset":"clean|documentary|broadcast|podcast|beast|karaoke|...|classic",'
+                '{"preset":"clean|documentary|broadcast|reels|podcast|beast|karaoke|...|classic",'
                 '"color":"#RRGGBB","size":"s|m|l|xl","size_scale":0.5-3.0,'
                 '"position":"bottom|top|middle","uppercase":true|false,'
                 '"dynamic":true|false,"highlight_color":"#RRGGBB",'
-                '"animation":"none|fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop",'
+                '"animation":"none|fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop|elastic|bounce|swing|zoom_blur",'
                 '"font":"<bundled family>","effect":"chroma|chrome|glow",'
                 '"layout":"stack|flow","leading":0.5-2.2,'
                 '"emphasis":"big|huge|accent|pop|box|serif|chrome|glow|chroma",'
@@ -2720,7 +2720,7 @@ def _parse_partial_style(style):
                 "anchor_y is the exact vertical output-frame fraction. "
                 "preset picks "
                 "a look (clean/documentary/broadcast/retro/neon/podcast/"
-                "beast/karaoke/elegant/stacked/iridescent/chrome/editorial/"
+                "reels/beast/karaoke/elegant/stacked/iridescent/chrome/editorial/"
                 "fashion/luxe/impact/lyric/classic); "
                 "font names a bundled family (e.g. 'Playfair Display Black'); "
                 "effect layers chroma/chrome/glow onto emphasised words; "
@@ -2732,11 +2732,11 @@ def _parse_partial_style(style):
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
         return (f"ERR: bad style: {str(e)[:160]}. Use "
-                '{"preset":"clean|documentary|broadcast|podcast|beast|karaoke|...|classic",'
+                '{"preset":"clean|documentary|broadcast|reels|podcast|beast|karaoke|...|classic",'
                 '"color":"#RRGGBB","size":"s|m|l|xl",'
                 '"position":"bottom|top|middle","dynamic":true|false,'
                 '"highlight_color":"#RRGGBB","leading":0.5-2.2,'
-                '"emphasis_scale":1.0-3.0,"animation":"none|fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop"}.')
+                '"emphasis_scale":1.0-3.0,"animation":"none|fade|pop|slide_up|punch|blur_in|whip|flash|rise|drop|elastic|bounce|swing|zoom_blur"}.')
     return {k: validated[k] for k in style}
 
 
@@ -3380,6 +3380,13 @@ def find_song(ctx, query):
             + "; don't give up on the song. " + _tail)
 
 
+def _can_receive_images(ctx):
+    """Whether this tool transport can put pixels in the editor's next turn."""
+    return (getattr(ctx, "sight_out", False) or
+            (getattr(ctx, "direct_sight", False)
+             and llm.agent_sees(getattr(ctx, "agent_model", None))))
+
+
 def _queue_candidate_thumbs(ctx, hits, limit=5):
     """Put the candidates' own pictures in front of the agent's eyes.
 
@@ -3396,10 +3403,7 @@ def _queue_candidate_thumbs(ctx, hits, limit=5):
     # same queue into the tool response as a labeled contact sheet. The old
     # direct_sight-only gate made MCP stock selection text-blind even though
     # its transport was fully capable of returning the thumbnails.
-    can_see = (getattr(ctx, "sight_out", False) or
-               (getattr(ctx, "direct_sight", False)
-                and llm.agent_sees(getattr(ctx, "agent_model", None))))
-    if not can_see:
+    if not _can_receive_images(ctx):
         return 0
     queued = 0
     for h in hits[:limit]:
@@ -3422,6 +3426,73 @@ def _queue_candidate_thumbs(ctx, hits, limit=5):
         except Exception:
             continue
     return queued
+
+
+def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
+                           limit=4):
+    """Attach representative pixels from a just-downloaded visual asset.
+
+    Search thumbnails prove only that a candidate looked plausible. The file
+    ultimately downloaded can be a different rendition, begin on a title
+    card, or contain an irrelevant middle. Pulling frames *before the scratch
+    directory is deleted* gives the agent direct evidence from the actual
+    asset it may place. Audio deliberately skips this path.
+
+    Returns the number of source frames queued. Review is best-effort: a
+    frame-extraction problem must not turn a valid, safely stored download
+    into a false failure.
+    """
+    if kind not in (url_media.KIND_VIDEO, url_media.KIND_IMAGE) or \
+            not _can_receive_images(ctx):
+        return 0
+    frames, labels = [], []
+    try:
+        if kind == url_media.KIND_IMAGE:
+            ext = os.path.splitext(path)[1] or ".img"
+            local = os.path.join(
+                ctx.workdir, f"review_{uuid.uuid4().hex[:8]}{ext}")
+            shutil.copyfile(path, local)
+            frames, labels = [local], ["full image"]
+        else:
+            try:
+                dur = float(duration_s or 0.0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            if dur <= 0:
+                try:
+                    dur = float((media.probe(path) or {}).get("duration") or 0)
+                except Exception:
+                    dur = 0.0
+            # Avoid the first/last frame, which are disproportionately black
+            # slates and fades. Four spread samples reveal subject, quality,
+            # shot continuity and whether this is actually useful B-roll.
+            fracs = (0.08, 0.34, 0.61, 0.87)[:max(1, min(int(limit), 4))]
+            times = ([min(max(dur * f, 0.0), max(0.0, dur - 0.04))
+                      for f in fracs] if dur > 0.08 else [0.0])
+            seen_t = set()
+            for t in times:
+                t = round(t, 2)
+                if t in seen_t:
+                    continue
+                seen_t.add(t)
+                local = os.path.join(
+                    ctx.workdir, f"review_{uuid.uuid4().hex[:8]}.jpg")
+                try:
+                    media.frame_at(path, t, local, width=768)
+                except Exception:
+                    continue
+                frames.append(local)
+                labels.append(f"{t:g}s")
+        if not frames:
+            return 0
+        _deliver_frames(
+            ctx, frames, labels,
+            "Verify subject, visual quality, relevance, logos/watermarks and "
+            "the exact useful moment before placing this asset in the edit.",
+            f"Automatic review of the downloaded {label}")
+        return len(frames)
+    except Exception:
+        return 0
 
 
 def find_footage(ctx, query):
@@ -3502,6 +3573,46 @@ def search_sfx(ctx, query, max_seconds=None):
               "add_sfx places it on its moment.")
 
 
+def _download_sfx_hit(ctx, hit):
+    """Download/store one resolved SFX hit. Returns (asset, error_text)."""
+    lp = os.path.join(ctx.workdir, f"sfxfetch_{uuid.uuid4().hex[:8]}.mp3")
+    try:
+        sfx_search.download(hit, lp)
+    except Exception as e:
+        return None, (f"Could not download that sound ({str(e)[:160]}). Try "
+                      "another result. Do NOT claim a sound was added.")
+    dur = music_search.probe_duration_s(lp)
+    if dur <= 0.05:
+        return None, ("REJECTED: the downloaded file is not playable audio — "
+                      "try another result. Do NOT claim a sound was added.")
+    key = f"sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
+    try:
+        storage.upload_file(lp, key, "audio/mpeg")
+    except Exception as e:
+        return None, (f"Downloaded but could not save it ({str(e)[:140]}) — "
+                      "try again. Do NOT claim a sound was added.")
+    title = (hit.get("title") or "sound").strip()
+    fname = title[:80] + ".mp3"
+    note = sfx_search.license_note(hit)
+    byte_count = os.path.getsize(lp)
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
+               bytes_=byte_count, duration_s=dur,
+               meta={"filename": fname, "source": hit.get("provider"),
+                     "source_url": hit.get("page_url") or hit.get("_url"),
+                     "license": hit.get("license"), "license_note": note,
+                     "author": hit.get("author"),
+                     "caption": "found online by search_sfx"})
+    if not hasattr(ctx, "audio_fetched"):
+        ctx.audio_fetched = []
+    ctx.audio_fetched.append(key)
+    try:
+        os.remove(lp)
+    except OSError:
+        pass
+    return {"title": title, "duration_s": dur, "storage_key": key,
+            "license_note": note, "hit": hit}, None
+
+
 def fetch_sfx(ctx, id):
     """WRITE (to the project's assets): download a search_sfx hit and
     register it as a normal audio asset, ready for add_sfx."""
@@ -3511,37 +3622,62 @@ def fetch_sfx(ctx, id):
         return ("REJECTED: that sound result id could not be recovered"
                 + (f" ({recover_error})" if recover_error else "")
                 + ". Call search_sfx and choose one of its current ids.")
-    lp = os.path.join(ctx.workdir, f"sfxfetch_{uuid.uuid4().hex[:8]}.mp3")
-    try:
-        sfx_search.download(hit, lp)
-    except Exception as e:
-        return (f"Could not download that sound ({str(e)[:160]}). Try "
-                "another result. Do NOT claim a sound was added.")
-    dur = music_search.probe_duration_s(lp)
-    if dur <= 0.05:
-        return ("REJECTED: the downloaded file is not playable audio — "
-                "try another result. Do NOT claim a sound was added.")
-    key = f"sfx/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp3"
-    try:
-        storage.upload_file(lp, key, "audio/mpeg")
-    except Exception as e:
-        return (f"Downloaded but could not save it ({str(e)[:140]}) — try "
-                "again. Do NOT claim a sound was added.")
-    title = (hit.get("title") or "sound").strip()
-    fname = title[:80] + ".mp3"
-    note = sfx_search.license_note(hit)
-    ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
-               bytes_=os.path.getsize(lp), duration_s=dur,
-               meta={"filename": fname, "source": hit.get("provider"),
-                     "source_url": hit.get("page_url") or hit.get("_url"),
-                     "license": hit.get("license"), "license_note": note,
-                     "author": hit.get("author"),
-                     "caption": "found online by search_sfx"})
-    ctx.audio_fetched.append(key)
+    asset, error = _download_sfx_hit(ctx, hit)
+    if error:
+        return error
+    title, dur, key, note = (asset["title"], asset["duration_s"],
+                             asset["storage_key"], asset["license_note"])
     return (f"Fetched \"{title}\" — {dur:g}s, saved as storage_key={key}. "
             f"License: {note}. Next: add_sfx(storage_key='{key}', "
             f"at=<moment>) — every "
             "sound lands ON a nameable visible moment.")
+
+
+def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None):
+    """Find the best real one-shot online, store it and place it in one call."""
+    if not sfx_search.available():
+        return ("REJECTED: web sound-effect search is disabled. Use add_sfx "
+                "with a user-uploaded audio or video asset.")
+    try:
+        at_n = float(at)
+        gain_n = float(gain_db)
+        mx = float(max_seconds) if max_seconds is not None else None
+    except (TypeError, ValueError):
+        return "REJECTED: at, gain_db and max_seconds must be numbers."
+    try:
+        prog = program_duration(ctx.latest_edl()["json"])
+    except Exception as e:
+        return f"REJECTED: could not read the timeline ({str(e)[:120]})."
+    if at_n < 0 or at_n > max(0.0, prog - 0.05):
+        return (f"REJECTED: at={at_n:g}s is outside the program "
+                f"(0 to {round(prog, 2)}s).")
+    try:
+        hits = sfx_search.search(query, max_s=mx, count=6)
+    except Exception as e:
+        return (f"Sound search failed ({str(e)[:180]}). Use a physical sound "
+                "name such as 'cinematic whoosh' or 'camera shutter'.")
+    if not hits:
+        return (f"No usable one-shot matched '{query}'. Try a more physical "
+                "sound name; nothing was fetched or placed.")
+    _remember_search_hits(ctx, "sfx", hits)
+    errors = []
+    # CDN availability varies. Try the top three ranked real recordings so a
+    # dead preview URL does not derail a whole edit turn.
+    for hit in hits[:3]:
+        asset, error = _download_sfx_hit(ctx, hit)
+        if error:
+            errors.append(error)
+            continue
+        placed = add_sfx(ctx, asset["storage_key"], at_n, gain_n)
+        if placed.startswith("REJECTED"):
+            return placed
+        return (placed + f" Source: \"{asset['title']}\""
+                f" ({hit.get('provider')}); license: "
+                f"{asset['license_note']}. Selected automatically from "
+                "ranked real one-shot recordings for the exact query "
+                f"'{query}'.")
+    return ("Could not download any of the top ranked sounds. "
+            + " ".join(errors)[:400])
 
 
 def _speech_overlap_s(ctx, edl, start_out, end_out):
@@ -10481,6 +10617,10 @@ def add_stylize(ctx, kind, start=None, end=None, intensity=None):
     if (start is None) != (end is None):
         return ("REJECTED: pass both start and end (program seconds), or "
                 "neither for the whole video.")
+    if k == "stabilize" and start is not None:
+        return ("REJECTED: stabilize analyzes motion across adjacent frames, "
+                "so it must cover the whole video. Omit start/end; use "
+                "intensity to control its search range.")
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     s = e = None
@@ -11387,8 +11527,12 @@ def fetch_url(ctx, url, as_kind=None):
 
     kind, path = got["kind"], got["path"]
     key = url_media.storage_key(ctx.project_id, kind, path)
+    reviewed = 0
     try:
         storage.upload_file(path, key, url_media.content_type(path))
+        reviewed = _queue_download_review(
+            ctx, path, kind, got.get("duration_s"), got.get("filename") or
+            url_media.KIND_LABEL[kind])
     except Exception as e:
         return (f"Downloaded that {url_media.KIND_LABEL[kind]} but could not "
                 f"save it to storage ({str(e)[:160]}). Do NOT claim it was "
@@ -11431,9 +11575,14 @@ def fetch_url(ctx, url, as_kind=None):
         bits.append("no audio")
     detail = f" ({', '.join(bits)})" if bits else ""
     nxt = _FETCH_NEXT_STEP[kind].format(key=key)
+    review = (f" AUTOMATIC VISUAL REVIEW: {reviewed} representative "
+              "frame(s) from the actual downloaded file are attached. "
+              "Inspect those pixels before placing it; use look_at_asset "
+              "for exact seconds."
+              if reviewed else "")
     return (f"Downloaded \"{got['filename']}\"{detail} as a "
             f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
-            f"the project but NOT in the video yet — {nxt}. RIGHTS CHECK: "
+            f"the project but NOT in the video yet — {nxt}.{review} RIGHTS CHECK: "
             "source title/uploader identify the file, but no usage license "
             "was verified; downloading it does not grant republication "
             "rights. Use it only when the user has the needed rights.")
@@ -11566,15 +11715,18 @@ def add_stock_media(ctx, id):
                 "a different result. Do NOT claim anything was added.")
 
     key = url_media.storage_key(ctx.project_id, kind, path)
+    dur = (info or {}).get("duration") or item.get("duration_s")
+    reviewed = 0
     try:
         storage.upload_file(path, key, url_media.content_type(path))
+        reviewed = _queue_download_review(
+            ctx, path, kind, dur, (item.get("description") or "stock media")[:60])
     except Exception as e:
         return (f"Downloaded the stock clip but could not save it "
                 f"({str(e)[:160]}). Do NOT claim it was added; try again.")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    dur = (info or {}).get("duration") or item.get("duration_s")
     w = (info or {}).get("width") or item.get("picked_width") or item.get("width")
     h = (info or {}).get("height") or item.get("picked_height") or item.get("height")
     desc = (item.get("description") or "stock clip")[:60]
@@ -11606,9 +11758,13 @@ def add_stock_media(ctx, id):
              "keeps running, or insert_media to splice it in and add time"
              if is_video else
              "insert_media to hold it on screen, or add_overlay(fit='cover')")
+    review = (f" {reviewed} representative frame(s) from the downloaded "
+              "rendition are attached for an automatic visual review; inspect "
+              "them before placement."
+              if reviewed else "")
     return (f"Added stock {'clip' if is_video else 'image'} \"{desc}\""
             f"{detail} to the project: storage_key={key}. It is SILENT and "
-            f"NOT in the video yet — place it with {place}. Cover overlays of "
+            f"NOT in the video yet — place it with {place}.{review} Cover overlays of "
             "2-6s read best; start it on the words that mention the subject.")
 
 
@@ -14644,7 +14800,7 @@ def _seg_schema():
 # restyle EXISTING captions. Keep in step with captions.STYLE_KEYS,
 # schemas.CaptionStyle and _parse_partial_style's allowlist.
 CAPTION_PRESETS = ["clean", "documentary", "broadcast", "retro", "neon",
-                   "podcast", "beast", "karaoke", "elegant", "spotlight",
+                   "podcast", "reels", "beast", "karaoke", "elegant", "spotlight",
                    "stacked", "iridescent", "chrome", "editorial",
                    "fashion", "luxe", "impact", "lyric", "classic"]
 def make_shorts(ctx, count=None, style_note=None):
@@ -14895,7 +15051,8 @@ CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
                  "Instrument Serif", "DM Serif Display", "Montserrat",
                  "Plus Jakarta Sans"]
 CAPTION_ANIMS = ["none", "fade", "pop", "slide_up", "punch", "blur_in",
-                 "whip", "flash", "rise", "drop"]
+                 "whip", "flash", "rise", "drop", "elastic", "bounce",
+                 "swing", "zoom_blur"]
 _STYLE_PROPS = {
     "preset": {"type": "string", "enum": CAPTION_PRESETS},
     "color": {"type": "string"},
@@ -15153,7 +15310,9 @@ TOOLS = {
                      "phrases, size-only hierarchy), 'documentary' "
                      "(restrained subtitles on a translucent contrast "
                      "panel), and 'broadcast' (left-aligned news/explainer "
-                     "lower third). SOCIAL/CREATIVE: 'podcast' (bold "
+                     "lower third). SOCIAL/CREATIVE: 'reels' (FLAGSHIP "
+                     "short-form system: tight two-line hierarchy, warm hero "
+                     "word and multi-stage elastic word landings), 'podcast' (bold "
                      "white words land on screen as spoken, keywords light "
                      "up in the accent color, get a highlight box or serif "
                      "italics, numbers render HUGE), 'beast' (loud "
@@ -15191,7 +15350,8 @@ TOOLS = {
                      "Other style fields: color '#RRGGBB', size s|m|l|xl "
                      "(presets are already big at 'm'), size_scale "
                      "0.5-3.0, dynamic:true (legacy karaoke, no preset), "
-                     "animation fade|pop|slide_up, or 'none' to turn a "
+                     "animation fade|pop|slide_up|punch|blur_in|whip|flash|"
+                     "rise|drop|elastic|bounce|swing|zoom_blur, or 'none' to turn a "
                      "preset's animation OFF (instant words), "
                      "max_words_per_caption 1-16. Example — premium reel "
                      "captions: {mode:'from_transcript', style:{preset:"
@@ -15328,6 +15488,19 @@ TOOLS = {
                   "add_sfx. Repeat the "
                   "license line to the user when it carries an obligation.",
                   {"id": {"type": "string"}}),
+    "add_web_sfx": (add_web_sfx, "ONE-CALL on-demand sound design: search "
+                    "real Openverse/Freesound recordings, rank clean "
+                    "physical one-shots above loops/music/ambience, fetch "
+                    "the best available result, and place it at an exact "
+                    "OUTPUT-timeline second. Use for 'add a cinematic "
+                    "whoosh at 3.2s', 'put a shutter on this cut', or any "
+                    "specific requested sound. The result reports the real "
+                    "source and license. gain_db defaults -6; max_seconds "
+                    "defaults 15.",
+                    {"query": {"type": "string"},
+                     "at": {"type": "number"},
+                     "gain_db": {"type": "number"},
+                     "max_seconds": {"type": "number"}}),
     "add_sfx": (add_sfx, "Punctuate a MOMENT with a one-shot sound effect — a "
                 "whoosh on a cut, a click on a beat, an impact on a reveal. "
                 "Choose it when the brief, format, timing, or your editorial "
@@ -15636,7 +15809,9 @@ TOOLS = {
                      "Wikimedia/Flickr's photo record; relay each photo's "
                      "license line when it carries an obligation. For real "
                      "topical VIDEO use find_footage instead. Returns "
-                     "candidates ONLY: nothing is downloaded and nothing "
+                     "a VISUALLY REVIEWABLE, provider-diverse grid (Pexels/"
+                     "Pixabay/Openverse when configured), not a homogeneous "
+                     "first-provider dump. Candidates ONLY: nothing is downloaded and nothing "
                      "enters the video. kind 'video' (default) or 'photo'. "
                      "orientation defaults to the project's output frame, "
                      "so a 9:16 edit gets vertical footage. Then call "
@@ -15654,7 +15829,10 @@ TOOLS = {
                         "is SILENT and is NOT in the video yet — place it "
                         "with add_overlay(fit='cover') for a cutaway that "
                         "keeps the speech running, or insert_media to splice "
-                        "it in. Always tell the user which shot you used.",
+                        "it in. Representative frames from the ACTUAL "
+                        "downloaded rendition are automatically attached; "
+                        "inspect them before placement. Always tell the user "
+                        "which shot you used.",
                         {"id": {"type": "string"}}),
     "record_website": (record_website, "RECORD A LIVE WEB PAGE as video: a "
                        "headless browser opens the URL at the project's "
@@ -16488,17 +16666,19 @@ TOOLS = {
                                          "enum": ["pause", "continue"]}}),
     "add_stylize": (add_stylize, "Layer a windowed finishing effect on the "
                     "program picture: 'grain' (film grain), 'vignette' "
-                    "(darkened corners), 'glow' (soft bloom), 'chromatic' "
+                    "(darkened corners), 'glow' (soft bloom), 'halation' "
+                    "(warm red-orange highlight bloom like exposed film), 'chromatic' "
                     "(RGB fringe), 'dream_blur' (soft dreamy diffusion), "
                     "'vhs' (tape look), 'flash' (strobe pop), 'shake' "
                     "(adds camera shake), 'sharpen' / 'denoise' (picture "
                     "quality — prefer enhance_video, which orders them "
                     "correctly), 'motion_blur' (real frame blending; only "
                     "reads on movement, does nothing on a static shot), "
-                    "'stabilize' (smooths a HANDHELD wobble via deshake — it "
-                    "crops a few percent at the edges and cannot fix a whip, "
-                    "a walk or rolling shutter; say that rather than "
-                    "promising stabilization). start/end are PROGRAM seconds — omit "
+                    "'stabilize' (smooths modest HANDHELD wobble via deshake; "
+                    "mirrored edges may soften and it cannot fix a whip, a "
+                    "walk or rolling shutter; say that rather than promising "
+                    "stabilization). Stabilize is whole-video only. For other "
+                    "kinds start/end are PROGRAM seconds — omit "
                     "both for the whole video. intensity 0.05-1.0 (default "
                     "0.5). Content-anchored: a stylized moment follows its "
                     "footage through later cuts. One or two layered "
@@ -16854,6 +17034,7 @@ REQUIRED_ARGS = {
     "search_sfx": ["query"],
     "find_footage": ["query"],
     "fetch_sfx": ["id"],
+    "add_web_sfx": ["query", "at"],
     "beat_align_cuts": [],
     "suggest_emphasis": [],
     "apply_look": ["name"],
@@ -16878,7 +17059,7 @@ WRITE_TOOLS = {"apply_edit_recipe",
                "add_kinetic_text",
                "set_caption_style", "add_music", "remove_music",
                "swap_music", "set_music_fit", "extract_audio",
-               "add_sfx", "move_sfx", "remove_sfx",
+               "add_sfx", "add_web_sfx", "move_sfx", "remove_sfx",
                "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
                "record_website", "record_website_demo", "showcase_demo",
                "add_stock_media",
@@ -16939,7 +17120,7 @@ def _tool_disabled(name, model=None):
         return not song_find.available()
     if name == "find_footage":
         return not song_find.footage_available()
-    if name in ("search_sfx", "fetch_sfx"):
+    if name in ("search_sfx", "fetch_sfx", "add_web_sfx"):
         return not sfx_search.available()
     return False
 

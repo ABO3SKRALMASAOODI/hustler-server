@@ -51,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlparse
 
 import config
 import db
@@ -65,6 +66,20 @@ def bot_walled(detail):
     d = (detail or "").lower()
     return ("sign in to confirm" in d or "not a bot" in d
             or "--cookies" in d)
+
+
+def access_blocked(detail):
+    """Retryable YouTube access failures, including the CDN-level wall.
+
+    YouTube can return a perfectly valid player response and formats, then
+    reject the googlevideo request with a bare HTTP 403. That is the same
+    access-control family for our purposes: another client/format class may
+    work. This helper is used only after a URL is known to be YouTube, so it
+    cannot turn an unrelated website's ordinary 403 into a retry storm.
+    """
+    d = (detail or "").lower()
+    return (bot_walled(d) or "http error 403" in d
+            or "403 forbidden" in d or "403: forbidden" in d)
 
 
 def stale_cookies(detail):
@@ -267,6 +282,80 @@ def prepare_run_jar(workdir=None):
         return None                   # degrade to anonymous, never crash
 
 
+# ── extraction strategy: public media must not depend on account cookies ──
+
+def is_youtube_url(url):
+    """True only for YouTube page hosts handled by the YouTube extractor.
+
+    Keep this intentionally narrow: SoundCloud/Vimeo/TikTok currently work,
+    and the public-YouTube strategy ladder must never perturb their proven
+    extraction path.
+    """
+    try:
+        host = (urlparse(str(url or "")).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    return (host == "youtu.be" or host == "youtube.com"
+            or host.endswith(".youtube.com")
+            or host == "youtube-nocookie.com"
+            or host.endswith(".youtube-nocookie.com"))
+
+
+def extraction_strategies(have_cookies=None):
+    """Ordered YouTube extraction attempts.
+
+    Public footage should not ride a logged-in browser session by default.
+    A rejected/rotated cookie jar turns an otherwise public request into the
+    exact account path YouTube challenges most aggressively, which is what the
+    Aug-13 production audit showed: POT was on, but all real B-roll fetches
+    still carried the mounted 55-entry jar and died at the player request.
+
+    The official yt-dlp path is anonymous ``mweb`` with a per-video PO-token
+    provider. A production-equivalent byte test also proved ``web_embedded``
+    can deliver the 1080p adaptive streams that mweb's CDN rejected; that
+    verified high-quality path leads, then mweb+POT, then a combined-stream
+    availability rung. Cookies are an
+    isolated last rung for content which genuinely needs an account; they can
+    no longer poison every public attempt.  Each row is plain data so the boot
+    probe and the real downloader execute the *same* ladder.
+    """
+    if have_cookies is None:
+        have_cookies = resolve_cookies()[0] is not None
+    out = [{"name": "anonymous-web-embedded", "client": "web_embedded",
+            "cookies": False, "format": "adaptive"},
+           {"name": "anonymous-mweb-pot", "client": "mweb",
+            "cookies": False, "format": "adaptive"},
+           # The adaptive manifest can enumerate correctly yet return 403 at
+           # the media CDN. YouTube's combined progressive stream is a
+           # separate delivery class and was byte-verified on the exact
+           # production probe video; it is the availability fallback.
+           {"name": "anonymous-mweb-progressive", "client": "mweb",
+            "cookies": False, "format": "progressive"}]
+    seen = {"mweb", "web_embedded"}
+    for raw in config.YTDLP_FALLBACK_CLIENTS:
+        client = str(raw or "").strip()
+        if not client or client in seen:
+            continue
+        seen.add(client)
+        # tv_embedded is the one configured fallback whose useful form needs
+        # an account session. Everything else stays anonymous so a bad jar
+        # cannot make all rungs fail in the same way.
+        use_cookies = client == "tv_embedded" and bool(have_cookies)
+        if client == "tv_embedded" and not have_cookies:
+            continue
+        out.append({"name": (("cookies-" if use_cookies else "anonymous-")
+                             + client.replace(",", "+")),
+                    "client": client, "cookies": use_cookies,
+                    "format": "adaptive"})
+    # Some age/account-gated public pages work only on yt-dlp's selected
+    # default client with cookies. Last, never first: it is a capability
+    # fallback, not the identity of every public download.
+    if have_cookies:
+        out.append({"name": "cookies-default", "client": None,
+                    "cookies": True, "format": "adaptive"})
+    return out
+
+
 # ── PO tokens: the door that stays open by itself ────────────────────────
 
 def pot_args():
@@ -283,13 +372,17 @@ def pot_args():
 
 # ── the boot probe: the answer to "is it working", asked from the box ────
 
-def _probe_cmd(url, run_jar):
+def _probe_cmd(url, run_jar, strategy=None):
+    strategy = strategy or {"client": "mweb", "cookies": False}
     cmd = [sys.executable, "-m", "yt_dlp",
            "--ignore-config",
            "--socket-timeout", "20",
            "-f", "ba/b"]
-    if run_jar:
+    if run_jar and strategy.get("cookies"):
         cmd += ["--cookies", run_jar]
+    if strategy.get("client"):
+        cmd += ["--extractor-args",
+                f"youtube:player_client={strategy['client']}"]
     if config.YTDLP_PROXY:
         cmd += ["--proxy", config.YTDLP_PROXY]
     if config.YTDLP_REMOTE_COMPONENTS:
@@ -312,8 +405,8 @@ def probe(url=None, timeout_s=120.0):
     --simulate passed from the very box whose downloads still walled.
 
       simulate  — the bot wall at extraction + format resolution
-      download  — the media-serving gate (a few hundred KB of worstaudio,
-                  capped, deleted immediately)
+      download  — the media-serving gate (yt-dlp --test reads a small real
+                  byte range from the selected CDN URL, deleted immediately)
 
     The probe URL can be overridden without a deploy through the app_kv
     row 'ytdlp_probe_url' — pointing the next boot at whatever video prod
@@ -334,41 +427,72 @@ def probe(url=None, timeout_s=120.0):
         verdict["cookie_entries"] = sum(
             1 for line in _normalize_jar(content).splitlines()
             if line.strip() and not line.startswith("#") and "\t" in line)
-    base, target = _probe_cmd(url, run_jar)
+    strategies = extraction_strategies(have_cookies=bool(content))
+    target = ["--", url]
+    attempts = []
     try:
-        proc = subprocess.run(
-            base + ["--simulate",
-                    "--print", "probe_ok id=%(id)s fmt=%(format_id)s"]
-            + target,
-            capture_output=True, text=True, errors="replace",
-            timeout=timeout_s)
-        err = proc.stderr or ""
-        verdict["ok"] = proc.returncode == 0 and "probe_ok" in (
-            proc.stdout or "")
-        if stale_cookies(err):
-            verdict["stale_cookies"] = True
-        if not verdict["ok"]:
-            verdict["why"] = ("bot_wall" if bot_walled(err) else "error"
-                              ) + ": " + _tail(err)
-        if verdict["ok"]:
+        for strategy in strategies:
+            base, _ = _probe_cmd(url, run_jar, strategy)
+            progressive = strategy.get("format") == "progressive"
+            selector = "b[height<=360]/b" if progressive else "ba/b"
+            proc = subprocess.run(
+                base + ["-f", selector, "--simulate",
+                        "--print", "probe_ok id=%(id)s fmt=%(format_id)s"]
+                + target,
+                capture_output=True, text=True, errors="replace",
+                timeout=timeout_s)
+            err = proc.stderr or ""
+            extract_ok = (proc.returncode == 0 and
+                          "probe_ok" in (proc.stdout or ""))
+            if stale_cookies(err):
+                verdict["stale_cookies"] = True
+            row = {"strategy": strategy["name"],
+                   "extract_ok": extract_ok, "download_ok": False,
+                   "ok": False, "why": ""}
+            if not extract_ok:
+                row["why"] = (("access_blocked"
+                               if access_blocked(err) else "error")
+                              + ": " + _tail(err))
+                attempts.append(row)
+                if access_blocked(err):
+                    continue
+                break
+
+            # A successful manifest/format lookup is not a successful fetch.
+            # Test the actual media URL on EVERY rung; Aug 13's mweb+POT
+            # manifest succeeded while googlevideo still answered 403.
             with tempfile.TemporaryDirectory(prefix="ytprobe_") as d:
                 proc = subprocess.run(
-                    base + ["-f", "worstaudio/worst",
-                            "--max-filesize", str(4 << 20),
-                            "-o", os.path.join(d, "p.%(ext)s")]
-                    + target,
+                    base + ["--test", "-f", selector,
+                            "-o", os.path.join(d, "p.%(ext)s")] + target,
                     capture_output=True, text=True, errors="replace",
                     timeout=timeout_s)
                 err = proc.stderr or ""
                 got = any(os.path.getsize(os.path.join(d, f))
                           for f in os.listdir(d))
-                verdict["download_ok"] = proc.returncode == 0 and got
+                row["download_ok"] = proc.returncode == 0 and bool(got)
+                row["ok"] = row["download_ok"]
                 if stale_cookies(err):
                     verdict["stale_cookies"] = True
-                if not verdict["download_ok"]:
-                    verdict["download_why"] = (
-                        "bot_wall" if bot_walled(err) else "error"
-                    ) + ": " + _tail(err)
+                if not row["download_ok"]:
+                    row["why"] = (("access_blocked"
+                                   if access_blocked(err) else "error")
+                                  + ": " + _tail(err))
+            attempts.append(row)
+            if row["download_ok"]:
+                verdict["ok"] = verdict["download_ok"] = True
+                verdict["strategy"] = strategy["name"]
+                break
+            # A real content verdict (private/removed/region-blocked) is not
+            # repaired by changing the player client/format. Access-control
+            # failures are: the progressive rung is specifically for them.
+            if not access_blocked(err):
+                break
+        verdict["attempts"] = attempts
+        if not verdict["ok"]:
+            verdict["why"] = (attempts[-1]["why"] if attempts else
+                              "error: no extraction strategy")
+            verdict["download_why"] = verdict["why"]
     except subprocess.TimeoutExpired:
         verdict["why"] = verdict["why"] or f"timeout after {timeout_s:.0f}s"
     except Exception as e:                        # pragma: no cover

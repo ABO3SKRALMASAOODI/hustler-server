@@ -143,6 +143,29 @@ def test_search_falls_through_to_pixabay_when_pexels_errors(monkeypatch):
     assert hits[0]["id"] == "pixabay:video:7"
 
 
+def test_search_grid_is_diverse_instead_of_pexels_only(monkeypatch):
+    monkeypatch.setattr(stock, "PEXELS_KEY", "k")
+    monkeypatch.setattr(stock, "PIXABAY_KEY", "k2")
+
+    def rows(provider):
+        return [{"provider": provider, "kind": stock.KIND_VIDEO,
+                 "id": f"{provider}:video:{i}", "width": 1920,
+                 "height": 1080, "duration_s": 8,
+                 "description": "professional city skyline",
+                 "_files": _files((1920, 1080))}
+                for i in range(5)]
+
+    monkeypatch.setattr(stock, "_pexels_search",
+                        lambda *a, **k: rows("pexels"))
+    monkeypatch.setattr(stock, "_pixabay_search",
+                        lambda *a, **k: rows("pixabay"))
+    hits = stock.search("city skyline", kind="video", count=6)
+    providers = [h["provider"] for h in hits]
+    assert providers.count("pexels") == 3
+    assert providers.count("pixabay") == 3
+    assert providers[:4] == ["pexels", "pixabay", "pexels", "pixabay"]
+
+
 def test_search_raises_only_when_every_provider_fails(monkeypatch):
     monkeypatch.setattr(stock, "PEXELS_KEY", "k")
     monkeypatch.setattr(stock, "PIXABAY_KEY", "")
