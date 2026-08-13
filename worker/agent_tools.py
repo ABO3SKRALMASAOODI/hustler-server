@@ -2465,6 +2465,15 @@ def _auto_caption_emphasis(ctx, edl, limit=25):
 def add_captions(ctx, mode=None, items=None, style=None,
                  max_words_per_caption=None, emphasis_words=None):
     edl = dict(ctx.latest_edl()["json"])
+    # `position` / `anchor_y` are user-authored geometry, not mere visual
+    # preferences.  The measured placement compiler used to keep running even
+    # when either was explicit, then stored a per-shot placement_track whose
+    # values beat the global style at render time.  The EDL could therefore
+    # say position:"bottom" while the caption visibly jumped middle/top later
+    # in the video.  Preserve adaptive collision avoidance only when the
+    # caller leaves placement open for the product to direct.
+    placement_locked = isinstance(style, dict) and any(
+        style.get(key) is not None for key in ("position", "anchor_y"))
     parsed_style = _parse_style(style)
     if isinstance(parsed_style, str):
         return "REJECTED: " + parsed_style[5:]
@@ -2533,17 +2542,19 @@ def add_captions(ctx, mode=None, items=None, style=None,
                         "burned-in captions during "
                         f"{int(round(burned_score * 100))}% of sampled "
                         "speaking moments; the new layer may stack words.")
-                preferred = ((parsed_style or {}).get("position") or
-                             ("middle" if preset in ("spotlight", "lyric")
-                              else "bottom"))
-                placement, unsafe, analyzed = _caption_placement_track(
-                    ctx, edl, spatial_track, preferred)
-                if analyzed and unsafe / analyzed > 0.35:
-                    spatial_notes.append(
-                        f"\nQUALITY ADVISORY: {unsafe} of {analyzed} analyzed "
-                        "caption moments had no clean top/middle/bottom band. "
-                        "The captions were still committed; inspect the "
-                        "preview and mute or restyle any collisions.")
+                if not placement_locked:
+                    preferred = ((parsed_style or {}).get("position") or
+                                 ("middle" if preset in ("spotlight", "lyric")
+                                  else "bottom"))
+                    placement, unsafe, analyzed = _caption_placement_track(
+                        ctx, edl, spatial_track, preferred)
+                    if analyzed and unsafe / analyzed > 0.35:
+                        spatial_notes.append(
+                            f"\nQUALITY ADVISORY: {unsafe} of {analyzed} "
+                            "analyzed caption moments had no clean "
+                            "top/middle/bottom band. The captions were still "
+                            "committed; inspect the preview and mute or "
+                            "restyle any collisions.")
         # karaoke groups larger than the hard max read as a wall of text —
         # clamp the STORED value so EDL, diff line and reply all match what
         # actually renders, and disclose the clamp. Premium presets chunk
@@ -2761,6 +2772,14 @@ def merge_caption_style(captions, partial):
         if drop_pos:
             st.pop("position", None)
         new["style"] = st
+        # A stored placement_track has higher render priority than the global
+        # style.  Once the caller explicitly fixes a position/anchor, keeping
+        # that adaptive track would make the accepted style update a visual
+        # no-op for some shots.  None is signature-safe and validates for both
+        # historical and current transcript-caption EDLs.
+        if any(partial.get(key) is not None
+               for key in ("position", "anchor_y")):
+            new["placement_track"] = None
         return new
     out = []
     # dynamic word-pop (and its highlight color) only exists for
@@ -2870,6 +2889,10 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
         return ("REJECTED: no captions exist yet — call "
                 "add_captions(mode='from_transcript') first (you can pass "
                 "a style there directly).")
+    cleared_adaptive_placement = isinstance(caps, dict) \
+        and bool(caps.get("placement_track")) \
+        and any(partial.get(key) is not None
+                for key in ("position", "anchor_y"))
     merged = merge_caption_style(caps, partial)
     # A style write is the migration boundary: the historical EDL stays on
     # its frozen renderer, while this newly-created version opts into the
@@ -2960,6 +2983,9 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
         desc += f", {len(merged.get('emphasis_words') or [])} emphasis words auto-selected"
     result = ctx.write_edl(edl, desc)
     result += karaoke_note + emph_note
+    if cleared_adaptive_placement:
+        result += ("\nCaption placement is locked for the whole video; the "
+                   "previous shot-aware position changes were removed.")
     if isinstance(caps, list) and ({"dynamic", "highlight_color"}
                                    & set(partial)):
         result += ("\nNote: dynamic karaoke captions (and highlight_color) "
@@ -15139,7 +15165,11 @@ TOOLS = {
                      "required, or [] to explicitly disable hierarchy. "
                      "highlight_color sets the accent (default warm "
                      "yellow); uppercase overrides the preset's casing; "
-                     "position bottom/top/middle overrides its placement. "
+                     "position bottom/top/middle overrides its placement "
+                     "and LOCKS that band for the whole video (no shot-by-"
+                     "shot position changes); anchor_y similarly locks an "
+                     "exact vertical frame fraction. Omit both to let "
+                     "collision-aware placement adapt by shot. "
                      "Other style fields: color '#RRGGBB', size s|m|l|xl "
                      "(presets are already big at 'm'), size_scale "
                      "0.5-3.0, dynamic:true (legacy karaoke, no preset), "
@@ -15358,6 +15388,10 @@ TOOLS = {
                           "emphasized/spoken words; uppercase forces "
                           "casing; emphasis_words (top-level arg, with a "
                           "preset) replaces the emphasized keyword list. "
+                          "An explicit position or anchor_y locks captions "
+                          "there for the whole video and removes any old "
+                          "shot-aware placement track — use this when the "
+                          "user says captions must stop moving. "
                           "For fine size control that the s|m|l|xl buckets "
                           "can't hit pass size_scale (0.5-3.0; 1.5 = 50% "
                           "bigger). Outline, shadow, backing panel, tracking "

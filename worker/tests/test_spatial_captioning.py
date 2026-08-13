@@ -182,6 +182,85 @@ def test_renderer_follows_baked_source_time_placement_track(tmp_path):
     assert min(ys) < 200 and max(ys) - min(ys) > 1000
 
 
+def test_add_captions_explicit_position_disables_adaptive_track(monkeypatch):
+    class Ctx:
+        enforce_spatial = True
+        duration = 6.0
+        user_message = "keep every caption at the bottom"
+        edit_plan = None
+        index = {
+            "video": {"duration": 6.0, "width": 1920, "height": 1080},
+            "words": [
+                {"w": "keep", "t0": 0.5, "t1": 0.8},
+                {"w": "captions", "t0": 1.0, "t1": 1.4},
+                {"w": "still", "t0": 4.5, "t1": 4.9},
+            ],
+        }
+
+        def __init__(self):
+            self.edl = default_edl(self.duration)
+
+        def latest_edl(self):
+            return {"version": 1, "json": self.edl}
+
+        def write_edl(self, edl, _summary):
+            self.edl = edl
+            return "EDL v1 -> v2"
+
+    sidecar = {"samples": [
+        {"t": 1.0, "faces": [[0.3, 0.55, 0.7, 0.95]], "text": [],
+         "dense_ui": False},
+        {"t": 5.0, "faces": [[0.3, 0.02, 0.7, 0.35]], "text": [],
+         "dense_ui": False},
+    ]}
+    monkeypatch.setattr(agent_tools, "_get_spatial", lambda _ctx: sidecar)
+
+    ctx = Ctx()
+    result = agent_tools.add_captions(
+        ctx, mode="from_transcript",
+        style={"preset": "clean", "position": "bottom"})
+
+    assert result.startswith("EDL v1 -> v2")
+    assert ctx.edl["captions"]["style"]["position"] == "bottom"
+    assert ctx.edl["captions"]["placement_track"] is None
+
+
+def test_explicit_restyle_clears_stale_adaptive_track_only_for_geometry():
+    track = [
+        {"t0": 0.0, "t1": 3.0, "position": "top", "anchor_y": 0.16},
+        {"t0": 3.0, "t1": 6.0, "position": "bottom", "anchor_y": 0.80},
+    ]
+
+    class Ctx:
+        index = {"words": []}
+
+        def __init__(self):
+            self.edl = default_edl(6.0)
+            self.edl["captions"] = {
+                "mode": "from_transcript",
+                "design_version": captions.CAPTION_DESIGN_VERSION,
+                "style": {"preset": "clean"},
+                "placement_track": json.loads(json.dumps(track)),
+            }
+
+        def latest_edl(self):
+            return {"version": 2, "json": self.edl}
+
+        def write_edl(self, edl, _summary):
+            self.edl = edl
+            return "EDL v2 -> v3"
+
+    visual_only = Ctx()
+    agent_tools.set_caption_style(visual_only, {"color": "#FF0000"})
+    assert visual_only.edl["captions"]["placement_track"] == track
+
+    locked = Ctx()
+    result = agent_tools.set_caption_style(locked, {"position": "bottom"})
+    assert locked.edl["captions"]["style"]["position"] == "bottom"
+    assert locked.edl["captions"]["placement_track"] is None
+    assert "locked for the whole video" in result
+
+
 def test_placement_track_schema_rejects_overlaps():
     edl = default_edl(6.0)
     edl["captions"] = {
