@@ -2224,6 +2224,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     # Resolved from the user's plan in run_agent_job. _build_messages and the
     # tool schemas are model-agnostic and do not change with it.
     client = ctx.llm_client or llm.client()
+    # This loop already owns bounded, turn-budget-aware rate-limit recovery.
+    # The SDK's five hidden retries could otherwise hold a user's message for
+    # up to 7.5 minutes before our first 12-second recovery wait even began.
+    # Disable that nested layer for agent calls only; other LLM consumers keep
+    # the configured SDK retry policy.
+    step_client = llm.without_sdk_retries(client)
     model = ctx.agent_model or config.AGENT_MODEL
     messages = _build_messages(ctx, worker_db, user_message, attachment_note)
     _cont = _cont or {}
@@ -2577,7 +2583,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             _rl_waits = 0
             while resp is None:
                 try:
-                    resp = client.chat.completions.create(
+                    resp = step_client.chat.completions.create(
                         model=model, messages=messages, tools=tools, **kw)
                     break
                 except Exception as e:

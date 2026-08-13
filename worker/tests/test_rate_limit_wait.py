@@ -84,3 +84,22 @@ def test_bounds():
     assert llm.rate_limit_wait(_RL(), 1, 600, shutting_down=True) is None
     # With 22s left the wait shrinks to leave 10s of working budget.
     assert llm.rate_limit_wait(_RL(), 1, 22) == 12.0
+
+
+def test_agent_client_disables_hidden_sdk_retries():
+    class _Client:
+        def __init__(self):
+            self.options = None
+
+        def with_options(self, **options):
+            self.options = options
+            return "bounded-client"
+
+    client = _Client()
+    assert llm.without_sdk_retries(client) == "bounded-client"
+    assert client.options == {"max_retries": 0}
+
+
+def test_agent_client_accepts_provider_test_doubles_without_options():
+    client = object()
+    assert llm.without_sdk_retries(client) is client

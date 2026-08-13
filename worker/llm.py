@@ -88,6 +88,23 @@ def client():
     return _client
 
 
+def without_sdk_retries(client):
+    """Return an OpenAI client view that surfaces failures immediately.
+
+    Agent turns own their retry policy: they classify 429s, respect the
+    remaining turn budget, heartbeat while waiting, and cap the number of
+    retries.  Letting the SDK also retry first hid each 429 for as much as
+    ``LLM_TIMEOUT_S * LLM_MAX_RETRIES`` before that policy could run.  Keep
+    the pooled transport and timeout, but disable only the SDK's nested retry
+    layer for those calls.  The fallback keeps light test/provider doubles
+    that do not expose ``with_options`` compatible.
+    """
+    with_options = getattr(client, "with_options", None)
+    if callable(with_options):
+        return with_options(max_retries=0)
+    return client
+
+
 def image_client():
     """Separate pooled client for /images/generations — the image provider is
     configured independently of the chat provider (config.IMAGE_BASE_URL), so
