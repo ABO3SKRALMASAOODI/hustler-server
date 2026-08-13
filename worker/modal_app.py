@@ -61,13 +61,32 @@ def _boot(profile, role="executor"):
 
 
 def _run(job, profile, role="executor"):
-    if (job or {}).get("type") == "__warm":
-        return {"result": {"warmed": True}, "job_completed": False}
     _boot(profile, role)
     import config
     import http_server
     import executor_runtime
     config.require_core()
+    if (job or {}).get("type") == "__warm":
+        import subprocess
+        import version
+        ffmpeg = subprocess.run(
+            ["ffmpeg", "-version"], capture_output=True, text=True,
+            timeout=10, check=True).stdout.splitlines()[0]
+        return {
+            "result": {
+                "warmed": True,
+                "profile": profile,
+                "role": role,
+                "code_version": version.code_version(),
+                "features": version.version_report().get("features", []),
+                "runners": sorted(http_server.RUNNERS),
+                "ffmpeg": ffmpeg,
+                "compute_region": os.getenv("MODAL_REGION", "unknown"),
+                "compute_cloud_provider": os.getenv(
+                    "MODAL_CLOUD_PROVIDER", "unknown"),
+            },
+            "job_completed": False,
+        }
     executor_runtime.ensure_heartbeat()
     return executor_runtime.execute(job or {}, http_server.RUNNERS)
 

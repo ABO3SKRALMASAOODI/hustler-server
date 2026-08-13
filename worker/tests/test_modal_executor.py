@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
 import config  # noqa: E402
+import modal_app  # noqa: E402
 import remote  # noqa: E402
 
 
@@ -163,3 +164,14 @@ def test_final_and_index_skip_slow_cloud_run_job_launcher_when_modal_selected(
 def test_unconfigured_job_type_keeps_cloud_run(monkeypatch):
     _enable(monkeypatch)
     assert remote._modal_selected(dict(JOB, type="capture")) is False
+
+
+def test_modal_warm_path_boots_real_runner_stack(monkeypatch):
+    monkeypatch.setattr(modal_app, "_boot", lambda profile, role="executor": None)
+    monkeypatch.setattr(config, "require_core", lambda: None)
+    result = modal_app._run({"type": "__warm"}, "preview")
+    report = result["result"]
+    assert report["warmed"] is True
+    assert report["profile"] == "preview"
+    assert "preview" in report["runners"]
+    assert report["ffmpeg"].startswith("ffmpeg version")
