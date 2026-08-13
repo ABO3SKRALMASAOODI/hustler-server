@@ -47,6 +47,7 @@ and /etc/secrets is read-only ([Errno 30], Aug 8).
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -514,6 +515,35 @@ def probe(url=None, timeout_s=120.0):
                 os.unlink(run_jar)
             except OSError:
                 pass
+    return verdict
+
+
+def run_probe_job(worker_db, job):
+    """Measure actual YouTube byte delivery on this executor provider.
+
+    Search success is not download success. Cloud Run, Modal and Render can
+    all receive different YouTube treatment, so each provider records its own
+    real-byte verdict rather than overwriting the dispatcher's boot probe.
+    The key is fixed from the trusted runtime provider name; request payloads
+    cannot turn this authenticated diagnostic into arbitrary app_kv writes.
+    """
+    import version
+
+    payload = job.get("payload") or {}
+    provider = re.sub(r"[^a-z0-9_]+", "_", os.getenv(
+        "EXECUTOR_PROVIDER", "cloud_run").lower()).strip("_") or "unknown"
+    try:
+        timeout_s = max(20.0, min(180.0, float(
+            payload.get("timeout_s") or 120.0)))
+    except (TypeError, ValueError):
+        timeout_s = 120.0
+    verdict = probe(url=payload.get("url") or None, timeout_s=timeout_s)
+    verdict.update(provider=provider, code=version.code_version())
+    try:
+        worker_db.run(db.kv_put, f"ytdlp_probe_{provider}",
+                      json.dumps(verdict))
+    except Exception as exc:
+        verdict["store_error"] = str(exc)[:160]
     return verdict
 
 

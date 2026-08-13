@@ -909,7 +909,8 @@ MODAL_EXECUTOR_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "MODAL_EXECUTOR_TYPES",
         "preview,preview_check,final,index,capture,frames,track,matte,"
-        "smatch,clean,stems,fetch,search,agent_turn").split(",") if part.strip())
+        "smatch,clean,stems,fetch,search,ytprobe,agent_turn").split(",")
+    if part.strip())
 MODAL_CLOUD_RUN_FALLBACK = os.getenv(
     "MODAL_CLOUD_RUN_FALLBACK", "1") == "1"
 
@@ -1098,6 +1099,7 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # wall because the editor is synchronously waiting for this tool call.
     "fetch": int(os.getenv("REMOTE_TIMEOUT_FETCH_S", "600")),
     "search": int(os.getenv("REMOTE_TIMEOUT_SEARCH_S", "180")),
+    "ytprobe": int(os.getenv("REMOTE_TIMEOUT_YTPROBE_S", "600")),
     # Frame extraction from a stored original (round 62): dominated by the
     # executor pulling the source object from storage — a few hundred MB on
     # Cloud Run's own pipe — plus a handful of single-frame seeks. Like

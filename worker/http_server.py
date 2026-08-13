@@ -40,6 +40,7 @@ import tracker
 import url_media
 import version
 import webrecord
+import ytaccess
 
 # Only compute runners are exposed by the heavy executor. The separate
 # agent_executor role replaces this whole map with agent_turn only.
@@ -86,6 +87,7 @@ COMPUTE_RUNNERS = {
     # directly to object storage, and returns only metadata + review frames.
     "fetch": url_media.run_fetch_job,
     "search": song_find.run_search_job,
+    "ytprobe": ytaccess.run_probe_job,
 }
 
 # A separate Cloud Run service uses the same authenticated HTTP contract but

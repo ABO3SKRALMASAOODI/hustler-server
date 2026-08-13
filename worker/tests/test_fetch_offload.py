@@ -12,11 +12,13 @@ import remote                                                   # noqa: E402
 import song_find                                                # noqa: E402
 import storage                                                  # noqa: E402
 import url_media                                                # noqa: E402
+import ytaccess                                                 # noqa: E402
 
 
 def test_executor_exposes_the_stateless_fetch_runner():
     assert http_server.COMPUTE_RUNNERS["fetch"] is url_media.run_fetch_job
     assert http_server.COMPUTE_RUNNERS["search"] is song_find.run_search_job
+    assert http_server.COMPUTE_RUNNERS["ytprobe"] is ytaccess.run_probe_job
 
 
 def test_fetch_runner_uploads_media_and_actual_review_frames(
@@ -197,3 +199,19 @@ def test_search_runner_returns_access_wall_as_provider_fallback_data(
         "payload": {"query": "rocket", "mode": "footage"},
     })
     assert not got["ok"] and got["access_blocked"]
+
+
+def test_provider_probe_records_an_independent_verdict(monkeypatch):
+    writes = []
+
+    class Db:
+        def run(self, fn, *args, **kwargs):
+            writes.append((fn, args, kwargs))
+
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    monkeypatch.setattr(ytaccess, "probe", lambda **kwargs: {
+        "ok": True, "strategy": "anonymous-web-embedded",
+    })
+    got = ytaccess.run_probe_job(Db(), {"payload": {"timeout_s": 42}})
+    assert got["ok"] and got["provider"] == "modal"
+    assert writes and writes[0][1][0] == "ytdlp_probe_modal"

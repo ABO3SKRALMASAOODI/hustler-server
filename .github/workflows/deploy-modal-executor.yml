@@ -72,3 +72,27 @@ jobs:
             exit 1
           }
           echo "Modal executor code=$got provider=modal"
+
+      - name: record Modal YouTube byte health
+        run: |
+          python - <<'PY'
+          import json
+          import modal
+          result = modal.Function.from_name(
+              "valmera-executor", "heavy", environment_name="main").remote({
+                  "id": None,
+                  "type": "ytprobe",
+                  "project_id": "provider-health",
+                  "user_id": None,
+                  "attempts": 0,
+                  "payload": {"timeout_s": 120},
+              })
+          verdict = (result or {}).get("result") or {}
+          assert verdict.get("provider") == "modal", result
+          print(json.dumps({
+              "ok": verdict.get("ok"),
+              "strategy": verdict.get("strategy"),
+              "why": verdict.get("why"),
+              "code": verdict.get("code"),
+          }))
+          PY
