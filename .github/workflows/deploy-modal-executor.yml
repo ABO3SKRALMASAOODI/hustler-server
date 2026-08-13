@@ -63,15 +63,27 @@ jobs:
           print(hashlib.sha256(open("worker/modal_app.py", "rb").read()).hexdigest()[:12])
           PY
           )
-          read -r got got_adapter < <(python - <<'PY'
-          import json
+          got=""
+          got_adapter=""
+          # A successful deploy can take a few seconds to replace the Function
+          # handle returned by from_name(). Poll the reported fingerprint so a
+          # healthy rollout is not marked failed merely because verification
+          # raced Modal's control-plane propagation.
+          for attempt in {1..12}; do
+            read -r got got_adapter < <(python - <<'PY'
           import modal
           health = modal.Function.from_name(
               "valmera-executor", "health", environment_name="main").remote()
           assert health.get("provider") == "modal", health
           print(health["code_version"], health["adapter_version"])
           PY
-          )
+            )
+            if [ "$want" = "$got" ] && [ "$want_adapter" = "$got_adapter" ]; then
+              break
+            fi
+            echo "Waiting for Modal deployment propagation ($attempt/12): code=$got adapter=$got_adapter"
+            sleep 5
+          done
           test "$want" = "$got" || {
             echo "::error::Modal executor reports $got, expected $want"
             exit 1
