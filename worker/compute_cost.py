@@ -52,6 +52,11 @@ def annotate_request(timings, seconds, role=None, service=None):
             "compute_unit_usd_s": round(unit, 9),
             "gross_compute_usd_ceiling": round(float(seconds) * unit, 6),
         })
+        if os.getenv("MODAL_REGION"):
+            timings["compute_region"] = os.environ["MODAL_REGION"]
+        if os.getenv("MODAL_CLOUD_PROVIDER"):
+            timings["compute_cloud_provider"] = \
+                os.environ["MODAL_CLOUD_PROVIDER"]
         return timings
     name, cpu, memory = request_profile(role, service)
     unit = cpu * REQUEST_CPU_S + memory * REQUEST_GIB_S

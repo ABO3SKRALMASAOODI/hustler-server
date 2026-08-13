@@ -46,3 +46,13 @@ def test_modal_preview_cost_ceiling_is_lower_than_cloud_run(monkeypatch):
     assert modal["compute_provider"] == "modal"
     assert modal["gross_compute_usd_ceiling"] \
         < cloud["gross_compute_usd_ceiling"]
+
+
+def test_modal_cost_annotation_records_actual_region(monkeypatch):
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "batch")
+    monkeypatch.setenv("MODAL_REGION", "us-west-2")
+    monkeypatch.setenv("MODAL_CLOUD_PROVIDER", "aws")
+    timings = compute_cost.annotate_request({}, 12)
+    assert timings["compute_region"] == "us-west-2"
+    assert timings["compute_cloud_provider"] == "aws"

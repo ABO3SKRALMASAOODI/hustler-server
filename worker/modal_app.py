@@ -107,5 +107,11 @@ def health():
     _boot("health")
     import version
     report = version.version_report()
-    report.update({"status": "ok", "provider": "modal"})
+    report.update({
+        "status": "ok",
+        "provider": "modal",
+        "compute_region": os.getenv("MODAL_REGION", "unknown"),
+        "compute_cloud_provider": os.getenv(
+            "MODAL_CLOUD_PROVIDER", "unknown"),
+    })
     return report
