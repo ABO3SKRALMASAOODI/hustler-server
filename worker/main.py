@@ -48,7 +48,7 @@ import ytaccess
 # ffmpeg here, and a filmstrip never occupies a render slot.
 # A failed one is deliberately absent from FAIL_NOTES/REAPER_NOTES — a missing
 # strip is a cosmetic degradation, not something to put in a user's chat.
-if config.REMOTE_EXECUTOR_URL:
+if config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED:
     MEDIA_TYPES = ("preview", "preview_check", "final")
     FILMSTRIP_TYPES = ("filmstrip",)
 else:
@@ -80,14 +80,17 @@ def _build_runners():
     when discovered; that service exists for memory isolation and scale-out,
     not extra CPU. Explicit empty URLs restore the historical local paths.
     """
-    if config.REMOTE_EXECUTOR_URL:
+    if config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED:
         return {
             "index": remote.run_index_remote,
             "preview": remote.run_render_remote,
             "preview_check": remote.run_render_remote,
             "final": remote.run_render_remote,
             "agent_turn": (remote.run_agent_remote
-                           if config.REMOTE_AGENT_EXECUTOR_URL
+                           if (config.REMOTE_AGENT_EXECUTOR_URL
+                               or (config.MODAL_EXECUTOR_ENABLED
+                                   and "agent_turn" in
+                                   config.MODAL_EXECUTOR_TYPES))
                            else agent_loop.run_agent_job),
             "shorts_plan": shorts.run_shorts_plan,
             "mcp_tool": mcp_exec.run_mcp_job,
@@ -541,8 +544,10 @@ def main():
     signal.signal(signal.SIGTERM, _on_shutdown)
     signal.signal(signal.SIGINT, _on_shutdown)
     slots = config.worker_lane_slots()
-    exec_mode = ("remote executor " + config.REMOTE_EXECUTOR_URL
-                 if config.REMOTE_EXECUTOR_URL else "local")
+    exec_mode = (f"modal {config.MODAL_EXECUTOR_PERCENT}% + Cloud Run fallback"
+                 if config.MODAL_EXECUTOR_ENABLED else
+                 ("remote executor " + config.REMOTE_EXECUTOR_URL
+                  if config.REMOTE_EXECUTOR_URL else "local"))
     print(f"valmera-worker ({config.WORKER_ROLE}) starting: "
           f"code={version.code_version()} media_slots={slots['media']} "
           f"filmstrip_slots={slots['filmstrip']} "
@@ -572,7 +577,7 @@ def main():
               "REMOTE_EXECUTOR_SECRET is empty — calls will be unauthenticated.",
               flush=True)
 
-    if config.REMOTE_EXECUTOR_URL:
+    if config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED:
         # Say, on every boot, whether the service that actually makes the
         # pixels is running this code. A push deploys the dispatcher
         # automatically and the executor not at all, so the moment a deploy is
@@ -589,7 +594,9 @@ def main():
         threading.Thread(target=_probe, daemon=True,
                          name="version-probe").start()
 
-    if config.REMOTE_AGENT_EXECUTOR_URL:
+    if config.REMOTE_AGENT_EXECUTOR_URL or (
+            config.MODAL_EXECUTOR_ENABLED
+            and "agent_turn" in config.MODAL_EXECUTOR_TYPES):
         def _agent_probe():
             try:
                 remote.check_agent_executor_version()

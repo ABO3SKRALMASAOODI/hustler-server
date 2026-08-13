@@ -13,6 +13,7 @@ The executor reads the job's real state from the shared Postgres, so the body
 we POST is only what the runner needs to identify the work — never asset bytes.
 """
 
+import hashlib
 import threading
 import time
 from datetime import datetime, timezone
@@ -41,6 +42,10 @@ class RemoteBatchDetached(RuntimeError):
     """A Job may be running without this dispatcher; leave its DB lease alone."""
 
 
+class ModalLaunchUnavailable(RemoteExecutorError):
+    """Modal rejected the submission before returning a durable call id."""
+
+
 # The last version skew observed against the executor, or "" when the two
 # services agree (or when we have not been able to ask). Written by
 # check_executor_version, read by _run_remote so that a job which fails on a
@@ -57,6 +62,66 @@ _health_cache = {}
 _health_lock = threading.Lock()
 _HEALTH_CACHE_S = 300.0
 
+_modal_functions = {}
+_modal_lock = threading.Lock()
+
+
+def _modal_function(name):
+    """Hydrate and cache a deployed Modal Function handle lazily."""
+    with _modal_lock:
+        function = _modal_functions.get(name)
+        if function is not None:
+            return function
+        try:
+            import modal
+            function = modal.Function.from_name(
+                config.MODAL_EXECUTOR_APP, name,
+                environment_name=config.MODAL_EXECUTOR_ENVIRONMENT or None)
+        except Exception as exc:
+            raise ModalLaunchUnavailable(
+                f"Modal function lookup failed for {name}: {exc}") from exc
+        _modal_functions[name] = function
+        return function
+
+
+def _modal_selected(job):
+    if not config.MODAL_EXECUTOR_ENABLED:
+        return False
+    jtype = str(job.get("type") or "")
+    if jtype not in config.MODAL_EXECUTOR_TYPES:
+        return False
+    percent = config.MODAL_EXECUTOR_PERCENT
+    if percent >= 100:
+        return True
+    if percent <= 0:
+        return False
+    stable = f"{job.get('id')}:{job.get('project_id')}:{jtype}"
+    bucket = int(hashlib.sha256(stable.encode("utf-8")).hexdigest()[:8], 16)
+    return bucket % 100 < percent
+
+
+def _modal_function_name(job_type, override=None):
+    if override:
+        return override
+    if job_type in ("preview", "preview_check"):
+        return "preview"
+    if job_type in ("final", "index"):
+        return "batch"
+    if job_type == "agent_turn":
+        return "agent"
+    return "heavy"
+
+
+def _modal_health(timeout=20):
+    try:
+        call = _modal_function("health").spawn()
+    except Exception as exc:
+        if isinstance(exc, ModalLaunchUnavailable):
+            raise
+        raise ModalLaunchUnavailable(f"Modal health launch failed: {exc}") \
+            from exc
+    return call.get(timeout=timeout)
+
 
 def executor_health(timeout=20, job_type=None):
     """GET /health on the executor. Returns the parsed body, or raises."""
@@ -64,6 +129,18 @@ def executor_health(timeout=20, job_type=None):
     # same application image as the 32-GiB fallback, but costs a quarter of the
     # vCPU allocation to cold-start. Heavy capacity is tested by real heavy
     # work, never by a diagnostic ping.
+    if config.MODAL_EXECUTOR_ENABLED and (
+            job_type is None or job_type in config.MODAL_EXECUTOR_TYPES):
+        key = "modal:health"
+        now = time.monotonic()
+        with _health_lock:
+            cached = _health_cache.get(key)
+            if cached and now - cached[0] < _HEALTH_CACHE_S:
+                return cached[1]
+        body = _modal_health(timeout=timeout)
+        with _health_lock:
+            _health_cache[key] = (now, body)
+        return body
     url = _executor_url("preview" if job_type is None else job_type)
     if not url:
         raise RemoteExecutorError("remote executor URL is not set")
@@ -111,7 +188,7 @@ def warm_executor():
     render_preview enqueues, the cold start is already paid. Every failure
     is swallowed: the worst case is exactly the old behavior."""
     global _warm_last
-    if not config.REMOTE_EXECUTOR_URL:
+    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED:
         return
     now = time.monotonic()
     with _warm_lock:
@@ -119,6 +196,12 @@ def warm_executor():
             return
         _warm_last = now
     try:
+        if config.MODAL_EXECUTOR_ENABLED \
+                and "preview" in config.MODAL_EXECUTOR_TYPES:
+            # A no-op input boots the actual 2-core preview image while the
+            # model plans. It is intentionally not awaited.
+            _modal_function("preview").spawn({"type": "__warm"})
+            return
         url = _executor_url("preview")
         resp = requests.get(f"{url}/health", timeout=45)
         resp.raise_for_status()
@@ -168,7 +251,9 @@ def check_executor_version(quiet=False):
 
 def check_agent_executor_version(quiet=False):
     """Report agent-service skew without conflating it with render skew."""
-    if not config.REMOTE_AGENT_EXECUTOR_URL:
+    if not config.REMOTE_AGENT_EXECUTOR_URL and not (
+            config.MODAL_EXECUTOR_ENABLED
+            and "agent_turn" in config.MODAL_EXECUTOR_TYPES):
         return ""
     mine = version.code_version()
     try:
@@ -203,7 +288,7 @@ def executor_supports(feature, timeout=8):
     round-53 rule — a diagnostic outage must never take a feature down), so
     callers treat None as permission plus a louder failure elsewhere.
     """
-    if not config.REMOTE_EXECUTOR_URL:
+    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED:
         return True
     try:
         body = executor_health(timeout=timeout)
@@ -307,7 +392,94 @@ def _launch_batch_and_wait(worker_db, job):
         f"batch execution for job {job_id} outlived the dispatcher poll window")
 
 
-def _run_remote(job, url_override=None):
+def _interpret_executor_data(data, job):
+    """Turn either provider's established envelope into runner semantics."""
+    if not isinstance(data, dict):
+        raise RemoteExecutorError(
+            f"executor returned an invalid response: {type(data).__name__}")
+    if data.get("error"):
+        msg = str(data["error"])[:500]
+        skew = (check_agent_executor_version(quiet=True)
+                if job.get("type") == "agent_turn"
+                else check_executor_version(quiet=True))
+        if skew:
+            msg = f"{msg} [{skew}]"
+        failure = data.get("failure") or {}
+        if data.get("lease_lost"):
+            err = dbx.JobLeaseLost(msg)
+            err.executor_timings = data.get("timings") or {}
+            raise failure_policy.attach(
+                err, failure_policy.classify(err, job.get("type")), failure)
+        if data.get("retryable") is False:
+            err = dbx.PermanentJobError(msg)
+            err.executor_timings = data.get("timings") or {}
+            raise failure_policy.attach(
+                err, failure_policy.classify(err, job.get("type")), failure)
+        err = RemoteExecutorError(msg)
+        err.executor_timings = data.get("timings") or {}
+        raise failure_policy.attach(
+            err, failure_policy.classify(err, job.get("type")), failure)
+    result = data.get("result")
+    if data.get("job_completed") and isinstance(result, dict):
+        result["_remote_job_completed"] = True
+    return result
+
+
+def _recover_modal_result(call_id, job, deadline):
+    """Reconnect to a durable call after a transient SDK transport failure."""
+    import modal
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            call = modal.FunctionCall.from_id(call_id)
+            return call.get(timeout=min(30, max(1, deadline - time.monotonic())))
+        except TimeoutError as exc:
+            last = exc
+        except Exception as exc:
+            last = exc
+            time.sleep(2)
+        if job.get("id") is not None:
+            try:
+                current = dbx.Db().run(dbx.get_job, job["id"])
+                if current and current.get("state") == "done":
+                    return {"result": current.get("result"),
+                            "job_completed": True}
+            except Exception:
+                pass
+    raise RemoteExecutorError(
+        f"Modal call {call_id} could not be recovered: {last}") from last
+
+
+def _run_modal(job, function_override=None):
+    name = _modal_function_name(job.get("type"), function_override)
+    function = _modal_function(name)
+    try:
+        call = function.spawn(_job_payload(job))
+    except Exception as exc:
+        raise ModalLaunchUnavailable(
+            f"Modal rejected {name} before launch: {exc}") from exc
+    call_id = call.object_id
+    # Once a durable call id exists, timing out early and returning to the
+    # queue would run the same paid render twice. Stay attached through the
+    # provider's full function limit; inner ffmpeg/stall deadlines still make
+    # genuinely bad previews fail much earlier.
+    deadline = time.monotonic() + max(
+        config.executor_timeout_for(job.get("type")),
+        config.EXECUTOR_REQUEST_TIMEOUT_S) + 60
+    try:
+        data = call.get(timeout=max(1, deadline - time.monotonic()))
+    except TimeoutError as exc:
+        raise RemoteExecutorError(
+            f"Modal {name} call {call_id} exceeded its dispatcher deadline") \
+            from exc
+    except Exception:
+        # The call id proves submission happened. Never fall back and buy a
+        # duplicate render; reconnect to the durable call instead.
+        data = _recover_modal_result(call_id, job, deadline)
+    return _interpret_executor_data(data, job)
+
+
+def _run_cloud(job, url_override=None):
     url_base = url_override or _executor_url(job.get("type"))
     if not url_base:
         raise RemoteExecutorError("REMOTE_EXECUTOR_URL is not set")
@@ -341,46 +513,19 @@ def _run_remote(job, url_override=None):
     except ValueError as e:
         raise RemoteExecutorError(
             f"executor returned non-JSON: {(resp.text or '')[:300]}") from e
-    if data.get("error"):
-        # The runner itself raised on the executor (e.g. "EDL version not
-        # found"). Surface it as an error so the dispatcher's normal failure
-        # path — requeue then reaper note — runs, identical to a local raise.
-        #
-        # And ASK WHOSE CODE FAILED, right here, while the instance that just
-        # ran the job is still warm. A stale executor produces errors that read
-        # as ordinary defects — "the render is the wrong length", "EDL shape
-        # invalid: kind should be one of ..." — and are nothing of the kind:
-        # they are this dispatcher handing work to a build that predates the
-        # fix. Both times that happened the missing sentence was this one, and
-        # both times it cost a day to reconstruct from the database. It is one
-        # cheap GET on a failure path, so it never touches a healthy render.
-        msg = str(data["error"])[:500]
-        skew = (check_agent_executor_version(quiet=True)
-                if job.get("type") == "agent_turn"
-                else check_executor_version(quiet=True))
-        if skew:
-            msg = f"{msg} [{skew}]"
-        failure = data.get("failure") or {}
-        if data.get("lease_lost"):
-            import db as dbx
-            err = dbx.JobLeaseLost(msg)
-            err.executor_timings = data.get("timings") or {}
-            raise failure_policy.attach(
-                err, failure_policy.classify(err, job.get("type")), failure)
-        if data.get("retryable") is False:
-            import db as dbx
-            err = dbx.PermanentJobError(msg)
-            err.executor_timings = data.get("timings") or {}
-            raise failure_policy.attach(
-                err, failure_policy.classify(err, job.get("type")), failure)
-        err = RemoteExecutorError(msg)
-        err.executor_timings = data.get("timings") or {}
-        raise failure_policy.attach(
-            err, failure_policy.classify(err, job.get("type")), failure)
-    result = data.get("result")
-    if data.get("job_completed") and isinstance(result, dict):
-        result["_remote_job_completed"] = True
-    return result
+    return _interpret_executor_data(data, job)
+
+
+def _run_remote(job, url_override=None, modal_function=None):
+    if url_override is None and _modal_selected(job):
+        try:
+            return _run_modal(job, modal_function)
+        except ModalLaunchUnavailable as exc:
+            if not config.MODAL_CLOUD_RUN_FALLBACK:
+                raise
+            print(f"[dispatcher] {exc}; using Cloud Run launch fallback",
+                  flush=True)
+    return _run_cloud(job, url_override=url_override)
 
 
 def capture_available():
@@ -392,7 +537,7 @@ def capture_available():
     single-box deployment; it is only the LARGE dispatcher-plus-executor
     deployment where the browser has to move.
     """
-    return bool(config.REMOTE_EXECUTOR_URL)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
 
 
 def run_capture_remote(project_id, payload, user_id=None):
@@ -416,7 +561,7 @@ def frames_available():
     shipped before — correct for that deployment, fatal only beside a
     dispatcher whose job is to stay light.
     """
-    return bool(config.REMOTE_EXECUTOR_URL)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
 
 
 def run_frames_remote(project_id, payload, user_id=None):
@@ -436,7 +581,7 @@ def track_available():
     window of what is usually a user's 4K original — the job class that has
     OOM-killed the dispatcher four times — so with no executor the caller
     keeps the static pin rather than attempting it locally."""
-    return bool(config.REMOTE_EXECUTOR_URL)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
 
 
 def run_track_remote(project_id, payload, user_id=None):
@@ -455,7 +600,7 @@ def matte_available():
     but the person model's forward passes are CPU compute the dispatcher
     cannot afford beside agent turns — with no executor the caller builds the
     photometric mask locally, which is exactly what shipped before."""
-    return bool(config.REMOTE_EXECUTOR_URL)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
 
 
 def run_matte_remote(project_id, payload, user_id=None):
@@ -473,7 +618,7 @@ def smatch_available():
     (round 65d) Same contract as track_available — SIFT on 2048px frames of
     a user original OOM-killed the dispatcher the one time it ran there, so
     with no executor the caller refines on its small local frames only."""
-    return bool(config.REMOTE_EXECUTOR_URL)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
 
 
 def run_smatch_remote(project_id, payload, user_id=None):
@@ -492,7 +637,7 @@ def clean_available():
     of the job class that has OOM-killed the dispatcher repeatedly — so with
     an executor configured it never runs locally, and a remote failure is an
     honest refusal, never a local retry."""
-    return bool(config.REMOTE_EXECUTOR_URL)
+    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED)
 
 
 def run_clean_remote(project_id, payload, user_id=None):
@@ -513,7 +658,7 @@ def stems_available():
     answer comes from /health's features (executor_supports), or from this
     process's own import when there is no executor at all. None (executor
     unreachable) follows the round-53 rule: unknown is not "no"."""
-    if not config.REMOTE_EXECUTOR_URL:
+    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED:
         import stems
         return stems.available()
     return executor_supports("stems")
@@ -526,14 +671,14 @@ def run_stems_remote(project_id, payload, user_id=None):
     Synchronous, no job row — the round-61 capture shape."""
     job = {"id": None, "type": "stems", "project_id": project_id,
            "user_id": user_id, "attempts": 0, "payload": payload}
-    if not config.REMOTE_EXECUTOR_URL:
+    if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED:
         import stems
         return stems.run_stems_job(None, job)
     return _run_remote(job)
 
 
 def run_render_remote(worker_db, job):      # signature matches run_render_job
-    if job.get("type") == "final":
+    if job.get("type") == "final" and not _modal_selected(job):
         try:
             return _launch_batch_and_wait(worker_db, job)
         except BatchUnavailable as exc:
@@ -543,11 +688,12 @@ def run_render_remote(worker_db, job):      # signature matches run_render_job
 
 
 def run_index_remote(worker_db, job):       # signature matches run_index_job
-    try:
-        return _launch_batch_and_wait(worker_db, job)
-    except BatchUnavailable as exc:
-        print(f"[dispatcher] batch index unavailable ({exc}); using request "
-              "executor for this job", flush=True)
+    if not _modal_selected(job):
+        try:
+            return _launch_batch_and_wait(worker_db, job)
+        except BatchUnavailable as exc:
+            print(f"[dispatcher] batch index unavailable ({exc}); using "
+                  "request executor for this job", flush=True)
     return _run_request_with_capacity_fallback(job)
 
 
@@ -560,12 +706,17 @@ def _run_request_with_capacity_fallback(job):
         is_capacity = getattr(error, "failure_kind", "") == \
             "executor_capacity"
         definitely_missing = isinstance(error, RemoteServiceUnavailable)
-        if primary and primary != config.REMOTE_EXECUTOR_URL \
-                and (is_capacity or definitely_missing):
+        modal_capacity = _modal_selected(job) and is_capacity
+        cloud_sibling_fallback = primary \
+            and primary != config.REMOTE_EXECUTOR_URL \
+            and (is_capacity or definitely_missing)
+        if modal_capacity or cloud_sibling_fallback:
             why = "source needs 32 GiB" if is_capacity else \
                 "right-sized service is not deployed"
             print(f"[dispatcher] {job.get('type')} {why}; using heavy "
                   "request executor once", flush=True)
+            if modal_capacity:
+                return _run_modal(job, function_override="heavy")
             return _run_remote(job, url_override=config.REMOTE_EXECUTOR_URL)
         raise
 

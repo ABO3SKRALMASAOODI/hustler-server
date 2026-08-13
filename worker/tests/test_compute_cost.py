@@ -34,3 +34,15 @@ def test_fast_batch_request_service_costs_less_than_heavy_fallback():
         right_sized, 100, "executor", "valmera-executor-batch")
     assert right_sized["gross_compute_usd_ceiling"] \
         < heavy["gross_compute_usd_ceiling"]
+
+
+def test_modal_preview_cost_ceiling_is_lower_than_cloud_run(monkeypatch):
+    cloud, modal = {}, {}
+    compute_cost.annotate_request(
+        cloud, 3600, "executor", "valmera-executor-preview")
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "preview")
+    compute_cost.annotate_request(modal, 3600)
+    assert modal["compute_provider"] == "modal"
+    assert modal["gross_compute_usd_ceiling"] \
+        < cloud["gross_compute_usd_ceiling"]

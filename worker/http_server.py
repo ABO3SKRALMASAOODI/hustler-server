@@ -24,19 +24,13 @@ import hmac
 import json
 import os
 import shutil
-import threading
-import time
-import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
-import compute_cost
-import db as dbx
+import executor_runtime
 import frameserve
-import failure_policy
 import indexer
 import inpaint
-import job_completion
 import matte
 import renderer
 import screenmatch
@@ -44,8 +38,6 @@ import stems
 import tracker
 import version
 import webrecord
-from schemas import EDLValidationError
-from storage import WorkdirTooSmall
 
 # Only compute runners are exposed by the heavy executor. The separate
 # agent_executor role replaces this whole map with agent_turn only.
@@ -97,37 +89,6 @@ if config.WORKER_ROLE == "agent_executor":
     RUNNERS = {"agent_turn": agent_loop.run_agent_job}
 else:
     RUNNERS = COMPUTE_RUNNERS
-
-
-class _LeasedDb:
-    """Bind every executor progress write to one monotonic queue claim.
-
-    Runners deliberately share the ordinary Db interface. Keeping the binding
-    here means every present and future executor runner gets fencing without
-    relying on each call site to remember an extra argument.
-    """
-
-    def __init__(self, job_id, total_claims):
-        self._db = dbx.Db()
-        self._job_id = job_id
-        self._total_claims = total_claims
-        self._lost = threading.Event()
-
-    def run(self, fn, *args, **kwargs):
-        is_progress = fn is dbx.set_progress and args \
-            and args[0] == self._job_id and self._total_claims is not None
-        if is_progress:
-            kwargs["total_claims"] = self._total_claims
-        out = self._db.run(fn, *args, **kwargs)
-        if is_progress and out is False:
-            self._lost.set()
-        return out
-
-    def cancelled(self):
-        return self._lost.is_set()
-
-    def reset(self):
-        self._db.reset()
 
 
 def _authorized(headers):
@@ -228,75 +189,14 @@ class Handler(BaseHTTPRequestHandler):
         if not runner:
             return self._send(400, {"error": f"unsupported job type: {jtype}"})
 
-        job_id = job.get("id")
-        t0 = time.monotonic()
-        print(f"[executor] start {jtype} job={job_id} "
-              f"project={job.get('project_id')}", flush=True)
-        lease_claim = job.get("total_claims")
-        db = _LeasedDb(job_id, lease_claim)
-        if job_id is not None:
-            dbx.track_job(job_id)
+        data = executor_runtime.execute(job, RUNNERS)
         try:
-            if lease_claim is not None and not db.run(
-                    dbx.lease_is_current, job_id, lease_claim):
-                raise dbx.JobLeaseLost(
-                    f"job {job_id} execution lease {lease_claim} is no longer current")
-            result = runner(db, job)
-            dt = round(time.monotonic() - t0, 2)
-            completed = False
-            # The process that spent the compute owns the result.  This used
-            # to be agent-only, leaving a completed preview/final dependent on
-            # the Render waiter's HTTP connection.  A Render deploy after the
-            # encode therefore bought the same Cloud Run work again.
-            if job_id is not None:
-                if isinstance(result, dict):
-                    timings = result.setdefault("timings", {})
-                    timings["queue_wait_s"] = job.get("_queue_wait_s")
-                    timings["total_s"] = dt
-                    compute_cost.annotate_request(
-                        timings, dt, config.WORKER_ROLE,
-                        os.getenv("K_SERVICE", ""))
-                completed = job_completion.finalize_success(
-                    db, job, result, lease_claim)
-                if completed is False:
-                    raise dbx.JobLeaseLost(
-                        f"job {job_id} execution lease {lease_claim} was "
-                        "superseded before executor completion")
-            print(f"[executor] done {jtype} job={job_id} in {dt}s", flush=True)
-            try:
-                self._send(200, {"result": result,
-                                 "job_completed": bool(completed)})
-            except (BrokenPipeError, ConnectionResetError):
-                if not completed:
-                    raise
-                # The Render waiter disappeared after the executor had
-                # already committed the fenced result. That is exactly why
-                # completion ownership lives here; it is success, not a retry.
-                print(f"[executor] dispatcher disconnected after committed "
-                      f"job={job_id}; result is safe", flush=True)
-        except Exception as e:
-            traceback.print_exc()
-            dt = round(time.monotonic() - t0, 2)
-            print(f"[executor] FAILED {jtype} job={job_id} after {dt}s: {e}",
-                  flush=True)
-            # 200 + {"error"} so the dispatcher parses the real message and runs
-            # its normal requeue/reaper path — same as a local runner raising.
-            decision = failure_policy.classify(e, jtype)
-            failure_timings = {"total_s": dt}
-            compute_cost.annotate_request(
-                failure_timings, dt, config.WORKER_ROLE,
-                os.getenv("K_SERVICE", ""))
-            self._send(200, {
-                "error": str(e),
-                "retryable": decision.retryable,
-                "failure": decision.payload(e),
-                "timings": failure_timings,
-                "lease_lost": isinstance(e, dbx.JobLeaseLost),
-            })
-        finally:
-            if job_id is not None:
-                dbx.untrack_job(job_id)
-            db.reset()   # close this request's connection (no pooling here)
+            self._send(200, data)
+        except (BrokenPipeError, ConnectionResetError):
+            if not data.get("job_completed"):
+                raise
+            print("[executor] dispatcher disconnected after committed "
+                  f"job={job.get('id')}; result is safe", flush=True)
 
 
 def serve():
@@ -310,8 +210,7 @@ def serve():
     # agent executor also beats locally so a Render redeploy or network reset
     # cannot let the reaper kill a still-running turn whose result this request
     # is responsible for committing.
-    threading.Thread(target=dbx.heartbeat_forever, daemon=True,
-                     name="executor-heartbeat").start()
+    executor_runtime.ensure_heartbeat()
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"valmera-{config.WORKER_ROLE.replace('_', '-')} listening on :{port} "
           f"(code={version.code_version()} "

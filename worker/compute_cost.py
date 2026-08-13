@@ -13,6 +13,9 @@ REQUEST_CPU_S = 0.000024
 REQUEST_GIB_S = 0.0000025
 JOB_CPU_S = 0.000018
 JOB_GIB_S = 0.000002
+MODAL_CORE_S = 0.0000131
+MODAL_GIB_S = 0.00000222
+MODAL_US_MULTIPLIER = 1.5
 
 
 def request_profile(role=None, service=None):
@@ -28,9 +31,32 @@ def request_profile(role=None, service=None):
 
 
 def annotate_request(timings, seconds, role=None, service=None):
+    if os.getenv("EXECUTOR_PROVIDER", "") == "modal":
+        profile = os.getenv("MODAL_EXECUTOR_PROFILE", "heavy")
+        resources = {
+            # Modal requests physical cores; two vCPUs are approximately one
+            # physical core, preserving the live Cloud Run compute shape.
+            "preview": (2.0, 8),
+            "batch": (4.0, 16),
+            "heavy": (4.0, 32),
+            # Agent containers share up to four I/O-heavy turns. The 0.125
+            # core reservation may burst to one physical core when needed.
+            "agent": (0.125, 2),
+        }
+        cores, memory = resources.get(profile, resources["heavy"])
+        unit = (cores * MODAL_CORE_S + memory * MODAL_GIB_S) \
+            * MODAL_US_MULTIPLIER
+        timings.update({
+            "compute_provider": "modal",
+            "compute_profile": f"modal-{profile}-{cores:g}core-{memory}g-us",
+            "compute_unit_usd_s": round(unit, 9),
+            "gross_compute_usd_ceiling": round(float(seconds) * unit, 6),
+        })
+        return timings
     name, cpu, memory = request_profile(role, service)
     unit = cpu * REQUEST_CPU_S + memory * REQUEST_GIB_S
     timings.update({
+        "compute_provider": "cloud_run",
         "compute_profile": name,
         "compute_unit_usd_s": round(unit, 9),
         # With concurrency >1 this is a ceiling per request; overlapping agent

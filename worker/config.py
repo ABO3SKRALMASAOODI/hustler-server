@@ -678,7 +678,8 @@ POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2.0"))
 # where the encodes genuinely contend for this box's own CPU. The media/index
 # lanes also poll faster remotely — a claim is one indexed SKIP LOCKED query,
 # and 2s of claim latency was pure dead time on every render.
-_REMOTE_EXEC = bool(os.getenv("REMOTE_EXECUTOR_URL", "").strip())
+_REMOTE_EXEC = bool(os.getenv("REMOTE_EXECUTOR_URL", "").strip()) \
+    or os.getenv("MODAL_EXECUTOR_ENABLED", "0") == "1"
 MEDIA_SLOTS = int(os.getenv("WORKER_MEDIA_SLOTS", "3" if _REMOTE_EXEC else "1"))
 INDEX_SLOTS = int(os.getenv("WORKER_INDEX_SLOTS", "2" if _REMOTE_EXEC else "1"))
 # When projects compete for the index lane, at most this many of one
@@ -892,6 +893,25 @@ SHUTDOWN_GRACE_S = max(
 # Dispatcher -> executor. Base URL of the Cloud Run service (no trailing path),
 # e.g. https://valmera-executor-xxxx.a.run.app. Empty = run media/index locally.
 REMOTE_EXECUTOR_URL = os.getenv("REMOTE_EXECUTOR_URL", "").strip().rstrip("/")
+
+# Cheaper executor provider. Modal is invoked through its durable Function API,
+# while the existing Cloud Run URLs remain a no-deploy rollback and a safe
+# launch-time fallback during migration. Selection is deterministic by job id,
+# so a percentage rollout never flips one retry between providers randomly.
+MODAL_EXECUTOR_ENABLED = os.getenv("MODAL_EXECUTOR_ENABLED", "0") == "1"
+MODAL_EXECUTOR_APP = os.getenv(
+    "MODAL_EXECUTOR_APP", "valmera-executor").strip()
+MODAL_EXECUTOR_ENVIRONMENT = os.getenv(
+    "MODAL_EXECUTOR_ENVIRONMENT", "main").strip()
+MODAL_EXECUTOR_PERCENT = max(0, min(100, int(os.getenv(
+    "MODAL_EXECUTOR_PERCENT", "100"))))
+MODAL_EXECUTOR_TYPES = frozenset(
+    part.strip() for part in os.getenv(
+        "MODAL_EXECUTOR_TYPES",
+        "preview,preview_check,final,index,capture,frames,track,matte,"
+        "smatch,clean,stems,agent_turn").split(",") if part.strip())
+MODAL_CLOUD_RUN_FALLBACK = os.getenv(
+    "MODAL_CLOUD_RUN_FALLBACK", "1") == "1"
 
 
 def _sibling_preview_executor_url(main_url):
@@ -1675,7 +1695,7 @@ def require_core():
     if missing:
         raise SystemExit(f"Worker cannot start — missing env: {', '.join(missing)}")
     if WORKER_ROLE in ("agent", "agent_executor") \
-            and not REMOTE_EXECUTOR_URL:
+            and not REMOTE_EXECUTOR_URL and not MODAL_EXECUTOR_ENABLED:
         raise SystemExit(
             "Agent worker cannot start without REMOTE_EXECUTOR_URL — refusing "
             "to pull render/index compute back onto the agent service")
