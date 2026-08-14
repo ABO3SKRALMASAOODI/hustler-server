@@ -314,9 +314,10 @@ def _extract(url, workdir, prefer=None, client_override=None,
     if run_cookies:
         cmd += ["--cookies", run_cookies]
     # Operator-supplied proxy (config.YTDLP_PROXY): the no-account route
-    # past the bot wall — the extractor egresses from a residential address
-    # instead of the datacenter IP YouTube challenges.
-    if config.YTDLP_PROXY:
+    # past YouTube's bot wall. Keep every other provider on its existing
+    # direct path: the proxy is a YouTube access fix, not a new dependency
+    # for SoundCloud, Vimeo, TikTok, or the generic extractor.
+    if config.YTDLP_PROXY and ytaccess.is_youtube_url(url):
         cmd += ["--proxy", config.YTDLP_PROXY]
     # The EJS challenge solver (see config.YTDLP_REMOTE_COMPONENTS): without
     # it, the cookie-mode client path resolves NO formats.

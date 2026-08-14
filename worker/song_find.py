@@ -225,7 +225,10 @@ def _candidates(engine, query, count, what="a search query"):
         if strategy.get("client"):
             cmd += ["--extractor-args",
                     f"youtube:player_client={strategy['client']}"]
-        if config.YTDLP_PROXY:
+        # The paid egress is exclusively for YouTube's datacenter-IP wall.
+        # SoundCloud search already works directly and must not inherit a
+        # new cost or failure dependency from the YouTube repair.
+        if config.YTDLP_PROXY and engine == "ytsearch":
             cmd += ["--proxy", config.YTDLP_PROXY]
         if config.YTDLP_REMOTE_COMPONENTS:
             cmd += ["--remote-components", config.YTDLP_REMOTE_COMPONENTS]
