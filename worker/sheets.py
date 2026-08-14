@@ -229,6 +229,55 @@ def build_timestamp_sheet(frames, out_path):
     return out_path
 
 
+def build_caption_comparison_pages(frames, out_prefix, per_page=4):
+    """Build readable, labeled pages from a complete caption proof slate.
+
+    ``frames`` is ``[(preset_id, rendered_frame_path)]``.  Every input appears
+    exactly once in the returned pages; ``per_page`` controls only page layout,
+    never which candidates survive.  Portrait proofs stay tall and large
+    enough to judge font weight/placement, while landscape proofs use a 2x2
+    page so a provider does not crush four wide frames into one row.
+    """
+    if not frames:
+        return []
+    per_page = max(1, int(per_page or 1))
+    pages = []
+    label_h = 34
+    font = _font(19)
+    for page_n, start in enumerate(range(0, len(frames), per_page), 1):
+        group = frames[start:start + per_page]
+        with Image.open(group[0][1]) as first:
+            portrait = first.height > first.width * 1.12
+        cols = len(group) if portrait else min(2, len(group))
+        rows = (len(group) + cols - 1) // cols
+        tile_w = 300 if portrait else 480
+        tile_h = 534 if portrait else 270
+        canvas = Image.new(
+            "RGB", (cols * tile_w, rows * (tile_h + label_h)),
+            (12, 12, 12))
+        draw = ImageDraw.Draw(canvas)
+        for slot, (label, fp) in enumerate(group):
+            x = (slot % cols) * tile_w
+            y = (slot // cols) * (tile_h + label_h)
+            # This slate is all-or-nothing: a blank tile would make the
+            # visual director compare an incomplete catalog while believing
+            # it saw every preset. Let an unreadable proof abort the page and
+            # route the caller to its complete metadata fallback.
+            with Image.open(fp) as source:
+                img = source.convert("RGB")
+                img.thumbnail((tile_w, tile_h))
+            canvas.paste(img, (x + (tile_w - img.width) // 2,
+                               y + (tile_h - img.height) // 2))
+            draw.rectangle((x, y + tile_h, x + tile_w,
+                            y + tile_h + label_h), fill=(12, 12, 12))
+            draw.text((x + 8, y + tile_h + 6), str(label)[:42],
+                      fill=(245, 245, 245), font=font)
+        path = f"{out_prefix}_{page_n}.jpg"
+        canvas.save(path, "JPEG", quality=91)
+        pages.append(path)
+    return pages
+
+
 def build_frames_sheet(video_path, out_path, times, cols=3, max_tiles=9,
                        parallelism=1):
     """Numbered tiles at EXPLICIT times — round 81's verify sheet.

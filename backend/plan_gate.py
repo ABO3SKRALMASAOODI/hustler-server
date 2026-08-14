@@ -6,7 +6,7 @@ Every account, old or new, holds `credits.FREE_GRANT_CREDITS` (50) it can
 actually spend on real agent turns. While there is a credit left, there is no
 gate: the visitor edits their own footage, watches the preview come back, and
 decides what this product is worth from the thing itself. The moment the pool
-is empty the gate closes and the ask is the 3-day trial.
+is empty the gate closes and the ask is a paid plan.
 
 That replaces two earlier rules, both of which are now gone:
 
@@ -29,7 +29,7 @@ spent trial is a different wall with its own message (see routes/video.py).
 WHAT THIS GATE IS NOT: the credit check. `credits.check_and_reserve` still runs
 below it in routes/video.py and covers subscribers who have spent their pool.
 This one answers "does this account have a plan-shaped reason to be refused",
-so the studio can answer with the trial card rather than a refresh notice.
+so the studio can answer with the subscribe card rather than a refresh notice.
 """
 
 import credits
@@ -37,9 +37,8 @@ import credits
 # What the frontend and the API both say when the gate closes. One string, so
 # the 402 body and the pricing page cannot drift apart.
 GATE_CODE = "plan_required"
-GATE_MESSAGE = ("That's your free credits used up. Start your 3-day free "
-                "trial to keep editing — cancel inside the trial and you're "
-                "not charged.")
+GATE_MESSAGE = ("That's your free credits used up. Subscribe to keep "
+                "editing — cancel anytime.")
 
 
 def _row_get(row, key, index):

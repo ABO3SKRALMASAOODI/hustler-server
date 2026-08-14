@@ -1461,6 +1461,55 @@ def latest_creative_blueprint(conn, session_id):
         return row.get("blueprint") if row else None
 
 
+def editorial_preference_rows(conn, user_id, family, limit=120):
+    """Same-account, same-family stable decision outcomes for taste memory.
+
+    The model-facing reducer never receives chat text, URLs or candidate ids.
+    Export is bounded to the assistant message's own response window so a
+    later unrelated download cannot bless an earlier treatment.
+    """
+    limit = min(200, max(1, int(limit or 120)))
+    with conn.cursor() as cur:
+        cur.execute("""SELECT base.feedback, base.decisions, base.profile,
+                         EXISTS (
+                           SELECT 1 FROM client_events ce
+                           WHERE ce.project_id = base.project_id
+                             AND ce.kind = 'download_triggered'
+                             AND ce.created_at >= base.created_at
+                             AND ce.created_at < LEAST(
+                               base.created_at + INTERVAL '24 hours',
+                               COALESCE((
+                                 SELECT MIN(nu.created_at)
+                                 FROM chat_messages nu
+                                 WHERE nu.session_id = base.session_id
+                                   AND nu.role = 'user' AND nu.id > base.id
+                               ), base.created_at + INTERVAL '24 hours'))
+                         ) AS exported_after
+                       FROM (
+                         SELECT cm.id, cm.session_id, cm.created_at,
+                                p.id AS project_id,
+                                cm.meta->>'feedback' AS feedback,
+                                cm.meta->'editing_metrics'->
+                                  'editorial_decisions' AS decisions,
+                                cm.meta->'editing_metrics'->
+                                  'treatment_profile' AS profile
+                         FROM chat_messages cm
+                         JOIN projects p
+                           ON p.chat_session_id = cm.session_id
+                         WHERE p.user_id = %s
+                           AND cm.role = 'assistant'
+                           AND cm.created_at > NOW() - INTERVAL '180 days'
+                           AND cm.meta->'editing_metrics'->>
+                                 'editorial_family' = %s
+                           AND cm.meta->'editing_metrics' ?
+                                 'editorial_decisions'
+                         ORDER BY cm.id DESC LIMIT %s
+                       ) base
+                       ORDER BY base.id DESC""",
+                    (user_id, str(family), limit))
+        return cur.fetchall()
+
+
 def record_client_event(conn, user_id, project_id, kind, detail=None,
                         asset_id=None):
     """Server-authoritative funnel event emitted by the worker.

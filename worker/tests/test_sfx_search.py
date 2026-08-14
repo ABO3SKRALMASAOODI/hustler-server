@@ -159,8 +159,9 @@ def test_one_call_web_sfx_searches_fetches_and_places(monkeypatch, tmp_path):
             str(audition), None))
     placed = {}
 
-    def fake_add(_ctx, storage_key, at, gain_db):
-        placed.update(storage_key=storage_key, at=at, gain_db=gain_db)
+    def fake_add(_ctx, storage_key, at, gain_db, purpose=None):
+        placed.update(storage_key=storage_key, at=at, gain_db=gain_db,
+                      purpose=purpose)
         return "EDL v1 -> v2: sfx placed"
 
     monkeypatch.setattr(agent_tools, "add_sfx", fake_add)
@@ -175,7 +176,7 @@ def test_one_call_web_sfx_searches_fetches_and_places(monkeypatch, tmp_path):
     out = agent_tools.add_web_sfx(Ctx(), "cinematic whoosh", 3.2, -7)
     assert out.startswith("EDL v1 -> v2")
     assert placed == {"storage_key": "sfx/3/real.mp3", "at": 3.2,
-                      "gain_db": -7.0}
+                      "gain_db": -7.0, "purpose": "cinematic whoosh"}
     assert "Clean Cinematic Whoosh" in out and "license: CC0" in out
 
 
@@ -260,3 +261,74 @@ def test_one_call_web_sfx_uses_actual_listener_when_choice_is_unambiguous(
     assert "interface resolves" in heard_prompt["text"]
     assert "light glassy sweep" in heard_prompt["text"]
     assert "logo lockup" not in heard_prompt["text"]
+    trace = ctx.editing_metrics["editorial_decisions"][0]
+    assert trace["kind"] == "sfx_cast"
+    assert trace["decision"] == "use"
+    assert trace["candidate_id"] == "openverse:tailored"
+    assert trace["asset_key"] == "sfx/3/chosen.mp3"
+    assert trace["purpose"] == "restrained product UI sweep"
+    assert trace["review_stage"] == "actual_audio"
+    assert trace["source"] == "independent_listener"
+
+
+def test_one_call_web_sfx_can_choose_professional_silence(
+        monkeypatch, tmp_path):
+    first = _hit("Heavy Trailer Slam", 1.2)
+    first["id"] = "openverse:slam"
+    second = _hit("Cartoon Pop", .7)
+    second["id"] = "openverse:pop"
+    monkeypatch.setattr(
+        sfx_search, "search",
+        lambda query, max_s=None, count=6: [first, second])
+
+    def measure(_ctx, selected, need_file=False):
+        local = tmp_path / (selected["id"].split(":")[1] + ".mp3")
+        local.write_bytes(b"actual sound")
+        return (selected,
+                {"active_duration_s": 1.0, "duration_s": 1.2,
+                 "leading_silence_s": 0, "attack_s": .08,
+                 "peak_position": .2, "tail_s": .5, "crest_db": 8,
+                 "spectral_centroid_hz": 2200, "bass_ratio": .2,
+                 "midband_ratio": .4, "strong_event_count": 1},
+                str(local), None)
+
+    monkeypatch.setattr(agent_tools, "_measure_sfx_candidate", measure)
+    monkeypatch.setattr(agent_tools.llm, "audio_review_available", lambda: True)
+    monkeypatch.setattr(
+        agent_tools.llm, "ask_audio",
+        lambda *_args, **_kwargs: (
+            '{"choice":"none","reason":"the unforced logo settle feels '
+            'more premium without either exaggerated sound"}'))
+    monkeypatch.setattr(
+        agent_tools, "_download_sfx_hit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an abstention must not fetch an asset")))
+    monkeypatch.setattr(
+        agent_tools, "add_sfx",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an abstention must not write the EDL")))
+
+    class Ctx(_Ctx):
+        workdir = str(tmp_path)
+        editing_metrics = {}
+        edit_plan = {"sfx_direction": "quiet premium restraint"}
+
+        @staticmethod
+        def latest_edl():
+            return {"json": {"keep": [[0, 10]]}}
+
+    ctx = Ctx()
+    out = agent_tools.add_web_sfx(ctx, "subtle logo settle", 6.0)
+
+    assert out.startswith("SOUND DESIGN DECISION: KEEP THIS MOMENT DRY")
+    assert "no SFX was fetched or placed" in out
+    assert ctx.editing_metrics["sfx_candidates_heard"] == 2
+    assert ctx.editing_metrics["sfx_abstentions"] == 1
+    trace = ctx.editing_metrics["editorial_decisions"][0]
+    assert trace["kind"] == "sfx_cast"
+    assert trace["decision"] == "none"
+    assert set(trace["candidate_ids"]) == {"openverse:slam", "openverse:pop"}
+    assert trace["purpose"] == "subtle logo settle"
+    assert trace["at"] == 6.0
+    assert trace["review_stage"] == "actual_audio"
+    assert not list(tmp_path.glob("*.mp3"))

@@ -27,44 +27,63 @@ def get_offers_db():
 # ── Plan definitions ──────────────────────────────────────────────────────────
 
 PLANS_LIVE = {
-    # ── The three live plans (round 49) ─────────────────────────────────
-    # All carry a 3-DAY FREE TRIAL, configured on the Paddle PRICE itself
-    # (trial_period: 3 days, requires_payment_method) — not in this code.
-    # Paddle therefore creates the subscription immediately, charges nothing
-    # until day 3, and fires subscription.created right away; the webhook
-    # grants credits on that event, so a trialling user is a paying user as
-    # far as the app is concerned and simply stops being one if they cancel.
+    # ── The three live plans ────────────────────────────────────────────
+    # Shopfront (Aug 2026): no trial on new checkouts. The price IDs below
+    # have no trial_period — Paddle creates the subscription as `active` and
+    # charges immediately. Existing subscriptions on the previous $30/$50/$100
+    # 3-day-trial prices stay on those prices; they are listed in
+    # `legacy_prices` so the webhook still resolves them and grants the
+    # credits those customers actually bought.
     #
     # The pricing page sells ONE product at THREE volumes:
-    #   'ai'     Creator  $30/mo,   $300/yr —  2,000 credits
-    #   'ai_pro' Pro      $50/mo,   $500/yr —  4,000 credits
-    #   'ai_max' Frontier $100/mo, $1000/yr — 10,000 credits
+    #   'ai'     Creator  $15/mo,  $150/yr —  1,000 credits
+    #   'ai_pro' Pro      $30/mo,  $300/yr —  2,000 credits
+    #   'ai_max' Frontier $50/mo,  $500/yr —  5,000 credits
     #
     # THE MARGIN IS IN THE BURN RATE, NOT THE GRANT (round 49). A credit is
     # spent at TWICE the model's real cost — credits.USD_PER_CREDIT is $0.005,
-    # so 2,000 credits is $10 of API spend, not $20. That one constant is what
-    # makes these numbers work, and it is the thing to check before believing
-    # any margin claim here:
+    # so 1,000 credits is $5 of API spend. That one constant is what makes
+    # these numbers work:
     #
     #        plan      price   credits   real cost   margin
-    #        Creator    $30     2,000      $10        67%
-    #        Pro        $50     4,000      $20        60%
-    #        Frontier  $100    10,000      $50        50%
+    #        Creator    $15     1,000      $5         67%
+    #        Pro        $30     2,000     $10         67%
+    #        Frontier   $50     5,000     $25         50%
     #
-    # The annual prices are ten months of the monthly one, so they land at 60%
-    # / 52% / 40% — all positive, which is new. Under the old 1-credit-per-cent
-    # burn the annual tiers were the thin ones (40% and 28%) and an intro
-    # discount on top went negative; doubling the burn rate is what fixed that
-    # without moving a single sticker price.
+    # The annual prices are ten months of the monthly one.
     #
     # Change the number here and PLAN_CREDITS in paddle_webhook.py and
     # PLAN_MONTHLY_LIMITS in credits.py together — three places, one truth.
-    'ai':     {'price_id': 'pri_01kyde25cwqf7t2bk1ekky2pyp', 'yearly_price_id': 'pri_01kyde25n7rxrhajg5xvxxka7y', 'monthly_credits': 2000},
-    'ai_pro': {'price_id': 'pri_01kye15m5262nbs7hjmazrej7j', 'yearly_price_id': 'pri_01kye15mdacm7wzqp740g3rvy4', 'monthly_credits': 4000},
+    'ai': {
+        'price_id': 'pri_01m00w4aa9nqj2r3x30jkagbq0',
+        'yearly_price_id': 'pri_01m00w4ahg1q4m56km4nb46a27',
+        'monthly_credits': 1000,
+        # Previous $30 / $300 3-day-trial prices. Live trials keep these.
+        'legacy_prices': {
+            'pri_01kyde25cwqf7t2bk1ekky2pyp': 2000,
+            'pri_01kyde25n7rxrhajg5xvxxka7y': 2000,
+        },
+    },
+    'ai_pro': {
+        'price_id': 'pri_01m00w4as67k67tmbxgs8kab8j',
+        'yearly_price_id': 'pri_01m00w4b14hkwr6y3zp8wjksm9',
+        'monthly_credits': 2000,
+        'legacy_prices': {
+            'pri_01kye15m5262nbs7hjmazrej7j': 4000,
+            'pri_01kye15mdacm7wzqp740g3rvy4': 4000,
+        },
+    },
     # Frontier runs the agent AND vision on the frontier model (worker/llm.py
-    # routes 'ai_max' to FRONTIER_BASE_URL). Product pro_01kyg21hq9mbaj7pk3y1ewmzxp,
-    # prices created 2026-07-27 with the same 3-day trial as the other two.
-    'ai_max': {'price_id': 'pri_01kyg21hzbbz360kn0ptjnpdar', 'yearly_price_id': 'pri_01kyg21j78jk6tpkkcpkrysvc4', 'monthly_credits': 10000},
+    # routes 'ai_max' to FRONTIER_BASE_URL). Product pro_01kyg21hq9mbaj7pk3y1ewmzxp.
+    'ai_max': {
+        'price_id': 'pri_01m00w4bakj10vypkqqg8b7jse',
+        'yearly_price_id': 'pri_01m00w4bpedjqatvn0f640ngzz',
+        'monthly_credits': 5000,
+        'legacy_prices': {
+            'pri_01kyg21hzbbz360kn0ptjnpdar': 10000,
+            'pri_01kyg21j78jk6tpkkcpkrysvc4': 10000,
+        },
+    },
     # ── MCP: off the pricing page, kept so the one live subscription resolves.
     # monthly_credits 0 is deliberate — that customer supplies their own model
     # through their own MCP client, so the pool (which meters OUR model spend)
@@ -95,8 +114,8 @@ PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_L
 # price IDs.
 # 'mcp' is deliberately NOT here: the MCP server does not exist yet, so a buyer
 # would pay, correctly receive 0 credits (they bring their own model) and have
-# nothing to connect to. The Paddle product, prices and 3-day trial are already
-# live and the plan stays in PLANS, so the one existing MCP subscription keeps
+# nothing to connect to. The Paddle product and prices are already live and
+# the plan stays in PLANS, so the one existing MCP subscription keeps
 # renewing and resolving — this only blocks NEW checkouts, including
 # hand-crafted ones that bypass the pricing page. Add 'mcp' back the day the
 # server ships.
@@ -387,6 +406,8 @@ def change_plan():
 def _plan_from_price(price_id):
     for name, cfg in PLANS.items():
         if price_id in (cfg.get('price_id'), cfg.get('yearly_price_id')):
+            return name
+        if price_id in (cfg.get('legacy_prices') or {}):
             return name
     return None
 

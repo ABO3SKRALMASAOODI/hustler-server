@@ -12,6 +12,7 @@ Callers configure it and the planner spends it on whole-program coverage plus
 the edit's actual decisions instead of silently judging only the opening.
 """
 
+import motion_contract
 from timeline import Timeline, program_blocks
 
 
@@ -33,6 +34,34 @@ def _spread(items, count):
     indexes = sorted({round(i * (len(items) - 1) / (count - 1))
                       for i in range(count)})
     return [items[i] for i in indexes]
+
+
+def _select_motion_states(group, count):
+    """Keep path knots and before/after evidence before optional midpoints."""
+    count = max(0, int(count or 0))
+    if count <= 0 or not group:
+        return []
+    if len(group) <= count:
+        return list(group)
+    ends = [group[0], group[-1]]
+    knot_rows = [row for row in group[1:-1] if row.get("proof_knot")]
+    knot_room = max(0, count - len(ends))
+    if len(knot_rows) > knot_room:
+        # Interior waypoints reveal the actual path. Start/end knots are
+        # already bracketed by the before/after states, so protect interior
+        # knots first when a four-state evidence budget cannot keep all five.
+        interior = knot_rows[1:-1] if len(knot_rows) > 2 else knot_rows
+        chosen_knots = _spread(interior, min(knot_room, len(interior)))
+        leftovers = [row for row in knot_rows if row not in chosen_knots]
+        chosen_knots += _spread(
+            leftovers, max(0, knot_room - len(chosen_knots)))
+    else:
+        chosen_knots = knot_rows
+    required = sorted(ends + chosen_knots, key=lambda row: row["time_s"])
+    chosen_times = {row["time_s"] for row in required}
+    optional = [row for row in group if row["time_s"] not in chosen_times]
+    picked = required + _spread(optional, max(0, count - len(required)))
+    return sorted(picked, key=lambda row: row["time_s"])
 
 
 def _inside(start, end, bias=0.5):
@@ -182,6 +211,7 @@ def _graphic_motion_groups(edl, duration, states=7):
             continue
         edge = min(0.04, span * 0.08)
         local = {edge, span * 0.25, span * 0.5, span * 0.75, span - edge}
+        exact_local = set()
         for value in motion.values():
             if not isinstance(value, list):
                 continue
@@ -197,7 +227,14 @@ def _graphic_motion_groups(edl, duration, states=7):
                 t = edge if t <= 0 else span - edge if t >= span else t
                 if 0 <= t <= span:
                     local.add(t)
-        picked = _spread(sorted(local), max(3, int(states or 3)))
+                    exact_local.add(t)
+        candidates = [{"time_s": value,
+                       "proof_knot": value in exact_local}
+                      for value in sorted(local)]
+        picked_rows = _select_motion_states(
+            candidates, max(3, int(states or 3)))
+        picked = [row["time_s"] for row in picked_rows]
+        motif = str(item.get("motion_motif") or "unbound")[:48]
         group = []
         for state_n, t in enumerate(picked, 1):
             group.append({
@@ -205,11 +242,133 @@ def _graphic_motion_groups(edl, duration, states=7):
                                     max(0.0, duration - 0.01)), 3),
                 "reason": (f"{label} motion {i} state "
                            f"{state_n}/{len(picked)} "
+                           f"[motif={motif} id={str(item.get('id') or i)[:60]}] "
                            f"(+{t:.2f}s local)"),
+                "proof_knot": any(abs(t - value) <= 0.012
+                                  for value in exact_local),
             })
         if group:
             groups.append(group)
     return groups
+
+
+def _motion_event_knots(edl, event):
+    """Exact output-clock knots for renderer paths when the EDL exposes them."""
+    item_id = str(event.get("id") or "")
+    kind = event.get("kind")
+    start, end = _number(event.get("start")), _number(event.get("end"))
+    if start is None or end is None or end <= start:
+        return []
+    knots = []
+    if kind == "zoom":
+        row = next((item for item in
+                    ((edl.get("effects") or {}).get("zooms") or [])
+                    if isinstance(item, dict) and
+                    str(item.get("id") or "") == item_id), None)
+        span = end - start
+        for point in (row or {}).get("path") or []:
+            fraction = _number(point.get("f") if isinstance(point, dict)
+                               else getattr(point, "f", None))
+            if fraction is not None and 0 <= fraction <= 1:
+                knots.append(start + fraction * span)
+    elif kind == "overlay_keyframes":
+        row = next((item for item in (edl.get("overlays") or [])
+                    if isinstance(item, dict) and
+                    str(item.get("id") or "") == item_id), None)
+        for key in ("x", "y", "scale", "rotation", "opacity"):
+            points = (row or {}).get(key)
+            if not isinstance(points, list):
+                continue
+            for point in points:
+                if not isinstance(point, dict):
+                    continue
+                local = _number(point.get("t"))
+                if local is not None:
+                    knots.append(_number((row or {}).get("start"), start) +
+                                 local)
+    return [value for value in knots if start <= value <= end]
+
+
+def _event_motion_groups(edl, duration, index=None, states=5):
+    """Ordered visual proof for every renderer-visible motion family.
+
+    Structural provenance says that an event exists. These state sequences let
+    a fresh visual reviewer decide whether its path, trigger and settle are
+    actually composed. Text/vector keyframes keep their richer exact-knot
+    groups above; playback speed is excluded because still frames cannot prove
+    rate or smoothness honestly.
+    """
+    groups = []
+    try:
+        events = motion_contract.motion_events(edl or {}, index=index)
+    except Exception:
+        return []
+    for event_n, event in enumerate(events, 1):
+        # The complete reviewer already gets lightweight event snapshots for
+        # legacy/unplanned motion. Reserve expensive ordered proof for causal
+        # motion-language events whose exact motif is available to judge.
+        if not event.get("motion_motif") or event.get("kind") == "speed" or (
+                event.get("kind") == "keyframes" and
+                event.get("domain") in {"type", "graphic"}):
+            continue
+        start, end = _number(event.get("start")), _number(event.get("end"))
+        if start is None or end is None or end <= start:
+            continue
+        start, end = max(0.0, start), min(float(duration), end)
+        span = end - start
+        if span <= 0.02:
+            continue
+        edge = min(0.06, max(0.015, span * 0.08))
+        halo = min(0.12, max(0.04, span * 0.20))
+        candidates = [max(0.0, start - halo), start + edge,
+                      (start + end) / 2.0, end - edge,
+                      min(max(0.0, duration - 0.01), end + halo)]
+        exact_knots = _motion_event_knots(edl or {}, event)
+        candidates.extend(exact_knots)
+        unique = []
+        for value in sorted(candidates):
+            value = min(max(value, 0.0), max(0.0, duration - 0.01))
+            if not unique or abs(value - unique[-1]) > 0.012:
+                unique.append(value)
+        state_count = max(3, int(states or 3))
+        boundary = [unique[0], unique[-1]] if unique else []
+        required = []
+        for value in sorted(boundary + exact_knots):
+            value = min(max(value, 0.0), max(0.0, duration - 0.01))
+            if not required or abs(value - required[-1]) > 0.012:
+                required.append(value)
+        if len(required) > state_count:
+            required = [required[0]] + _spread(
+                required[1:-1], max(0, state_count - 2)) + [required[-1]]
+        remaining = [value for value in unique if all(
+            abs(value - fixed) > 0.012 for fixed in required)]
+        picked = sorted(required + _spread(
+            remaining, max(0, state_count - len(required))))
+        if len(picked) < 2:
+            continue
+        motif = str(event.get("motion_motif") or "unbound")[:48]
+        identity = str(event.get("id") or f"event-{event_n}")[:60]
+        label = f"{event.get('domain')}/{event.get('kind')}"
+        group = []
+        for state_n, at in enumerate(picked, 1):
+            phase = ("pre-trigger" if at < start else
+                     "post-settle" if at > end else "authored-window")
+            group.append({
+                "time_s": round(at, 3),
+                "reason": (f"motion proof {event_n} {label} state "
+                           f"{state_n}/{len(picked)} [{phase} "
+                           f"motif={motif} id={identity}]"),
+                "proof_knot": any(abs(at - value) <= 0.012
+                                  for value in exact_knots),
+            })
+        groups.append(group)
+    return groups
+
+
+def _motion_groups(edl, duration, index=None, states=7):
+    return (_graphic_motion_groups(edl, duration, states=states) +
+            _event_motion_groups(edl, duration, index=index,
+                                 states=min(5, states)))
 
 
 # Private compatibility alias: callers/tests written when only text exposed
@@ -231,7 +390,8 @@ def _dedupe(frames, within_s=0.08):
     return clean
 
 
-def plan(edl, duration, max_frames=32, base_frames=12, extra_frames=None):
+def plan(edl, duration, max_frames=32, base_frames=12, extra_frames=None,
+         index=None):
     """Return timestamped frames covering both program time and edit events.
 
     At least half of a normal budget remains available for authored events;
@@ -270,7 +430,7 @@ def plan(edl, duration, max_frames=32, base_frames=12, extra_frames=None):
     priority = [row for row in events if any(
         abs(row["time_s"] - wanted["time_s"]) <= 0.08
         for wanted in requested)]
-    motion_groups = _graphic_motion_groups(edl or {}, duration)
+    motion_groups = _motion_groups(edl or {}, duration, index=index)
     if motion_groups:
         # Preserve static-plan behavior byte-for-byte when no general motion
         # exists. With motion, reserve at most two thirds of the non-base
@@ -296,7 +456,7 @@ def plan(edl, duration, max_frames=32, base_frames=12, extra_frames=None):
         if chosen_groups:
             per_group = max(3, motion_budget // len(chosen_groups))
             for group in chosen_groups:
-                motion_frames.extend(_spread(group, per_group))
+                motion_frames.extend(_select_motion_states(group, per_group))
         selected = _dedupe(selected + motion_frames)
         remaining = max(0, max_frames - len(selected))
         leftovers = [row for row in events if all(

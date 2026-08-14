@@ -2040,6 +2040,11 @@ def events_from_items(items, tl, play_res=BASE_PLAY_RES):
     for it in items:
         get = (lambda k, d=None: it.get(k, d)) if isinstance(it, dict) \
             else (lambda k, d=None: getattr(it, k, d))
+        # Keep authoring provenance on the exact compiled event. A manual
+        # track may mix animated and static cards, so only the card whose
+        # effective style actually moves may satisfy a motion-language beat.
+        item_motion_mode = motion_mode([it])
+        item_motion_motif = get("motion_motif") if item_motion_mode else None
         spans = tl.span_to_out(get("start"), get("end"))
         if not spans:
             continue
@@ -2072,18 +2077,24 @@ def events_from_items(items, tl, play_res=BASE_PLAY_RES):
                 events.append({"start": start,
                                "end": end,
                                "text": panel, "item_style": get("style"),
-                               "layer": 0, "premium": True})
+                               "layer": 0, "premium": True,
+                               "motion_mode": item_motion_mode,
+                               "motion_motif": item_motion_motif})
             events.append({"start": start,
                            "end": end,
                            "text": geom + anim +
                            r"\N".join(_esc(l) for l in lines),
                            "item_style": get("style"), "layer": 5,
-                           "premium": True})
+                           "premium": True,
+                           "motion_mode": item_motion_mode,
+                           "motion_motif": item_motion_motif})
             continue
         lines = _wrap(get("text"), item_chars)[:MAX_LINES]
         events.append({"start": start, "end": end,
                        "text": r"\N".join(_esc(l) for l in lines),
-                       "item_style": get("style")})
+                       "item_style": get("style"),
+                       "motion_mode": item_motion_mode,
+                       "motion_motif": item_motion_motif})
     events.sort(key=lambda ev: ev["start"])
     return events
 
@@ -2357,14 +2368,19 @@ def _positioned_events(out_words, captions, global_style, play_res):
     return [ev for ev in events if float(ev["end"]) > float(ev["start"]) + 0.01]
 
 
-def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
-    """EDL captions field -> .ass file (or None when captions are off).
+def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
+    """EDL captions field -> exact timed events before ASS serialization.
+
     Captions come from the MAIN footage's transcript only — inserted clips
     are not transcribed (v1), so no events land inside spliced insert time
-    (kept_words maps around inserts via the Timeline)."""
+    (kept_words maps around inserts via the Timeline). Exposing this pure
+    stage lets screening and execution audits reason about the same caption
+    windows the renderer will burn instead of approximating word groups.
+    Returns ``(events, global_style)``; no captions is ``([], None)``.
+    """
     captions = edl.get("captions")
     if not captions:
-        return None
+        return [], None
     mutes = effective_caption_mutes(edl)
     if isinstance(captions, dict) and captions.get("mode") == "from_transcript":
         # Hesitation sounds are in the INDEX (round 69) so remove_filler_words
@@ -2426,7 +2442,7 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         events = events_from_items(captions, tl, play_res)
         global_style = None
     else:
-        return None
+        return [], None
     events = _clamp_events_to_inserts(events, tl)
     if isinstance(captions, dict) and \
             captions.get("mode") == "from_transcript":
@@ -2435,6 +2451,60 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         events = _clamp_event_ends_to_mutes(events, mutes)
     else:
         events = apply_mutes(events, mutes)
+    if not events:
+        return [], global_style
+    return events, global_style
+
+
+def motion_mode(captions):
+    """``continuous``/``entrance`` when captions author timed type motion.
+
+    Plain static subtitles appearing at their authored boundaries do not make
+    the motion department true. Named animation, karaoke/dynamic highlighting,
+    reveal composition and preset word animation do. This is metadata only;
+    ``compiled_events`` remains authoritative about where those states render.
+    """
+    if isinstance(captions, list):
+        entrance = False
+        for item in captions:
+            style = item.get("style") if isinstance(item, dict) else \
+                getattr(item, "style", None)
+            if style is not None and not isinstance(style, dict):
+                style = style.model_dump(exclude_none=True)
+            normalized = _norm_style(style)
+            if normalized.get("dynamic"):
+                return "continuous"
+            entrance = entrance or \
+                normalized.get("animation") not in (None, "none")
+        return "entrance" if entrance else None
+    if not isinstance(captions, dict):
+        return None
+    style = _norm_style(captions.get("style"))
+    if style.get("dynamic"):
+        return "continuous"
+    preset = _preset_of(style) or {}
+    if not preset:
+        return ("entrance" if
+                style.get("animation") not in (None, "none") else None)
+    # An explicit animation='none' cancels transforms but a reveal/karaoke
+    # preset still authors word-state changes synchronized to speech.
+    if preset.get("mode") in {"reveal", "karaoke"}:
+        return "continuous"
+    if style.get("animation") not in (None, "none") or \
+            (style.get("animation") != "none" and bool(
+                preset.get("animation") or preset.get("word_anim"))):
+        return "entrance"
+    return None
+
+
+def motion_enabled(captions):
+    """Whether a caption track deliberately changes type state over time."""
+    return motion_mode(captions) is not None
+
+
+def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
+    """EDL captions field -> .ass file (or None when captions are off)."""
+    events, global_style = compiled_events(edl, index, tl, play_res)
     if not events:
         return None
     return write_ass(events, path, global_style, play_res)

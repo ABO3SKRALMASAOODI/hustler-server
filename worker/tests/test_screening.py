@@ -113,6 +113,77 @@ def test_explicit_text_motion_gets_an_ordered_state_sequence_in_budget():
     assert any("B-roll" in row["reason"] for row in frames)
 
 
+def test_bound_camera_and_overlay_paths_get_ordered_causal_proof():
+    edl = {
+        "keep": [[0, 12]],
+        "effects": {"zooms": [{
+            "id": "z-proof", "start": 2.0, "end": 5.0,
+            "mode": "path", "motion_motif": "proof_lock",
+            "path": [{"f": 0.0, "cx": .2, "cy": .5, "s": .1},
+                     {"f": .35, "cx": .7, "cy": .4, "s": .3},
+                     {"f": 1.0, "cx": .5, "cy": .5, "s": .15}],
+        }]},
+        "overlays": [{
+            "id": "ov-proof", "asset_key": "proof.png", "kind": "image",
+            "start": 7.0, "duration_s": 3.0,
+            "x": [{"t": 0, "v": -.1}, {"t": .6, "v": .5}],
+            "y": .5, "scale": .4, "motion_motif": "support_drift",
+        }],
+    }
+
+    groups = screening._event_motion_groups(edl, 12, states=7)
+    zoom = next(group for group in groups
+                if any("id=z-proof" in row["reason"] for row in group))
+    overlay = next(group for group in groups
+                   if any("id=ov-proof" in row["reason"] for row in group))
+
+    assert [row["time_s"] for row in zoom] == sorted(
+        row["time_s"] for row in zoom)
+    assert any(abs(row["time_s"] - 3.05) < .01 for row in zoom)
+    assert "pre-trigger" in zoom[0]["reason"]
+    assert "post-settle" in zoom[-1]["reason"]
+    assert all("motif=proof_lock" in row["reason"] for row in zoom)
+    assert any(abs(row["time_s"] - 7.6) < .01 for row in overlay)
+    assert all("motif=support_drift" in row["reason"] for row in overlay)
+    reduced = screening._select_motion_states(zoom, 4)
+    assert any(abs(row["time_s"] - 3.05) < .01 for row in reduced)
+    assert reduced[0]["time_s"] < 2.0 and reduced[-1]["time_s"] > 5.0
+
+
+def test_bound_animated_caption_gets_exact_program_state_sequence():
+    edl = {
+        "keep": [[0, 8]],
+        "captions": {"mode": "from_transcript", "design_version": 2,
+                     "style": {"preset": "karaoke"},
+                     "motion_motif": "word_pulse"},
+        "effects": {},
+    }
+    index = {"words": [
+        {"w": "measured", "t0": 2.1, "t1": 2.7},
+        {"w": "proof", "t0": 2.8, "t1": 3.5},
+    ]}
+
+    groups = screening._event_motion_groups(
+        edl, 8, index=index, states=5)
+    captions = [group for group in groups
+                if any("type/caption_motion" in row["reason"]
+                       for row in group)]
+    caption = captions[0]
+
+    assert len(caption) >= 3
+    assert all("motif=word_pulse" in row["reason"] for row in caption)
+    assert caption[0]["time_s"] < 2.1
+    assert max(row["time_s"] for group in captions for row in group) > 3.5
+
+
+def test_unbound_legacy_motion_keeps_lightweight_screening():
+    edl = {"keep": [[0, 8]], "effects": {"zooms": [{
+        "id": "legacy", "start": 2, "end": 4, "mode": "ease",
+    }]}}
+
+    assert screening._event_motion_groups(edl, 8) == []
+
+
 def test_director_beat_frames_are_prioritized_and_sanitized_in_budget():
     edl = {"keep": [[0, 60]], "overlays": [], "effects": {"zooms": []}}
     for i in range(20):

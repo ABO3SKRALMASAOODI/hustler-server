@@ -1460,7 +1460,8 @@ tr_edl = validate_edl(
 check("transition survives validation",
       tr_edl["effects"]["transition"] == {"style": "dip_black",
                                           "duration_s": 0.3,
-                                          "scope": "scene"})
+                                          "scope": "scene",
+                                          "motion_motif": None})
 # Round 48: an EDL written before `scope` existed reads as 'scene'. Every one
 # of those carries the every-cut defect, so defaulting them to the fixed
 # behaviour repairs them on their next render instead of grandfathering a bug.
@@ -1626,7 +1627,7 @@ r = agent_tools.insert_media(ictx_kb, "images/1/logo.jpg", 0.0,
                              motion="zoom_in")
 check("image insert stores the Ken Burns motion",
       ictx_kb.written["inserts"][0]["motion"] == "zoom_in" and
-      "Ken Burns zoom_in" in r)
+      "local zoom_in camera move" in r)
 ictx_kb2 = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
 r = agent_tools.insert_media(ictx_kb2, "clips/1/rec.mp4", 0.0,
                              duration_s=2.0, clip_start_s=1.0,
@@ -4154,13 +4155,14 @@ from agent_tools import (add_sfx, move_sfx, remove_sfx,       # noqa: E402
 # --- the silent-drop guard, applied to sfx ---------------------------------
 # Same lesson as FIT_FIELDS above: a field declared in only SOME layers is
 # dropped without a trace and the agent still reports success.
-SFX_FIELDS = {"id", "storage_key", "at", "gain_db"}
+SFX_FIELDS = {"id", "storage_key", "at", "gain_db", "purpose"}
 check("sfx: the item model declares exactly the intended fields",
       SFX_FIELDS == set(schemas.SfxItem.model_fields))
 check("sfx: the EDL model carries an sfx list",
       "sfx" in schemas.EDL.model_fields)
-check("sfx: add_sfx offers storage_key/at/gain_db to the agent",
-      {"storage_key", "at", "gain_db"} == set(agent_tools.TOOLS["add_sfx"][2]))
+check("sfx: add_sfx offers storage_key/at/gain_db/purpose to the agent",
+      {"storage_key", "at", "gain_db", "purpose"} ==
+      set(agent_tools.TOOLS["add_sfx"][2]))
 check("sfx: the write tools are tracked for honesty",
       {"add_sfx", "move_sfx", "remove_sfx"} <= agent_tools.WRITE_TOOLS)
 check("sfx: set_audio_gain accepts kind 'sfx'",

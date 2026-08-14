@@ -12,7 +12,7 @@ suggest one visual skin; the user's brief can invent another.  The contract
 only states what must remain true for that kind of edit to work.
 """
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 
 
 _CONTRACTS = {
@@ -231,6 +231,47 @@ def prompt_block(family):
         "The user's explicit direction wins, but do not waive coherence, "
         "truthfulness, legibility, semantic relevance or evidence.",
     ])
+
+
+def casting_block(cast):
+    """Format decision context without pretending an uncertain brief is known."""
+    cast = cast or {}
+    family = cast.get("family")
+    confidence = float(cast.get("confidence") or 0.0)
+    reason = str(cast.get("reason") or "insufficient evidence")
+    if family in _CONTRACTS and family != "mixed_other" and confidence >= .75:
+        return (f"FORMAT CAST — provisional {family} ({reason}). Confirm it "
+                "against the actual pixels and user words; record "
+                "editorial_family in set_edit_plan, or choose a different "
+                "family when stronger evidence wins.\n" + prompt_block(family))
+
+    lines = [
+        "FORMAT CAST — UNCERTAIN. A platform word (reel/TikTok/Instagram), "
+        "duration or energy adjective is not a storytelling format. Inspect "
+        "speech, actual pixels, motion, uploaded media and references; compare "
+        "materially credible drivers below, then record ONE editorial_family "
+        "in set_edit_plan. Use mixed_other only for a genuinely hybrid/novel "
+        "dominant logic—not as a substitute for looking.",
+        f"Current abstention basis: {reason}.",
+        "FAMILY DRIVER SLATE:",
+    ]
+    for name, spec in _CONTRACTS.items():
+        if name != "mixed_other":
+            lines.append(f"- {name}: {spec['driver']}")
+    lines.append(
+        "The family chooses an invariant quality contract, not a visual preset, "
+        "cut density or permission boundary. A novel treatment remains valid.")
+    return "\n".join(lines)
+
+
+def selection_note(family):
+    """Compact same-turn handoff after set_edit_plan chooses a family."""
+    family = family if family in _CONTRACTS else "mixed_other"
+    spec = contract(family)
+    return (
+        f"FORMAT CONTRACT NOW ACTIVE — {family}. Dominant driver: "
+        f"{spec['driver']}. Guardrails: " + " | ".join(spec["reject_if"])
+    )
 
 
 def critic_block(family):

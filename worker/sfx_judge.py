@@ -5,6 +5,7 @@ catalog title says what a recording purports to be; measured transient shape
 says whether it behaves like the editorial event requested.
 """
 
+import json
 import math
 import re
 
@@ -89,3 +90,57 @@ def judge(hit, analysis, purpose):
 def rank(measured, purpose):
     rows = [judge(hit, analysis, purpose) for hit, analysis in measured]
     return sorted(rows, key=lambda row: (-row["score"], str(row["id"])))
+
+
+def listener_choice(answer, candidate_ids, allow_none=True):
+    """Parse an actual-audio supervisor's choice without guessing.
+
+    Structured JSON is preferred, with a narrow legacy text fallback. An
+    ambiguous answer returns None so the caller can retain deterministic
+    waveform ranking; it must never pick whichever id happened to be named
+    first in a comparison sentence.
+    """
+    if not isinstance(answer, str) or not answer.strip():
+        return None
+    allowed = {str(value): str(value) for value in candidate_ids or []}
+    folded = {key.casefold(): value for key, value in allowed.items()}
+    raw = None
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(answer):
+        if char != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(answer[index:])
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            raw = value
+            break
+    if raw is not None:
+        choice = str(raw.get("choice") or "").strip()
+        reason = " ".join(str(raw.get("reason") or "").split())[:420]
+        if allow_none and choice.casefold() in {
+                "none", "no sfx", "silence", "keep silence", "dry"}:
+            return {"choice": None, "abstain": True, "reason": reason}
+        selected = folded.get(choice.casefold())
+        if selected:
+            return {"choice": selected, "abstain": False, "reason": reason}
+        return None
+
+    mentions = []
+    for candidate_id in allowed:
+        boundary = (r"(?<![A-Za-z0-9:_-])" + re.escape(candidate_id) +
+                    r"(?![A-Za-z0-9:_-])")
+        if re.search(boundary, answer, flags=re.IGNORECASE):
+            mentions.append(candidate_id)
+    if len(mentions) == 1:
+        return {"choice": mentions[0], "abstain": False,
+                "reason": " ".join(answer.split())[:420]}
+    none_pattern = (
+        r"(?:^|\b(?:choice|choose|winner|best|recommend(?:ation)?)\s*[:=\-]?\s*)"
+        r"(?:none|no\s+sfx|silence|keep\s+(?:it\s+)?dry|keep\s+silence)\b")
+    if allow_none and not mentions and re.search(
+            none_pattern, answer.strip(), flags=re.IGNORECASE):
+        return {"choice": None, "abstain": True,
+                "reason": " ".join(answer.split())[:420]}
+    return None

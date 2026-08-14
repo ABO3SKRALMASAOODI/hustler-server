@@ -586,13 +586,13 @@ def _project_for_user(cur, project_id, user_id):
     return cur.fetchone()
 
 
-def _trial_gate_applies(cur, user_id):
-    """Round 101's conversion wall: an unsubscribed account that has already
-    had one video actually edited (an agent turn that moved a timeline past
-    v1, or a legacy shorts run that actually rendered clips) sends its NEXT prompt into the trial
-    cards. Subscribers (trialing counts), the admin account, and accounts
-    that haven't seen an edit yet all pass. Fails OPEN like plan_gate: a
-    lookup error must never eat a paying user's message."""
+def _subscribe_gate_applies(cur, user_id):
+    """Conversion wall: an unsubscribed account that tries to run a real
+    edit is shown the subscription cards immediately — no first free turn,
+    no new trial. Callers hang this off `indexed` so a greeting on an empty
+    project still gets the concierge, not a paywall. Subscribers (a live
+    trial still counts) and the admin account pass. Fails OPEN like
+    plan_gate: a lookup error must never eat a paying user's message."""
     try:
         cur.execute("SELECT is_subscribed, email FROM users WHERE id = %s",
                     (int(user_id),))
@@ -602,32 +602,19 @@ def _trial_gate_applies(cur, user_id):
         from routes.admin import ADMIN_EMAIL
         if (u["email"] or "").lower() == ADMIN_EMAIL.lower():
             return False
-        cur.execute("""
-            SELECT 1 FROM video_jobs
-            WHERE user_id = %s AND state = 'done'
-              AND ((type = 'agent_turn' AND
-                    CASE WHEN result->>'edl_version' ~ '^[0-9]+$'
-                         THEN (result->>'edl_version')::int ELSE 1 END > 1)
-                   OR (type = 'shorts_plan' AND
-                       CASE
-                         WHEN result ? 'rendered_clips'
-                              AND result->>'rendered_clips' ~ '^[0-9]+$'
-                           THEN (result->>'rendered_clips')::int
-                         WHEN NOT (result ? 'rendered_clips')
-                              AND result->>'clips' ~ '^[0-9]+$'
-                           THEN (result->>'clips')::int
-                         ELSE 0
-                       END > 0))
-            LIMIT 1""", (int(user_id),))
-        return cur.fetchone() is not None
+        return True
     except Exception as e:                                  # pragma: no cover
-        print(f"[trial_gate] lookup failed for user {user_id}: {e}",
+        print(f"[subscribe_gate] lookup failed for user {user_id}: {e}",
               flush=True)
         return False
 
 
-def _trial_offer_body():
-    """The 402 the trial gate answers with. Carries the three live plans
+# Older tests monkeypatch this name.
+_trial_gate_applies = _subscribe_gate_applies
+
+
+def _subscribe_offer_body():
+    """The 402 the subscribe gate answers with. Carries the three live plans
     with server-quoted prices and credits so the studio's cards never
     hardcode a number (the CLAUDE.md four-places rule)."""
     import billing
@@ -642,11 +629,13 @@ def _trial_offer_body():
             "yearly": prices.get("yearly"),
             "credits": PLAN_MONTHLY_LIMITS.get(pid)})
     return {
-        "error": ("You've seen it edit — keep going with a free 3-day "
-                  "trial. $0 today; cancel inside the trial and you're "
-                  "never charged."),
+        "error": ("Subscribe to start editing. Cancel anytime."),
         "code": "trial_offer", "trial_offer": True,
-        "trial_days": 3, "plans": plans}
+        "subscribe_offer": True, "trial_days": 0, "plans": plans}
+
+
+def _trial_offer_body():
+    return _subscribe_offer_body()
 
 
 def _running_jobs_count(cur, user_id):
@@ -3099,23 +3088,19 @@ def post_message(user_id, project_id):
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
 
-        # THE TRIAL GATE (round 101) — one free edited video, then the ask.
-        # The moment this account has SEEN the product work — any completed
-        # agent turn that actually changed a timeline, or a finished shorts
-        # run — every next prompt answers with the trial cards instead of
-        # running. The message is NOT persisted: closing the cards and
-        # resending shows them again, by design. Fires before the round-50
-        # credits gate because it is stricter (it doesn't wait for the 50 to
-        # drain), and never for a subscriber (a trialing user IS subscribed
-        # from day zero) or the admin account.
-        if _trial_gate_applies(cur, user_id):
-            # Leave a trace for admin: WHO met the wall, WHERE and WHEN —
-            # every showing, so the resend count reads as intent. The
-            # blocked message itself is deliberately not persisted.
+        # THE SUBSCRIBE GATE — no first free turn, no new trial. The moment
+        # this message would run an agent turn (the project is indexed), an
+        # unsubscribed account sees the subscription cards instead of a
+        # launch. The message is NOT persisted: closing the cards and
+        # resending shows them again, by design. Active trials pass because
+        # they are subscribed. Hangs off `indexed` so a greeting on an empty
+        # project still gets the concierge.
+        if indexed and _subscribe_gate_applies(cur, user_id):
             record_client_event(user_id, project_id, "trial_gate_shown",
-                                detail={"message_chars": len(text)},
+                                detail={"message_chars": len(text),
+                                        "subscribe_offer": True},
                                 origin="server")
-            return jsonify(_trial_offer_body()), 402
+            return jsonify(_subscribe_offer_body()), 402
 
         # The plan gate — round 50: "this account has spent its 50 free
         # credits and holds no plan". It hangs off `indexed` for the SAME
@@ -5302,8 +5287,9 @@ def start_shorts(user_id, project_id):
                 "kind": "edit",
                 "duration_s": round(source_duration, 1),
             })
-        # Same two walls as sending a message: story scouting is model time,
-        # so it needs the same credit standing. Child edits are separate turns.
+        # Same walls as sending a message: story scouting is model time.
+        if _subscribe_gate_applies(cur, user_id):
+            return jsonify(_subscribe_offer_body()), 402
         if plan_gate.needs_plan(conn, user_id):
             return plan_gate.gate_response(jsonify)
         if not check_and_reserve(conn, user_id, min_credits=1.0):
@@ -5468,8 +5454,8 @@ def start_short_editor(user_id, project_id, child_project_id):
         indexed = bool(original and _index_row(cur, original["sha256"]))
         if not indexed:
             return jsonify({"error": "This reel is still preparing."}), 409
-        if _trial_gate_applies(cur, user_id):
-            return jsonify(_trial_offer_body()), 402
+        if _subscribe_gate_applies(cur, user_id):
+            return jsonify(_subscribe_offer_body()), 402
         if plan_gate.needs_plan(conn, user_id):
             return plan_gate.gate_response(jsonify)
         if not check_and_reserve(conn, user_id, min_credits=1.0):

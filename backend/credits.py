@@ -85,9 +85,9 @@ PLAN_MONTHLY_LIMITS = {
     # — that one GRANTS the credits, this one is the denominator the studio
     # shows. They were missing here, so an 'ai' subscriber paying $30 would have
     # seen a limit of 20 (the daily top-up alone) even while holding 2,400.
-    "ai":     2000,     # Creator  $30 — round 49, see the table in paddle.py
-    "ai_pro": 4000,     # Pro      $50
-    "ai_max": 10000,    # Frontier $100
+    "ai":     1000,     # Creator  $15
+    "ai_pro": 2000,     # Pro      $30
+    "ai_max": 5000,     # Frontier $50
     # 'mcp' is 0 on purpose: that plan brings its own model, so it never draws
     # on our metered pool.
     "mcp":   0,
@@ -145,7 +145,7 @@ def trial_allowance(plan):
 #
 # It does NOT refill. One grant, at registration (routes/auth.py and
 # routes/google_auth.py both write it explicitly), and when it is gone the ask
-# is the trial. Existing accounts were topped up to the same 50 by a data
+# is a paid plan. Existing accounts were topped up to the same 50 by a data
 # migration (migrations/010_free_taste_credits.sql), so "all users" means all
 # users and not just the ones who arrived after the deploy.
 FREE_GRANT_CREDITS  = 50
@@ -289,10 +289,22 @@ def _trial_status(conn, user_id: int):
 
 def get_balance(conn, user_id: int) -> dict:
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT credits_balance, is_subscribed, plan FROM users WHERE id = %s",
-            (user_id,)
-        )
+        try:
+            cur.execute(
+                "SELECT credits_balance, is_subscribed, plan, "
+                "credits_monthly_limit FROM users WHERE id = %s",
+                (user_id,)
+            )
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            cur.execute(
+                "SELECT credits_balance, is_subscribed, plan FROM users "
+                "WHERE id = %s",
+                (user_id,)
+            )
         row = cur.fetchone()
         if not row:
             return {"balance": 0, "is_subscribed": False, "plan": "free", "plan_limit": 20}
@@ -306,11 +318,19 @@ def get_balance(conn, user_id: int) -> dict:
                                     daily_top_up=is_subscribed and not trialing)
 
     monthly = PLAN_MONTHLY_LIMITS.get(plan, 0)
+    try:
+        stored_limit = int(row.get("credits_monthly_limit") or 0)
+    except (TypeError, ValueError):
+        stored_limit = 0
+    if stored_limit > 0:
+        # Grandfathered trials / old-price subscribers keep the grant they
+        # were sold, not the current shopfront number.
+        monthly = stored_limit
     if trialing:
         # The denominator during a trial is the trial allowance itself. Showing
         # "x / 2,000" to someone who can only spend 200 of them is the kind of
         # number that reads as a bug the moment the wall arrives.
-        plan_limit = trial_allowance(plan)
+        plan_limit = stored_limit or trial_allowance(plan)
     elif is_subscribed:
         plan_limit = SUB_DAILY_CREDITS + monthly
     else:

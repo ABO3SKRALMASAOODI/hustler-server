@@ -210,9 +210,11 @@ def _visual_once(left_paths, left_labels, right_paths, right_labels,
 Only judge the rendered screening pages supplied. Opening/closing and
 edit-event tiles are labeled. Still pages can show visual rhythm and authored
 state changes, but not smoothness between sampled instants; abstain when motion
-quality itself is not visible. Tiles labeled "text motion N state A/B" are
-ordered states of one animation: they can prove trajectory, clipping,
-legibility and the composed settle, but still not interpolation smoothness.
+quality itself is not visible. Tiles labeled "text motion N state A/B" or
+"motion proof N <domain>/<kind> state A/B" are ordered states of one
+animation: they can prove trajectory, clipping, legibility and the composed
+settle, but still not interpolation smoothness. Motion-proof labels carry the
+exact EDL id and authored motif; judge the visible path, not the tag itself.
 Narrative relevance requires a stated purpose
 and visible evidence, not a plausible stock title."""
     answer = llm.ask_vision(
@@ -328,6 +330,16 @@ def evaluate_pair(case):
         "family": family,
         "channels": channels,
         "human_winner": human,
+        # These fields are deliberately copied only AFTER every blinded model
+        # call. They let the release gate map LEFT/RIGHT back to candidate and
+        # opponent without leaking identity into a judging prompt.
+        "candidate_side": (case.get("candidate_side")
+                           if case.get("candidate_side") in {"left", "right"}
+                           else None),
+        "opponent_kind": str(case.get("opponent_kind") or "unspecified")[:80],
+        "side_metrics": {
+            side: dict((case.get(side) or {}).get("metrics") or {})
+            for side in ("left", "right")},
         "evidence_coverage": [name for name, report in channels.items()
                               if report is not None],
     }

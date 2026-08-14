@@ -19,9 +19,11 @@ import editorial_contracts
 import grammar
 import llm
 import model_prices
+import motion_contract
 import motion_judge
 import music_search
 import preview_critic
+import preference_memory
 import reference_profile
 import remote
 import request_intent
@@ -38,6 +40,24 @@ from schemas import describe_edl
 # The turn loop checks it between iterations and finalizes honestly inside
 # the grace window instead of dying and leaving the reaper to guess.
 SHUTDOWN = threading.Event()
+
+
+def _sleep_keeping_lease(worker_db, job_id, seconds, progress=5):
+    """Sleep through a TPM wait without letting the reaper think we died.
+
+    heartbeat_forever should cover this, but a wedged beat plus a 60s sleep
+    is exactly how a live turn became 'Worker died'. Touch the lease every
+    15s while we wait."""
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        try:
+            worker_db.run(dbx.set_progress, job_id, progress)
+        except Exception:
+            pass
+        time.sleep(min(15.0, left))
 
 
 def _silence_line(index):
@@ -990,14 +1010,35 @@ def state_block(ctx, worker_db, denied_tools=()):
     # true for the chosen format to work. It is deliberately invariant-level
     # (no fixed cut/B-roll/effect density), so a novel style remains possible
     # while a vague "make it nice" still receives a real quality target.
+    family = None
     try:
         inferred = grammar.classify(ctx.index)[0] if ctx.has_main_video else None
-        family = director.editorial_family(
+        cast = director.editorial_family_cast(
             getattr(ctx, "edit_plan", None), inferred, ctx.has_main_video,
             request_text=getattr(ctx, "user_message", None))
-        block += "\n\n" + editorial_contracts.prompt_block(family)
+        family = cast["family"]
+        block += "\n\n" + editorial_contracts.casting_block(cast)
     except Exception as e:
         print(f"[editorial-contract] state block failed: {e}", flush=True)
+    # Repeated accepted outcomes can teach a per-account taste prior without
+    # leaking another user's choices or copying old content. It is deliberately
+    # weak/correlational and the current brief remains authoritative.
+    try:
+        user_id = ((getattr(ctx, "job", None) or {}).get("user_id")
+                   or (getattr(ctx, "project", None) or {}).get("user_id"))
+        if family and user_id:
+            cache = getattr(ctx, "_preference_memory_blocks", None)
+            if cache is None:
+                cache = {}
+                setattr(ctx, "_preference_memory_blocks", cache)
+            if family not in cache:
+                rows = worker_db.run(
+                    dbx.editorial_preference_rows, user_id, family)
+                cache[family] = preference_memory.prompt_block(rows, family)
+            if cache[family]:
+                block += "\n\n" + cache[family]
+    except Exception as e:
+        print(f"[preference-memory] skipped: {e}", flush=True)
     return block
 
 
@@ -2678,6 +2719,114 @@ def _turn_has_asset_progress(ctx):
         "stock_added"))
 
 
+def _semantic_progress_marker(ctx):
+    """Bounded evidence that this turn crossed a meaningful frontier.
+
+    A new EDL row is not automatically progress: production job 9169 wrote 97
+    versions and rendered 14 previews while repeatedly revising the same edit.
+    The inactivity window used those counters and therefore renewed forever.
+    This marker rewards new editorial departments/evidence, plan closure,
+    cleaner independent review, or genuinely new assets—not version churn.
+    It never limits which tool may run or how many legitimate elements an edit
+    may contain.
+    """
+    plan = director.normalize_blueprint(getattr(ctx, "edit_plan", None)) or {}
+    steps = frozenset(
+        int(row["id"]) for row in (plan.get("step_states") or [])
+        if row.get("status") in {"completed", "blocked"})
+    checks = frozenset(
+        int(row["id"]) for row in (plan.get("acceptance_checks") or [])
+        if row.get("status") in {"passed", "failed"})
+    decision_rows = ((getattr(ctx, "editing_metrics", None) or {}).get(
+        "editorial_decisions") or [])
+    decisions = frozenset(
+        (str(row.get("kind") or "unknown"),
+         str(row.get("moment_id") or row.get("purpose") or "")[:120],
+         str(row.get("decision") or "unknown"))
+        for row in decision_rows if isinstance(row, dict))
+    asset_lists = (
+        "images_generated", "videos_generated", "urls_fetched",
+        "web_recordings", "audio_extracted", "audio_fetched", "stock_added")
+    assets = tuple(
+        len(getattr(ctx, name, None) or []) for name in asset_lists)
+
+    visual = getattr(ctx, "last_visual_critic", None) or {}
+    story = getattr(ctx, "last_story_review", None) or {}
+    audio = getattr(ctx, "last_audio_review", None) or {}
+    rank = {None: 0, "not_reviewed": 0, "repair": 1, "fix": 1,
+            "advisory": 2, "pass": 3}
+    verdicts = (
+        rank.get(str(visual.get("verdict") or "not_reviewed"), 0),
+        rank.get(str(story.get("verdict") or "not_reviewed"), 0),
+        rank.get(str(audio.get("verdict") or "not_reviewed"), 0),
+    )
+    findings = tuple(
+        len(report.get("findings") or []) if report else None
+        for report in (visual, story, audio))
+    try:
+        department_gaps = len(director.department_execution_gaps(
+            plan, ctx.latest_edl()["json"],
+            bool(getattr(ctx, "has_main_video", False))))
+        motion_gaps = len(motion_contract.execution_gaps(
+            plan, ctx.latest_edl()["json"],
+            index=getattr(ctx, "index", None)))
+    except Exception:
+        department_gaps = None
+        motion_gaps = None
+    return {
+        "has_write": bool(getattr(ctx, "versions_written", None)),
+        "write_tools": frozenset(getattr(ctx, "write_calls", None) or []),
+        "has_render": bool(getattr(ctx, "rendered_versions", None)),
+        "has_plan": bool(plan),
+        "resolved_steps": steps,
+        "resolved_checks": checks,
+        "decisions": decisions,
+        "assets": assets,
+        "review_verdicts": verdicts,
+        "review_findings": findings,
+        "department_gaps": department_gaps,
+        "motion_gaps": motion_gaps,
+    }
+
+
+def _semantic_progressed(before, after):
+    """Whether ``after`` contains strictly stronger completion evidence."""
+    before = before or {}
+    after = after or {}
+    for key in ("has_write", "has_render", "has_plan"):
+        if after.get(key) and not before.get(key):
+            return True
+    for key in ("write_tools", "resolved_steps", "resolved_checks",
+                "decisions"):
+        old, new = set(before.get(key) or ()), set(after.get(key) or ())
+        if new - old:
+            return True
+    old_assets = tuple(before.get("assets") or ())
+    new_assets = tuple(after.get("assets") or ())
+    if any(n > (old_assets[i] if i < len(old_assets) else 0)
+           for i, n in enumerate(new_assets)):
+        return True
+    old_verdicts = tuple(before.get("review_verdicts") or ())
+    new_verdicts = tuple(after.get("review_verdicts") or ())
+    if any(n > (old_verdicts[i] if i < len(old_verdicts) else 0)
+           for i, n in enumerate(new_verdicts)):
+        return True
+    old_findings = tuple(before.get("review_findings") or ())
+    new_findings = tuple(after.get("review_findings") or ())
+    for i, n in enumerate(new_findings):
+        old = old_findings[i] if i < len(old_findings) else None
+        if n is not None and old is not None and n < old:
+            return True
+    old_gaps, new_gaps = before.get("department_gaps"), \
+        after.get("department_gaps")
+    if new_gaps is not None and old_gaps is not None and new_gaps < old_gaps:
+        return True
+    old_gaps, new_gaps = before.get("motion_gaps"), after.get("motion_gaps")
+    if new_gaps is not None and old_gaps is not None and new_gaps < old_gaps:
+        return True
+    return False
+
+
 def _record_outer_tool_outcome(ctx, name, result):
     """Record one model-visible tool result (a recipe remains one call)."""
     kind = agent_tools.tool_result_kind(result)
@@ -2695,14 +2844,14 @@ def _record_outer_tool_outcome(ctx, name, result):
 
 
 def _repeated_tool_failure(ctx):
-    rows = ctx.turn_tool_outcomes
-    if len(rows) < 2:
-        return False
-    a, b = rows[-2], rows[-1]
-    return (a.get("kind") in {"failed", "refused"}
-            and b.get("kind") in {"failed", "refused"}
-            and a.get("fingerprint") == b.get("fingerprint")
-            and a.get("writes") == b.get("writes"))
+    """Never dump the turn. A tool error stays in the tool result.
+
+    This used to finalize after two matching failures. That is how user
+    715's 18-minute vlog died on an Openverse 401, then again on one
+    slightly-wide sequence_map beat — the agent stopped serving. Kept as
+    a hard False so older tests still import a name.
+    """
+    return False
 
 
 def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
@@ -2736,6 +2885,113 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     return outcome, billable
 
 
+def _treatment_profile(edl):
+    """Compact final craft choices, with no authored words or asset identity.
+
+    Decision traces explain how one candidate won.  This profile captures the
+    *final* visual/audio language after later revisions, so outcome learning
+    does not accidentally reward an intermediate style that was replaced.
+    Every value comes from a bounded schema facet; custom filter chains,
+    graphic text, caption words, purposes, ids and storage keys stay out.
+    """
+    if not isinstance(edl, dict):
+        return {}
+    profile = {}
+
+    def scalar(name, value):
+        if isinstance(value, (str, bool)) and value not in ("", None):
+            profile[name] = value
+
+    def values(name, rows, field, default=None):
+        found = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            value = row.get(field)
+            if value in (None, ""):
+                value = default
+            if isinstance(value, (str, bool)) and value not in ("", None):
+                found.add(value)
+        if found:
+            profile[name] = sorted(found, key=str)[:16]
+
+    frame = edl.get("frame") or {}
+    if isinstance(frame, dict):
+        scalar("frame_ratio", frame.get("ratio"))
+        scalar("frame_mode", frame.get("mode"))
+
+    captions_cfg = edl.get("captions")
+    caption_styles = []
+    if isinstance(captions_cfg, dict):
+        if isinstance(captions_cfg.get("style"), dict):
+            caption_styles.append(captions_cfg["style"])
+        track = captions_cfg.get("placement_track") or []
+        if track:
+            profile["caption_placement"] = "adaptive"
+        else:
+            values("caption_position", caption_styles, "position")
+    elif isinstance(captions_cfg, list):
+        caption_styles = [row.get("style") for row in captions_cfg
+                          if isinstance(row, dict)
+                          and isinstance(row.get("style"), dict)]
+        values("caption_position", caption_styles, "position")
+    for key in ("preset", "animation", "font", "layout", "emphasis",
+                "effect", "text_align"):
+        values("caption_" + key, caption_styles, key)
+
+    effects = edl.get("effects") or {}
+    if isinstance(effects, dict):
+        scalar("grade", effects.get("grade"))
+        transition = effects.get("transition") or {}
+        if isinstance(transition, dict):
+            scalar("transition_style", transition.get("style"))
+            scalar("transition_scope", transition.get("scope") or "scene")
+        values("stylize_kinds", effects.get("stylize"), "kind")
+        values("zoom_modes", effects.get("zooms"), "mode", "punch")
+        values("frame_shift_ratios", effects.get("frame_shifts"), "ratio")
+        screen_frame = effects.get("screen_frame")
+        if isinstance(screen_frame, dict):
+            profile["screen_frame"] = True
+            scalar("screen_frame_direction", screen_frame.get("direction"))
+        if effects.get("custom"):
+            profile["custom_pixel_treatment"] = True
+
+    texts = edl.get("texts") or []
+    values("text_templates", texts, "template", "title")
+    values("text_entrances", texts, "entrance", "none")
+    values("text_exits", texts, "exit", "none")
+    values("text_fonts", texts, "font")
+    text_motion = ["keyframed" for row in texts
+                   if isinstance(row, dict) and row.get("motion")]
+    if text_motion:
+        profile["text_motion"] = text_motion[:1]
+
+    overlays = edl.get("overlays") or []
+    profile["overlay_modes"] = sorted({
+        "screen_pin" if row.get("screen") else
+        "cover" if row.get("fit") == "cover" else "picture_in_picture"
+        for row in overlays if isinstance(row, dict)})[:16]
+    if not profile["overlay_modes"]:
+        profile.pop("overlay_modes")
+    values("overlay_entrances", overlays, "entrance", "none")
+    values("overlay_exits", overlays, "exit", "none")
+
+    values("vector_kinds", edl.get("vectors"), "kind")
+    if any(isinstance(row, dict) and row.get("motion")
+           for row in (edl.get("vectors") or [])):
+        profile["vector_motion"] = ["keyframed"]
+
+    music = [row for row in (edl.get("music") or [])
+             if isinstance(row, dict) and not row.get("mute")]
+    if music:
+        profile["music_ducking"] = sorted({
+            "smooth" if row.get("duck_mode") == "smooth" else
+            "step" if row.get("duck", True) else "none"
+            for row in music})
+        profile["music_looping"] = bool(any(row.get("loop") for row in music))
+    return profile
+
+
 def _outcome_meta(ctx, outcome):
     counts = {}
     for row in ctx.turn_tool_outcomes:
@@ -2744,8 +3000,13 @@ def _outcome_meta(ctx, outcome):
     tokens_in = sum(int(row.get("in") or 0) for row in usage)
     cached_in = sum(int(row.get("cached") or 0) for row in usage)
     tokens_out = sum(int(row.get("out") or 0) for row in usage)
+    latest = {}
+    latest_available = False
     try:
         latest = ctx.latest_edl()["json"]
+        if not isinstance(latest, dict):
+            raise TypeError("latest EDL JSON is not an object")
+        latest_available = True
         program = timeline.Timeline(latest.get("keep") or [],
                                     latest.get("inserts") or [],
                                     latest.get("speed") or [])
@@ -2773,11 +3034,67 @@ def _outcome_meta(ctx, outcome):
             getattr(ctx, "index", None))[0]
     except Exception:
         inferred_grammar = None
-    editorial_family = director.editorial_family(
+    family_cast = director.editorial_family_cast(
         getattr(ctx, "edit_plan", None), inferred_grammar,
         bool(getattr(ctx, "has_main_video", False)),
         request_text=getattr(ctx, "user_message", None))
+    editorial_family = family_cast["family"]
     metrics = dict(getattr(ctx, "editing_metrics", None) or {})
+    department_execution = {
+        "decisions": 0, "auditable_promises": 0,
+        "fulfilled_promises": 0, "gaps": [],
+    }
+    motion_execution = {
+        "active": False, "beats": [], "mapped_beats": 0,
+        "fulfilled_beats": 0, "gaps": [],
+    }
+    if latest_available:
+        profile = _treatment_profile(latest)
+        if profile:
+            metrics["treatment_profile"] = profile
+        department_execution = director.department_execution_summary(
+            getattr(ctx, "edit_plan", None), latest,
+            bool(getattr(ctx, "has_main_video", False)))
+        motion_execution = motion_contract.evaluate(
+            getattr(ctx, "edit_plan", None), latest,
+            index=getattr(ctx, "index", None))
+    traces = []
+    used_assets = {}
+
+    def used(key, role, element_id):
+        if key:
+            used_assets.setdefault(str(key), []).append(
+                {"role": role, "element_id": element_id})
+
+    for row in latest.get("inserts") or []:
+        used(row.get("asset_key"), "insert", row.get("id"))
+    for row in latest.get("overlays") or []:
+        used(row.get("asset_key"), "overlay", row.get("id"))
+    for row in latest.get("music") or []:
+        used(row.get("storage_key"), "music", row.get("id"))
+    for row in latest.get("sfx") or []:
+        used(row.get("storage_key"), "sfx", row.get("id"))
+    for raw in metrics.get("editorial_decisions") or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        key = row.get("asset_key")
+        if key and not latest_available:
+            row["placement_status"] = "edl_unavailable"
+            row["placements"] = []
+        elif key:
+            row["placement_status"] = (
+                "placed" if str(key) in used_assets else "not_placed")
+            row["placements"] = used_assets.get(str(key), [])[:6]
+        elif row.get("decision") == "none":
+            row["placement_status"] = "not_applicable"
+        else:
+            row["placement_status"] = "not_trackable"
+        traces.append(row)
+        if len(traces) >= 32:
+            break
+    if traces:
+        metrics["editorial_decisions"] = traces
     model_calls = metrics.get("model_calls_by_purpose") or {}
     try:
         estimated_model_cost_usd = round(
@@ -2787,7 +3104,23 @@ def _outcome_meta(ctx, outcome):
     metrics.update({
         "code_version": worker_version.code_version(),
         "editorial_family": editorial_family,
+        "editorial_family_explicit": bool(
+            (getattr(ctx, "edit_plan", None) or {}).get("editorial_family")),
+        "format_cast_confidence": round(
+            float(family_cast.get("confidence") or 0.0), 3),
+        "format_cast_abstained": int(editorial_family == "mixed_other"),
         "editorial_contract_v": editorial_contracts.CONTRACT_VERSION,
+        "department_decisions": department_execution["decisions"],
+        "department_promises": department_execution["auditable_promises"],
+        "department_promises_fulfilled": department_execution[
+            "fulfilled_promises"],
+        "department_execution_gaps": len(department_execution["gaps"]),
+        "motion_contract_active": int(motion_execution["active"]),
+        "motion_contract_beats": len(motion_execution["beats"]),
+        "motion_contract_mapped_beats": motion_execution["mapped_beats"],
+        "motion_contract_fulfilled_beats": motion_execution[
+            "fulfilled_beats"],
+        "motion_contract_gaps": len(motion_execution["gaps"]),
         "model_calls": sum(int(n or 0) for n in model_calls.values()),
         "agent_dispatches": int(model_calls.get("agent") or 0),
         "tool_calls": len(getattr(ctx, "turn_tool_outcomes", None) or []),
@@ -2939,6 +3272,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     step_client = llm.without_sdk_retries(client)
     model = ctx.agent_model or config.AGENT_MODEL
     _cont = _cont or {}
+    semantic_start = (_cont.get("semantic0")
+                      if _cont.get("semantic0") is not None
+                      else _semantic_progress_marker(ctx))
     # A progress-window continuation is the SAME user turn after ten minutes
     # of already-landed work. Its durable blueprint + current EDL are rebuilt
     # below; paying for the broad 36-60-tile library overview again neither
@@ -3015,6 +3351,30 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     plan_close_pushed = bool(_cont.get("plan_close_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
+    # TPM admission: the provider's tokens-per-minute ceiling is org-wide,
+    # and a fresh turn's first call is the biggest single request we make
+    # (~50K tokens of state + filmstrips). Starting it into a burst that is
+    # already over the ceiling buys a guaranteed 429. A FRESH turn peeks at
+    # the fleet's last-60s burn and yields until the next call fits, not
+    # just three times and then slams in (that is how 5 TPM deaths still
+    # happened after the first wait helper). Continuations never wait here:
+    # their clock is already running and mid-turn 429s use rate_limit_wait.
+    if not _cont:
+        room = config.AGENT_TPM_HARD_CAP - config.AGENT_TPM_CALL_RESERVE
+        yield_line = min(config.AGENT_TPM_SOFT_CAP, room)
+        for _adm in range(12):
+            try:
+                burn = worker_db.run(dbx.recent_llm_tokens, 60)
+            except Exception:
+                break                # the gate is advisory, never load-bearing
+            if burn < yield_line:
+                break
+            print(f"[job {job['id']}] fleet pushed {burn} tokens in the last "
+                  f"60s (yield under {yield_line}) — pausing 20s before the "
+                  "first call instead of joining the burst",
+                  flush=True)
+            _sleep_keeping_lease(worker_db, job["id"], 20, progress=5)
+
     while True:
         iteration = timings["llm_calls"]
         if SHUTDOWN.is_set():
@@ -3064,13 +3424,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "web_recordings", "audio_extracted", "stock_added")
             asset_progress = sum(
                 len(getattr(ctx, name, None) or []) for name in progress_lists)
-            _progressed = (len(ctx.versions_written) > _cont.get("writes0", 0)
-                           or len(ctx.rendered_versions)
-                           > _cont.get("renders0", 0)
-                           or asset_progress > _cont.get("assets0", 0))
+            semantic_now = _semantic_progress_marker(ctx)
+            _progressed = _semantic_progressed(semantic_start, semantic_now)
             if _progressed and not ctx.over_budget() and not total_expired \
                     and not SHUTDOWN.is_set():
-                print(f"[job {job['id']}] progress window spent after "
+                print(f"[job {job['id']}] semantic progress window spent after "
                       f"{total_steps} step(s), but work is still landing — "
                       f"refreshing it (refresh {n_clock + 1})", flush=True)
                 return _run_loop(
@@ -3087,6 +3445,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                quality_repair_versions),
                            "plan_write_pushed": plan_write_pushed,
                            "plan_close_pushed": plan_close_pushed,
+                           "semantic0": semantic_now,
                            "writes0": len(ctx.versions_written),
                            "renders0": len(ctx.rendered_versions),
                            "assets0": asset_progress})
@@ -3174,7 +3533,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                        "Your credits refresh on your plan's cycle — or "
                        "upgrade for a bigger monthly pool to keep editing now."
                        if subscribed else
-                       "Start your trial to keep editing.")
+                       "Subscribe to keep editing.")
             if ctx.versions_written:
                 if exhausted:
                     return _finalize(
@@ -3307,18 +3666,48 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # that contradicts the reasoning_out beside it is worse than none,
             # because it is the field you would check first.
             used_lane = None
+            _rl_waits = 0
+
+            def _seconds_left():
+                return min(
+                    config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start),
+                    config.AGENT_TURN_TOTAL_TIMEOUT_S
+                    - (time.monotonic() - turn_started))
+
+            def _wait_tpm(exc, where):
+                nonlocal _rl_waits
+                wait = llm.rate_limit_wait(
+                    exc, _rl_waits + 1, _seconds_left(),
+                    shutting_down=SHUTDOWN.is_set())
+                if wait is None:
+                    return False
+                _rl_waits += 1
+                print(f"[agent {job['id']}] rate-limited on {where} "
+                      f"({_rl_waits}/20) — waiting {wait:.0f}s and retrying "
+                      "instead of failing the turn",
+                      flush=True)
+                _sleep_keeping_lease(worker_db, job["id"], wait, progress)
+                return True
+
             if llm.responses_available(model, config.OPENAI_BASE_URL):
-                lane_rate_waits = 0
-                for lane_attempt in range(3):
+                while resp is None:
                     try:
                         resp = llm.responses_create(
                             config.OPENAI_BASE_URL, config.OPENAI_API_KEY,
                             model, messages, tools, max_tokens=max_tokens,
                             effort=step_effort,
+                            # Thinking-sized, not dispatch-sized: a max-effort
+                            # call reasons past LLM_TIMEOUT_S, and timing out
+                            # here silently reruns the step at effort='none'.
                             timeout=config.AGENT_LANE_TIMEOUT_S)
                         used_lane = step_effort
                         break
                     except Exception as e:
+                        # TPM 429s stay on this lane. Falling through to
+                        # chat used to (1) spend a second 429, (2) lose
+                        # thinking, (3) 400 on Luna+tools and kill the turn.
+                        if _wait_tpm(e, "responses"):
+                            continue
                         permanent = llm.looks_like_responses_unsupported(e)
                         if permanent:
                             llm.mark_responses_dead(model)
@@ -3329,37 +3718,21 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                     f"supported ({str(e)[:180]}) — using "
                                     "chat/completions for this process",
                                     flush=True)
+                            resp = None
                             break
-                        remaining = min(
-                            config.AGENT_TURN_TOTAL_TIMEOUT_S
-                            - (time.monotonic() - turn_started),
-                            config.AGENT_TURN_TIMEOUT_S
-                            - (time.monotonic() - t_start))
-                        retry_wait = llm.rate_limit_wait(
-                            e, lane_rate_waits + 1, remaining,
-                            shutting_down=SHUTDOWN.is_set())
-                        if retry_wait is not None and lane_attempt < 2:
-                            lane_rate_waits += 1
-                            print(f"[agent {job['id']}] responses lane was "
-                                  f"rate-limited — waiting {retry_wait:.1f}s "
-                                  "and retrying the same lane", flush=True)
-                            time.sleep(retry_wait)
-                            continue
                         if _retryable_provider_rejection(e) \
-                                and lane_attempt < 2 \
-                                and remaining > 3:
-                            retry_wait = min(2 ** lane_attempt, remaining)
+                                and _seconds_left() > 3:
+                            retry_wait = min(2.0, _seconds_left())
                             print(f"[agent {job['id']}] transient responses "
                                   f"failure — retrying the same lane in "
                                   f"{retry_wait:.1f}s", flush=True)
-                            time.sleep(retry_wait)
+                            _sleep_keeping_lease(
+                                worker_db, job["id"], retry_wait, progress)
                             continue
                         # Never duplicate a possibly accepted expensive call
-                        # on chat/completions after a timeout/5xx. Only a
-                        # definite unsupported-endpoint response falls back.
+                        # on chat/completions after a timeout/5xx.
                         raise
             _adapt_tries = 0
-            _rl_waits = 0
             while resp is None:
                 try:
                     resp = step_client.chat.completions.create(
@@ -3367,22 +3740,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     break
                 except Exception as e:
                     # Rate limits get their own budget-aware waits, BEFORE
-                    # the dialect adapters — see llm.rate_limit_wait for the
-                    # reasoning and bounds (round 91).
-                    wait = llm.rate_limit_wait(
-                        e, _rl_waits + 1,
-                        min(config.AGENT_TURN_TIMEOUT_S
-                            - (time.monotonic() - t_start),
-                            config.AGENT_TURN_TOTAL_TIMEOUT_S
-                            - (time.monotonic() - turn_started)),
-                        shutting_down=SHUTDOWN.is_set())
-                    if wait is not None:
-                        _rl_waits += 1
-                        print(f"[agent {job['id']}] rate-limited by the "
-                              f"model ({_rl_waits}/6) — waiting {wait:.0f}s "
-                              "and retrying instead of failing the turn",
-                              flush=True)
-                        time.sleep(wait)
+                    # the dialect adapters — see llm.rate_limit_wait.
+                    if _wait_tpm(e, "chat"):
                         continue
                     _adapt_tries += 1
                     if _adapt_tries > 3:
@@ -3720,30 +4079,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                           else None))
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
-
-        if _repeated_tool_failure(ctx):
-            last = ctx.turn_tool_outcomes[-1]
-            print(f"[job {job['id']}] stopping repeated deterministic "
-                  f"failure from {last['tool']} before another model call",
-                  flush=True)
-            has_progress = bool(ctx.versions_written
-                                or _turn_has_asset_progress(ctx))
-            last_err = ""
-            raw = str(getattr(ctx, "last_tool_result", "") or "").strip()
-            if raw:
-                last_err = " Last error: " + raw.splitlines()[0][:180]
-            text = (
-                "I stopped this attempt because the same editing operation "
-                "failed twice without changing anything. No credits are "
-                "charged for this run; try a different instruction or tell "
-                "me the exact scene to target."
-                if not has_progress else
-                "I stopped the repeated failing operation instead of spending "
-                "more time on the same error. The edits that did succeed are "
-                "saved and previewed below; that last part is not complete."
-            ) + last_err
-            return _finalize(ctx, worker_db, session_id, text, "tool_stall",
-                             total_steps, timings, honesty)
 
         # Round 67 — direct sight. A look tool captured frames for the
         # AGENT'S OWN eyes this step; deliver them as image parts in a user

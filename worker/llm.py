@@ -943,36 +943,84 @@ def responses_available(model, base_url):
     return "api.openai.com" in (base_url or "")
 
 
-def rate_limit_wait(exc, attempt, seconds_left, shutting_down=False):
-    """How long to sleep before retrying a rate-limited agent step, or None
-    to give up and fail the turn (round 91).
+_RETRY_IN_RE = re.compile(
+    r"try again in\s+([0-9]+(?:\.[0-9]+)?)\s*s", re.I)
+_QUOTA_MARKERS = (
+    "insufficient_quota", "no credits remaining",
+    "used all available credits", "exceeded your current quota",
+    "spending limit", "credit balance", "billing/",
+)
 
-    One agent turn can exceed the provider's whole TPM tier by itself
-    (round 80), so a long turn hitting 429 mid-flight is expected operation —
-    and it used to KILL the turn: minutes of finished edits ended in "I'm
-    being rate-limited, resend that". Waiting is strictly better than dying
-    while the turn still has wall clock. Bounds: never during a deploy drain,
-    at most 6 waits, never into the turn's last 20s, honour Retry-After up
-    to 60s, otherwise grow 12s per attempt capped at 45s — four flat 15s
-    waits (60s total patience) was less than one real TPM burst, and job
-    4120 died mid-burst on Aug 9 while the burst still had minutes to run.
+
+def is_quota_error(exc):
+    """Provider wallet is empty. Waiting will not refill it."""
+    text = f"{exc}".lower()
+    return any(k in text for k in _QUOTA_MARKERS)
+
+
+def is_rate_limit_error(exc):
+    """A recoverable tokens-per-minute / request 429 — not a billing 429.
+
+    OpenAI uses HTTP 429 for BOTH. Treating insufficient_quota as TPM made
+    the agent sleep six times and then die (Aug 14 13:00-17:30: 29 turns).
     """
+    if is_quota_error(exc):
+        return False
     text = f"{exc}".lower()
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    if not (status == 429 or "rate limit" in text
-            or "too many requests" in text):
-        return None
-    if shutting_down or attempt > 6 or seconds_left < 20:
-        return None
-    wait = min(45.0, 12.0 * max(1, attempt))
+    return (status == 429
+            or "http 429" in text
+            or "error code: 429" in text
+            or "rate limit" in text
+            or "too many requests" in text
+            or "tokens per min" in text
+            or "rate_limit_exceeded" in text)
+
+
+def retry_after_seconds(exc):
+    """Provider-named wait: Retry-After header, or 'try again in 12.525s'."""
     try:
         resp = getattr(exc, "response", None)
         ra = resp.headers.get("retry-after") if resp is not None else None
         if ra:
-            wait = min(60.0, max(wait, float(ra)))
+            return float(ra)
     except Exception:
         pass
-    return max(1.0, min(wait, seconds_left - 10.0))
+    m = _RETRY_IN_RE.search(f"{exc}")
+    if m:
+        try:
+            return float(m.group(1))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def rate_limit_wait(exc, attempt, seconds_left, shutting_down=False):
+    """How long to sleep before retrying a TPM 429, or None to give up.
+
+    One agent turn can exceed the provider's whole TPM tier by itself
+    (round 80), so a long turn hitting 429 mid-flight is expected operation —
+    and it used to KILL the turn. Waiting is strictly better than dying
+    while the turn still has wall clock.
+
+    Aug 14: 5 real TPM deaths still got through because (1) Responses-lane
+    429s were not classified as 429 (RuntimeError, no status_code) and fell
+    through to chat, (2) six waits of 12-45s was less than one hot minute
+    when other turns kept the window full, (3) the body's own
+    'try again in 12.525s' was ignored unless a Retry-After header existed.
+    """
+    if not is_rate_limit_error(exc):
+        return None
+    if shutting_down or attempt > 20 or seconds_left < 15:
+        return None
+    wait = min(60.0, 8.0 * max(1, attempt))
+    hinted = retry_after_seconds(exc)
+    if hinted is not None:
+        # Honour the named wait, plus a second so we do not retry on the
+        # exact boundary the provider just refused. Never shrink below the
+        # backoff floor — a 1s hint mid-burst walks straight back into it.
+        wait = min(90.0, max(wait, hinted + 1.0))
+    return max(1.0, min(wait, seconds_left - 8.0))
 
 
 def looks_like_responses_unsupported(exc):
@@ -981,6 +1029,11 @@ def looks_like_responses_unsupported(exc):
     timeout or a 500 must not cost the agent its thinking for the rest of
     the worker's life."""
     text = f"{exc}".lower()
+    # A 429 (TPM or empty wallet) is not "this endpoint does not exist".
+    # Latching the lane dead on it would strip thinking from every later
+    # step of every turn on this worker for the rest of the process.
+    if is_rate_limit_error(exc) or is_quota_error(exc) or "http 429" in text:
+        return False
     # A 400 complaining about the reasoning EFFORT is a bad knob value, not
     # the endpoint saying "not here". Latching the lane dead on it would turn
     # one config typo (or a provider trimming its effort enum) into a

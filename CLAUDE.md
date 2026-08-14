@@ -61,21 +61,21 @@ Columns on `users`: `credits_daily`, `credits_bonus`, `credits_monthly`, `credit
 | Plan | Price | Credits/mo |
 |---|---|---|
 | Free | $0 | 50 one-time bonus only |
-| Creator (`ai`) | $30/mo, $300/yr | 2,000 |
-| Pro (`ai_pro`) | $50/mo, $500/yr | 4,000 |
-| Frontier (`ai_max`) | $100/mo, $1000/yr | 10,000 — only plan on the `FRONTIER_*` model |
+| Creator (`ai`) | $15/mo, $150/yr | 1,000 |
+| Pro (`ai_pro`) | $30/mo, $300/yr | 2,000 |
+| Frontier (`ai_max`) | $50/mo, $500/yr | 5,000 — only plan on the `FRONTIER_*` model |
 
 Retired but grandfathered: Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,000 / Ace 30,000, and `mcp`. When changing plan credits, change **four places together**: `backend/routes/paddle.py` `PLANS`, `backend/routes/paddle_webhook.py` `PLAN_CREDITS`, `backend/credits.py` `PLAN_MONTHLY_LIMITS`, and all frontend/SEO copy quoting numbers. `worker/tests/test_model_prices.py` asserts ≥40% margin on every plan.
 
 ### Trials & billing rules
 
-- All paid plans carry a **3-day trial configured on the Paddle price** — subscription is created `trialing`, `is_subscribed` is true from day zero.
-- A trial grants `credits.TRIAL_CREDIT_FRACTION` (**10%** of the plan) and no daily top-up. During a trial, `plan_limit` reports the allowance, not the plan. Hitting it → 402 `trial_cap_reached`.
-- **Paddle flips a subscription to `active` when the trial ENDS, then tries the card — `active` ≠ paid.** Revenue is only a row in `payments` with `amount_cents > 0` (`grand_total` is minor units). `backend/billing.py` owns plan prices (`PLAN_PRICES_USD`); yearly is amortised for MRR.
+- **New checkouts have no trial.** Shopfront Paddle prices charge immediately. Existing subscriptions on the previous $30/$50/$100 3-day-trial prices keep running; the webhook grants the credits those prices sold.
+- A live trial still grants `credits.TRIAL_CREDIT_FRACTION` (**10%** of the plan they bought) and no daily top-up. During a trial, `plan_limit` reports the allowance, not the plan. Hitting it → 402 `trial_cap_reached`.
+- **Paddle flips a legacy trial to `active` when the trial ENDS, then tries the card — `active` ≠ paid.** Revenue is only a row in `payments` with `amount_cents > 0` (`grand_total` is minor units). `backend/billing.py` owns plan prices (`PLAN_PRICES_USD`); yearly is amortised for MRR.
 - Check `FAILING_STATUSES` before any credit grant — `subscription.updated` keeps arriving during dunning with the paid price id and would otherwise re-fund the pool.
 - Grace on failed payment is graded by history: never paid → pool lifted immediately; has paid → `PAID_GRACE_DAYS` (3). `lift_paid_credits` strips credits but keeps `subscription_id` so later retry events still find the user.
 - `billing_sync.py` reconciles against Paddle hourly (`POST /admin/billing/sync`); it never downgrades on silence, and a Paddle 404 goes to the admin contradiction list, not auto-action.
-- **Plan gate** (`plan_gate.needs_plan`): one rule — no subscription AND `credits_balance < 1`. It hangs off `indexed` (pre-index chat always answers) and fails open on DB errors. The paywall renders as an inline chat message, variant read off `chat_messages.meta` flags; credit numbers always quoted from the server, never hardcoded in the frontend.
+- **Subscribe gate** (`routes/video._subscribe_gate_applies`): an unsubscribed account that would run an agent turn (project is indexed) sees subscription cards immediately — no first free turn, no new trial. Active trials pass because they are subscribed. **Plan gate** (`plan_gate.needs_plan`) remains the credits-empty wall. Both fail open on DB errors. Credit numbers always quoted from the server, never hardcoded in the frontend.
 - **Offers** (`backend/offers.py`): one 50%-off per account ever (`UNIQUE (user_id, kind)` on `user_offers` + `mint()` refuses after any `used_at`), monthly plans only, first period only, Frontier never discountable. `used_at` is set only by the Paddle webhook.
 
 ## Required production env (Render)

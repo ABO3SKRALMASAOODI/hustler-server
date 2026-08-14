@@ -130,9 +130,13 @@ def test_generic_health_is_cached_on_preview_not_heavy(monkeypatch):
     assert seen == [("https://preview/health", 20)]
 
 
-def test_proof_range_guard_rejects_full_length_abuse():
-    with pytest.raises(dbx.PermanentJobError):
-        renderer._validated_check_ranges([[0.0, 30.0]], 30.0)
+def test_proof_range_guard_clamps_full_length_abuse():
+    ranges = renderer._validated_check_ranges([[0.0, 30.0]], 30.0)
+    assert ranges == [[0.0, 25.0]]
+    many = [[float(i), float(i) + 5.0] for i in range(0, 40, 5)]
+    clamped = renderer._validated_check_ranges(many, 40.0)
+    assert len(clamped) <= 6
+    assert sum(b - a for a, b in clamped) <= 25.0 + 1e-6
 
 
 def test_canvas_proof_geometry_respects_output_ratio():

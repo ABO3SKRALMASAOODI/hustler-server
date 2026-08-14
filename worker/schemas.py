@@ -9,9 +9,9 @@ at src/types/edl.ts — keep the two in sync.
 import hashlib
 import json
 import re
-from typing import List, Literal, Optional, Union
+from typing import Annotated, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 
 # SINGLE source of truth for the index pipeline version — bump it HERE, by
 # commit, whenever index OUTPUT changes (transcriber switch, segmentation
@@ -47,6 +47,20 @@ MAX_WORDS_PER_CAPTION = 16
 # Continuous caption-size fine-tune multiplier bounds (see CaptionStyle).
 CAPTION_SIZE_SCALE_MIN = 0.5
 CAPTION_SIZE_SCALE_MAX = 3.0
+
+
+def _motion_motif_id(value):
+    """Canonical free-named motion motif stored as EDL provenance."""
+    value = str(value or "").strip().lower()
+    if value == "hold":
+        raise ValueError("'hold' is reserved for a still sequence beat")
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", value):
+        raise ValueError(
+            "motion_motif must be a lowercase identifier beginning with a letter")
+    return value
+
+
+MotionMotif = Annotated[str, AfterValidator(_motion_motif_id)]
 
 
 class EDLValidationError(ValueError):
@@ -450,6 +464,8 @@ class CaptionItem(BaseModel):
     start: float   # source-timeline seconds
     end: float
     style: Optional[CaptionStyle] = None   # per-item override
+    # Blueprint v3 provenance; ignored by rendering, consumed by execution QA.
+    motion_motif: Optional[MotionMotif] = None
 
     _style = field_validator("style", mode="before")(_coerce_style)
 
@@ -494,6 +510,8 @@ class CaptionsFromTranscript(BaseModel):
     # caption placement follows this deterministic track rather than assuming
     # one global bottom/middle position fits every shot.
     placement_track: Optional[List["CaptionPlacementSpan"]] = None
+    # Which authored motion-language motif owns animated/reveal/karaoke type.
+    motion_motif: Optional[MotionMotif] = None
 
     _style = field_validator("style", mode="before")(_coerce_style)
 
@@ -573,6 +591,9 @@ class MusicItem(BaseModel):
     # -12dB step). Opt-in per item by add_music so every music item written
     # before this field renders exactly as it always did.
     duck_mode: Optional[Literal["smooth"]] = None
+    # Editorial intent for later turns and the independent final mix review.
+    # None preserves old EDL signatures and render cache identity.
+    purpose: Optional[str] = None
     # Round 79i — the piece stays on the timeline but does not sound: the
     # A/B verb (mute one alternative, hear the other) and half of "put one
     # split below the other". The renderer skips muted pieces before
@@ -602,6 +623,10 @@ class SfxItem(BaseModel):
     # speech. It must match add_sfx's default AND the renderer's fallback —
     # three layers, one number, or the EDL and the render disagree.
     gain_db: float = -6.0
+    # The nameable editorial/visible event this transient serves. Optional so
+    # every historical EDL keeps its signature; new authored sounds can be
+    # judged later from intent rather than surviving as anonymous noises.
+    purpose: Optional[str] = None
 
 
 class VolumeItem(BaseModel):
@@ -707,6 +732,7 @@ class InsertItem(BaseModel):
     source_start_s: Optional[float] = None
     motion: Optional[Literal["zoom_in", "zoom_out",
                              "pan_left", "pan_right"]] = None
+    motion_motif: Optional[MotionMotif] = None
     rate: Optional[float] = None
     crop: Optional[List[float]] = None
     # mute (round 78): the spliced scene plays SILENT — its own audio is
@@ -866,6 +892,7 @@ class ZoomItem(BaseModel):
     path: Optional[List[ZoomPathPoint]] = None
     ease: Optional[Literal["cubic_in_out", "linear"]] = None
     rect: Optional[List[float]] = None
+    motion_motif: Optional[MotionMotif] = None
 
 
 # Round 35: the junction library grew past the two dips. Every style is
@@ -919,6 +946,7 @@ class TransitionSpec(BaseModel):
     # grandfathering a bug. Already-rendered outputs are untouched — renders
     # are cached by EDL fingerprint and the stored JSON does not change.
     scope: Literal["scene", "every_cut"] = "scene"
+    motion_motif: Optional[MotionMotif] = None
 
 
 REGION_MODES = ("blur", "pixelate", "black")
@@ -980,6 +1008,7 @@ class StylizeItem(BaseModel):
     start: Optional[float] = None
     end: Optional[float] = None
     intensity: Optional[float] = None      # None = the kind's default (0.5)
+    motion_motif: Optional[MotionMotif] = None
 
 
 # ── Custom filter chains (round 96) ─────────────────────────────────────────
@@ -1063,6 +1092,7 @@ class CustomFilterItem(BaseModel):
     start: Optional[float] = None
     end: Optional[float] = None
     label: Optional[str] = None
+    motion_motif: Optional[MotionMotif] = None
 
 
 class GradeCustom(BaseModel):
@@ -1142,6 +1172,7 @@ class FrameShift(BaseModel):
     duration_s: float = 0.8
     zoom: bool = True
     color: str = "#000000"
+    motion_motif: Optional[MotionMotif] = None
 
 
 class Effects(BaseModel):
@@ -1335,6 +1366,7 @@ class OverlayItem(BaseModel):
     # a different branch. None on every overlay ever written, and _sig_canon
     # drops nested None keys, so no stored EDL changes signature.
     screen: Optional[ScreenLock] = None
+    motion_motif: Optional[MotionMotif] = None
 
 
 # ── Text overlays (round 35): the motion-graphics layer ──────────────────
@@ -1407,6 +1439,7 @@ class TextItem(BaseModel):
     # byte. When present, it owns entrance/exit motion; author fades/pops as
     # opacity/scale curves instead of stacking two animation systems.
     motion: Optional[TextMotion] = None
+    motion_motif: Optional[MotionMotif] = None
     # Designed text and transcript captions are separate visual systems. When
     # this is true, the caption compiler derives a mute from THIS item's live
     # window. Ownership matters: moving/resizing/removing the graphic carries
@@ -1474,6 +1507,7 @@ class VectorItem(BaseModel):
     background_color: Optional[str] = None
     value: Optional[float] = None
     motion: Optional[TextMotion] = None
+    motion_motif: Optional[MotionMotif] = None
 
 
 class SubjectMatte(BaseModel):
@@ -1505,6 +1539,7 @@ class SpeedSpan(BaseModel):
     start: float                    # SOURCE seconds
     end: float
     factor: float
+    motion_motif: Optional[MotionMotif] = None
 
 
 class Master(BaseModel):
@@ -2982,6 +3017,8 @@ def describe_edl(edl_dict, duration=None):
                 f.append("no duck")
             elif m.duck_mode == "smooth":
                 f.append("smooth duck")
+            if m.purpose:
+                f.append("=" + m.purpose[:32])
             bits.append("/".join(f) or "plain")
         parts.append(f"music x{len(edl.music)} ({', '.join(bits)})")
     if edl.sfx:
@@ -2992,7 +3029,8 @@ def describe_edl(edl_dict, duration=None):
         for s in edl.sfx:
             key = s.storage_key.split(":")[-1].split("/")[-1]
             g = f" {s.gain_db:+g}dB" if s.gain_db else ""
-            bits.append(f"{key}@{s.at:g}s{g}")
+            why = f"={s.purpose[:32]}" if s.purpose else ""
+            bits.append(f"{key}@{s.at:g}s{g}{why}")
         parts.append(f"sfx x{len(edl.sfx)} ({', '.join(bits)})")
     if edl.volume:
         parts.append(f"volume x{len(edl.volume)}")

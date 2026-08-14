@@ -342,10 +342,16 @@ A user message → an `agent_turn` job (**never auto-retried** — `MAX_ATTEMPTS
 1. **System prompt** (§7.3), rebuilt fresh each turn.
 2. **CAPABILITIES block** — auto-generated from the live tool registry, one line per enabled write tool with its parameter names, followed by: *"Nothing else exists. If the user asks for anything not listed (motion-TRACKED stickers pinned to moving objects, true crossfades, custom font files, ...), say so plainly and offer the closest listed alternative."* Because it's generated from the registry, prompt and reality cannot drift.
 3. **CURRENT PROJECT STATE** — video metadata, the index summary, the current EDL version + description, the current keep list **verbatim as JSON** (first 40 spans), current captions config as JSON, EDL history line, uploaded music files, and (only when the catalogs actually shipped in this deployment) the built-in music/SFX library summary lines.
-4. The last **20** chat messages (activity rows excluded, each capped at 2,000 chars).
-5. The current user message (capped 4,000 chars) plus attachment notes — up to 4 attachments; images get captioned **once** by the vision model and cached; if vision is unavailable the note says *"you CANNOT see it. Say so honestly and ask the user to describe what matters."*
+4. A fresh labeled filmstrip/still overview of the current project precedes the changing state block when the agent model supports images. This stable prefix includes the main source plus fairly selected uploaded clips/images; overflow is named rather than silently treated as seen.
+5. Only the last **4** chat messages (activity rows excluded, each capped at 2,000 chars), followed by the current request (capped at 4,000 chars) and attachment notes.
 
-**The full-index-in-context strategy**: for videos ≤ 600 seconds whose assembled text fits in 40,000 chars, the context includes the **complete transcript** (every sentence with ids and timestamps) and **every shot's visual caption** plus a silence summary. This exists to kill the "it didn't bother to look" failure class — for a short video, the agent literally cannot claim ignorance of any spoken line or visible scene. Longer videos get head/tail elision plus retrieval tools.
+**The full-index-in-context strategy**: when the assembled transcript fits in
+40,000 chars, the context includes every sentence with ids/timestamps plus shot
+geometry, silence, motion and audio facts. Current v10 indexes deliberately do
+not pay a separate vision model to caption every sampled frame: the sighted
+editing model receives the real filmstrip pixels directly. Longer transcripts
+get head/tail elision plus retrieval tools; auxiliary clips keep their own
+durable transcript/editorial map and CLIP clock.
 
 ## 7.3 The system prompt (what the agent is told)
 
@@ -410,9 +416,10 @@ Everything the agent can do, exhaustively. The registry (`agent_tools.py`) maps 
 | `get_kept_transcript()` | The program-time transcript of what the current edit KEEPS, with source spans per line, plus **repeated-phrase detection** (4-word shingles) reporting "POSSIBLE REPETITIONS still in the output." |
 | `get_words(start, end)` | Word-level timestamps, ≤400 words per response with paging instructions. |
 | `search_transcript(query)` | Substring (≤20 hits) + difflib fuzzy (≤8) sentence search. |
-| `get_shots(start, end)` | Shots with their vision captions (setting/people/action/on-screen text). |
+| `get_shots(start, end)` | Main-source scene-change boundaries plus any legacy visual captions. On current v10 indexes the actual picture is in filmstrips/`look_at`; geometry is never presented as visual understanding. |
 | `find_silences(min_seconds=0.7)` | ≤100 silences with midpoints and surrounding words. |
 | `list_assets(kind)` | music/image/clip/render/all. The pipeline's own extracted `audio` artifact is deliberately excluded everywhere (root cause of an old inaudible-music bug). |
+| `compare_uploaded_media(asset_keys, question, samples_per_asset)` | One story-wide direct-sight comparison over every supplied uploaded clip/image. It returns dynamically paged real frames, file-local times and exact sentence/shot IDs so a multi-clip plan does not require one `look_at_asset` call per file. |
 | `look_at(start, end, question)` | Vision Q&A over 2/4/6 evenly-sampled proxy frames; letterbox context included so bars don't read as broken frames. |
 | `look_at_asset(asset_key, question, start, end)` | Same for uploaded clips/images — "THE way to pick which moment of a long clip to splice." |
 | `get_audio_analysis(asset_key?)` | Tempo + confidence verdict, beat grid, energy peaks/quiets/biggest rise, top-8 stressed words. Works on the main video, an uploaded music file, or a library track ("find the drop for add_music offset_s"). |
@@ -881,19 +888,29 @@ Everything the product cannot do today, organized by layer. (Notably, the worker
 ## Editing model
 1. **Single video track.** One main video (or one canvas insert sequence). Inserts splice only at keep boundaries (mid-take placement works by splitting the take at a word edge). No B-roll track, no picture-in-picture *tracks* — just the overlay layer stack.
 2. **No crossfades/dissolves.** All seven transitions are duration-preserving junction effects; there is deliberately no xfade overlap model. The prompt: "True crossfades still do not exist — say so when asked."
-3. **Keyframes exist only on overlay x/y** (max 24, five easings, no bezier). No keyframed opacity/scale/rotation/effects/audio.
-4. **Nothing tracks motion.** Censor rectangles, overlays, and text are all static-position (or keyframe-drifted); no object tracking, face tracking, or auto-reframe-on-subject.
+3. Text, visual overlays and renderer-native vectors support bounded element-local x/y/scale/rotation/opacity keyframes with named easing, and the camera has zoom paths. There is still no arbitrary Bézier/path editor, expressions, shape morphing or general keyframed effects/audio automation.
+4. **General object tracking does not exist.** Censor rectangles and most elements are fixed/keyframed rather than locked to an arbitrary moving object. Subject-aware placement, text-behind mattes and auto-reframe exist, but they are narrower measured helpers—not a general tracker.
 5. **No multi-cam, no markers, no nested sequences, no project-level assets reuse across projects** (assets are per-project; only the index is content-shared).
 
 ## Captions & text
-6. Inserted/generated/fetched clips are **never transcribed** — no captions over inserts, and their content is invisible to search.
+6. Uploaded auxiliary video/audio is now indexed by SHA with its own transcript,
+   shots, filmstrip, perception, spatial and motion evidence, available on later
+   turns through per-asset reads. Transcript-derived caption generation still
+   follows the main source timeline; it does not automatically caption spoken
+   words inside inserted clips.
 7. No SRT/VTT import or export. No custom font uploads (12 bundled families only). No emoji/sticker decorations. Text width is estimated, not shaped-measured.
 8. Karaoke sliver-drop: under extremely fast speech, some words never get their own highlight frame.
 
 ## Audio
-9. **No stem separation** — baked-in music is inseparable from speech.
+9. Stem separation exists as an explicit expensive operation, but it is not a
+   guaranteed perfect removal: artifacts and missing separation services remain
+   real, and the agent must review the result rather than claim clean isolation.
 10. **No TTS** — voiceover requires a user-provided audio file.
-11. No denoise/restoration, no diarization/per-speaker control, no beat-matched music (library BPM is measured offline but unused; 17/24 tracks octave-ambiguous), no limiter on the mix (deliberate — sync over safety-clipping), video-overlay audio never plays.
+11. The index can carry diarized speaker labels, audio perception and beat grids;
+   the editor can remove noise/enhance, align existing cuts to measured music
+   beats and set master loudness. These are bounded tools, not source
+   separation/mastering guarantees. Inserted visual-clip audio remains muted
+   unless deliberately routed as a music/SFX/voiceover asset.
 12. The music library cannot serve "epic trailer" requests (0/24 tracks pass the measured bar) and cannot guarantee instrumental-ness.
 
 ## Rendering
@@ -1000,7 +1017,7 @@ what is merely measured, and what is not available.
 | Input | What reaches the model | Later turns and overflow |
 |---|---|---|
 | Main video | A current labeled filmstrip (up to 36 tiles), duration/frame/audio facts, transcript when it fits, shot boundaries, silences, motion summary, current EDL and program map | Rebuilt on every fresh user turn. Long transcript text is paged, but remains available through transcript/search tools. |
-| Uploaded video clips | Labeled filmstrips for indexed clips, clip duration/role/storage key, and their transcript/perception through read tools | Rebuilt every turn. Current-message attachments and clips already used in the edit are prioritized. The whole visual turn budget is 60 video tiles; overflow clips remain explicitly named and can be opened with `look_at_asset`. |
+| Uploaded video clips | Labeled filmstrips for indexed clips, clip duration/role/storage key, and their transcript/perception through read tools | Rebuilt every turn. Current-message attachments and clips already used in the edit are prioritized. The whole visual turn budget is 60 video tiles; overflow clips remain explicitly named. One clip can be opened with `look_at_asset`; a relevant set can be compared story-wide with `compare_uploaded_media`. |
 | Uploaded still images | The actual image pixels, one labeled still per selected asset (up to 20 per turn) | Rebuilt every turn, including images uploaded in earlier messages. Current attachments and used assets are prioritized. Overflow images remain named and retrievable; they are not falsely treated as seen. |
 | Reference clips/images | The same real pixels plus a `STYLE REFERENCE ONLY` role. Indexed reference video also contributes measured cut rhythm, shot-duration distribution, energy shape, beat relationship and motion profile | Persists in project inventory across later turns. The prompt forbids inserting a reference merely because it is attached. |
 | Uploaded audio-only file | Its filename/key/duration and an explicit warning that DB kind `music` may actually be music, voiceover/dialogue or SFX. Indexed transcript, tempo/energy and waveform facts are available | Raw audio is **not** continuously streamed into the general editing model. `review_audio`, music auditions, SFX auditions, and final-mix review can send bounded real excerpts to an audio-capable reviewer when configured. |
@@ -1012,8 +1029,9 @@ So the precise answer to “does it receive every uploaded image, including from
 later turns?” is: **for normal-sized projects, yes, every current turn gets a
 fresh labeled visual overview of the project's images and indexed clips, not
 only the current attachment.** On very large libraries it receives a balanced
-bounded visual slice, explicitly sees which files were omitted, and must call
-`look_at_asset` before making a pixel-dependent decision about an omitted file.
+bounded visual slice, explicitly sees which files were omitted, and must use
+`look_at_asset` or one complete `compare_uploaded_media` set before making a
+pixel-dependent decision about omitted files.
 That is a visual evidence budget, not a creative or placement cap.
 
 ## 23.2 What is cached and what is deliberately released
@@ -1059,8 +1077,203 @@ SFX, normalizes neutral mixed-media arguments, and commits a coherent
 picture/type/vector/music/SFX treatment as one EDL version. Search, download,
 generation and extraction remain outside the transaction because they have
 external side effects. New recipe metrics make reject/abort/churn visible.
-These changes are tested locally; they are **not deployed and not yet proof of
-a 10× production improvement**.
+Those recipe changes are tested locally and are present in the current `main`
+commit. The additional working-tree continuation guard renews only for
+stronger semantic completion evidence: a newly covered edit department, a
+resolved plan/check, a genuinely new asset or decision, or an independent
+review that improves. More versions, previews, repeated recipes or repeated
+replanning alone no longer buy another work window. This is not a fixed
+tool/model-call cap; useful work can continue while the 97-version churn
+pattern cannot keep itself alive.
+The deployment state was not verified during this audit, and no matched
+production cohort yet proves a 10× improvement.
+
+Additional working-tree changes made after that production audit target the
+remaining *selection* failures without reopening an unbounded agent loop:
+
+- one B-roll research packet now presents a story-wide board to an independent
+  casting editor, whose valid result can explicitly keep the base picture for
+  any moment; every candidate id is scoped by research run + story moment, so
+  the same provider asset can no longer overwrite another moment's purpose;
+- the downloaded B-roll rendition is separately reviewed from its real pixels
+  before the main editor decides whether to place it—the search thumbnail is
+  never treated as proof of the delivered file;
+- SFX audition has a structured candidate-or-silence decision, and authored
+  SFX retain the physical/editorial event they serve in the EDL and final mix
+  review;
+- music audition now hears one bounded opening/body/ending reel per candidate,
+  can explicitly choose no music, and preserves each placed track's story or
+  energy role for later turns and the final rendered-mix critic;
+- automatic podcast/short selection now receives one bounded independent
+  casting pass over the exact proposed transcript windows and adjacent cut
+  context. A valid “nothing is worth recommending” verdict ends as an honest
+  empty board instead of being retried as a model failure. The final assembled
+  story review is separately grounded in literal surviving word fragments,
+  not sentence-midpoint reconstruction: sentence cut-ins/cut-offs are marked,
+  every shown edit join preserves the left/right words and speakers, and a
+  repair must cite an existing keep, inserted clip or assembled join at a real
+  output time. Its evidence is priority-packed to at most 30,000 characters,
+  including on micro-cut timelines, rather than growing with the EDL;
+- when captions are requested without an explicit user style, an independent
+  type director compares the complete live renderer catalog—currently all 20
+  presets—against measured pace, aspect, speakers, source visuals and the
+  durable treatment. The current working tree now compiles every preset with
+  the production ASS engine and bundled fonts on the same demanding surviving
+  transcript landing and real crop/zoom output geometry, then compares five
+  readable labeled proof pages in one vision call. An incomplete proof slate
+  is discarded rather than biasing the cast; the complete metadata cast and
+  then a deterministic source-grounded fallback keep captions available. It
+  can preserve adaptive shot-aware placement, and explicit styles bypass the
+  cast entirely.
+
+A separate August 14 production trace showed why “the uploads are indexed” was
+not enough. A 26.5-second request—“Make me a fast, stunning, high energy
+instagram reel”—spent roughly twelve minutes on 28 model calls / 22 general
+dispatches. The editor inspected six uploaded clips with six sequential
+`look_at_asset` calls and submitted `set_edit_plan` six times. Five plans were
+rejected because auxiliary clip labels/times were being validated as if they
+belonged to the main source; the accepted plan retained only one weakly bound
+cross-modal beat. It then produced four written versions and several previews.
+
+The current working tree attacks both multipliers without limiting how many
+assets may be used:
+
+- `sequence_map` now has optional `source_asset_key`. Main-source beats omit it;
+  an auxiliary beat uses the exact project storage key, CLIP seconds and that
+  asset index's exact sentence/shot IDs. Same-looking IDs in two files cannot
+  collide. Unknown keys, pending indexes and out-of-range clocks fail with a
+  machine-usable correction, including the exact overlapping IDs where
+  available;
+- the same asset-local binding reaches final screening. A planned auxiliary
+  beat is mapped through the actual insert's clip offset/rate into output time;
+  it is never “proved” from unrelated main-video pixels;
+- `compare_uploaded_media` accepts every relevant storage key in one read,
+  decodes representative real frames per file (parallel on the executor), and
+  returns dynamically generated comparison pages plus exact evidence IDs. The
+  main editor compares the whole library as one cast/order decision and may
+  leave weak or redundant footage unused. Direct-sight evidence arrives after
+  the tool result, so the plan is intentionally authored on the following
+  reasoning step rather than guessed in the same parallel tool batch;
+- vague platform language no longer forces a format. “Fast high-energy
+  Instagram reel” now abstains instead of becoming `talking_head_social` by
+  keyword. When evidence is uncertain, the editor receives all nine concrete
+  family drivers, inspects transcript/pixels/motion/assets/references, and
+  records one explicit `editorial_family` plus a footage-specific treatment.
+  The selected version-2 family contract is returned immediately by
+  `set_edit_plan` and persists with the blueprint. `mixed_other` remains valid
+  for a genuinely hybrid/novel driver, not as permission to skip looking.
+- when that pre-plan cast is genuinely uncertain—or only measured source
+  grammar identifies the family while the user's actual treatment remains
+  vague—the candidate treatment now receives one bounded independent text
+  review before it becomes durable or
+  triggers an EDL write. The reviewer sees only the user request, chosen
+  treatment, labeled decision facts/alternatives/reference transfers, sequence
+  beats, department choices and family contract—it cannot claim to see pixels
+  or hear audio. Accept/revise judgments must cite exact packet labels, and
+  only a high-confidence grounded revision rejects the candidate. Precise
+  format requests, narrow repairs, MCP callers, malformed reviews and reviewer
+  outages stay on the direct path. Exact repeated candidates reuse their
+  review instead of adding cost.
+
+Production metadata now exposes explicit-family rate, casting confidence and
+abstentions beside uploaded-media comparison/requested/seen assets, frames and
+pages. It also records treatment reviews, reuse, accepts, grounded revisions
+and abstentions. That makes it possible to verify whether the new path
+actually replaces six looks and six
+plan submissions with one comparison plus one valid plan. It is still a local
+implementation, not evidence that the production agent now one-shots the edit.
+
+These additions are local working-tree changes, not a production claim. They
+passed 1,404 worker tests and 229 backend tests in the full local regression
+suites on August 14, 2026;
+the new three-window audio montage also passed an actual ffmpeg smoke test.
+They still require a matched post-deploy cohort before being credited with
+reducing cost or increasing first-render acceptance.
+
+The broader daily comparison confirms the outlier mechanism. On August 12,
+50 completed turns averaged 16.1 agent calls and 5.8 new EDL versions. On
+August 13, 67 completed turns averaged 20.4 calls and 9.4 versions, with a
+50-call p90; the three largest completed jobs made 134, 96 and 92 agent calls.
+August 14 through the audit time had fallen to 12.2 calls across 19 completed
+turns, but that partial day is not a matched cohort. Cache was not the cause:
+agent prompt cache coverage was 84.5% on August 12, 87.0% on August 13 and
+86.8% on August 14. The bill rose because the same large cached prefix was
+dispatched many more times.
+
+A fresh August 14 production trace exposed a second multiplication mechanism:
+**finishing-review oscillation**. One 15-second talking-head outcome recorded
+35 general dispatches, 14 written versions, 13 complete previews, 13 visual
+critic calls and 13 rendered-audio reviews; the underlying job made 49 general
+calls and requested `render_preview` 18 times before stopping on its credit
+budget. The review sequence first rejected serif captions, then repeatedly
+changed its opinion about caption size/weight, warm versus gray/magenta color,
+and glow/dream blur. Preview v24 passed both visual and audio review. A later
+picture-only custom-filter change caused a new audio reviewer to reopen the
+unchanged mix; subsequent reviews alternated masking advice and an out-of-scope
+request to cut a story pause. The EDL moved through at least 28 treatment
+states while the same 15 seconds were repeatedly re-encoded.
+
+The working tree now closes that class structurally:
+
+- visual and audio evidence are fingerprinted from only the renderer state
+  each reviewer can perceive. A gain-only change reuses the prior visual
+  verdict; a color/caption-only change reuses the prior actual-audio verdict;
+  a still-unfixed verdict survives an unrelated change instead of being
+  forgotten;
+- a changed visual program receives convergence context: the prior verdict,
+  concrete prior findings and the exact renderer facets that changed. The
+  critic must verify those changes and cannot reopen an untouched accepted
+  facet merely to propose another valid aesthetic;
+- only structured, confident, in-scope audible evidence can produce an audio
+  `FIX`: an allowed defect category, exact audible fact, concrete action and
+  program time (except whole-program tone mismatch). Free-form “fix the story
+  pause,” malformed JSON and low-confidence reversals cannot trigger another
+  edit/render cycle;
+- a clean immutable preview now closes a durable blueprint carried from an
+  earlier turn. It no longer requires rewriting the plan during the current
+  turn before taste-only variations are refused;
+- after a complete baseline exists, the first verification of a changed EDL
+  becomes a bounded changed-section proof even if the editor reflexively asks
+  for `complete=true`. The exact proof-checked version can still be rendered
+  whole, and the turn-end user preview is always complete. This is semantic
+  stage routing, not a preview-count cap.
+
+Outcome metrics now expose reused visual/audio reviews, pass-to-repair
+reversals, resolved repairs and complete previews routed to proof. The release
+policy separately gates dispatches, EDL versions, complete previews and review
+reversals, so a seemingly good output cannot hide an unstable or expensive
+finishing loop.
+
+The failure lane contributed additional waste: over the prior seven days 27
+agent jobs were reaped after a worker death, four failed on the Luna
+tools/reasoning Chat Completions incompatibility, three on invalid content
+blocks, and five on 28K–55K-token TPM-limit requests. The current `main` tree
+already
+uses the Responses lane, seeds the known OpenAI dialect, performs bounded
+TPM-aware waits, releases consumed image payloads, and resumes one hard-death
+turn from durable EDL/blueprint state. Those protections still need a verified
+deployment and matched cohort before production credit can be claimed.
+
+This audit also closed several high-frequency deterministic retry causes:
+
+- video B-roll now genuinely supports local `zoom_in`, `zoom_out`,
+  `pan_left` and `pan_right` motion instead of rejecting or ignoring the
+  advertised argument; a real ffmpeg smoke render preserved 30 frames and
+  exactly 1.0s of video/audio;
+- `add_zoom(rect=[])` treats the empty optional array as absent, retaining a
+  valid measured `cx/cy` target;
+- `get_edl` accepts natural read dialects such as `all`, `video`, `timeline`,
+  `media`, `grade`, `stylize` and `erases`; `list_assets(kind="video")`
+  resolves to clips;
+- a multi-region erase wins over redundant legacy x/y/w/h fields instead of
+  refusing an unambiguous repaint; and fixed blur/pixelate/black regions can
+  participate in the same atomic recipe as the rest of a repair;
+- the release/family scorecard now exposes p50/p90/max tokens, dispatches,
+  tool calls, versions and previews, model calls by purpose, tool outcomes,
+  weighted cache coverage, dispatches per version, recipe commit rate and
+  operations per commit, modality-review reuse and pass/reopen convergence.
+  This makes another multiplication event diagnosable without collapsing
+  taste into a gameable score.
 
 ## 23.4 Capability truth table
 
@@ -1079,6 +1292,21 @@ operate on the exact compiled artifact. Limitations remain: no SRT/VTT import
 or export, no arbitrary uploaded font file, no per-word manual Studio editor,
 and no continuously subject-tracked caption band.
 
+When no explicit style was requested, the current local path casts across that
+entire live catalog in one stateless specialist call instead of mapping a few
+brief keywords directly to a preset. Explicit choices remain authoritative,
+adaptive placement remains the default unless the evidence calls for a fixed
+band, and the final effective preset/layout/emphasis/animation is traced for
+outcome analysis. Before committing, every live preset is now burned through
+the exact production ASS compiler and bundled-font path at one common real
+transcript timestamp over the current output crop/zoom geometry. The visual
+director receives every labeled candidate across dynamically generated proof
+pages; no preset is truncated by a hand-maintained shortlist. If any candidate
+frame or the vision review fails, the whole pixel slate is rejected and the
+complete metadata comparison runs instead. This is a real-pixel treatment
+cast, not 20 full preview-video encodes; final adaptive placement, animation
+across time and interaction with all overlays still require preview review.
+
 ### Designed text, vectors and animation
 
 Designed text has seven templates (`title`, `subtitle`, `lower_third`,
@@ -1091,6 +1319,19 @@ element-local keyframes for x, y, scale, rotation and opacity with linear,
 in/out, in-out and hold easing. There are also zoom paths, aspect shifts,
 screen corner-pin/takeover moves, text-behind-subject mattes, panel composition,
 freezes, grades, stylize effects and duration-preserving transitions.
+
+For motion authored under Blueprint v3, the complete preview now spends its
+existing screening-frame budget on representative ordered state sequences
+across the renderer-visible families—not only designed text/vector keyframes,
+but also motif-bound camera paths, overlay moves, transitions, animated
+captions, insert-camera motion and temporal effects. Each state is labeled with
+its exact EDL id, motif and phase (`pre-trigger`, authored window or
+`post-settle`). Exact zoom/overlay keyframe knots are protected when the
+evidence budget samples a path. Playback speed is deliberately excluded from
+still-frame trajectory claims because contact sheets cannot prove rate or
+smoothness. The critic may report `motion_path`, `motion_trigger` or
+`motion_settle`, but such a finding can authorize repair only when it cites an
+exact time and target id.
 
 This is a capable 2D motion-graphics system, not After Effects. It cannot do
 general object tracking, arbitrary Bézier paths/shape morphing, particles,
@@ -1106,15 +1347,38 @@ hear the whole soundtrack continuously by default. Music search currently
 uses Jamendo (when keyed) and Openverse; SFX search uses Openverse/Freesound.
 Candidates carry duration, authorship and license obligations, are measured,
 and can be compared by an audio-capable reviewer before download/placement.
+The current local audition compares representative opening, body and ending
+excerpts rather than one arbitrary middle slice. Its structured result may
+choose a candidate or no music. SFX selection likewise treats a dry moment as
+a valid winner. Music and SFX items can retain their authored sequence purpose
+so a later turn and the final mix reviewer know why each sound exists.
 The renderer supports music, SFX, uploaded voiceover, gain, fades/loop/offset,
 ducking, source volume automation, stem mix when separation exists, and
 master loudness. The actual rendered mix can be heard by an independent final
-audio reviewer.
+audio reviewer. Complete previews reuse the measured Blueprint beat anchors as
+audio sampling candidates alongside opening/body/ending and authored audio
+events. Each heard clip is labeled with its exact program window, overlapping
+music/SFX ids and purposes, and the mapped sequence beat/sound intention. A
+separate output-clock evidence block makes a misplaced “proof” impact explicit
+(`touches beats=none`) without turning every beat into a sound quota. Current
+audio direction, sequence sound, authored roles and this execution mapping are
+priority-packed ahead of optional treatment history.
+
+New render metadata preserves those exact listening windows, so reusing a
+cached preview on a later turn no longer discards the final-mix evidence.
+Historical cached clips that retained only storage keys may still support a
+sampled pass, but cannot authorize a timed repair. A fix must cite a time that
+was actually heard and an existing EDL target id (`music`, `SFX`, voiceover,
+`master` or `source`); the critic can distinguish music entry/exit, SFX timing
+versus SFX choice, and cross-sequence sound coherence. Intentional silence and
+“none” remain valid treatment choices.
 
 Important limits: no generated TTS voice by default, no guarantee that an
 audio reviewer is configured, no full-song copyrighted catalog license, and
-no basis for claiming unheard portions sound good. A platform-trending sound
-often still needs to be added/licensed in the platform itself.
+no basis for claiming unheard portions sound good. A sampled pass explicitly
+means no defect in the heard windows, not certification of the entire mix. A
+platform-trending sound often still needs to be added/licensed in the platform
+itself.
 
 ### B-roll and web fetching
 
@@ -1124,9 +1388,14 @@ Pexels/Pixabay video/photo when configured plus Openverse photos, matches the
 output orientation, interleaves providers, removes duplicates and presents a
 balanced candidate board across the whole story. Selection is explicitly by
 relevance, authenticity, composition, light/color and sequence diversity—not
-search rank. After `add_stock_media`, the downloaded file is probed and its
-actual frames/motion are delivered before placement is allowed on the next
-reasoning step.
+search rank. Candidate identity is scoped to the research run and story moment,
+so reusing a provider result across two queries does not collapse their
+provenance. The current local in-house path performs one independent
+story-wide cast that may recommend the base picture/no B-roll, then probes the
+chosen downloaded file and asks a separate rendition reviewer to accept,
+reject or abstain from its actual frames. The main editor receives that
+judgment plus the real frames/motion and can override it with stronger evidence;
+the search thumbnail is never presented as the downloaded rendition.
 
 The agent cannot fetch “anything on the web.” It can ingest an accessible
 direct URL or supported platform media when URL fetching/extraction is enabled,
@@ -1151,12 +1420,14 @@ has been a decision system:
 4. Search relevance can be acceptable while the chosen B-roll is generic;
    waveform fit can be acceptable while music taste is ordinary; a caption
    preset can render correctly while being wrong for the speaker/brand.
-5. There is a blinded pairwise benchmark runner, but no real multi-family
-   candidate-vs-human corpus checked into this workspace. There is therefore
-   no evidence yet that a release beats a human reference, much less by 10×.
+5. There is now a blinded pairwise benchmark runner and a fail-closed release
+   gate, but no real multi-family candidate-vs-human corpus checked into this
+   workspace. There is therefore no evidence yet that a release beats a human
+   reference, much less by 10×.
 
 The current local implementation closes part of (1) and (2) without adding a
-second permanent model call. A substantial first-call blueprint now records:
+second permanent model call to every edit. A substantial first-call blueprint
+now records:
 
 - one named treatment;
 - observed `decision_basis` facts;
@@ -1166,10 +1437,138 @@ second permanent model call. A substantial first-call blueprint now records:
 - an ordered sequence map whose timed beats cite real transcript/shot IDs.
 
 Timed source beats with invented or unrelated evidence IDs are mechanically
-rejected. This contract feeds the main editor, music/SFX selection, motion
-direction and the independent visual, story and final-audio reviewers. Narrow
-repairs inherit the established language without paying a new director call or
-being forced through whole-program paperwork.
+rejected. Each beat also names which file owns that clock, so auxiliary footage
+can participate without being mislabeled as main-source evidence; exact
+replacement IDs are returned on repairable citation errors. A complete
+multi-upload visual cast can be inspected in one paged comparison before this
+map is authored. The plan now records one explicit invariant editorial family
+selected from the full contract slate; generic platform/energy language yields
+an uncertainty slate instead of a confident wrong family. This contract feeds
+the main editor, music/SFX selection, motion direction and the independent
+visual, story and final-audio reviewers. Narrow repairs inherit the established
+language without paying a new director call or being forced through
+whole-program paperwork.
+
+For an uncertain whole-program cast—or a vague request where measured grammar
+identifies a family but not a treatment—that candidate is now checked by a
+separate bounded treatment reviewer before the blueprint is recorded. It
+receives the labeled decision record and selected family contract, not raw
+media, and must abstain rather than claim unseen evidence. A rejection only
+blocks the candidate at confidence ≥0.86 with exact cited packet labels and a
+concrete plan-level correction; outages and malformed answers fail open. The
+same candidate fingerprint is cached within the turn. Explicit-format briefs,
+narrow refinements and external MCP editors do not pay for this call. This is
+a guard against first-plausible-route momentum, not proof that the accepted
+route beats a professional reference—the real blind corpus remains essential.
+
+That treatment is also bound to executable department promises. Blueprint v3
+records captions, motion, B-roll, music,
+SFX and color independently as `author`, `preserve` or `omit`, each with its
+editorial purpose. `author` must exist in the final EDL; `omit` must remain
+absent; `preserve` is deliberate restraint and imposes no feature-density
+requirement. A substantial sequence accounts for all six, while a narrow
+later repair inherits the established contract and updates only the touched
+department. Closure is rejected when a promise is structurally false, and a
+complete readiness encode is skipped before spending renderer time on that
+known-incomplete version. Changed-section proof and the turn-end honesty
+render remain available. The same structured decisions expose their relevant
+tool domains immediately after a vague brief is cast, avoiding a separate
+`expand_toolset` dispatch merely because the user's original words did not
+name captions, sound, media or motion.
+
+Blueprint v3 also makes authored motion a causal sequence contract instead of
+a style adjective or feature count. A treatment records one footage-specific
+principle, relative density/intensity/contrast, a stillness rule and free-named
+motifs with explicit triggers and renderer domains. Every measured sequence
+beat binds to one motif or reserved `hold`. A pure timeline verifier maps main
+source spans, auxiliary insert clocks (including playback rate) and auxiliary
+overlay clocks onto the assembled output, then joins them to real zoom,
+keyframed designed type/vector/overlay, exact compiled animated-caption
+windows, insert-camera, speed, frame-morph, transition, fade and bounded
+temporal-effect events. Every authored event now carries the exact declared
+`motion_motif` it was designed to execute; merely placing an unrelated or
+unbound animation in the right time/domain cannot close the beat. The binding
+is available directly on every motion-capable primitive and through a generic
+existing-object binder, while manual caption tracks preserve it per animated
+card rather than falsely attributing static cards. The reserved `hold` value
+cannot be attached to an event. A camera event cannot satisfy a
+type-only motif; a mapped hold fails when explicit choreography overlaps it;
+an untimed beat remains `not_judged`. These contradictions now stop blueprint
+closure and skip a known-wasteful complete readiness encode, while the
+independent visual critic receives the same event mapping and still owns the
+harder judgment of trajectory, trigger, composition and taste. It now receives
+ordered pre-trigger/path/settle states for representative motif-bound events,
+with exact event ids and protected renderer keyframe knots. Structural success
+therefore cannot itself create a visual pass: a correctly bound zoom that
+crosses a face, fires before its promised trigger or settles into a weak frame
+can be returned as a targeted repair. The critic context is priority-packed
+inside a fixed character budget so current motion, B-roll-purpose and caption
+evidence cannot be silently displaced by a long treatment or convergence
+history; optional prose uses only the remaining room. This reuses the existing
+preview sheets and critic call rather than adding another render or dispatch.
+Production telemetry records mapped, fulfilled and gap counts, and the example release
+policy requires `motion_contract_gaps=0`. This is an execution invariant, not
+an animation quota: `preserve` imposes none, and natural source movement is
+never fabricated as authored evidence.
+
+The independent story reviewer now reconstructs audible dialogue from inserted
+uploaded clips as part of the actual program transcript. Each insert's
+file-local source start, chosen duration and playback rate are mapped into the
+output clock, surrounding clip context is supplied at its cut boundaries, and
+muted insert dialogue is excluded. A multi-upload podcast/conversation can no
+longer receive a story pass based only on the main source while incoherent
+auxiliary speech remains invisible to the judge. It now reconstructs the exact
+surviving word fragments from both main and inserted speech. A keep that starts
+halfway through “We launched before customers could finish checkout” is shown
+as the surviving tail with a literal cut-in marker; the removed opening is not
+silently restored because the sentence midpoint survived. A separate assembled
+join ledger retains the last words/speaker on the left and the first
+words/speaker on the right at each shown cut, so long-program sampling cannot
+make two individually strong excerpts look like a coherent exchange. Major
+repairs require an evidence-visible `keep-*`, `insert:*` or `join:*` target and
+a valid program clock; invented ids, impossible clocks and out-of-range source
+suggestions remain advisory. The specialist request is priority-packed inside
+30,000 characters and still runs only when a speech-led EDL made a meaningful
+semantic cut, so this closes a judgment gap without adding a general-agent
+dispatch loop.
+
+The local selection layer now also lets “use none” win independently in three
+places where the first plausible asset previously had too much momentum:
+B-roll moment casting, music supervision and SFX audition. Podcast selection
+gets a separate exact-transcript slate review, not merely the original scout's
+self-reported score. These are bounded specialist calls attached to existing
+research/planning actions, not new general-agent turns, so they add targeted
+evidence without recreating the 183-dispatch failure mode.
+
+Final sound judgment now also has causal program-time evidence. The preview
+sampler reuses mapped story beats as listening candidates, cached renders keep
+their exact clip windows, and each excerpt names the music/SFX/voiceover ids
+and beat intentions it covers. The independent listener sees an explicit
+beat-to-item overlap map, while repairs are rejected unless they cite an
+existing target at a genuinely heard time. This can expose an audible but
+misplaced or tonally wrong effect without demanding that restrained or silent
+beats contain any sound.
+
+The same local path now records compact editorial decision traces on the
+assistant message: the bounded candidate slate, use/none choice, rationale,
+actual-audio or actual-frame review stage, deliberate override, downloaded
+asset, authored purpose, and whether that asset survived into the final EDL.
+Raw URLs and arbitrary model payloads are excluded. Because thumbs,
+export-before-next-request and rapid follow-up already join to the same message,
+this produces learnable accepted/rejected ranking evidence without pretending
+that every rendered asset caused the user's response.
+
+It also derives a compact profile from the *final* EDL, after restyles and
+repairs: frame mode, caption grammar, transition/grade/zoom families,
+text/vector/overlay motion language and music duck/loop behavior. Repeated
+thumbs or export-bearing outcomes from the same account and same editorial
+family become a weak preference prior on later turns. At least two signals are
+required, contradictory evidence cancels, and current footage/brief/reference,
+accessibility and professional judgment explicitly override the prior. The
+memory query never crosses accounts and never returns transcript/graphic text,
+prompts, candidate ids, URLs, storage keys, authored purposes or custom filter
+code. This makes learning possible without copying an earlier asset or
+mistaking one accepted export for causal proof.
 
 ## 23.6 Concrete path to “one-shot professional”
 
@@ -1180,13 +1579,20 @@ rewrite.
    (podcast conversation, talking-head social, narrative vlog, product demo,
    voiceover montage, action/music), preserve the same source + brief, a strong
    human reference, the current Valmera result and blind human pairwise labels.
-   Use the existing two-order visual/story/audio evaluator; never collapse
+   Use the existing two-order visual/story/audio evaluator and the explicit
+   gate policy documented in `docs/EDITORIAL_BENCHMARKS.md`; never collapse
    regressions into one flattering aggregate score.
 2. **Make the treatment contract the execution authority.** The first call
-   should pick one source-grounded route; atomic compilation should express its
+   should inspect any multi-upload candidate set in one evidence turn, then pick
+   one source-grounded editorial family and treatment; atomic compilation should express its
    picture/type/motion/audio pass in as few coherent versions as evidence
    permits. Keep unlimited tools available, but measure semantic progress,
    recipe aborts, versions per finished edit, model calls, wall time and cost.
+   The local continuation guard now follows that semantic-progress rule rather
+   than raw version/render growth. The local department contract now also
+   blocks false author/omit closure and avoids full readiness encodes for a
+   structurally unfinished treatment; the production benchmark must prove that
+   this reduces churn without encouraging empty `preserve` decisions.
 3. **Turn B-roll into retrieval + ranking + sequence casting.** Learn from
    accepted/rejected human candidate choices. Rank visual specificity,
    authenticity, composition match, motion direction and sequence diversity;
@@ -1194,20 +1600,55 @@ rewrite.
    retrieval cannot supply the needed proof, not as a generic fallback.
 4. **Turn sound into supervision, not decoration.** Compare real music/SFX
    excerpts; model entry/exit, contrast and motif reuse across the sequence;
-   review the real final mix. Silence and no-SFX must remain valid winners.
-5. **Promote animation from presets to grammar.** Use the shared keyframe
-   primitive to express a small coherent motion vocabulary per treatment;
-   attach movement to rhetorical/visible events and preserve stillness as
-   contrast. Add primitives only when the benchmark repeatedly proves a real
-   capability gap.
+   review the real final mix. The local path now maps authored items to output-
+   clock story beats, samples those semantic anchors, preserves cached heard
+   windows and requires target-specific repairs from actual audio. Silence and
+   no-SFX must remain valid winners. The missing proof is a labeled family-
+   diverse corpus showing these judgments beat strong human sound design.
+5. **Promote animation from presets to grammar.** The local Blueprint v3 path
+   now expresses a coherent free-named motion vocabulary per treatment, binds
+   it to rhetorical/visible beats, preserves `hold` as contrast and verifies
+   that exact motif-bound renderer events land in the promised domains and
+   times. Temporal overlap alone is deliberately insufficient. The shared
+   preview evidence now samples exact motif-labeled state trajectories across
+   camera/media/type/effect families, and the independent critic can return a
+   timed target-specific path/trigger/settle repair even when structural
+   provenance passes. The shared keyframe primitive remains open-ended; add
+   primitives only when the
+   benchmark repeatedly proves a real capability gap. The final-treatment
+   profile, same-account/family outcome memory and new causal execution traces
+   provide the learning substrate; the missing step is a sufficiently large
+   labeled corpus to rank which motion relationships actually beat strong
+   human work, not merely whether an animation was present.
 6. **Make podcast cutting a discourse task.** Score complete question/answer
    arcs, references, escalation and payoff from the whole transcript; retain
-   boundary context; independently review the assembled transcript. Optimize
-   for a coherent conversation, never “top isolated quotes.”
+   boundary context; independently review the assembled transcript. The local
+   reviewer now sees exact surviving words, explicit sentence truncation and
+   a speaker-preserving left/right ledger for every shown assembled join, and
+   can authorize only a real timed boundary repair. The remaining proof is a
+   blinded, family-diverse podcast corpus measuring arc coherence and first-
+   render acceptance against strong human cuts. Optimize for a coherent
+   conversation, never “top isolated quotes.”
 7. **Release behind family-level gates.** A candidate build ships only when it
    wins or ties the previous build on blind human and model-separated visual,
    story and audio dimensions, with no material family regression and with
-   cost/latency inside the target envelope.
+   cost/latency inside the target envelope. The example gate also requires
+   lower dispatch/version/full-preview churn and zero finishing-review
+   pass-to-repair reversals.
+
+The local gate now enforces that rule mechanically. Candidate identity is
+attached only after both blind presentation orders have been judged. Every
+required family, channel, craft dimension, previous-build comparison,
+human-reference comparison and curator label is evaluated independently;
+missing evidence is insufficient rather than a tie. Paired wall time, model
+cost, corrective turns, agent dispatches, EDL versions and complete-preview
+metrics have separate p50/p95 ceilings, including an explicit failure when a
+candidate regresses from a zero baseline. Review pass-to-repair reversals have
+an absolute ceiling of zero, as do department-execution and beat-level
+motion-contract gaps. The example policy is
+`worker/benchmark_policy.example.json`, and the command exits nonzero on any
+failed invariant. This is release infrastructure, not a substitute for the
+still-missing real corpus.
 
 The north-star claim should be earned with measurable outcomes: publishable on
 first render, pairwise win rate against the previous build and a strong human

@@ -1,0 +1,100 @@
+{
+  "name": "multi-family candidate release",
+  "required_families": [
+    "podcast_conversation",
+    "talking_head_social",
+    "product_demo_explainer",
+    "action_sports_gameplay",
+    "narrative_story",
+    "voiceover_montage"
+  ],
+  "required_channels_by_family": {
+    "podcast_conversation": ["visual", "story", "audio"],
+    "talking_head_social": ["visual", "story", "audio"],
+    "product_demo_explainer": ["visual", "story", "audio"],
+    "action_sports_gameplay": ["visual", "audio"],
+    "narrative_story": ["visual", "story", "audio"],
+    "voiceover_montage": ["visual", "story", "audio"]
+  },
+  "quality": {
+    "min_cases_per_family": 5,
+    "max_loss_rate": 0.05,
+    "min_win_or_tie_rate": 0.9,
+    "max_insufficient_rate": 0.1
+  },
+  "quality_by_opponent": {
+    "previous_build": {
+      "min_cases_per_family": 3,
+      "max_loss_rate": 0.0,
+      "min_win_or_tie_rate": 1.0,
+      "max_insufficient_rate": 0.1
+    },
+    "human_reference": {
+      "min_cases_per_family": 2,
+      "max_loss_rate": 0.25,
+      "min_win_or_tie_rate": 0.75,
+      "min_win_rate": 0.5,
+      "max_insufficient_rate": 0.1
+    }
+  },
+  "human_labels": {
+    "min_cases_per_family": 3,
+    "max_loss_rate": 0.15,
+    "min_win_or_tie_rate": 0.8,
+    "min_win_rate": 0.5,
+    "max_insufficient_rate": 0.05
+  },
+  "efficiency": {
+    "wall_time_s": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_p50_ratio": 0.5,
+      "max_p95_ratio": 0.75
+    },
+    "model_cost_usd": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_p50_ratio": 0.5,
+      "max_p95_ratio": 0.75
+    },
+    "corrective_turns": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_p50_ratio": 0.5,
+      "max_p95_ratio": 1.0
+    },
+    "agent_dispatches": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_p50_ratio": 0.5,
+      "max_p95_ratio": 0.65
+    },
+    "edl_versions": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_p50_ratio": 0.5,
+      "max_p95_ratio": 0.75
+    },
+    "complete_previews": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_p50_ratio": 0.5,
+      "max_p95_ratio": 0.75
+    },
+    "review_pass_reopens": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_candidate_value": 0.0
+    },
+    "department_execution_gaps": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_candidate_value": 0.0
+    },
+    "motion_contract_gaps": {
+      "min_pairs_per_family": 3,
+      "opponent_kinds": ["previous_build"],
+      "max_candidate_value": 0.0
+    }
+  }
+}

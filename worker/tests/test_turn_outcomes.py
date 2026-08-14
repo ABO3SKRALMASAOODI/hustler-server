@@ -65,17 +65,36 @@ def test_read_only_analysis_answer_remains_billable():
     assert agent_loop._turn_completion(ctx) == ("fulfilled", True)
 
 
-def test_identical_deterministic_failure_stops_before_third_model_call():
+def test_nothing_dumps_the_turn_on_repeated_tool_failure():
+    """The stall used to finalize after two matching errors. That is how
+    an Openverse 401 and a sequence_map REJECTED each killed a whole
+    vlog. Tool errors stay in the result; the agent keeps going."""
     ctx = _ctx()
     agent_loop._record_outer_tool_outcome(
         ctx, "apply_edit_recipe",
         "RECIPE ABORTED at operation 4 (add_zoom): target at 7.91s")
-    assert agent_loop._repeated_tool_failure(ctx) is False
     agent_loop._record_outer_tool_outcome(
         ctx, "apply_edit_recipe",
         "RECIPE ABORTED at operation 4 (add_zoom): target at 7.92s")
-    assert agent_loop._repeated_tool_failure(ctx) is True
-    assert "add_zoom" in ctx.last_tool_result
+    assert agent_loop._repeated_tool_failure(ctx) is False
+    ctx = _ctx()
+    agent_loop._record_outer_tool_outcome(
+        ctx, "search_sfx",
+        "Sound search failed (HTTP 401 from api.openverse.org).")
+    agent_loop._record_outer_tool_outcome(
+        ctx, "search_sfx",
+        "Sound search failed (HTTP 401 from api.openverse.org).")
+    assert agent_loop._repeated_tool_failure(ctx) is False
+    ctx = _ctx()
+    agent_loop._record_outer_tool_outcome(
+        ctx, "set_edit_plan",
+        "REJECTED: sequence_map[4] range 858.0-881.8s falls outside "
+        "its cited source evidence (859.680-873.725s).")
+    agent_loop._record_outer_tool_outcome(
+        ctx, "set_edit_plan",
+        "REJECTED: sequence_map[4] range 860.0-882.0s falls outside "
+        "its cited source evidence (859.680-873.725s).")
+    assert agent_loop._repeated_tool_failure(ctx) is False
 
 
 def test_unused_fetched_music_is_disclosed():

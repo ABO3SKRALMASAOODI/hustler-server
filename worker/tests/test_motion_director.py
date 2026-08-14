@@ -96,3 +96,64 @@ def test_sequence_energy_guides_emphasis_without_forcing_a_motion_quota(
     agent_tools.punch_in_on_emphasis(ctx, count=1)
     zoom = ctx.written["effects"]["zooms"][0]
     assert 14.8 <= zoom["start"] <= 15.1
+
+
+def _language(density, intensity, contrast=1.0):
+    return {
+        "principle": "one earned convergence at evidence peaks",
+        "density": density, "intensity": intensity, "contrast": contrast,
+        "stillness_rule": "hold whenever the speaker is establishing context",
+        "motifs": [{"id": "proof_push",
+                    "behavior": "ease toward the speaker and proof word",
+                    "trigger": "a concrete result lands",
+                    "domains": ["camera", "type"]}],
+    }
+
+
+def test_structured_language_directs_density_magnitude_and_contrast(
+        monkeypatch):
+    words = [_word(f"proof{i}", at) for i, at in enumerate(
+        (2.0, 6.0, 10.0, 14.0, 18.0, 22.0, 27.0))]
+    monkeypatch.setattr(agent_tools, "_get_perception", lambda _ctx: {})
+    monkeypatch.setattr(agent_tools.perception, "word_stress",
+                        lambda _p, _w: [1, .92, .84, .76, .68, .60, .52])
+    monkeypatch.setattr(
+        agent_tools, "_face_at_source_moments",
+        lambda _ctx, _edl, moments: {moment: (.5, .4) for moment in moments})
+
+    sparse = _Ctx(words, {"motion_language": _language(0, 0)})
+    agent_tools.punch_in_on_emphasis(sparse)
+    sparse_zooms = sparse.written["effects"]["zooms"]
+    assert len(sparse_zooms) == 2
+    assert max(row["strength"] for row in sparse_zooms) == .07
+
+    expressive = _Ctx(words, {"motion_language": _language(1, 1)})
+    result = agent_tools.punch_in_on_emphasis(expressive)
+    expressive_zooms = expressive.written["effects"]["zooms"]
+    assert len(expressive_zooms) == 4
+    assert max(row["strength"] for row in expressive_zooms) == .19
+    assert min(row["strength"] for row in expressive_zooms) < .19
+    assert "no style adjectives were used" in result
+
+
+def test_hold_binding_is_authoritative_even_on_a_louder_word(monkeypatch):
+    words = [_word("loudsetup", 2.0), _word("proof", 15.0)]
+    monkeypatch.setattr(agent_tools, "_get_perception", lambda _ctx: {})
+    monkeypatch.setattr(agent_tools.perception, "word_stress",
+                        lambda _p, _w: [1.0, .55])
+    monkeypatch.setattr(agent_tools, "_face_at_source_moments",
+                        lambda *_args: {})
+    ctx = _Ctx(words, {
+        "motion_language": _language(.5, .5),
+        "sequence_map": [
+            {"source_start_s": 1.5, "source_end_s": 3.0,
+             "energy": .9, "motion_motif": "hold"},
+            {"source_start_s": 14.5, "source_end_s": 16.0,
+             "energy": .6, "motion_motif": "proof_push"},
+        ],
+    })
+    result = agent_tools.punch_in_on_emphasis(ctx, count=1)
+    zoom = ctx.written["effects"]["zooms"][0]
+    assert 14.8 <= zoom["start"] <= 15.1
+    assert zoom["motion_motif"] == "proof_push"
+    assert "motif=proof_push, beat=2" in result

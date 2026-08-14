@@ -1,15 +1,13 @@
-"""Round 91 — a rate-limited agent step WAITS instead of dying.
+"""A rate-limited agent step WAITS instead of dying.
 
-One agent turn can exceed the provider's whole TPM tier by itself (round
-80), so a long turn hitting 429 mid-flight is expected operation — and it
-used to kill the turn: minutes of finished edits ended in "I'm being
-rate-limited, resend that". llm.rate_limit_wait decides the sleep; the loop
-retries. Aug 10 widened the patience: four flat 15s waits (60s total) was
-less than one real TPM burst — job 4120 died mid-burst with the burst still
-minutes from over. Bounds pinned here: only genuine rate limits wait;
-Retry-After is honoured up to 60s and never SHRINKS the wait; at most 6
-waits, growing 12s per attempt capped at 45s; never into the turn's last
-20s; never during a deploy drain.
+One agent turn can exceed the provider's whole TPM tier by itself, so a
+long turn hitting 429 mid-flight is expected. Waiting is better than
+killing minutes of finished edits.
+
+Aug 14: OpenAI uses HTTP 429 for BOTH an empty wallet and TPM. Waiting on
+insufficient_quota just delayed the same death. Responses-lane 429s arrived
+as RuntimeError('responses HTTP 429: ...') with no status_code, so they
+were not waited at all.
 """
 
 import os
@@ -48,42 +46,100 @@ class _WithRA(Exception):
         return "too many requests"
 
 
+class _ResponsesTPM(Exception):
+    """The live shape: responses_create raises RuntimeError, no status_code."""
+
+    def __str__(self):
+        return (
+            "responses HTTP 429: {\"error\": {\"message\": "
+            "\"Rate limit reached for gpt-5.6-luna in organization org-x "
+            "on tokens per min (TPM): Limit 200000, Used 187948, "
+            "Requested 53803. Please try again in 12.525s.\", "
+            "\"type\": \"tokens\", \"code\": \"rate_limit_exceeded\"}}"
+        )
+
+
+class _Quota(Exception):
+    status_code = 429
+
+    def __str__(self):
+        return (
+            "Error code: 429 - {'error': {'message': "
+            "'You have no credits remaining. Add credits to continue "
+            "using the API at https://platform.openai.com/settings/"
+            "organization/billing/.', 'type': 'insufficient_quota'}}"
+        )
+
+
+class _ResponsesQuota(Exception):
+    def __str__(self):
+        return (
+            "responses HTTP 429: {\n"
+            "  \"error\": {\n"
+            "    \"message\": \"You have no credits remaining. "
+            "Add credits to continue using the API at "
+            "https://platform.openai.com/settings/organization/billing/\",\n"
+            "    \"type\": \"insufficient_quota\"\n"
+            "  }\n}"
+        )
+
+
 def test_only_rate_limits_wait():
     assert llm.rate_limit_wait(_Other(), 1, 600) is None
-    assert llm.rate_limit_wait(_RL(), 1, 600) == 12.0
-    assert llm.rate_limit_wait(_Text(), 1, 600) == 12.0
+    assert llm.rate_limit_wait(_RL(), 1, 600) == 8.0
+    assert llm.rate_limit_wait(_Text(), 1, 600) == 8.0
+
+
+def test_quota_429_does_not_wait():
+    """Empty wallet is not a TPM window. Sleeping it just delayed the death."""
+    assert llm.is_quota_error(_Quota())
+    assert not llm.is_rate_limit_error(_Quota())
+    assert llm.rate_limit_wait(_Quota(), 1, 600) is None
+    assert llm.rate_limit_wait(_ResponsesQuota(), 1, 600) is None
+
+
+def test_responses_http_429_tpm_waits_and_honours_body():
+    assert llm.is_rate_limit_error(_ResponsesTPM())
+    wait = llm.rate_limit_wait(_ResponsesTPM(), 1, 600)
+    # Named wait 12.525s + 1s buffer, not less than the 8s backoff floor.
+    assert wait == 13.525
 
 
 def test_waits_grow_with_attempts():
-    assert llm.rate_limit_wait(_RL(), 2, 600) == 24.0
-    assert llm.rate_limit_wait(_RL(), 3, 600) == 36.0
-    assert llm.rate_limit_wait(_RL(), 4, 600) == 45.0, "growth caps at 45s"
-    assert llm.rate_limit_wait(_RL(), 6, 600) == 45.0
+    assert llm.rate_limit_wait(_RL(), 2, 600) == 16.0
+    assert llm.rate_limit_wait(_RL(), 3, 600) == 24.0
+    assert llm.rate_limit_wait(_RL(), 8, 600) == 60.0, "growth caps at 60s"
+    assert llm.rate_limit_wait(_RL(), 20, 600) == 60.0
 
 
 def test_retry_after_is_honoured_and_capped():
-    assert llm.rate_limit_wait(_WithRA(), 1, 600) == 30.0
+    assert llm.rate_limit_wait(_WithRA(), 1, 600) == 31.0  # 30 + 1s buffer
 
     class _Huge(_WithRA):
         class response:                                # noqa: N801
             headers = {"retry-after": "600"}
-    assert llm.rate_limit_wait(_Huge(), 1, 600) == 60.0
+    assert llm.rate_limit_wait(_Huge(), 1, 600) == 90.0
 
     class _Tiny(_WithRA):
         class response:                                # noqa: N801
             headers = {"retry-after": "1"}
     # A shorter server hint never undercuts the backoff schedule: attempt 3
-    # would wait 36s on its own, and a 1s Retry-After mid-burst is exactly
+    # would wait 24s on its own, and a 1s Retry-After mid-burst is exactly
     # how the old schedule kept walking back into the same wall.
-    assert llm.rate_limit_wait(_Tiny(), 3, 600) == 36.0
+    assert llm.rate_limit_wait(_Tiny(), 3, 600) == 24.0
 
 
 def test_bounds():
-    assert llm.rate_limit_wait(_RL(), 7, 600) is None, "wait-count cap"
-    assert llm.rate_limit_wait(_RL(), 1, 15) is None, "turn nearly over"
+    assert llm.rate_limit_wait(_RL(), 21, 600) is None, "wait-count cap"
+    assert llm.rate_limit_wait(_RL(), 1, 14) is None, "turn nearly over"
     assert llm.rate_limit_wait(_RL(), 1, 600, shutting_down=True) is None
-    # With 22s left the wait shrinks to leave 10s of working budget.
-    assert llm.rate_limit_wait(_RL(), 1, 22) == 12.0
+    # With 20s left the wait shrinks to leave 8s of working budget.
+    assert llm.rate_limit_wait(_RL(), 1, 20) == 8.0
+
+
+def test_quota_does_not_latch_responses_lane_dead():
+    assert llm.looks_like_responses_unsupported(_ResponsesQuota()) is False
+    assert llm.looks_like_responses_unsupported(_ResponsesTPM()) is False
 
 
 def test_agent_client_disables_hidden_sdk_retries():

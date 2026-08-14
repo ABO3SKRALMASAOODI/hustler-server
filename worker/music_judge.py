@@ -7,6 +7,7 @@ measurements against the director's brief.  The model still owns taste and
 can override the ranking; it no longer chooses from a title alone.
 """
 
+import json
 import re
 
 
@@ -106,3 +107,54 @@ def rank(candidates, brief, *, speech_led=False):
             for item, analysis in candidates]
     return sorted(rows, key=lambda row: (-row["score"], row["title"],
                                          str(row.get("id") or "")))
+
+
+def audition_windows(duration_s, span_s=6.0):
+    """Representative opening/body/ending windows without pretending one
+    arbitrary middle excerpt represents a whole track."""
+    try:
+        duration = max(0.0, float(duration_s))
+        span = max(1.0, min(float(span_s), duration))
+    except (TypeError, ValueError):
+        return []
+    if duration <= 0:
+        return []
+    last = max(0.0, duration - span)
+    starts = [0.0, last * .42, last]
+    out = []
+    for start in starts:
+        window = (round(start, 2), round(min(duration, start + span), 2))
+        if window[1] <= window[0]:
+            continue
+        if not any(abs(window[0] - old[0]) < max(1.0, span * .45)
+                   for old in out):
+            out.append(window)
+    return out
+
+
+def listener_choice(answer, candidate_ids):
+    """Parse the actual listener's candidate-or-no-music decision."""
+    if not isinstance(answer, str):
+        return None
+    raw = None
+    decoder = json.JSONDecoder()
+    for i, char in enumerate(answer):
+        if char != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(answer[i:])
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            raw = value
+            break
+    if raw is None:
+        return None
+    allowed = {str(value) for value in candidate_ids}
+    choice = str(raw.get("choice") or "").strip()
+    reason = " ".join(str(raw.get("reason") or "").split())[:360]
+    if choice.casefold() in {"none", "no music", "silence", "dry"}:
+        return {"choice": None, "abstain": True, "reason": reason}
+    if choice in allowed:
+        return {"choice": choice, "abstain": False, "reason": reason}
+    return None

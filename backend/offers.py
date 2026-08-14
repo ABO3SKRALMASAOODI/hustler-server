@@ -466,10 +466,9 @@ def _headers():
 
 
 # Which plans a 50% intro may be applied to. NOT every purchasable plan:
-# Frontier is deliberately absent. It is priced at a 50% margin (10,000 credits
-# at USD_PER_CREDIT is $50 of model spend against $100), so half off is a month
-# sold at exactly cost — and the model it promises is the expensive one, so the
-# first month of a Frontier trial is where an abused discount hurts most. The
+# Frontier is deliberately absent. It is priced at a 50% margin (5,000 credits
+# at USD_PER_CREDIT is $25 of model spend against $50), so half off is a month
+# sold at exactly cost — and the model it promises is the expensive one. The
 # discount is an acquisition tool for the entry tiers; the top tier is bought
 # by people who already know what they want.
 DISCOUNTABLE_PLANS = ("ai", "ai_pro")

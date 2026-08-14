@@ -78,11 +78,18 @@ def test_manifest_paths_are_relative_to_manifest_not_process_cwd(
     monkeypatch.setattr(runner, "prepare_side", fake_prepare)
     got = runner.prepare_manifest({"cases": [{
         "id": "one", "source_context_path": "source.txt",
-        "left": {"video_path": "left.mp4", "story_text_path": "left.txt"},
-        "right": {"video_path": "right.mp4", "story_text": "right story"},
+        "candidate_side": "left", "opponent_kind": "previous_build",
+        "left": {"video_path": "left.mp4", "story_text_path": "left.txt",
+                 "build_id": "candidate", "metrics": {"wall_time_s": 20}},
+        "right": {"video_path": "right.mp4", "story_text": "right story",
+                  "build_id": "baseline", "metrics": {"wall_time_s": 50}},
     }]}, str(tmp_path), str(tmp_path / "out"))
 
     assert got["cases"][0]["source_context"] == "source context"
+    assert got["cases"][0]["candidate_side"] == "left"
+    assert got["cases"][0]["opponent_kind"] == "previous_build"
+    assert got["cases"][0]["left"]["metrics"]["wall_time_s"] == 20
+    assert got["cases"][0]["right"]["build_id"] == "baseline"
     assert seen == [
         (str((tmp_path / "left.mp4").resolve()), "left", "left story"),
         (str((tmp_path / "right.mp4").resolve()), "right", "right story"),

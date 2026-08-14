@@ -59,9 +59,9 @@ import time
 # in MRR as what they are worth per month rather than as a lump or a zero.
 PLAN_PRICES_USD = {
     # live
-    'ai':     {'monthly': 30,  'yearly': 300},
-    'ai_pro': {'monthly': 50,  'yearly': 500},
-    'ai_max': {'monthly': 100, 'yearly': 1000},
+    'ai':     {'monthly': 15,  'yearly': 150},
+    'ai_pro': {'monthly': 30,  'yearly': 300},
+    'ai_max': {'monthly': 50,  'yearly': 500},
     # off the shopfront, one grandfathered subscription
     'mcp':    {'monthly': 15,  'yearly': 150},
     # retired, grandfathered only

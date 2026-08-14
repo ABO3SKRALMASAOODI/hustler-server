@@ -10,9 +10,18 @@ Run from worker/:  python3 -m pytest tests/test_shorts.py -q
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import shorts                                                # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _disable_independent_cast_by_default(monkeypatch):
+    """Plan unit tests isolate the first scout unless they opt into casting."""
+    monkeypatch.setattr(shorts.shorts_judge, "review",
+                        lambda *_args, **_kwargs: None)
 
 
 # ------------------------------------------------------------------ helpers
@@ -138,6 +147,36 @@ def test_plan_respects_requested_count(monkeypatch):
     assert len(out) == 3
     assert [c["score"] for c in out] == sorted(
         [c["score"] for c in out], reverse=True)
+
+
+def test_independent_cast_can_reject_every_proposed_fragment(monkeypatch):
+    _fake_plan(monkeypatch, [
+        {"start": 30, "end": 58, "title": "Isolated quote", "score": 99},
+    ])
+    monkeypatch.setattr(
+        shorts.shorts_judge, "review",
+        lambda *_a, **_k: {"decisions": [{
+            "id": "clip_1", "verdict": "reject", "confidence": .96,
+            "evidence": "the question and resolution are outside the cut",
+            "reason": "the excerpt is not self-contained",
+        }]})
+    try:
+        shorts._plan_clips(None, {"user_id": 1}, _index(SENTS), 600.0,
+                           None, {}, False, "free")
+        assert False, "a decisive all-reject cast must abstain"
+    except shorts.NoWorthyStories as exc:
+        assert "rejected every proposed window" in str(exc)
+
+
+def test_valid_empty_story_scout_is_abstention_not_retryable_parse_failure(
+        monkeypatch):
+    _fake_plan(monkeypatch, [])
+    try:
+        shorts._plan_clips(None, {"user_id": 1}, _index(SENTS), 600.0,
+                           None, {}, False, "free")
+        assert False, "a deliberate empty slate must be distinguished"
+    except shorts.NoWorthyStories as exc:
+        assert "no complete story" in str(exc)
 
 
 def test_story_treatment_survives_plan_validation():

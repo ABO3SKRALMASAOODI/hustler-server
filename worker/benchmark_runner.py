@@ -29,6 +29,7 @@ import re
 from pathlib import Path
 
 import editorial_benchmark
+import benchmark_gate
 import media
 import screening
 import sheets
@@ -162,7 +163,8 @@ def prepare_manifest(manifest, manifest_dir, output_dir):
             case.get("source_context"), case.get("source_context_path"),
             manifest_dir)
         row = {key: case.get(key) for key in (
-            "id", "family", "brief", "human_winner")}
+            "id", "family", "brief", "human_winner", "candidate_side",
+            "opponent_kind")}
         row["id"] = case_id
         row["source_context"] = source_context
         for side in ("left", "right"):
@@ -177,6 +179,10 @@ def prepare_manifest(manifest, manifest_dir, output_dir):
                 max_frames=case.get("max_frames", 24),
                 page_tiles=case.get("page_tiles", 12),
                 audio_span_s=case.get("audio_span_s", 6.0))
+            if isinstance(spec.get("metrics"), dict):
+                row[side]["metrics"] = dict(spec["metrics"])
+            if spec.get("build_id") is not None:
+                row[side]["build_id"] = str(spec["build_id"])[:120]
         prepared["cases"].append(row)
     return prepared
 
@@ -221,7 +227,18 @@ def main(argv=None):
     run.add_argument("output_dir")
     run.add_argument("--prepared", required=True)
     run.add_argument("--results", required=True)
+    gate = commands.add_parser("gate")
+    gate.add_argument("results")
+    gate.add_argument("--policy", required=True)
+    gate.add_argument("--report", required=True)
     args = parser.parse_args(argv)
+
+    if args.command == "gate":
+        evaluated = _load(args.results)
+        report = benchmark_gate.evaluate_release(
+            evaluated.get("results") or [], _load(args.policy))
+        _write(args.report, report)
+        return 0 if report["release_allowed"] else 2
 
     if args.command in {"prepare", "run"}:
         manifest_path = str(Path(args.manifest).expanduser().resolve())

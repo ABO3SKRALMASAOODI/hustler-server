@@ -471,6 +471,41 @@ def extract_audio_clip(src, t0, t1, dst):
          dst])
 
 
+def extract_audio_windows(src, windows, dst):
+    """Concatenate representative source windows into one tiny audition.
+
+    Keeping one file per candidate lets the bounded audio lane compare up to
+    three candidates while hearing each track's opening, body and ending.
+    The excerpts remain in source order and are not crossfaded, so the model
+    is never misled into judging a transition we manufactured.
+    """
+    clean = []
+    for raw in windows or []:
+        try:
+            start = max(0.0, float(raw[0]))
+            end = max(start + .1, float(raw[1]))
+        except (TypeError, ValueError, IndexError):
+            continue
+        clean.append((start, end))
+    if not clean:
+        raise ValueError("audio audition needs at least one valid window")
+    if len(clean) == 1:
+        return extract_audio_clip(src, clean[0][0], clean[0][1], dst)
+    split_labels = "".join(f"[s{i}]" for i in range(len(clean)))
+    filters = [f"[0:a]asplit={len(clean)}{split_labels}"]
+    for i, (start, end) in enumerate(clean):
+        filters.append(
+            f"[s{i}]atrim=start={start:.3f}:end={end:.3f},"
+            f"asetpts=PTS-STARTPTS[a{i}]")
+    inputs = "".join(f"[a{i}]" for i in range(len(clean)))
+    filters.append(
+        f"{inputs}concat=n={len(clean)}:v=0:a=1,"
+        "aformat=channel_layouts=mono,aresample=22050[out]")
+    run(["ffmpeg", "-y", "-i", src, "-filter_complex",
+         ";".join(filters), "-map", "[out]", "-c:a", "libmp3lame",
+         "-b:a", "48k", dst])
+
+
 # Codecs an .m4a container carries unchanged, so the extraction is a remux
 # (a second or two on a long clip) instead of a full decode+encode.
 AUDIO_COPY_CODECS = ("aac", "alac")

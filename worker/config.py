@@ -719,7 +719,9 @@ MEDIA_POLL_INTERVAL_S = float(os.getenv(
 # floor that forbids the operator from trading latency for survival turns a
 # tuning knob into an outage. Default stays 4; the env now wins in BOTH
 # directions. (Heartbeats log RSS so the next death names its number.)
-AGENT_SLOTS = max(1, int(os.getenv("WORKER_AGENT_SLOTS", "4")))
+# Default 2: 4 concurrent turns OOMed the box (19 then 26 "Worker died"
+# agent turns in a week). Env still wins in both directions.
+AGENT_SLOTS = max(1, int(os.getenv("WORKER_AGENT_SLOTS", "2")))
 # Shorts planning is LLM/tool work with the same memory profile as a normal
 # turn, but it has its own lane so a long podcast plan cannot occupy chat
 # capacity. Keeping this configurable lets an agent-only service own it while
@@ -1232,10 +1234,16 @@ AGENT_TURN_TIMEOUT_S = min(
 # forever while preserving enough room for a complex edit and its preview.
 AGENT_TURN_TOTAL_TIMEOUT_S = min(
     900.0, max(180.0, float(os.getenv("AGENT_TURN_TOTAL_TIMEOUT_S", "720"))))
-# Fleet-wide reservations admit every model call, not only fresh turns. Keep
-# this below the provider's 200K TPM tier to leave headroom for other lanes.
-AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "150000"))
+# Fresh turns yield while the fleet's last-60s token burn is above this —
+# leave room for the next ~50K first call under the org's 200K TPM tier.
+AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))
 AGENT_TPM_WINDOW_S = int(os.getenv("AGENT_TPM_WINDOW_S", "60"))
+# Hard ceiling we will not start a call into. Soft cap is the yield line;
+# this is "Used + Requested" on the 429 itself.
+AGENT_TPM_HARD_CAP = int(os.getenv("AGENT_TPM_HARD_CAP", "200000"))
+# Tokens we assume a fresh first call will request. Admission waits until
+# last-60s burn + this fits under HARD_CAP.
+AGENT_TPM_CALL_RESERVE = int(os.getenv("AGENT_TPM_CALL_RESERVE", "55000"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # Transcript tools get a far larger budget: silently dropping the tail of a

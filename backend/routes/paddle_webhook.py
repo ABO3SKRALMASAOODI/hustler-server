@@ -52,7 +52,7 @@ def _trial_aware_grant(user_id, plan, subscription_id, event_type, data):
     wrongly grants the full pool: the subscription.created that follows sets it
     back down to the trial slice, seconds later.
     """
-    full = PLAN_CREDITS.get(plan, 0)
+    full = credits_for_price(_price_id_from_data(data), plan)
     status = (data.get('status') or '').lower()
     if not event_type.startswith('subscription.'):
         status = ''             # not the subscription's status — see above
@@ -76,12 +76,12 @@ def _trial_aware_grant(user_id, plan, subscription_id, event_type, data):
 PLAN_CREDITS = {
     # The three live tiers. Keep in step with PLANS in paddle.py (the checkout)
     # and PLAN_MONTHLY_LIMITS in credits.py (the denominator the studio shows).
-    # Round 49: credits burn at TWICE the model's real cost
-    # (credits.USD_PER_CREDIT = $0.005), so the cost column below is half what
-    # the credit count suggests. See the margin table in paddle.py.
-    'ai':     2000,     # Creator  $30  -> $10 of model cost, 67% margin
-    'ai_pro': 4000,     # Pro      $50  -> $20 of model cost, 60% margin
-    'ai_max': 10000,    # Frontier $100 -> $50 of model cost, 50% margin
+    # Shopfront grants. Legacy $30/$50/$100 prices grant the old amounts via
+    # PRICE_CREDITS so an in-flight trial converting on the old price still
+    # receives what they bought.
+    'ai':     1000,     # Creator  $15  -> $5 of model cost, 67% margin
+    'ai_pro': 2000,     # Pro      $30  -> $10 of model cost, 67% margin
+    'ai_max': 5000,     # Frontier $50  -> $25 of model cost, 50% margin
     # 'mcp' grants 0 ON PURPOSE. Credits meter OUR model spend, and on the
     # MCP plan the customer's own key pays for the model — topping up a pool
     # they never draw from would be meaningless, and metering their key as
@@ -108,21 +108,46 @@ try:
 except Exception:                       # pragma: no cover - import safety
     _PADDLE_PLANS = {}
 PRICE_TO_PLAN = {}
+PRICE_CREDITS = {}
 for _name, _cfg in (_PADDLE_PLANS or {}).items():
+    _credits = (_cfg or {}).get('monthly_credits', 0)
     for _k in ('price_id', 'yearly_price_id'):
         _pid = (_cfg or {}).get(_k)
         if _pid:
             PRICE_TO_PLAN[_pid] = _name
+            PRICE_CREDITS[_pid] = _credits
+    for _legacy_id, _legacy_credits in ((_cfg or {}).get('legacy_prices') or {}).items():
+        if _legacy_id:
+            PRICE_TO_PLAN[_legacy_id] = _name
+            PRICE_CREDITS[_legacy_id] = _legacy_credits
+
+
+def _price_id_from_data(data):
+    for it in (data.get('items') or []):
+        price = it.get('price') or {}
+        pid = price.get('id') or it.get('price_id')
+        if pid:
+            return pid
+    return None
+
+
+def credits_for_price(price_id, plan):
+    """Credits this paid price actually bought.
+
+    Shopfront prices use PLAN_CREDITS[plan]. A grandfathered trial or
+    subscription on a previous price keeps the grant that price sold —
+    otherwise converting a $30 trial would land 1,000 credits."""
+    if price_id and price_id in PRICE_CREDITS:
+        return PRICE_CREDITS[price_id]
+    return PLAN_CREDITS.get(plan, 0)
 
 
 def _plan_from_data(data):
     """Authoritative plan from the PAID price id in the event's line items.
     Returns the plan name or None if no known price is present."""
-    for it in (data.get('items') or []):
-        price = it.get('price') or {}
-        pid = price.get('id') or it.get('price_id')
-        if pid and pid in PRICE_TO_PLAN:
-            return PRICE_TO_PLAN[pid]
+    pid = _price_id_from_data(data)
+    if pid and pid in PRICE_TO_PLAN:
+        return PRICE_TO_PLAN[pid]
     return None
 
 

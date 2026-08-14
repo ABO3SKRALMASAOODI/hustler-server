@@ -276,6 +276,65 @@ def test_manual_preview_defers_complete_encode_to_turn_end(
     assert len(PreviewDb.payload["render_signature"]) == 64
 
 
+def test_complete_preview_uses_changed_proof_before_reencoding_whole_program(
+        monkeypatch):
+    calls = []
+
+    class Ctx:
+        autorendering = False
+        rendered_versions = set()
+        failed_preview_versions = {}
+        checked_versions = set()
+        last_preview = {"edl_version": 1}
+        editing_metrics = {}
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 2, "json": default_edl(20.0)}
+
+    monkeypatch.setattr(agent_tools, "_grade_strip_shortcut",
+                        lambda *_args: None)
+    monkeypatch.setattr(agent_tools, "_verify_plan_for", lambda *_args: [])
+    monkeypatch.setattr(
+        agent_tools, "_change_check_ranges",
+        lambda *_args: ([[4.0, 7.0]], {"version": 1}))
+    monkeypatch.setattr(
+        agent_tools, "_run_changed_preview_check",
+        lambda _ctx, _row, _plan, ranges: (
+            calls.append(ranges) or "changed proof"))
+
+    assert agent_tools.render_preview(Ctx(), complete=True) == "changed proof"
+    assert calls == [[[4.0, 7.0]]]
+    assert Ctx.editing_metrics["complete_previews_routed_to_proof"] == 1
+
+    # The exact proof-checked version can still be explicitly rendered whole;
+    # there is no per-turn preview ceiling.
+    Ctx.checked_versions.add(2)
+    monkeypatch.setattr(
+        agent_tools, "_run_changed_preview_check",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("checked version must proceed to full render")))
+    # Stop just after routing by making the full-render DB access distinctive.
+    Ctx.spec_preview_jobs = {}
+    Ctx.project_id = 9
+    Ctx.job = {"id": 7, "user_id": 3}
+
+    class Db:
+        @staticmethod
+        def run(fn, *_args):
+            if fn is dbx.get_or_enqueue_preview_job:
+                raise RuntimeError("full-render path reached")
+            raise AssertionError(fn)
+
+    Ctx.db = Db()
+    try:
+        agent_tools.render_preview(Ctx(), complete=True)
+    except RuntimeError as exc:
+        assert str(exc) == "full-render path reached"
+    else:
+        raise AssertionError("proof-checked version did not reach full render")
+
+
 def test_sequence_screening_maps_kept_source_beats_and_omits_cut_regions():
     class Ctx:
         edit_plan = {
@@ -301,6 +360,38 @@ def test_sequence_screening_maps_kept_source_beats_and_omits_cut_regions():
     reasons = " | ".join(row["reason"] for row in frames)
     assert "create tension" in reasons and "earn trust" in reasons
     assert "not in final" not in reasons
+
+
+def test_sequence_screening_maps_auxiliary_clip_clock_to_its_insert():
+    key = "projects/9/uploads/proof.mov"
+
+    class Ctx:
+        edit_plan = {
+            "steps": ["Build the proof montage"],
+            "sequence_map": [
+                {"role": "proof", "anchor": "visible result",
+                 "purpose": "make the claim credible",
+                 "source_asset_key": key,
+                 "source_start_s": 2, "source_end_s": 4},
+                {"role": "unused", "anchor": "alternate take",
+                 "purpose": "not selected", "source_asset_key": "other.mov",
+                 "source_start_s": 1, "source_end_s": 2},
+            ],
+        }
+
+    edl = default_edl(20.0)
+    edl["keep"] = [[0, 5], [10, 20]]
+    edl["inserts"] = [{
+        "id": "ins1", "asset_key": key, "kind": "video",
+        "at_output_s": 5.0, "duration_s": 3.0,
+        "source_start_s": 2.0, "rate": 1.0,
+    }]
+    frames = agent_tools._sequence_screening_frames(Ctx(), {"json": edl})
+
+    assert frames == [{
+        "time_s": 6.0,
+        "reason": "planned beat 1 [proof]: make the claim credible",
+    }]
 
 
 def test_add_zoom_uses_center_default_and_advises_after_writing():

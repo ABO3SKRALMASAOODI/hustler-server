@@ -37,6 +37,7 @@ import config
 import db as dbx
 import llm
 import reference_profile as reference_grammar
+import shorts_judge
 import storage
 from psycopg2.extras import Json
 from schemas import GRADE_PRESETS
@@ -48,6 +49,10 @@ CAPTION_PRESETS = ("classic", "clean", "documentary", "broadcast", "retro",
                    "neon", "podcast", "beast", "karaoke", "elegant",
                    "spotlight", "stacked", "impact", "lyric")
 LONG_TRANSCRIPT_DIRECT_CHARS = 45000
+
+
+class NoWorthyStories(RuntimeError):
+    """A valid evidence-based scout completed and intentionally abstained."""
 
 
 # ------------------------------------------------------------------ helpers
@@ -798,6 +803,17 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
             config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
         os.makedirs(wd, exist_ok=True)
         return _visual_plan_clips(index, duration, n_target, want, note, wd)
+    if out is not None and not clips:
+        raise NoWorthyStories(
+            "the transcript contains no complete story strong enough to "
+            "recommend as a short")
+    if clips:
+        cast = shorts_judge.review(clips, index, note)
+        clips, rejected = shorts_judge.apply_report(clips, cast)
+        if cast is not None and rejected and not clips:
+            raise NoWorthyStories(
+                "an independent story editor rejected every proposed "
+                "window as incomplete or not self-contained")
     return clips
 
 
@@ -817,7 +833,8 @@ def _create_child(conn, user_id, parent, clip):
                      Json({"clip": {
                          key: clip.get(key) for key in (
                              "order", "start", "end", "score", "hook",
-                             "story", "visual_direction", "broll")
+                             "story", "visual_direction", "broll",
+                             "selection_review")
                          if clip.get(key) is not None},
                            "shorts_editor": {
                                "status": "locked",
@@ -914,6 +931,30 @@ def run_shorts_plan(worker_db, job):
     try:
         subscribed, plan, trialing = worker_db.run(dbx.user_billing,
                                                    job["user_id"])
+    except NoWorthyStories as exc:
+        shorts_meta = {
+            "status": "ready", "plan_job_id": job_id,
+            "started_at": shorts_meta.get("started_at") or _now_iso(),
+            "finished_at": _now_iso(), "clips": [],
+            "selection_source": "valmera_planner",
+            "selection_abstained": True,
+            "selection_reason": str(exc)[:500],
+        }
+        worker_db.run(_save_shorts_meta, project_id, shorts_meta)
+        if session_id:
+            worker_db.run(
+                dbx.add_message, session_id, "assistant",
+                f"I reviewed the full source and did not find a complete, "
+                f"self-contained story I could honestly recommend yet: "
+                f"{exc}. I did not fill the board with weak fragments. You "
+                "can give me a topic or moment to prioritize and run the "
+                "story search again.",
+                {"kind": "shorts_candidates", "clips": 0,
+                 "parent_project_id": project_id,
+                 "selection_abstained": True})
+        worker_db.run(dbx.set_progress, job_id, 100)
+        return {"clips": 0, "rendered_clips": 0, "billable": True,
+                "selection_abstained": True}
     except Exception:
         subscribed, plan, trialing = False, "free", False
     balance = worker_db.run(dbx.user_credits_balance, job["user_id"])

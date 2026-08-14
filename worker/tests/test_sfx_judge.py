@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import agent_tools  # noqa: E402
 import perception  # noqa: E402
+import schemas  # noqa: E402
 import sfx_judge  # noqa: E402
 
 
@@ -87,3 +88,41 @@ def test_audition_tool_ranks_cached_waveforms_and_denies_hearing_claim():
     assert out.index("openverse:a") < out.index("openverse:b")
     assert agent_tools.REQUIRED_ARGS["audition_sfx_candidates"] == [
         "ids", "purpose"]
+
+
+def test_listener_choice_accepts_structured_candidate_or_silence():
+    ids = ["openverse:a", "openverse:b"]
+    picked = sfx_judge.listener_choice(
+        '{"choice":"openverse:b","reason":"cleaner, shorter tail"}', ids)
+    dry = sfx_judge.listener_choice(
+        '{"choice":"none","reason":"both make the quiet reveal cheaper"}',
+        ids)
+
+    assert picked == {"choice": "openverse:b", "abstain": False,
+                      "reason": "cleaner, shorter tail"}
+    assert dry == {"choice": None, "abstain": True,
+                   "reason": "both make the quiet reveal cheaper"}
+    assert sfx_judge.listener_choice(
+        '{"choice":"none","reason":"quiet wins"}', ids,
+        allow_none=False) is None
+
+
+def test_listener_choice_abstains_on_ambiguous_comparison():
+    ids = ["openverse:a", "openverse:b"]
+    answer = ("openverse:a is tighter, while openverse:b is softer; either "
+              "could work")
+    assert sfx_judge.listener_choice(answer, ids) is None
+
+
+def test_sfx_purpose_is_durable_optional_editorial_provenance():
+    edl = schemas.default_edl(10.0)
+    edl["sfx"] = [{"id": "sx1", "storage_key": "sfx/1/click.mp3",
+                   "at": 3.2, "gain_db": -6,
+                   "purpose": "cursor confirms the primary action"}]
+    validated = schemas.validate_edl(edl, 10.0).model_dump()
+
+    assert validated["sfx"][0]["purpose"] == \
+        "cursor confirms the primary action"
+    assert "cursor confirms the primary action"[:32] in \
+        schemas.describe_edl(validated, 10.0)
+    assert "purpose" in agent_tools.TOOLS["add_sfx"][2]

@@ -4087,12 +4087,28 @@ def _validated_check_ranges(raw, duration):
             merged[-1][1] = max(merged[-1][1], b)
         else:
             merged.append([a, b])
-    if len(merged) > 6 or sum(b - a for a, b in merged) > 25.0:
-        raise dbx.PermanentJobError(
-            "changed-section proof exceeds its 6-window/25-second budget")
-    if not merged:
+    # Clamp, do not fail. Raising here killed the preview_check job (13
+    # times in a week) and left the user staring at a dead editor for a
+    # proof window the critic asked too generously. A shorter proof is a
+    # real look; a failed job is nothing.
+    if len(merged) > 6:
+        merged = merged[:6]
+    budget = 25.0
+    kept = []
+    used = 0.0
+    for a, b in merged:
+        span = b - a
+        if used + span <= budget:
+            kept.append([a, b])
+            used += span
+            continue
+        remain = budget - used
+        if remain >= 0.1:
+            kept.append([a, a + remain])
+        break
+    if not kept:
         raise dbx.PermanentJobError("changed-section proof has no valid range")
-    return merged
+    return kept
 
 
 def _contain_check_items(edl, tl, ranges, duration, index):
@@ -4308,12 +4324,18 @@ def run_render_job(worker_db, job):
                                        _tail_out) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings):
+            cached_meta = cached.get("meta") or {}
             return {"render_asset_id": cached["id"],
-                    "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
-                    "screening_pages": ((cached.get("meta") or {})
-                                        .get("screening_pages") or []),
-                    "caption_sheet_key": ((cached.get("meta") or {})
-                                          .get("caption_sheet_key")),
+                    "sheet_key": cached_meta.get("sheet_key"),
+                    "verify_sheet_key": cached_meta.get("verify_sheet_key"),
+                    "screening_pages": cached_meta.get("screening_pages") or [],
+                    "caption_sheet_key": cached_meta.get("caption_sheet_key"),
+                    "audio_qc": cached_meta.get("audio_qc"),
+                    # New renders retain exact program windows. Historical
+                    # metadata stored keys only; those clips are still valid
+                    # heard evidence and get generic labels on reuse.
+                    "listen_keys": (cached_meta.get("listen_clips") or
+                                    cached_meta.get("listen_keys") or []),
                     "duration_s": cached["duration_s"], "edl_version": version,
                     "variant": variant, "cached": True}
     if is_canvas:
@@ -4639,7 +4661,7 @@ def run_render_job(worker_db, job):
                     max_frames=config.SCREENING_MAX_FRAMES,
                     base_frames=config.SCREENING_BASE_FRAMES,
                     extra_frames=(job["payload"].get("screening_frames")
-                                  or []))
+                                  or []), index=index)
                 for page_n, page in enumerate(screening.pages(
                         screening_frames, config.SCREENING_PAGE_TILES), 1):
                     local = os.path.join(
@@ -4752,6 +4774,16 @@ def run_render_job(worker_db, job):
                 # real program position rather than insertion order.
                 review_times.extend(
                     out_dur * fraction for fraction in (0.08, 0.5, 0.92))
+                # The dispatcher already maps measured Blueprint sequence
+                # beats onto the output clock for visual screening. Reuse
+                # those same semantic anchors for the final-mix listener so
+                # intentional silence, build and payoff can be heard even
+                # when no SFX happens to create an audio event there.
+                for frame in job["payload"].get("screening_frames") or []:
+                    try:
+                        review_times.append(float(frame.get("time_s")))
+                    except (AttributeError, TypeError, ValueError):
+                        pass
                 for item, field in (
                         *((row, "start") for row in
                           (authored.get("music") or [])),
@@ -4801,6 +4833,8 @@ def run_render_job(worker_db, job):
                   "screening_pages": screening_pages,
                   "screening_frame_count": len(screening_frames),
                   "listen_keys": [item["key"] for item in listen_keys],
+                  "listen_clips": listen_keys,
+                  "audio_qc": audio_qc_res,
                   "src_sha256": src_sha,
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),

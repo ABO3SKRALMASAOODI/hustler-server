@@ -4,8 +4,8 @@ Round 100 put a max(4, env) floor here so a stale hosting override could not
 quietly undo the capacity fix. Then 19 agent turns died as "Worker died and
 retries are exhausted" in three days — the box OOMs under concurrent turns —
 and the floor was the one thing forbidding the operator from trading latency
-for survival. The contract now: default 4, env wins in BOTH directions,
-absolute floor of 1 so a typo can't park the lane at zero.
+for survival. The contract now: default 2 (4 OOMed the box), env wins in
+BOTH directions, absolute floor of 1 so a typo can't park the lane at zero.
 """
 
 import os
@@ -24,8 +24,8 @@ def _slots(env_value):
         cwd=worker_dir, env=env, text=True).strip()
 
 
-def test_agent_slots_default_four():
-    assert _slots(None) == "4"
+def test_agent_slots_default_two():
+    assert _slots(None) == "2"
 
 
 def test_agent_slots_env_may_lower():

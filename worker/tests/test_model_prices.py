@@ -403,8 +403,8 @@ def test_every_live_plan_clears_a_forty_percent_margin():
     make sense together — this is the assertion that ties them."""
     backend = _load_backend_copy()
     assert backend.USD_PER_CREDIT == model_prices.USD_PER_CREDIT
-    for plan, price, granted in (("ai", 30, 2000), ("ai_pro", 50, 4000),
-                                 ("ai_max", 100, 10000)):
+    for plan, price, granted in (("ai", 15, 1000), ("ai_pro", 30, 2000),
+                                 ("ai_max", 50, 5000)):
         cost = granted * model_prices.USD_PER_CREDIT
         assert cost <= price * 0.60, (plan, cost, price)
         # ...and the annual price (ten months of the monthly one) too, which is

@@ -141,15 +141,22 @@ def update_payment_method_link(subscription_id):
         return None, None
 
 
+def _price_id_from_items(data):
+    for it in (data.get("items") or []):
+        pid = (it.get("price") or {}).get("id") or it.get("price_id")
+        if pid:
+            return pid
+    return None
+
+
 def _plan_from_items(data):
     try:
         from routes.paddle_webhook import PRICE_TO_PLAN
     except Exception:
         return None
-    for it in (data.get("items") or []):
-        pid = (it.get("price") or {}).get("id") or it.get("price_id")
-        if pid and pid in PRICE_TO_PLAN:
-            return PRICE_TO_PLAN[pid]
+    pid = _price_id_from_items(data)
+    if pid and pid in PRICE_TO_PLAN:
+        return PRICE_TO_PLAN[pid]
     return None
 
 
@@ -287,7 +294,8 @@ def reconcile_user(conn, row, fetch_all_transactions=False):
             # the exact state that produced the round-59 bug, and re-granting
             # a full pool from it would rebuild it here.
             _activate(conn, user_id, plan, sub_id,
-                      _parse(data.get("next_billed_at")))
+                      _parse(data.get("next_billed_at")),
+                      price_id=_price_id_from_items(data))
             report["changes"].append("re-subscribed (Paddle says active, "
                                      "payment on record)")
     return report
@@ -322,12 +330,12 @@ def _downgrade(conn, user_id):
     cur.close()
 
 
-def _activate(conn, user_id, plan, subscription_id, expiry):
+def _activate(conn, user_id, plan, subscription_id, expiry, price_id=None):
     """Restore a paid plan in full. Mirrors the `is_subscribed and not
     preserve` branch of models.update_user_subscription_status, including the
     20-a-day subscriber top-up."""
-    from routes.paddle_webhook import PLAN_CREDITS, SUB_DAILY_CREDITS
-    monthly = PLAN_CREDITS.get(plan, 0)
+    from routes.paddle_webhook import credits_for_price, SUB_DAILY_CREDITS
+    monthly = credits_for_price(price_id, plan)
     cur = conn.cursor()
     cur.execute("""UPDATE users
                       SET is_subscribed         = 1,
@@ -386,10 +394,9 @@ def _clamp_trial_credits(conn, user_id, plan):
     """
     import credits as credits_mod
     allowance = credits_mod.trial_allowance(plan)
-    if allowance <= 0:
-        return None
     cur = conn.cursor()
-    cur.execute("""SELECT credits_monthly, credits_balance
+    cur.execute("""SELECT credits_monthly, credits_balance,
+                          credits_monthly_limit
                      FROM users WHERE id = %s""", (user_id,))
     row = cur.fetchone()
     if not row:
@@ -399,7 +406,18 @@ def _clamp_trial_credits(conn, user_id, plan):
                      else row[0]) or 0)
     balance = float((row["credits_balance"] if isinstance(row, dict)
                      else row[1]) or 0)
-    if monthly <= allowance:
+    try:
+        if isinstance(row, dict):
+            stored = int(row.get("credits_monthly_limit") or 0)
+        else:
+            stored = int(row[2] or 0) if len(row) > 2 else 0
+    except (TypeError, ValueError, IndexError):
+        stored = 0
+    # A live trial sold on the previous price keeps that allowance. Never
+    # shrink it to the new shopfront's 10% slice.
+    if stored > allowance:
+        allowance = stored
+    if allowance <= 0 or monthly <= allowance:
         cur.close()
         return None
     # Clamp the pool, and take the same amount off the balance rather than

@@ -260,10 +260,14 @@ def test_first_planning_call_chooses_an_evidence_bound_treatment():
     p = agent_prompt.SYSTEM_PROMPT
     for phrase in (
             "Do not accept the first plausible pile of techniques",
-            "choose ONE from observed footage/transcript/audio/reference/brief evidence",
-            "treatment, decision_basis, shared coherence_rules",
+            "use the FORMAT CAST as a candidate slate",
+            "choose the dominant editorial_family quality contract plus ONE specific treatment",
+            "record decision_basis, shared coherence_rules",
+            "MAKE DEPARTMENT CHOICES EXECUTABLE",
+            "silence, the base picture, stillness and natural color can win",
             "exact transcript sentence and/or shot evidence_ids",
-            "rejects plausible-looking invented times"):
+            "compare_uploaded_media ONCE",
+            "DIRECT-SIGHT READS ARE SEQUENTIAL EVIDENCE"):
         assert phrase in p
 
 

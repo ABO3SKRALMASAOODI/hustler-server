@@ -108,6 +108,22 @@ def _quality_scorecard(rows):
     """
     cohorts = {}
 
+    def distribution(values):
+        """Small exact cohort distribution without a stats dependency."""
+        ordered = sorted(float(value or 0) for value in values)
+        if not ordered:
+            return {"p50": 0.0, "p90": 0.0, "max": 0.0}
+
+        def pct(q):
+            if len(ordered) == 1:
+                return ordered[0]
+            pos = (len(ordered) - 1) * q
+            lo, hi = int(pos), min(int(pos) + 1, len(ordered) - 1)
+            return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+        return {"p50": round(pct(.5), 3), "p90": round(pct(.9), 3),
+                "max": round(ordered[-1], 3)}
+
     def number(value):
         try:
             return float(value or 0)
@@ -124,17 +140,29 @@ def _quality_scorecard(rows):
             "code_version": code, "editorial_family": family,
             "turns": 0, "outcomes": {}, "quality": {}, "audio_review": {},
             "story_review": {},
+            "tool_outcomes": {}, "model_call_purposes": {},
+            "editorial_decisions": {}, "editorial_choices": {},
+            "treatment_choices": {},
+            "decision_placements": {},
             "user_feedback": {"up": 0, "down": 0, "unrated": 0},
             "behavior": {"exported_before_next_request": 0,
                          "rapid_followup": 0, "no_observed_signal": 0},
             "contract_versions": {},
-            "sums": {"tokens_in": 0.0, "tokens_out": 0.0,
+            "sums": {"tokens_in": 0.0, "tokens_cached_in": 0.0,
+                     "tokens_out": 0.0,
                      "estimated_model_cost_usd": 0.0,
                      "cache_ratio": 0.0, "versions_written": 0.0,
                      "previews_rendered": 0.0, "tool_schema_chars": 0.0,
                      "model_calls": 0.0, "agent_dispatches": 0.0,
                      "tool_calls": 0.0,
                      "audio_mix_reviews": 0.0, "audio_asset_reviews": 0.0,
+                     "audio_mix_reviews_reused": 0.0,
+                     "visual_reviews_reused": 0.0,
+                     "audio_passes_reopened": 0.0,
+                     "audio_repairs_resolved": 0.0,
+                     "visual_passes_reopened": 0.0,
+                     "visual_repairs_resolved": 0.0,
+                     "complete_previews_routed_to_proof": 0.0,
                      "audio_review_clips": 0.0,
                      "story_reviews": 0.0,
                      "screening_frames": 0.0,
@@ -147,7 +175,47 @@ def _quality_scorecard(rows):
                      "clean_finishing_checkpoints": 0.0,
                      "post_pass_variations_prevented": 0.0,
                      "candidates_measured": 0.0,
-                     "candidates_heard": 0.0},
+                     "candidates_heard": 0.0,
+                     "broll_sequence_casts": 0.0,
+                     "broll_moments_cast": 0.0,
+                     "broll_moments_abstained": 0.0,
+                     "broll_renditions_reviewed": 0.0,
+                     "broll_renditions_rejected": 0.0,
+                     "broll_renditions_uncertain": 0.0,
+                    "sfx_abstentions": 0.0,
+                    "music_abstentions": 0.0,
+                    "caption_treatment_casts": 0.0,
+                    "caption_visual_casts": 0.0,
+                     "caption_visual_cast_fallbacks": 0.0,
+                     "caption_proof_candidates_rendered": 0.0,
+                     "caption_proof_pages": 0.0,
+                     "uploaded_media_comparisons": 0.0,
+                     "uploaded_media_assets_requested": 0.0,
+                     "uploaded_media_assets_compared": 0.0,
+                     "uploaded_media_frames_compared": 0.0,
+                     "uploaded_media_comparison_pages": 0.0,
+                     "editorial_family_explicit": 0.0,
+                     "format_cast_confidence": 0.0,
+                     "format_cast_abstained": 0.0,
+                     "department_decisions": 0.0,
+                     "department_promises": 0.0,
+                     "department_promises_fulfilled": 0.0,
+                     "department_execution_gaps": 0.0,
+                     "motion_contract_active": 0.0,
+                     "motion_contract_beats": 0.0,
+                     "motion_contract_mapped_beats": 0.0,
+                     "motion_contract_fulfilled_beats": 0.0,
+                     "motion_contract_gaps": 0.0,
+                     "department_closure_rejections": 0.0,
+                     "readiness_previews_prevented": 0.0,
+                     "treatment_judge_reviews": 0.0,
+                     "treatment_judge_reviews_reused": 0.0,
+                     "treatment_judge_accepts": 0.0,
+                     "treatment_judge_revisions": 0.0,
+                     "treatment_judge_abstentions": 0.0},
+            "samples": {key: [] for key in (
+                "tokens_in", "agent_dispatches", "model_calls",
+                "tool_calls", "versions_written", "previews_rendered")},
             "rubric": {d: {"strong": 0, "adequate": 0, "weak": 0,
                             "not_judged": 0, "missing": 0}
                        for d in _QUALITY_RUBRIC_DIMENSIONS},
@@ -158,6 +226,44 @@ def _quality_scorecard(rows):
         c["outcomes"][outcome] = c["outcomes"].get(outcome, 0) + 1
         quality = str(meta.get("quality_status") or "unknown")
         c["quality"][quality] = c["quality"].get(quality, 0) + 1
+        for kind, count in (meta.get("tool_outcomes") or {}).items():
+            kind = str(kind or "unknown")
+            c["tool_outcomes"][kind] = (
+                c["tool_outcomes"].get(kind, 0) + int(number(count)))
+        for purpose, count in (
+                metrics.get("model_calls_by_purpose") or {}).items():
+            purpose = str(purpose or "unknown")
+            c["model_call_purposes"][purpose] = (
+                c["model_call_purposes"].get(purpose, 0)
+                + int(number(count)))
+        for decision in metrics.get("editorial_decisions") or []:
+            if not isinstance(decision, dict):
+                continue
+            label = (str(decision.get("kind") or "unknown") + ":" +
+                     str(decision.get("decision") or "unknown"))
+            c["editorial_decisions"][label] = (
+                c["editorial_decisions"].get(label, 0) + 1)
+            # Stable, reusable treatment facets only. Candidate ids, URLs,
+            # free-form reasons and transcript words are intentionally absent.
+            for facet in ("preset", "placement_strategy", "emphasis",
+                          "animation", "layout"):
+                value = decision.get(facet)
+                if value in (None, "", []):
+                    continue
+                choice = f"{decision.get('kind') or 'unknown'}:{facet}={value}"
+                c["editorial_choices"][choice] = (
+                    c["editorial_choices"].get(choice, 0) + 1)
+            placement = str(decision.get("placement_status") or "unknown")
+            c["decision_placements"][placement] = (
+                c["decision_placements"].get(placement, 0) + 1)
+        for facet, raw in (metrics.get("treatment_profile") or {}).items():
+            values = raw if isinstance(raw, list) else [raw]
+            for value in values:
+                if not isinstance(value, (str, int, float, bool)):
+                    continue
+                choice = f"{facet}={value}"
+                c["treatment_choices"][choice] = (
+                    c["treatment_choices"].get(choice, 0) + 1)
         feedback = str(meta.get("feedback") or "unrated")
         if feedback not in c["user_feedback"]:
             feedback = "unrated"
@@ -176,6 +282,7 @@ def _quality_scorecard(rows):
             default=None)
         sums = c["sums"]
         sums["tokens_in"] += number(metrics.get("tokens_in"))
+        sums["tokens_cached_in"] += number(metrics.get("tokens_cached_in"))
         sums["tokens_out"] += number(metrics.get("tokens_out"))
         sums["estimated_model_cost_usd"] += number(
             metrics.get("estimated_model_cost_usd"))
@@ -184,6 +291,12 @@ def _quality_scorecard(rows):
         sums["agent_dispatches"] += number(metrics.get("agent_dispatches"))
         sums["tool_calls"] += number(metrics.get("tool_calls"))
         sums["audio_mix_reviews"] += number(metrics.get("audio_mix_reviews"))
+        for key in ("audio_mix_reviews_reused", "visual_reviews_reused",
+                    "audio_passes_reopened", "audio_repairs_resolved",
+                    "visual_passes_reopened", "visual_repairs_resolved"):
+            sums[key] += number(metrics.get(key))
+        sums["complete_previews_routed_to_proof"] += number(
+            metrics.get("complete_previews_routed_to_proof"))
         sums["audio_asset_reviews"] += number(
             metrics.get("audio_asset_reviews"))
         sums["audio_review_clips"] += number(metrics.get("audio_review_clips"))
@@ -208,6 +321,42 @@ def _quality_scorecard(rows):
              "broll_candidates_compared", "motion_profiles_measured"))
         sums["candidates_heard"] += sum(number(metrics.get(key)) for key in
             ("music_candidates_heard", "sfx_candidates_heard"))
+        for key in ("broll_sequence_casts", "broll_moments_cast",
+                    "broll_moments_abstained",
+                    "broll_renditions_reviewed",
+                    "broll_renditions_rejected",
+                    "broll_renditions_uncertain", "sfx_abstentions",
+                    "music_abstentions"):
+            sums[key] += number(metrics.get(key))
+        for key in ("caption_treatment_casts", "caption_visual_casts",
+                    "caption_visual_cast_fallbacks",
+                    "caption_proof_candidates_rendered",
+                    "caption_proof_pages"):
+            sums[key] += number(metrics.get(key))
+        for key in ("uploaded_media_comparisons",
+                    "uploaded_media_assets_requested",
+                    "uploaded_media_assets_compared",
+                    "uploaded_media_frames_compared",
+                    "uploaded_media_comparison_pages",
+                    "editorial_family_explicit", "format_cast_confidence",
+                    "format_cast_abstained", "department_decisions",
+                    "department_promises",
+                    "department_promises_fulfilled",
+                    "department_execution_gaps",
+                    "motion_contract_active", "motion_contract_beats",
+                    "motion_contract_mapped_beats",
+                    "motion_contract_fulfilled_beats",
+                    "motion_contract_gaps",
+                    "department_closure_rejections",
+                    "readiness_previews_prevented",
+                    "treatment_judge_reviews",
+                    "treatment_judge_reviews_reused",
+                    "treatment_judge_accepts",
+                    "treatment_judge_revisions",
+                    "treatment_judge_abstentions"):
+            sums[key] += number(metrics.get(key))
+        for key in c["samples"]:
+            c["samples"][key].append(number(metrics.get(key)))
         qe = metrics.get("quality_evidence") or {}
         sums["screening_frames"] += number(qe.get("screening_frames"))
         sums["screening_pages"] += number(qe.get("screening_pages"))
@@ -235,8 +384,39 @@ def _quality_scorecard(rows):
     out = []
     for cohort in cohorts.values():
         n = max(1, cohort["turns"])
+        totals = cohort.pop("sums")
         cohort["averages"] = {
-            key: round(value / n, 3) for key, value in cohort.pop("sums").items()
+            key: round(value / n, 3) for key, value in totals.items()
+        }
+        cohort["distributions"] = {
+            key: distribution(values)
+            for key, values in cohort.pop("samples").items()}
+        dispatches = totals["agent_dispatches"]
+        recipe_calls = totals["recipe_calls"]
+        recipe_commits = totals["recipe_commits"]
+        cohort["efficiency"] = {
+            "weighted_prompt_cache_ratio": round(
+                totals["tokens_cached_in"] / totals["tokens_in"], 3)
+            if totals["tokens_in"] else 0.0,
+            "input_tokens_per_agent_dispatch": round(
+                totals["tokens_in"] / dispatches, 1)
+            if dispatches else 0.0,
+            "agent_dispatches_per_written_version": round(
+                dispatches / totals["versions_written"], 3)
+            if totals["versions_written"] else 0.0,
+            "recipe_commit_rate": round(recipe_commits / recipe_calls, 3)
+            if recipe_calls else None,
+            "operations_per_recipe_commit": round(
+                totals["recipe_operations_committed"] / recipe_commits, 3)
+            if recipe_commits else 0.0,
+            "department_promise_fulfillment_rate": round(
+                totals["department_promises_fulfilled"] /
+                totals["department_promises"], 3)
+            if totals["department_promises"] else None,
+            "motion_contract_fulfillment_rate": round(
+                totals["motion_contract_fulfilled_beats"] /
+                totals["motion_contract_mapped_beats"], 3)
+            if totals["motion_contract_mapped_beats"] else None,
         }
         rated = cohort["user_feedback"]["up"] + \
             cohort["user_feedback"]["down"]

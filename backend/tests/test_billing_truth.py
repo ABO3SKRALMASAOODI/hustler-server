@@ -40,17 +40,17 @@ def test_every_live_plan_has_a_price():
 
 
 def test_prices_match_the_pricing_page():
-    assert billing.monthly_value('ai') == 30
-    assert billing.monthly_value('ai_pro') == 50
-    assert billing.monthly_value('ai_max') == 100
+    assert billing.monthly_value('ai') == 15
+    assert billing.monthly_value('ai_pro') == 30
+    assert billing.monthly_value('ai_max') == 50
 
 
 def test_yearly_is_amortised_not_counted_whole():
-    """A yearly Creator is $300 a year, which is $25 of MRR — not $300 (twelve
-    times the truth) and not $30 (the monthly sticker, ignoring the discount)."""
-    assert billing.monthly_value('ai', 'yearly') == 25.0
-    assert billing.monthly_value('ai_pro', 'yearly') == pytest.approx(41.67, abs=0.01)
-    assert billing.monthly_value('ai_max', 'yearly') == pytest.approx(83.33, abs=0.01)
+    """A yearly Creator is $150 a year, which is $12.50 of MRR — not $150
+    (twelve times the truth) and not $15 (the monthly sticker)."""
+    assert billing.monthly_value('ai', 'yearly') == 12.5
+    assert billing.monthly_value('ai_pro', 'yearly') == 25.0
+    assert billing.monthly_value('ai_max', 'yearly') == pytest.approx(41.67, abs=0.01)
 
 
 def test_an_unknown_plan_is_worth_nothing_not_a_crash():
@@ -142,9 +142,9 @@ def test_past_due_is_a_failure_not_a_grant():
 # ── The trial cap ───────────────────────────────────────────────────────────
 
 def test_trial_allowance_is_a_tenth_of_the_plan():
-    assert credits.trial_allowance('ai') == 200
-    assert credits.trial_allowance('ai_pro') == 400
-    assert credits.trial_allowance('ai_max') == 1000
+    assert credits.trial_allowance('ai') == 100
+    assert credits.trial_allowance('ai_pro') == 200
+    assert credits.trial_allowance('ai_max') == 500
 
 
 class _Cur:
@@ -197,15 +197,27 @@ def test_a_trial_holding_ten_times_its_allowance_is_clamped():
     conn = _Conn([{"credits_monthly": 3924.80, "credits_balance": 3924.80}])
     before, after = billing_sync._clamp_trial_credits(conn, 212, 'ai_pro')
     assert before == 3924.80
-    assert after == 400.0
+    assert after == 200.0
     sql, params = conn._cur.executed[-1]
     assert "credits_monthly" in sql and "GREATEST(0, credits_balance - %s)" in sql
-    assert params[0] == 400          # the allowance
-    assert params[2] == pytest.approx(3524.80)   # the overage removed
+    assert params[0] == 200          # the shopfront trial allowance
+    assert params[2] == pytest.approx(3724.80)   # the overage removed
+
+
+def test_a_legacy_trial_keeps_the_allowance_it_was_sold():
+    """An in-flight $50 Pro trial was granted 400. The new shopfront
+    allowance is 200 — clamping to that would cut a live trial in half."""
+    conn = _Conn([{
+        "credits_monthly": 400.0,
+        "credits_balance": 380.0,
+        "credits_monthly_limit": 400,
+    }])
+    assert billing_sync._clamp_trial_credits(conn, 1, 'ai_pro') is None
+    assert conn.committed == 0
 
 
 def test_a_trial_inside_its_allowance_is_left_alone():
-    conn = _Conn([{"credits_monthly": 150.0, "credits_balance": 170.0}])
+    conn = _Conn([{"credits_monthly": 80.0, "credits_balance": 90.0}])
     assert billing_sync._clamp_trial_credits(conn, 1, 'ai') is None
     assert conn.committed == 0
 

@@ -29,6 +29,37 @@ def test_parse_report_accepts_fenced_json_and_normalizes_findings():
     assert len(lines) == 1 and "blank wall" in lines[0]
 
 
+def test_motion_finding_preserves_exact_repair_identity():
+    report = preview_critic.parse_report(
+        '{"verdict":"repair","findings":[{'
+        '"severity":"major","category":"motion_path","time_s":5.2,'
+        '"target_id":"z-proof","motion_motif":"proof_lock",'
+        '"evidence":"the path travels across the face before settling",'
+        '"repair":"move the middle waypoint below the face",'
+        '"confidence":0.94}]}')
+
+    finding = report["findings"][0]
+    assert finding["target_id"] == "z-proof"
+    assert finding["motion_motif"] == "proof_lock"
+    line = preview_critic.repair_lines(report)[0]
+    assert "target=z-proof" in line and "motif=proof_lock" in line
+
+    untargeted = {"verdict": "repair", "findings": [dict(
+        finding, target_id=None)]}
+    assert preview_critic.repair_lines(untargeted) == []
+
+
+def test_priority_context_survives_large_supporting_history():
+    context = preview_critic.pack_context(
+        ["MOTION CONTRACT: proof_lock", "B-ROLL PURPOSE: exact product"],
+        ["OLD CONVERGENCE HISTORY " + ("x" * 30000)])
+
+    assert len(context) <= preview_critic._CONTEXT_MAX_CHARS
+    assert "MOTION CONTRACT: proof_lock" in context
+    assert "B-ROLL PURPOSE: exact product" in context
+    assert context.index("MOTION CONTRACT") < context.index("OLD CONVERGENCE")
+
+
 def test_malformed_or_low_confidence_review_cannot_block_delivery():
     assert preview_critic.parse_report("not json") is None
     report = preview_critic.parse_report(
@@ -204,6 +235,54 @@ def test_in_house_render_keeps_independent_critic(monkeypatch):
     monkeypatch.setattr(agent_tools, "_independent_preview_review",
                         lambda *_args: expected)
     assert agent_tools._preview_critic_report(Ctx(), {}, []) is expected
+
+
+def test_visual_review_reuses_identical_picture_and_tracks_convergence(
+        monkeypatch):
+    calls = []
+
+    class Ctx:
+        sight_out = False
+        edit_plan = {"treatment": "restrained founder proof"}
+        index = {"video": {"sha256": "source"}}
+        editing_metrics = {}
+        _visual_review_cache = {}
+        _last_visual_review_state = None
+        edl = {"keep": [[0, 10]], "captions": None,
+               "music": [{"id": "m1", "gain_db": -20}]}
+
+        def latest_edl(self):
+            return {"json": self.edl}
+
+    ctx = Ctx()
+
+    def review(_ctx, _result, _plan=None, convergence_context=None):
+        calls.append(convergence_context)
+        return {"verdict": "pass", "findings": []}
+
+    monkeypatch.setattr(agent_tools, "_independent_preview_review", review)
+    first = agent_tools._preview_critic_report(ctx, {}, [])
+    ctx.edl = {**ctx.edl, "music": [{"id": "m1", "gain_db": -26}]}
+    reused = agent_tools._preview_critic_report(ctx, {}, [])
+    assert first is reused
+    assert len(calls) == 1
+    assert ctx.editing_metrics["visual_reviews_reused"] == 1
+
+    ctx.edit_plan = {
+        "treatment": "restrained founder proof",
+        "department_plan": {
+            "color": {"mode": "author", "purpose": "warm proof world"},
+        },
+    }
+    agent_tools._preview_critic_report(ctx, {}, [])
+    assert len(calls) == 2
+
+    ctx.edl = {**ctx.edl, "effects": {"grade": "warm"}}
+    agent_tools._preview_critic_report(ctx, {}, [])
+    assert len(calls) == 3
+    assert "prior independently reviewed picture verdict was pass" in calls[2]
+    assert "effects(grade)" in calls[2]
+    assert "Do not reopen an untouched" in calls[2]
 
 
 def test_critic_compares_framing_treatment_across_shots(monkeypatch):

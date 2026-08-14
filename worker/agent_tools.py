@@ -2,9 +2,11 @@
 short instructive string the model can act on, every output fits the token
 budget. Write tools create new EDL versions and return one-line diffs."""
 
+import copy
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -15,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import audio_qc
 import audit
+import broll_judge
+import caption_judge
 import captions as caplib
 import config
 import db as dbx
@@ -31,6 +35,7 @@ import media
 import model_prices
 import music_search
 import music_judge
+import motion_contract
 import motion_judge
 import net_fetch
 import perception
@@ -52,6 +57,7 @@ import storage
 import story_critic
 import subject
 import taste
+import treatment_judge
 import videogen
 import cursor as cursorlib
 import screendet
@@ -155,6 +161,13 @@ class ToolContext:
         self._write_replay_results = {}
         self._music_hits = {}         # search_music results this turn, by id
         self._music_auditions = {}    # result id -> measured acoustic analysis
+        self._last_music_listener_choice = None
+        self._last_caption_cast = None
+        # Whole-program treatments on genuinely ambiguous briefs get one
+        # independent evidence-bounded review before any EDL write. Exact
+        # repeats reuse the result; a changed treatment earns a fresh review.
+        self._treatment_review_cache = {}
+        self._last_treatment_review = None
         self._sfx_hits = {}           # search_sfx results this turn, by id
         self._sfx_auditions = {}      # result id -> measured transient analysis
         # Compact cohort telemetry persisted with the assistant outcome. It
@@ -188,8 +201,10 @@ class ToolContext:
         # next reasoning step so "review before use" is literally true.
         self._pending_visual_review_assets = set()
         self._last_download_review_text = None
+        self._last_download_rendition_judgment = None
         self._last_candidate_review_text = None
         self._last_broll_board_review = None
+        self._last_broll_board_cast = None
         self.direct_sight = False
         self.sight_out = False
         # Durable project direction, loaded by the agent/MCP entry point and
@@ -203,6 +218,14 @@ class ToolContext:
         # a reviewer outage cannot block a user's chosen track or a valid EDL.
         self.last_audio_review = None
         self.audio_reviewed_versions = set()
+        # Independent finishing judgment is cached by the part of the
+        # rendered program that the reviewer can actually perceive. A color
+        # tweak must not buy a fresh audio opinion; a gain tweak must not let
+        # the visual critic relitigate typography. Exact modality identity,
+        # not a call-count allowance, controls reuse.
+        self._audio_review_cache = {}
+        self._visual_review_cache = {}
+        self._last_visual_review_state = None
         # EDL versions this turn already enqueued a SPECULATIVE preview for
         # (round 98) — the loop's fire-ahead encode. Bounds repeats and lets
         # render_preview adopt instead of re-enqueueing.
@@ -220,6 +243,11 @@ class ToolContext:
         # later EDL write.
         self.last_story_review = None
         self.story_reviewed_versions = set()
+        # Exact blueprint promises contradicted by the latest rendered EDL.
+        # Unlike taste findings these are structural: "author music" with an
+        # empty music layer cannot be marked complete, while preserve/omit
+        # remain legitimate choices.
+        self.last_department_gaps = []
         # What the user asked for THIS turn, verbatim. Read only to SUPPRESS
         # taste findings (round 52): a fade from black is a defect on a reel
         # right up until the moment somebody asks for one, and a critic that
@@ -512,6 +540,95 @@ def _metric(ctx, key, amount=1):
         metrics = {}
         setattr(ctx, "editing_metrics", metrics)
     metrics[key] = metrics.get(key, 0) + amount
+
+
+_MOTION_MOTIF_ID = re.compile(r"^[a-z][a-z0-9_-]{0,47}$")
+
+
+def _motion_motif_value(ctx, value, *, allow_clear=False):
+    """Validate durable event provenance against the active vocabulary."""
+    if value is None:
+        return None, None
+    motif = str(value).strip().lower()
+    if allow_clear and motif in {"", "none", "off", "clear"}:
+        return None, None
+    if motif == "hold":
+        return None, ("REJECTED: 'hold' is a deliberately still sequence "
+                      "beat, not a motif that can be attached to an animated "
+                      "EDL event.")
+    if not _MOTION_MOTIF_ID.fullmatch(motif):
+        return None, ("REJECTED: motion_motif must be a short lowercase "
+                      "identifier beginning with a letter, such as "
+                      "'proof_push'.")
+    plan = director.normalize_blueprint(getattr(ctx, "edit_plan", None)) or {}
+    language = plan.get("motion_language") or {}
+    declared = [row["id"] for row in language.get("motifs") or []]
+    if declared and motif not in declared:
+        return None, (f"REJECTED: motion_motif {motif!r} is not declared by "
+                      "the active motion language. Use one of: "
+                      + ", ".join(declared) + ".")
+    return motif, None
+
+
+_DECISION_TRACE_FIELDS = {
+    "moment_id", "candidate_ids", "decision", "candidate_id", "confidence",
+    "evidence", "reason", "asset_key", "purpose", "at", "window",
+    "review_stage", "alignment", "provider", "element_id", "source",
+    "preset", "position", "animation", "font", "effect", "layout",
+    "emphasis", "emphasis_mode", "emphasis_count", "placement_strategy",
+    "max_words_per_caption", "candidate_count", "rejected",
+}
+
+
+def _decision_trace(ctx, kind, **values):
+    """Persist one compact selection fact with the assistant outcome.
+
+    Thumbs/export/follow-up behavior is attached to that same message row, so
+    the trace becomes reusable ranking evidence without a new schema. Raw URLs
+    and arbitrary model payloads are excluded and the list is tightly bounded.
+    """
+    metrics = getattr(ctx, "editing_metrics", None)
+    if metrics is None:
+        metrics = {}
+        setattr(ctx, "editing_metrics", metrics)
+    rows = metrics.setdefault("editorial_decisions", [])
+    if not isinstance(rows, list):
+        rows = []
+        metrics["editorial_decisions"] = rows
+    if len(rows) >= 32:
+        metrics["editorial_decisions_dropped"] = (
+            int(metrics.get("editorial_decisions_dropped") or 0) + 1)
+        return
+
+    def clean(value):
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            number = float(value)
+            return round(number, 4) if math.isfinite(number) else None
+        if isinstance(value, str):
+            return " ".join(value.split())[:420]
+        if isinstance(value, (list, tuple)):
+            items = []
+            for item in list(value)[:12]:
+                if not isinstance(item, (str, int, float, bool)):
+                    continue
+                normalized = clean(item)
+                if normalized not in (None, "", []):
+                    items.append(normalized)
+            return items
+        return None
+
+    row = {"kind": " ".join(str(kind or "unknown").split())[:80],
+           "sequence": len(rows) + 1}
+    for key, value in values.items():
+        if key not in _DECISION_TRACE_FIELDS:
+            continue
+        normalized = clean(value)
+        if normalized not in (None, "", []):
+            row[key] = normalized
+    rows.append(row)
+    metrics["editorial_decisions_recorded"] = len(rows)
 
 
 def _loaded_skills(ctx):
@@ -1383,7 +1500,8 @@ def _deliver_frames(ctx, frames, labels, question, subject_line):
 
 
 def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
-                        prog_end, is_main, crop=None, fit=None):
+                        prog_end, is_main, crop=None, fit=None,
+                        output_size=None):
     """The round-72 geometry step of _look_at_output: one decoded frame ->
     what the RENDER shows at that output second. Fit first (the same
     cover-crop / letterbox _normalize_video applies, mirrored by
@@ -1412,8 +1530,12 @@ def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
         changed = True
     if canvas:
         w, h = img.size
-        ow = 640
-        oh = max(2, round(ow * canvas[1] / canvas[0]))
+        if output_size:
+            ow, oh = (max(2, int(output_size[0])),
+                      max(2, int(output_size[1])))
+        else:
+            ow = 640
+            oh = max(2, round(ow * canvas[1] / canvas[0]))
         kind, x0, y0, x1, y1 = renderer.fit_fractions(
             w, h, canvas[0], canvas[1], mode, focus if is_main else None)
         if x1 - x0 < 0.999 or y1 - y0 < 0.999:
@@ -1436,6 +1558,9 @@ def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
                                 Image.LANCZOS)
                 base.paste(fg, (round(ow * x0), round(oh * y0)))
                 img = base
+            changed = True
+        if output_size and img.size != (ow, oh):
+            img = img.resize((ow, oh), Image.LANCZOS)
             changed = True
     suffix = ""
     if z > 1.005:
@@ -2014,6 +2139,221 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
                       "or a narrower start/end to zoom into a region)"
                 + (f"\n{measured}" if measured else "")
                 + (f"\n{ref_grammar}" if ref_grammar else ""))
+
+
+def _comparison_sample_times(index, duration, count):
+    """Spread visual evidence across distinct real shots when possible."""
+    duration = max(0.05, float(duration or 0.05))
+    count = max(1, int(count or 1))
+    shot_midpoints = []
+    for shot in (index or {}).get("shots") or []:
+        try:
+            start, end = float(shot["start"]), float(shot["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end > start:
+            shot_midpoints.append((start + end) / 2.0)
+
+    def spread(values, amount):
+        if amount >= len(values):
+            return list(values)
+        if amount == 1:
+            return [values[len(values) // 2]]
+        return [values[round(i * (len(values) - 1) / (amount - 1))]
+                for i in range(amount)]
+
+    times = spread(shot_midpoints, min(count, len(shot_midpoints)))
+    # A locked-off performance is one shot but still changes over time. Fill
+    # the remaining evidence density uniformly rather than returning one frame
+    # and mistaking a static camera for static content.
+    uniform = [duration * (i + 0.5) / count for i in range(count)]
+    for value in uniform:
+        if len(times) >= count:
+            break
+        if all(abs(value - old) > 0.08 for old in times):
+            times.append(value)
+    times = sorted(times[:count])
+    return [round(min(max(value, 0.0), max(0.0, duration - 0.02)), 3)
+            for value in times]
+
+
+def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
+    """Show several uploaded clips/images together in one evidence turn.
+
+    This is the story-wide counterpart to ``look_at_asset``.  The caller names
+    every relevant candidate; none is silently shortlisted.  Representative
+    real frames are decoded in parallel on the executor, placed on dynamic
+    readable pages, and labeled with file-local times plus exact index IDs so
+    the resulting sequence_map can be submitted without another lookup.
+    """
+    if not isinstance(asset_keys, (list, tuple)) or not asset_keys:
+        return ("REJECTED: asset_keys must be a non-empty array of exact "
+                "storage_keys from list_assets. Put every relevant uploaded "
+                "clip/image in ONE call for a story-wide comparison.")
+    keys = []
+    for raw in asset_keys:
+        key = str(raw or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    if not keys:
+        return "REJECTED: asset_keys contains no usable storage_key."
+    try:
+        samples_per_asset = int(samples_per_asset or 4)
+    except (TypeError, ValueError):
+        return "REJECTED: samples_per_asset must be an integer."
+    if not 1 <= samples_per_asset <= 12:
+        return ("REJECTED: samples_per_asset must be 1..12. This controls "
+                "visual sampling density only; it never removes an asset "
+                "candidate from the comparison.")
+
+    fingerprint = ("compare_uploaded_media", tuple(keys), samples_per_asset)
+    evidence = _evidence_cache(ctx)
+    if fingerprint in evidence:
+        _metric(ctx, "visual_decodes_reused")
+        return ("UNCHANGED UPLOADED-MEDIA COMPARISON — these exact assets and "
+                "sampling density were already delivered earlier in this "
+                "turn. Use the labeled comparison pages already in context.")
+
+    assets = []
+    for key in keys:
+        asset, err = _resolve_media_asset(
+            ctx, key, ("video_clip", "image_ref"))
+        if err:
+            return err + " No comparison was run, so the candidate set remains complete."
+        assets.append(asset)
+
+    plans = []
+    for number, asset in enumerate(assets, 1):
+        idx = {}
+        if asset.get("sha256"):
+            try:
+                row = ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+                idx = (row or {}).get("json") or {}
+            except Exception:
+                idx = {}
+        if asset["kind"] == "image_ref":
+            times = [0.0]
+        else:
+            try:
+                duration = _asset_media_duration(ctx, asset)
+            except Exception as exc:
+                return (f"REJECTED: could not determine duration for "
+                        f"{asset['storage_key']!r} ({str(exc)[:160]}). No "
+                        "comparison was run.")
+            times = _comparison_sample_times(idx, duration, samples_per_asset)
+        plans.append({"number": number, "asset": asset, "index": idx,
+                      "times": times})
+
+    def decode(plan):
+        asset = plan["asset"]
+        if asset["kind"] == "image_ref":
+            try:
+                return plan, [(0, _asset_local_path(ctx, asset))], None
+            except Exception as exc:
+                return plan, [], str(exc)
+        pairs, err = _asset_frames(
+            ctx, asset, plan["times"], width=640,
+            tag=f"compare{plan['number']}", measure_motion=False)
+        return plan, pairs, err
+
+    decoded = []
+    if remote.frames_available() and len(plans) > 1:
+        # Each executor request decodes one source once for all its frames.
+        # Parallel files collapse wall time without placing simultaneous 4K
+        # decodes on the small dispatcher (the local path stays sequential).
+        with ThreadPoolExecutor(max_workers=min(4, len(plans))) as pool:
+            futures = [pool.submit(decode, plan) for plan in plans]
+            for future in as_completed(futures):
+                decoded.append(future.result())
+        decoded.sort(key=lambda row: row[0]["number"])
+    else:
+        decoded = [decode(plan) for plan in plans]
+
+    frames, frame_labels, catalog, failures = [], [], [], []
+    seen_bucket = ("_pending_looked_asset_times"
+                   if getattr(ctx, "direct_sight", False)
+                   else "_looked_asset_times")
+    seen = getattr(ctx, seen_bucket, None)
+    if seen is None:
+        seen = {}
+        setattr(ctx, seen_bucket, seen)
+    for plan, pairs, err in decoded:
+        asset, idx, times = plan["asset"], plan["index"], plan["times"]
+        number = plan["number"]
+        key = asset["storage_key"]
+        name = _asset_name(asset)
+        role = (asset.get("meta") or {}).get("role")
+        samples = []
+        for pair_index, path in pairs:
+            sample_t = float(times[pair_index])
+            ids = director.source_evidence_ids_at(idx, sample_t)
+            id_label = ",".join(ids[:3]) or "no-index-id"
+            label = f"A{number} @{sample_t:.2f}s ids={id_label}"
+            frames.append(path)
+            frame_labels.append(label)
+            samples.append({"time_s": round(sample_t, 3),
+                            "evidence_ids": ids})
+            seen.setdefault(str(key), set()).add(sample_t)
+        if not pairs:
+            failures.append(f"A{number} {key}: {(err or 'no frames')[:160]}")
+        role_note = (" STYLE-REFERENCE-ONLY" if role in {
+            "edit_reference", "shorts_reference"} else "")
+        catalog.append(
+            f"A{number}{role_note} storage_key={json.dumps(key)} "
+            f"name={json.dumps(name)} kind={asset['kind']} samples="
+            + json.dumps(samples, separators=(",", ":")))
+
+    if not frames:
+        return ("Could not decode any comparison evidence: "
+                + "; ".join(failures))
+
+    question = str(question or "").strip() or (
+        "Compare the candidates as one library: identify the strongest exact "
+        "moments and a coherent order for the user's brief; prefer none over "
+        "a weak/redundant clip, and judge relevance, framing, motion, visual "
+        "quality and continuity rather than upload order.")
+    page_size = 8
+    page_count = (len(frames) + page_size - 1) // page_size
+    visual_answers = []
+    for page_number, start in enumerate(range(0, len(frames), page_size), 1):
+        end = start + page_size
+        response = _deliver_frames(
+            ctx, frames[start:end], frame_labels[start:end], question,
+            f"STORY-WIDE UPLOADED-MEDIA COMPARISON page {page_number}/"
+            f"{page_count}; labels A1..A{len(assets)} map to the catalog in "
+            "the tool result. Compare across ALL pages before choosing")
+        if not (getattr(ctx, "sight_out", False) or
+                (getattr(ctx, "direct_sight", False) and
+                 llm.agent_sees(ctx.agent_model))):
+            visual_answers.append(
+                f"Page {page_number}/{page_count} vision: {response}")
+
+    evidence.add(fingerprint)
+    _metric(ctx, "uploaded_media_comparisons")
+    _metric(ctx, "uploaded_media_assets_requested", len(assets))
+    _metric(ctx, "uploaded_media_assets_compared", len(assets) - len(failures))
+    _metric(ctx, "uploaded_media_frames_compared", len(frames))
+    _metric(ctx, "uploaded_media_comparison_pages", page_count)
+    result = (
+        f"Compared {len(assets)} uploaded asset(s) from {len(frames)} real "
+        f"frame(s) on {page_count} page(s). "
+        + ("Every supplied candidate has visual evidence; " if not failures
+           else f"{len(failures)} supplied candidate(s) could not be seen and "
+                "are explicitly listed below; ")
+        + "A-labels and CLIP-second evidence for set_edit_plan:\n"
+        + "\n".join(catalog)
+        + "\nThe comparison pages follow this tool result. Make ONE "
+          "story-wide casting/order decision after reading all pages; a weak "
+          "asset may be deliberately unused. For an auxiliary sequence_map "
+          "beat, copy its storage_key into source_asset_key and its exact "
+          "evidence_ids above."
+    )
+    if failures:
+        result += ("\nINCOMPLETE DECODES (do not pretend these were seen): "
+                   + "; ".join(failures))
+    if visual_answers:
+        result += "\n" + "\n".join(visual_answers)
+    return _cap(result)
 
 
 # ------------------------------------------------------------------ #
@@ -2812,6 +3152,277 @@ def _direct_caption_style(ctx, edl):
         "long-form footage benefits from readable subtitles on a stable contrast panel"
 
 
+def _caption_cast_context(ctx, edl):
+    """Measured/contextual evidence for the independent type director."""
+    words = []
+    keep = edl.get("keep") or []
+    for row in (getattr(ctx, "index", None) or {}).get("words") or []:
+        try:
+            mid = (float(row["t0"]) + float(row["t1"])) / 2.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if keep and not any(float(a) - .05 <= mid <= float(b) + .05
+                            for a, b in keep):
+            continue
+        if str(row.get("w") or "").strip() and not row.get("filler"):
+            words.append(row)
+    duration = max(.1, program_duration(edl))
+    wpm = round(len(words) * 60.0 / duration, 1)
+    plan = getattr(ctx, "edit_plan", None) or {}
+    shots = []
+    for shot in ((getattr(ctx, "index", None) or {}).get("shots") or [])[:8]:
+        caption = shot.get("caption") or {}
+        summary = "; ".join(
+            str(caption.get(key) or "").strip() for key in
+            ("setting", "people", "action", "on_screen_text")
+            if str(caption.get(key) or "").strip())
+        if summary:
+            shots.append(summary[:240])
+    fallback, fallback_reason = _direct_caption_style(ctx, edl)
+    return {
+        "duration_s": round(duration, 2),
+        "ratio": (edl.get("frame") or {}).get("ratio") or "source",
+        "speech_words": len(words), "wpm": wpm,
+        "speakers": int(((getattr(ctx, "index", None) or {}).get(
+            "speakers") or 0)),
+        "kept_transcript_excerpt": " ".join(
+            str(row.get("w") or "") for row in words[:60])[:700],
+        "source_visual_summary": shots,
+        "user_request": str(getattr(ctx, "user_message", "") or "")[:700],
+        "treatment": plan.get("treatment"),
+        "format": plan.get("format"), "audience": plan.get("audience"),
+        "platform": plan.get("platform"), "objective": plan.get("objective"),
+        "caption_direction": plan.get("caption_direction"),
+        "motion_direction": plan.get("motion_direction"),
+        "coherence_rules": (plan.get("coherence_rules") or [])[:6],
+        "deterministic_fallback_candidate": fallback,
+        "fallback_basis": fallback_reason,
+    }
+
+
+def _caption_proof_moment(edl, index):
+    """Choose one demanding real phrase and return its output/source clocks.
+
+    A common timestamp keeps the catalog comparison honest: every preset is
+    judged on the same speaker pixels and transcript landing.  The widest
+    surviving phrase wins because wrapping, hierarchy and face-safe placement
+    reveal much more there than on a convenient two-letter word.
+    """
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    source_words = [row for row in (index.get("words") or [])
+                    if not row.get("filler") and
+                    str(row.get("w") or "").strip()]
+    words = tl.kept_words(source_words)
+    if not words:
+        return None
+    groups, group = [], []
+    for word in words:
+        if group and (float(word["t0"]) - float(group[-1]["t1"]) > .85
+                      or len(group) >= 8):
+            groups.append(group)
+            group = []
+        group.append(word)
+        raw = str(word.get("w") or "").rstrip()
+        if raw.endswith((".", "!", "?", "…")):
+            groups.append(group)
+            group = []
+    if group:
+        groups.append(group)
+
+    duration = max(.1, program_duration(edl))
+
+    def score(words_in_group):
+        text = " ".join(str(row.get("w") or "") for row in words_in_group)
+        width_stress = min(len(text), 72)
+        variety = len({_caption_token_key(row.get("w"))
+                       for row in words_in_group})
+        has_number = any(any(ch.isdigit() for ch in str(row.get("w") or ""))
+                         for row in words_in_group)
+        mid = (float(words_in_group[0]["t0"]) +
+               float(words_in_group[-1]["t1"])) / 2.0
+        # Prefer evidence away from title/outro edges when two phrases are
+        # equally demanding, without hiding a uniquely difficult phrase.
+        edge_penalty = abs(mid / duration - .5) * 2.0
+        return width_stress + variety * 2.5 + (8 if has_number else 0) \
+            - edge_penalty
+
+    chosen_group = max(groups, key=score)
+    # The last substantial word shows the complete reveal stack while still
+    # lighting an actual active karaoke word. Mid-word avoids fade boundaries.
+    chosen = chosen_group[-1]
+    for candidate in reversed(chosen_group):
+        if len(_caption_token_key(candidate.get("w"))) >= 3:
+            chosen = candidate
+            break
+    out_t = (float(chosen["t0"]) + float(chosen["t1"])) / 2.0
+    src_t = (float(chosen.get("src_t0", chosen["t0"])) +
+             float(chosen.get("src_t1", chosen["t1"]))) / 2.0
+    return {
+        "out_t": round(out_t, 4), "src_t": round(src_t, 4),
+        "phrase": " ".join(str(row.get("w") or "")
+                             for row in chosen_group)[:220],
+    }
+
+
+def _caption_proof_geometry(ctx, edl):
+    video = (ctx.index or {}).get("video") or {}
+    try:
+        width, height = int(video["width"]), int(video["height"])
+    except (KeyError, TypeError, ValueError):
+        width, height = 1280, 720
+    ratio = (edl.get("frame") or {}).get("ratio")
+    try:
+        width, height = renderer.frame_dims(width, height, ratio)
+    except Exception:
+        pass
+    width, height, _fps = renderer.preview_geometry(
+        width, height, float(video.get("fps") or 30.0))
+    return max(2, int(width)), max(2, int(height))
+
+
+def _caption_proof_base_frame(ctx, edl, moment, play_res):
+    """Decode the real source landing and apply current output geometry."""
+    raw = os.path.join(ctx.workdir,
+                       f"caption_cast_base_{uuid.uuid4().hex[:8]}.jpg")
+    media.frame_at(ctx.proxy_path(), moment["src_t"], raw)
+    frame_cfg = edl.get("frame") or {}
+    gmode = frame_cfg.get("mode", "crop") if frame_cfg else "crop"
+    gfocus = ((frame_cfg.get("focus_x"), frame_cfg.get("focus_y"))
+              if frame_cfg.get("focus_x") is not None or
+              frame_cfg.get("focus_y") is not None else None)
+    frame, _suffix = _fit_and_zoom_frame(
+        ctx.workdir, "caption_cast", raw, moment["out_t"], play_res,
+        gmode, gfocus, (edl.get("effects") or {}).get("zooms") or [],
+        program_duration(edl), True, output_size=play_res)
+    return frame
+
+
+def _caption_cast_proofs(ctx, edl, slate, max_words=None,
+                         emphasis_words=None):
+    """Render every live preset through production ASS on one real frame.
+
+    This is all-or-nothing.  An incomplete visual slate would quietly bias
+    the director toward whichever presets happened to render, so any missing
+    candidate routes the caller back to the complete metadata comparison.
+    """
+    if not slate or not llm.vision_available():
+        return None
+    moment = _caption_proof_moment(edl, ctx.index or {})
+    if not moment:
+        return None
+    play_res = _caption_proof_geometry(ctx, edl)
+    base_frame = _caption_proof_base_frame(ctx, edl, moment, play_res)
+    candidate_ids = [str(row.get("preset") or "") for row in slate]
+    if not all(candidate_ids) or len(set(candidate_ids)) != len(candidate_ids):
+        return None
+
+    def render_one(item):
+        order, preset = item
+        proof_edl = copy.deepcopy(edl)
+        cfg = {
+            "mode": "from_transcript",
+            "design_version": CAPTION_DESIGN_VERSION,
+            "max_words_per_caption": max_words,
+            "style": {"preset": preset},
+        }
+        if emphasis_words:
+            cfg["emphasis_words"] = list(emphasis_words)
+        proof_edl["captions"] = cfg
+        token = uuid.uuid4().hex[:8]
+        ass_path = os.path.join(
+            ctx.workdir, f"caption_cast_{order}_{token}.ass")
+        out_path = os.path.join(
+            ctx.workdir, f"caption_cast_{order}_{token}.jpg")
+        tl = Timeline(proof_edl.get("keep") or [],
+                      proof_edl.get("inserts") or [],
+                      proof_edl.get("speed") or [])
+        built = caplib.build_ass(
+            proof_edl, ctx.index or {}, tl, ass_path, play_res=play_res)
+        if not built:
+            raise RuntimeError(f"preset {preset} produced no caption proof")
+        # Shift the still's PTS onto the real program clock before libass.
+        # The exact ASS artifact, bundled fonts and production PlayRes are the
+        # same inputs renderer.build_filtergraph burns into the video.
+        vf = (f"setpts=PTS+{moment['out_t']:.4f}/TB,"
+              f"subtitles=filename='{built}'"
+              f":fontsdir='{caplib.FONTS_DIR}'")
+        media.run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-loop", "1", "-framerate", "30", "-i", base_frame,
+            "-vf", vf, "-frames:v", "1", "-q:v", "2", out_path])
+        if not os.path.exists(out_path) or os.path.getsize(out_path) < 100:
+            raise RuntimeError(f"preset {preset} proof was not written")
+        return order, preset, out_path
+
+    rendered = []
+    # Four still burns in flight keeps the dispatcher responsive; this is
+    # execution parallelism, never a candidate limit. Every catalog row must
+    # return below or the visual cast is discarded.
+    with ThreadPoolExecutor(max_workers=min(4, len(candidate_ids))) as pool:
+        futures = [pool.submit(render_one, item)
+                   for item in enumerate(candidate_ids)]
+        for future in as_completed(futures):
+            rendered.append(future.result())
+    rendered.sort(key=lambda row: row[0])
+    if [row[1] for row in rendered] != candidate_ids:
+        return None
+    proof_frames = [(f"preset={preset}", path)
+                    for _order, preset, path in rendered]
+    prefix = os.path.join(
+        ctx.workdir, f"caption_catalog_{uuid.uuid4().hex[:8]}")
+    pages = sheets.build_caption_comparison_pages(proof_frames, prefix)
+    if not pages:
+        return None
+    return {
+        "paths": pages,
+        "labels": [f"caption catalog page {i + 1}/{len(pages)}; "
+                   f"real output frame at {moment['out_t']:.2f}s"
+                   for i in range(len(pages))],
+        "candidate_ids": candidate_ids,
+        "candidate_count": len(candidate_ids),
+        "page_count": len(pages),
+        "output_time": moment["out_t"],
+        "phrase": moment["phrase"],
+        # Local-only artifacts used by tests/diagnostics; only the labeled
+        # pages above are sent to vision and no path enters durable telemetry.
+        "proof_frames": {preset: path for _order, preset, path in rendered},
+    }
+
+
+def _trace_caption_state(ctx, captions_value, source):
+    """Record the effective stable typography choices, not transcript text."""
+    if not captions_value:
+        _decision_trace(ctx, "caption_style", decision="none", source=source,
+                        review_stage="timeline")
+        return
+    if isinstance(captions_value, dict):
+        style = captions_value.get("style") or {}
+        mode = captions_value.get("mode") or "from_transcript"
+        placement = ("adaptive" if captions_value.get("placement_track") else
+                     "fixed" if any(style.get(key) is not None for key in
+                                    ("position", "anchor_y")) else
+                     "preset_default")
+        emphasis_mode = captions_value.get("emphasis_mode")
+        emphasis_count = len(captions_value.get("emphasis_words") or [])
+        max_words = captions_value.get("max_words_per_caption")
+    else:
+        first = captions_value[0] if isinstance(captions_value, list) \
+            and captions_value else {}
+        style = first.get("style") or {}
+        mode, placement = "manual", "authored_items"
+        emphasis_mode, emphasis_count, max_words = None, 0, None
+    _decision_trace(
+        ctx, "caption_style", decision="use", source=source,
+        review_stage="timeline", preset=style.get("preset") or "classic",
+        position=style.get("position"), animation=style.get("animation"),
+        font=style.get("font"), effect=style.get("effect"),
+        layout=style.get("layout"), emphasis=style.get("emphasis"),
+        emphasis_mode=emphasis_mode, emphasis_count=emphasis_count,
+        placement_strategy=placement, max_words_per_caption=max_words,
+        reason=mode)
+
+
 _CAPTION_STOPWORDS = {
     # Function words should almost never become the visual hero. The list is
     # intentionally multilingual but small; unknown languages still work via
@@ -2955,8 +3566,13 @@ def _auto_caption_emphasis(ctx, edl, limit=25):
 
 
 def add_captions(ctx, mode=None, items=None, style=None,
-                 max_words_per_caption=None, emphasis_words=None):
+                 max_words_per_caption=None, emphasis_words=None,
+                 motion_motif=None):
     edl = dict(ctx.latest_edl()["json"])
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
+    caption_source = "explicit_style" if style is not None else "auto"
     # `position` / `anchor_y` are user-authored geometry, not mere visual
     # preferences.  The measured placement compiler used to keep running even
     # when either was explicit, then stored a per-shot placement_track whose
@@ -2985,28 +3601,112 @@ def add_captions(ctx, mode=None, items=None, style=None,
             if isinstance(item_style, str):
                 return f"REJECTED: items[{i}]: {item_style[5:]}"
             try:
-                norm.append({"text": str(it["text"]),
-                             "start": ctx.clamp(it.get("start", 0)),
-                             "end": ctx.clamp(it.get("end", 0)),
-                             "style": item_style})
+                item = {"text": str(it["text"]),
+                        "start": ctx.clamp(it.get("start", 0)),
+                        "end": ctx.clamp(it.get("end", 0)),
+                        "style": item_style}
+                if motif and caplib.motion_enabled([item]):
+                    item["motion_motif"] = motif
+                norm.append(item)
             except ValueError as err:
                 return f"REJECTED: items[{i}]: {err}"
+        if motif and not any(it.get("motion_motif") == motif for it in norm):
+            return ("REJECTED: motion_motif can only bind manual captions "
+                    "whose effective style animates. Add an animation or an "
+                    "animated preset, or omit motion_motif.")
         edl["captions"] = norm
-        return ctx.write_edl(edl, f"{len(norm)} manual caption(s) set")
+        result = ctx.write_edl(edl, f"{len(norm)} manual caption(s) set")
+        if result.startswith("EDL v"):
+            _trace_caption_state(ctx, norm, "manual_items")
+        return result
     if mode in (None, "", "from_transcript"):
-        directed_style_note = ""
-        if parsed_style is None and (isinstance(ctx, ToolContext) or
-                                     getattr(ctx, "enforce_spatial", False)):
-            chosen, why = _direct_caption_style(ctx, edl)
-            parsed_style = _parse_style(chosen)
-            directed_style_note = (f"\nAuto-directed caption look: "
-                                   f"{chosen['preset']} — {why}.")
         mw = None
         if max_words_per_caption is not None:
             try:
                 mw = int(max_words_per_caption)
             except (TypeError, ValueError):
                 return "REJECTED: max_words_per_caption must be an integer."
+        directed_style_note = ""
+        proof_emphasis = None
+        proof_emphasis_computed = False
+        if parsed_style is None and (isinstance(ctx, ToolContext) or
+                                     getattr(ctx, "enforce_spatial", False)):
+            context = _caption_cast_context(ctx, edl)
+            fallback = context["deterministic_fallback_candidate"]
+            why = context["fallback_basis"]
+            cast = None
+            if isinstance(ctx, ToolContext) and ctx.has_main_video and \
+                    context.get("speech_words", 0) >= 3:
+                proofs = None
+                if llm.vision_available():
+                    try:
+                        proof_emphasis = (list(emphasis_words)
+                                          if emphasis_words is not None else
+                                          _auto_caption_emphasis(ctx, edl))
+                        proof_emphasis_computed = emphasis_words is None
+                        slate = caption_judge.catalog()
+                        proofs = _caption_cast_proofs(
+                            ctx, edl, slate, max_words=mw,
+                            emphasis_words=proof_emphasis)
+                        if proofs:
+                            _metric(ctx, "caption_proof_candidates_rendered",
+                                    proofs["candidate_count"])
+                            _metric(ctx, "caption_proof_pages",
+                                    proofs["page_count"])
+                    except Exception as exc:
+                        print(f"[captions] pixel proof skipped: {exc}",
+                              flush=True)
+                        proofs = None
+                try:
+                    if proofs:
+                        cast = caption_judge.review(
+                            context, proof_paths=proofs["paths"],
+                            proof_labels=proofs["labels"])
+                    else:
+                        cast = caption_judge.review(context)
+                except Exception as exc:
+                    print(f"[captions] treatment cast skipped: {exc}",
+                          flush=True)
+                if llm.vision_available():
+                    if cast and cast.get("visual_proof"):
+                        _metric(ctx, "caption_visual_casts")
+                    else:
+                        _metric(ctx, "caption_visual_cast_fallbacks")
+            chosen = cast.get("style") if cast else fallback
+            parsed_style = _parse_style(chosen)
+            if isinstance(parsed_style, str):
+                cast = None
+                chosen = fallback
+                parsed_style = _parse_style(chosen)
+            if cast:
+                caption_source = "independent_catalog_cast"
+                ctx._last_caption_cast = cast
+                _metric(ctx, "caption_treatment_casts")
+                pixel_cast = bool(cast.get("visual_proof"))
+                _decision_trace(
+                    ctx, "caption_cast", decision="use",
+                    candidate_ids=[row["preset"] for row in
+                                   caption_judge.catalog()],
+                    candidate_count=len(caption_judge.catalog()),
+                    preset=cast["preset"], confidence=cast["confidence"],
+                    reason=cast["reason"], rejected=cast.get("rejected"),
+                    review_stage=("actual_pixel_catalog" if pixel_cast else
+                                  "catalog_treatment"),
+                    source=("independent_pixel_type_director" if pixel_cast
+                            else "independent_type_director"))
+                directed_style_note = (
+                    f"\nIndependent "
+                    f"{'real-pixel ' if pixel_cast else ''}caption "
+                    f"treatment: {cast['preset']} — "
+                    f"{cast['reason']}.")
+            else:
+                caption_source = "deterministic_fallback"
+                directed_style_note = (
+                    f"\nAuto-directed caption fallback: "
+                    f"{chosen['preset']} — {why}.")
+            placement_locked = any(
+                (parsed_style or {}).get(key) is not None
+                for key in ("position", "anchor_y"))
         preset = (parsed_style or {}).get("preset")
         premium = preset and preset != "classic"
         # Caption geometry is compiled from pixels, not guessed from a global
@@ -3127,7 +3827,9 @@ def add_captions(ctx, mode=None, items=None, style=None,
             # failure: the model omitted an optional argument, so the most
             # important part of the design simply never activated. Make the
             # product own the default; an explicit [] still means "none".
-            emphasis_words = _auto_caption_emphasis(ctx, edl)
+            emphasis_words = (proof_emphasis
+                              if proof_emphasis_computed else
+                              _auto_caption_emphasis(ctx, edl))
             emphasis_mode = "auto"
             auto_emphasis = bool(emphasis_words)
             if auto_emphasis:
@@ -3145,7 +3847,14 @@ def add_captions(ctx, mode=None, items=None, style=None,
             cfg["emphasis_words"] = emphasis_words
         if emphasis_mode:
             cfg["emphasis_mode"] = emphasis_mode
-        edl["captions"] = _bake_karaoke_group(cfg)
+        cfg = _bake_karaoke_group(cfg)
+        if motif:
+            if not caplib.motion_enabled(cfg):
+                return ("REJECTED: motion_motif can only bind an animated "
+                        "caption treatment. Choose dynamic captions, an "
+                        "animated preset or an entrance animation.")
+            cfg["motion_motif"] = motif
+        edl["captions"] = cfg
         desc = "captions from transcript enabled"
         if premium:
             desc += f", preset {preset}"
@@ -3158,11 +3867,20 @@ def add_captions(ctx, mode=None, items=None, style=None,
             desc += f", style {parsed_style}"
         if placement:
             desc += f", {len(placement)} measured placement span(s)"
-        return (ctx.write_edl(edl, desc) + karaoke_note
-                + directed_style_note + "".join(spatial_notes))
+        result = ctx.write_edl(edl, desc)
+        if result.startswith("EDL v"):
+            _trace_caption_state(ctx, edl["captions"], caption_source)
+        return (result + karaoke_note + directed_style_note
+                + "".join(spatial_notes))
     if mode == "off":
+        if motif:
+            return ("REJECTED: motion_motif cannot be attached while "
+                    "captions are being turned off.")
         edl["captions"] = None
-        return ctx.write_edl(edl, "captions removed")
+        result = ctx.write_edl(edl, "captions removed")
+        if result.startswith("EDL v"):
+            _trace_caption_state(ctx, None, "captions_off")
+        return result
     return ("REJECTED: mode must be 'from_transcript' or 'off', or pass "
             "items=[{text,start,end}].")
 
@@ -3361,7 +4079,8 @@ def set_caption_fixes(ctx, replacements=None, clear=False):
     return res
 
 
-def set_caption_style(ctx, style=None, emphasis_words=None):
+def set_caption_style(ctx, style=None, emphasis_words=None,
+                      motion_motif=None):
     if emphasis_words is not None:
         if not isinstance(emphasis_words, list) \
                 or not all(isinstance(w, str) for w in emphasis_words):
@@ -3372,9 +4091,10 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
         partial = _parse_partial_style(style)
         if isinstance(partial, str):
             return "REJECTED: " + partial[5:]
-    elif emphasis_words is None:
+    elif emphasis_words is None and motion_motif is None:
         return ("REJECTED: pass style with the fields to change, "
-                "emphasis_words (with a premium preset), or both.")
+                "emphasis_words (with a premium preset), motion_motif, or "
+                "a combination of them.")
     edl = dict(ctx.latest_edl()["json"])
     caps = edl.get("captions")
     if not caps:
@@ -3386,6 +4106,12 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
         and any(partial.get(key) is not None
                 for key in ("position", "anchor_y"))
     merged = merge_caption_style(caps, partial)
+    motif = None
+    if motion_motif is not None:
+        motif, motif_err = _motion_motif_value(
+            ctx, motion_motif, allow_clear=True)
+        if motif_err:
+            return motif_err
     # A style write is the migration boundary: the historical EDL stays on
     # its frozen renderer, while this newly-created version opts into the
     # prosody-aware phrase and optical-layout engine.  Manual caption items
@@ -3468,12 +4194,45 @@ def set_caption_style(ctx, style=None, emphasis_words=None):
         karaoke_note += (f"\nNote: preset '{eff_preset}' drives its own "
                          "word-by-word animation — the 'dynamic' flag is "
                          "ignored while a preset is set.")
+    if isinstance(merged, dict):
+        if motion_motif is not None:
+            if motif and not caplib.motion_enabled(merged):
+                return ("REJECTED: motion_motif can only bind an animated "
+                        "caption treatment. Enable dynamic captions, an "
+                        "animated preset or an entrance animation first.")
+            if motif:
+                merged["motion_motif"] = motif
+            else:
+                merged.pop("motion_motif", None)
+        elif merged.get("motion_motif") and not caplib.motion_enabled(merged):
+            merged.pop("motion_motif", None)
+    elif isinstance(merged, list):
+        bound = 0
+        for item in merged:
+            if motion_motif is not None:
+                if motif and caplib.motion_enabled([item]):
+                    item["motion_motif"] = motif
+                    bound += 1
+                else:
+                    item.pop("motion_motif", None)
+            elif item.get("motion_motif") and not caplib.motion_enabled([item]):
+                item.pop("motion_motif", None)
+        if motif and not bound:
+            return ("REJECTED: motion_motif can only bind animated manual "
+                    "captions; none of the effective item styles move.")
     edl["captions"] = _bake_karaoke_group(merged)
-    desc = f"caption style updated: {json.dumps(partial)}" if partial \
-        else f"caption emphasis words set ({len(emphasis_words or [])})"
+    if partial:
+        desc = f"caption style updated: {json.dumps(partial)}"
+    elif emphasis_words is not None:
+        desc = f"caption emphasis words set ({len(emphasis_words or [])})"
+    else:
+        desc = (f"caption motion motif set to {motif}"
+                if motif else "caption motion motif cleared")
     if auto_emphasis:
         desc += f", {len(merged.get('emphasis_words') or [])} emphasis words auto-selected"
     result = ctx.write_edl(edl, desc)
+    if result.startswith("EDL v"):
+        _trace_caption_state(ctx, edl["captions"], "style_update")
     result += karaoke_note + emph_note
     if cleared_adaptive_placement:
         result += ("\nCaption placement is locked for the whole video; the "
@@ -3782,7 +4541,7 @@ def audition_music_candidates(ctx, ids, brief=None):
         result_id = hit["id"]
         cached = ctx._music_auditions.get(result_id)
         if cached:
-            return hit, cached, None, None
+            return hit, cached, None, None, []
         local = os.path.join(
             ctx.workdir, f"audition_{uuid.uuid4().hex[:8]}.audio")
         sample = None
@@ -3792,15 +4551,13 @@ def audition_music_candidates(ctx, ids, brief=None):
             ctx._music_auditions[result_id] = analysis
             if llm.audio_review_available():
                 duration = float(music_search.probe_duration_s(local) or 0.0)
-                start = min(max(duration * 0.25, 0.0),
-                            max(0.0, duration - 8.0))
+                windows = music_judge.audition_windows(duration)
                 sample = os.path.join(
                     ctx.workdir, f"audition_sample_{uuid.uuid4().hex[:8]}.mp3")
-                media.extract_audio_clip(
-                    local, start, min(duration, start + 8.0), sample)
-            return hit, analysis, None, sample
+                media.extract_audio_windows(local, windows, sample)
+            return hit, analysis, None, sample, (windows if sample else [])
         except Exception as exc:
-            return hit, None, str(exc)[:160], None
+            return hit, None, str(exc)[:160], None, []
         finally:
             try:
                 os.remove(local)
@@ -3812,11 +4569,12 @@ def audition_music_candidates(ctx, ids, brief=None):
     with ThreadPoolExecutor(max_workers=min(2, len(resolved))) as pool:
         futures = {pool.submit(_measure, hit): hit for hit in resolved}
         for future in as_completed(futures):
-            hit, analysis, error, sample = future.result()
+            hit, analysis, error, sample, windows = future.result()
             if analysis:
                 measured.append((hit, analysis))
                 if sample:
-                    samples[hit["id"]] = sample
+                    samples[hit["id"]] = {"path": sample,
+                                           "windows": windows}
             else:
                 errors.append(f"{hit['id']}: {error}")
     _touch_job_heartbeat(ctx)
@@ -3856,14 +4614,26 @@ def audition_music_candidates(ctx, ids, brief=None):
     listened = ""
     selected = [row for row in ranked if row["id"] in samples][:3]
     if len(selected) >= 2:
-        paths = [samples[row["id"]] for row in selected]
-        labels = [f"{row['id']} — {row['title']}" for row in selected]
+        paths = [samples[row["id"]]["path"] for row in selected]
+        labels = []
+        for row in selected:
+            windows = samples[row["id"]]["windows"]
+            phases = ", ".join(f"{start:g}-{end:g}s"
+                               for start, end in windows)
+            labels.append(
+                f"{row['id']} — {row['title']} — concatenated source "
+                f"phases {phases}")
         prompt = (
             "You are a senior music supervisor. Listen to each actual labeled "
-            "candidate excerpt and compare musical character, production "
+            "candidate audition reel. Each reel concatenates that track's "
+            "opening, body and ending excerpts in the labeled source order; "
+            "do not treat the joins as part of the music. Compare character, production "
             "quality, emotional tone, distinctiveness, vocal/dialogue masking "
-            "risk and fit for this edit. Name the best id and why, plus any "
-            "material concern. Do not infer from filenames. The waveform "
+            "risk, development/editability and fit for this edit. Return "
+            "STRICT JSON only: {\"choice\":\"candidate id|none\","
+            "\"reason\":\"specific audible reason\"}. Choose none when "
+            "the edit is stronger dry or every candidate is wrong. Do not infer from "
+            "filenames. The waveform "
             "ranking is separate evidence, not an instruction. Edit brief: "
             + direction[:900])
         assessment = llm.ask_audio(
@@ -3871,11 +4641,37 @@ def audition_music_candidates(ctx, ids, brief=None):
             purpose="audio_music_candidates")
         if assessment:
             _metric(ctx, "music_candidates_heard", len(selected))
-            listened = ("\nACTUAL LISTENING COMPARISON — an audio-capable "
-                        "reviewer heard the labeled excerpts: " + assessment)
+            choice = music_judge.listener_choice(
+                assessment, [row["id"] for row in selected])
+            if choice:
+                ctx._last_music_listener_choice = dict(
+                    choice, candidate_ids=[row["id"] for row in selected])
+                _decision_trace(
+                    ctx, "music_cast",
+                    candidate_ids=[row["id"] for row in selected],
+                    decision="none" if choice["abstain"] else "use",
+                    candidate_id=choice.get("choice"),
+                    reason=choice.get("reason"),
+                    review_stage="actual_audio",
+                    source="independent_listener")
+                if choice["abstain"]:
+                    _metric(ctx, "music_abstentions")
+                    listened = (
+                        "\nACTUAL LISTENING DECISION — KEEP THE EDIT DRY / "
+                        "NO MUSIC: " + (choice.get("reason") or
+                                        "every candidate lost")[:360])
+                else:
+                    listened = (
+                        f"\nACTUAL LISTENING DECISION — choose "
+                        f"{choice['choice']}: "
+                        + (choice.get("reason") or "best audible fit")[:360])
+            else:
+                listened = ("\nACTUAL LISTENING COMPARISON — an audio-capable "
+                            "reviewer heard the labeled audition reels but "
+                            "returned no parseable winner: " + assessment)
     for sample in samples.values():
         try:
-            os.remove(sample)
+            os.remove(sample["path"])
         except OSError:
             pass
     hearing_note = (" Waveforms were measured for every ranked candidate; "
@@ -3889,7 +4685,8 @@ def audition_music_candidates(ctx, ids, brief=None):
             f"blueprint{' and dialogue masking risk' if speech_led else ''}; "
             "it is evidence, not a taste lock:\n" + "\n".join(lines)
             + listened
-            + "\nChoose deliberately, then fetch_music(id) and "
+            + "\nChoose deliberately—including no music when it wins—then "
+              "fetch_music(id) only for a chosen candidate and "
               "get_audio_analysis on the chosen project asset for its exact "
               "beat grid/offset." + error_note)
 
@@ -3965,6 +4762,17 @@ def fetch_music(ctx, id):
                      "author": artist,
                      "caption": "found online by search_music"})
     ctx.audio_fetched.append(key)
+    listener = getattr(ctx, "_last_music_listener_choice", None) or {}
+    alignment = "unreviewed"
+    if listener:
+        alignment = ("aligned" if listener.get("choice") == str(id) else
+                     "override_no_music" if listener.get("abstain") else
+                     "override_other_candidate")
+    _decision_trace(
+        ctx, "music_fetch", candidate_id=str(id), decision="use",
+        candidate_ids=listener.get("candidate_ids"), asset_key=key,
+        reason=listener.get("reason"), alignment=alignment,
+        provider=hit.get("provider"), review_stage="downloaded")
     return (f"Fetched \"{title}\"{' by ' + artist if artist else ''} — "
             f"{dur:.0f}s, saved as storage_key={key}. License: {note}. "
             f"Next: add_music(storage_key='{key}') — set_music_fit retimes it, "
@@ -4154,7 +4962,7 @@ def _pending_visual_review(ctx, asset_key):
 
 
 def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
-                           limit=4):
+                           limit=4, review_context=None):
     """Attach representative pixels from a just-downloaded visual asset.
 
     Search thumbnails prove only that a candidate looked plausible. The file
@@ -4178,6 +4986,7 @@ def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
         except Exception:
             pass                       # evidence is best-effort, bytes are valid
     ctx._last_download_review_text = None
+    ctx._last_download_rendition_judgment = None
     if kind not in (url_media.KIND_VIDEO, url_media.KIND_IMAGE) or \
             not (_can_receive_images(ctx) or llm.vision_available()):
         return 0
@@ -4227,10 +5036,38 @@ def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
             "Verify subject, visual quality, relevance, logos/watermarks and "
             "the exact useful moment before placing this asset in the edit."
             + (f" {measured}" if measured else ""))
-        ctx._last_download_review_text = _deliver_frames(
-            ctx, frames, labels,
-            question,
-            f"Automatic review of the downloaded {label}")
+        delivery = None
+        if _can_receive_images(ctx):
+            delivery = _deliver_frames(
+                ctx, frames, labels, question,
+                f"Automatic review of the downloaded {label}")
+        report = None
+        if review_context and not getattr(ctx, "sight_out", False) and \
+                llm.vision_available():
+            context = dict(review_context) if isinstance(
+                review_context, dict) else {"direction": review_context}
+            if measured:
+                context["measured_motion"] = measured
+            try:
+                report = broll_judge.review_rendition(
+                    frames, labels, context)
+            except Exception as exc:
+                print(f"[broll] rendition review skipped: {exc}", flush=True)
+        if report:
+            ctx._last_download_rendition_judgment = report
+            ctx._last_download_review_text = broll_judge.rendition_summary(
+                report)
+            _metric(ctx, "broll_renditions_reviewed")
+            if report.get("decision") == "reject":
+                _metric(ctx, "broll_renditions_rejected")
+            elif report.get("decision") == "uncertain":
+                _metric(ctx, "broll_renditions_uncertain")
+        elif delivery:
+            ctx._last_download_review_text = delivery
+        else:
+            ctx._last_download_review_text = _deliver_frames(
+                ctx, frames, labels, question,
+                f"Automatic review of the downloaded {label}")
         return len(frames)
     except Exception:
         return 0
@@ -4499,7 +5336,8 @@ def audition_sfx_candidates(ctx, ids, purpose):
             "recording, compare whether it genuinely sounds like and supports "
             f"this visible/editorial event: {intent[:500]}. Judge specificity, "
             "production cleanliness, harshness, tail, scale and likely fit in "
-            "a professional mix. Name the best id and why. Do not infer from "
+            "a professional mix. Name the best id and why, or choose NONE if "
+            "keeping the moment dry is stronger than every candidate. Do not infer from "
             "filenames; waveform ranking is separate evidence. Sound design "
             "context: "
             + (sound_context or "no durable sequence direction recorded"),
@@ -4587,7 +5425,8 @@ def fetch_sfx(ctx, id):
             "sound lands ON a nameable visible moment.")
 
 
-def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None):
+def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None,
+                allow_none=True):
     """Search, acoustically compare, store and place a real one-shot."""
     if not sfx_search.available():
         return ("REJECTED: web sound-effect search is disabled. Use add_sfx "
@@ -4598,6 +5437,9 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None):
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
         return "REJECTED: at, gain_db and max_seconds must be numbers."
+    allow_none_n = not (
+        allow_none is False or
+        str(allow_none).strip().casefold() in {"false", "0", "no", "off"})
     try:
         prog = program_duration(ctx.latest_edl()["json"])
     except Exception as e:
@@ -4640,31 +5482,54 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None):
     # whenever the reviewer is absent, ambiguous or unavailable.
     heard = [row for row in ranked if row["id"] in local_by_id][:3]
     if len(heard) >= 2 and llm.audio_review_available():
+        none_contract = (
+            "Choice may be `none` when keeping the moment dry is stronger "
+            "than every recording."
+            if allow_none_n else
+            "The user explicitly requires a sound here, so choose one exact "
+            "candidate id; do not choose none.")
         assessment = llm.ask_audio(
             "You are a senior sound designer. Listen to each actual labeled "
             "recording and choose the best sound for this exact visible event: "
             f"{query[:500]}. Judge specificity, cleanliness, attack, tail, "
-            "scale, harshness and professional mix fit. State exactly one "
-            "candidate id, then the reason. Do not infer from filenames; "
+            "scale, harshness and professional mix fit. " + none_contract +
+            " Return JSON only as {\"choice\":\"exact candidate id|none\","
+            "\"reason\":\"one evidence-bound sentence\"}. Do not infer from filenames; "
             "waveform ranking is separate evidence. Sound design context: "
             + (sound_context or "no durable sequence direction recorded"),
             [local_by_id[row["id"]] for row in heard],
             [f"{row['id']} — {row['title']}" for row in heard],
             max_tokens=220, purpose="audio_sfx_candidates")
         if assessment:
-            mentions = []
-            for row in heard:
-                candidate_id = row["id"]
-                boundary = (r"(?<![A-Za-z0-9:_-])" +
-                            re.escape(candidate_id) +
-                            r"(?![A-Za-z0-9:_-])")
-                if re.search(boundary, assessment, flags=re.IGNORECASE):
-                    mentions.append(candidate_id)
-            if len(mentions) == 1:
-                chosen_id = mentions[0]
-                _metric(ctx, "sfx_candidates_heard", len(heard))
+            _metric(ctx, "sfx_candidates_heard", len(heard))
+            choice = sfx_judge.listener_choice(
+                assessment, [row["id"] for row in heard],
+                allow_none=allow_none_n)
+            if choice and choice["abstain"]:
+                _metric(ctx, "sfx_abstentions")
+                _decision_trace(
+                    ctx, "sfx_cast",
+                    candidate_ids=[row["id"] for row in heard],
+                    decision="none", reason=choice.get("reason"),
+                    purpose=query, at=at_n, review_stage="actual_audio",
+                    source="independent_listener")
+                for local in local_by_id.values():
+                    try:
+                        os.remove(local)
+                    except OSError:
+                        pass
+                return (
+                    "SOUND DESIGN DECISION: KEEP THIS MOMENT DRY — no SFX "
+                    "was fetched or placed. An audio-capable reviewer heard "
+                    f"{len(heard)} real candidates and preferred silence: "
+                    f"{choice.get('reason') or assessment[:320]}. Do not "
+                    "search again unless the visible event or sound direction "
+                    "materially changes.")
+            if choice and choice.get("choice"):
+                chosen_id = choice["choice"]
                 listening_evidence = (
-                    " Actual listening selection: " + assessment[:320])
+                    " Actual listening selection: " +
+                    str(choice.get("reason") or assessment)[:320])
     chosen = next(hit for hit, _analysis in measured
                   if hit["id"] == chosen_id)
     chosen = dict(chosen, _audition_local=local_by_id[chosen_id])
@@ -4672,7 +5537,19 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None):
         asset, error = _download_sfx_hit(ctx, chosen)
         if error:
             return error
-        placed = add_sfx(ctx, asset["storage_key"], at_n, gain_n)
+        placed = add_sfx(ctx, asset["storage_key"], at_n, gain_n,
+                         purpose=query)
+        _decision_trace(
+            ctx, "sfx_cast",
+            candidate_ids=[row["id"] for row in ranked],
+            decision="use", candidate_id=chosen_id,
+            reason=(listening_evidence or
+                    "; ".join(ranked[0]["reasons"][:3])),
+            asset_key=asset["storage_key"], purpose=query, at=at_n,
+            review_stage=("actual_audio" if listening_evidence else
+                          "measured_waveform"),
+            source=("independent_listener" if listening_evidence else
+                    "measured_rank"), provider=chosen.get("provider"))
         if placed.startswith("REJECTED"):
             return placed
         evidence = "; ".join(ranked[0]["reasons"][:3])
@@ -4709,7 +5586,7 @@ def _speech_overlap_s(ctx, edl, start_out, end_out):
 
 def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
               duck=None, offset_s=None, fade_in_s=None, fade_out_s=None,
-              loop=True):
+              loop=True, purpose=None):
     track, err = _resolve_music(ctx, storage_key)
     if err:
         return err
@@ -4781,12 +5658,19 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
             "start": s, "end": e, "gain_db": g, "duck": bool(duck),
             "duck_mode": "smooth" if duck else None,
             "offset_s": off, "fade_in_s": fi or None,
-            "fade_out_s": fo or None, "loop": True if loop else None}
+            "fade_out_s": fo or None, "loop": True if loop else None,
+            "purpose": (" ".join(str(purpose).split())[:300]
+                        if purpose else None)}
     music.append(item)
     edl["music"] = music
     res = ctx.write_edl(
         edl, f"music '{track['name']}' at {s}-{e}s "
              f"(output timeline), {g}dB, duck={bool(duck)} [{item['id']}]")
+    if res.startswith("EDL v"):
+        _decision_trace(
+            ctx, "music_placement", decision="use", asset_key=storage_key,
+            element_id=item["id"], purpose=item.get("purpose"),
+            window=[s, e], review_stage="timeline")
     if duck and res.startswith("EDL v"):
         res += ("\nNote: music ducks smoothly under speech (a sidechain dip "
                 "that follows the voice, not a hard step) — "
@@ -4922,7 +5806,7 @@ def _resolve_sfx(ctx, storage_key):
             "storage_key": storage_key}, None
 
 
-def add_sfx(ctx, storage_key, at, gain_db=-6.0):
+def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None):
     """Place a one-shot sound at a point in the program timeline."""
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
@@ -4950,8 +5834,10 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0):
     while f"sx{n}" in taken:
         n += 1
     sid = f"sx{n}"
+    purpose_n = " ".join(str(purpose or "").split())[:180] or None
     items.append({"id": sid, "storage_key": storage_key,
-                  "at": round(at, 2), "gain_db": gain_db})
+                  "at": round(at, 2), "gain_db": gain_db,
+                  "purpose": purpose_n})
     edl["sfx"] = items
     note = ""
     dur = sound.get("duration_s")
@@ -4962,9 +5848,16 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0):
                 f"at {round(prog, 2)}s, so its tail will be cut short.")
     if sound.get("note"):
         note += "\n" + sound["note"]
-    return ctx.write_edl(
+    result = ctx.write_edl(
         edl, f"added sfx '{sound['name']}' at {round(at, 2)}s "
-             f"({gain_db:+g}dB) as {sid}") + note
+             f"({gain_db:+g}dB) as {sid}"
+             + (f" for {purpose_n}" if purpose_n else ""))
+    if result.startswith("EDL v"):
+        _decision_trace(
+            ctx, "sfx_placement", decision="use", asset_key=storage_key,
+            element_id=sid, purpose=purpose_n, at=round(at, 2),
+            review_stage="timeline")
+    return result + note
 
 
 def remove_sfx(ctx, id):
@@ -5888,7 +6781,7 @@ def _parse_zoom_path(path):
 
 
 def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
-             path=None, rect=None):
+             path=None, rect=None, motion_motif=None):
     # Round 67 default: 15% (was 25%) — a gentle push the viewer feels
     # rather than sees. Big snaps are opt-in, not the default grammar.
     edl = dict(ctx.latest_edl()["json"])
@@ -5905,6 +6798,9 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
                 "punch-in; above 1.0 is a dramatic 2x+ punch).")
     if e - s < 0.2:
         return "REJECTED: a zoom needs at least 0.2s."
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
     zmode = (mode or "punch").strip().lower()
     if zmode not in ZOOM_MODES:
         return (f"REJECTED: mode must be one of {', '.join(ZOOM_MODES)}. "
@@ -5995,6 +6891,8 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     zooms = [dict(z) for z in (fx.get("zooms") or [])]
     item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
             "strength": st}
+    if motif:
+        item["motion_motif"] = motif
     if zmode != "punch":
         item["mode"] = zmode
     item.update(tgt)
@@ -6076,7 +6974,7 @@ def remove_zoom(ctx, id):
 # motion itself has nothing to do with where the footage came from, so it now
 # lives in worker/travel.py and BOTH tools call it.
 
-def add_zoom_path(ctx, keyframes, ease=None):
+def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None):
     """A zoom whose centre AND strength travel through a list of keyframes,
     interpolated, in output seconds."""
     if not isinstance(keyframes, list) or len(keyframes) < 2:
@@ -6085,6 +6983,9 @@ def add_zoom_path(ctx, keyframes, ease=None):
                 "cx/cy are 0-1 fractions of the output frame ((0,0) = "
                 "top-left, the same convention as add_zoom); strength is "
                 "0-4.5. The window runs from the first t to the last.")
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     clean = []
@@ -6196,6 +7097,8 @@ def add_zoom_path(ctx, keyframes, ease=None):
             # `s` values are what actually render.
             "strength": round(max(p["s"] for p in pts), 2) or ZOOM_STRENGTH_MIN,
             "mode": "path", "ease": ez, "path": pts}
+    if motif:
+        item["motion_motif"] = motif
     zooms.append(item)
     fx["zooms"] = zooms
     edl["effects"] = fx
@@ -6296,7 +7199,8 @@ TRANSITION_MIN_SPACING_S = taste.TRANSITION_MIN_SPACING_S
 CARD_SUBTITLE_Y = 0.5
 
 
-def set_transitions(ctx, style, duration_s=0.3, scope="scene"):
+def set_transitions(ctx, style, duration_s=0.3, scope="scene",
+                    motion_motif=None):
     p = (style or "").strip().lower()
     sc = (scope or "scene").strip().lower()
     if sc not in TRANSITION_SCOPES:
@@ -6330,7 +7234,16 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene"):
     except (TypeError, ValueError):
         return ("REJECTED: duration_s must be a number of seconds "
                 f"({TRANSITION_MIN_S:g}-{TRANSITION_MAX_S:g}).")
-    fx["transition"] = {"style": p, "duration_s": d, "scope": sc}
+    previous = fx.get("transition") or {}
+    motif = previous.get("motion_motif") if motion_motif is None else None
+    if motion_motif is not None:
+        motif, motif_err = _motion_motif_value(ctx, motion_motif)
+        if motif_err:
+            return motif_err
+    transition = {"style": p, "duration_s": d, "scope": sc}
+    if motif:
+        transition["motion_motif"] = motif
+    fx["transition"] = transition
     edl["effects"] = fx
     n_cuts = max(0, len(edl.get("keep") or []) - 1) \
         + len(edl.get("inserts") or [])
@@ -7762,7 +8675,7 @@ def _visual_asset_uses(edl, asset_key, exclude_ids=()):
 
 def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                  clip_start_s=None, motion=None, fit="auto",
-                 allow_repeat=False):
+                 allow_repeat=False, motion_motif=None):
     pending_review = _pending_visual_review(ctx, asset_key)
     if pending_review:
         return pending_review
@@ -7784,6 +8697,13 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
         if motion not in INSERT_MOTIONS:
             return (f"REJECTED: motion must be one of "
                     f"{', '.join(INSERT_MOTIONS)}.")
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
+    if motif and not motion:
+        return ("REJECTED: motion_motif can only bind an insert that has a "
+                "local motion. Pass motion=zoom_in/zoom_out/pan_left/"
+                "pan_right, or omit motion_motif.")
     fitv = str(fit or "auto").strip().lower().replace("-", "_")
     if fitv in ("auto", "safe", "contain", "fit"):
         # Lossless by default. When the program is already black-padded,
@@ -7849,6 +8769,8 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
             item["source_start_s"] = off
         if motion:
             item["motion"] = motion
+            if motif:
+                item["motion_motif"] = motif
         edl["inserts"] = inserts + [item]
         window = (f" (using clip {off:.1f}-{round(off + dur, 2):.1f}s)"
                   if off else "")
@@ -7907,6 +8829,8 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
         item["source_start_s"] = off
     if motion:
         item["motion"] = motion
+        if motif:
+            item["motion_motif"] = motif
     edl["inserts"] = inserts + [item]
     # Splicing shifts everything after the insert later (and may split a
     # take): re-anchor through the shared remap so content-anchored zooms/
@@ -7932,7 +8856,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
 
 def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
                       rate=None, crop=None, mute=None, fit=None,
-                      rotation=None):
+                      rotation=None, motion_motif=None):
     """Change WHICH PART of an already-spliced clip plays, in place.
 
     Round 61. Nothing could edit an insert once it existed — there was
@@ -7963,9 +8887,19 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
                 f"{have}. Call get_edl to see them.")
     if duration_s is None and clip_start_s is None and rate is None \
             and crop is None and mute is None and fit is None \
-            and rotation is None:
+            and rotation is None and motion_motif is None:
         return ("REJECTED: give duration_s, clip_start_s, rate, crop, mute "
-                "fit and/or rotation — otherwise there is nothing to change.")
+                "fit, rotation and/or motion_motif — otherwise there is "
+                "nothing to change.")
+    motif = hit.get("motion_motif")
+    if motion_motif is not None:
+        motif, motif_err = _motion_motif_value(
+            ctx, motion_motif, allow_clear=True)
+        if motif_err:
+            return motif_err
+        if motif and not hit.get("motion"):
+            return ("REJECTED: this insert has no local motion to bind. "
+                    "Bind another animated event or reinsert it with motion.")
     # fit (round 79): how this ONE scene maps onto the canvas. The program's
     # cover-crop default beheads a still whose aspect fights the canvas (a
     # 9:16 logo on a 16:9 program shows only its middle band); 'pad' shows
@@ -8146,8 +9080,9 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
     old_mute = bool(hit.get("mute"))
     old_fit = hit.get("fit") or None
     old_rotation = int(hit.get("rotation") or 0)
+    old_motif = hit.get("motion_motif")
     prev = (float(hit["duration_s"]), float(hit.get("source_start_s") or 0.0),
-            old_rate, old_crop, old_mute, old_fit, old_rotation)
+            old_rate, old_crop, old_mute, old_fit, old_rotation, old_motif)
     hit["duration_s"] = dur
     hit["source_start_s"] = round(off, 2) or None
     if hit["source_start_s"] is None:
@@ -8172,6 +9107,11 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         hit.pop("rotation", None)
     elif rot_val is not None:
         hit["rotation"] = rot_val
+    if motion_motif is not None:
+        if motif:
+            hit["motion_motif"] = motif
+        else:
+            hit.pop("motion_motif", None)
     new_crop = list(hit.get("crop") or [])
     new_mute = bool(hit.get("mute"))
     new_fit = hit.get("fit") or None
@@ -8207,7 +9147,9 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
         reg += ", its own audio MUTED"
     elif mute_val is False and old_mute:
         reg += ", its own audio back ON"
-    if (dur, off, r, new_crop, new_mute, new_fit, new_rotation) == prev:
+    new_motif = hit.get("motion_motif")
+    if (dur, off, r, new_crop, new_mute, new_fit, new_rotation,
+            new_motif) == prev:
         return (f"NO CHANGE — insert {id} already plays "
                 f"{off}-{round(off + span, 2)}s{at_rate}{reg}.")
     edl["inserts"] = inserts
@@ -8539,7 +9481,7 @@ def _write_speed(ctx, prev, edl, desc, warn_slow=False):
     return result
 
 
-def set_speed(ctx, start, end, factor):
+def set_speed(ctx, start, end, factor, motion_motif=None):
     """A constant speed factor over a SOURCE-time span (like set_volume) —
     the ramp belongs to the footage it was placed on, so it survives later
     cuts without drifting."""
@@ -8562,6 +9504,9 @@ def set_speed(ctx, start, end, factor):
     if abs(f - 1.0) < 0.01:
         return ("REJECTED: factor 1.0 is normal speed — nothing to write. "
                 "Use remove_speed(id) to undo an existing span.")
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
     prev = ctx.latest_edl()
     edl = dict(prev["json"])
     spans = [dict(sp) for sp in (edl.get("speed") or [])]
@@ -8572,6 +9517,8 @@ def set_speed(ctx, start, end, factor):
     spans = [sp for sp in spans if sp not in replaced]
     item = {"id": _next_item_id(spans, "sp"), "start": s, "end": e,
             "factor": f}
+    if motif:
+        item["motion_motif"] = motif
     spans.append(item)
     spans.sort(key=lambda x: float(x["start"]))
     edl["speed"] = spans
@@ -8872,7 +9819,8 @@ def _parse_text_motion(motion, allow_empty=False):
 
 def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
                 scale=0.4, opacity=None, entrance=None, exit=None,
-                source_start_s=None, fit=None, allow_repeat=False):
+                source_start_s=None, fit=None, allow_repeat=False,
+                motion_motif=None):
     """Draw an asset OVER the program picture for a program-time window —
     picture-in-picture, a corner logo, or (fit='cover') a full-frame B-ROLL
     cutaway while the program's audio keeps playing."""
@@ -8968,6 +9916,16 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
             "scale": sc, "fit": fitv, "opacity": op,
             "entrance": entrance, "exit": exit,
             "source_start_s": off if kind == "video" else None}
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
+    animated = entrance or exit or any(
+        isinstance(value, list) for value in (xv, yv, sc, op))
+    if motif and not animated:
+        return ("REJECTED: motion_motif can only bind an animated overlay. "
+                "Add keyframes or an entrance/exit, or omit the motif.")
+    if motif:
+        item["motion_motif"] = motif
     overlays.append(item)
     edl["overlays"] = overlays
     moving = isinstance(xv, list) or isinstance(yv, list)
@@ -9019,7 +9977,7 @@ def remove_overlay(ctx, id):
              f"{hit['start']}-{round(float(hit['start']) + float(hit['duration_s']), 2)}s)")
 
 
-def set_overlay_motion(ctx, id, motion):
+def set_overlay_motion(ctx, id, motion, motion_motif=None):
     """Set coherent element-local keyframes on an existing visual overlay."""
     if not isinstance(motion, dict) or not motion:
         return ("REJECTED: motion must be a non-empty object containing x, "
@@ -9041,6 +9999,9 @@ def set_overlay_motion(ctx, id, motion):
         return (f"REJECTED: '{id}' is a screen takeover. Its motion is "
                 "derived from the tracked device corners and camera push; "
                 "ordinary overlay curves would break that lock.")
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
     ignored = {"x", "y", "scale"} & set(motion) if hit.get("fit") == "cover" \
         else set()
     if ignored:
@@ -9056,6 +10017,16 @@ def set_overlay_motion(ctx, id, motion):
         if err:
             return err
         hit[name] = value
+    if motion_motif is None and hit.get("motion_motif") and not any(
+            isinstance(hit.get(name), list)
+            for name in _OVERLAY_MOTION_FIELDS):
+        hit.pop("motion_motif", None)
+    if motif:
+        if not any(isinstance(hit.get(name), list)
+                   for name in _OVERLAY_MOTION_FIELDS):
+            return ("REJECTED: motion_motif needs at least one animated "
+                    "keyframe curve; scalar overlay geometry is static.")
+        hit["motion_motif"] = motif
     if hit == before:
         return (f"NO CHANGE — overlay {id} already has those motion values. "
                 "Do NOT tell the user you changed anything.")
@@ -9783,7 +10754,7 @@ def _detect_screen(ctx, edl, src_t, content_aspect=None, content=None):
 def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=None,
                         corners=None, clip_start_s=None, hold_s=None,
                         push=None, ease=None, settle=None,
-                        allow_repeat=False):
+                        allow_repeat=False, motion_motif=None):
     """Push into a device screen in the footage and let an asset playing ON
     that screen become the whole video, in one continuous move.
 
@@ -9835,6 +10806,12 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=None,
             push = prev_scr.get("push")
         if settle is None:
             settle = prev_scr.get("land") is not False
+    if motion_motif is None and prev_tk is not None:
+        motif = prev_tk.get("motion_motif")
+    else:
+        motif, motif_err = _motion_motif_value(ctx, motion_motif)
+        if motif_err:
+            return motif_err
     # A takeover deliberately uses the same asset as its destination insert:
     # the overlay pins the opening of that clip onto the device, then hands
     # off to the full-screen inserted clip at the arrival frame. That is one
@@ -10192,6 +11169,8 @@ def add_screen_takeover(ctx, asset_key, at_output_s, duration_s=None,
             "entrance": None, "exit": None,
             "source_start_s": off if kind == "video" else None,
             "screen": screen_spec}
+    if motif:
+        item["motion_motif"] = motif
     overlays.append(item)
     edl["overlays"] = overlays
     written = ctx.write_edl(
@@ -10447,7 +11426,8 @@ def move_overlay(ctx, id, start=None, x=None, y=None, scale=None):
 
 def add_text(ctx, text, start, end, template="title", x=None, y=None,
              size_scale=None, color=None, accent_color=None, font=None,
-             entrance=None, exit=None, uppercase=None, box=None, motion=None):
+             entrance=None, exit=None, uppercase=None, box=None, motion=None,
+             motion_motif=None):
     """Burn a designed text template over a program-time window — titles,
     lower thirds, callouts, big numbers, quotes, chapter markers."""
     t = (text or "").strip()
@@ -10505,6 +11485,16 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
     if font is not None and font not in TEXT_FONTS:
         return (f"REJECTED: font must be one of the bundled families: "
                 f"{', '.join(TEXT_FONTS)}.")
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
+    has_curve = bool(parsed_motion) and any(
+        isinstance(value, list) for value in parsed_motion.values())
+    animated = has_curve or entrance not in (None, "none") or \
+        exit not in (None, "none")
+    if motif and not animated:
+        return ("REJECTED: motion_motif can only bind animated text. Add an "
+                "entrance/exit or a changing keyframe curve, or omit it.")
     for label, v in (("x", x), ("y", y)):
         if v is not None:
             try:
@@ -10559,6 +11549,8 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
             "uppercase": bool(uppercase) if uppercase is not None else None,
             "box": bool(box) if box is not None else None,
             "motion": parsed_motion, "mute_captions": True}
+    if motif:
+        item["motion_motif"] = motif
     texts.append(item)
     edl["texts"] = texts
     muted_note = ""
@@ -10681,7 +11673,8 @@ def _kinetic_phrases(words, tl, out_start, out_end):
 
 def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                      emphasis_words=None, zone="upper", color="#FFFFFF",
-                     font=None, size_scale=None, motion_style="composed"):
+                     font=None, size_scale=None, motion_style="composed",
+                     motion_motif=None):
     """Choreograph the SPOKEN words onto the screen: one placed, animated
     text event per phrase, timed to the transcript, in a single pass."""
     if not ctx.has_main_video:
@@ -10699,6 +11692,12 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
     if motion_style not in _KINETIC_MOTION_STYLES:
         return ("REJECTED: motion_style must be one of "
                 + ", ".join(_KINETIC_MOTION_STYLES) + ".")
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
+    if motif and motion_style == "still":
+        return ("REJECTED: motion_motif cannot bind kinetic text in still "
+                "mode. Use composed/preset motion, or omit motion_motif.")
     if font is not None and font not in TEXT_FONTS:
         return (f"REJECTED: font must be one of the bundled families: "
                 f"{', '.join(TEXT_FONTS)}.")
@@ -10778,6 +11777,8 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                          else "fade"),
                 "uppercase": None, "box": None,
                 "motion": phrase_motion, "mute_captions": True}
+        if motif:
+            item["motion_motif"] = motif
         texts.append(item)
         made.append(item)
     edl["texts"] = texts
@@ -11182,7 +12183,7 @@ def remove_text(ctx, id):
              f"\"{str(hit.get('text', ''))[:24]}\" ({id})")
 
 
-def set_text_motion(ctx, id, motion=None):
+def set_text_motion(ctx, id, motion=None, motion_motif=None):
     """Set or clear general motion curves on an existing text element."""
     edl = dict(ctx.latest_edl()["json"])
     items = [dict(tx) for tx in (edl.get("texts") or [])]
@@ -11199,6 +12200,10 @@ def set_text_motion(ctx, id, motion=None):
     if err:
         return err
     before = dict(hit)
+    motif, motif_err = _motion_motif_value(
+        ctx, motion_motif, allow_clear=True)
+    if motif_err:
+        return motif_err
     if parsed:
         hit["motion"] = parsed
         # One animation authority: no hidden preset transform can fight the
@@ -11207,6 +12212,18 @@ def set_text_motion(ctx, id, motion=None):
         hit["exit"] = "none"
     else:
         hit.pop("motion", None)
+        if motion_motif is None:
+            hit.pop("motion_motif", None)
+    if motion_motif is not None:
+        if motif:
+            has_curve = any(isinstance(value, list)
+                            for value in (parsed or {}).values())
+            if not has_curve:
+                return ("REJECTED: motion_motif needs a changing keyframe "
+                        "curve on this text; scalar geometry is static.")
+            hit["motion_motif"] = motif
+        else:
+            hit.pop("motion_motif", None)
     if hit == before:
         return (f"NO CHANGE — text {id} already has that motion. Do NOT tell "
                 "the user you changed anything.")
@@ -11219,7 +12236,8 @@ def set_text_motion(ctx, id, motion=None):
 def add_vector_graphic(ctx, kind, start, end, x=0.5, y=0.5, width=0.25,
                        height=0.08, color="#FFFFFF", opacity=1.0,
                        stroke_color=None, stroke_width=None, rounding=None,
-                       background_color=None, value=None, motion=None):
+                       background_color=None, value=None, motion=None,
+                       motion_motif=None):
     """Add a renderer-native panel, shape, connector or indicator."""
     kind = str(kind or "").strip().lower()
     if kind not in VECTOR_KINDS:
@@ -11247,11 +12265,20 @@ def add_vector_graphic(ctx, kind, start, end, x=0.5, y=0.5, width=0.25,
         parsed_motion, err = _parse_text_motion(motion)
         if err:
             return err.replace("text", "vector graphic")
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
+    if motif and not any(isinstance(value, list)
+                         for value in (parsed_motion or {}).values()):
+        return ("REJECTED: motion_motif needs a changing keyframe curve on "
+                "the vector graphic; scalar geometry is static.")
     vectors = [dict(v) for v in (edl.get("vectors") or [])]
     item = {"id": _next_item_id(vectors, "vec"), "kind": kind,
             "start": s, "end": e, **numeric, "color": color,
             "stroke_color": stroke_color,
             "background_color": background_color, "motion": parsed_motion}
+    if motif:
+        item["motion_motif"] = motif
     vectors.append(item)
     edl["vectors"] = vectors
     note = ""
@@ -11267,7 +12294,7 @@ def set_vector_graphic(ctx, id, kind=None, start=None, end=None, x=None,
                        y=None, width=None, height=None, color=None,
                        opacity=None, stroke_color=None, stroke_width=None,
                        rounding=None, background_color=None, value=None,
-                       motion=None):
+                       motion=None, motion_motif=None):
     """Patch geometry, styling or motion on one vector graphic."""
     edl = dict(ctx.latest_edl()["json"])
     items = [dict(v) for v in (edl.get("vectors") or [])]
@@ -11305,6 +12332,21 @@ def set_vector_graphic(ctx, id, kind=None, start=None, end=None, x=None,
             hit["motion"] = parsed
         else:
             hit.pop("motion", None)
+            if motion_motif is None:
+                hit.pop("motion_motif", None)
+    if motion_motif is not None:
+        motif, motif_err = _motion_motif_value(
+            ctx, motion_motif, allow_clear=True)
+        if motif_err:
+            return motif_err
+        if motif:
+            if not any(isinstance(value, list)
+                       for value in (hit.get("motion") or {}).values()):
+                return ("REJECTED: motion_motif needs a changing keyframe "
+                        "curve on this vector graphic.")
+            hit["motion_motif"] = motif
+        else:
+            hit.pop("motion_motif", None)
     if hit == before:
         return (f"NO CHANGE — vector graphic {id} already has those "
                 "properties. Do NOT tell the user you changed anything.")
@@ -11578,7 +12620,7 @@ def remove_screen_frame(ctx):
 
 
 def add_aspect_shift(ctx, at_output_s, ratio, duration_s=0.8, zoom=True,
-                     color="#000000"):
+                     color="#000000", motion_motif=None):
     """Morph the visible frame to another aspect ratio mid-video, smoothly."""
     r = str(ratio or "").strip().lower()
     if r not in FRAME_SHIFT_RATIOS:
@@ -11601,6 +12643,9 @@ def add_aspect_shift(ctx, at_output_s, ratio, duration_s=0.8, zoom=True,
     col = str(color or "#000000").strip().upper()
     if not HEX_COLOR.match(col):
         return "REJECTED: color must be #RRGGBB hex (the bars' colour)."
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
 
     _orient, ow, oh = _project_frame(ctx)
     fx = dict(edl.get("effects") or {})
@@ -11631,6 +12676,8 @@ def add_aspect_shift(ctx, at_output_s, ratio, duration_s=0.8, zoom=True,
                 f"{prior[-1]['at']}s.")
     item = {"id": _next_item_id(shifts, "as"), "at": at, "ratio": r,
             "duration_s": dur, "zoom": bool(zoom), "color": col}
+    if motif:
+        item["motion_motif"] = motif
     shifts.append(item)
     fx["frame_shifts"] = shifts
     edl["effects"] = fx
@@ -12176,7 +13223,8 @@ def add_freeze_frame(ctx, at_output_s, duration_s=2.5, text=None,
         "with it.")
 
 
-def add_stylize(ctx, kind, start=None, end=None, intensity=None):
+def add_stylize(ctx, kind, start=None, end=None, intensity=None,
+                motion_motif=None):
     """A windowed finishing effect on the program picture."""
     k = (kind or "").strip().lower()
     if k not in STYLIZE_KINDS:
@@ -12203,10 +13251,20 @@ def add_stylize(ctx, kind, start=None, end=None, intensity=None):
             inten = round(min(max(float(intensity), 0.05), 1.0), 3)
         except (TypeError, ValueError):
             return "REJECTED: intensity must be a number 0.05-1.0."
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
+    if motif and (s is None or
+                  k not in motion_contract.TEMPORAL_EFFECT_KINDS):
+        return ("REJECTED: motion_motif can only bind a bounded temporal "
+                "effect such as shake/flash/VHS; a whole-program or static "
+                "finishing look is not beat-level motion.")
     fx = dict(edl.get("effects") or {})
     sts = [dict(sx) for sx in (fx.get("stylize") or [])]
     item = {"id": _next_item_id(sts, "st"), "kind": k, "start": s, "end": e,
             "intensity": inten}
+    if motif:
+        item["motion_motif"] = motif
     sts.append(item)
     fx["stylize"] = sts
     edl["effects"] = fx
@@ -12409,7 +13467,8 @@ def _probe_custom_chain(ctx, chain):
     return None, ratio
 
 
-def add_custom_filter(ctx, chain, start=None, end=None, label=None):
+def add_custom_filter(ctx, chain, start=None, end=None, label=None,
+                      motion_motif=None):
     """Write-your-own-effect: one validated, dry-run ffmpeg chain."""
     err = custom_chain_error(chain)
     if err:
@@ -12433,7 +13492,13 @@ def add_custom_filter(ctx, chain, start=None, end=None, label=None):
                 "closest look from apply_look / add_stylize / "
                 "set_grade_custom / enhance_video instead, and tell the "
                 "user this exact effect needs a service update. (Operator: "
-                "deploy the executor — worker/DEPLOY_EXECUTOR.md.)")
+                  "deploy the executor — worker/DEPLOY_EXECUTOR.md.)")
+    motif, motif_err = _motion_motif_value(ctx, motion_motif)
+    if motif_err:
+        return motif_err
+    if motif and s is None:
+        return ("REJECTED: motion_motif can only bind a bounded custom "
+                "effect; pass start/end so it belongs to a real beat.")
     perr, ratio = _probe_custom_chain(ctx, chain.strip())
     if perr:
         return "REJECTED: " + perr
@@ -12442,6 +13507,8 @@ def add_custom_filter(ctx, chain, start=None, end=None, label=None):
     item = {"id": _next_item_id(cfs, "cf"), "chain": chain.strip(),
             "start": s, "end": e,
             "label": ((label or "").strip()[:60] or None)}
+    if motif:
+        item["motion_motif"] = motif
     cfs.append(item)
     fx["custom"] = cfs
     edl["effects"] = fx
@@ -12459,6 +13526,121 @@ def add_custom_filter(ctx, chain, start=None, end=None, label=None):
                 f"remove_custom_filter('{item['id']}') and write a better "
                 "chain.")
     return res
+
+
+def bind_motion_motif(ctx, target_type, motion_motif=None, id=None):
+    """Attach causal Blueprint-v3 provenance to an existing motion event.
+
+    This is deliberately a binder, not an effect generator or a quota: the
+    target must already produce renderer-visible motion. It lets automatic
+    directors and multi-operation recipes author first, then bind the exact
+    object to the story beat it was designed to serve.
+    """
+    kind = str(target_type or "").strip().lower().replace("-", "_")
+    aliases = {"frame_shift": "aspect_shift", "custom_filter": "custom",
+               "caption": "captions"}
+    kind = aliases.get(kind, kind)
+    allowed = {"zoom", "text", "vector", "overlay", "insert", "speed",
+               "aspect_shift", "stylize", "custom", "transition",
+               "captions"}
+    if kind not in allowed:
+        return ("REJECTED: target_type must be one of "
+                + ", ".join(sorted(allowed)) + ".")
+    motif, motif_err = _motion_motif_value(
+        ctx, motion_motif, allow_clear=True)
+    if motif_err:
+        return motif_err
+    edl = copy.deepcopy(ctx.latest_edl()["json"])
+
+    if kind == "captions":
+        caps = edl.get("captions")
+        if not caps:
+            return "REJECTED: no captions exist to bind."
+        bound = 0
+        if isinstance(caps, dict):
+            if motif and not caplib.motion_enabled(caps):
+                return ("REJECTED: the caption treatment is static. Enable "
+                        "dynamic/reveal motion or an entrance animation "
+                        "before binding a motif.")
+            if motif:
+                caps["motion_motif"] = motif
+                bound = 1
+            else:
+                caps.pop("motion_motif", None)
+        elif isinstance(caps, list):
+            for item in caps:
+                if caplib.motion_enabled([item]):
+                    if motif:
+                        item["motion_motif"] = motif
+                        bound += 1
+                    else:
+                        item.pop("motion_motif", None)
+                elif not motif:
+                    item.pop("motion_motif", None)
+            if motif and not bound:
+                return ("REJECTED: every manual caption is static; there is "
+                        "no rendered caption motion to bind.")
+        else:
+            return "REJECTED: the caption track is malformed."
+        edl["captions"] = caps
+        action = f"bound to motif {motif}" if motif else "motif cleared"
+        return ctx.write_edl(edl, f"caption motion {action}")
+
+    if kind == "transition":
+        transition = (edl.get("effects") or {}).get("transition")
+        if not isinstance(transition, dict) or not transition.get("style"):
+            return "REJECTED: no authored transition exists to bind."
+        if motif and not any(row["kind"] == "transition" for row in
+                             motion_contract.motion_events(
+                                 edl, index=getattr(ctx, "index", None))):
+            return ("REJECTED: the transition style currently creates no "
+                    "rendered junction, so it cannot prove a motion beat.")
+        if motif:
+            transition["motion_motif"] = motif
+        else:
+            transition.pop("motion_motif", None)
+        action = f"bound to motif {motif}" if motif else "motif cleared"
+        return ctx.write_edl(edl, f"transition motion {action}")
+
+    if not id:
+        return f"REJECTED: id is required for target_type={kind!r}."
+    paths = {
+        "zoom": ("effects", "zooms", {"zoom"}),
+        "aspect_shift": ("effects", "frame_shifts", {"frame_shift"}),
+        "stylize": ("effects", "stylize", {"stylize"}),
+        "custom": ("effects", "custom", {"custom"}),
+        "text": (None, "texts", {"keyframes", "entrance", "exit"}),
+        "vector": (None, "vectors", {"keyframes"}),
+        "overlay": (None, "overlays", {"overlay_keyframes",
+                                         "overlay_entrance", "overlay_exit",
+                                         "screen_track"}),
+        "insert": (None, "inserts", {"insert_motion"}),
+        "speed": (None, "speed", {"speed"}),
+    }
+    parent_name, collection, event_kinds = paths[kind]
+    parent = edl if parent_name is None else edl.setdefault(parent_name, {})
+    items = parent.get(collection) or []
+    hit = next((row for row in items
+                if isinstance(row, dict) and str(row.get("id")) == str(id)),
+               None)
+    if hit is None:
+        have = ", ".join(str(row.get("id") or "?") for row in items) or "none"
+        return (f"REJECTED: no {kind} with id {id!r}. Existing ids: "
+                f"{have}.")
+    if motif:
+        visible = any(
+            row.get("id") == str(id) and row.get("kind") in event_kinds
+            for row in motion_contract.motion_events(
+                edl, index=getattr(ctx, "index", None)))
+        if not visible:
+            return (f"REJECTED: {kind} {id!r} does not currently produce "
+                    "renderer-visible timed motion, so it cannot be bound "
+                    "to a motion motif.")
+        hit["motion_motif"] = motif
+    else:
+        hit.pop("motion_motif", None)
+    action = f"bound to motif {motif}" if motif else "motif cleared"
+    return ctx.write_edl(edl, f"{kind} {id} motion {action}")
 
 
 def remove_custom_filter(ctx, id):
@@ -13330,6 +14512,7 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
 def _queue_broll_research_sheet(ctx, labeled_hits, limit=20):
     """One compact visual board across multiple narrative moments."""
     ctx._last_broll_board_review = None
+    ctx._last_broll_board_cast = None
     if not (_can_receive_images(ctx) or llm.vision_available()):
         return 0
 
@@ -13344,7 +14527,7 @@ def _queue_broll_research_sheet(ctx, labeled_hits, limit=20):
             net_fetch.download(url, local, max_bytes=3 * 1024 * 1024,
                                timeout_s=15)
             hit["_thumbnail_delivered"] = True
-            return f"{moment_id} | {hit.get('id')}", local
+            return f"{moment_id} | {hit.get('id')}", local, moment_id, hit
         except Exception:
             return None
 
@@ -13364,13 +14547,26 @@ def _queue_broll_research_sheet(ctx, labeled_hits, limit=20):
         for moment_id in order:
             if buckets[moment_id] and len(rows) < limit:
                 rows.append(buckets[moment_id].pop(0))
-    frames = []
+    frames, review_rows = [], []
     with ThreadPoolExecutor(max_workers=min(6, len(rows) or 1)) as pool:
         futures = [pool.submit(_download, row) for row in rows]
         for future in futures:
             got = future.result()
             if got:
-                frames.append(got)
+                label, local, moment_id, hit = got
+                frames.append((label, local))
+                moment = hit.get("_broll_moment") or {}
+                review_rows.append({
+                    "moment_id": moment_id,
+                    "candidate_id": hit.get("id"),
+                    "provider_result_id": hit.get("_provider_result_id")
+                    or hit.get("id"),
+                    "purpose": moment.get("purpose"),
+                    "query": hit.get("_broll_query") or moment.get("query"),
+                    "description": hit.get("description"),
+                    "kind": hit.get("kind"),
+                    "provider": hit.get("provider"),
+                })
     if not frames:
         return 0
     sheet = os.path.join(ctx.workdir,
@@ -13379,13 +14575,74 @@ def _queue_broll_research_sheet(ctx, labeled_hits, limit=20):
         sheets.build_timestamp_sheet(frames, sheet)
     except Exception:
         return 0
-    ctx._last_broll_board_review = _deliver_frames(
-        ctx, [sheet], ["story-wide candidate board"],
+    question = (
         "Each tile is labeled moment | stock id. Compare relevance, "
         "authenticity, composition, light/color and sequence diversity; "
-        "identify strong/weak ids from visible evidence.",
-        "B-ROLL RESEARCH BOARD — compare relevance, authenticity, "
-        "composition, light/color and sequence diversity")
+        "identify strong/weak ids from visible evidence. Keeping the base "
+        "picture is a valid winner for every moment.")
+    delivery = None
+    if _can_receive_images(ctx):
+        delivery = _deliver_frames(
+            ctx, [sheet], ["story-wide candidate board"], question,
+            "B-ROLL RESEARCH BOARD — compare relevance, authenticity, "
+            "composition, light/color and sequence diversity")
+
+    # The in-house editor gets one stateless casting opinion in this same
+    # research call. That buys sequence judgment without another general-agent
+    # dispatch. MCP already sends the board to its outside model, so duplicating
+    # that paid review here would violate the caller-funded evidence boundary.
+    report = None
+    if not getattr(ctx, "sight_out", False) and llm.vision_available():
+        plan = getattr(ctx, "edit_plan", None) or {}
+        treatment = " | ".join(part for part in (
+            director.decision_block(plan).replace("\n", " | "),
+            str(plan.get("broll_direction") or "").strip(),
+            director.sequence_block(
+                plan, include=("anchor", "purpose", "visual"), max_rows=12
+            ).replace("\n", " | "),
+        ) if part)[:2600]
+        report = broll_judge.review(sheet, review_rows, treatment)
+    if report:
+        cast = broll_judge.summary(report)
+        ctx._last_broll_board_cast = cast
+        ctx._last_broll_board_review = cast
+        by_id = {hit.get("id"): hit for _moment, hit in labeled_hits}
+        by_moment = {}
+        for moment_id, hit in labeled_hits:
+            by_moment.setdefault(moment_id, []).append(hit)
+        for choice in report.get("selections") or []:
+            _decision_trace(
+                ctx, "broll_cast", moment_id=choice.get("moment_id"),
+                candidate_ids=[hit.get("id") for hit in
+                               by_moment.get(choice.get("moment_id"), [])],
+                decision=choice.get("decision"),
+                candidate_id=choice.get("candidate_id"),
+                confidence=choice.get("confidence"),
+                evidence=choice.get("visible_evidence"),
+                reason=choice.get("sequence_reason"),
+                review_stage="thumbnail_sequence",
+                source="independent_vision")
+            if choice.get("decision") == "use":
+                hit = by_id.get(choice.get("candidate_id"))
+                if hit is not None:
+                    hit["_broll_cast"] = dict(choice)
+            else:
+                for hit in by_moment.get(choice.get("moment_id"), []):
+                    hit["_broll_cast_abstain"] = dict(choice)
+        _metric(ctx, "broll_sequence_casts")
+        _metric(ctx, "broll_moments_cast", len(report.get("selections") or []))
+        _metric(ctx, "broll_moments_abstained", sum(
+            1 for row in report.get("selections") or []
+            if row.get("decision") == "none"))
+    elif delivery:
+        ctx._last_broll_board_review = delivery
+    else:
+        # Blind in-house deployments still get one vision call, now only when
+        # the structured casting path was unavailable or malformed.
+        ctx._last_broll_board_review = _deliver_frames(
+            ctx, [sheet], ["story-wide candidate board"], question,
+            "B-ROLL RESEARCH BOARD — compare relevance, authenticity, "
+            "composition, light/color and sequence diversity")
     return len(frames)
 
 
@@ -13503,18 +14760,29 @@ def research_broll(ctx, moments, orientation=None):
         while len(chosen) < alternatives and any(buckets.values()):
             for query in spec["queries"]:
                 while buckets[query]:
-                    hit = buckets[query].pop(0)
-                    if hit.get("id") in seen_ids:
+                    raw_hit = buckets[query].pop(0)
+                    provider_id = str(raw_hit.get("id") or "").strip()
+                    if provider_id in seen_ids:
                         duplicate_candidates += 1
                         continue
-                    seen_ids.add(hit.get("id"))
+                    seen_ids.add(provider_id)
+                    # One provider shot may answer multiple story queries.
+                    # Give each moment its own address and metadata object;
+                    # otherwise the last moment silently overwrites the first
+                    # in ctx.stock_results and later persists the wrong purpose.
+                    hit = dict(raw_hit)
+                    hit["_provider_result_id"] = provider_id
+                    hit["id"] = f"broll:{key}:{provider_id}"
                     hit["_broll_query"] = query
                     chosen.append(hit)
                     break
                 if len(chosen) >= alternatives:
                     break
         for hit in chosen:
-            hit["_broll_moment"] = dict(spec)
+            hit["_broll_moment"] = {
+                field: spec.get(field) for field in
+                ("id", "query", "purpose", "kind", "at", "duration_s")
+            }
             ctx.stock_results[hit["id"]] = hit
             labeled.append((spec["id"], hit))
         err = "; ".join(search_errors[key])[:300] if not chosen else None
@@ -13549,10 +14817,12 @@ def research_broll(ctx, moments, orientation=None):
                              + (f" [route: {route}]" if route else ""))
     tail = (f" A {board_n}-candidate visual board is attached."
             if board_n else " Thumbnail delivery was unavailable; judge from metadata.")
-    if board_n and getattr(ctx, "_last_broll_board_review", None) and \
+    if board_n and getattr(ctx, "_last_broll_board_cast", None):
+        tail += ("\n" + str(ctx._last_broll_board_cast)[:5200])
+    elif board_n and getattr(ctx, "_last_broll_board_review", None) and \
             not _can_receive_images(ctx):
         tail += (" Fallback visual review: "
-                 + str(ctx._last_broll_board_review)[:1400])
+                 + str(ctx._last_broll_board_review)[:1800])
     if errors:
         tail += " Invalid moment notes: " + "; ".join(errors)[:240] + "."
     return ("B-ROLL RESEARCH ACROSS THE STORY:\n" + "\n".join(lines)
@@ -13618,7 +14888,17 @@ def add_stock_media(ctx, id):
     try:
         storage.upload_file(path, key, url_media.content_type(path))
         reviewed = _queue_download_review(
-            ctx, path, kind, dur, (item.get("description") or "stock media")[:60])
+            ctx, path, kind, dur,
+            (item.get("description") or "stock media")[:60],
+            review_context={
+                "narrative_moment": item.get("_broll_moment"),
+                "search_route": item.get("_broll_query"),
+                "catalog_description": item.get("description"),
+                "provider": item.get("provider"),
+                "thumbnail_cast": item.get("_broll_cast")
+                or item.get("_broll_cast_abstain"),
+                "output_orientation": _project_frame(ctx)[0],
+            } if item.get("_broll_moment") else None)
     except Exception as e:
         return (f"Downloaded the stock clip but could not save it "
                 f"({str(e)[:160]}). Do NOT claim it was added; try again.")
@@ -13635,7 +14915,8 @@ def add_stock_media(ctx, id):
                fps=(info or {}).get("fps"),
                meta={"filename": fname, "stock": True,
                      "provider": item.get("provider"),
-                     "stock_id": sid,
+                     "stock_id": item.get("_provider_result_id") or sid,
+                     "research_candidate_id": sid,
                      "credit": item.get("credit"),
                      "license": item.get("license"),
                      "license_note": item.get("license_note"),
@@ -13643,9 +14924,28 @@ def add_stock_media(ctx, id):
                      "source_url": item.get("source_url"),
                      "description": item.get("description"),
                      "motion_profile": motion_profile,
-                     "broll_moment": item.get("_broll_moment")})
+                     "broll_moment": item.get("_broll_moment"),
+                     "broll_sequence_judgment": item.get("_broll_cast")
+                     or item.get("_broll_cast_abstain"),
+                     "broll_rendition_judgment": getattr(
+                         ctx, "_last_download_rendition_judgment", None)})
     ctx.stock_added.append({"storage_key": key, "id": sid,
                             "provider": item.get("provider")})
+    cast_choice = item.get("_broll_cast")
+    cast_none = item.get("_broll_cast_abstain")
+    rendition = getattr(ctx, "_last_download_rendition_judgment", None) or {}
+    _decision_trace(
+        ctx, "broll_download",
+        moment_id=(item.get("_broll_moment") or {}).get("id"),
+        candidate_id=sid, decision="use", asset_key=key,
+        confidence=rendition.get("confidence"),
+        evidence=rendition.get("visible_evidence"),
+        reason=(cast_choice or cast_none or {}).get("sequence_reason"),
+        purpose=(item.get("_broll_moment") or {}).get("purpose"),
+        review_stage="downloaded_rendition",
+        alignment=("aligned" if cast_choice else
+                   "override_no_broll" if cast_none else "uncast"),
+        provider=item.get("provider"))
     _mark_visual_review_pending(ctx, key, reviewed)
 
     bits = []
@@ -13664,13 +14964,31 @@ def add_stock_media(ctx, id):
               "rendition are attached for an automatic visual review; inspect "
               "them before placement."
               if reviewed else "")
+    rendition = getattr(ctx, "_last_download_rendition_judgment", None)
     if reviewed and getattr(ctx, "_last_download_review_text", None) and \
-            not _can_receive_images(ctx):
+            not _can_receive_images(ctx) and not rendition:
         review += (" Fallback vision report from the actual rendition: "
                    + str(ctx._last_download_review_text)[:1200])
     measured = motion_judge.describe(motion_profile)
     if measured:
         review += " " + measured
+    cast = item.get("_broll_cast")
+    abstain = item.get("_broll_cast_abstain")
+    if cast:
+        review += (
+            " The independent thumbnail cast recommended this shot for "
+            f"{cast.get('moment_id')} ({float(cast.get('confidence') or 0):.0%}): "
+            f"{str(cast.get('visible_evidence') or '')[:260]}. The downloaded "
+            "frames you just received supersede that thumbnail if they differ.")
+    elif abstain:
+        review += (
+            " SELECTION WARNING: the independent thumbnail cast preferred "
+            "KEEP BASE PICTURE / NO B-ROLL for this moment: "
+            f"{str(abstain.get('visible_evidence') or '')[:260]}. You may "
+            "override only if the downloaded frames provide stronger specific "
+            "evidence; do not place it merely because it was downloaded.")
+    if rendition:
+        review += " " + broll_judge.rendition_summary(rendition)
     return (f"Added stock {'clip' if is_video else 'image'} \"{desc}\""
             f"{detail} to the project: storage_key={key}. It is SILENT and "
             f"NOT in the video yet — place it with {place}.{review} Cover overlays of "
@@ -14924,6 +16242,33 @@ def render_preview(ctx, complete=False):
     # preview. A model asking for complete=true mid-turn used to encode the
     # whole programme repeatedly while it experimented with later versions.
     complete = bool(getattr(ctx, "autorendering", False))
+    if complete:
+        department_gaps = director.department_execution_gaps(
+            getattr(ctx, "edit_plan", None), row.get("json") or {},
+            getattr(ctx, "has_main_video", True))
+        motion_gaps = motion_contract.execution_gaps(
+            getattr(ctx, "edit_plan", None), row.get("json") or {},
+            index=getattr(ctx, "index", None))
+        gaps = department_gaps + motion_gaps
+        if gaps:
+            ctx.last_department_gaps = gaps
+            _metric(ctx, "readiness_previews_prevented")
+            if department_gaps:
+                _metric(ctx, "department_execution_gaps",
+                        len(department_gaps))
+            if motion_gaps:
+                _metric(ctx, "motion_contract_gaps", len(motion_gaps))
+            return (
+                "REJECTED: READINESS PRECHECK — no complete preview was "
+                "encoded because "
+                "the current EDL contradicts its own executable treatment "
+                "contract: "
+                + "; ".join(row["message"] for row in gaps[:6])
+                + ". Fulfill/remove those layers, or revise their mode to "
+                  "preserve/omit with the evidence-backed editorial reason. "
+                  "A changed-section proof remains available with "
+                  "render_preview(complete=false), and the turn-end honesty "
+                  "render is never withheld.")
     if version in ctx.rendered_versions and \
             (ctx.last_preview or {}).get("edl_version") == version:
         return (f"Preview v{version} is already rendered and attached — "
@@ -14939,9 +16284,20 @@ def render_preview(ctx, complete=False):
     # ("this should read X, behind the person") instead of nine even samples
     # of the whole programme that the edit may not even appear in.
     plan = _verify_plan_for(ctx, row)
-    if not complete:
+    if not autorendering:
         ranges, _baseline = _change_check_ranges(ctx, row, plan)
-        if ranges:
+        # Once a complete immutable baseline exists, the first look at a new
+        # version is the bounded changed-section proof—even when the editor
+        # reflexively asks for complete=true. This is stage routing, not a
+        # preview allowance: after that exact version has been proof-checked,
+        # another explicit complete call renders it in full, and the turn-end
+        # autorender always renders the user-facing complete file. Production
+        # previously encoded a 15s program 17 times while changing one caption
+        # or grade at a time; those inner-loop encodes carried no extra whole-
+        # program evidence.
+        if ranges and (not complete or version not in ctx.checked_versions):
+            if complete:
+                _metric(ctx, "complete_previews_routed_to_proof")
             return _run_changed_preview_check(ctx, row, plan, ranges)
         if requested_complete:
             _metric(ctx, "full_preview_requests_deferred")
@@ -15145,7 +16501,41 @@ def render_preview(ctx, complete=False):
             note += audio_qc.summary_line(aq)
             audio_review = _review_render_audio(ctx, row, result)
             if audio_review:
-                note += " ACTUAL-AUDIO REVIEW: " + audio_review["text"]
+                reused = (" (reused: rendered audio program unchanged)"
+                          if audio_review.get("reused") else "")
+                note += " ACTUAL-AUDIO REVIEW" + reused + ": " + \
+                    audio_review["text"]
+            department_gaps = director.department_execution_gaps(
+                getattr(ctx, "edit_plan", None), row.get("json") or {},
+                getattr(ctx, "has_main_video", True))
+            motion_report = motion_contract.evaluate(
+                getattr(ctx, "edit_plan", None), row.get("json") or {},
+                index=getattr(ctx, "index", None))
+            motion_gaps = motion_report["gaps"]
+            execution_gaps = department_gaps + motion_gaps
+            ctx.last_department_gaps = execution_gaps
+            if motion_report["active"]:
+                _metric(ctx, "motion_contract_beats",
+                        len(motion_report["beats"]))
+                _metric(ctx, "motion_contract_mapped_beats",
+                        motion_report["mapped_beats"])
+                _metric(ctx, "motion_contract_fulfilled_beats",
+                        motion_report["fulfilled_beats"])
+            if department_gaps:
+                _metric(ctx, "department_execution_gaps",
+                        len(department_gaps))
+            if motion_gaps:
+                _metric(ctx, "motion_contract_gaps", len(motion_gaps))
+            if execution_gaps:
+                messages = [gap["message"] for gap in execution_gaps[:6]]
+                for message in messages:
+                    if message not in ctx.last_taste:
+                        ctx.last_taste.append(message)
+                note += (
+                    " TREATMENT EXECUTION CHECK: " + "; ".join(messages)
+                    + ". Fulfill those authored/omitted promises or revise "
+                      "the department decision with the real editorial "
+                      "reason; do not close the blueprint by assertion.")
             if finishing_checkpoint(ctx):
                 if not getattr(ctx, "_finishing_checkpoint_announced", False):
                     ctx._finishing_checkpoint_announced = True
@@ -15175,6 +16565,97 @@ def render_preview(ctx, complete=False):
             "attach to the chat. Summarize your edit for the user now.")
 
 
+def _audio_window_label(edl, plan, t0, t1):
+    """Causal EDL/sequence facts for one actually heard program excerpt."""
+    t0, t1 = float(t0), float(t1)
+
+    def overlaps(start, end):
+        try:
+            return min(float(end), t1) - max(float(start), t0) > .01
+        except (TypeError, ValueError):
+            return False
+
+    facts = [f"PROGRAM {t0:.1f}-{t1:.1f}s"]
+    for number, item in enumerate((edl.get("music") or []), 1):
+        if item.get("mute") or not overlaps(item.get("start"), item.get("end")):
+            continue
+        identity = item.get("id") or f"legacy-music-{number}"
+        facts.append(
+            f"music id={identity} purpose={item.get('purpose') or 'not recorded'}")
+    for number, item in enumerate((edl.get("sfx") or []), 1):
+        try:
+            at = float(item.get("at"))
+        except (TypeError, ValueError):
+            continue
+        if t0 - .08 <= at <= t1 + .08:
+            facts.append(
+                f"SFX id={item.get('id') or f'legacy-sfx-{number}'} "
+                f"at={at:.2f}s purpose={item.get('purpose') or 'not recorded'}")
+    for number, item in enumerate((edl.get("voiceover") or []), 1):
+        try:
+            at = float(item.get("start_output_s"))
+        except (TypeError, ValueError):
+            continue
+        if t0 - .08 <= at <= t1 + .08:
+            facts.append(
+                f"voiceover id={item.get('id') or f'legacy-vo-{number}'} "
+                f"starts={at:.2f}s")
+    for beat_n, beat in enumerate((plan or {}).get("sequence_map") or [], 1):
+        spans = motion_contract.sequence_output_spans(edl, beat)
+        if any(overlaps(start, end) for start, end in spans):
+            facts.append(
+                f"beat={beat_n} role={beat.get('role') or 'planned'} "
+                f"sound={beat.get('sound') or 'not specified'} "
+                f"purpose={beat.get('purpose') or beat.get('anchor') or 'planned beat'}")
+    return " | ".join(facts)[:1200]
+
+
+def _audio_execution_context(edl, plan):
+    """Output-clock joins for authored sound; presence is never a quota."""
+    beats = []
+    for beat_n, beat in enumerate((plan or {}).get("sequence_map") or [], 1):
+        spans = motion_contract.sequence_output_spans(edl, beat)
+        beats.append({"n": beat_n, "role": beat.get("role"),
+                      "sound": beat.get("sound"), "spans": spans})
+
+    def touching(start, end=None, halo=.08):
+        try:
+            start = float(start)
+            end = start if end is None else float(end)
+        except (TypeError, ValueError):
+            return []
+        return [row["n"] for row in beats if any(
+            min(end + halo, span_end) - max(start - halo, span_start) > -.001
+            for span_start, span_end in row["spans"])]
+
+    rows = []
+    for beat in beats:
+        rows.append(
+            f"beat {beat['n']} role={beat['role'] or 'planned'} "
+            f"output={beat['spans'] or 'unmapped'} "
+            f"sound={beat['sound'] or 'not specified'}")
+    for number, item in enumerate((edl.get("music") or []), 1):
+        if item.get("mute"):
+            continue
+        hit = touching(item.get("start"), item.get("end"), halo=0)
+        rows.append(
+            f"music {item.get('id') or f'legacy-music-{number}'} "
+            f"{item.get('start')}-{item.get('end')}s touches beats="
+            f"{hit or 'none'} purpose={item.get('purpose') or 'not recorded'}")
+    for number, item in enumerate((edl.get("sfx") or []), 1):
+        hit = touching(item.get("at"))
+        rows.append(
+            f"SFX {item.get('id') or f'legacy-sfx-{number}'} "
+            f"at={item.get('at')}s touches beats={hit or 'none'} "
+            f"purpose={item.get('purpose') or 'not recorded'}")
+    if not rows:
+        return ""
+    return (
+        "AUDIO EXECUTION EVIDENCE (clock mapping only; judge choice, timing, "
+        "mix and intentional silence from heard excerpts): " +
+        " | ".join(rows))[:3200]
+
+
 def _review_render_audio(ctx, row, result):
     """Listen to the final mix excerpts emitted by the executor, best effort."""
     if not llm.audio_review_available():
@@ -15182,7 +16663,19 @@ def _review_render_audio(ctx, row, result):
     edl = row.get("json") or {}
     if not (edl.get("music") or edl.get("sfx") or edl.get("voiceover")):
         return None
-    paths, labels = [], []
+    signature = _modality_signature(ctx, edl, "audio")
+    cache = getattr(ctx, "_audio_review_cache", None)
+    if cache is None:
+        cache = {}
+        ctx._audio_review_cache = cache
+    if signature in cache:
+        report = dict(cache[signature], edl_version=row["version"], reused=True)
+        ctx.last_audio_review = report
+        ctx.audio_reviewed_versions.add(row["version"])
+        _metric(ctx, "audio_mix_reviews_reused")
+        return report
+    plan = getattr(ctx, "edit_plan", None) or {}
+    paths, labels, heard_windows = [], [], []
     for i, item in enumerate((result or {}).get("listen_keys") or []):
         key = item.get("key") if isinstance(item, dict) else item
         if not key:
@@ -15197,50 +16690,192 @@ def _review_render_audio(ctx, row, result):
             continue
         paths.append(local)
         if isinstance(item, dict):
-            labels.append(
-                f"PROGRAM {float(item.get('t0') or 0):.1f}-"
-                f"{float(item.get('t1') or 0):.1f}s")
+            t0 = float(item.get("t0") or 0)
+            t1 = float(item.get("t1") or 0)
+            labels.append(_audio_window_label(edl, plan, t0, t1))
+            if t1 > t0:
+                heard_windows.append((t0, t1))
         else:
             labels.append(f"PROGRAM excerpt {i + 1}")
     if not paths:
         return None
-    plan = getattr(ctx, "edit_plan", None) or {}
-    direction = "; ".join(str(plan.get(key))[:220] for key in (
+    global_direction = "; ".join(str(plan.get(key))[:220] for key in (
         "treatment", "format", "objective", "music_direction",
         "sfx_direction")
         if plan.get(key))
     decision = director.decision_block(plan)
-    if decision:
-        direction = (direction + "; " + decision.replace("\n", " | "))[:2600]
     sequence_sound = director.sequence_block(
         plan, include=("anchor", "purpose", "sound"), max_rows=12)
-    if sequence_sound:
-        direction = (direction + "; sequence: " +
-                     sequence_sound.replace("\n", " | "))[:2600]
+    authored_music = [
+        f"{item.get('id')} {item.get('start')}-{item.get('end')}s: "
+        f"purpose={item.get('purpose') or 'not recorded'}"
+        for item in (edl.get("music") or []) if not item.get("mute")]
+    authored_sfx = [
+        f"{item.get('id')} at={item.get('at')}s: "
+        f"purpose={item.get('purpose') or 'not recorded'}"
+        for item in (edl.get("sfx") or [])]
+    execution_context = _audio_execution_context(edl, plan)
+    priority_audio = [
+        "Global audio direction: " + global_direction
+        if global_direction else "Global audio direction: use restraint",
+        execution_context,
+        ("Sound sequence contract: " + sequence_sound.replace("\n", " | "))
+        if sequence_sound else "",
+        ("Authored music roles: " + " | ".join(authored_music))
+        if authored_music else "Authored music roles: none",
+        ("Authored SFX events: " + " | ".join(authored_sfx))
+        if authored_sfx else "Authored SFX events: none",
+    ]
+    direction = preview_critic.pack_context(
+        priority_audio,
+        [("Treatment decision context: " + decision.replace("\n", " | "))
+         if decision else ""], max_chars=6000)
+    valid_targets = {"master", "source"}
+    valid_targets.update(str(item.get("id")) for key in
+                         ("music", "sfx", "voiceover")
+                         for item in (edl.get(key) or []) if item.get("id"))
     prompt = (
         "You are the independent final audio editor. Listen to the labeled "
         "excerpts from the ACTUAL RENDERED PROGRAM mix, not filenames or "
         "waveform statistics. Start with PASS or FIX. Judge whether speech "
         "is intelligible, music is audible but supports rather than masks, "
-        "SFX land naturally, and the combined choice/tone/levels feel "
-        "coherent and professionally intentional. If FIX, name one exact "
-        "audible defect and one concrete timing/gain/replacement action. Do "
+        "SFX land naturally, music entries/exits develop with the sequence, "
+        "repeated accents form a coherent language, and intentional silence "
+        "creates contrast. Labels are provenance, not proof: audible evidence "
+        "wins. Judge only the supplied program windows and do not claim to "
+        "have heard an unsampled moment. Judge audio craft only: "
+        "do not request story cuts for pauses, visual changes, caption edits, "
+        "or alternate pacing. Return JSON only: "
+        '{"verdict":"pass|fix","category":"speech_masking|music_balance|'
+        'music_edit|sfx_timing|sfx_choice|sound_coherence|audio_artifact|'
+        'level|tone_mismatch|null",'
+        '"program_time_s":0.0,"target_id":"exact labeled id|master|source|null",'
+        '"sequence_beat":1,"confidence":0.0,'
+        '"evidence":"one exact audible fact",'
+        '"action":"one timing/gain/replacement action or null"}. '
+        "A FIX requires one exact heard time, one allowed target id, one "
+        "audible defect and one concrete action. PASS means no defect in the "
+        "sampled windows, not certification of unheard audio. Do "
         "not penalize absent music/SFX unless the recorded direction asks "
-        "for them. Direction: " + (direction or "unspecified; use restraint"))
+        "for them. Allowed target ids: " + ", ".join(sorted(valid_targets)) +
+        ". Direction: " + direction)
     answer = llm.ask_audio(
-        prompt, paths, labels, max_tokens=220,
+        prompt, paths, labels, max_tokens=300,
         purpose="audio_render_review")
     if not answer:
         return None
-    verdict = "fix" if re.search(r"(?:^|\W)fix(?:\W|$)", answer,
-                                 re.I) else "pass"
-    report = {"edl_version": row["version"], "verdict": verdict,
-              "text": answer[:900], "clips": len(paths)}
+    report = _parse_render_audio_review(
+        answer, row["version"], len(paths), heard_windows=heard_windows,
+        valid_targets=valid_targets)
+    if report is None:
+        return None
+    prior_audio = getattr(ctx, "last_audio_review", None) or {}
+    if prior_audio.get("verdict") == "pass" and report["verdict"] == "fix":
+        _metric(ctx, "audio_passes_reopened")
+    elif prior_audio.get("verdict") == "fix" and \
+            report["verdict"] == "pass":
+        _metric(ctx, "audio_repairs_resolved")
     ctx.last_audio_review = report
     ctx.audio_reviewed_versions.add(row["version"])
+    cache[signature] = dict(report)
     _metric(ctx, "audio_mix_reviews")
     _metric(ctx, "audio_review_clips", len(paths))
     return report
+
+
+_AUDIO_REPAIR_CATEGORIES = {
+    "speech_masking", "music_balance", "sfx_timing", "audio_artifact",
+    "level", "tone_mismatch", "music_edit", "sfx_choice",
+    "sound_coherence",
+}
+
+
+def _parse_render_audio_review(answer, edl_version, clips,
+                               heard_windows=None, valid_targets=None):
+    """Only structured, confident audible evidence can reopen the mix."""
+    raw = None
+    if isinstance(answer, str):
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(answer):
+            if char != "{":
+                continue
+            try:
+                candidate, _end = decoder.raw_decode(answer[index:])
+            except (ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(candidate, dict):
+                raw = candidate
+                break
+    if raw is None:
+        # Backward-compatible PASS is safe evidence. An unstructured FIX is
+        # advisory prose, not enough to trigger another render/edit loop.
+        if isinstance(answer, str) and re.match(r"^\s*PASS\b", answer, re.I):
+            return {"edl_version": edl_version, "verdict": "pass",
+                    "text": answer[:900], "clips": clips}
+        return None
+    verdict = str(raw.get("verdict") or "").strip().lower()
+    if verdict == "pass":
+        evidence = " ".join(str(raw.get("evidence") or "").split())
+        return {"edl_version": edl_version, "verdict": "pass",
+                "text": "PASS" + (" — " + evidence[:500]
+                                  if evidence else ""), "clips": clips}
+    if verdict != "fix":
+        return None
+    category = str(raw.get("category") or "").strip().lower()
+    target_id = " ".join(str(raw.get("target_id") or "").split())[:80]
+    evidence = " ".join(str(raw.get("evidence") or "").split())
+    action = " ".join(str(raw.get("action") or "").split())
+    try:
+        confidence = float(raw.get("confidence"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(confidence) or confidence < 0.78 or \
+            category not in _AUDIO_REPAIR_CATEGORIES or not evidence or \
+            not action:
+        return None
+    try:
+        at = float(raw.get("program_time_s"))
+        if not math.isfinite(at) or at < 0:
+            at = None
+    except (TypeError, ValueError):
+        at = None
+    if at is None or not target_id:
+        return None
+    if valid_targets and target_id not in set(valid_targets):
+        return None
+    windows = []
+    for window in heard_windows or []:
+        try:
+            start, end = float(window[0]), float(window[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if end > start:
+            windows.append((start, end))
+    if heard_windows is not None and not windows:
+        # Historical cached excerpts retained their storage keys but not the
+        # program clock. They can support a sampled PASS/advisory listen, but
+        # never authorize a destructive timed repair by guesswork.
+        return None
+    if windows and not any(start - .08 <= at <= end + .08
+                           for start, end in windows):
+        return None
+    try:
+        sequence_beat = int(raw.get("sequence_beat"))
+        if sequence_beat < 1:
+            sequence_beat = None
+    except (TypeError, ValueError):
+        sequence_beat = None
+    where = f" at {at:.1f}s" if at is not None else ""
+    beat = f" beat={sequence_beat}" if sequence_beat is not None else ""
+    text = (f"FIX [{category}]{where} target={target_id}{beat}: "
+            f"{evidence[:420]} "
+            f"Action: {action[:360]}")
+    return {"edl_version": edl_version, "verdict": "fix",
+            "category": category, "program_time_s": at,
+            "target_id": target_id, "sequence_beat": sequence_beat,
+            "confidence": round(min(confidence, 1.0), 3),
+            "evidence": evidence[:420], "action": action[:360],
+            "text": text, "clips": clips}
 
 
 def _review_program_story(ctx, row):
@@ -15266,8 +16901,25 @@ def _review_program_story(ctx, row):
         bool(getattr(ctx, "has_main_video", True)),
         request_text=getattr(ctx, "user_message", None))
     edl = row.get("json") or {}
-    if not story_critic.should_review(edl, getattr(ctx, "index", None),
-                                      family):
+    asset_indexes = {}
+    for item in edl.get("inserts") or []:
+        if not isinstance(item, dict) or item.get("mute") or \
+                not item.get("asset_key") or \
+                item["asset_key"] in asset_indexes:
+            continue
+        try:
+            asset = ctx.db.run(
+                dbx.asset_by_key, ctx.project_id, item["asset_key"])
+            index_row = (ctx.db.run(dbx.get_index_by_sha, asset.get("sha256"))
+                         if asset and asset.get("sha256") else None)
+            clip_index = (index_row or {}).get("json") or {}
+            if clip_index:
+                asset_indexes[item["asset_key"]] = clip_index
+        except Exception as exc:
+            print(f"[story-critic] inserted-clip index skipped: {exc}",
+                  flush=True)
+    if not story_critic.should_review(
+            edl, getattr(ctx, "index", None), family, asset_indexes):
         return None
     # Mark attempted before the remote call: a malformed/outage response on a
     # cached preview must not silently multiply calls within the same turn.
@@ -15275,7 +16927,8 @@ def _review_program_story(ctx, row):
     report = story_critic.review(
         edl, getattr(ctx, "index", None), family,
         user_request=getattr(ctx, "user_message", None),
-        plan=getattr(ctx, "edit_plan", None))
+        plan=getattr(ctx, "edit_plan", None),
+        asset_indexes=asset_indexes)
     if report is None:
         return None
     report = dict(report, edl_version=version, editorial_family=family)
@@ -15364,6 +17017,7 @@ def _sequence_screening_frames(ctx, row):
     try:
         tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                       edl.get("speed") or [])
+        program_blocks = timeline_mod.program_blocks(edl)
     except Exception:
         return []
     frames = []
@@ -15373,7 +17027,23 @@ def _sequence_screening_frames(ctx, row):
                         float(beat["source_end_s"])) / 2.0
         except (KeyError, TypeError, ValueError):
             continue
-        output_t = tl.src_to_out(source_t)
+        asset_key = beat.get("source_asset_key")
+        if asset_key:
+            output_t = None
+            for block in program_blocks:
+                if block.get("kind") != "insert" or \
+                        block.get("asset_key") != asset_key:
+                    continue
+                clip_start = float(block.get("clip_start_s") or 0.0)
+                rate = max(0.001, float(block.get("rate") or 1.0))
+                clip_end = clip_start + (
+                    float(block["out_end"]) - float(block["out_start"])) * rate
+                if clip_start - 1e-6 <= source_t <= clip_end + 1e-6:
+                    output_t = float(block["out_start"]) + \
+                        (source_t - clip_start) / rate
+                    break
+        else:
+            output_t = tl.src_to_out(source_t)
         if output_t is None:
             continue
         purpose = beat.get("purpose") or beat.get("anchor") or "planned beat"
@@ -15459,7 +17129,8 @@ def _queue_check_frames(ctx, result, plan=None):
     return queued > 0
 
 
-def _independent_preview_review(ctx, result, plan=None):
+def _independent_preview_review(ctx, result, plan=None,
+                                convergence_context=None):
     """Fresh critic over edited output plus a small raw-source comparison.
 
     This is deliberately independent of ``ctx.pending_images``: those pixels
@@ -15542,7 +17213,7 @@ def _independent_preview_review(ctx, result, plan=None):
         edl = ctx.latest_edl()["json"]
     except Exception:
         edl = {}
-    lines = [
+    priority_lines = [
         "The rendered file completed and passed deterministic duration and "
         "broad black-frame verification before these sheets were created. "
         "A black/missing/continuity claim still needs an exact tile/time and "
@@ -15554,6 +17225,9 @@ def _independent_preview_review(ctx, result, plan=None):
         f"{getattr(ctx, 'duration', None)}s.",
         _frame_context(edl),
     ]
+    lines = []
+    if convergence_context:
+        lines.append(convergence_context[:3600])
     try:
         inferred = grammar.classify(getattr(ctx, "index", None))[0]
     except Exception:
@@ -15597,6 +17271,17 @@ def _independent_preview_review(ctx, result, plan=None):
             if edit_plan.get(key))
         if craft:
             lines.append("Craft direction: " + craft[:1200])
+        if edit_plan.get("motion_language"):
+            priority_lines.append(
+                "Authored motion-language contract (judge trajectories and "
+                "rhythm against these relationships, never against effect "
+                "count): " + json.dumps(
+                    edit_plan["motion_language"], ensure_ascii=False,
+                    separators=(",", ":"))[:3200])
+            motion_evidence = motion_contract.evidence_block(
+                edit_plan, edl, index=getattr(ctx, "index", None))
+            if motion_evidence:
+                priority_lines.append(motion_evidence)
         if edit_plan.get("narrative_arc"):
             lines.append("Narrative arc: " + " -> ".join(
                 str(x)[:180] for x in edit_plan["narrative_arc"][:10]))
@@ -15621,7 +17306,8 @@ def _independent_preview_review(ctx, result, plan=None):
             for z in zooms[:8]))
     caps = edl.get("captions") or {}
     if caps:
-        lines.append("Caption layer: " + json.dumps(caps, default=str)[:900])
+        priority_lines.append(
+            "Caption layer: " + json.dumps(caps, default=str)[:900])
     # Give the reviewer each selected cutaway's durable narrative purpose and
     # actual provider description. It can now reject generic/contradictory
     # stock from visible evidence instead of reviewing only fit/crop damage.
@@ -15643,8 +17329,77 @@ def _independent_preview_review(ctx, result, plan=None):
             f"query={moment.get('query') or 'not recorded'}; "
             f"downloaded description={meta.get('description') or meta.get('filename') or 'unknown'}")
     if broll:
-        lines.append("Authored B-roll evidence: " + " | ".join(broll)[:2200])
-    return preview_critic.review(images, labels, "\n".join(x for x in lines if x))
+        priority_lines.append(
+            "Authored B-roll evidence: " + " | ".join(broll)[:2200])
+    context = preview_critic.pack_context(priority_lines, lines)
+    return preview_critic.review(images, labels, context)
+
+
+_AUDIO_EDL_FIELDS = {
+    "keep", "inserts", "speed", "volume", "music", "sfx", "voiceover",
+    "master", "stem_mix",
+}
+_AUDIO_DIRECTION_FIELDS = {
+    "treatment", "format", "objective", "music_direction", "sfx_direction",
+    "coherence_rules", "sequence_map", "department_plan",
+}
+_VISUAL_DIRECTION_FIELDS = {
+    "treatment", "format", "objective", "caption_direction",
+    "motion_direction", "motion_language", "broll_direction", "color_direction",
+    "coherence_rules", "sequence_map", "department_plan",
+}
+
+
+def _modality_signature(ctx, edl, modality):
+    """Identity of only what one independent reviewer can perceive."""
+    edl = edl if isinstance(edl, dict) else {}
+    plan = getattr(ctx, "edit_plan", None) or {}
+    if modality == "audio":
+        subset = {key: edl.get(key) for key in _AUDIO_EDL_FIELDS
+                  if key in edl}
+        effects = edl.get("effects") or {}
+        subset["program_fades"] = {
+            key: effects.get(key) for key in ("fade_in_s", "fade_out_s")
+            if effects.get(key) is not None}
+        direction_fields = _AUDIO_DIRECTION_FIELDS
+    else:
+        subset = {key: value for key, value in edl.items()
+                  if key not in {"volume", "music", "sfx", "voiceover",
+                                 "master", "stem_mix"}}
+        direction_fields = _VISUAL_DIRECTION_FIELDS
+    direction = {key: plan.get(key) for key in direction_fields
+                 if plan.get(key) not in (None, "", [])}
+    source = ((getattr(ctx, "index", None) or {}).get("video") or {})
+    payload = {
+        "edl": subset, "direction": direction,
+        "source": {key: source.get(key) for key in
+                   ("sha256", "duration", "width", "height")
+                   if source.get(key) is not None},
+    }
+    return hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+        default=str).encode()).hexdigest()
+
+
+def _visual_change_summary(previous, current):
+    """Bounded renderer facets changed since the prior independent review."""
+    previous = previous if isinstance(previous, dict) else {}
+    current = current if isinstance(current, dict) else {}
+    changed = []
+    for key in sorted(set(previous) | set(current)):
+        if key in {"volume", "music", "sfx", "voiceover", "master",
+                   "stem_mix"}:
+            continue
+        if previous.get(key) == current.get(key):
+            continue
+        if key == "effects":
+            old_fx, new_fx = previous.get(key) or {}, current.get(key) or {}
+            parts = [name for name in sorted(set(old_fx) | set(new_fx))
+                     if old_fx.get(name) != new_fx.get(name)]
+            changed.append("effects(" + ",".join(parts[:12]) + ")")
+        else:
+            changed.append(key)
+    return changed[:16]
 
 
 def _preview_critic_report(ctx, result, plan=None):
@@ -15656,7 +17411,57 @@ def _preview_critic_report(ctx, result, plan=None):
     """
     if getattr(ctx, "sight_out", False):
         return None
-    return _independent_preview_review(ctx, result, plan)
+    try:
+        edl = ctx.latest_edl()["json"]
+    except Exception:
+        edl = {}
+    signature = _modality_signature(ctx, edl, "visual")
+    cache = getattr(ctx, "_visual_review_cache", None)
+    if cache is None:
+        cache = {}
+        ctx._visual_review_cache = cache
+    if signature in cache:
+        _metric(ctx, "visual_reviews_reused")
+        return cache[signature]
+
+    prior = getattr(ctx, "_last_visual_review_state", None) or {}
+    convergence = None
+    if prior.get("report"):
+        prior_report = prior["report"]
+        prior_findings = [
+            f"{row.get('severity')}/{row.get('category')}"
+            + (f"@{row.get('time_s')}s" if row.get("time_s") is not None
+               else "")
+            for row in (prior_report.get("findings") or [])[:6]]
+        changed = _visual_change_summary(prior.get("edl"), edl)
+        convergence = (
+            "CONVERGENCE EVIDENCE: the immediately prior independently "
+            f"reviewed picture verdict was {prior_report.get('verdict')}; "
+            f"its concrete findings were {prior_findings or ['none']}. "
+            f"Renderer-relevant facets changed since then: {changed or ['none']}. "
+            "Verify whether prior defects resolved and inspect regressions in "
+            "the changed facets. Do not reopen an untouched, previously "
+            "accepted facet merely to propose a different aesthetic. A new "
+            "blocker/major outside changed facets requires an exact visible "
+            "tile/time contradiction; preference for another valid treatment "
+            "is not a defect.")
+    if convergence:
+        report = _independent_preview_review(
+            ctx, result, plan, convergence_context=convergence)
+    else:
+        report = _independent_preview_review(ctx, result, plan)
+    if report is not None:
+        prior_report = prior.get("report") or {}
+        if prior_report.get("verdict") == "pass" and \
+                report.get("verdict") == "repair":
+            _metric(ctx, "visual_passes_reopened")
+        elif prior_report.get("verdict") == "repair" and \
+                report.get("verdict") == "pass":
+            _metric(ctx, "visual_repairs_resolved")
+        cache[signature] = report
+        ctx._last_visual_review_state = {
+            "signature": signature, "edl": edl, "report": report}
+    return report
 
 
 def _preview_fallback_check(ctx, result, plan, delivered, critic_report):
@@ -16043,23 +17848,48 @@ def expand_toolset(ctx, domains):
 
 def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
                   intent=None,
-                  style_family=None, must_keep=None, must_avoid=None,
+                  style_family=None, editorial_family=None,
+                  must_keep=None, must_avoid=None,
                   audience=None, platform=None, objective=None,
                   narrative_arc=None, sequence_map=None,
                   decision_basis=None, reference_transfer=None,
                   coherence_rules=None, alternatives_rejected=None,
                   caption_direction=None,
-                  motion_direction=None, broll_direction=None,
+                  motion_direction=None, motion_language=None,
+                  broll_direction=None,
                   music_direction=None, sfx_direction=None,
-                  color_direction=None, acceptance_criteria=None):
+                  color_direction=None, department_plan=None,
+                  acceptance_criteria=None):
     """Author the durable creative blueprint, then execute it this turn."""
+    if editorial_family is not None and \
+            str(editorial_family).strip() not in editorial_contracts.FAMILIES:
+        return ("REJECTED: editorial_family must be one of "
+                + ", ".join(editorial_contracts.FAMILIES)
+                + ". Choose the dominant storytelling driver from actual "
+                  "evidence; use mixed_other only for a genuinely hybrid one.")
     try:
+        motion_signal = motion_direction
+        if motion_signal is None and isinstance(motion_language, dict):
+            motion_signal = motion_language.get("principle") or \
+                "author the recorded motion language"
+        department_plan = director.department_plan_for_update(
+            ctx.edit_plan, department_plan,
+            substantial=sequence_map is not None,
+            directions={
+                "captions": caption_direction,
+                "motion": motion_signal,
+                "broll": broll_direction,
+                "music": music_direction,
+                "sfx": sfx_direction,
+                "color": color_direction,
+            })
         plan = director.create_blueprint(
             steps=steps, previous=ctx.edit_plan,
             source_request=getattr(ctx, "user_message", None),
             preserve_progress=bool(ctx.plan_revised_this_turn),
             brief=brief, treatment=treatment, format=format, intent=intent,
-            style_family=style_family, must_keep=must_keep,
+            style_family=style_family, editorial_family=editorial_family,
+            must_keep=must_keep,
             must_avoid=must_avoid, audience=audience, platform=platform,
             objective=objective, narrative_arc=narrative_arc,
             sequence_map=sequence_map,
@@ -16069,16 +17899,49 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
             alternatives_rejected=alternatives_rejected,
             caption_direction=caption_direction,
             motion_direction=motion_direction,
+            motion_language=motion_language,
             broll_direction=broll_direction,
             music_direction=music_direction, sfx_direction=sfx_direction,
             color_direction=color_direction,
+            department_plan=department_plan,
             acceptance_criteria=acceptance_criteria)
     except ValueError as exc:
         return f"REJECTED: {exc}."
     if not plan:
         return ("REJECTED: steps must be a non-empty array of short "
                 "strings, one per planned move, in execution order.")
+    asset_indexes = {}
     for index, beat in enumerate(plan.get("sequence_map") or [], 1):
+        asset_key = beat.get("source_asset_key")
+        if asset_key:
+            asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+            if not asset:
+                return (f"REJECTED: sequence_map[{index}] "
+                        f"source_asset_key={asset_key!r} is not an asset in "
+                        "this project. Copy its exact storage_key from "
+                        "list_assets; never use a filename, ordinal, or "
+                        "descriptive label as the key.")
+            row = (ctx.db.run(dbx.get_index_by_sha, asset.get("sha256"))
+                   if asset.get("sha256") else None)
+            asset_index = (row or {}).get("json") or {}
+            if (beat.get("source_start_s") is not None or
+                    beat.get("evidence_ids")) and not asset_index:
+                return (f"REJECTED: sequence_map[{index}] cites timed "
+                        f"evidence from {asset_key!r}, but that asset's index "
+                        "is not ready. Keep the asset in the project and retry "
+                        f"get_editorial_map(asset_key={asset_key!r}) after "
+                        "indexing; do not remap its seconds onto the main video.")
+            asset_indexes[asset_key] = asset_index
+            if beat.get("source_start_s") is not None:
+                duration = float(
+                    asset.get("duration_s") or
+                    (asset_index.get("video") or {}).get("duration") or 0.0)
+                if duration > 0 and float(beat["source_end_s"]) > duration + .05:
+                    return (f"REJECTED: sequence_map[{index}] ends at CLIP "
+                            f"{beat['source_end_s']}s, beyond asset "
+                            f"{asset_key!r}'s {duration:.2f}s duration. Use "
+                            "that asset's filmstrip/editorial-map timestamps.")
+            continue
         if beat.get("source_start_s") is None:
             continue
         if not getattr(ctx, "has_main_video", True):
@@ -16111,9 +17974,83 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
                 + ". Choose one evidence-backed route rather than recording "
                   "the first plausible collection of effects.")
         violations = director.source_evidence_violations(
-            plan["sequence_map"], getattr(ctx, "index", None) or {})
+            plan["sequence_map"], getattr(ctx, "index", None) or {},
+            asset_indexes=asset_indexes)
         if violations:
-            return "REJECTED: " + violations[0] + "."
+            return "REJECTED: " + violations[0].rstrip(".") + "."
+    # The editing model that proposed a vague brief's first plausible route
+    # should not be its only judge.  Cast ambiguity from the evidence that
+    # existed BEFORE this candidate plan (otherwise its own explicit family
+    # would manufacture confidence), then run one small independent review.
+    # Precise format requests, narrow plan updates, MCP callers and reviewer
+    # outages stay on the direct path.
+    treatment_review = None
+    if (sequence_map is not None and plan.get("sequence_map")
+            and str(getattr(ctx, "user_message", "") or "").strip()
+            and not getattr(ctx, "sight_out", False)):
+        try:
+            inferred = (grammar.classify(getattr(ctx, "index", None) or {})[0]
+                        if getattr(ctx, "has_main_video", True) else None)
+        except Exception:
+            inferred = None
+        prior_cast = director.editorial_family_cast(
+            getattr(ctx, "edit_plan", None), inferred,
+            getattr(ctx, "has_main_video", True),
+            request_text=getattr(ctx, "user_message", None))
+        # A measured grammar can identify the storytelling family while the
+        # user's actual treatment remains entirely open ("make it great").
+        # Explicit format words or a durable prior family are different: they
+        # already constrain the route and stay on the fast path.
+        ambiguous_treatment = (
+            float(prior_cast.get("confidence") or 0.0) < .75
+            or str(prior_cast.get("reason") or "").startswith(
+                "measured source grammar"))
+        if ambiguous_treatment:
+            chosen_family = director.editorial_family(
+                plan, inferred, getattr(ctx, "has_main_video", True),
+                request_text=getattr(ctx, "user_message", None))
+            review_key = treatment_judge.fingerprint(
+                plan, getattr(ctx, "user_message", None))
+            cache = getattr(ctx, "_treatment_review_cache", None)
+            if cache is None:
+                cache = {}
+                ctx._treatment_review_cache = cache
+            if review_key in cache:
+                treatment_review = cache[review_key]
+                _metric(ctx, "treatment_judge_reviews_reused")
+            else:
+                treatment_review = treatment_judge.review(
+                    plan, getattr(ctx, "user_message", None),
+                    editorial_contracts.prompt_block(chosen_family))
+                cache[review_key] = treatment_review
+                _metric(ctx, "treatment_judge_reviews")
+                verdict = str((treatment_review or {}).get("verdict")
+                              or "abstain")
+                outcome_metric = {
+                    "accept": "treatment_judge_accepts",
+                    "revise": "treatment_judge_revisions",
+                    "abstain": "treatment_judge_abstentions",
+                }.get(verdict, "treatment_judge_abstentions")
+                _metric(ctx, outcome_metric)
+            ctx._last_treatment_review = treatment_review
+            if treatment_review:
+                _decision_trace(
+                    ctx, "treatment_review",
+                    decision=treatment_review.get("verdict"),
+                    confidence=treatment_review.get("confidence"),
+                    evidence=treatment_review.get("evidence_refs"),
+                    reason=treatment_review.get("reason"),
+                    rejected=treatment_review.get("revision"),
+                    review_stage="pre_execution")
+            if treatment_judge.actionable_revision(treatment_review):
+                return (
+                    "REJECTED: independent treatment review found a "
+                    "high-confidence pre-execution issue. No blueprint was "
+                    "recorded and no EDL was changed. Revise the chosen "
+                    "treatment, decision_basis, credible alternatives, "
+                    "sequence logic and department plan from the cited "
+                    "evidence, then call set_edit_plan again with the better "
+                    "route. " + treatment_judge.summary(treatment_review))
     ctx.edit_plan = plan
     ctx.plan_revised_this_turn = True
     head = (f" Brief: {ctx.edit_plan['brief']}."
@@ -16123,6 +18060,8 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
         anchors.append(f"format={ctx.edit_plan['format']}")
     if ctx.edit_plan["style_family"]:
         anchors.append(f"style={ctx.edit_plan['style_family']}")
+    if ctx.edit_plan["editorial_family"]:
+        anchors.append(f"family={ctx.edit_plan['editorial_family']}")
     if ctx.edit_plan["treatment"]:
         anchors.append(f"treatment={ctx.edit_plan['treatment']}")
     if plan["must_keep"]:
@@ -16134,21 +18073,38 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
     dimensions = sum(bool(ctx.edit_plan.get(k)) for k in (
         "treatment", "decision_basis", "reference_transfer",
         "coherence_rules", "alternatives_rejected", "narrative_arc",
-        "sequence_map", "caption_direction",
+        "sequence_map", "caption_direction", "motion_language",
         "motion_direction",
         "broll_direction", "music_direction", "sfx_direction",
         "color_direction", "acceptance_criteria"))
     beat_note = (f", {len(plan['sequence_map'])} cross-modal sequence beats"
                  if plan.get("sequence_map") else "")
+    department_note = (
+        ", " + str(len(plan.get("department_plan") or {}))
+        + " explicit department decisions"
+        if plan.get("department_plan") else "")
+    try:
+        inferred = (grammar.classify(getattr(ctx, "index", None) or {})[0]
+                    if getattr(ctx, "has_main_video", True) else None)
+    except Exception:
+        inferred = None
+    chosen_family = director.editorial_family(
+        plan, inferred,
+        getattr(ctx, "has_main_video", True),
+        request_text=getattr(ctx, "user_message", None))
+    review_note = (("\n" + treatment_judge.summary(treatment_review))
+                   if treatment_review else "")
     return (f"Plan recorded as a creative blueprint ({len(plan['steps'])} "
             f"execution steps, {dimensions} directed craft dimensions"
-            f"{beat_note}).{head}"
+            f"{beat_note}{department_note}).{head}"
             f"{anchor_note} "
             + " ".join(f"{i + 1}) {s}"
                        for i, s in enumerate(plan["steps"]))
             + " — execute it in big batched steps. Before replying, call "
               "complete_edit_plan_steps with real EDL/render evidence; once "
-              "all steps and acceptance checks close, stop experimenting.")
+              "all steps and acceptance checks close, stop experimenting.\n"
+            + editorial_contracts.selection_note(chosen_family)
+            + review_note)
 
 
 def complete_edit_plan_steps(ctx, completed_steps=None, blocked_steps=None,
@@ -16156,13 +18112,38 @@ def complete_edit_plan_steps(ctx, completed_steps=None, blocked_steps=None,
                              evidence=None):
     """Close semantic work against evidence, not a model-call allowance."""
     try:
-        ctx.edit_plan = director.update_progress(
+        candidate = director.update_progress(
             ctx.edit_plan, completed_steps=completed_steps,
             blocked_steps=blocked_steps, passed_criteria=passed_criteria,
             failed_criteria=failed_criteria, evidence=evidence)
     except ValueError as exc:
         return f"REJECTED: {exc}."
-    state = director.status(ctx.edit_plan)
+    state = director.status(candidate)
+    if state["state"] == "complete":
+        try:
+            edl = ctx.latest_edl()["json"]
+        except Exception:
+            edl = {}
+        department_gaps = director.department_execution_gaps(
+            candidate, edl, getattr(ctx, "has_main_video", True))
+        motion_gaps = motion_contract.execution_gaps(
+            candidate, edl, index=getattr(ctx, "index", None))
+        gaps = department_gaps + motion_gaps
+        if gaps:
+            _metric(ctx, "department_closure_rejections")
+            if department_gaps:
+                _metric(ctx, "department_execution_gaps",
+                        len(department_gaps))
+            if motion_gaps:
+                _metric(ctx, "motion_contract_gaps", len(motion_gaps))
+            return (
+                "REJECTED: blueprint cannot close because its executable "
+                "department contract is not true yet: "
+                + "; ".join(row["message"] for row in gaps[:6])
+                + ". Author/remove those layers, or revise their plan mode "
+                  "to preserve/omit with the real editorial reason; do not "
+                  "mark an undelivered promise passed.")
+    ctx.edit_plan = candidate
     if state["state"] == "complete":
         return ("Blueprint COMPLETE — every planned move and acceptance "
                 "criterion has evidence. Do not make another taste-only "
@@ -16208,6 +18189,7 @@ RECIPE_TOOLS = frozenset({
     "add_sfx", "move_sfx", "remove_sfx", "set_audio_gain",
     "add_stylize", "remove_stylize", "set_master_loudness",
     "enhance_video", "add_custom_filter", "remove_custom_filter",
+    "bind_motion_motif",
     "beat_align_cuts",
     # reset_edit creates only a fresh in-memory EDL when called through the
     # staging context. Keeping it outside recipes made a clean rebuild begin
@@ -16596,7 +18578,8 @@ def _declared_mix_state(ctx, edl):
                    "window": [item.get("start"), item.get("end")],
                    "source_offset_s": item.get("offset_s") or 0,
                    "gain_db": item.get("gain_db"),
-                   "duck": item.get("duck")}
+                   "duck": item.get("duck"),
+                   "purpose": item.get("purpose")}
                   for item in (edl.get("music") or [])],
         "voiceover": [{"id": item.get("id"),
                        "file": asset_label(item.get("asset_key")),
@@ -16606,7 +18589,8 @@ def _declared_mix_state(ctx, edl):
                        "duck_others": item.get("duck_others")}
                       for item in (edl.get("voiceover") or [])],
         "sfx": [{"id": item.get("id"), "at": item.get("at"),
-                 "gain_db": item.get("gain_db")}
+                 "gain_db": item.get("gain_db"),
+                 "purpose": item.get("purpose")}
                 for item in (edl.get("sfx") or [])],
         "master_loudness": (edl.get("master") or {}).get("loudness"),
     }
@@ -16943,18 +18927,22 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
         plan.get("style_family"), plan.get("motion_direction"),
         sequence_motion,
         getattr(ctx, "user_message", ""))).casefold()
+    motion_language = plan.get("motion_language") or {}
 
-    def sequence_energy(source_t):
-        for beat in plan.get("sequence_map") or []:
+    def sequence_direction(source_t):
+        for beat_number, beat in enumerate(plan.get("sequence_map") or [], 1):
             try:
                 start = float(beat["source_start_s"])
                 end = float(beat["source_end_s"])
-                energy = float(beat.get("energy"))
             except (KeyError, TypeError, ValueError):
                 continue
             if start <= source_t <= end:
-                return min(max(energy, 0.0), 1.0)
-        return None
+                try:
+                    energy = min(max(float(beat.get("energy")), 0.0), 1.0)
+                except (TypeError, ValueError):
+                    energy = None
+                return energy, beat.get("motion_motif"), beat_number
+        return None, None, None
     explicit_count = count is not None
     if explicit_count:
         try:
@@ -16962,13 +18950,18 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
         except (TypeError, ValueError):
             return "REJECTED: count must be a positive integer."
     else:
-        # Sub-linear growth: a 30s reel gets roughly three meaningful moves;
-        # a ten-minute talk gets more coverage without becoming 60 zooms.
-        energy = (1.3 if any(x in motion_brief for x in
-                            ("hype", "kinetic", "aggressive", "fast-paced"))
-                  else .72 if any(x in motion_brief for x in
-                                  ("calm", "luxury", "elegant", "minimal",
-                                   "subtle", "restrained")) else 1.0)
+        # Sub-linear growth: duration provides opportunity, while the
+        # treatment's explicit relative density directs how many of those
+        # meaningful opportunities move. This replaces adjective routing for
+        # v3 plans; legacy blueprints retain their historical fallback.
+        if motion_language.get("density") is not None:
+            energy = .55 + .8 * float(motion_language["density"])
+        else:
+            energy = (1.3 if any(x in motion_brief for x in
+                                ("hype", "kinetic", "aggressive", "fast-paced"))
+                      else .72 if any(x in motion_brief for x in
+                                      ("calm", "luxury", "elegant", "minimal",
+                                       "subtle", "restrained")) else 1.0)
         n = max(1, int(round((max(prog, 1.0) / 4.0) ** .5 * energy)))
     explicit_strength = strength is not None
     if explicit_strength:
@@ -16978,13 +18971,17 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
         except (TypeError, ValueError):
             return "REJECTED: strength must be a number (0.05-4.5)."
     else:
-        base_strength = (0.10 if any(x in motion_brief for x in
-                                    ("calm", "luxury", "elegant", "minimal",
-                                     "subtle", "restrained"))
-                         else 0.18 if any(x in motion_brief for x in
-                                         ("hype", "kinetic", "aggressive",
-                                          "punchy", "fast-paced"))
-                         else 0.14)
+        if motion_language.get("intensity") is not None:
+            base_strength = round(
+                .07 + .12 * float(motion_language["intensity"]), 2)
+        else:
+            base_strength = (0.10 if any(x in motion_brief for x in
+                                        ("calm", "luxury", "elegant", "minimal",
+                                         "subtle", "restrained"))
+                             else 0.18 if any(x in motion_brief for x in
+                                             ("hype", "kinetic", "aggressive",
+                                              "punchy", "fast-paced"))
+                             else 0.14)
     scores = perception.word_stress(p, words)
     plan_terms = {w for w in re.findall(r"[\w]+", motion_brief)
                   if len(w) >= 4}
@@ -17004,21 +19001,28 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
         semantic = (0.28 if clean in plan_terms else 0.0)
         semantic += 0.16 if any(ch.isdigit() for ch in clean) else 0.0
         semantic += min(.12, max(0, len(clean) - 4) * .02)
-        beat_energy = sequence_energy(mid)
+        beat_energy, motion_motif, beat_number = sequence_direction(mid)
+        if motion_motif == "hold":
+            # The structured stillness decision is authoritative. It is not a
+            # low score that a sufficiently loud word can overcome.
+            continue
         if beat_energy is not None:
             # A measured source-bound sequence beat is stronger timing
             # evidence than generic duration spacing, but never a command to
             # animate: vocal stress and the global restraint grammar still
             # participate in the same score.
             semantic += .24 * beat_energy
+        if motion_motif:
+            semantic += .10
         # The first frame needs a moment to register; an explicitly energetic
         # hook can still win because this is a penalty rather than a ban.
         opening_penalty = .18 if float(pt) < 1.2 else 0.0
         candidates.append((float(scores[i]) + semantic - opening_penalty,
-                           word, round(float(pt), 2), mid))
+                           word, round(float(pt), 2), mid,
+                           motion_motif, beat_number))
     candidates.sort(key=lambda row: (-row[0], row[2]))
     spacing = max(1.4, min(6.0, prog / max(1.0, n * 1.6)))
-    picked = []          # (combined score, word, program_t0, source_mid)
+    picked = []          # score, word, program_t0, source_mid, motif, beat
     for row in candidates:
         if len(picked) >= n:
             break
@@ -17037,7 +19041,9 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
     placed = []
     lo_score = min(row[0] for row in picked)
     hi_score = max(row[0] for row in picked)
-    for combined_score, w, pt, source_mid in picked:
+    contrast = (float(motion_language.get("contrast"))
+                if motion_language.get("contrast") is not None else .63)
+    for combined_score, w, pt, source_mid, motion_motif, beat_number in picked:
         measured = source_mid in targets
         target = targets.get(source_mid) or (0.5, 0.5)
         # 60ms early so the punch lands ON the word's attack, not after it.
@@ -17048,16 +19054,20 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
         if explicit_strength or hi_score <= lo_score:
             st = base_strength
         else:
-            # One motion grammar, varied emphasis: supporting turns are
-            # gentler; the strongest argument turn receives the full move.
+            # One motion grammar, varied emphasis: the authored contrast says
+            # how far support moves sit below the strongest argument turn.
             rank = (combined_score - lo_score) / (hi_score - lo_score)
+            floor = 1.0 - .35 * contrast
             st = round(max(ZOOM_STRENGTH_MIN,
-                           base_strength * (.78 + .22 * rank)), 2)
+                           base_strength * (floor + (1.0 - floor) * rank)), 2)
         item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
                 "strength": st, "cx": target[0], "cy": target[1],
                 "target_measured": measured}
+        if motion_motif:
+            item["motion_motif"] = motion_motif
         zooms.append(item)
-        placed.append((w, pt, item["id"], target, measured, st))
+        placed.append((w, pt, item["id"], target, measured, st,
+                       motion_motif, beat_number))
     if not placed:
         return ("No placeable emphasis moments — the stressed words all sit "
                 "at the very end of the program. Nothing was written.")
@@ -17072,12 +19082,20 @@ def punch_in_on_emphasis(ctx, count=None, strength=None):
                             f"{int(st * 100)}%, "
                             f"{'face target' if measured else 'center fallback'} "
                             f"({target[0]:g},{target[1]:g}) [{zid}]"
-                            for w, pt, zid, target, measured, st in placed))
+                            + (f", motif={motif}, beat={beat}"
+                               if motif else "")
+                            for w, pt, zid, target, measured, st, motif, beat
+                            in placed))
         if not explicit_count:
             res += (f"\nMotion density was directed from the {prog:g}s "
                     f"program/brief; selected moments stay ~{spacing:.1f}s "
-                    "apart instead of clustering on adjacent loud words.")
-        fallback_count = sum(1 for *_rest, measured, _st in placed
+                    "apart instead of clustering on adjacent loud words."
+                    + (" Structured motion_language supplied density, "
+                       "intensity and contrast; no style adjectives were "
+                       "used to choose them."
+                       if motion_language else ""))
+        fallback_count = sum(1 for _w, _pt, _zid, _target, measured,
+                             _st, _motif, _beat in placed
                              if not measured)
         if fallback_count:
             res += (f"\nQUALITY ADVISORY: {fallback_count} punch-in(s) had "
@@ -17999,6 +20017,11 @@ _OVERLAY_MOTION_PROP = {
                    for name in _OVERLAY_MOTION_FIELDS},
     "additionalProperties": False,
 }
+_MOTION_MOTIF_PROP = {
+    "type": "string",
+    "description": ("Active Blueprint motion motif id this event executes; "
+                    "never 'hold'."),
+}
 
 TOOLS = {
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
@@ -18062,7 +20085,9 @@ TOOLS = {
                       "one short line per move, in order. This is direction "
                       "for yourself, not a proposal for user approval. "
                       "A concrete brief is already permission to cut; do "
-                      "not stop after recording the plan. Record format, "
+                      "not stop after recording the plan. From FORMAT CAST "
+                      "and actual evidence, record the dominant "
+                      "editorial_family quality contract plus format, "
                       "audience, platform, objective, narrative arc, and a "
                       "coherent style bible for captions, motion, B-roll, "
                       "music, SFX and color. Add observable acceptance "
@@ -18073,20 +20098,41 @@ TOOLS = {
                       "type/motion/sound, any relationships transferred from "
                       "an actual reference, and short reasons weaker routes "
                       "lost. This is a decision record, not hidden reasoning "
-                      "or a feature wishlist. Add a "
+                      "or a feature wishlist. "
+                      "Genuinely ambiguous whole-program choices receive a "
+                      "small independent evidence review here before any "
+                      "EDL write. If it returns a high-confidence REJECTED "
+                      "result, revise the plan-level route from its cited "
+                      "evidence and call this tool again; this is not user "
+                      "approval, an effect quota, or a preference vote. Add a "
                       "sequence_map: one row per meaningful audience beat, "
                       "binding an exact phrase/scene/card anchor to its "
                       "purpose, picture treatment, sound treatment and "
-                      "relative energy. This is a causal treatment, never a "
-                      "quota for cuts or effects. Every timed main-source "
+                      "relative energy. When motion is authored, define one "
+                      "free-named motion_language with numeric relative "
+                      "density/intensity/contrast, explicit triggers and a "
+                      "stillness rule; bind every beat to a reusable motif "
+                      "or hold. This directs general keyframes instead of "
+                      "choosing animations from adjectives. The sequence is "
+                      "a causal treatment, never a quota for cuts or effects. "
+                      "Every timed main-source "
                       "beat must cite evidence_ids copied from transcript/"
                       "shot evidence; valid-looking invented seconds are "
                       "rejected. These fields coordinate "
                       "every later choice "
                       "and persist into later user turns; unspecified style "
-                      "fields inherit the project's last direction. Call it "
-                      "in the same batch as your "
-                      "reads on any multi-step edit: the plan survives "
+                      "fields inherit the project's last direction. "
+                      "For each live craft department, department_plan says "
+                      "author, preserve, or omit plus why. Author is a real "
+                      "promise checked against the final EDL; omit is an "
+                      "equally valid restraint choice and is also checked. "
+                      "A full sequence accounts for all departments; narrow "
+                      "repairs inherit and update only what they touch. Call "
+                      "this in the same batch as text/metadata reads on a multi-step "
+                      "edit. Exception: direct-sight tools deliver pictures "
+                      "only after their result, so compare/look first and plan "
+                      "on the next reasoning step when the decision depends on "
+                      "those pixels. The plan survives "
                       "auto-continuations (a resumed pass finishes what "
                       "was PLANNED instead of re-deciding). Re-call to "
                       "replace when the edit legitimately changes course. "
@@ -18105,6 +20151,15 @@ TOOLS = {
                        "platform": {"type": "string"},
                        "objective": {"type": "string"},
                        "style_family": {"type": "string"},
+                       "editorial_family": {
+                           "type": "string",
+                           "enum": list(editorial_contracts.FAMILIES),
+                           "description": (
+                               "Dominant invariant storytelling driver chosen "
+                               "after inspecting actual source evidence. This "
+                               "selects a quality contract, not a preset or "
+                               "cut/effect density. Use mixed_other only when "
+                               "the treatment is genuinely hybrid/novel.")},
                        "must_keep": {"type": "array",
                                      "items": {"type": "string"}},
                        "must_avoid": {"type": "array",
@@ -18139,7 +20194,9 @@ TOOLS = {
                            "description": (
                                "Ordered cross-modal story/treatment beats for "
                                "substantial whole-program edits. Use exact "
-                               "source seconds only when known from evidence."),
+                               "source seconds only when known from evidence. "
+                               "Each clock is either the main source or one "
+                               "explicit uploaded asset."),
                            "items": {
                                "type": "object",
                                "properties": {
@@ -18148,27 +20205,108 @@ TOOLS = {
                                    "purpose": {"type": "string"},
                                    "visual": {"type": "string"},
                                    "sound": {"type": "string"},
+                                   "motion_motif": {
+                                       "type": "string",
+                                       "description": (
+                                           "Declared motif id, or 'hold'.")},
                                    "energy": {"type": "number",
                                               "minimum": 0, "maximum": 1},
                                    "source_start_s": {"type": "number",
                                                       "minimum": 0},
                                    "source_end_s": {"type": "number",
                                                     "minimum": 0},
+                                   "source_asset_key": {
+                                       "type": "string",
+                                       "description": (
+                                           "Exact project storage_key when "
+                                           "this beat's source_start_s/end_s "
+                                           "are CLIP seconds in an auxiliary "
+                                           "upload. Omit for main-source "
+                                           "seconds; never put a filename, "
+                                           "shot label, or ordinal here.")},
                                    "evidence_ids": {
                                        "type": "array",
                                        "items": {"type": "string"},
                                        "description": (
                                            "Exact transcript sentence and/"
-                                           "or shot ids cited for this "
-                                           "source-timed beat.")},
+                                           "or shot ids cited for this beat, "
+                                           "scoped to source_asset_key when "
+                                           "present.")},
                                },
                            }},
                        "caption_direction": {"type": "string"},
                        "motion_direction": {"type": "string"},
+                       "motion_language": {
+                           "type": "object",
+                           "description": (
+                               "Free-named motion grammar; required when a "
+                               "substantial plan authors motion."),
+                           "properties": {
+                               "principle": {"type": "string"},
+                               "density": {"type": "number", "minimum": 0,
+                                           "maximum": 1},
+                               "intensity": {"type": "number", "minimum": 0,
+                                             "maximum": 1},
+                               "contrast": {"type": "number", "minimum": 0,
+                                            "maximum": 1},
+                               "stillness_rule": {"type": "string"},
+                               "motifs": {
+                                   "type": "array",
+                                   "items": {
+                                       "type": "object",
+                                       "properties": {
+                                           "id": {"type": "string"},
+                                           "behavior": {"type": "string"},
+                                           "trigger": {"type": "string"},
+                                           "domains": {
+                                               "type": "array",
+                                               "items": {
+                                                   "type": "string",
+                                                   "enum": list(
+                                                       director.MOTION_DOMAINS)},
+                                           },
+                                       },
+                                       "required": ["id", "behavior",
+                                                    "trigger", "domains"],
+                                       "additionalProperties": False,
+                                   },
+                               },
+                           },
+                           "required": ["principle", "density", "intensity",
+                                        "contrast", "stillness_rule", "motifs"],
+                           "additionalProperties": False,
+                       },
                        "broll_direction": {"type": "string"},
                        "music_direction": {"type": "string"},
                        "sfx_direction": {"type": "string"},
                        "color_direction": {"type": "string"},
+                       "department_plan": {
+                           "type": "object",
+                           "description": (
+                               "Executable cross-department promises. For a "
+                               "substantial build account for captions, "
+                               "motion, broll, music, sfx and color. author "
+                               "means the final EDL must contain that layer; "
+                               "preserve means deliberate restraint/current "
+                               "state; omit means the layer must be absent. "
+                               "No mode implies a tool count or effect "
+                               "density; each needs an editorial purpose."),
+                           "properties": {
+                               name: {
+                                   "type": "object",
+                                   "properties": {
+                                       "mode": {
+                                           "type": "string",
+                                           "enum": list(
+                                               director.DEPARTMENT_MODES)},
+                                       "purpose": {"type": "string"},
+                                   },
+                                   "required": ["mode", "purpose"],
+                               }
+                               for name in director.TREATMENT_DEPARTMENTS
+                           },
+                           "additionalProperties": False,
+                       },
                        "acceptance_criteria": {
                            "type": "array", "items": {"type": "string"}}}),
     "complete_edit_plan_steps": (
@@ -18244,6 +20382,21 @@ TOOLS = {
                     "UNUSED files are marked AVAILABLE and can be placed "
                     "without asking the user to re-upload.",
                     {"kind": {"type": "string"}}),
+    "compare_uploaded_media": (
+        compare_uploaded_media,
+        "YOUR OWN EYES on SEVERAL uploaded clips/images in ONE story-wide "
+        "comparison. Pass every relevant exact storage_key together; each "
+        "candidate is represented on dynamically built labeled pages, with "
+        "representative real frames, CLIP seconds and exact sentence/shot IDs. "
+        "Use this instead of serial look_at_asset calls when choosing/order-"
+        "casting a reel, montage, B-roll library or multi-clip story. It does "
+        "not rank by upload order, does not silently shortlist, and explicitly "
+        "allows leaving a weak/redundant asset unused. Then use source_asset_key "
+        "+ the returned evidence_ids in sequence_map.",
+        {"asset_keys": {"type": "array", "items": {"type": "string"}},
+         "question": {"type": "string"},
+         "samples_per_asset": {"type": "integer", "minimum": 1,
+                               "maximum": 12}}),
     "look_at": (look_at, "YOUR OWN EYES on the footage. Pass times=[...] "
                 "(1-8 exact source seconds of the MAIN video) and the "
                 "frames at those moments come back as ONE timestamp-labeled "
@@ -18442,7 +20595,8 @@ TOOLS = {
                       "emphasis_words": {"type": "array",
                                          "items": {"type": "string"}},
                       "items": {"type": "array",
-                                "items": {"type": "object"}}}),
+                                "items": {"type": "object"}},
+                      "motion_motif": _MOTION_MOTIF_PROP}),
     "search_music": (search_music, "Search the web's music catalogs by "
                      "genre/vibe words — 'dark phonk', 'lofi chill beat', "
                      "'cinematic piano', 'upbeat funk'. Search by what the "
@@ -18542,7 +20696,9 @@ TOOLS = {
                    "offset_s": {"type": "number"},
                    "fade_in_s": {"type": "number"},
                    "fade_out_s": {"type": "number"},
-                   "loop": {"type": "boolean"}}),
+                   "loop": {"type": "boolean"},
+                   "purpose": {"type": "string",
+                               "description": "Why this music belongs in this program/window, including the story turn or energy role it supports."}}),
     "extract_audio": (extract_audio, "Take ONLY the sound out of an uploaded "
                       "VIDEO and save it as an audio file — THE answer to "
                       "'use the song from this clip', 'put this video's audio "
@@ -18601,8 +20757,12 @@ TOOLS = {
     "add_web_sfx": (add_web_sfx, "ONE-CALL on-demand sound design: search "
                     "real Openverse/Freesound recordings, rank clean "
                     "physical one-shots above loops/music/ambience, DOWNLOAD "
-                    "and acoustically compare the candidates, fetch the best "
-                    "measured match, and place it at an exact "
+                    "and acoustically compare the candidates. By default an "
+                    "actual-audio reviewer may choose KEEP THIS MOMENT DRY "
+                    "when every sound weakens it; pass allow_none=false only "
+                    "when the user explicitly requires an effect. Otherwise "
+                    "the tool fetches the best measured/listened match and "
+                    "places it at an exact "
                     "OUTPUT-timeline second. Use for 'add a cinematic "
                     "whoosh at 3.2s', 'put a shutter on this cut', or any "
                     "specific requested sound. The result reports the real "
@@ -18611,7 +20771,8 @@ TOOLS = {
                     {"query": {"type": "string"},
                      "at": {"type": "number"},
                      "gain_db": {"type": "number"},
-                     "max_seconds": {"type": "number"}}),
+                     "max_seconds": {"type": "number"},
+                     "allow_none": {"type": "boolean"}}),
     "add_sfx": (add_sfx, "Punctuate a MOMENT with a one-shot sound effect — a "
                 "whoosh on a cut, a click on a beat, an impact on a reveal. "
                 "Choose it when the brief, format, timing, or your editorial "
@@ -18623,10 +20784,13 @@ TOOLS = {
                 "list_assets(kind='music') — never invent one. `at` is an "
                 "OUTPUT-timeline second (the edited program, not source "
                 "time). This is NOT background music: it plays once, for as "
-                "long as the sound is, and never ducks. Default -6dB.",
+                "long as the sound is, and never ducks. purpose records the "
+                "nameable visible/editorial event for later final-mix review; "
+                "do not add anonymous decorative sounds. Default -6dB.",
                 {"storage_key": {"type": "string"},
                  "at": {"type": "number"},
-                 "gain_db": {"type": "number"}}),
+                 "gain_db": {"type": "number"},
+                 "purpose": {"type": "string"}}),
     "move_sfx": (move_sfx, "Retime an existing sound effect — 'the whoosh is "
                  "too early'. Keeps which sound and how loud. id from "
                  "get_edl.",
@@ -18705,7 +20869,8 @@ TOOLS = {
                                      "properties": _STYLE_PROPS},
                            "emphasis_words": {"type": "array",
                                               "items": {"type":
-                                                        "string"}}}),
+                                                        "string"}},
+                           "motion_motif": _MOTION_MOTIF_PROP}),
     "set_volume": (set_volume, "Volume automation on the ORIGINAL footage's "
                    "audio (the speaker) over a SOURCE-time span. NOT for "
                    "music or voiceover loudness — use set_audio_gain for "
@@ -18789,7 +20954,8 @@ TOOLS = {
                               "enum": ["auto", "crop", "pad", "pad_blur"]},
                       "motion": {"type": "string",
                                  "enum": ["zoom_in", "zoom_out",
-                                          "pan_left", "pan_right"]}}),
+                                          "pan_left", "pan_right"]},
+                      "motion_motif": _MOTION_MOTIF_PROP}),
     "compose_panels": (
         compose_panels,
         "PROJECT-SCOPED: build ONE 16:9 clip that shows 2 or 3 independent "
@@ -18861,7 +21027,8 @@ TOOLS = {
                            "fit": {"type": "string",
                                    "enum": ["pad", "pad_blur", "crop",
                                             "auto"]},
-                           "rotation": {"type": ["integer", "string"]}}),
+                           "rotation": {"type": ["integer", "string"]},
+                           "motion_motif": _MOTION_MOTIF_PROP}),
     "move_insert": (move_insert, "MOVE A SPLICED SCENE — reorder an inserted "
                     "clip between any other scenes, in place. after_id is "
                     "the insert it should play right AFTER (the scene map "
@@ -18963,8 +21130,11 @@ TOOLS = {
         "keyword's near-duplicates. The tool searches moments concurrently, "
         "adapts candidate depth to the size of the story, returns candidates "
         "grouped by purpose, and attaches one balanced visual board spanning "
-        "the whole edit. Judge relevance, authenticity, composition, color "
-        "and diversity across the sequence before choosing. Nothing enters "
+        "the whole edit. For the in-house editor, one independent sequence "
+        "cast compares visible specificity, authenticity, composition, color "
+        "and diversity and may choose KEEP BASE PICTURE / NO B-ROLL for any "
+        "weak moment. This is selection evidence, not a placement quota. "
+        "Nothing enters "
         "the project until add_stock_media; the actual downloaded clip is "
         "then visually reviewed before placement. Use kind='photo' for real "
         "people/products/places when topical video is unavailable.",
@@ -19116,7 +21286,8 @@ TOOLS = {
                   "cx": {"type": "number"},
                   "cy": {"type": "number"},
                   "rect": {"type": "array",
-                           "items": {"type": "number"}}}),
+                           "items": {"type": "number"}},
+                  "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_zoom": (remove_zoom, "Remove one zoom by its id (see "
                     "get_edl).", {"id": {"type": "string"}}),
     "add_zoom_path": (
@@ -19138,15 +21309,16 @@ TOOLS = {
         "arrives and ease out as it leaves; to HOLD on a subject, repeat "
         "its keyframe at the hold's start and end times. The window runs "
         "from the first t to the last. NO ramp is added at the edges: give "
-        "the first and last keyframe strength 0 for a seamless entry and "
-        "exit (a strength-0 rect keyframe still aims where the move is "
-        "going). ease: 'cubic_in_out' (default — settles at each keyframe, "
+                "the first and last keyframe strength 0 for a seamless entry and "
+                "exit (a strength-0 rect keyframe still aims where the move is "
+                "going). ease: 'cubic_in_out' (default — settles at each keyframe, "
         "the right answer for stopping at buttons) or 'linear' (constant "
         "speed, for a steady scan across a wide screenshot). It re-anchors "
         "across later cuts exactly like add_zoom, so cutting elsewhere "
         "never strands it. Remove the whole move with remove_zoom_path.",
         {"keyframes": {"type": "array", "items": {"type": "object"}},
-         "ease": {"type": "string", "enum": ["cubic_in_out", "linear"]}}),
+         "ease": {"type": "string", "enum": ["cubic_in_out", "linear"]},
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_zoom_path": (
         remove_zoom_path,
         "Remove one keyframed travelling zoom by its id (see get_edl). Use "
@@ -19221,7 +21393,8 @@ TOOLS = {
          "ratio": {"type": "string",
                    "enum": ["source", "16:9", "9:16", "1:1", "4:5", "4:3"]},
          "duration_s": {"type": "number"}, "zoom": {"type": "boolean"},
-         "color": {"type": "string"}}),
+         "color": {"type": "string"},
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_aspect_shift": (
         remove_aspect_shift,
         "Remove one mid-video aspect change by its id (see get_edl).",
@@ -19277,7 +21450,8 @@ TOOLS = {
                                        "splices in. 'every_cut' = every "
                                        "junction including silence-removal "
                                        "jump cuts; use it whenever that is "
-                                       "the intended treatment."}}),
+                                       "the intended treatment."},
+                         "motion_motif": _MOTION_MOTIF_PROP}),
     "blur_region": (blur_region, "Put a VISIBLE censor over a fixed "
                     "RECTANGLE of the original footage — blur, mosaic or a "
                     "black bar. Use it when the user WANTS the covering to "
@@ -19428,7 +21602,8 @@ TOOLS = {
                   "moment'.",
                   {"start": {"type": "number"},
                    "end": {"type": "number"},
-                   "factor": {"type": "number"}}),
+                   "factor": {"type": "number"},
+                   "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_speed": (remove_speed, "Remove one speed span by its id (see "
                      "get_edl) — that footage returns to normal speed and "
                      "program-time items re-anchor automatically.",
@@ -19472,7 +21647,8 @@ TOOLS = {
                                   "enum": list(OVERLAY_ANIMS)},
                      "exit": {"type": "string",
                               "enum": list(OVERLAY_ANIMS)},
-                     "source_start_s": {"type": "number"}}),
+                     "source_start_s": {"type": "number"},
+                     "motion_motif": _MOTION_MOTIF_PROP}),
     "move_overlay": (move_overlay, "Reposition/retime/resize an EXISTING "
                      "overlay — 'move the logo to the other corner', 'make "
                      "the PIP smaller'. Only the fields you pass change. id "
@@ -19492,7 +21668,8 @@ TOOLS = {
         "start, not program time. A scalar makes that property static. "
         "Full-frame B-roll covers ignore x/y/scale; screen takeovers own "
         "their tracked camera geometry and reject ordinary curves.",
-        {"id": {"type": "string"}, "motion": _OVERLAY_MOTION_PROP}),
+        {"id": {"type": "string"}, "motion": _OVERLAY_MOTION_PROP,
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_overlay": (remove_overlay, "Remove one overlay by its id (see "
                        "get_edl).", {"id": {"type": "string"}}),
     "add_screen_takeover": (
@@ -19564,7 +21741,8 @@ TOOLS = {
          "push": {"type": "number"},
          "ease": {"type": "string",
                   "enum": ["smooth", "accelerate", "linear"]},
-         "settle": {"type": "boolean"}}),
+         "settle": {"type": "boolean"},
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_screen_takeover": (
         remove_screen_takeover,
         "Undo a screen takeover by its id (see get_edl): the corner pin, the "
@@ -19615,7 +21793,8 @@ TOOLS = {
                                     if a != "typewriter"]},
                   "uppercase": {"type": "boolean"},
                   "box": {"type": "boolean"},
-                  "motion": _TEXT_MOTION_PROP}),
+                  "motion": _TEXT_MOTION_PROP,
+                  "motion_motif": _MOTION_MOTIF_PROP}),
     "add_vector_graphic": (
         add_vector_graphic,
         "Add a renderer-native VECTOR graphic over a PROGRAM-time window. "
@@ -19639,7 +21818,8 @@ TOOLS = {
          "stroke_width": {"type": "number"},
          "rounding": {"type": "number"},
          "background_color": {"type": "string"},
-         "value": {"type": "number"}, "motion": _TEXT_MOTION_PROP}),
+         "value": {"type": "number"}, "motion": _TEXT_MOTION_PROP,
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "set_vector_graphic": (
         set_vector_graphic,
         "Patch an existing vector graphic by id: its kind, program window, "
@@ -19656,7 +21836,8 @@ TOOLS = {
          "stroke_width": {"type": "number"},
          "rounding": {"type": "number"},
          "background_color": {"type": "string"},
-         "value": {"type": "number"}, "motion": _TEXT_MOTION_PROP}),
+         "value": {"type": "number"}, "motion": _TEXT_MOTION_PROP,
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_vector_graphic": (
         remove_vector_graphic,
         "Remove one renderer-native vector graphic by id.",
@@ -19699,7 +21880,8 @@ TOOLS = {
                           "size_scale": {"type": "number"},
                           "motion_style": {"type": "string",
                                            "enum": list(
-                                               _KINETIC_MOTION_STYLES)}}),
+                                               _KINETIC_MOTION_STYLES)},
+                          "motion_motif": _MOTION_MOTIF_PROP}),
     "add_text_behind": (add_text_behind, "Put words BEHIND the moving subject "
                         "— the person walks IN FRONT of the letters, the way a "
                         "title painted on the street or the wall behind them "
@@ -19767,7 +21949,8 @@ TOOLS = {
         "This replaces named entrance/exit animation with one authored "
         "motion system. Pass motion={} (or omit it) to clear the explicit "
         "curve and leave the text static. Subject-matted text cannot move.",
-        {"id": {"type": "string"}, "motion": _TEXT_MOTION_PROP}),
+        {"id": {"type": "string"}, "motion": _TEXT_MOTION_PROP,
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "add_title_card": (add_title_card, "Cut to a STANDALONE full-frame card "
                        "showing only this text, then return to the footage — "
                        "the 'show the term on a blank screen' move. One call "
@@ -19930,7 +22113,8 @@ TOOLS = {
                               "enum": list(STYLIZE_KINDS)},
                      "start": {"type": "number"},
                      "end": {"type": "number"},
-                     "intensity": {"type": "number"}}),
+                     "intensity": {"type": "number"},
+                     "motion_motif": _MOTION_MOTIF_PROP}),
     "enhance_video": (enhance_video, "PICTURE QUALITY, not a look — the right "
                       "answer to 'make it clearer / sharper / better quality "
                       "/ HD / enhance this'. sharpen 0-1 (default 0.5) "
@@ -19974,10 +22158,28 @@ TOOLS = {
                           {"chain": {"type": "string"},
                            "start": {"type": "number"},
                            "end": {"type": "number"},
-                           "label": {"type": "string"}}),
+                           "label": {"type": "string"},
+                           "motion_motif": _MOTION_MOTIF_PROP}),
     "remove_custom_filter": (remove_custom_filter, "Remove one custom "
                              "filter chain by its id (see get_edl).",
                              {"id": {"type": "string"}}),
+    "bind_motion_motif": (
+        bind_motion_motif,
+        "Bind an EXISTING renderer-visible movement to the exact motif id "
+        "it was designed to execute in the active Blueprint v3 motion "
+        "language. This records causal provenance; it does not create an "
+        "effect or require a count. target_type: zoom, text, vector, overlay, "
+        "insert, speed, aspect_shift, stylize, custom, transition or captions. "
+        "Pass id for item targets; transition/captions are track-level. Pass "
+        "motion_motif='clear' to remove a binding. Static targets and the "
+        "reserved stillness decision 'hold' are rejected.",
+        {"target_type": {"type": "string",
+                         "enum": ["zoom", "text", "vector", "overlay",
+                                  "insert", "speed", "aspect_shift",
+                                  "stylize", "custom", "transition",
+                                  "captions"]},
+         "id": {"type": "string"},
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "set_grade_custom": (set_grade_custom, "Continuous color controls on "
                          "all footage, applied AFTER the preset grade (the "
                          "two compose — 'cinematic but warmer' = preset "
@@ -20228,7 +22430,10 @@ TOOLS = {
 # unlocks all normal tools, so a real defect can always be fixed.
 def finishing_checkpoint(ctx):
     plan = getattr(ctx, "edit_plan", None)
-    if not plan or not getattr(ctx, "plan_revised_this_turn", False):
+    # A carried-forward blueprint is still the execution authority. Requiring
+    # set_edit_plan to have rewritten it in this same turn let a fully clean
+    # preview reopen into eight more subjective versions in production.
+    if not plan:
         return False
     try:
         latest_version = int(ctx.latest_edl()["version"])
@@ -20259,6 +22464,18 @@ def finishing_checkpoint(ctx):
     if story.get("edl_version") == latest_version and \
             story_critic.repair_lines(story):
         return False
+    try:
+        department_gaps = director.department_execution_gaps(
+            plan, ctx.latest_edl()["json"],
+            getattr(ctx, "has_main_video", True))
+        motion_gaps = motion_contract.execution_gaps(
+            plan, ctx.latest_edl()["json"],
+            index=getattr(ctx, "index", None))
+        gaps = department_gaps + motion_gaps
+    except Exception:
+        return False
+    if gaps:
+        return False
     return director.status(plan)["state"] in {
         "in_progress", "needs_review", "complete"}
 
@@ -20271,7 +22488,7 @@ TOOL_DOMAIN_NAMES = {
     "story", "captions", "audio", "media", "motion", "screen", "shorts"}
 TOOL_CORE = {
     "set_edit_plan", "complete_edit_plan_steps", "expand_toolset",
-    "apply_edit_recipe", "get_edl", "list_assets", "look_at",
+    "apply_edit_recipe", "get_edl", "list_assets", "compare_uploaded_media", "look_at",
     "look_at_asset", "render_preview", "read_skill", "ask_user",
     "get_transcript", "get_words", "search_transcript",
     "get_kept_transcript", "get_shots", "get_editorial_map",
@@ -20302,6 +22519,7 @@ TOOL_DOMAINS = {
         "set_text_motion", "add_text_behind", "add_title_card",
         "add_vector_graphic", "set_vector_graphic",
         "remove_vector_graphic",
+        "bind_motion_motif",
         "suggest_emphasis",
     },
     "audio": {
@@ -20315,7 +22533,7 @@ TOOL_DOMAINS = {
         "separate_music", "remove_stem_mix", "set_master_loudness",
     },
     "media": {
-        "search_stock", "research_broll", "add_stock_media",
+        "compare_uploaded_media", "search_stock", "research_broll", "add_stock_media",
         "find_footage", "fetch_url", "generate_image", "generate_video",
         "insert_media", "set_insert_window", "move_insert", "remove_insert",
         "add_overlay", "move_overlay", "set_overlay_motion",
@@ -20331,7 +22549,7 @@ TOOL_DOMAINS = {
         "punch_in_on_emphasis",
         "set_transitions",
         "set_fades", "add_stylize", "remove_stylize", "add_custom_filter",
-        "remove_custom_filter", "enhance_video", "add_aspect_shift",
+        "remove_custom_filter", "bind_motion_motif", "enhance_video", "add_aspect_shift",
         "remove_aspect_shift", "add_color_screen", "add_corrupt_screen",
     },
     "screen": {
@@ -20368,6 +22586,24 @@ def compact_tool_names(ctx):
     text = " ".join(open_tasks + [str(getattr(ctx, "user_message", "") or "")])
     domains = {name for name, pattern in _DOMAIN_HINTS.items()
                if re.search(pattern, text, re.I)}
+    # A vague request can become specific only after set_edit_plan inspects
+    # the evidence ("make it great" -> authored captions/music/B-roll/motion).
+    # Routing from the original user words/open-step nouns alone hid those
+    # newly chosen tools and cost another expand_toolset dispatch—or, worse,
+    # let a promised department disappear. The structured plan is the
+    # authoritative post-cast signal and exposes capability, never a quota.
+    department_domains = {
+        "captions": "captions", "motion": "motion", "broll": "media",
+        "music": "audio", "sfx": "audio", "color": "motion",
+    }
+    for department, row in (plan.get("department_plan") or {}).items():
+        if isinstance(row, dict) and row.get("mode") == "author":
+            domain = department_domains.get(department)
+            if domain:
+                domains.add(domain)
+    family = str(plan.get("editorial_family") or "")
+    if family == "product_demo_explainer":
+        domains.add("screen")
     domains.update(getattr(ctx, "_expanded_tool_domains", None) or set())
     # A generic recorded plan with no recognizable vocabulary still needs an
     # executable lane. Story tools + the atomic recipe are the safest base;
@@ -20383,6 +22619,7 @@ REQUIRED_ARGS = {
     # times OR start/end — validated in the tool, so neither is "required".
     "look_at": [],
     "look_at_asset": ["asset_key"],
+    "compare_uploaded_media": ["asset_keys"],
     "keep_segments": ["segments"],
     "cut_range": ["start", "end"],
     "restore_range": ["start", "end"],
@@ -20459,6 +22696,7 @@ REQUIRED_ARGS = {
     "set_caption_mutes": ["spans"],
     "add_stylize": ["kind"],
     "add_custom_filter": ["chain"],
+    "bind_motion_motif": ["target_type", "motion_motif"],
     "remove_custom_filter": ["id"],
     "add_freeze_frame": ["at_output_s"],
     "set_caption_fixes": [],
@@ -20527,6 +22765,7 @@ WRITE_TOOLS = {"apply_edit_recipe",
                "add_stylize", "add_freeze_frame", "enhance_video",
                "set_caption_fixes",
                "remove_stylize",
+               "bind_motion_motif",
                "set_grade_custom", "set_master_loudness",
                "separate_music", "remove_stem_mix",
                "punch_in_on_emphasis", "fetch_sfx",
@@ -20600,9 +22839,9 @@ def _compact_description(description):
     """A post-plan reminder, not a second copy of the full handbook."""
     text = " ".join(str(description or "").split())
     first = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
-    if len(first) <= 140:
+    if len(first) <= 110:
         return first
-    return first[:137].rsplit(" ", 1)[0] + "..."
+    return first[:107].rsplit(" ", 1)[0] + "..."
 
 
 def openai_tools(model=None, compact=False, names=None):
