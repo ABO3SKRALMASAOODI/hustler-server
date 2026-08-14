@@ -986,7 +986,7 @@ def run_shorts_plan(worker_db, job):
             "selection_source": (str(payload.get("source") or "caller_direct")
                                  if caller_planned is not None else
                                  "valmera_planner"),
-            "finals_deferred": False,
+            "finals_deferred": True,
             "clips": clips,
         }
         worker_db.run(_save_shorts_meta, project_id, shorts_meta)

@@ -36,14 +36,17 @@ def annotate_request(timings, seconds, role=None, service=None):
         resources = {
             # Modal requests physical cores; two vCPUs are approximately one
             # physical core, preserving the live Cloud Run compute shape.
-            "preview": (2.0, 8),
+            "preview": (2.0, 4),
             "batch": (4.0, 16),
             "heavy": (4.0, 32),
             # Agent containers share up to four I/O-heavy turns. The 0.125
             # core reservation may burst to one physical core when needed.
-            "agent": (0.125, 2),
+            "agent": (0.125, 1),
+            "probe": (0.25, 1),
         }
         cores, memory = resources.get(profile, resources["heavy"])
+        tail_s = {"preview": 10, "batch": 10, "heavy": 10,
+                  "agent": 30, "probe": 5}.get(profile, 10)
         unit = (cores * MODAL_CORE_S + memory * MODAL_GIB_S) \
             * MODAL_US_MULTIPLIER
         timings.update({
@@ -51,6 +54,11 @@ def annotate_request(timings, seconds, role=None, service=None):
             "compute_profile": f"modal-{profile}-{cores:g}core-{memory}g-us",
             "compute_unit_usd_s": round(unit, 9),
             "gross_compute_usd_ceiling": round(float(seconds) * unit, 6),
+            # Conservative: consecutive jobs may reuse one tail, so this is a
+            # visibility ceiling rather than a billable per-job charge.
+            "configured_idle_tail_s": tail_s,
+            "gross_compute_usd_with_tail_ceiling": round(
+                (float(seconds) + tail_s) * unit, 6),
         })
         if os.getenv("MODAL_REGION"):
             timings["compute_region"] = os.environ["MODAL_REGION"]

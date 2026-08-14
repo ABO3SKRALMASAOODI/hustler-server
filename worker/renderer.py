@@ -2977,13 +2977,15 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                   "-crf", str(config.FINAL_CRF), "-g", "120",
                   "-c:a", "aac", "-b:a", "192k"]
 
+    expected_out_s = (tl.out_duration
+                      + music_tail_ext(edl, tl.out_duration) + outro_s)
     cmd = ["ffmpeg", "-y", *extra_inputs,
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
-           *encode, *_output_clock(fps), "-movflags", "+faststart",
+           *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
+           "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
     media.run(cmd, progress_cb=progress_cb,
-              expected_out_s=tl.out_duration
-                              + music_tail_ext(edl, tl.out_duration) + outro_s,
+              expected_out_s=expected_out_s,
               cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
 
@@ -3478,14 +3480,16 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # decoded, so the video pipeline's whole cost (the reason previews
         # were slow) drops away and this finishes in seconds.
         graph = _prune_graph_to_audio(graph)
+        expected_out_s = (tl.out_duration
+                          + music_tail_ext(edl, tl.out_duration) + outro_s)
         cmd = ["ffmpeg", "-y", "-i", src_path, *extra_inputs,
                "-filter_complex", graph, "-map", "[aout]",
                "-c:a", "aac", "-b:a", "128k" if preview else "192k",
+               "-t", f"{expected_out_s:.3f}",
                "-movflags", "+faststart",
                "-progress", "pipe:1", "-nostats", out_path]
         media.run(cmd, progress_cb=progress_cb,
-                  expected_out_s=tl.out_duration
-                  + music_tail_ext(edl, tl.out_duration) + outro_s,
+                  expected_out_s=expected_out_s,
                   cancelled_cb=cancelled_cb)
         return media.probe_audio_duration(out_path)
 
@@ -3501,16 +3505,18 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                   "-crf", str(config.FINAL_CRF), "-g", "120",
                   "-c:a", "aac", "-b:a", "192k"]
 
+    expected_out_s = (tl.out_duration
+                      + music_tail_ext(edl, tl.out_duration) + outro_s)
     cmd = ["ffmpeg", "-y", "-i", src_path, *extra_inputs,
            "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
-           *encode, *_output_clock(fps), "-movflags", "+faststart",
+           *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
+           "-movflags", "+faststart",
            "-progress", "pipe:1", "-nostats", out_path]
     # Progress is percent-of-expected, so it must be the RENDERED length. Left
     # at the programme duration the bar hits 99.9% at programme end and then
     # flatlines through the whole end card.
     media.run(cmd, progress_cb=progress_cb,
-              expected_out_s=tl.out_duration
-                              + music_tail_ext(edl, tl.out_duration) + outro_s,
+              expected_out_s=expected_out_s,
               cancelled_cb=cancelled_cb)
     return media.duration_of(out_path)
 

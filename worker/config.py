@@ -1227,10 +1227,15 @@ AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
 # before detecting an actually stuck turn.
 AGENT_TURN_TIMEOUT_S = min(
     600.0, float(os.getenv("AGENT_TURN_TIMEOUT_S", "600")))
-# Fresh turns yield (up to 3×20s) while the fleet's last-60s token burn is
-# above this — 75% of the org's 200K TPM tier. Raise alongside the provider
-# tier; see recent_llm_tokens / the admission gate in agent_loop.
+# Absolute lifetime of one user turn, including productive continuations.
+# This prevents a stream of tiny writes from refreshing the inactivity clock
+# forever while preserving enough room for a complex edit and its preview.
+AGENT_TURN_TOTAL_TIMEOUT_S = min(
+    900.0, max(180.0, float(os.getenv("AGENT_TURN_TOTAL_TIMEOUT_S", "720"))))
+# Fleet-wide reservations admit every model call, not only fresh turns. Keep
+# this below the provider's 200K TPM tier to leave headroom for other lanes.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "150000"))
+AGENT_TPM_WINDOW_S = int(os.getenv("AGENT_TPM_WINDOW_S", "60"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
 # Transcript tools get a far larger budget: silently dropping the tail of a

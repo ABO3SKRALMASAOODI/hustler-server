@@ -51,7 +51,9 @@ COMMON = {
     "routing_region": "us-east",
     "min_containers": 0,
     "max_containers": 5,
-    "scaledown_window": 120,
+    # Keep a container only long enough to absorb an immediate follow-up.
+    # The old two-minute tail was the largest source of paid idle time.
+    "scaledown_window": 10,
     "retries": 0,
     "timeout": 3600,
     "startup_timeout": 300,
@@ -121,7 +123,7 @@ def _run(job, profile, role="executor"):
     return executor_runtime.execute(job or {}, http_server.RUNNERS)
 
 
-@app.function(name="preview", cpu=PREVIEW_CPU, memory=8192, **COMMON)
+@app.function(name="preview", cpu=PREVIEW_CPU, memory=4096, **COMMON)
 def preview(job):
     return _run(job, "preview")
 
@@ -137,12 +139,26 @@ def heavy(job):
 
 
 @app.function(
+    name="probe", image=image, secrets=[secret], region="us",
+    routing_region="us-east", min_containers=0, max_containers=1,
+    scaledown_window=5, retries=0, timeout=600, startup_timeout=300,
+    cpu=(0.25, 0.5), memory=1024,
+)
+def probe(job):
+    """Run diagnostics without renting the 32-GiB heavy profile."""
+    return _run(job, "probe")
+
+
+@app.function(
     name="agent", image=agent_image, secrets=[secret], region="us",
     routing_region="us-east", min_containers=0, max_containers=5,
-    scaledown_window=120, retries=0, timeout=3600, startup_timeout=300,
-    cpu=(0.125, 1.0), memory=2048,
+    scaledown_window=30, retries=0, timeout=3600, startup_timeout=300,
+    cpu=(0.125, 1.0), memory=1024,
 )
-@modal.concurrent(max_inputs=4, target_inputs=3)
+# Agent turns spend most of their wall time waiting on the model, database, or
+# remote render functions. Share that idle I/O time inside one container before
+# scaling another container; no always-on instance is purchased.
+@modal.concurrent(max_inputs=6, target_inputs=4)
 def agent(job):
     return _run(job, "agent", role="agent_executor")
 
@@ -150,7 +166,7 @@ def agent(job):
 @app.function(
     name="health", image=image, min_containers=0, max_containers=1,
     cpu=0.125, memory=512, timeout=60, startup_timeout=300,
-    scaledown_window=60, retries=0, region="us", routing_region="us-east",
+    scaledown_window=5, retries=0, region="us", routing_region="us-east",
 )
 def health():
     _boot("health")

@@ -1351,6 +1351,134 @@ def _compact_consumed_look_frames(messages, before_index=None):
     return removed
 
 
+def _compact_old_tool_results(messages, keep_latest=8, char_limit=900):
+    """Keep protocol-valid tool history without resending bulky old output."""
+    call_names = {}
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            call_names[call.get("id")] = fn.get("name") or "tool"
+    tool_indexes = [i for i, m in enumerate(messages)
+                    if m.get("role") == "tool"]
+    old = tool_indexes[:-max(0, int(keep_latest))] if keep_latest else tool_indexes
+    changed = 0
+    for i in old:
+        message = messages[i]
+        content = message.get("content")
+        if not isinstance(content, str) or len(content) <= char_limit:
+            continue
+        name = call_names.get(message.get("tool_call_id"), "tool")
+        # Skill instructions and their exact constraints remain authoritative
+        # for the whole turn; compact ordinary evidence and diffs only.
+        if name == "read_skill":
+            continue
+        head = content[:max(300, char_limit - 380)].rstrip()
+        tail = content[-180:].lstrip()
+        message["content"] = (
+            f"{head}\n...[older {name} result compacted; current EDL/state "
+            f"is authoritative]...\n{tail}")
+        changed += 1
+    return changed
+
+
+def _agent_request_token_estimate(messages, tools, max_tokens):
+    """Conservative TPM estimate without counting base64 image bytes."""
+    image_parts = 0
+
+    def clean(value):
+        nonlocal image_parts
+        if isinstance(value, dict):
+            if value.get("type") == "image_url":
+                image_parts += 1
+                return {"type": "image_url", "image_url": "[image]"}
+            return {str(k): clean(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        return value
+
+    raw = json.dumps({"messages": clean(messages), "tools": tools},
+                     ensure_ascii=False, separators=(",", ":"), default=str)
+    prompt = (len(raw) + 2) // 3 + image_parts * 1700
+    completion = min(max(0, int(max_tokens)), 8000)
+    return max(2000, prompt + completion)
+
+
+def _retryable_provider_rejection(exc):
+    text = str(exc).lower()
+    # Explicit provider refusals are safe to repeat. A timeout/reset is not:
+    # the server may have accepted and billed the request before our socket
+    # lost its answer, so replaying it can duplicate a very large prompt.
+    return any(marker in text for marker in (
+        "connection refused", "temporarily unavailable", "http 500",
+        "http 502", "http 503", "http 504", "status 500", "status 502",
+        "status 503", "status 504"))
+
+
+def _adopt_steering_messages(ctx, worker_db, job, session_id, messages,
+                             after_message_id):
+    """Append messages typed while this editor is running; return newest id."""
+    try:
+        adopted = worker_db.run(
+            dbx.adopt_queued_agent_steers, job["project_id"], job["id"],
+            session_id, int(after_message_id or 0))
+    except Exception as e:
+        print(f"[agent {job['id']}] steering poll failed: {str(e)[:120]}",
+              flush=True)
+        return after_message_id
+    if not adopted:
+        return after_message_id
+    rows = adopted.get("messages") or []
+    job_ids = adopted.get("job_ids") or []
+    if not rows:
+        return after_message_id
+    existing_ids = set(getattr(ctx, "adopted_steer_job_ids", set()))
+    existing_ids.update(int(x) for x in job_ids)
+    ctx.adopted_steer_job_ids = existing_ids
+    messages.append({
+        "role": "system",
+        "content": (
+            "The user added instructions while you were editing. Incorporate "
+            "them now into this same turn. Preserve compatible work already "
+            "landed; when an instruction conflicts, the newest user message "
+            "wins. Do not finish or render the complete preview until these "
+            "new instructions are handled."),
+    })
+    newest = int(after_message_id or 0)
+    joined = []
+    for row in rows:
+        content = str(row.get("content") or "")[:4000]
+        note = _attachment_context(worker_db, ctx, row)
+        messages.append({"role": "user", "content": content + note})
+        joined.append(content)
+        newest = max(newest, int(row["id"]))
+    if joined:
+        ctx.user_message = (str(getattr(ctx, "user_message", "")) + "\n" +
+                            "\n".join(joined))[-8000:]
+        ctx.editing_metrics["steering_messages_adopted"] = (
+            ctx.editing_metrics.get("steering_messages_adopted", 0)
+            + len(rows))
+        print(f"[agent {job['id']}] adopted {len(rows)} queued user "
+              "message(s) into the live turn", flush=True)
+    return newest
+
+
+def _complete_adopted_steers(ctx, worker_db, active_job_id):
+    ids = sorted(getattr(ctx, "adopted_steer_job_ids", set()))
+    if not ids:
+        return
+    try:
+        worker_db.run(dbx.complete_adopted_agent_steers, ids, active_job_id)
+        ctx.adopted_steer_job_ids = set()
+    except Exception as e:
+        # Leave the durable rows queued. A duplicate follow-up is safer than
+        # losing a message the live turn already promised to handle.
+        print(f"[agent {active_job_id}] could not retire adopted steering "
+              f"jobs ({str(e)[:120]}); durable fallback remains queued",
+              flush=True)
+
+
 def _activity(worker_db, session_id, name, args, result, source=None,
               edl_version=None, change=None, creative_blueprint=None):
     res_str = (result or "").replace("\n", " ")
@@ -1492,12 +1620,9 @@ def run_agent_job(worker_db, job):
     # with direct sight off; the loop that can honour it turns it on.
     ctx.direct_sight = True
     ctx.user_message = (user_message.get("content") or "")[:4000]
-    # Wake the executor NOW, while the model is still reading and planning
-    # (round 98): the first render of an idle session otherwise pays the
-    # Cloud Run cold start ON TOP of the encode. Fire-and-forget — a failed
-    # ping costs nothing and the render path keeps its own error handling.
-    if config.REMOTE_EXECUTOR_URL:
-        threading.Thread(target=remote.warm_executor, daemon=True).start()
+    # Do not pre-warm the preview fleet here. Agent planning routinely lasts
+    # longer than the executor's short idle window, which made the warm-up
+    # container disappear before rendering and charged for two cold starts.
     # A turn spends what the user can PAY FOR — balance + a small grace — and
     # nothing else bounds it.
     #
@@ -2797,12 +2922,11 @@ _CONTINUATION_NOTE = (
 
 def _run_loop(ctx, worker_db, job, session_id, user_message,
               attachment_note="", _cont=None):
-    """Run an uncapped tool-calling loop over the request.
+    """Run a quality-driven tool-calling loop over the request.
 
-    There is no model-call, iteration, preview, or write quota. Real external
-    boundaries still apply: shutdown, available credits, provider capacity,
-    and a progress-sensitive stall window. Productive work refreshes that
-    window with the same context and counters.
+    There is no arbitrary preview or write quota. Shutdown, available credits,
+    shared provider capacity, an inactivity window, and an absolute turn wall
+    bound runaway work. Productive work refreshes only the inactivity window.
     """
     # Resolved from the user's plan in run_agent_job. _build_messages and the
     # tool schemas are model-agnostic and do not change with it.
@@ -2871,6 +2995,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         json.dumps(tools, separators=(",", ":")))
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
+    turn_started = _cont.get("turn_started") or time.monotonic()
+    seen_message_id = int(_cont.get("seen_message_id")
+                          or user_message.get("id") or 0)
     timings = _cont.get("timings") or \
         {"llm_s": 0.0, "llm_calls": 0, "tools": {}}
     honesty = _cont.get("honesty") or \
@@ -2887,27 +3014,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     plan_write_pushed = bool(_cont.get("plan_write_pushed", False))
     plan_close_pushed = bool(_cont.get("plan_close_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
-
-    # TPM admission (Aug 10): the provider's tokens-per-minute ceiling is
-    # org-wide, and a fresh turn's first call is the biggest single request
-    # we make (~50K tokens of state + filmstrips). Starting it into a burst
-    # that is already over the ceiling buys a guaranteed 429 — so a FRESH
-    # turn (nothing done yet, nothing to lose) peeks at the fleet's last-60s
-    # burn and yields briefly while it is above the soft cap. Continuations
-    # never wait: their clock is already running.
-    if not _cont:
-        for _adm in range(3):
-            try:
-                burn = worker_db.run(dbx.recent_llm_tokens, 60)
-            except Exception:
-                break                # the gate is advisory, never load-bearing
-            if burn < config.AGENT_TPM_SOFT_CAP:
-                break
-            print(f"[job {job['id']}] fleet pushed {burn} tokens in the last "
-                  f"60s (soft cap {config.AGENT_TPM_SOFT_CAP}) — pausing 20s "
-                  "before the first call instead of joining the burst",
-                  flush=True)
-            time.sleep(20)
 
     while True:
         iteration = timings["llm_calls"]
@@ -2945,14 +3051,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             return {"status": "shutdown", "steps": total_steps,
                     "timings": timings, "billable": False,
                     "outcome": outcome}
-        if time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
-            # This is an INACTIVITY wall, never a total-edit wall. A complex
-            # turn that is still landing EDL versions or successful previews
-            # gets another window with no fixed count. Spend/credit guards
-            # still stop unaffordable work; the clock only catches a genuinely
-            # stalled turn. Tool calls are synchronous, so a long render is
-            # not interrupted mid-call either — its completed preview counts
-            # as progress when control returns here.
+        total_expired = (time.monotonic() - turn_started
+                         > config.AGENT_TURN_TOTAL_TIMEOUT_S)
+        if total_expired or \
+                time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S:
+            # Productive work may refresh the INACTIVITY window, but never the
+            # absolute turn wall. Tool calls are synchronous, so a call already
+            # running is not killed halfway through; its result is preserved.
             n_clock = _cont.get("clock", 0)
             progress_lists = (
                 "images_generated", "videos_generated", "urls_fetched",
@@ -2963,7 +3068,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            or len(ctx.rendered_versions)
                            > _cont.get("renders0", 0)
                            or asset_progress > _cont.get("assets0", 0))
-            if _progressed and not ctx.over_budget() \
+            if _progressed and not ctx.over_budget() and not total_expired \
                     and not SHUTDOWN.is_set():
                 print(f"[job {job['id']}] progress window spent after "
                       f"{total_steps} step(s), but work is still landing — "
@@ -2974,6 +3079,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     _cont={"n": _cont.get("n", 0), "clock": n_clock + 1,
                            "why": "turn clock", "steps": total_steps,
                            "t_start": time.monotonic(),
+                           "turn_started": turn_started,
+                           "seen_message_id": seen_message_id,
                            "timings": timings, "honesty": honesty,
                            "preview_repair_pushed": preview_repair_pushed,
                            "quality_repair_versions": sorted(
@@ -2983,9 +3090,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "writes0": len(ctx.versions_written),
                            "renders0": len(ctx.rendered_versions),
                            "assets0": asset_progress})
-            print(f"[job {job['id']}] stalled with no editing/rendering "
-                  f"progress for {config.AGENT_TURN_TIMEOUT_S:.0f}s",
-                  flush=True)
+            why = (f"absolute turn limit of "
+                   f"{config.AGENT_TURN_TOTAL_TIMEOUT_S:.0f}s reached"
+                   if total_expired else
+                   f"no editing/rendering progress for "
+                   f"{config.AGENT_TURN_TIMEOUT_S:.0f}s")
+            print(f"[job {job['id']}] {why}", flush=True)
             if ctx.versions_written:
                 # Name the half-done state plainly. The old copy ("the edits
                 # I completed are saved") read as DONE to a user who wasn't
@@ -2995,8 +3105,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 # finish, and left (Aug 3 2026, project 335).
                 return _finalize(
                     ctx, worker_db, session_id,
-                    "This edit stopped making progress on my side, so I'm "
-                    "stopping the stalled run — the edits I finished are "
+                    ("This edit reached this turn's safe processing limit, "
+                     if total_expired else
+                     "This edit stopped making progress on my side, ")
+                    + "so I'm stopping here — the edits I finished are "
                     "saved "
                     "and previewed below. If part of your request isn't in "
                     "them yet, it is NOT done — say \"continue\" and I'll "
@@ -3009,7 +3121,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             saved = _assets_made_note(ctx)
             outcome, billable = _turn_completion(ctx, "timeout")
             worker_db.run(dbx.add_message, session_id, "assistant",
-                          "That request stopped making progress before I "
+                          ("That request reached this turn's safe processing "
+                           "limit before I " if total_expired else
+                           "That request stopped making progress before I ")
+                          +
                           "could finish anything — the edit itself was not changed"
                           f"{saved}. Please try again, or break the request "
                           "into smaller steps.",
@@ -3018,6 +3133,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             return {"status": "timeout", "steps": total_steps,
                     "timings": timings, "outcome": outcome,
                     "billable": billable}
+
+        seen_message_id = _adopt_steering_messages(
+            ctx, worker_db, job, session_id, messages, seen_message_id)
 
         # Graceful spend cap: stop before starting another (expensive) model
         # call once this turn's model cost has reached the budget. Honest stop
@@ -3124,6 +3242,44 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # 'none' on EVERY tools call — including iteration 0, where the
             # field is otherwise never sent.
             extra["reasoning_effort"] = "none"
+
+        # Reserve this exact request before every dispatch. Completed-call
+        # rows are retrospective; this atomic ledger prevents two workers
+        # from simultaneously opening prompts that exceed the org TPM tier.
+        estimate = _agent_request_token_estimate(messages, tools, max_tokens)
+        capacity_expired = False
+        capacity_waited = 0.0
+        while True:
+            try:
+                wait = worker_db.run(
+                    dbx.reserve_llm_tokens, estimate,
+                    config.AGENT_TPM_SOFT_CAP, config.AGENT_TPM_WINDOW_S)
+            except Exception as e:
+                print(f"[agent {job['id']}] TPM reservation unavailable "
+                      f"({str(e)[:120]}) — failing open", flush=True)
+                wait = 0.0
+            if not wait or wait <= 0:
+                break
+            remaining = min(
+                config.AGENT_TURN_TOTAL_TIMEOUT_S
+                - (time.monotonic() - turn_started),
+                config.AGENT_TURN_TIMEOUT_S
+                - (time.monotonic() - t_start))
+            if remaining <= 0.25:
+                capacity_expired = True
+                break
+            nap = min(float(wait), 20.0, remaining)
+            print(f"[agent {job['id']}] reserving {estimate} TPM tokens "
+                  f"would exceed the fleet soft cap — waiting {nap:.1f}s",
+                  flush=True)
+            time.sleep(nap)
+            capacity_waited += nap
+        if capacity_waited:
+            timings["tpm_wait_s"] = round(
+                timings.get("tpm_wait_s", 0.0) + capacity_waited, 2)
+        if capacity_expired:
+            continue
+        t0 = time.monotonic()
         try:
             # THE KNOBS HAVE TO BE SAFE TO TURN ON. reasoning_effort is an
             # env var someone sets against a provider we cannot test from
@@ -3141,11 +3297,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             kw.update(extra)
             # THINKING, ON THE MODEL WE ALREADY PAY FOR (round 91). When this
             # model has told us it will not reason alongside tools on
-            # chat/completions, ask the endpoint it named instead. Any failure
-            # — transport, HTTP, or a body llm._from_responses does not
-            # recognise — falls straight through to the call below, which is
-            # byte-for-byte what runs today. The lane can only add thinking;
-            # it cannot take a turn away.
+            # chat/completions, ask the endpoint it named instead. Only a
+            # definite unsupported-endpoint response falls back; ambiguous
+            # timeouts never replay a possibly accepted expensive request.
             resp = None
             # What the request ACTUALLY carried, for the record below. Without
             # this the row said reasoning_effort='none' (the chat path's value)
@@ -3154,35 +3308,56 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # because it is the field you would check first.
             used_lane = None
             if llm.responses_available(model, config.OPENAI_BASE_URL):
-                try:
-                    resp = llm.responses_create(
-                        config.OPENAI_BASE_URL, config.OPENAI_API_KEY, model,
-                        messages, tools, max_tokens=max_tokens,
-                        effort=step_effort,
-                        # Thinking-sized, not dispatch-sized: a max-effort
-                        # call reasons past LLM_TIMEOUT_S, and timing out
-                        # here silently reruns the step at effort='none'.
-                        timeout=config.AGENT_LANE_TIMEOUT_S)
-                    used_lane = step_effort
-                except Exception as e:
-                    # A definite "not here" latches the lane off for the
-                    # process so a doomed request is paid once, not once per
-                    # step. A timeout or a 500 does NOT — that would cost the
-                    # agent its thinking for the life of the worker over a
-                    # blip.
-                    permanent = llm.looks_like_responses_unsupported(e)
-                    if permanent:
-                        llm.mark_responses_dead(model)
-                    if not _responses_warned:
-                        _responses_warned = True
-                        print(f"[agent {job['id']}] the responses lane failed "
-                              f"({str(e)[:180]}) — falling back to "
-                              "chat/completions; the model answers WITHOUT "
-                              "reasoning there"
-                              + (" [latched off for this process]"
-                                 if permanent else " [will retry next step]"),
-                              flush=True)
-                    resp = None
+                lane_rate_waits = 0
+                for lane_attempt in range(3):
+                    try:
+                        resp = llm.responses_create(
+                            config.OPENAI_BASE_URL, config.OPENAI_API_KEY,
+                            model, messages, tools, max_tokens=max_tokens,
+                            effort=step_effort,
+                            timeout=config.AGENT_LANE_TIMEOUT_S)
+                        used_lane = step_effort
+                        break
+                    except Exception as e:
+                        permanent = llm.looks_like_responses_unsupported(e)
+                        if permanent:
+                            llm.mark_responses_dead(model)
+                            if not _responses_warned:
+                                _responses_warned = True
+                                print(
+                                    f"[agent {job['id']}] responses is not "
+                                    f"supported ({str(e)[:180]}) — using "
+                                    "chat/completions for this process",
+                                    flush=True)
+                            break
+                        remaining = min(
+                            config.AGENT_TURN_TOTAL_TIMEOUT_S
+                            - (time.monotonic() - turn_started),
+                            config.AGENT_TURN_TIMEOUT_S
+                            - (time.monotonic() - t_start))
+                        retry_wait = llm.rate_limit_wait(
+                            e, lane_rate_waits + 1, remaining,
+                            shutting_down=SHUTDOWN.is_set())
+                        if retry_wait is not None and lane_attempt < 2:
+                            lane_rate_waits += 1
+                            print(f"[agent {job['id']}] responses lane was "
+                                  f"rate-limited — waiting {retry_wait:.1f}s "
+                                  "and retrying the same lane", flush=True)
+                            time.sleep(retry_wait)
+                            continue
+                        if _retryable_provider_rejection(e) \
+                                and lane_attempt < 2 \
+                                and remaining > 3:
+                            retry_wait = min(2 ** lane_attempt, remaining)
+                            print(f"[agent {job['id']}] transient responses "
+                                  f"failure — retrying the same lane in "
+                                  f"{retry_wait:.1f}s", flush=True)
+                            time.sleep(retry_wait)
+                            continue
+                        # Never duplicate a possibly accepted expensive call
+                        # on chat/completions after a timeout/5xx. Only a
+                        # definite unsupported-endpoint response falls back.
+                        raise
             _adapt_tries = 0
             _rl_waits = 0
             while resp is None:
@@ -3196,8 +3371,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # reasoning and bounds (round 91).
                     wait = llm.rate_limit_wait(
                         e, _rl_waits + 1,
-                        config.AGENT_TURN_TIMEOUT_S
-                        - (time.monotonic() - t_start),
+                        min(config.AGENT_TURN_TIMEOUT_S
+                            - (time.monotonic() - t_start),
+                            config.AGENT_TURN_TOTAL_TIMEOUT_S
+                            - (time.monotonic() - turn_started)),
                         shutting_down=SHUTDOWN.is_set())
                     if wait is not None:
                         _rl_waits += 1
@@ -3347,6 +3524,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                               body.rfind("?"))
                     if cut > 40:
                         body = body[:cut + 1]
+            # A user message can arrive while the provider is drafting this
+            # reply. Adopt it before the expensive complete preview and keep
+            # editing; the draft remains context, not a premature response.
+            steered_to = _adopt_steering_messages(
+                ctx, worker_db, job, session_id, messages, seen_message_id)
+            if steered_to != seen_message_id:
+                seen_message_id = steered_to
+                if body:
+                    messages.append({"role": "assistant", "content": body})
+                continue
             # Auto-render first so the turn facts include the real preview.
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings)
@@ -3426,6 +3613,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           message_meta)
+            _complete_adopted_steers(ctx, worker_db, job["id"])
             return {"status": "replied", "edl_version": latest["version"],
                     "steps": total_steps, "auto_render": ctx.autorendered,
                     "honesty": honesty, "timings": timings,
@@ -3501,6 +3689,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                       {"ask_user": True,
                                        "edl_version": _cur_v,
                                        "outcome": "blocked"})
+                        _complete_adopted_steers(ctx, worker_db, job["id"])
                         return {"status": "awaiting_user",
                                 "steps": total_steps, "timings": timings,
                                 "outcome": "blocked"}
@@ -3610,6 +3799,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # judged before the evidence had actually reached the editor.
         if getattr(ctx, "_pending_visual_review_assets", None):
             ctx._pending_visual_review_assets.clear()
+
+        compacted = _compact_old_tool_results(messages)
+        if compacted:
+            ctx.editing_metrics["old_tool_results_compacted"] = (
+                ctx.editing_metrics.get("old_tool_results_compacted", 0)
+                + compacted)
 
         # The broad contact sheets did their job on the planning call. Keep
         # exact look evidence added above, but do not pay to resend all

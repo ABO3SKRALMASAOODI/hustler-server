@@ -42,18 +42,17 @@ part in both:
     the same clip used in ten projects is sampled once per project and never
     twice within one.
 
-  * WAVEFORM PEAKS — for the main video's own audio and for every audio asset
-    (uploads AND bundled library tracks). These do NOT become storage objects.
-    A peak envelope at the resolution a 44px lane can actually draw is a few
-    hundred bytes; storing it would mean an object, a presign and a round trip
-    per track to deliver less data than the presigned URL itself. They ride
-    inside the job result as base64 uint8, so the studio gets every waveform in
-    the SAME poll that tells it the strip is ready — no extra request at all.
+  * WAVEFORM PEAKS — for the main video's own audio and every audio asset.
+    They still ride inside the job result, while a tiny private cache object
+    prevents later filmstrip rebuilds from decoding the same audio again.
 """
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
+import json
 import math
 import os
+import shutil
 
 import config
 import media
@@ -96,6 +95,7 @@ ASSET_MAX_TILES = 16
 # must cost this and then be skipped, not hold the media lane the previews
 # people are waiting on share with it.
 ASSET_FFMPEG_TIMEOUT_S = 90
+ASSET_WORKERS = max(1, min(3, int(os.getenv("FILMSTRIP_ASSET_WORKERS", "2"))))
 
 # Waveform resolution. The envelope is drawn into a lane 16-26px tall and at
 # most ~1400px wide at 8x zoom, so more points than this cannot be seen; fewer
@@ -133,6 +133,50 @@ def asset_storage_key(project_id, storage_or_ref, n):
     h = hashlib.sha1((storage_or_ref or "").encode("utf-8",
                                                    "replace")).hexdigest()[:16]
     return f"filmstrip/{project_id}/a-{h}-{n}.jpg"
+
+
+def wave_storage_key(project_id, storage_or_ref, n_points):
+    h = hashlib.sha1((storage_or_ref or "").encode(
+        "utf-8", "replace")).hexdigest()[:16]
+    return f"filmstrip/{project_id}/w1-{h}-{int(n_points)}.json"
+
+
+def _cached_wave(project_id, ref, n_points, workdir, tag):
+    """Return ``(hit, encoded_wave)``; ``None`` is a cached silent answer."""
+    key = wave_storage_key(project_id, ref, n_points)
+    local = os.path.join(workdir, f"{tag}_wave.json")
+    try:
+        if not storage.exists(key):
+            return False, None
+        storage.download_to(key, local)
+        with open(local, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict) or "wave" not in payload:
+            return False, None
+        return True, payload.get("wave")
+    except Exception:
+        return False, None
+    finally:
+        try:
+            os.remove(local)
+        except OSError:
+            pass
+
+
+def _store_wave(project_id, ref, n_points, encoded, workdir, tag):
+    key = wave_storage_key(project_id, ref, n_points)
+    local = os.path.join(workdir, f"{tag}_wave.json")
+    try:
+        with open(local, "w", encoding="utf-8") as f:
+            json.dump({"wave": encoded}, f, separators=(",", ":"))
+        storage.upload_file(local, key, "application/json")
+    except Exception:
+        pass
+    finally:
+        try:
+            os.remove(local)
+        except OSError:
+            pass
 
 
 # ── Waveform envelope ───────────────────────────────────────────────────────
@@ -363,18 +407,35 @@ def _asset_artifacts(project_id, ref, kind, duration_s, workdir, tag):
                 cached_key = k
         except Exception:
             cached_key = None
+    wave_hit, cached_wave = (False, None)
+    if kind in ("audio", "video"):
+        wave_hit, cached_wave = _cached_wave(
+            project_id, ref, WAVE_POINTS_ASSET, workdir, tag)
+        if cached_wave:
+            out["wave"] = cached_wave
+
+    if cached_key:
+        # This key encodes the tile count that was actually built. Re-running
+        # plan() here would reduce a short clip to fewer tiles and make the
+        # client's grid disagree with the cached JPEG.
+        n_c = n_want
+        iv_c = max(0.05, dur or 1.0) / n_c
+        c_c = min(COLS, n_c)
+        r_c = int(math.ceil(n_c / float(c_c)))
+        out.update({"key": cached_key, "tiles": n_c,
+                    "interval_s": round(iv_c, 4),
+                    "cols": c_c, "rows": r_c})
     # An image has no waveform, so a cached sheet means there is nothing left
     # to do — and nothing to download. That is the common case on a rebuild.
-    if cached_key and kind == "image":
-        return {**out, "key": cached_key, "tiles": n_want,
-                "interval_s": max(0.05, dur or 1.0), "cols": 1, "rows": 1}
+    if cached_key and (kind == "image" or wave_hit):
+        return out
+    if kind == "audio" and wave_hit:
+        return out if out.get("wave") else None
 
     local = _local_for_ref(ref, workdir, tag)
     if not local or not os.path.exists(local):
         # A cached sheet still beats nothing when the file itself is gone.
-        return {**out, "key": cached_key, "tiles": n_want,
-                "interval_s": max(0.05, dur or 1.0), "cols": 1,
-                "rows": 1} if cached_key and kind == "image" else None
+        return out if out.get("key") or out.get("wave") else None
     try:
         if dur <= 0.05:
             try:
@@ -386,7 +447,7 @@ def _asset_artifacts(project_id, ref, kind, duration_s, workdir, tag):
                 n_want = (1 if kind == "image" or dur > ASSET_STRIP_MAX_S
                           else ASSET_MAX_TILES)
 
-        if want_sheet:
+        if want_sheet and not cached_key:
             sheet = os.path.join(workdir, f"{tag}.jpg")
             try:
                 if n_want <= 1:
@@ -426,22 +487,15 @@ def _asset_artifacts(project_id, ref, kind, duration_s, workdir, tag):
                 os.remove(sheet)
             except OSError:
                 pass
-            if not out.get("key") and cached_key:
-                # The re-sample failed but a sheet from a previous build is
-                # still in storage — serve that rather than dropping this
-                # asset back to a flat rectangle.
-                n_c, iv_c, c_c, r_c = plan(max(0.1, dur), max_tiles=n_want)
-                out.update({"key": cached_key, "tiles": n_c,
-                            "interval_s": round(iv_c, 4),
-                            "cols": c_c, "rows": r_c})
 
         # Sound belongs to video clips too — an inserted clip carries audio
         # into the edit, and a lane that shows its frames but hides its sound
         # is why "why is this clip loud?" has no answer on the timeline.
-        if kind in ("audio", "video"):
+        if kind in ("audio", "video") and not wave_hit:
             enc = encode_peaks(peaks(local, WAVE_POINTS_ASSET, dur, workdir))
             if enc:
                 out["wave"] = enc
+            _store_wave(project_id, ref, WAVE_POINTS_ASSET, enc, workdir, tag)
     finally:
         try:
             if local.startswith(workdir):
@@ -471,9 +525,9 @@ _KIND_MAP = {"video_clip": "video", "image_ref": "image",
 def run_filmstrip_job(worker_db, job):
     """Build (or find) everything the timeline draws itself from.
 
-    The main sheet is cached in storage and short-circuits; the waveforms are
-    not stored at all (see the module docstring), so a job whose sheet already
-    exists still opens the proxy when it has envelopes to measure.
+    Main/asset sheets and compact waveform envelopes are cached independently.
+    Uncached secondary assets are processed with bounded parallelism so one
+    slow clip does not force every other decoder to wait behind it.
     """
     import db as dbx
     project_id = job["project_id"]
@@ -542,22 +596,24 @@ def run_filmstrip_job(worker_db, job):
         row["storage_key"])[1])
     out = os.path.join(workdir, "strip.jpg")
     cached = storage.exists(key)
+    main_ref = "main:" + str(src_row.get("sha256") or row["storage_key"])
+    main_wave_hit, main_wave = _cached_wave(
+        project_id, main_ref, WAVE_POINTS_MAIN, workdir, "main")
+    meta["wave"] = main_wave
     try:
-        try:
-            storage.download_to(row["storage_key"], local)
-        except Exception as e:
-            # A REBUILD (the sheet already exists, we came back only for the
-            # waveforms) must not fail the job over a download: the result
-            # would then carry no key at all and the studio would lose the
-            # frames it already had. Only a first build needs the file.
-            if cached:
+        have_local = False
+        if not cached or not main_wave_hit:
+            try:
+                storage.download_to(row["storage_key"], local)
+                have_local = True
+            except Exception as e:
+                # A cached sheet remains useful even when a waveform refresh
+                # cannot read the proxy. Secondary assets can still be served.
+                if not cached:
+                    raise
                 print(f"[filmstrip] project {project_id}: proxy unreadable "
-                      f"({e}) — keeping the cached sheet, no waveforms",
-                      flush=True)
-                return {"available": True, "key": key, "cached": True,
-                        **meta, "assets": {}}
-            raise
-        if not cached:
+                      f"({e}) — keeping cached main artifacts", flush=True)
+        if not cached and have_local:
             if main_is_original:
                 # No proxy will ever come (the index failed for good, or was
                 # never run) — the timeline still deserves a scrub bar, but a
@@ -580,8 +636,12 @@ def run_filmstrip_job(worker_db, job):
             storage.upload_file(out, key, "image/jpeg")
             meta.update({k: built[k] for k in
                          ("tiles", "interval_s", "cols", "rows", "tile_h")})
-        meta["wave"] = encode_peaks(peaks(local, WAVE_POINTS_MAIN, dur,
-                                          workdir))
+        if not main_wave_hit and have_local:
+            main_wave = encode_peaks(peaks(local, WAVE_POINTS_MAIN, dur,
+                                           workdir))
+            meta["wave"] = main_wave
+            _store_wave(project_id, main_ref, WAVE_POINTS_MAIN, main_wave,
+                        workdir, "main")
     finally:
         for p in (local, out):
             try:
@@ -618,15 +678,27 @@ def run_filmstrip_job(worker_db, job):
     except Exception:
         pass
 
-    for i, (ref, kind, adur) in enumerate(todo[:MAX_ASSETS]):
+    def _one_asset(i, ref, kind, adur):
+        asset_dir = os.path.join(workdir, f"asset_{i}")
+        os.makedirs(asset_dir, exist_ok=True)
         try:
-            art = _asset_artifacts(project_id, ref, kind, adur, workdir,
-                                   f"as{i}")
+            return ref, _asset_artifacts(
+                project_id, ref, kind, adur, asset_dir, f"as{i}")
         except Exception as e:
             print(f"[filmstrip] asset {ref} skipped: {e}", flush=True)
-            art = None
-        if art:
-            assets[ref] = art
+            return ref, None
+        finally:
+            shutil.rmtree(asset_dir, ignore_errors=True)
+
+    selected = todo[:MAX_ASSETS]
+    with ThreadPoolExecutor(max_workers=min(ASSET_WORKERS,
+                                             max(1, len(selected)))) as pool:
+        futures = [pool.submit(_one_asset, i, ref, kind, adur)
+                   for i, (ref, kind, adur) in enumerate(selected)]
+        for future in as_completed(futures):
+            ref, art = future.result()
+            if art:
+                assets[ref] = art
     if len(todo) > MAX_ASSETS:
         print(f"[filmstrip] project {project_id}: {len(todo) - MAX_ASSETS} "
               f"asset(s) past the {MAX_ASSETS} cap got no artwork", flush=True)

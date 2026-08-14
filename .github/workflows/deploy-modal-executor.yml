@@ -43,19 +43,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: coalesce rapid worker pushes
+        if: github.event_name == 'push'
+        run: |
+          sleep 120
+          git fetch origin main
+          pushed_tree=$(git rev-parse "$GITHUB_SHA:worker")
+          latest_tree=$(git rev-parse "origin/main:worker")
+          if [ "$pushed_tree" != "$latest_tree" ]; then
+            echo "A newer worker tree is already queued; skipping this intermediate deploy."
+            echo "skip_deploy=true" >> "$GITHUB_ENV"
+          fi
+
       - uses: actions/setup-python@v5
+        if: env.skip_deploy != 'true'
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: worker/requirements.txt
 
       - name: install Modal CLI
+        if: env.skip_deploy != 'true'
         run: pip install "modal==1.5.4"
 
       - name: deploy executor functions
+        if: env.skip_deploy != 'true'
         run: modal deploy worker/modal_app.py --env main --tag "$GITHUB_SHA"
 
       - name: verify deployed code and provider
+        if: env.skip_deploy != 'true'
         run: |
           want=$(cd worker && python -c "import version; print(version.code_version())")
           want_adapter=$(python - <<'PY'
@@ -95,12 +111,13 @@ jobs:
           echo "Modal executor code=$got adapter=$got_adapter provider=modal"
 
       - name: record Modal YouTube byte health
+        if: env.skip_deploy != 'true'
         run: |
           python - <<'PY'
           import json
           import modal
           result = modal.Function.from_name(
-              "valmera-executor", "heavy", environment_name="main").remote({
+              "valmera-executor", "probe", environment_name="main").remote({
                   "id": None,
                   "type": "ytprobe",
                   "project_id": "provider-health",

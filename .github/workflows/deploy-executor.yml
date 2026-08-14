@@ -1,13 +1,9 @@
-# Executor auto-deploy (round 97, #4).
+# Emergency Cloud Run fallback deployment.
 #
-# The render executor on Cloud Run does NOT redeploy itself — the dispatcher
-# on Render does, on every push, and the halves drift. That skew has now
-# broken production FOUR separate times (rounds 53, 55, 96, 97: the last one
-# put three red "render is the wrong length" errors in front of one user in
-# two minutes). This workflow removes the whole failure class: any push to
-# main that touches worker/ rebuilds the executor from the same commit, then
-# REFUSES to call it done until /health reports the checked-out tree's own
-# code fingerprint.
+# Modal is the primary executor. Building five Cloud Run services after every
+# worker edit created hundreds of unused revisions and images, so the fallback
+# is now deployed deliberately from the Actions UI only. The workflow still
+# verifies its code fingerprint before calling the release healthy.
 #
 # Setup (once): a GCP service account with run.admin +
 # cloudbuild.builds.editor + storage.admin project roles, serviceAccountUser
@@ -19,14 +15,6 @@
 name: deploy-executor
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "worker/**"
-      - "!worker/tests/**"
-      - "!worker/**/*.md"
-      - "!worker/modal_app.py"
-      - "!worker/setup_modal_executor.py"
   workflow_dispatch: {}
 
 concurrency:

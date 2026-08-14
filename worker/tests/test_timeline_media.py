@@ -62,9 +62,13 @@ _enc = filmstrip.encode_peaks(_vals)
 import base64                                                # noqa: E402
 check("peaks survive the base64 round trip byte for byte",
       list(base64.b64decode(_enc)) == _vals)
-check("an envelope is smaller than the URL that would fetch it "
-      "(the whole reason it is not a storage object)",
+check("an envelope stays small enough to ride inside the job result",
       len(filmstrip.encode_peaks([200] * filmstrip.WAVE_POINTS_ASSET)) < 600)
+check("waveform cache keys are stable and resolution-specific",
+      filmstrip.wave_storage_key(7, "clips/a.mp4", 320)
+      == filmstrip.wave_storage_key(7, "clips/a.mp4", 320)
+      and filmstrip.wave_storage_key(7, "clips/a.mp4", 320)
+      != filmstrip.wave_storage_key(7, "clips/a.mp4", 1400))
 
 _src = open(os.path.join(os.path.dirname(__file__), "..",
                          "filmstrip.py")).read()
@@ -125,6 +129,9 @@ print("\n— cost bounds —")
 
 check("one job never decodes an unbounded number of assets",
       filmstrip.MAX_ASSETS <= 20 and "todo[:MAX_ASSETS]" in _src)
+check("secondary assets use bounded parallelism rather than a serial queue",
+      2 <= filmstrip.ASSET_WORKERS <= 3
+      and "ThreadPoolExecutor" in _src and "as_completed" in _src)
 check("a dropped asset is reported, not silently swallowed",
       "past the" in _src and "cap got no artwork" in _src)
 check("a feature-length 'insert' gets one poster frame, not a linear decode",
@@ -174,7 +181,7 @@ check("a still is sampled at t=0 — seeking 10% into a one-frame PNG finds "
       'at = 0.0 if kind == "image"' in _src)
 check("a rebuild does not re-download an asset whose sheet already exists "
       "and which has no waveform to measure",
-      'if cached_key and kind == "image"' in _src)
+      'if cached_key and (kind == "image" or wave_hit)' in _src)
 
 print("\n— the reply contract —")
 

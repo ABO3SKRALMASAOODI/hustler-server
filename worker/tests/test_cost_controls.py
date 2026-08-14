@@ -10,6 +10,7 @@ ROOT = WORKER.parent
 sys.path.insert(0, str(WORKER))
 
 import agent_tools  # noqa: E402
+import agent_loop  # noqa: E402
 import config  # noqa: E402
 import db as dbx  # noqa: E402
 import http_server  # noqa: E402
@@ -220,3 +221,130 @@ def test_deploy_workflow_right_sizes_and_coalesces():
     heavy_health = "valmera-executor-950454325677.us-central1.run.app/health"
     assert heavy_health not in workflow
     assert config.REMOTE_AGENT_DISPATCH_SLOTS >= 10
+
+
+def test_old_tool_results_are_compacted_without_breaking_protocol():
+    messages = []
+    for i in range(10):
+        messages.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": f"c{i}", "type": "function",
+                            "function": {"name": "get_edl",
+                                         "arguments": "{}"}}],
+        })
+        messages.append({"role": "tool", "tool_call_id": f"c{i}",
+                         "content": "x" * 1800})
+    changed = agent_loop._compact_old_tool_results(messages, keep_latest=3)
+    tools = [m for m in messages if m["role"] == "tool"]
+    assert changed == 7
+    assert "compacted" in tools[0]["content"]
+    assert len(tools[-1]["content"]) == 1800
+    assert [m["tool_call_id"] for m in tools] == [f"c{i}" for i in range(10)]
+
+
+def test_tpm_estimate_does_not_count_embedded_image_bytes():
+    small = [{"role": "user", "content": [{"type": "image_url",
+              "image_url": {"url": "data:image/jpeg;base64," + "a" * 10}}]}]
+    huge = [{"role": "user", "content": [{"type": "image_url",
+             "image_url": {"url": "data:image/jpeg;base64," + "a" * 500000}}]}]
+    tools = [{"function": {"name": "get_edl"}}]
+    assert agent_loop._agent_request_token_estimate(small, tools, 4000) \
+        == agent_loop._agent_request_token_estimate(huge, tools, 4000)
+
+
+def test_render_signature_is_exact_and_pipeline_scoped():
+    row = {"version": 2, "json": _edl()}
+    first = agent_tools._render_signature(row, "preview")
+    assert first == agent_tools._render_signature(
+        {"version": 99, "json": _edl()}, "preview")
+    assert first != agent_tools._render_signature(row, "preview_check", [[0, 2]])
+    assert len(first) == 64
+
+
+def test_modal_lifecycle_is_short_and_diagnostics_use_probe():
+    source = (WORKER / "modal_app.py").read_text()
+    workflow = (ROOT / ".github/workflows/deploy-modal-executor.yml").read_text()
+    cloud = (ROOT / ".github/workflows/deploy-executor.yml").read_text()
+    assert '"scaledown_window": 10' in source
+    assert 'name="preview", cpu=PREVIEW_CPU, memory=4096' in source
+    assert 'cpu=(0.125, 1.0), memory=1024' in source
+    assert '@modal.concurrent(max_inputs=6, target_inputs=4)' in source
+    assert 'name="probe"' in source
+    assert remote._modal_function_name("ytprobe") == "probe"
+    assert '"valmera-executor", "probe"' in workflow
+    assert "coalesce rapid worker pushes" in workflow
+    assert "branches: [main]" not in cloud
+
+
+def test_renderer_caps_mux_to_expected_duration():
+    source = (WORKER / "renderer.py").read_text()
+    assert source.count('"-t", f"{expected_out_s:.3f}"') >= 3
+
+
+def test_tpm_reservation_waits_for_live_fleet_capacity(monkeypatch):
+    class Cursor:
+        def __init__(self, raw):
+            self.raw = raw
+            self.sql = ""
+            self.writes = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+            if "INSERT INTO app_kv" in sql:
+                self.writes.append(params)
+
+        def fetchone(self):
+            if "to_regclass" in self.sql:
+                return {"t": "app_kv"}
+            if "SELECT value" in self.sql:
+                return {"value": self.raw}
+            return None
+
+    class Conn:
+        def __init__(self, raw):
+            self.cur = Cursor(raw)
+
+        def cursor(self):
+            return self.cur
+
+    monkeypatch.setattr(dbx.time, "time", lambda: 1000.0)
+    open_conn = Conn("[]")
+    assert dbx.reserve_llm_tokens(open_conn, 80, 150, 60) == 0
+    assert open_conn.cur.writes
+
+    full_conn = Conn("[[990,100]]")
+    assert dbx.reserve_llm_tokens(full_conn, 60, 150, 60) \
+        == pytest.approx(50.0)
+    assert not full_conn.cur.writes
+
+
+def test_live_turn_adopts_mid_edit_messages(monkeypatch):
+    rows = [{"id": 12, "content": "also make it vertical", "meta": None}]
+
+    class WorkerDb:
+        @staticmethod
+        def run(fn, *_args):
+            assert fn is dbx.adopt_queued_agent_steers
+            return {"messages": rows, "job_ids": [22]}
+
+    class Ctx:
+        user_message = "trim the intro"
+        editing_metrics = {}
+
+    monkeypatch.setattr(agent_loop, "_attachment_context",
+                        lambda *_args: "")
+    messages = []
+    ctx = Ctx()
+    newest = agent_loop._adopt_steering_messages(
+        ctx, WorkerDb(), {"id": 4, "project_id": 3}, 7, messages, 10)
+    assert newest == 12
+    assert messages[-1]["content"] == "also make it vertical"
+    assert "newest user message wins" in messages[0]["content"]
+    assert Ctx.editing_metrics["steering_messages_adopted"] == 1
+    assert ctx.adopted_steer_job_ids == {22}

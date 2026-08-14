@@ -606,6 +606,21 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
         row = cur.fetchone()
         if row:
             return row["id"], False
+        signature = str((payload or {}).get("render_signature") or "")
+        if signature and not (payload or {}).get("force"):
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'preview'
+                             AND state = 'failed'
+                             AND payload->>'render_signature' = %s
+                             AND created_at > NOW() - INTERVAL '30 minutes'
+                             AND COALESCE(
+                                 (result->'failure'->>'retryable')::boolean,
+                                 false) = false
+                           ORDER BY id DESC LIMIT 1""",
+                        (project_id, signature))
+            row = cur.fetchone()
+            if row:
+                return row["id"], False
         cur.execute("""INSERT INTO video_jobs
                           (project_id, user_id, type, payload)
                        VALUES (%s, %s, 'preview', %s) RETURNING id""",
@@ -645,6 +660,21 @@ def get_or_enqueue_preview_check_job(conn, project_id, user_id, payload):
         row = cur.fetchone()
         if row:
             return row["id"], False
+        signature = str((payload or {}).get("render_signature") or "")
+        if signature:
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'preview_check'
+                             AND state = 'failed'
+                             AND payload->>'render_signature' = %s
+                             AND created_at > NOW() - INTERVAL '30 minutes'
+                             AND COALESCE(
+                                 (result->'failure'->>'retryable')::boolean,
+                                 false) = false
+                           ORDER BY id DESC LIMIT 1""",
+                        (project_id, signature))
+            row = cur.fetchone()
+            if row:
+                return row["id"], False
         cur.execute("""INSERT INTO video_jobs
                           (project_id, user_id, type, payload)
                        VALUES (%s, %s, 'preview_check', %s) RETURNING id""",
@@ -1340,6 +1370,57 @@ def recent_llm_tokens(conn, seconds=60):
         return int(list(row.values())[0] if isinstance(row, dict) else row[0])
 
 
+def reserve_llm_tokens(conn, estimated_tokens, soft_cap, window_s=60):
+    """Atomically reserve org-wide TPM capacity before an agent call.
+
+    Completed-call telemetry arrives too late to prevent two workers from
+    starting large prompts together. A tiny rolling ledger in ``app_kv`` plus
+    a transaction advisory lock makes admission fleet-wide without a schema
+    migration. Returns seconds to wait; zero means the reservation is held.
+    """
+    estimate = max(1, min(int(estimated_tokens), int(soft_cap)))
+    now = time.time()
+    key = "agent_tpm_reservations_v1"
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (841731, 1))
+        cur.execute("SELECT to_regclass('public.app_kv') AS t")
+        table = cur.fetchone()
+        table = table.get("t") if isinstance(table, dict) else table[0]
+        if not table:
+            return 0.0
+        cur.execute("SELECT value FROM app_kv WHERE key = %s FOR UPDATE",
+                    (key,))
+        row = cur.fetchone()
+        raw = (row.get("value") if isinstance(row, dict) else row[0]) \
+            if row else None
+        try:
+            reservations = json.loads(raw or "[]")
+            if not isinstance(reservations, list):
+                reservations = []
+        except (TypeError, ValueError):
+            reservations = []
+        cutoff = now - max(1, int(window_s))
+        live = []
+        for item in reservations:
+            try:
+                ts, tokens = float(item[0]), int(item[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if ts > cutoff and tokens > 0:
+                live.append([ts, tokens])
+        used = sum(item[1] for item in live)
+        if live and used + estimate > int(soft_cap):
+            return max(0.25, live[0][0] + window_s - now)
+        live.append([now, estimate])
+        value = json.dumps(live, separators=(",", ":"))
+        cur.execute("""INSERT INTO app_kv (key, value, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (key) DO UPDATE
+                       SET value = EXCLUDED.value, updated_at = NOW()""",
+                    (key, value))
+        return 0.0
+
+
 def insert_llm_call(conn, project_id, job_id, purpose, model, request,
                     response, prompt_tokens=None, completion_tokens=None):
     with conn.cursor() as cur:
@@ -1457,6 +1538,64 @@ def pending_user_message(conn, project_id, session_id):
                     AND j.payload->>'message_id' = m.id::text)
             ORDER BY m.id DESC LIMIT 1""", (session_id, project_id))
         return cur.fetchone()
+
+
+def adopt_queued_agent_steers(conn, project_id, active_job_id, session_id,
+                              after_message_id):
+    """Move mid-turn user messages into the live editor atomically.
+
+    The backend still creates a durable queued follow-up, so a message cannot
+    be lost if the live turn ends before seeing it. Adoption marks the row;
+    successful reply delivery retires it, while a crash leaves it queued so
+    the same instruction is never silently lost.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                    (int(project_id), 841732))
+        cur.execute("""SELECT id, (payload->>'message_id')::bigint AS message_id
+                       FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND id <> %s AND state = 'queued'
+                         AND payload->>'message_id' ~ '^[0-9]+$'
+                         AND (payload->>'message_id')::bigint > %s
+                         AND NOT (payload ? 'steered_into')
+                       ORDER BY id FOR UPDATE""",
+                    (project_id, active_job_id, int(after_message_id or 0)))
+        jobs = cur.fetchall()
+        if not jobs:
+            return []
+        upper = max(int(row["message_id"]) for row in jobs)
+        cur.execute("""SELECT id, content, meta FROM chat_messages
+                       WHERE session_id = %s AND role = 'user'
+                         AND id > %s AND id <= %s
+                       ORDER BY id""",
+                    (session_id, int(after_message_id or 0), upper))
+        messages = cur.fetchall()
+        ids = [int(row["id"]) for row in jobs]
+        # Keep the durable fallback queued until the live turn has actually
+        # posted its answer. If that turn crashes, claim_job later runs this
+        # row; if it succeeds, complete_adopted_agent_steers retires it.
+        cur.execute("""UPDATE video_jobs
+                       SET payload = payload || %s, updated_at = NOW()
+                       WHERE id = ANY(%s) AND state = 'queued'""",
+                    (Json({"steered_into": int(active_job_id)}), ids))
+        return {"messages": messages, "job_ids": ids}
+
+
+def complete_adopted_agent_steers(conn, job_ids, active_job_id):
+    if not job_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET state = 'done', progress = 100,
+                           result = %s, updated_at = NOW()
+                       WHERE id = ANY(%s) AND state = 'queued'
+                         AND payload->>'steered_into' = %s
+                       RETURNING id""",
+                    (Json({"steered_into": int(active_job_id),
+                           "billable": False}), list(job_ids),
+                     str(active_job_id)))
+        return len(cur.fetchall())
 
 
 def has_active_agent_turn(conn, project_id):

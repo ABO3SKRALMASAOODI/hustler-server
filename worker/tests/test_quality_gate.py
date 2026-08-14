@@ -202,7 +202,7 @@ def test_additional_writes_do_not_need_reviewer_permission():
     assert fake.inserts == 2
 
 
-def test_manual_preview_has_no_fixed_per_turn_candidate_ceiling(
+def test_manual_preview_defers_complete_encode_to_turn_end(
         monkeypatch, tmp_path):
     class PreviewDb:
         payload = None
@@ -263,13 +263,17 @@ def test_manual_preview_has_no_fixed_per_turn_candidate_ceiling(
     monkeypatch.setattr(agent_tools.taste, "critique", lambda *_args, **_kw: [])
     monkeypatch.setattr(agent_tools.time, "sleep", lambda *_args: None)
 
+    result = agent_tools.render_preview(Ctx(), complete=True)
+    assert "rendered automatically once" in result
+    assert 22 not in Ctx.rendered_versions
+    assert PreviewDb.payload is None
+
+    Ctx.autorendering = True
     result = agent_tools.render_preview(Ctx())
     assert result.startswith("Preview v22 rendered:")
     assert 22 in Ctx.rendered_versions
-    assert PreviewDb.payload["screening_frames"] == [{
-        "time_s": 9.0,
-        "reason": "planned beat 1 [proof]: make the result credible",
-    }]
+    assert PreviewDb.payload["edl_version"] == 22
+    assert len(PreviewDb.payload["render_signature"]) == 64
 
 
 def test_sequence_screening_maps_kept_source_beats_and_omits_cut_regions():

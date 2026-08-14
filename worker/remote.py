@@ -109,6 +109,8 @@ def _modal_function_name(job_type, override=None):
         return "batch"
     if job_type == "agent_turn":
         return "agent"
+    if job_type == "ytprobe":
+        return "probe"
     return "heavy"
 
 
@@ -137,8 +139,9 @@ def executor_health(timeout=20, job_type=None):
             cached = _health_cache.get(key)
             if cached and now - cached[0] < _HEALTH_CACHE_S:
                 return cached[1]
-        body = _modal_health(timeout=timeout)
-        with _health_lock:
+            # Keep the lock through the cold launch.  Two dispatcher boot
+            # threads used to rent duplicate health containers at once.
+            body = _modal_health(timeout=timeout)
             _health_cache[key] = (now, body)
         return body
     url = _executor_url("preview" if job_type is None else job_type)

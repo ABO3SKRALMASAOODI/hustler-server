@@ -56,3 +56,13 @@ def test_modal_cost_annotation_records_actual_region(monkeypatch):
     timings = compute_cost.annotate_request({}, 12)
     assert timings["compute_region"] == "us-west-2"
     assert timings["compute_cloud_provider"] == "aws"
+
+
+def test_modal_profiles_include_right_sized_memory_and_idle_tail(monkeypatch):
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "preview")
+    timings = compute_cost.annotate_request({}, 12)
+    assert timings["compute_profile"] == "modal-preview-2core-4g-us"
+    assert timings["configured_idle_tail_s"] == 10
+    assert timings["gross_compute_usd_with_tail_ceiling"] \
+        > timings["gross_compute_usd_ceiling"]

@@ -67,6 +67,7 @@ import remote
 import ytaccess
 import visual
 import webrecord
+import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      custom_chain_error, patch_fingerprint,
@@ -14801,11 +14802,13 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
     version = int(row["version"])
     if version in ctx.checked_versions:
         return (f"Changed sections of EDL v{version} were already rendered "
-                "and checked. Keep editing, or call "
-                "render_preview(complete=true) once the edit is ready.")
+                "and checked. Keep editing, or finish the edit; the complete "
+                "preview is automatic once.")
     payload = {"edl_version": version, "check_ranges": ranges,
                "source": "agent_preview_check",
-               "agent_job_id": ctx.job["id"]}
+               "agent_job_id": ctx.job["id"],
+               "render_signature": _render_signature(row, "preview_check",
+                                                       ranges)}
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     job_id = getattr(ctx, "spec_preview_check_jobs", {}).get(version)
@@ -14840,8 +14843,8 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
             if critic is not None:
                 note += preview_critic.summary_line(critic)
             note += (" Continue iterating cheaply. When the edit is ready, "
-                     "call render_preview(complete=true) exactly once to "
-                     "produce the complete user preview.")
+                     "finish the turn; the complete user preview is produced "
+                     "automatically exactly once.")
             return note
         if job["state"] == "failed":
             failure = dict(((job.get("result") or {}).get("failure") or {}))
@@ -14879,7 +14882,9 @@ def speculative_preview(ctx):
         return
     payload = {"edl_version": version, "check_ranges": ranges,
                "source": "agent_preview_check",
-               "agent_job_id": ctx.job["id"]}
+               "agent_job_id": ctx.job["id"],
+               "render_signature": _render_signature(row, "preview_check",
+                                                       ranges)}
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     job_id, _created = ctx.db.run(
@@ -14892,10 +14897,33 @@ def speculative_preview(ctx):
 
 
 
+def _render_signature(row, kind, ranges=None):
+    """Identify the exact pixels requested under this deployed renderer.
+
+    EDL versions are cheap history and two versions may contain identical
+    JSON. Including the worker fingerprint lets a fixed deployment try again,
+    while an unchanged deterministic failure is returned without another
+    paid ffmpeg launch.
+    """
+    material = {
+        "kind": kind,
+        "edl": (row or {}).get("json") or {},
+        "ranges": ranges or [],
+        "code": worker_version.code_version(),
+    }
+    raw = json.dumps(material, sort_keys=True, separators=(",", ":"),
+                     ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def render_preview(ctx, complete=False):
     row = ctx.latest_edl()
     version = row["version"]
-    complete = bool(complete) or bool(getattr(ctx, "autorendering", False))
+    requested_complete = bool(complete)
+    # Only the loop's turn-end honesty pass may produce the complete player
+    # preview. A model asking for complete=true mid-turn used to encode the
+    # whole programme repeatedly while it experimented with later versions.
+    complete = bool(getattr(ctx, "autorendering", False))
     if version in ctx.rendered_versions and \
             (ctx.last_preview or {}).get("edl_version") == version:
         return (f"Preview v{version} is already rendered and attached — "
@@ -14915,11 +14943,17 @@ def render_preview(ctx, complete=False):
         ranges, _baseline = _change_check_ranges(ctx, row, plan)
         if ranges:
             return _run_changed_preview_check(ctx, row, plan, ranges)
+        if requested_complete:
+            _metric(ctx, "full_preview_requests_deferred")
+        return (f"EDL v{version} is marked ready. The complete Studio preview "
+                "is rendered automatically once, after editing finishes. "
+                "No full encode was started by this intermediate tool call.")
     # Adopt the speculative encode of this exact version when one is already
     # queued/running (round 98) — same payload shape, same verify plan,
     # half the wait and none of the double cost.
     payload = {"edl_version": version, "source": "agent_preview",
-               "agent_job_id": ctx.job["id"]}
+               "agent_job_id": ctx.job["id"],
+               "render_signature": _render_signature(row, "preview")}
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     sequence_frames = _sequence_screening_frames(ctx, row)
@@ -20130,16 +20164,16 @@ TOOLS = {
                        "only the output seconds affected since the last "
                        "complete preview and inspect their proof frames; the "
                        "short proof reel never replaces the Studio player. "
-                       "When the entire edit is ready, call ONCE with "
-                       "complete=true to render and attach the complete 480p "
-                       "preview. Valmera's in-house agent automatically does "
-                       "that complete render at turn end. When only COLOR changed "
+                       "When the edit is ready, complete=true is only a "
+                       "readiness hint: the in-house loop, not this tool call, "
+                       "renders and attaches exactly one complete 480p preview "
+                       "at turn end. When only COLOR changed "
                        "since the last render, this returns a ~2s grade "
                        "contact strip instead of re-encoding the program — "
                        "iterate the look against the strip; the complete "
                        "readiness render still happens exactly once.",
                        {"complete": {"type": "boolean",
-                                     "description": "False/default: changed sections only. True: one complete readiness preview."}}),
+                                     "description": "False/default: changed sections only. True: mark ready; the one complete preview is still automatic at turn end."}}),
     "ask_user": (ask_user, "Ask the user a specific question and wait for "
                  "their reply (ends this turn). Use whenever a material "
                  "choice genuinely belongs to the user.",
