@@ -38,6 +38,7 @@ import agent_loop
 import agent_tools
 import config
 import db as dbx
+import director
 import llm
 import mcp_media
 import storage
@@ -48,6 +49,18 @@ from agent_prompt import system_prompt
 CATALOG_TOOL = "__catalog__"
 STATE_TOOL = "__state__"
 MEDIA_TOOL = "__media__"        # watch_video — see mcp_media.py
+
+# Editor tools that exist for Valmera's in-house agent but must never be
+# reachable from MCP. edit_shorts is not an EDL operation, and the locked-card
+# lifecycle reserves in-house child-agent boot for an explicit Studio press.
+# The model on the other end of MCP is already the editor, so it opens a child
+# and edits that EDL directly.
+MCP_DENIED_TOOLS = frozenset({"edit_shorts"})
+MCP_DENIED_MESSAGE = (
+    "edit_shorts is unavailable over MCP. Studio's child-agent boot is an "
+    "explicit locked-card action. Edit each child yourself: call "
+    "shorts_status, open_short, then use the normal EDL editing and preview "
+    "tools.")
 
 
 class _Session:
@@ -64,14 +77,18 @@ _sessions_lock = threading.Lock()
 
 
 def catalog():
-    """Every editor tool this deployment can actually run, plus the prompt
-    that describes them. Built from the live registry, so tools whose backing
-    service is unconfigured (no image key, no stock key, no music pack) are
-    absent here exactly as they are absent from the in-house agent's tool
-    list — an outside model must never be handed a capability that can only
-    answer "unavailable"."""
+    """Every direct editor tool this deployment can run, plus the prompt.
+
+    Built from the live registry, so tools whose backing service is
+    unconfigured remain absent. Agent-orchestration tools are filtered too:
+    an outside model must edit with the EDL tools itself, never enqueue a
+    second model to do its work.
+    """
+    tools = [t for t in agent_tools.openai_tools()
+             if (t.get("function") or {}).get("name")
+             not in MCP_DENIED_TOOLS]
     return {
-        "tools": agent_tools.openai_tools(),
+        "tools": tools,
         "system_prompt": system_prompt(),
         "capabilities": agent_loop.capabilities_block(),
         "write_tools": sorted(agent_tools.WRITE_TOOLS),
@@ -152,6 +169,12 @@ def _new_context(worker_db, job, project, index, sha):
                            f"mcp_{project['id']}_{int(time.time())}")
     os.makedirs(workdir, exist_ok=True)
     ctx = agent_tools.ToolContext(worker_db, job, project, index, workdir)
+    try:
+        ctx.edit_plan = director.normalize_blueprint(worker_db.run(
+            dbx.latest_creative_blueprint, project["chat_session_id"]))
+        ctx.plan_loaded = bool(ctx.edit_plan)
+    except Exception:
+        pass
     # The caller is a model, and a tools/call result carries image content.
     # So a look tool hands over the FRAMES, not our vision model's paragraph
     # about them — cheaper for us and first-hand for whoever is editing.
@@ -220,6 +243,12 @@ def run_mcp_job(worker_db, job):
     if tool == CATALOG_TOOL:
         return catalog()
 
+    # Defense in depth for stale clients and manually-created mcp_tool rows.
+    # The backend also refuses this before queueing, but the worker is the
+    # authority that would otherwise enqueue the agent turns.
+    if tool in MCP_DENIED_TOOLS:
+        return {"text": MCP_DENIED_MESSAGE, "is_error": True}
+
     project = worker_db.run(dbx.get_project, job["project_id"])
     if not project:
         raise RuntimeError("project not found")
@@ -265,7 +294,8 @@ def run_mcp_job(worker_db, job):
         llm.set_turn_plan(ctx.plan if ctx.subscribed else "")
         try:
             if tool == STATE_TOOL:
-                return {"text": agent_loop.state_block(ctx, worker_db),
+                return {"text": agent_loop.state_block(
+                            ctx, worker_db, denied_tools=MCP_DENIED_TOOLS),
                         "edl_version": ctx.latest_edl()["version"]}
 
             if tool == MEDIA_TOOL:
@@ -298,7 +328,10 @@ def run_mcp_job(worker_db, job):
 
             agent_loop._activity(worker_db, project["chat_session_id"],
                                  tool, args, text, source="mcp",
-                                 edl_version=after)
+                                 edl_version=after,
+                                 creative_blueprint=(ctx.edit_plan if tool in {
+                                     "set_edit_plan",
+                                     "complete_edit_plan_steps"} else None))
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
             imgs = _drain_images(ctx)

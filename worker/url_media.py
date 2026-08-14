@@ -51,6 +51,7 @@ from urllib.parse import urlparse, unquote
 
 import config
 import media
+import motion_judge
 import net_fetch
 import ytaccess
 
@@ -671,6 +672,13 @@ def run_fetch_job(worker_db, job):
         storage.upload_file(path, key, content_type(path))
 
         review_keys, review_labels = [], []
+        motion_profile = None
+        if kind == KIND_VIDEO:
+            try:
+                motion_profile = motion_judge.analyze_video(
+                    path, duration_s=got.get("duration_s"))
+            except Exception:
+                pass                   # optional evidence, never media validity
         if payload.get("review", True) and kind in (KIND_VIDEO, KIND_IMAGE):
             if kind == KIND_IMAGE:
                 samples = [(0.0, "full image")]
@@ -703,7 +711,8 @@ def run_fetch_job(worker_db, job):
         result = {k: v for k, v in got.items() if k != "path"}
         result.update(ok=True, storage_key=key,
                       review_keys=review_keys,
-                      review_labels=review_labels)
+                      review_labels=review_labels,
+                      motion_profile=motion_profile)
         return result
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

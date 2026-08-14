@@ -32,6 +32,7 @@ import gradelut
 import graphics
 import media
 import screenframe
+import screening
 import sheets
 import stitch
 import storage
@@ -1697,9 +1698,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f":trunc(iw*{cx0:.4f}/2)*2"
                 f":trunc(ih*{cy0:.4f}/2)*2[insvc{j}]")
             ins_in, imode = f"insvc{j}", "pad"
-        # Ken Burns motion on image inserts: a per-block zoompan that
-        # drifts across the still instead of freezing it.
-        motion = item.get("motion") if item["kind"] == "image" else None
+        # Local camera motion on any insert. zoompan with d=1 emits one output
+        # frame per input frame, so this keeps a still alive and adds a push or
+        # pan to video B-roll without changing its duration, rate, or audio.
+        # No motion keeps the legacy graph byte-identical.
+        motion = item.get("motion")
         norm_out = f"v_insn{j}" if motion else f"v_ins{j}"
         _normalize_video(parts, ins_in, norm_out, W, H, fps,
                          imode, f"i{j}", seg_dur=dur)
@@ -2360,12 +2363,25 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     for j, (idx, item) in enumerate(overlay_inputs):
         o_start = float(item["start"])
         o_dur = float(item["duration_s"])
-        ow = _even((W or 1280) * float(item.get("scale") or 0.4))
+        scale_value = item.get("scale", 0.4)
+        scale_animated = isinstance(scale_value, list)
+        op = item.get("opacity")
+        opacity_animated = isinstance(op, list)
         chain = []
         if item["kind"] != "image":
             off = float(item.get("source_start_s") or 0.0)
             chain.append(f"trim=start={off:.3f}:end={off + o_dur:.3f}")
             chain.append("setpts=PTS-STARTPTS")
+        if opacity_animated:
+            # geq negotiates its output dimensions from its first frame.  Run
+            # it while the asset is still a stable size; putting it after an
+            # animated scale would freeze every later frame at the initial
+            # width and silently defeat the scale curve.
+            alpha = _anim_expr(op, "T")
+            chain.append("format=rgba")
+            chain.append(
+                "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
+                f":a='alpha(X,Y)*({alpha})'")
         if item.get("fit") == "cover":
             # B-roll cutaway (round 36): fill the WHOLE output frame — scale
             # up + center-crop the overflow. The position expression below
@@ -2375,10 +2391,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f"force_original_aspect_ratio=increase,"
                          f"crop={W or 1280}:{H or 720}")
         else:
-            chain.append(f"scale={ow}:-2")
-        chain.append("format=rgba")
-        op = item.get("opacity")
-        if op is not None and float(op) < 0.999:
+            if scale_animated:
+                scale_expr = _anim_expr(scale_value, "t")
+                chain.append(
+                    f"scale=w='{W or 1280}*({scale_expr})':h=-2:eval=frame")
+            else:
+                ow = _even((W or 1280) * float(scale_value or 0.4))
+                chain.append(f"scale={ow}:-2")
+        if not opacity_animated:
+            chain.append("format=rgba")
+        if not opacity_animated and op is not None and float(op) < 0.999:
             chain.append(f"colorchannelmixer=aa={float(op):.3f}")
         ent, ext = item.get("entrance"), item.get("exit")
         ed = min(0.35, o_dur / 3)
@@ -2388,7 +2410,29 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             chain.append(f"fade=t=out:st={max(0.0, o_dur - ed):.2f}"
                          f":d={ed:.2f}:alpha=1")
         rot = item.get("rotation")
-        if rot:
+        if isinstance(rot, list):
+            rad = f"({_anim_expr(rot, 't')})*PI/180"
+            if scale_animated:
+                # rotate's ow/oh are init-only.  If its input starts small,
+                # an ordinary hypot(iw,ih) canvas permanently crops a later
+                # scale-up.  Pad every frame onto one canvas derived from the
+                # largest authored width (and the source aspect), then rotate
+                # that fixed canvas in place.  Position remains center-based.
+                max_scale = max(float(k["v"]) for k in scale_value)
+                max_width = _even((W or 1280) * max_scale)
+                diagonal = (
+                    f"ceil(hypot({max_width},ih*{max_width}/iw)/2)*2")
+                chain.append(
+                    f"pad=w='{diagonal}':h='{diagonal}':"
+                    "x='(ow-iw)/2':y='(oh-ih)/2':"
+                    "color=black@0:eval=frame")
+                chain.append(
+                    f"rotate=angle='{rad}':c=black@0.0:ow=iw:oh=ih")
+            else:
+                chain.append(
+                    f"rotate=angle='{rad}':c=black@0.0:"
+                    "ow='hypot(iw,ih)':oh='hypot(iw,ih)'")
+        elif rot:
             rad = float(rot) * 3.14159265 / 180.0
             chain.append(f"rotate={rad:.4f}:c=black@0.0"
                          f":ow=rotw({rad:.4f}):oh=roth({rad:.4f})")
@@ -3376,7 +3420,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         ass = None
         if pieces:
             ass = graphics.build_gfx_ass(
-                dict(edl, texts=[item]), tl.out_duration,
+                # This ASS is composited under the subject matte and belongs
+                # to this text alone. Program vectors stay in the ordinary
+                # front graphics file; carrying them here would burn every
+                # shape twice and incorrectly put one copy behind the person.
+                dict(edl, texts=[item], vectors=[]), tl.out_duration,
                 os.path.join(workdir, f"behind_{bi}.ass"), play_res=(W, H))
         if not pieces or not ass:
             print(f"[render] behind-text {item.get('id')}: "
@@ -4256,6 +4304,8 @@ def run_render_job(worker_db, job):
                                       wm_settings):
             return {"render_asset_id": cached["id"],
                     "sheet_key": (cached.get("meta") or {}).get("sheet_key"),
+                    "screening_pages": ((cached.get("meta") or {})
+                                        .get("screening_pages") or []),
                     "caption_sheet_key": ((cached.get("meta") or {})
                                           .get("caption_sheet_key")),
                     "duration_s": cached["duration_s"], "edl_version": version,
@@ -4567,6 +4617,38 @@ def run_render_job(worker_db, job):
                                     outro_seconds(variant == "preview"))))
         except Exception:
             sheet_local = None
+        # A complete preview deserves more than nine clock samples. Build a
+        # compact visual screening plan from the actual edit decisions and
+        # spread it across 4x4 pages. Proof renders stay intentionally narrow:
+        # their numbered verify sheet answers the changed-moment question and
+        # duplicating whole-program evidence would add latency and vision cost.
+        screening_locals = []
+        screening_frames = []
+        if variant == "preview" and not proof_only:
+            try:
+                program_dur = max(
+                    0.1, out_dur - outro_seconds(variant == "preview"))
+                screening_frames = screening.plan(
+                    edl_row["json"], program_dur,
+                    max_frames=config.SCREENING_MAX_FRAMES,
+                    base_frames=config.SCREENING_BASE_FRAMES,
+                    extra_frames=(job["payload"].get("screening_frames")
+                                  or []))
+                for page_n, page in enumerate(screening.pages(
+                        screening_frames, config.SCREENING_PAGE_TILES), 1):
+                    local = os.path.join(
+                        workdir, f"screening_sheet_{page_n}.jpg")
+                    sheets.build_frames_sheet(
+                        out_local, local,
+                        [row["time_s"] for row in page], cols=4,
+                        max_tiles=len(page),
+                        parallelism=config.SCREENING_FRAME_PARALLELISM)
+                    screening_locals.append((local, page))
+            except Exception as exc:
+                print(f"[render {job_id}] screening sheets skipped: "
+                      f"{str(exc)[:160]}", flush=True)
+                screening_locals = []
+                screening_frames = []
         # Round 81: the dispatcher may name the exact output seconds its edit
         # changed (edl_diff.verify_plan); frames pulled HERE cost a few seeks
         # on a file we already hold, where pulling them dispatcher-side would
@@ -4623,26 +4705,82 @@ def run_render_job(worker_db, job):
         if caption_local and os.path.exists(caption_local):
             caption_sheet_key = f"media/{project_id}/{stamp}_cap.jpg"
             storage.upload_file(caption_local, caption_sheet_key, "image/jpeg")
+        screening_pages = []
+        for page_n, (local, page) in enumerate(screening_locals, 1):
+            if not os.path.exists(local):
+                continue
+            key = f"media/{project_id}/{stamp}_scr{page_n}.jpg"
+            storage.upload_file(local, key, "image/jpeg")
+            screening_pages.append({"key": key, "frames": page})
         if not _still_ours(96):
             storage.delete_keys([render_key, sheet_key, verify_sheet_key,
-                                 caption_sheet_key])
+                                 caption_sheet_key] +
+                                [page["key"] for page in screening_pages])
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
         _mark("upload_s")
 
         out_info = media.probe(out_local)
-        # Deterministic preview sound measurements (LUFS / true peak / dead
-        # air) stay local and model-free. Do not cut or upload subjective
-        # listening clips: no second model should hear on the editor's behalf.
+        # Deterministic measurements are always-on.  When the edit authors
+        # music/SFX/voiceover, also cut a few tiny excerpts while the finished
+        # render is already local.  The dispatcher can hand those to the
+        # bounded audio reviewer without downloading/decoding the whole MP4.
+        # These clips are evidence, never a render gate, and failures here do
+        # not fail the valid preview.
         audio_qc_res = None
+        listen_keys = []
         if variant == "preview" and not proof_only:
             try:
                 audio_qc_res = audio_qc.measure(out_local, duration_s=out_dur)
             except Exception:
                 audio_qc_res = None
+            authored = edl_row["json"]
+            has_designed_audio = bool(
+                authored.get("music") or authored.get("sfx") or
+                authored.get("voiceover"))
+            if has_designed_audio:
+                review_times = list(vtimes or [])
+                # Ensure the bounded actual-audio listener hears the beginning,
+                # middle and end of the final mix even when all authored SFX
+                # happen near the opening. Event times below then compete on
+                # real program position rather than insertion order.
+                review_times.extend(
+                    out_dur * fraction for fraction in (0.08, 0.5, 0.92))
+                for item, field in (
+                        *((row, "start") for row in
+                          (authored.get("music") or [])),
+                        *((row, "at") for row in
+                          (authored.get("sfx") or [])),
+                        *((row, "start_output_s") for row in
+                          (authored.get("voiceover") or []))):
+                    try:
+                        review_times.append(float(item.get(field) or 0.0))
+                    except (TypeError, ValueError):
+                        pass
+                try:
+                    for i, (ls, le) in enumerate(audio_qc.listen_windows(
+                            review_times, out_dur, max_windows=3)):
+                        local = os.path.join(workdir, f"listen_{i}.mp3")
+                        media.extract_audio_clip(out_local, ls, le, local)
+                        key = f"media/{project_id}/{stamp}_l{i}.mp3"
+                        storage.upload_file(local, key, "audio/mpeg")
+                        listen_keys.append({
+                            "key": key, "t0": round(ls, 2),
+                            "t1": round(le, 2)})
+                except Exception as exc:
+                    print(f"[render {job_id}] listening excerpts skipped: "
+                          f"{str(exc)[:160]}", flush=True)
+                    try:
+                        storage.delete_keys(
+                            [item["key"] for item in listen_keys])
+                    except Exception:
+                        pass
+                    listen_keys = []
         if not _still_ours(98):
             storage.delete_keys(
-                [render_key, sheet_key, verify_sheet_key, caption_sheet_key])
+                [render_key, sheet_key, verify_sheet_key, caption_sheet_key]
+                + [page["key"] for page in screening_pages]
+                + [item["key"] for item in listen_keys])
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
         asset_id = worker_db.run(
@@ -4654,6 +4792,9 @@ def run_render_job(worker_db, job):
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
                   "caption_sheet_key": caption_sheet_key,
                   "caption_review_times": caption_times,
+                  "screening_pages": screening_pages,
+                  "screening_frame_count": len(screening_frames),
+                  "listen_keys": [item["key"] for item in listen_keys],
                   "src_sha256": src_sha,
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),
@@ -4688,6 +4829,10 @@ def run_render_job(worker_db, job):
                     keys.append((a.get("meta") or {}).get("sheet_key"))
                     keys.append((a.get("meta") or {}).get("verify_sheet_key"))
                     keys.append((a.get("meta") or {}).get("caption_sheet_key"))
+                    keys.extend(page.get("key") for page in
+                                ((a.get("meta") or {}).get(
+                                    "screening_pages") or [])
+                                if isinstance(page, dict))
                     keys.extend((a.get("meta") or {}).get("listen_keys")
                                 or [])
                 storage.delete_keys(keys)
@@ -4710,11 +4855,13 @@ def run_render_job(worker_db, job):
                 "verify_sheet_key": verify_sheet_key,
                 "caption_sheet_key": caption_sheet_key,
                 "caption_review_times": caption_times,
+                "screening_pages": screening_pages,
+                "screening_frame_count": len(screening_frames),
                 "duration_s": out_dur, "edl_version": version,
                 "variant": asset_variant, "timings": timings,
                 **({"changed_ranges": changed_ranges,
                     "scope": "changes"} if proof_only else {}),
                 "midword_audit": mw,
-                "audio_qc": audio_qc_res}
+                "audio_qc": audio_qc_res, "listen_keys": listen_keys}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

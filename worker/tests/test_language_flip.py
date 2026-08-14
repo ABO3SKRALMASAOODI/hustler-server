@@ -27,6 +27,20 @@ def test_cyrillic_reply_to_english_user_flips():
                  "первый — стартовый кадр SpaceX с огнём") is not None
 
 
+def test_english_advisory_must_not_run_before_the_language_check():
+    """Project 755: a Bulgarian draft plus the English quality advisory
+    dropped below the 60% Cyrillic threshold and shipped. Check the draft
+    alone; the advisory is appended after."""
+    bg = ("Промоът е финализиран като съществуваща 16:9 Dope Sports "
+          "редакция с продължителност 56,9 секунди: започва и завършва "
+          "с 3-панелните action монтажи.")
+    assert al._language_flip(EN_HIST, EN_LAST, bg) is not None
+    diluted = bg + "\n\nQuality advisory (export remains available): " + (
+        "independent visual review at 12.2s: two text cards compete.")
+    # Documents the failure mode the call-site order must avoid.
+    assert al._dominant_script(diluted) in (None, "Latin")
+
+
 def test_spanish_reply_to_english_user_flips():
     assert _flip("Descargué y añadí “Hans Zimmer - Interstellar Main "
                  "Theme” (versión no oficial de SoundCloud) como pista "

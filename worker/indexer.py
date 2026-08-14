@@ -30,13 +30,15 @@ import config
 import db as dbx
 import llm
 import media
+import motion_judge
 import scenes
 import spatial
 import storage
 import tiles as tilestrip
 import transcribe
 from schemas import (VideoIndex, VideoInfo, clamp_word_times,
-                     default_edl, is_canvas_program, keep_boundaries,
+                     default_edl, edl_accepts_tray_autoplace,
+                     is_canvas_program, keep_boundaries,
                      validate_edl)
 
 
@@ -395,9 +397,11 @@ def run_index_job(worker_db, job):
             # and nothing else — side by side.
             proxy_dur = p_info["duration"]
             ceil = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
-            with futures.ThreadPoolExecutor(max_workers=3) as sub:
+            with futures.ThreadPoolExecutor(max_workers=4) as sub:
                 f_shots = sub.submit(scenes.detect_shots, proxy_local,
                                      info["duration"], warnings)
+                f_motion = sub.submit(
+                    motion_judge.analyze_video, proxy_local, info["duration"])
                 f_tiles = sub.submit(
                     _build_and_upload_tiles, job_id, project_id, sha,
                     proxy_local, info["duration"], workdir, warnings,
@@ -405,6 +409,12 @@ def run_index_job(worker_db, job):
                 f_up = sub.submit(storage.upload_file, proxy_local,
                                   proxy_key, "video/mp4")
                 state["shots"] = f_shots.result()
+                try:
+                    state["motion"] = f_motion.result()
+                except Exception as e:
+                    warnings.append(
+                        f"motion profiling failed ({str(e)[:120]}) — "
+                        "shot boundaries and filmstrip remain available")
                 (state["tile_keys"], state["tile_step"],
                  state["spatial"]) = f_tiles.result()
                 try:
@@ -491,6 +501,7 @@ def run_index_job(worker_db, job):
         language, silences = state["language"], state["silences"]
         perception_sidecar = state.get("perception")
         spatial_sidecar = state.get("spatial")
+        motion_sidecar = state.get("motion")
         # Lane timings for the admin views: the two lanes overlap, so the
         # old per-stage ladder is now picture/sound walls plus their split.
         t_lanes = time.monotonic() - _t
@@ -532,6 +543,7 @@ def run_index_job(worker_db, job):
             language=language,
             warnings=warnings,
             perception=perception_sidecar,
+            motion=motion_sidecar,
             spatial=spatial_sidecar,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
@@ -626,6 +638,7 @@ def _run_clip_index(worker_db, job, asset):
                                     warnings)
 
         shots, tile_keys, tile_step = [], [], None
+        motion_sidecar = None
         if not is_music:
             try:
                 shots = scenes.detect_shots(src, info["duration"], warnings)
@@ -643,6 +656,13 @@ def _run_clip_index(worker_db, job, asset):
                 warnings.append(
                     f"shot-boundary spatial supplement failed "
                     f"({str(e)[:120]}) — coarse face/text track kept")
+            try:
+                motion_sidecar = motion_judge.analyze_video(
+                    src, info["duration"])
+            except Exception as e:
+                warnings.append(
+                    f"motion profiling failed ({str(e)[:120]}) — "
+                    "shot boundaries and filmstrip remain available")
             _mark("tiles_s")
         else:
             spatial_sidecar = None
@@ -672,6 +692,7 @@ def _run_clip_index(worker_db, job, asset):
             language=language,
             warnings=warnings,
             perception=perception_sidecar,
+            motion=motion_sidecar,
             spatial=spatial_sidecar,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
@@ -854,6 +875,15 @@ def _sweep_tray_placements(worker_db, project_id):
     if not row:
         return 0
     edl = row["json"]
+    if not edl_accepts_tray_autoplace(row.get("version"), edl):
+        # Mid-session leftovers: drop the place flag, keep the files.
+        for a in pending:
+            try:
+                worker_db.run(dbx.update_asset_meta, a["id"],
+                              {"tray_place": None})
+            except Exception:
+                pass
+        return 0
     inserts = list(edl.get("inserts") or [])
     have_keys = {i.get("asset_key") for i in inserts}
     keep = edl.get("keep") or []

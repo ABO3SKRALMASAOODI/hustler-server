@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import agent_tools
+import agent_loop
 import preview_critic
 
 
@@ -38,6 +39,25 @@ def test_malformed_or_low_confidence_review_cannot_block_delivery():
     assert preview_critic.repair_lines(report) == []
 
 
+def test_weak_craft_rubric_forces_repair_and_relevance_needs_timed_evidence():
+    report = preview_critic.parse_report(
+        '{"verdict":"pass","findings":['
+        '{"severity":"major","category":"narrative_relevance",'
+        '"time_s":8.4,"evidence":"generic skyline contradicts the named product reveal",'
+        '"repair":"replace it with footage of the product",'
+        '"confidence":0.87}],"rubric":{"narrative_support":{'
+        '"level":"weak","evidence":"the cutaway does not show the named subject",'
+        '"confidence":0.9}}}')
+
+    assert report["verdict"] == "repair"
+    assert report["rubric"]["narrative_support"]["level"] == "weak"
+    assert "narrative_relevance" in preview_critic.repair_lines(report)[0]
+
+    untimed = {"verdict": "repair", "findings": [dict(
+        report["findings"][0], time_s=None)]}
+    assert preview_critic.repair_lines(untimed) == []
+
+
 def test_independent_review_sees_edited_output_and_raw_source(monkeypatch,
                                                              tmp_path):
     seen = {}
@@ -63,11 +83,33 @@ def test_independent_review_sees_edited_output_and_raw_source(monkeypatch,
         duration = 30.0
         edit_plan = {"brief": "talking-head reel", "steps": ["reframe"],
                      "format": "social interview", "must_keep": ["face"],
-                     "must_avoid": ["burned text collision"]}
+                     "must_avoid": ["burned text collision"],
+                     "narrative_arc": ["pain", "mechanism", "resolution"],
+                     "sequence_map": [{
+                         "role": "proof", "anchor": "retention collapsed",
+                         "purpose": "prove the cost of the mistake",
+                         "visual": "reviewed analytics chart",
+                         "sound": "one soft impact then voice", "energy": .8,
+                     }],
+                     "broll_direction": "literal proof, no generic wallpaper"}
+        project_id = 5
+
+        class Db:
+            def run(self, _fn, *_args):
+                return {"meta": {
+                    "filename": "retention-chart.mp4",
+                    "description": "mobile analytics retention graph",
+                    "broll_moment": {"purpose": "prove retention collapse",
+                                     "query": "mobile retention graph"}}}
+
+        db = Db()
 
         def latest_edl(self):
             return {"json": {"keep": [[0.0, 30.0]],
                              "frame": {"ratio": "9:16", "mode": "crop"},
+                             "overlays": [{"asset_key": "stock/graph.mp4",
+                                           "start": 7.5, "end": 10.0,
+                                           "fit": "cover"}],
                              "effects": {"zooms": []}}}
 
     report = agent_tools._independent_preview_review(
@@ -82,7 +124,59 @@ def test_independent_review_sees_edited_output_and_raw_source(monkeypatch,
     assert "talking-head reel" in seen["context"]
     assert "format=social interview" in seen["context"]
     assert "must avoid=burned text collision" in seen["context"]
+    assert "pain -> mechanism -> resolution" in seen["context"]
+    assert "Beat 1 [proof]" in seen["context"]
+    assert "picture=reviewed analytics chart" in seen["context"]
+    assert "sound=one soft impact then voice" in seen["context"]
+    assert "purpose=prove retention collapse" in seen["context"]
+    assert "mobile analytics retention graph" in seen["context"]
+    assert "FORMAT-SPECIFIC VISUAL BENCHMARK: podcast_conversation" in \
+        seen["context"]
+    assert "speaker-aware framing" in seen["context"]
     assert all(os.path.exists(path) for path in seen["paths"])
+
+
+def test_independent_review_prefers_event_screening_over_redundant_overview(
+        monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(agent_tools.llm, "vision_available", lambda: True)
+    monkeypatch.setattr(
+        agent_tools.storage, "download_to",
+        lambda key, path: open(path, "wb").write(key.encode()))
+    monkeypatch.setattr(
+        agent_tools.preview_critic, "review",
+        lambda paths, labels, context: (
+            seen.update(paths=paths, labels=labels, context=context) or
+            {"verdict": "pass", "findings": []}))
+
+    class Ctx:
+        workdir = str(tmp_path)
+        index = {}
+        user_message = "make this publish-ready"
+        duration = 30.0
+        edit_plan = {}
+        project_id = 8
+
+        def latest_edl(self):
+            return {"json": {"keep": [[0, 30]], "effects": {}}}
+
+    result = {
+        "sheet_key": "render/legacy-overview.jpg", "duration_s": 30,
+        "screening_pages": [{
+            "key": "render/screen-1.jpg",
+            "frames": [
+                {"time_s": 0.08, "reason": "opening frame"},
+                {"time_s": 18.2, "reason": "B-roll 3 body"},
+            ],
+        }],
+    }
+    report = agent_tools._independent_preview_review(Ctx(), result)
+
+    assert report["verdict"] == "pass"
+    assert len(seen["paths"]) == 1
+    assert "critic_screening1" in seen["paths"][0]
+    assert all("overview" not in label.lower() for label in seen["labels"])
+    assert "tile 2=18.20s (B-roll 3 body)" in seen["labels"][0]
 
 
 def test_mcp_render_frames_skip_valmera_funded_second_critic(monkeypatch):
@@ -127,3 +221,26 @@ def test_critic_compares_framing_treatment_across_shots(monkeypatch):
     assert report["verdict"] == "pass"
     assert "compare treatment ACROSS SHOTS" in seen["prompt"]
     assert "close shot should normally fill" in seen["prompt"]
+
+
+def test_new_preview_version_with_proven_craft_defect_gets_repair_decision(
+        monkeypatch):
+    monkeypatch.setattr(agent_loop.config, "AGENT_TURN_TIMEOUT_S", 600)
+
+    class Ctx:
+        last_preview = {"edl_version": 7}
+        last_visual_critic = {"verdict": "repair", "findings": [{
+            "severity": "major", "category": "style_coherence",
+            "time_s": 11.0, "evidence": "caption family changes mid-edit",
+            "repair": "use one caption family", "confidence": .91}]}
+
+        def latest_edl(self):
+            return {"version": 7}
+
+    messages, pushed = [], set()
+    assert agent_loop._quality_repair_pushback(
+        Ctx(), messages, agent_loop.time.monotonic(), pushed)
+    assert pushed == {7}
+    assert "caption family changes" in messages[0]["content"]
+    assert not agent_loop._quality_repair_pushback(
+        Ctx(), messages, agent_loop.time.monotonic(), pushed)

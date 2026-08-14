@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "id": "podcast-001",
+      "family": "podcast_conversation",
+      "brief": "Cut one coherent, self-contained exchange into a polished vertical reel.",
+      "source_context_path": "fixtures/podcast-001-source.txt",
+      "human_winner": "right",
+      "left": {
+        "video_path": "fixtures/podcast-001-candidate.mp4",
+        "story_text_path": "fixtures/podcast-001-candidate.txt"
+      },
+      "right": {
+        "video_path": "fixtures/podcast-001-reference.mp4",
+        "story_text_path": "fixtures/podcast-001-reference.txt"
+      }
+    }
+  ]
+}

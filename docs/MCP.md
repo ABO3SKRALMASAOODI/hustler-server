@@ -8,8 +8,8 @@ the URL reaches a login screen that will never say yes.
 
 ## What it is
 
-An MCP endpoint at `POST /mcp` that hands **the complete Valmera editor tool
-registry** to whatever model you are running — Claude in the claude.ai app, or
+An MCP endpoint at `POST /mcp` that hands **Valmera's direct editor tools** to
+whatever model you are running — Claude in the claude.ai app, or
 Opus/Fable in Claude Code — on your Anthropic subscription. Your model does the
 thinking; Valmera does the editing. That is exactly the trade the `mcp` plan
 was always written around ("brings its own model").
@@ -19,8 +19,11 @@ worker publishes its live registry on boot; the backend clones each live
 schema only to add the transport-level required `project_id`, title and MCP
 behavior hints. Every actual editor argument, description and honest-off gate
 still comes from the same registry (a tool whose backing service has no key is
-hidden from both). Execution happens in the worker, in the same `ToolContext`
-an agent turn uses. There is no capability copy to keep in sync —
+hidden from both). Agent orchestration is the intentional exception: Studio's
+card-level Edit action and `edit_shorts` are excluded because MCP must edit a
+child EDL directly, never delegate to Valmera's agent. Execution happens in
+the worker, in the same `ToolContext` an
+agent turn uses. There is no capability copy to keep in sync —
 `worker/tests/test_mcp_surface.py` fails if one appears.
 
 On top of that, twelve **session tools** the studio UI normally covers and a
@@ -49,7 +52,8 @@ adds the four OAuth tables claude.ai needs.
 its tool catalog on boot and, if that fails (migration not applied yet), keeps
 retrying from the reaper until it lands: look for `[mcp] published tool
 catalog`. The backend adds the session tools above and explicitly filters final
-export even if an old worker catalog or connected client still remembers it.
+export and agent delegation even if an old worker catalog or connected client
+still remembers them.
 
 **Capabilities currently OFF on the worker**, so they are hidden from the
 connector rather than failing when called: `search_stock` / `add_stock_media`
@@ -153,27 +157,44 @@ approximate with individual cut calls:
 create_project(title="My podcast", kind="shorts")
   → upload_start(project_id=ID) / upload_finish(project_id=ID)
   → index_status(project_id=ID) until done
-  → shorts_status(project_id=ID) until the child projects are ready
-  → open_short(parent_project_id=ID, card=N) → edit/render/watch with its child ID
+  → read the full transcript and choose complete story arcs
+  → make_shorts(project_id=ID, clips=[explicit complete story arcs])
+  → shorts_status(project_id=ID) until the locked child projects exist
+  → open_short(parent_project_id=ID, card=N) → watch it, direct its treatment,
+    edit, render and watch the result with its child ID
   → tell the user which verified edits are ready for Studio export
 ```
 
-The Shorts planner starts automatically after a `kind="shorts"` project's
-main video finishes analysis. On an existing normal long-video project,
-`make_shorts` starts the same pipeline and returns its job id; poll that with
-`wait_for_job` or use `shorts_status`. `list_projects` labels each generated
-short with its parent so a caller never has to guess which new project belongs
-to which podcast. A source under one minute is already a direct short and is
-edited normally rather than rejected by the multi-clip extractor.
+Selecting `kind="shorts"` creates an intake project; it does not make creative
+decisions when indexing finishes. Over MCP, `make_shorts.clips` is required.
+The connected model reads the podcast and supplies non-overlapping source
+ranges with useful titles, hooks, and story context. The worker creates locked
+child projects and seeds only those source windows; it does not style, reframe,
+caption, add B-roll/music, render a creative edit, or ask Valmera's planner or
+agent to choose the arcs. On an existing normal long-video project the same
+explicit call starts the pipeline and returns its job id; poll that with
+`wait_for_job` or `shorts_status`. `list_projects` labels every generated short
+with its parent. A source under one minute is already one direct short and is
+edited normally rather than sent through the multi-clip extractor.
+
+The selection rule is strict: a short is a micro-story, not a catchy transcript
+fragment. It needs an intelligible hook/setup, development, and a payoff such
+as a resolution, lesson, reveal, consequence, decision, or punchline. Include
+the podcast question/premise when the answer needs it. Selection deliberately
+does not prescribe a treatment. After opening each child, the MCP editor
+watches and hears it, then judges captions, framing, motion, color, sound,
+cards and B-roll in context. B-roll should serve proof, context, contrast,
+scale or payoff rather than a quota; holding the performance is often the
+stronger picture.
 
 `open_short(parent_project_id=BOARD, card=N)` (or
 `open_short(child_project_id=ID)`) is the explicit direct-edit path: it switches the MCP
-connection to that generated child, after which the complete live editor tool
-registry operates on the child's EDL. No Valmera agent is called. By contrast,
-`edit_shorts` is deliberately a delegation tool: it forwards one prompt into
-each selected child's chat and starts Valmera's in-house agent there. An MCP
-model must not use it when the user asked that outside model to perform the
-edits itself.
+connection to that generated child, after which the live direct-editor tools
+operate on the child's EDL. No Valmera agent is called. Studio's card-level
+Edit action is not exposed over MCP, and `edit_shorts` is excluded because it
+would delegate instead of editing. The MCP model must open each selected child
+and perform the edits itself; its completed direct preview unlocks the Studio
+card.
 
 **Uploading a local file.** MCP arguments are JSON, so bytes never travel over
 the protocol. `upload_start` returns a presigned URL and the exact `curl` to

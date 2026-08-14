@@ -196,9 +196,9 @@ def _change_ranges(prev, new):
                     span, new_plays.get(it.get("asset_key"), [])):
                 add_cut(w[0] + (r0 - off), w[0] + (r1 - off))
 
-    # ── program-anchored spans: texts, overlays, music ────────────────────
+    # ── program-anchored spans: texts, vectors, overlays, music ───────────
     for field, prefix in (("texts", "tx"), ("overlays", "ov"),
-                          ("music", "mu")):
+                          ("vectors", "vec"), ("music", "mu")):
         p, n = _by_id(prev.get(field), prefix), _by_id(new.get(field), prefix)
         if p == n:
             continue
@@ -369,6 +369,27 @@ def _verify_plan(prev, new, max_tiles):
                            'the removed text "'
                            + str(it.get("text") or "")[:40]
                            + '" must NOT appear anywhere in the frame'))
+
+    # Vector graphics are visual claims too. Motion gets additional ordered
+    # state sampling from screening.plan; this midpoint proves the primitive
+    # exists, is the requested kind and points/frames where intended.
+    p, n = _by_id(prev.get("vectors"), "vec"), \
+        _by_id(new.get("vectors"), "vec")
+    for k, it in n.items():
+        if k in p and _canon(p[k]) == _canon(it):
+            continue
+        kind = it.get("kind") or "vector"
+        purpose = ("points to the intended visible target" if kind in
+                   ("arrow", "ring") else
+                   "supports the intended composition without covering the "
+                   "subject, source text or captions")
+        claims.append((mid(it.get("start", 0.0), it.get("end")),
+                       f"the {kind} graphic is visible and {purpose}"))
+    for k, it in p.items():
+        if k not in n:
+            claims.append((at(it.get("start", 0.0)),
+                           f"the removed {it.get('kind') or 'vector'} "
+                           "graphic must NOT appear"))
 
     # inserts — a spliced clip either fills the frame at its window or the
     # splice failed; id-level is enough for a claim (a split's re-minted

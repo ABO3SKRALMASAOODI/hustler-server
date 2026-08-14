@@ -6,7 +6,13 @@ Pure logic — no ffmpeg, no fonts loaded, no network. Run from worker/:
 
 import os
 import re
+import glob
+import shutil
+import subprocess
 import sys
+
+import pytest
+from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -16,6 +22,22 @@ from schemas import TEXT_ANIMS, TEXT_TEMPLATES               # noqa: E402
 DIALOGUE_RE = re.compile(
     r"^Dialogue: 0,(\d+:\d{2}:\d{2}\.\d{2}),(\d+:\d{2}:\d{2}\.\d{2}),"
     r"(G\d+),,0,0,0,,(.+)$")
+
+
+def _libass_ffmpeg():
+    """Find an ffmpeg that can execute the production ASS burn."""
+    candidates = [shutil.which("ffmpeg")]
+    candidates.extend(sorted(glob.glob(
+        "/usr/local/Cellar/ffmpeg-full/*/bin/ffmpeg"), reverse=True))
+    for binary in filter(None, candidates):
+        probe = subprocess.run([binary, "-hide_banner", "-filters"],
+                               capture_output=True, text=True)
+        if re.search(r"\bsubtitles\b", probe.stdout + probe.stderr):
+            return binary
+    return None
+
+
+LIBASS_FFMPEG = _libass_ffmpeg()
 
 
 def _t(s):
@@ -96,6 +118,102 @@ def test_determinism(tmp_path):
     p2 = _build(texts, tmp_path=tmp_path, name="b.ass")
     with open(p1, "rb") as f1, open(p2, "rb") as f2:
         assert f1.read() == f2.read()
+
+
+def test_general_motion_compiles_all_axes_as_continuous_spans(tmp_path):
+    texts = [{
+        "id": "motion", "text": "MOVE", "start": 1.0, "end": 3.0,
+        "template": "title", "entrance": "none", "exit": "none",
+        "motion": {
+            "x": [{"t": 0.0, "v": -0.1},
+                  {"t": 2.0, "v": 0.8, "ease": "in_out"}],
+            "y": [{"t": 0.0, "v": 0.35}, {"t": 2.0, "v": 0.55}],
+            "scale": [{"t": 0.0, "v": 0.6},
+                      {"t": 2.0, "v": 1.3, "ease": "out"}],
+            "rotation": [{"t": 0.0, "v": -12.0},
+                         {"t": 2.0, "v": 16.0}],
+            "opacity": [{"t": 0.0, "v": 0.0},
+                        {"t": 0.2, "v": 1.0, "ease": "out"},
+                        {"t": 1.8, "v": 1.0},
+                        {"t": 2.0, "v": 0.0, "ease": "in"}],
+        },
+    }]
+    path = _build(texts, out_dur=4.0, play_res=(640, 360),
+                  tmp_path=tmp_path)
+    content, events, _ = _events(path)
+    assert len(events) > 4                # nonlinear curves are sampled
+    assert r"\move(" in content
+    assert r"\fscx" in content and r"\fscy" in content
+    assert r"\frz" in content and r"\alpha&H" in content
+    assert r"\t(0," in content
+    # The motion path is allowed to originate intentionally off-frame.
+    first_x = int(re.search(r"\\move\((-?\d+),", events[0].group(4)).group(1))
+    assert first_x < 0
+    # Segments meet exactly: no visible hole in the authored window.
+    windows = [(_t(m.group(1)), _t(m.group(2))) for m in events]
+    assert windows[0][0] == 1.0 and windows[-1][1] == 3.0
+    assert all(abs(a[1] - b[0]) <= 0.011 for a, b in zip(windows, windows[1:]))
+
+
+@pytest.mark.skipif(not LIBASS_FFMPEG,
+                    reason="needs ffmpeg with the libass subtitles filter")
+def test_general_motion_renders_position_scale_rotation_and_opacity(
+        tmp_path):
+    """Golden pixel proof: the emitted ASS changes actual rendered frames."""
+    texts = [{
+        "id": "golden", "text": "MOVE", "start": 0.0, "end": 2.0,
+        "template": "title", "entrance": "none", "exit": "none",
+        "motion": {
+            "x": [{"t": 0.0, "v": 0.2},
+                  {"t": 2.0, "v": 0.8, "ease": "in_out"}],
+            "scale": [{"t": 0.0, "v": 0.6},
+                      {"t": 2.0, "v": 1.3, "ease": "out"}],
+            "rotation": [{"t": 0.0, "v": -10.0},
+                         {"t": 2.0, "v": 15.0}],
+            "opacity": [{"t": 0.0, "v": 0.0},
+                        {"t": 0.2, "v": 1.0, "ease": "out"},
+                        {"t": 1.8, "v": 1.0},
+                        {"t": 2.0, "v": 0.0, "ease": "in"}],
+        },
+    }]
+    ass = _build(texts, out_dur=2.0, play_res=(640, 360),
+                 tmp_path=tmp_path, name="golden.ass")
+    video = str(tmp_path / "golden.mp4")
+    filt = f"subtitles=filename='{ass}':fontsdir='{graphics.FONTS_DIR}'"
+    subprocess.run([
+        LIBASS_FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i",
+        "color=c=black:s=640x360:r=30:d=2", "-vf", filt,
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", video,
+    ], check=True)
+
+    def pixels_at(t, name):
+        frame = str(tmp_path / name)
+        subprocess.run([
+            LIBASS_FFMPEG, "-y", "-v", "error", "-ss", str(t), "-i",
+            video, "-frames:v", "1", frame,
+        ], check=True)
+        image = Image.open(frame).convert("RGB")
+        pts = [(x, y) for y in range(image.height) for x in range(image.width)
+               if sum(image.getpixel((x, y))) > 80]
+        energy = sum(sum(image.getpixel((x, y)))
+                     for y in range(image.height) for x in range(image.width))
+        if not pts:
+            return None, 0, energy
+        box = (min(x for x, _ in pts), min(y for _, y in pts),
+               max(x for x, _ in pts), max(y for _, y in pts))
+        return box, len(pts), energy
+
+    almost_hidden, hidden_pixels, hidden_energy = pixels_at(
+        0.02, "hidden.png")
+    early, early_pixels, early_energy = pixels_at(0.25, "early.png")
+    late, late_pixels, _late_energy = pixels_at(1.70, "late.png")
+    assert early and late
+    early_cx = (early[0] + early[2]) / 2.0
+    late_cx = (late[0] + late[2]) / 2.0
+    assert late_cx - early_cx > 220       # position curve rendered
+    assert late[2] - late[0] > (early[2] - early[0]) * 1.45  # scale
+    assert late[3] - late[1] > early[3] - early[1]            # rotation/scale
+    assert hidden_energy < early_energy * 0.45                # opacity fade
 
 
 def test_offframe_xy_clamped(tmp_path):

@@ -14,16 +14,23 @@ import uuid
 import agent_tools
 import config
 import db as dbx
+import director
+import editorial_contracts
 import grammar
 import llm
+import model_prices
+import motion_judge
 import music_search
 import preview_critic
+import reference_profile
 import remote
 import request_intent
 import sfx_search
 import song_find
 import storage
+import story_critic
 import timeline
+import version as worker_version
 from agent_prompt import project_state_block, system_prompt
 from schemas import describe_edl
 
@@ -166,6 +173,12 @@ def _index_summary(index):
     if fl:
         lines.append(fl)
     lines.append(_shot_boundaries_line(index))
+    motion = motion_judge.describe(
+        index.get("motion"), (index.get("video") or {}).get("duration"))
+    if motion:
+        lines.append(motion + " Use it with the filmstrip and story brief; "
+                     "motion intensity is evidence, not an instruction to "
+                     "make every edit faster.")
     bc = _burned_captions_line(index)
     if bc:
         lines.append(bc)
@@ -186,20 +199,23 @@ def _pending_clips(conn, project_id):
                        WHERE project_id = %s AND kind = 'video_clip'
                          AND COALESCE(meta->>'indexed', '') != 'true'
                          AND COALESCE(meta->>'staged', '') != 'true'
-                       ORDER BY id ASC LIMIT 20""", (project_id,))
+                       ORDER BY id ASC LIMIT 80""", (project_id,))
         return cur.fetchall()
 
 
-def _image_assets(conn, project_id):
-    # Oldest first, so the user's own uploads outrank later generated
-    # cards when the attach cap bites. The LIMIT follows IMAGES_TURN_MAX
-    # so raising that env genuinely raises both this list and the attach.
+def _image_assets(conn, project_id, limit=200):
+    # Pull a broad bounded inventory, then let _image_visual_plan spend the
+    # per-turn pixel budget fairly. Querying only IMAGES_TURN_MAX here made
+    # every later image disappear from both the overview *and* the overflow
+    # notice on subsequent turns: the caller could not know rows existed
+    # beyond its SQL LIMIT. Two hundred matches list_assets' durable inventory
+    # bound without injecting two hundred image payloads into the prompt.
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
                        WHERE project_id = %s AND kind = 'image_ref'
                          AND COALESCE(meta->>'staged', '') != 'true'
                        ORDER BY id ASC LIMIT %s""",
-                    (project_id, max(20, config.IMAGES_TURN_MAX)))
+                    (project_id, max(1, int(limit or 1))))
         return cur.fetchall()
 
 
@@ -299,16 +315,99 @@ def _image_attach_local(asset):
     return local
 
 
-def filmstrip_parts(ctx, worker_db):
-    """The per-turn senses message content: labeled image parts for the
-    main footage, EVERY indexed uploaded clip AND every still image the
-    project holds — the agent's fresh eyes on everything in the project,
-    rebuilt each turn so nothing is ever stale.
+def _spread_rows(rows, count):
+    """Deterministically sample ``count`` rows across an ordered library."""
+    rows = list(rows or [])
+    count = max(0, min(int(count or 0), len(rows)))
+    if count >= len(rows):
+        return rows
+    if count <= 0:
+        return []
+    if count == 1:
+        return [rows[-1]]
+    picks = []
+    seen = set()
+    for i in range(count):
+        idx = round(i * (len(rows) - 1) / (count - 1))
+        if idx not in seen:
+            picks.append(rows[idx])
+            seen.add(idx)
+    return picks
+
+
+def _clip_visual_plan(clips, tile_budget, per_clip, priority_ids=None,
+                      used_keys=None):
+    """[(clip, tile_count)] with fair coverage before visual depth.
+
+    The old sequential allocator gave ten tiles each to the first clips and
+    none to the rest.  This gives every selected clip one tile first, then
+    distributes depth evenly.  Current-message attachments lead, unused
+    library media comes next, and a very large remainder is sampled across
+    upload order instead of silently truncating its tail.
+    """
+    clips = list(clips or [])
+    budget = max(0, int(tile_budget or 0))
+    ceiling = max(1, int(per_clip or 1))
+    if not clips or budget <= 0:
+        return [], len(clips)
+    priority_ids = {int(x) for x in (priority_ids or [])
+                    if str(x).isdigit()}
+    used_keys = set(used_keys or [])
+    priority = [row for row in clips if row.get("id") in priority_ids]
+    rest = [row for row in clips if row.get("id") not in priority_ids]
+    unused = [row for row in rest if row.get("storage_key") not in used_keys]
+    used = [row for row in rest if row.get("storage_key") in used_keys]
+    ordered = priority + unused + used
+    slots = min(len(ordered), budget)
+    selected = priority[:slots]
+    remaining = [row for row in ordered if row not in selected]
+    selected += _spread_rows(remaining, slots - len(selected))
+    allocations = [1] * len(selected)
+    left = budget - len(selected)
+    i = 0
+    while left > 0 and any(n < ceiling for n in allocations):
+        if allocations[i] < ceiling:
+            allocations[i] += 1
+            left -= 1
+        i = (i + 1) % len(allocations)
+    return list(zip(selected, allocations)), len(clips) - len(selected)
+
+
+def _image_visual_plan(images, image_budget, priority_ids=None,
+                       used_keys=None):
+    """Fair still-image coverage before truncating an extreme library."""
+    images = list(images or [])
+    budget = max(0, int(image_budget or 0))
+    if not images or budget <= 0:
+        return [], len(images)
+    priority_ids = {int(x) for x in (priority_ids or [])
+                    if str(x).isdigit()}
+    used_keys = set(used_keys or [])
+    priority = [row for row in images if row.get("id") in priority_ids]
+    rest = [row for row in images if row.get("id") not in priority_ids]
+    unused = [row for row in rest if row.get("storage_key") not in used_keys]
+    used = [row for row in rest if row.get("storage_key") in used_keys]
+    ordered = priority + unused + used
+    slots = min(len(ordered), budget)
+    selected = priority[:slots]
+    remaining = [row for row in ordered if row not in selected]
+    selected += _spread_rows(remaining, slots - len(selected))
+    return selected, len(images) - len(selected)
+
+
+def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
+    """The per-turn senses message content: a labeled visual overview of
+    the main footage, uploaded clips and stills, rebuilt every turn.
+
+    Normal projects fit in full.  Very large libraries use explicit balanced
+    budgets; current-message attachments are prioritized and omitted files
+    remain named in project state for exact ``look_at_asset`` retrieval.
 
     Returns a content list ([{type: text}, {type: image_url}, ...]) or None
     when there is nothing visual to attach."""
     strips = []      # (label, [(key, local)])
     total = 0
+    priority_asset_ids = list(priority_asset_ids or [])
     if ctx.has_main_video:
         original = worker_db.run(dbx.latest_asset, ctx.project_id, "original")
         sha = original and original.get("sha256")
@@ -327,25 +426,48 @@ def filmstrip_parts(ctx, worker_db):
     # freshness. A clip that just finished indexing appears here on the very
     # next turn with no one having to remember it exists.
     try:
-        clips = worker_db.run(dbx.indexed_clips, ctx.project_id)
+        clips = list(worker_db.run(
+            dbx.indexed_clips, ctx.project_id, 80) or [])
     except Exception:
         clips = []
-    for c in clips:
-        if total >= config.TILES_TURN_MAX:
-            break
+    # An attachment can sit beyond indexed_clips' broad library query on an
+    # extreme project. Fetch those few explicit ids and prepend them if ready.
+    for aid in priority_asset_ids[:4]:
+        try:
+            attached = worker_db.run(dbx.get_asset, aid)
+        except Exception:
+            attached = None
+        if attached and attached.get("kind") == "video_clip" and \
+                attached.get("sha256") and \
+                (attached.get("meta") or {}).get("indexed") and \
+                not any(row.get("id") == attached.get("id") for row in clips):
+            clips.insert(0, attached)
+    try:
+        used_keys = agent_tools.edl_used_asset_keys(ctx.latest_edl()["json"])
+    except Exception:
+        used_keys = set()
+    clip_plan, clips_omitted = _clip_visual_plan(
+        clips, max(0, config.TILES_TURN_MAX - total),
+        config.TILES_CLIP_MAX, priority_asset_ids, used_keys)
+    for c, budget in clip_plan:
         sha = c.get("sha256")
         if not sha:
             continue
-        budget = min(config.TILES_CLIP_MAX, config.TILES_TURN_MAX - total)
         tiles, idx = _strip_for(worker_db, sha, budget)
         if not tiles:
             continue
         name = (c.get("meta") or {}).get("filename") or \
             os.path.basename(c["storage_key"])
         dur = c.get("duration_s") or (idx.get("video") or {}).get("duration")
+        asset_role = ((c.get("meta") or {}).get("role") or "")
+        role_note = ("STYLE REFERENCE ONLY — study its grammar; never insert "
+                     "its picture" if asset_role in
+                     ("edit_reference", "shorts_reference") else
+                     "source footage available to place")
         strips.append((
             f"UPLOADED CLIP \"{name}\" — {float(dur or 0):.1f}s, "
-            f"storage_key {c['storage_key']} (timestamps are CLIP seconds)",
+            f"{role_note}, storage_key {c['storage_key']} "
+            "(timestamps are CLIP seconds)",
             tiles))
         total += len(tiles)
 
@@ -357,11 +479,24 @@ def filmstrip_parts(ctx, worker_db):
     # stills started with no eyes at all. A failed image is skipped, never
     # a dead turn.
     try:
-        images = worker_db.run(
-            lambda conn: _image_assets(conn, ctx.project_id))
+        images = list(worker_db.run(
+            lambda conn: _image_assets(conn, ctx.project_id)) or [])
     except Exception:
         images = []
-    images = list(images or [])[:max(0, config.IMAGES_TURN_MAX)]
+    priority_images = []
+    for aid in priority_asset_ids[:4]:
+        try:
+            attached = worker_db.run(dbx.get_asset, aid)
+        except Exception:
+            attached = None
+        if attached and attached.get("kind") == "image_ref":
+            priority_images.append(attached)
+    deduped = []
+    for row in priority_images + images:
+        if not any(old.get("id") == row.get("id") for old in deduped):
+            deduped.append(row)
+    images, images_omitted = _image_visual_plan(
+        deduped, config.IMAGES_TURN_MAX, priority_asset_ids, used_keys)
     if images:
         import concurrent.futures as _cf
 
@@ -391,9 +526,18 @@ def filmstrip_parts(ctx, worker_db):
 
     if not strips:
         return None
+    omitted_note = ""
+    if clips_omitted or images_omitted:
+        omitted_note = (
+            f" This project exceeds the visual overview budget: "
+            f"{clips_omitted} clip(s) and {images_omitted} image(s) are "
+            "inventory-only in this message. Use list_assets for their "
+            "storage keys, then look_at_asset for any one that matters.")
     content = [{"type": "text", "text":
-                "FILMSTRIPS & STILLS — your eyes on every video and image "
-                "in this project, current as of THIS message. Each video "
+                "FILMSTRIPS & STILLS — a current, labeled visual overview "
+                "of this project's footage and images. Current-message "
+                "attachments are prioritized; normal libraries fit in full. "
+                "Each video "
                 "tile is a 2x2 grid of frames with the timestamp printed "
                 "under each frame; each still image appears once, labeled "
                 "with its storage_key. Read the footage directly: what is "
@@ -401,7 +545,7 @@ def filmstrip_parts(ctx, worker_db):
                 "UI content, framing, where the action is. For a closer or "
                 "exact look at any moment, call look_at (main footage / "
                 "program) or look_at_asset (a clip or image) — look as "
-                "often as you need."}]
+                "often as you need." + omitted_note}]
     for label, tiles in strips:
         content.append({"type": "text", "text": f"[{label}]"})
         for _key, local in tiles:
@@ -436,13 +580,18 @@ def _attachment_context(worker_db, ctx, user_message):
         m = asset.get("meta") or {}
         name = m.get("filename") or os.path.basename(asset["storage_key"])
         if asset["kind"] == "music":
-            # never 'audio' — that kind is the pipeline's own extracted
-            # transcription WAV, and presenting it as attached music is how
-            # the inaudible-music bug started
+            # Database kind `music` is the upload container for every audio
+            # file: songs, voice notes/VO and one-shot sounds. Never infer its
+            # editorial role from that storage kind. (`audio` is different:
+            # the pipeline's private transcription WAV and is skipped.)
             dur = (f" ({asset['duration_s']:.0f}s)"
                    if asset.get("duration_s") else "")
-            notes.append(f'[User attached music "{name}"{dur} — '
-                         f'storage_key: {asset["storage_key"]}]')
+            notes.append(
+                f'[User attached an audio file "{name}"{dur} — storage_key: '
+                f'{asset["storage_key"]}. Decide FROM THEIR WORDS and its '
+                "measured/transcribed evidence whether it is music, "
+                "voiceover/dialogue, or a sound effect; do not assume "
+                "'music' merely because that is the database asset kind.]")
         elif asset["kind"] == "video_clip":
             dur = (f" ({asset['duration_s']:.0f}s)"
                    if asset.get("duration_s") else "")
@@ -504,14 +653,14 @@ def _attachment_context(worker_db, ctx, user_message):
     return ("\n\n" + "\n".join(notes)) if notes else ""
 
 
-def state_block(ctx, worker_db):
+def state_block(ctx, worker_db, denied_tools=()):
     """The CURRENT PROJECT STATE message: the footage, its transcript/shots,
     the current EDL and what is available to place.
 
     Extracted from _build_messages so the MCP surface (worker/mcp_exec) can
-    hand an OUTSIDE model exactly the state the in-house agent gets — two
-    versions of "what does the model know about this project" would drift
-    within a round.
+    hand an OUTSIDE model the same project facts the in-house agent gets.
+    `denied_tools` changes only routing advice for tools intentionally absent
+    from a surface; it never changes the underlying project state.
     """
     index = ctx.index
     if ctx.has_main_video:
@@ -520,6 +669,11 @@ def state_block(ctx, worker_db):
                       f"{v['width']}x{v['height']} @ {v['fps']}fps, "
                       f"audio={'yes' if v['has_audio'] else 'no'}.")
         index_summary = _index_summary(index)
+        # Let joined evidence avoid duplicating a transcript that this exact
+        # caller just received.  MCP contexts start false as well; state_block
+        # flips them only when its project-state response contains COMPLETE.
+        ctx.full_transcript_in_context = \
+            "TRANSCRIPT — COMPLETE" in index_summary
     else:
         # A canvas program: no main video, so there is no transcript, no shot
         # list and no source clock. Everything below still applies — the EDL,
@@ -546,9 +700,38 @@ def state_block(ctx, worker_db):
     history = worker_db.run(dbx.edl_history, ctx.project_id)
     history_lines = [f"v{h['version']} ({h['created_by']})" for h in history]
     music = worker_db.run(agent_tools._music_assets, ctx.project_id)
-    music_lines = [
-        f"{m['storage_key']} — {(m.get('meta') or {}).get('filename', '?')}"
-        for m in music]
+    music_lines = []
+    for m in music:
+        label = (f"{m['storage_key']} — "
+                 f"{(m.get('meta') or {}).get('filename', '?')}")
+        evidence = []
+        idx = None
+        if m.get("sha256"):
+            try:
+                idx_row = worker_db.run(dbx.get_index_by_sha, m["sha256"])
+                idx = (idx_row or {}).get("json") or None
+            except Exception:
+                idx = None
+        if idx:
+            words = [w for w in (idx.get("words") or [])
+                     if str(w.get("w") or "").strip()]
+            if len(words) >= 3:
+                excerpt = " ".join(str(w.get("w") or "").strip()
+                                   for w in words[:18])
+                evidence.append(
+                    f"speech/vocals detected ({len(words)} words, "
+                    f"{idx.get('language') or 'language unknown'}): "
+                    f"\"{excerpt}{' …' if len(words) > 18 else ''}\"")
+            else:
+                evidence.append("no reliable speech/vocals transcript")
+            sensed = idx.get("perception") or {}
+            if sensed.get("bpm") and float(sensed.get("bpm_conf") or 0) >= .3:
+                evidence.append(
+                    f"measured {float(sensed['bpm']):.0f} BPM "
+                    f"(confidence {float(sensed.get('bpm_conf') or 0):.2f})")
+        if evidence:
+            label += " — " + "; ".join(evidence)
+        music_lines.append(label)
 
     # MEDIA INVENTORY — every video/image the project holds, its state, and
     # whether it is placed in the program. Rebuilt each turn: a clip that
@@ -556,15 +739,15 @@ def state_block(ctx, worker_db):
     # with nobody having to remember it.
     media_lines = []
     try:
-        placed_keys = {i.get("asset_key")
-                       for i in (edl["json"].get("inserts") or [])}
+        used_keys = agent_tools.edl_used_asset_keys(edl["json"])
         clips = worker_db.run(
-            lambda conn: dbx.indexed_clips(conn, ctx.project_id, 50))
+            lambda conn: dbx.indexed_clips(conn, ctx.project_id, 80))
         all_clips = {c["id"]: c for c in clips}
         # Also list clips still indexing, so the agent never denies having
         # a file the user just added.
         pending = worker_db.run(
             lambda conn: _pending_clips(conn, ctx.project_id))
+        unused_n = 0
         for c in list(all_clips.values()) + pending:
             cmeta = c.get("meta") or {}
             name = cmeta.get("filename") or \
@@ -573,8 +756,12 @@ def state_block(ctx, worker_db):
             state = ("indexed" if cmeta.get("indexed")
                      else "still analyzing — filmstrip/transcript arrive "
                           "shortly")
-            where = ("placed in the program" if c["storage_key"] in
-                     placed_keys else "NOT placed in the program")
+            if c["storage_key"] in used_keys:
+                where = "in the current edit"
+            else:
+                where = ("AVAILABLE — not in the current edit "
+                         "(insert_media / add_overlay)")
+                unused_n += 1
             role = ("STYLE REFERENCE ONLY — an example to inspect, never "
                     "source footage to insert or edit"
                     if cmeta.get("role") in
@@ -583,18 +770,62 @@ def state_block(ctx, worker_db):
             media_lines.append(
                 f'  clip "{name}" ({float(dur or 0):.1f}s) — {role}; {state}, '
                 f'{where}, storage_key {c["storage_key"]}')
+            if cmeta.get("role") == "edit_reference" and c.get("sha256"):
+                try:
+                    ref_index = worker_db.run(
+                        dbx.get_index_by_sha, c["sha256"])
+                    measured = reference_profile.describe(
+                        reference_profile.from_index(
+                            (ref_index or {}).get("json") or {}))
+                    if measured:
+                        media_lines.append("    " + measured.replace(
+                            "\n", "\n    "))
+                except Exception as exc:
+                    print(f"[reference] profile skipped: {exc}", flush=True)
         images = worker_db.run(
             lambda conn: _image_assets(conn, ctx.project_id))
-        for a in images:
+        # State is text, but an unbounded filename dump still taxes every
+        # model dispatch. Name a broad, fair slice and state the overflow;
+        # list_assets returns the durable 200-row inventory on demand.
+        inventory_images, inventory_omitted = _image_visual_plan(
+            images, max(40, config.IMAGES_TURN_MAX), used_keys=used_keys)
+        for a in inventory_images:
             ameta = a.get("meta") or {}
             name = ameta.get("filename") or \
                 os.path.basename(a["storage_key"])
-            where = ("placed in the program" if a["storage_key"] in
-                     placed_keys else "NOT placed in the program")
+            if a["storage_key"] in used_keys:
+                where = "in the current edit"
+            else:
+                where = ("AVAILABLE — not in the current edit "
+                         "(insert_media / add_overlay)")
+                unused_n += 1
             role = ("STYLE REFERENCE ONLY; "
                     if ameta.get("role") == "edit_reference" else "")
             media_lines.append(f'  image "{name}" — {role}{where}, storage_key '
                                f'{a["storage_key"]}')
+        if inventory_omitted:
+            suffix = "+" if len(images) >= 200 else ""
+            media_lines.append(
+                f"  {inventory_omitted}{suffix} additional image(s) are "
+                "outside this text inventory slice — use "
+                "list_assets(kind='image') for their storage keys, then "
+                "look_at_asset for exact pixels.")
+        for m in music:
+            key = m.get("storage_key")
+            fname = (m.get("meta") or {}).get("filename") or \
+                os.path.basename(key or "?")
+            if key in used_keys:
+                where = "in the current edit"
+            else:
+                where = "AVAILABLE — not in the current edit (add_music)"
+                unused_n += 1
+            media_lines.append(
+                f'  audio "{fname}" — role may be music, voiceover or SFX; '
+                f'{where}, storage_key {key}')
+        if unused_n:
+            media_lines.insert(
+                0, f"  {unused_n} file(s) are in the library and NOT on "
+                   "the timeline. Place them; do not ask for a re-upload.")
         staged = worker_db.run(dbx.staged_assets, ctx.project_id)
         if staged:
             names = "; ".join(
@@ -625,6 +856,7 @@ def state_block(ctx, worker_db):
         board = agent_tools._shorts_children(ctx)
     except Exception:
         board = []
+    denied_tools = frozenset(denied_tools or ())
     if board:
         lines = ["", "THE SHORTS BOARD — this project's finished vertical "
                      "shorts, each one its OWN project with its own "
@@ -636,16 +868,25 @@ def state_block(ctx, worker_db):
             except (KeyError, TypeError, ValueError):
                 pass
             lines.append(f"  {i}. “{c.get('title') or f'Short {i}'}”{dur}")
-        lines.append(
-            "When the user asks for a change to THE SHORTS — 'all of "
-            "them', 'the shorts', 'short 3', 'add music to them' — use "
-            "edit_shorts(instruction, shorts). That request is NEVER an "
-            "edit of this parent timeline (the original long video); "
-            "only edit here when they explicitly ask about the "
-            "original/full video. Prepare anything the instruction needs "
-            "first (e.g. fetch the track HERE with find_song/fetch_url), "
-            "then name it in the instruction — edit_shorts shares this "
-            "project's music/clips/images into every short.")
+        if "edit_shorts" in denied_tools:
+            lines.append(
+                "When the user asks for a change to THE SHORTS — 'all of "
+                "them', 'the shorts', 'short 3', 'add music to them' — NEVER "
+                "edit this parent timeline (the original long video) and do "
+                "not delegate to Valmera's agent. Use shorts_status and "
+                "open_short, then make every requested change yourself with "
+                "the normal editor tools on each child project.")
+        else:
+            lines.append(
+                "When the user asks for a change to THE SHORTS — 'all of "
+                "them', 'the shorts', 'short 3', 'add music to them' — use "
+                "edit_shorts(instruction, shorts). That request is NEVER an "
+                "edit of this parent timeline (the original long video); "
+                "only edit here when they explicitly ask about the "
+                "original/full video. Prepare anything the instruction needs "
+                "first (e.g. fetch the track HERE with find_song/fetch_url), "
+                "then name it in the instruction — edit_shorts shares this "
+                "project's music/clips/images into every short.")
         block += "\n" + "\n".join(lines)
     elif (ctx.project.get("kind") == "shorts"
           and not ctx.project.get("parent_project_id")
@@ -685,16 +926,50 @@ def state_block(ctx, worker_db):
                              == ctx.project_id), None)
                 card = f"card {mine} of {len(live)}" if mine else \
                     f"one of {len(live)} clips"
+                route = (
+                    "Use shorts_status and open_short to visit every selected "
+                    "sibling, then make the changes yourself with the normal "
+                    "editor tools; do not delegate to Valmera's agent."
+                    if "edit_shorts" in denied_tools else
+                    "Call edit_shorts(instruction, shorts) right from here — "
+                    "it reaches the parent board automatically; never claim "
+                    "the parent must be opened first.")
                 block += (
                     f"\n\nTHIS PROJECT IS A GENERATED SHORT — {card} on "
                     f"the Shorts board of parent project {parent['id']} "
                     f"(“{parent.get('title') or ''}”). Edit THIS clip here "
-                    "with the normal tools. When the user asks for a "
-                    "change to ALL the shorts ('all of them', 'every "
-                    "short', 'the shorts'), call edit_shorts(instruction, "
-                    "shorts) right from here — it reaches the parent "
-                    "board automatically; never claim the parent must be "
-                    "opened first.")
+                    "with the normal tools. When the user asks for a change "
+                    "to ALL the shorts ('all of them', 'every short', 'the "
+                    f"shorts'), {route}")
+                treatment = (ctx.project.get("meta") or {}).get("clip") or {}
+                story = treatment.get("story") or {}
+                if isinstance(story, dict) and any(story.values()):
+                    block += (
+                        "\n\nSOURCE STORY CONTRACT — preserve this complete "
+                        "micro-story while refining the cut:\n"
+                        f"  SETUP: {story.get('setup') or '?'}\n"
+                        f"  DEVELOPMENT: {story.get('development') or '?'}\n"
+                        f"  PAYOFF: {story.get('payoff') or '?'}")
+                if treatment.get("visual_direction"):
+                    block += ("\nVISUAL DIRECTION — "
+                              + str(treatment["visual_direction"])[:700])
+                broll = treatment.get("broll") or []
+                if broll:
+                    rows = [
+                        f"  source {moment.get('at')}s — "
+                        f"{moment.get('query')} — PURPOSE: "
+                        f"{moment.get('purpose')}"
+                        for moment in broll[:6]
+                    ]
+                    block += (
+                        "\nPLANNED B-ROLL — research actual candidates, judge "
+                        "them visually, then place only shots that fulfill "
+                        "the named story purpose; never generic wallpaper. "
+                        "These are ORIGINAL source seconds: translate through "
+                        "the current keep mapping before placing on the output "
+                        "clock (on the untouched one-span seed, subtract the "
+                        "clip's source start):\n"
+                        + "\n".join(rows))
         except Exception as e:
             print(f"[state] parent-board note failed: {e}", flush=True)
     # Round 82e: the HOUSE STYLE — what this footage most wants to become
@@ -708,6 +983,21 @@ def state_block(ctx, worker_db):
                 block += "\n\n" + style
         except Exception as e:
             print(f"[grammar] plan_block failed: {e}", flush=True)
+    blueprint = director.prompt_block(getattr(ctx, "edit_plan", None))
+    if blueprint:
+        block += "\n\n" + blueprint
+    # Reference grammars suggest a skin; this contract states what must be
+    # true for the chosen format to work. It is deliberately invariant-level
+    # (no fixed cut/B-roll/effect density), so a novel style remains possible
+    # while a vague "make it nice" still receives a real quality target.
+    try:
+        inferred = grammar.classify(ctx.index)[0] if ctx.has_main_video else None
+        family = director.editorial_family(
+            getattr(ctx, "edit_plan", None), inferred, ctx.has_main_video,
+            request_text=getattr(ctx, "user_message", None))
+        block += "\n\n" + editorial_contracts.prompt_block(family)
+    except Exception as e:
+        print(f"[editorial-contract] state block failed: {e}", flush=True)
     return block
 
 
@@ -715,14 +1005,14 @@ def capabilities_block():
     """The CAPABILITIES message — generated from the tool registry, so it can
     never advertise a tool this deployment turned off.
 
-    Names only (round 71f): every tool's full contract already rides in the
-    request's tool schemas, so the old first-sentence-per-tool digest was
-    ~13k chars repeated in every call of every turn — context spent telling
-    the model things it was being told anyway. MCP is the same: its
-    catalog() ships openai_tools() next to this block."""
+    Names only (round 71f): the active stage's tools carry full contracts in
+    the request schemas. Omitted domains are loaded with expand_toolset. The
+    old first-sentence-per-tool digest was ~13k chars repeated every call;
+    MCP still gets the complete catalog from catalog()."""
     return ("CAPABILITIES — the complete list of write operations that "
-            "exist this deployment (each one's full contract is in your "
-            "tool schemas): "
+            "exist this deployment. Your current stage has full schemas for "
+            "the relevant subset; if a listed capability is not callable, "
+            "use expand_toolset for its domain: "
             + ", ".join(agent_tools.capability_names())
             + ". Nothing else exists. If the user asks for anything not "
             "listed (motion-TRACKED stickers pinned to moving objects, "
@@ -914,7 +1204,8 @@ def _reply_language_note(user_texts):
             "reply language.]")
 
 
-def _build_messages(ctx, worker_db, user_message, attachment_note=""):
+def _build_messages(ctx, worker_db, user_message, attachment_note="",
+                    include_visual_overview=True):
     # system_prompt(), not the raw constant: it drops the built-in-library
     # claims when this image shipped no tracks.
     msgs = [{"role": "system", "content": system_prompt()},
@@ -931,9 +1222,16 @@ def _build_messages(ctx, worker_db, user_message, attachment_note=""):
     # with the strips first they ride the provider's cached prefix and only
     # the (small, text) state re-processes. Same content, same senses,
     # meaningfully faster first token and a cheaper turn.
-    if ctx.direct_sight and llm.agent_sees(ctx.agent_model):
+    if include_visual_overview and ctx.direct_sight \
+            and llm.agent_sees(ctx.agent_model):
         try:
-            parts = filmstrip_parts(ctx, worker_db)
+            attachment_ids = (user_message.get("meta") or {}).get(
+                "attachments") or []
+            attachment_ids = [
+                item.get("id") if isinstance(item, dict) else item
+                for item in attachment_ids]
+            parts = filmstrip_parts(
+                ctx, worker_db, priority_asset_ids=attachment_ids[:4])
             if parts:
                 msgs.append({"role": "user", "content": parts})
         except Exception as e:
@@ -1004,8 +1302,57 @@ def _compact_initial_filmstrip(messages):
     return False
 
 
+def _compact_consumed_look_frames(messages, before_index=None):
+    """Drop targeted frame pixels only after they produced a committed edit.
+
+    ``look_at``/``look_at_asset`` and preview review frames must survive the
+    next model dispatch: that is when the editor actually judges them.  Once
+    that judgment has landed a new EDL version, resending the same base64
+    pictures on every later dispatch adds no evidence and can multiply the
+    input bill dramatically in a long turn.  Keep the labels/timestamps as a
+    provenance record and tell the model how to reopen the pixels.
+
+    ``before_index`` excludes evidence captured by the same tool batch as the
+    write.  Those new frames have not been seen by the model yet and therefore
+    remain intact for the following dispatch.
+    """
+    limit = len(messages) if before_index is None else max(
+        0, min(int(before_index), len(messages)))
+    removed = 0
+    marker = "Frames for your own eyes"
+    for message in messages[:limit]:
+        content = message.get("content")
+        if message.get("role") != "user" or not isinstance(content, list):
+            continue
+        first_text = next((part.get("text", "") for part in content
+                           if isinstance(part, dict)
+                           and part.get("type") == "text"), "")
+        if not first_text.startswith(marker):
+            continue
+        image_count = sum(
+            1 for part in content if isinstance(part, dict)
+            and part.get("type") == "image_url")
+        if not image_count:
+            continue
+        labels = [part for part in content
+                  if isinstance(part, dict) and part.get("type") == "text"]
+        labels[0] = {
+            "type": "text",
+            "text": (
+                "Frames for your own eyes — inspected before a committed "
+                "EDL change. Their exact labels/timestamps remain below, "
+                "but the old pixel payloads were released. If a later "
+                "decision needs those pixels again, call look_at or "
+                "look_at_asset for the named moment instead of relying on "
+                "visual memory."),
+        }
+        message["content"] = labels
+        removed += image_count
+    return removed
+
+
 def _activity(worker_db, session_id, name, args, result, source=None,
-              edl_version=None, change=None):
+              edl_version=None, change=None, creative_blueprint=None):
     res_str = (result or "").replace("\n", " ")
     # Long enough that a diff line PLUS its appended WARNING lines survive —
     # truncating warnings out of the activity feed would hide them from the
@@ -1038,6 +1385,12 @@ def _activity(worker_db, session_id, name, args, result, source=None,
         # admin views and the logs must be able to tell an outside model's edit
         # from ours.
         meta["source"] = source
+    if creative_blueprint is not None:
+        # Append-only durable direction: the latest activity carrying this
+        # field becomes the project's blueprint on the next agent/MCP turn.
+        normalized = director.normalize_blueprint(creative_blueprint)
+        if normalized:
+            meta["creative_blueprint"] = normalized
     worker_db.run(dbx.add_message, session_id, "activity",
                   f"{label} → {res_str}", meta)
 
@@ -1126,6 +1479,13 @@ def run_agent_job(worker_db, job):
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"] if index_row else None,
                                   workdir)
+    try:
+        ctx.edit_plan = director.normalize_blueprint(worker_db.run(
+            dbx.latest_creative_blueprint, session_id))
+        ctx.plan_loaded = bool(ctx.edit_plan)
+    except Exception as e:
+        # Direction improves continuity but never makes the editor unavailable.
+        print(f"[director] could not load project blueprint: {e}", flush=True)
     # Round 67: only THIS loop can deliver captured frames into the model's
     # context (an MCP tool call has no loop — its result is text, and a
     # "the picture follows" claim there would be a lie). ToolContext ships
@@ -1203,6 +1563,16 @@ def run_agent_job(worker_db, job):
     # spend cap. Payloads are capped + redacted in dbx.insert_llm_call;
     # failures never break the turn.
     def _llm_recorder(purpose, request, response, usage):
+        # Persist the shape of a turn, not just its aggregate tokens.  The
+        # Aug-13 spike was caused by more calls per job while prompt size and
+        # cache behavior were stable; aggregate token totals alone could not
+        # tell an operator whether planning, vision, repair or reply rewrites
+        # multiplied.  Count failed calls too (they still cost wall time), but
+        # token/cost fields below continue to use provider-reported usage.
+        call_counts = ctx.editing_metrics.setdefault(
+            "model_calls_by_purpose", {})
+        purpose_key = str(purpose or "unknown")[:64]
+        call_counts[purpose_key] = call_counts.get(purpose_key, 0) + 1
         cached_in = llm.cached_input_tokens(usage)
         reasoning = llm.reasoning_tokens(usage)
         audio_in, audio_out = llm.audio_token_counts(usage)
@@ -1347,6 +1717,55 @@ def _preview_repair_pushback(ctx, messages, t_start, already_pushed):
     return True
 
 
+def _quality_repair_pushback(ctx, messages, t_start, pushed_versions):
+    """Require one decision on each newly proven high-confidence defect.
+
+    This is semantic, not a turn-count throttle: an immutable preview version
+    is surfaced once. A repaired version may produce new evidence and earns
+    its own decision; the same false positive cannot trap the model forever.
+    """
+    report = getattr(ctx, "last_visual_critic", None) or {}
+    findings = preview_critic.repair_lines(report)
+    findings.extend(story_critic.repair_lines(
+        getattr(ctx, "last_story_review", None) or {}))
+    audio_review = getattr(ctx, "last_audio_review", None) or {}
+    if audio_review.get("verdict") == "fix" and audio_review.get("text"):
+        findings.append(
+            "independent actual-audio review: "
+            + str(audio_review["text"])[:700])
+    if not findings:
+        return False
+    preview = getattr(ctx, "last_preview", None) or {}
+    version = preview.get("edl_version")
+    try:
+        latest = ctx.latest_edl()["version"]
+    except Exception:
+        return False
+    if version is None or int(version) != int(latest) \
+            or int(version) in pushed_versions:
+        return False
+    # Leave room for a targeted write plus one immutable proof. If there is
+    # not enough clock, the finding is still disclosed in the final handoff.
+    if config.AGENT_TURN_TIMEOUT_S - (time.monotonic() - t_start) < 120:
+        return False
+    pushed_versions.add(int(version))
+    messages.append({
+        "role": "system",
+        "content": (
+            f"The independent finishing review found publish-blocking craft "
+            f"evidence in preview v{version}:\n- "
+            + "\n- ".join(findings[:4])
+            + "\nDo not hand this version off as world-class. Inspect the "
+              "named exact moment if needed, then make a targeted repair and "
+              "render the new version. If direct pixels prove a finding is a "
+              "false positive or conflicts with the user's explicit choice, "
+              "keep the version and state that concrete evidence; do not add "
+              "random polish or repeat the same failed edit."
+        ),
+    })
+    return True
+
+
 _PLAN_WITHOUT_WRITE_NUDGE = (
     "You recorded an edit plan but have not written the EDL. A concrete "
     "brief is permission to cut — execute the plan NOW in this same turn. "
@@ -1366,6 +1785,39 @@ def _plan_without_write_pushback(ctx, messages, already_pushed):
     if getattr(ctx, "versions_written", None):
         return False
     messages.append({"role": "system", "content": _PLAN_WITHOUT_WRITE_NUDGE})
+    return True
+
+
+def _plan_completion_pushback(ctx, messages, already_pushed):
+    """One semantic close-out pass for a blueprint authored this turn.
+
+    This is deliberately not a tool/call cap.  It asks the director to compare
+    its own finite plan with the EDL and preview evidence, finish genuinely
+    open work, and record closure.  A later turn inherits the unresolved state
+    instead of rediscovering or silently forgetting it.
+    """
+    if already_pushed or not getattr(ctx, "plan_revised_this_turn", False):
+        return False
+    if not getattr(ctx, "versions_written", None):
+        return False
+    state = director.status(getattr(ctx, "edit_plan", None))
+    if state["state"] in {"none", "complete", "blocked"}:
+        return False
+    messages.append({
+        "role": "system",
+        "content": (
+            "Before you finish, close the CREATIVE BLUEPRINT against the "
+            "current EDL and preview evidence. Its state is "
+            f"{state['state']}; pending steps={state['pending_steps'] or 'none'}; "
+            f"pending acceptance={state['pending_criteria'] or 'none'}; "
+            f"failed acceptance={state['failed_criteria'] or 'none'}. "
+            "Do not redo completed work and do not invent evidence. Finish or "
+            "repair anything genuinely open, then call "
+            "complete_edit_plan_steps (it can be batched with final reads). "
+            "If a step is impossible with the available assets/capabilities, "
+            "mark it blocked with the concrete reason instead of looping."
+        ),
+    })
     return True
 
 
@@ -1586,6 +2038,9 @@ def _assets_made_note(ctx):
         made.append(_n(len(ctx.audio_extracted),
                        "soundtrack taken out of a video you uploaded",
                        "soundtracks taken out of videos you uploaded"))
+    if getattr(ctx, "audio_fetched", None):
+        made.append(_n(len(ctx.audio_fetched),
+                       "track downloaded", "tracks downloaded"))
     if not made:
         return ""
     return (" — but " + " and ".join(made)
@@ -1606,8 +2061,16 @@ def _quality_handoff(ctx):
     report = getattr(ctx, "last_visual_critic", None) or {}
     for line in preview_critic.repair_lines(report)[:3]:
         findings.append(line)
+    for line in story_critic.repair_lines(
+            getattr(ctx, "last_story_review", None) or {})[:2]:
+        findings.append(line)
     for line in (getattr(ctx, "last_audio_qc_findings", None) or [])[:2]:
         findings.append("audio QC: " + str(line))
+    audio_review = getattr(ctx, "last_audio_review", None) or {}
+    if audio_review.get("edl_version") == latest \
+            and audio_review.get("verdict") == "fix":
+        findings.append("actual-audio review: "
+                        + str(audio_review.get("text") or "needs repair"))
     # Deterministic taste findings (dead air, excessive devices, invalid mix)
     # count too, but only for the exact latest version.
     if getattr(ctx, "last_taste_version", None) == latest:
@@ -1620,9 +2083,28 @@ def _quality_handoff(ctx):
     if findings:
         return {"quality_status": "advisory", "quality_findings": findings,
                 "export_ready": True}
-    status = "pass" if report.get("verdict") == "pass" else "unchecked"
+    story_report = getattr(ctx, "last_story_review", None) or {}
+    status = ("pass" if report.get("verdict") == "pass" or
+              story_report.get("verdict") == "pass" else "unchecked")
     return {"quality_status": status, "quality_findings": [],
             "export_ready": True}
+
+
+def _unused_fetched_audio_note(ctx):
+    """User-facing: a track was fetched this turn but never add_music'd."""
+    keys = list(getattr(ctx, "audio_fetched", None) or [])
+    if not keys:
+        return ""
+    try:
+        music = (ctx.latest_edl()["json"] or {}).get("music") or []
+    except Exception:
+        music = []
+    placed = {m.get("storage_key") for m in music}
+    leftover = [k for k in keys if k not in placed]
+    if not leftover:
+        return ""
+    return (" A soundtrack was downloaded into the project but was not "
+            "placed on the timeline.")
 
 
 def _disclose_outstanding_quality(ctx, text):
@@ -1749,7 +2231,8 @@ ALTERNATIVE_HINTS = [
                 r"big.?numbers?|chapter.?mark|text.?on.?screen|\blogo\b"),
      "What I CAN do: draw an image or clip over the footage — "
      "picture-in-picture, a corner logo, a full-frame cover — at a fixed "
-     "or slowly drifting position, and burn designed text templates: "
+     "or keyframed position/scale/rotation/opacity, and burn designed text "
+     "templates: "
      "title cards, lower thirds, callouts, big numbers, quotes, chapter "
      "markers. Overlays hold their position; they can't track a moving "
      "object in the footage."),
@@ -1766,7 +2249,7 @@ ALTERNATIVE_HINTS = [
      "cuts and automatic punch-ins on the most stressed words, one-call "
      "looks (hype/clean/cinematic/luxury/meme), loudness mastering for "
      "social platforms, karaoke captions, animated caption entrances, and "
-     "Ken Burns motion on inserted images."),
+     "local push/pan motion on inserted images or video B-roll."),
     (re.compile(r"(?i)9.?:.?16|16.?:.?9|1.?:.?1|4.?:.?5|aspect|ratio|"
                 r"vertical|portrait|square|crop|tiktok|reels?|shorts?"),
      "What I CAN do: change the output frame to 16:9, 9:16, 1:1 or 4:5 with "
@@ -2078,6 +2561,7 @@ def _record_outer_tool_outcome(ctx, name, result):
     # still one repeated structural failure, while retaining the words and
     # tool identity that distinguish different recovery attempts.
     fingerprint = name + "|" + re.sub(r"\d+(?:\.\d+)?", "#", first)
+    ctx.last_tool_result = first
     ctx.turn_tool_outcomes.append(
         {"tool": name, "kind": kind, "fingerprint": fingerprint,
          "writes": len(ctx.versions_written)})
@@ -2131,9 +2615,104 @@ def _outcome_meta(ctx, outcome):
     counts = {}
     for row in ctx.turn_tool_outcomes:
         counts[row["kind"]] = counts.get(row["kind"], 0) + 1
+    usage = list((getattr(ctx, "model_usage", None) or {}).values())
+    tokens_in = sum(int(row.get("in") or 0) for row in usage)
+    cached_in = sum(int(row.get("cached") or 0) for row in usage)
+    tokens_out = sum(int(row.get("out") or 0) for row in usage)
+    try:
+        latest = ctx.latest_edl()["json"]
+        program = timeline.Timeline(latest.get("keep") or [],
+                                    latest.get("inserts") or [],
+                                    latest.get("speed") or [])
+        duration = round(float(program.out_duration or 0.0), 2)
+        effects = latest.get("effects") or {}
+        edit_shape = {
+            "duration_s": duration,
+            "cuts": max(0, len(latest.get("keep") or [])
+                        + len(latest.get("inserts") or []) - 1),
+            "captions": bool(latest.get("captions")),
+            "music_layers": len(latest.get("music") or []),
+            "sfx": len(latest.get("sfx") or []),
+            "zooms": len(effects.get("zooms") or []),
+            "broll_overlays": sum(
+                1 for row in (latest.get("overlays") or [])
+                if row.get("fit") == "cover"),
+            "designed_texts": len(latest.get("texts") or []),
+            "vector_graphics": len(latest.get("vectors") or []),
+        }
+    except Exception:
+        edit_shape = {}
+    plan_state = director.status(getattr(ctx, "edit_plan", None))["state"]
+    try:
+        inferred_grammar = grammar.classify(
+            getattr(ctx, "index", None))[0]
+    except Exception:
+        inferred_grammar = None
+    editorial_family = director.editorial_family(
+        getattr(ctx, "edit_plan", None), inferred_grammar,
+        bool(getattr(ctx, "has_main_video", False)),
+        request_text=getattr(ctx, "user_message", None))
+    metrics = dict(getattr(ctx, "editing_metrics", None) or {})
+    model_calls = metrics.get("model_calls_by_purpose") or {}
+    try:
+        estimated_model_cost_usd = round(
+            float(ctx.running_credits()) * model_prices.USD_PER_CREDIT, 6)
+    except Exception:
+        estimated_model_cost_usd = 0.0
+    metrics.update({
+        "code_version": worker_version.code_version(),
+        "editorial_family": editorial_family,
+        "editorial_contract_v": editorial_contracts.CONTRACT_VERSION,
+        "model_calls": sum(int(n or 0) for n in model_calls.values()),
+        "agent_dispatches": int(model_calls.get("agent") or 0),
+        "tool_calls": len(getattr(ctx, "turn_tool_outcomes", None) or []),
+        "versions_written": len(getattr(ctx, "versions_written", None) or []),
+        "previews_rendered": len(getattr(ctx, "rendered_versions", None) or []),
+        "blueprint_state": plan_state,
+        "tokens_in": tokens_in,
+        "tokens_cached_in": cached_in,
+        "prompt_cache_ratio": (round(cached_in / tokens_in, 3)
+                               if tokens_in else 0.0),
+        "tokens_out": tokens_out,
+        "estimated_model_cost_usd": estimated_model_cost_usd,
+        "edit_shape": edit_shape,
+        "quality_evidence": {
+            "visual_critic_verdict": (
+                (getattr(ctx, "last_visual_critic", None) or {}).get("verdict")),
+            "visual_rubric": (
+                (getattr(ctx, "last_visual_critic", None) or {}).get("rubric")
+                or {}),
+            "visual_finding_categories": [
+                row.get("category") for row in
+                ((getattr(ctx, "last_visual_critic", None) or {}).get(
+                    "findings") or [])],
+            "deterministic_taste_findings": len(
+                getattr(ctx, "last_taste", None) or []),
+            "audio_qc_findings": len(
+                getattr(ctx, "last_audio_qc_findings", None) or []),
+            "audio_review_verdict": (
+                (getattr(ctx, "last_audio_review", None) or {}).get(
+                    "verdict")),
+            "story_critic_v": story_critic.STORY_CRITIC_VERSION,
+            "story_review_verdict": (
+                (getattr(ctx, "last_story_review", None) or {}).get(
+                    "verdict")),
+            "story_finding_categories": [
+                row.get("category") for row in
+                ((getattr(ctx, "last_story_review", None) or {}).get(
+                    "findings") or [])],
+            "screening_frames": int(
+                (getattr(ctx, "last_preview", None) or {}).get(
+                    "screening_frame_count") or 0),
+            "screening_pages": len(
+                (getattr(ctx, "last_preview", None) or {}).get(
+                    "screening_pages") or []),
+        },
+    })
     return {"outcome": outcome,
             "tool_outcomes": counts,
-            "write_attempts": ctx.write_attempts}
+            "write_attempts": ctx.write_attempts,
+            "editing_metrics": metrics}
 
 
 def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
@@ -2147,6 +2726,7 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     if fail_note:
         final_text += fail_note
     final_text = _disclose_outstanding_quality(ctx, final_text)
+    final_text += _unused_fetched_audio_note(ctx)
     outcome, billable = _turn_completion(ctx, status, fail_note=fail_note)
     meta = {"edl_version": latest["version"], "preview": ctx.last_preview,
             **_quality_handoff(ctx), **_outcome_meta(ctx, outcome)}
@@ -2209,7 +2789,10 @@ _CONTINUATION_NOTE = (
     "were already working on. Current PROJECT STATE and version history are "
     "authoritative. Already ran this turn: {done}.{plan} Continue exercising "
     "your own judgment: use, repeat, inspect, write, and preview with any "
-    "tools needed to finish the request.]")
+    "tools needed to finish the request. The broad project filmstrip was "
+    "already used during the earlier planning window and is not reattached "
+    "to this continuation; use look_at/look_at_asset for exact pixels needed "
+    "by any remaining visual decision.]")
 
 
 def _run_loop(ctx, worker_db, job, session_id, user_message,
@@ -2231,8 +2814,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     # the configured SDK retry policy.
     step_client = llm.without_sdk_retries(client)
     model = ctx.agent_model or config.AGENT_MODEL
-    messages = _build_messages(ctx, worker_db, user_message, attachment_note)
     _cont = _cont or {}
+    # A progress-window continuation is the SAME user turn after ten minutes
+    # of already-landed work. Its durable blueprint + current EDL are rebuilt
+    # below; paying for the broad 36-60-tile library overview again neither
+    # restores the discarded internal conversation nor adds exact evidence.
+    # The continuation note explicitly routes new visual decisions through
+    # look_at/look_at_asset. Fresh user turns still receive the full overview.
+    messages = _build_messages(
+        ctx, worker_db, user_message, attachment_note,
+        include_visual_overview=not bool(_cont))
     if _cont:
         done = ", ".join(
             f"{name} x{t['n']}" if t["n"] > 1 else name
@@ -2248,6 +2839,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 row for row in (
                     f"format={ep.get('format')}" if ep.get("format") else "",
                     f"intent={ep.get('intent')}" if ep.get("intent") else "",
+                    ("treatment=" + str(ep.get("treatment"))
+                     if ep.get("treatment") else ""),
                     ("style=" + str(ep.get("style_family"))
                      if ep.get("style_family") else ""),
                     ("must keep=" + ", ".join(ep.get("must_keep") or [])
@@ -2268,9 +2861,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          "content": _CONTINUATION_NOTE.format(
                              done=done, plan=plan_note,
                              why=_cont.get("why", "step ceiling"))})
+    names = agent_tools.compact_tool_names(ctx)
     tools = agent_tools.openai_tools(
-        model, compact=bool(getattr(ctx, "edit_plan", None)
-                            or ctx.versions_written))
+        model,
+        compact=bool(getattr(ctx, "edit_plan", None) or ctx.versions_written),
+        names=names)
+    ctx.editing_metrics["initial_tool_schemas"] = len(tools)
+    ctx.editing_metrics["initial_tool_schema_chars"] = len(
+        json.dumps(tools, separators=(",", ":")))
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
     timings = _cont.get("timings") or \
@@ -2284,7 +2882,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     truncated_retries = 0
     truncated_out = False          # last step died at the ceiling, saying nothing
     preview_repair_pushed = bool(_cont.get("preview_repair_pushed", False))
+    quality_repair_versions = set(
+        int(x) for x in (_cont.get("quality_repair_versions") or []))
     plan_write_pushed = bool(_cont.get("plan_write_pushed", False))
+    plan_close_pushed = bool(_cont.get("plan_close_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
     # TPM admission (Aug 10): the provider's tokens-per-minute ceiling is
@@ -2375,7 +2976,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                            "t_start": time.monotonic(),
                            "timings": timings, "honesty": honesty,
                            "preview_repair_pushed": preview_repair_pushed,
+                           "quality_repair_versions": sorted(
+                               quality_repair_versions),
                            "plan_write_pushed": plan_write_pushed,
+                           "plan_close_pushed": plan_close_pushed,
                            "writes0": len(ctx.versions_written),
                            "renders0": len(ctx.rendered_versions),
                            "assets0": asset_progress})
@@ -2755,12 +3359,28 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if body:
                     messages.append({"role": "assistant", "content": body})
                 continue
+            if _quality_repair_pushback(
+                    ctx, messages, t_start, quality_repair_versions):
+                print(f"[job {job['id']}] preview v{latest['version']} has "
+                      "high-confidence craft defects — requesting a targeted "
+                      "repair decision", flush=True)
+                if body:
+                    messages.append({"role": "assistant", "content": body})
+                continue
             if _plan_without_write_pushback(
                     ctx, messages, plan_write_pushed):
                 plan_write_pushed = True
                 print(f"[job {job['id']}] plan recorded with no EDL write "
                       "— requesting execution instead of a propose-only "
                       "reply", flush=True)
+                if body:
+                    messages.append({"role": "assistant", "content": body})
+                continue
+            if _plan_completion_pushback(ctx, messages, plan_close_pushed):
+                plan_close_pushed = True
+                print(f"[job {job['id']}] creative blueprint still has open "
+                      "semantic work — requesting one evidence-based close "
+                      "pass", flush=True)
                 if body:
                     messages.append({"role": "assistant", "content": body})
                 continue
@@ -2783,10 +3403,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final = _enforce_honesty(ctx, client, messages, tools, draft,
                                      start_version, honesty,
                                      user_text=user_message["content"] or "")
-            final = _disclose_outstanding_quality(ctx, final)
+            # Language MUST run on the model draft before the English
+            # quality advisory is appended — otherwise a Cyrillic reply
+            # plus a long Latin advisory fails the 60% script threshold
+            # and ships (Robbie / project 755).
             final = _enforce_reply_language(
                 ctx, client, messages, tools, final,
                 user_text=user_message["content"] or "", honesty=honesty)
+            final = _disclose_outstanding_quality(ctx, final)
+            final += _unused_fetched_audio_note(ctx)
             if fail_note:
                 final += fail_note
             honesty["auto_render"] = ctx.autorendered
@@ -2821,6 +3446,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                              "arguments": tc.function.arguments or "{}"},
             } for tc in msg.tool_calls],
         })
+
+        # Everything before this boundary was visible to the model when it
+        # chose the tool batch. Frames captured by the batch itself are added
+        # later and must survive into the next dispatch.
+        visible_message_boundary = len(messages)
+        batch_committed_edl = False
 
         for tc in msg.tool_calls:
             name = tc.function.name
@@ -2879,6 +3510,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if name in agent_tools.WRITE_TOOLS and \
                         isinstance(result, str) and result.startswith("EDL v"):
                     ctx.write_calls.append(name)
+                    batch_committed_edl = True
             _record_outer_tool_outcome(ctx, name, result)
             total_steps += 1
             # A fresh write's change ranges belong to ITS activity row only —
@@ -2893,7 +3525,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       edl_version=(ctx.versions_written[-1]
                                    if ctx.versions_written
                                    else start_version),
-                      change=chg)
+                      change=chg,
+                      creative_blueprint=(ctx.edit_plan if name in {
+                          "set_edit_plan", "complete_edit_plan_steps"}
+                          else None))
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
 
@@ -2904,6 +3539,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                   flush=True)
             has_progress = bool(ctx.versions_written
                                 or _turn_has_asset_progress(ctx))
+            last_err = ""
+            raw = str(getattr(ctx, "last_tool_result", "") or "").strip()
+            if raw:
+                last_err = " Last error: " + raw.splitlines()[0][:180]
             text = (
                 "I stopped this attempt because the same editing operation "
                 "failed twice without changing anything. No credits are "
@@ -2913,7 +3552,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "I stopped the repeated failing operation instead of spending "
                 "more time on the same error. The edits that did succeed are "
                 "saved and previewed below; that last part is not complete."
-            )
+            ) + last_err
             return _finalize(ctx, worker_db, session_id, text, "tool_stall",
                              total_steps, timings, honesty)
 
@@ -2956,17 +3595,36 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             ctx._pending_looked_output_times = set()
             ctx._pending_looked_asset_times = {}
 
+        if batch_committed_edl:
+            released = _compact_consumed_look_frames(
+                messages, before_index=visible_message_boundary)
+            if released:
+                ctx.editing_metrics["consumed_look_images_compacted"] = (
+                    ctx.editing_metrics.get(
+                        "consumed_look_images_compacted", 0) + released)
+
+        # A fetched/generated visual's review is now in the model-visible
+        # tool results (and, for direct sight, the image message above). The
+        # next reasoning step may place it. Keeping this set through the whole
+        # tool batch prevents a download+placement batch from claiming it was
+        # judged before the evidence had actually reached the editor.
+        if getattr(ctx, "_pending_visual_review_assets", None):
+            ctx._pending_visual_review_assets.clear()
+
         # The broad contact sheets did their job on the planning call. Keep
         # exact look evidence added above, but do not pay to resend all
         # project pixels on every subsequent model dispatch.
         if getattr(ctx, "edit_plan", None) or ctx.versions_written:
             _compact_initial_filmstrip(messages)
-            # The first planning request receives every tool's complete
-            # handbook. Once a plan or edit exists, re-sending 61k characters
-            # of descriptions on every dispatch is pure latency/context
-            # pressure. Keep every function and its full parameter schema,
-            # but reduce each description to a short reminder.
-            tools = agent_tools.openai_tools(model, compact=True)
+            # Stage routing avoids resending 100+ schemas after every action.
+            # Every capability remains name-visible and expand_toolset can
+            # load any omitted domain; this changes context size, not power.
+            names = agent_tools.compact_tool_names(ctx)
+            tools = agent_tools.openai_tools(
+                model, compact=True, names=names)
+            ctx.editing_metrics["post_plan_tool_schemas"] = len(tools)
+            ctx.editing_metrics["post_plan_tool_schema_chars"] = len(
+                json.dumps(tools, separators=(",", ":")))
 
         # Speculative verification is a bounded changed-section proof only.
         # A complete preview is reserved for the turn-end honesty pass, so an

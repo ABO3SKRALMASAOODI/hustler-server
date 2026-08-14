@@ -67,6 +67,15 @@ check("text added -> one window around it",
       w is not None and len(w) == 1 and 11.0 <= w[0][0] <= 12.0
       and 14.0 <= w[0][1] <= 15.0)
 
+vv = {**BASE, "vectors": [{"id": "vec1", "kind": "arrow",
+                             "start": 5.0, "end": 7.0, "x": 0.5,
+                             "y": 0.5, "width": 0.25, "height": 0.08,
+                             "color": "#FFFFFF"}]}
+w, why = stitch.plan(BASE, vv, tl_of(BASE), tl_of(vv), 20.0, 16.0)
+check("vector added -> one local stitch window",
+      w is not None and len(w) == 1 and w[0][0] <= 5.0
+      and w[0][1] >= 7.0)
+
 cut = {**BASE, "keep": [[0.0, 8.0], [10.0, 17.0]]}
 w, why = stitch.plan(BASE, cut, tl_of(BASE), tl_of(cut), 20.0, 15.0)
 check("timeline change refuses", w is None and "structural" in why)
@@ -98,6 +107,10 @@ we2 = stitch.window_edl(v2, tl_of(v2), 11.0, 15.0)
 check("text inside the window shifted",
       we2["texts"] and we2["texts"][0]["id"] == "tx2"
       and abs(we2["texts"][0]["start"] - 1.0) < 0.01)
+we3 = stitch.window_edl(vv, tl_of(vv), 4.0, 8.0)
+check("vector inside the window shifted",
+      we3["vectors"] and we3["vectors"][0]["id"] == "vec1"
+      and abs(we3["vectors"][0]["start"] - 1.0) < 0.01)
 
 print("== 3. ass shifting and snapping ==")
 

@@ -357,9 +357,10 @@ def test_designed_text_moves_to_a_measured_clean_band_and_mutes_captions():
                                   template="title")
     assert result.startswith("EDL v1 -> v2")
     assert ctx._edl["texts"][0]["y"] == 0.16
-    assert ctx._edl["caption_mutes"] == [[0.5, 2.5]]
+    assert ctx._edl["texts"][0]["mute_captions"] is True
+    assert ctx._edl["caption_mutes"] == []
     assert "moved the title" in result
-    assert "two independent word layers never stack" in result
+    assert "two word layers never stack" in result
 
 
 def test_short_text_window_gets_exact_frame_when_sidecar_is_sparse(

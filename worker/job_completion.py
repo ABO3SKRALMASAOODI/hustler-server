@@ -23,8 +23,15 @@ def finalize_success(worker_db, job, result, lease_claim):
     if job["type"] in ("agent_turn", "shorts_plan") \
             and result.get("billable", True):
         try:
-            extra = (config.SHORTS_CLIP_CREDITS
-                     * int(result.get("clips") or 0)
+            # A shorts_plan now scouts and seeds LOCKED story cuts; it does
+            # not render or creatively edit them.  New workers report
+            # rendered_clips=0, so selection is charged only for its model
+            # turn.  Keep the old clips fallback for jobs completed by an
+            # older worker during a rolling deploy.
+            rendered = result.get("rendered_clips")
+            clip_count = (rendered if rendered is not None
+                          else result.get("clips"))
+            extra = (config.SHORTS_CLIP_CREDITS * int(clip_count or 0)
                      if job["type"] == "shorts_plan" else 0.0)
             charged = worker_db.run(
                 dbx.charge_turn_credits, job["user_id"], job["id"], extra)

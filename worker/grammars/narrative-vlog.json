@@ -1,8 +1,8 @@
 {
   "slug": "narrative-vlog",
-  "v": 1,
+  "v": 2,
   "genre": "cinematic personal-story reel (first-person mini-film)",
-  "identity": "A first-person story with a real emotional arc (doubt -> discovery -> resolution) told over beautifully-shot mundane b-roll of the narrator's life. Typography works in TWO registers: tiny italic-serif 'whisper' words for connective narration, and large display words that land ONLY on emotional peaks. Slow by reel standards, warm-dark grade, phone-screen inserts when other content is discussed. The longest family in the corpus.",
+  "identity": "A first-person story with a real emotional arc told through specific observed details from the narrator's life. Typography may use a quiet connective register and a stronger peak register when that contrast serves the story. Pace, color and insert treatment follow the emotional material; the measured warm-dark exemplar is one skin, not the family definition.",
   "exemplars": {
     "cinematic-story": {"file": "6061bbab", "duration_s": 72.2, "cuts_per_10s": 2.4, "median_shot_s": 3.94, "sat": 0.054, "brightness": 0.24, "motion_mean": 1.46, "notes": "'a video nearly made me quit' arc; kettle/lamp/couch b-roll; repeated display word ('failure' x3) at the low point; inset phone-UI clips for the video being discussed; ends on a direct 'you.'"}
   },
@@ -15,15 +15,15 @@
       "final": "the last word addresses the viewer directly, alone on screen"
     },
     "inserts": "content being discussed appears as small inset clips/phone frames, never full-screen replacements",
-    "pace": "2-3 cuts/10s; motion mean lowest in corpus (1.46) — stillness is the aesthetic",
-    "grade": "warm-dark, sat ~0.05, brightness ~0.25"
+    "pace": "let mundane images breathe until their emotional information lands, then cut on a story turn, gesture, look, sound or revealing detail. Stillness is a storytelling register, not a mandated shot length",
+    "grade": "build a consistent emotional world from the actual footage; the warm-dark exemplar is evidence for intimate lamplit stories, not a universal treatment"
   },
   "rubric": {
     "has_arc": "disruption, descent, named turn, direct-address resolution — all four present",
     "two_register_typography": true,
     "display_words_only_on_peaks": true,
-    "median_shot_s_min": 2.5,
-    "saturation_max": 0.08,
+    "shot_duration_serves_emotional_readability": true,
+    "grade_supports_story_without_damaging_truthful_color": true,
     "insets_for_discussed_content": true
   },
   "capability_notes": "The register split maps to add_text sizes/fonts; insets are insert_media with fit/frames. The real dependency is TRANSCRIPT-DRIVEN PLANNING: the agent must find the arc (disruption/descent/turn/resolution) in the user's narration and place registers accordingly — a prompt-level planning grammar, not a new tool."

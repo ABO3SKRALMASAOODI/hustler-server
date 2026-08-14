@@ -47,10 +47,11 @@ def test_catalog_is_the_live_registry():
         assert n in agent_tools.TOOLS
         assert not agent_tools._tool_disabled(n), \
             f"{n} is published but disabled on this deployment"
-    # ...and nothing enabled was left out: the outside model must see exactly
-    # what the in-house agent sees.
+    # ...and nothing enabled was left out except explicit orchestration tools.
+    # The outside model must do the edit itself, never enqueue our agent.
     enabled = [n for n in agent_tools.TOOLS
-               if not agent_tools._tool_disabled(n)]
+               if not agent_tools._tool_disabled(n)
+               and n not in mcp_exec.MCP_DENIED_TOOLS]
     assert sorted(names) == sorted(enabled)
 
 
@@ -99,10 +100,54 @@ def test_control_tools_are_not_offered_to_the_model():
     assert mcp_exec.MEDIA_TOOL not in published
 
 
-def test_batch_shorts_tool_is_honest_about_agent_delegation():
-    tool = next(t for t in mcp_exec.catalog()["tools"]
-                if t["function"]["name"] == "edit_shorts")
-    desc = tool["function"]["description"]
-    assert "DELEGATION ONLY" in desc
-    assert "does NOT directly edit any EDL" in desc
-    assert "open_short/open_project" in desc
+def test_locked_card_agent_boot_is_not_published_or_executable_over_mcp():
+    published = {t["function"]["name"]
+                 for t in mcp_exec.catalog()["tools"]}
+    assert "edit_shorts" not in published
+    assert "make_shorts" in published
+    # The restriction is an MCP boundary, never a removal from Valmera's
+    # internal agent registry.
+    assert "edit_shorts" in agent_tools.TOOLS
+    assert not agent_tools._tool_disabled("edit_shorts")
+
+    class NoDb:
+        def run(self, *_args, **_kwargs):
+            raise AssertionError("denied MCP tool must not touch the database")
+
+    out = mcp_exec.run_mcp_job(NoDb(), {
+        "payload": {"tool": "edit_shorts", "args": {"instruction": "x"}},
+    })
+    assert out["is_error"] is True
+    assert "explicit locked-card action" in out["text"]
+    assert "Edit each child yourself" in out["text"]
+
+
+def test_mcp_project_state_routes_batch_edits_to_direct_child_tools(monkeypatch):
+    class Ctx:
+        index = None
+        has_main_video = False
+        project_id = 7
+        duration = 0
+        project = {"id": 7, "kind": "shorts", "parent_project_id": None}
+        edit_plan = None
+
+        @staticmethod
+        def latest_edl():
+            return {"version": 1, "json": {"keep": []}}
+
+    class Db:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return []
+
+    monkeypatch.setattr(agent_tools, "_shorts_children", lambda _ctx: [{
+        "title": "First", "start": 0, "end": 20, "child_project_id": 8,
+    }])
+    direct = mcp_exec.agent_loop.state_block(
+        Ctx(), Db(), denied_tools=mcp_exec.MCP_DENIED_TOOLS)
+    internal = mcp_exec.agent_loop.state_block(Ctx(), Db())
+
+    assert "edit_shorts" not in direct
+    assert "open_short" in direct
+    assert "make every requested change yourself" in direct
+    assert "edit_shorts" in internal

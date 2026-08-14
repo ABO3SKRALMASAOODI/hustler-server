@@ -34,7 +34,9 @@ import numpy as np
 # 2 (Jul 26 2026): _onset_env now clips outliers, so every sidecar computed
 # before it — including the ones that recorded "beats: none detected" on real
 # music — must be recomputed rather than read back.
-PERCEPTION_VERSION = 2
+# 3: compact timbre/mid-band/bass descriptors let the music workbench compare
+# actual candidate audio instead of selecting from titles alone.
+PERCEPTION_VERSION = 3
 
 SR = 22050
 N_FFT = 2048
@@ -55,6 +57,7 @@ SPEECH_BAND = (300.0, 3400.0)
 # The frequency bin masks, computed once.
 _FREQS = np.fft.rfftfreq(N_FFT, 1.0 / SR)
 _VB = (_FREQS >= SPEECH_BAND[0]) & (_FREQS <= SPEECH_BAND[1])
+_BASS = (_FREQS >= 35.0) & (_FREQS <= 250.0)
 
 
 class PerceptionError(RuntimeError):
@@ -300,7 +303,7 @@ def _beat_grid(env, bpm):
 
 
 # ------------------------------------------------------------------ analyze
-def analyze_audio(path):
+def analyze_audio(path, max_s=MAX_ANALYZE_S):
     """Full analysis of a media file's first audio stream.
 
     Returns {"v", "bpm", "bpm_conf", "beats", "energy", "energy_db_range",
@@ -308,8 +311,9 @@ def analyze_audio(path):
     (float, FPS Hz, quantized) kept so word stress can be scored against any
     word list without re-decoding the audio."""
     flux_parts, energy_parts, vb_parts = [], [], []
+    centroid_parts, mid_ratio_parts, bass_ratio_parts = [], [], []
     prev_sqrt = None
-    for mag in _stream_frames(path):
+    for mag in _stream_frames(path, max_s=max_s):
         c = np.sqrt(mag, dtype=np.float32)
         if prev_sqrt is not None:
             block = np.concatenate([prev_sqrt[None, :], c])
@@ -323,12 +327,23 @@ def analyze_audio(path):
         prev_sqrt = c[-1]
         flux_parts.append(flux)
         p = mag.astype(np.float64) ** 2
-        energy_parts.append(p.sum(axis=1))
+        total = p.sum(axis=1)
+        safe_total = np.maximum(total, 1e-18)
+        energy_parts.append(total)
         vb_parts.append(np.sqrt(p[:, _VB].sum(axis=1)))
+        centroid_parts.append((p * _FREQS[None, :]).sum(axis=1) / safe_total)
+        mid_ratio_parts.append(p[:, _VB].sum(axis=1) / safe_total)
+        bass_ratio_parts.append(p[:, _BASS].sum(axis=1) / safe_total)
 
     flux = np.concatenate(flux_parts) if flux_parts else np.zeros(0)
     frame_e = np.concatenate(energy_parts) if energy_parts else np.zeros(0)
     vb_env = np.concatenate(vb_parts) if vb_parts else np.zeros(0)
+    centroids = (np.concatenate(centroid_parts)
+                 if centroid_parts else np.zeros(0))
+    mid_ratios = (np.concatenate(mid_ratio_parts)
+                  if mid_ratio_parts else np.zeros(0))
+    bass_ratios = (np.concatenate(bass_ratio_parts)
+                   if bass_ratio_parts else np.zeros(0))
     if flux.size < int(FPS * 2):
         raise PerceptionError("audio too short to analyze (need ~2s)")
 
@@ -344,6 +359,11 @@ def analyze_audio(path):
     peak = float(binned.max()) or 1e-12
     energy_db = 10.0 * np.log10(np.maximum(binned / peak, 1e-8))
     energy = [round(float(v), 1) for v in energy_db]
+    active = frame_e > max(float(np.percentile(frame_e, 20)), 1e-18)
+
+    def _active_median(values):
+        rows = values[active] if len(values) == len(active) else values
+        return float(np.median(rows)) if rows.size else 0.0
 
     # speech-band envelope, normalized, then MAX-pooled down to VB_STORE_FPS
     # for compact storage (word stress reads peaks over ≥100ms word spans, so
@@ -362,8 +382,85 @@ def analyze_audio(path):
         "beats": beats,
         "energy_bin_s": ENERGY_BIN_S,
         "energy": energy,
+        "duration_s": round(len(frame_e) / FPS, 2),
+        "dynamic_range_db": round(float(np.percentile(energy_db, 90)
+                                         - np.percentile(energy_db, 10)), 1),
+        "spectral_centroid_hz": round(_active_median(centroids)),
+        # "midband", not "vocals": instruments share 300-3400 Hz. This is
+        # still useful evidence for whether a bed may crowd spoken dialogue.
+        "midband_ratio": round(_active_median(mid_ratios), 3),
+        "bass_ratio": round(_active_median(bass_ratios), 3),
         "vb_env_fps": round(FPS / pool, 3),
         "vb_env": [round(float(v), 3) for v in vb_pooled],
+    }
+
+
+def analyze_transient(path, max_s=60.0):
+    """Measure a short sound effect without pretending to hear it.
+
+    Music analysis intentionally refuses clips shorter than roughly two
+    seconds because tempo needs history.  Editorial one-shots are often
+    80–900 ms, so they need a different measurement surface: attack, peak
+    position, audible tail, crest, spectral balance and event density.  These
+    facts distinguish a clean click, impact, whoosh and riser far better than
+    a catalog title while remaining honest about semantic hearing.
+    """
+    energy_parts, centroid_parts = [], []
+    bass_parts, mid_parts = [], []
+    for mag in _stream_frames(path, max_s=max_s):
+        power = mag.astype(np.float64) ** 2
+        total = power.sum(axis=1)
+        safe = np.maximum(total, 1e-18)
+        energy_parts.append(total)
+        centroid_parts.append(
+            (power * _FREQS[None, :]).sum(axis=1) / safe)
+        bass_parts.append(power[:, _BASS].sum(axis=1) / safe)
+        mid_parts.append(power[:, _VB].sum(axis=1) / safe)
+    energy = np.concatenate(energy_parts) if energy_parts else np.zeros(0)
+    if not energy.size or float(energy.max()) <= 1e-18:
+        raise PerceptionError("sound effect has no measurable audio")
+    centroid = np.concatenate(centroid_parts)
+    bass = np.concatenate(bass_parts)
+    mid = np.concatenate(mid_parts)
+    peak = float(energy.max())
+    db = 10.0 * np.log10(np.maximum(energy / peak, 1e-8))
+    active = np.flatnonzero(db >= -35.0)
+    if not active.size:
+        raise PerceptionError("sound effect has no measurable active event")
+    peak_i = int(np.argmax(energy))
+    first_i, last_i = int(active[0]), int(active[-1])
+    duration = len(energy) / FPS
+    active_duration = max(1.0 / FPS, (last_i - first_i + 1) / FPS)
+
+    # Count separate strong local maxima. A clean one-shot generally has one;
+    # a loop/pack/ambience result often has several. Suppress neighboring
+    # frames so one transient's rounded top is not counted repeatedly.
+    strong = np.flatnonzero(db >= -9.0)
+    peaks = []
+    guard = max(1, int(round(FPS * 0.12)))
+    for i in strong:
+        lo, hi = max(0, i - guard), min(len(energy), i + guard + 1)
+        if energy[i] >= float(energy[lo:hi].max()) \
+                and (not peaks or i - peaks[-1] > guard):
+            peaks.append(int(i))
+
+    mask = db >= -35.0
+    mean_power = float(energy[mask].mean()) if mask.any() else 1e-18
+    return {
+        "v": PERCEPTION_VERSION,
+        "duration_s": round(duration, 3),
+        "active_duration_s": round(active_duration, 3),
+        "leading_silence_s": round(first_i / FPS, 3),
+        "attack_s": round(max(0.0, (peak_i - first_i) / FPS), 3),
+        "peak_time_s": round(peak_i / FPS, 3),
+        "peak_position": round(peak_i / max(1, len(energy) - 1), 3),
+        "tail_s": round(max(0.0, (last_i - peak_i) / FPS), 3),
+        "crest_db": round(10.0 * math.log10(peak / max(mean_power, 1e-18)),
+                           2),
+        "spectral_centroid_hz": round(float(np.median(centroid[mask]))),
+        "bass_ratio": round(float(np.median(bass[mask])), 3),
+        "midband_ratio": round(float(np.median(mid[mask])), 3),
+        "strong_event_count": len(peaks),
     }
 
 

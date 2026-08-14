@@ -145,6 +145,18 @@ def test_one_call_web_sfx_searches_fetches_and_places(monkeypatch, tmp_path):
                "hit": hit}
     monkeypatch.setattr(agent_tools, "_download_sfx_hit",
                         lambda ctx, selected: (fetched, None))
+    audition = tmp_path / "candidate.mp3"
+    audition.write_bytes(b"measured audio")
+    monkeypatch.setattr(
+        agent_tools, "_measure_sfx_candidate",
+        lambda ctx, selected, need_file=False: (
+            selected,
+            {"active_duration_s": 1.1, "duration_s": 1.2,
+             "leading_silence_s": 0, "attack_s": .25,
+             "peak_position": .5, "tail_s": .5, "crest_db": 7,
+             "spectral_centroid_hz": 2200, "bass_ratio": .08,
+             "midband_ratio": .4, "strong_event_count": 1},
+            str(audition), None))
     placed = {}
 
     def fake_add(_ctx, storage_key, at, gain_db):
@@ -165,3 +177,86 @@ def test_one_call_web_sfx_searches_fetches_and_places(monkeypatch, tmp_path):
     assert placed == {"storage_key": "sfx/3/real.mp3", "at": 3.2,
                       "gain_db": -7.0}
     assert "Clean Cinematic Whoosh" in out and "license: CC0" in out
+
+
+def test_one_call_web_sfx_uses_actual_listener_when_choice_is_unambiguous(
+        monkeypatch, tmp_path):
+    first = _hit("Generic Whoosh", 1.2)
+    first["id"] = "openverse:generic"
+    second = _hit("Tailored Product Sweep", 1.1)
+    second["id"] = "openverse:tailored"
+    monkeypatch.setattr(
+        sfx_search, "search",
+        lambda query, max_s=None, count=6: [first, second])
+    local_by_id = {}
+
+    def measure(_ctx, selected, need_file=False):
+        local = tmp_path / (selected["id"].split(":")[1] + ".mp3")
+        local.write_bytes(b"actual sound")
+        local_by_id[selected["id"]] = str(local)
+        return (selected,
+                {"active_duration_s": 1.0, "duration_s": 1.2,
+                 "leading_silence_s": 0, "attack_s": .15,
+                 "peak_position": .4, "tail_s": .5, "crest_db": 7,
+                 "spectral_centroid_hz": 2200, "bass_ratio": .08,
+                 "midband_ratio": .4, "strong_event_count": 1},
+                str(local), None)
+
+    chosen = {}
+
+    def download(_ctx, selected):
+        chosen["id"] = selected["id"]
+        return ({"title": selected["title"], "duration_s": 1.1,
+                 "storage_key": "sfx/3/chosen.mp3", "license_note": "CC0",
+                 "hit": selected}, None)
+
+    monkeypatch.setattr(agent_tools, "_measure_sfx_candidate", measure)
+    monkeypatch.setattr(agent_tools, "_download_sfx_hit", download)
+    monkeypatch.setattr(agent_tools.llm, "audio_review_available", lambda: True)
+    heard_prompt = {}
+
+    def listen(prompt, *args, **kwargs):
+        heard_prompt["text"] = prompt
+        return ("Choose openverse:tailored — its restrained sweep lands with "
+                "the product motion and leaves room for speech.")
+
+    monkeypatch.setattr(agent_tools.llm, "ask_audio", listen)
+    monkeypatch.setattr(agent_tools, "add_sfx",
+                        lambda *_args, **_kwargs: "EDL v1 -> v2: sfx placed")
+
+    class Ctx(_Ctx):
+        workdir = str(tmp_path)
+        editing_metrics = {}
+        edit_plan = {
+            "steps": ["Build a coherent product reveal"],
+            "objective": "make the result feel precise, not bombastic",
+            "sfx_direction": "one restrained tactile digital family",
+            "sequence_map": [{
+                "role": "proof", "anchor": "interface resolves",
+                "purpose": "make the interaction feel effortless",
+                "sound": "a light glassy sweep; preserve the voice",
+                "source_start_s": 2.5, "source_end_s": 4.0,
+                "energy": .55,
+            }, {
+                "role": "ending", "anchor": "logo lockup",
+                "purpose": "close with confidence",
+                "sound": "near-silence, no impact",
+                "source_start_s": 8.0, "source_end_s": 9.5,
+                "energy": .2,
+            }],
+        }
+
+        @staticmethod
+        def latest_edl():
+            return {"json": {"keep": [[0, 10]]}}
+
+    ctx = Ctx()
+    out = agent_tools.add_web_sfx(ctx, "restrained product UI sweep", 3.2)
+
+    assert chosen["id"] == "openverse:tailored"
+    assert "Actual listening selection" in out
+    assert ctx.editing_metrics["sfx_candidates_heard"] == 2
+    assert "one restrained tactile digital family" in heard_prompt["text"]
+    assert "interface resolves" in heard_prompt["text"]
+    assert "light glassy sweep" in heard_prompt["text"]
+    assert "logo lockup" not in heard_prompt["text"]

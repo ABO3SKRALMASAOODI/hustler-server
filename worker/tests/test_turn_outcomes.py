@@ -75,3 +75,14 @@ def test_identical_deterministic_failure_stops_before_third_model_call():
         ctx, "apply_edit_recipe",
         "RECIPE ABORTED at operation 4 (add_zoom): target at 7.92s")
     assert agent_loop._repeated_tool_failure(ctx) is True
+    assert "add_zoom" in ctx.last_tool_result
+
+
+def test_unused_fetched_music_is_disclosed():
+    ctx = _ctx(audio_fetched=["music/1/track.mp3"])
+    ctx.latest_edl = lambda: {"json": {"music": []}}
+    note = agent_loop._unused_fetched_audio_note(ctx)
+    assert "not placed" in note
+    ctx.latest_edl = lambda: {"json": {
+        "music": [{"storage_key": "music/1/track.mp3"}]}}
+    assert agent_loop._unused_fetched_audio_note(ctx) == ""

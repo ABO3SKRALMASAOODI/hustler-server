@@ -38,6 +38,19 @@ AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
 # editing agent — its own eyes — instead of asking the separate VISION_*
 # provider to describe them second-hand.
 AGENT_MULTIMODAL = os.getenv("AGENT_MULTIMODAL", "1") == "1"
+# Bounded subjective audio review is deliberately a separate lane.  The
+# editing model keeps its strong tool/vision context; an audio-capable model
+# hears only the small candidate or rendered-mix excerpts it is asked to
+# assess, then returns text evidence to the editor.  Empty model/key disables
+# the lane honestly and deterministic waveform/QC measurements remain.
+AUDIO_REVIEW_BASE_URL = os.getenv(
+    "AUDIO_REVIEW_BASE_URL", "https://api.openai.com/v1").strip()
+AUDIO_REVIEW_MODEL = os.getenv(
+    "AUDIO_REVIEW_MODEL", "gpt-audio-1.5").strip()
+AUDIO_REVIEW_API_KEY = (
+    os.getenv("AUDIO_REVIEW_API_KEY", "").strip()
+    or (OPENAI_API_KEY if AUDIO_REVIEW_BASE_URL == OPENAI_BASE_URL else ""))
+AUDIO_REVIEW_TIMEOUT_S = float(os.getenv("AUDIO_REVIEW_TIMEOUT_S", "45"))
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 
 # THE NUMBER THAT TURNS A FIVE-SECOND WAIT INTO A DEAD TURN (round 80).
@@ -1451,6 +1464,16 @@ SPECULATIVE_PREVIEWS_MAX = min(
 # long-edge cap alone. See preview_geometry for the measurement (25%).
 PREVIEW_MAX_HEIGHT = int(os.getenv("PREVIEW_MAX_HEIGHT", "480"))
 PREVIEW_MAX_FPS = float(os.getenv("PREVIEW_MAX_FPS", "30"))
+
+# Complete-preview perception budget. Unlike the legacy 3x3 overview, these
+# frames are selected from authored cuts, B-roll, text, zooms and reframing as
+# well as from uniform timeline coverage. Two 4x4 pages gives a critic much
+# broader evidence without sending the video itself or an unbounded frame set.
+SCREENING_MAX_FRAMES = int(os.getenv("SCREENING_MAX_FRAMES", "32"))
+SCREENING_BASE_FRAMES = int(os.getenv("SCREENING_BASE_FRAMES", "12"))
+SCREENING_PAGE_TILES = int(os.getenv("SCREENING_PAGE_TILES", "16"))
+SCREENING_FRAME_PARALLELISM = int(os.getenv(
+    "SCREENING_FRAME_PARALLELISM", "4"))
 
 # Final exports: veryfast/CRF20 is effectively transparent for talking-head /
 # screen content and several times faster than the old medium/CRF18.

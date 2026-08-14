@@ -6,7 +6,7 @@ added at 0:05 re-rendered all ten minutes. The EDL write is instant; the
 wait was the file. This makes the preview cost O(change):
 
   1. GATE (`plan`): stitching happens ONLY when the new EDL differs from the
-     last-rendered one in VIDEO-LOCAL layers — texts, zooms, overlays,
+     last-rendered one in VIDEO-LOCAL layers — texts, vectors, zooms, overlays,
      censor regions, patches — while the whole timeline STRUCTURE (keep,
      speed, inserts, frame, captions config, grade, stylize, transitions,
      fades, master, audio tracks, source derivations) is identical. Anything
@@ -39,7 +39,7 @@ import subprocess
 import media
 
 # Video-local layers a stitch may differ in. Everything else must be equal.
-_CHANGEABLE_TOP = ("texts", "patches", "overlays")
+_CHANGEABLE_TOP = ("texts", "vectors", "patches", "overlays")
 _CHANGEABLE_FX = ("zooms", "regions", "custom")
 
 _PAD_S = 0.5
@@ -85,6 +85,8 @@ def _item_windows(edl, tl, duration):
         if t.get("behind"):
             continue
         out.append((float(t["start"]), float(t["end"]), "text"))
+    for v in (edl.get("vectors") or []):
+        out.append((float(v["start"]), float(v["end"]), "vector"))
     fx = edl.get("effects") or {}
     for z in (fx.get("zooms") or []):
         out.append((float(z["start"]), float(z["end"]), "zoom"))
@@ -111,6 +113,7 @@ def _canon_items(edl):
     out = {}
     fx = edl.get("effects") or {}
     for layer, items in (("texts", edl.get("texts")),
+                         ("vectors", edl.get("vectors")),
                          ("patches", edl.get("patches")),
                          ("overlays", edl.get("overlays")),
                          ("zooms", fx.get("zooms")),
@@ -163,7 +166,9 @@ def plan(prev_edl, new_edl, tl_prev, tl_new, duration, out_duration):
     for l, i in changed:
         for edl, tl in ((prev_edl, tl_prev), (new_edl, tl_new)):
             fx = edl.get("effects") or {}
-            src = {"texts": edl.get("texts"), "patches": edl.get("patches"),
+            src = {"texts": edl.get("texts"),
+                   "vectors": edl.get("vectors"),
+                   "patches": edl.get("patches"),
                    "overlays": edl.get("overlays"), "zooms": fx.get("zooms"),
                    "regions": fx.get("regions"),
                    "custom": fx.get("custom")}[l] or []
@@ -272,6 +277,9 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     e["texts"] = _shift(e.get("texts"), lambda t: (t["start"], t["end"]),
                         lambda t, a, b: {**t, "start": round(a, 3),
                                          "end": round(b, 3)})
+    e["vectors"] = _shift(
+        e.get("vectors"), lambda v: (v["start"], v["end"]),
+        lambda v, a, b: {**v, "start": round(a, 3), "end": round(b, 3)})
     fx["zooms"] = _shift(fx.get("zooms"), lambda z: (z["start"], z["end"]),
                          lambda z, a, b: {**z, "start": round(a, 3),
                                           "end": round(b, 3)})
@@ -743,6 +751,8 @@ def plan_timeline(prev_edl, new_edl, tl_prev, tl_new, out_duration,
     anchored = []
     for t in (new_edl.get("texts") or []):
         anchored.append((float(t["start"]), float(t["end"])))
+    for v in (new_edl.get("vectors") or []):
+        anchored.append((float(v["start"]), float(v["end"])))
     for z in (fx.get("zooms") or []):
         anchored.append((float(z["start"]), float(z["end"])))
     for r in (fx.get("regions") or []):

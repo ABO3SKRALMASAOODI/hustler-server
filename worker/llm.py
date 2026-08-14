@@ -16,6 +16,7 @@ import json
 import mimetypes
 import re
 import threading
+from types import SimpleNamespace
 
 import requests
 from openai import OpenAI
@@ -448,6 +449,154 @@ def audio_token_counts(usage):
         return 0, 0
     return (_one(getattr(usage, "prompt_tokens_details", None)),
             _one(getattr(usage, "completion_tokens_details", None)))
+
+
+_audio_review_dead = False
+
+
+def audio_review_available():
+    """Whether the bounded actual-audio reviewer is configured and live."""
+    return bool(config.AUDIO_REVIEW_MODEL and config.AUDIO_REVIEW_API_KEY
+                and not _audio_review_dead)
+
+
+def audio_part(path, fmt=None):
+    """OpenAI-style input_audio part for one intentionally short clip."""
+    if fmt is None:
+        fmt = "mp3" if str(path).lower().endswith(".mp3") else "wav"
+    with open(path, "rb") as source:
+        b64 = base64.b64encode(source.read()).decode()
+    return {"type": "input_audio",
+            "input_audio": {"data": b64, "format": fmt}}
+
+
+def _chat_usage(raw):
+    """Small object adapter for the requests-based audio response."""
+    raw = raw or {}
+    return SimpleNamespace(
+        prompt_tokens=raw.get("prompt_tokens") or 0,
+        completion_tokens=raw.get("completion_tokens") or 0,
+        total_tokens=raw.get("total_tokens") or 0,
+        prompt_tokens_details=raw.get("prompt_tokens_details") or {},
+        completion_tokens_details=raw.get("completion_tokens_details") or {},
+    )
+
+
+def _audio_answer_is_actionable(answer, purpose):
+    value = str(answer or "").strip()
+    if not value:
+        return False
+    lowered = value.casefold()
+    if any(phrase in lowered for phrase in (
+            "i will listen", "i'll listen", "will now listen",
+            "provided clip to assess", "once i listen")):
+        return False
+    if purpose == "audio_render_review" and not re.search(
+            r"(?:^|\W)(?:pass|fix)(?:\W|$)", lowered):
+        return False
+    return True
+
+
+def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
+              purpose="audio_review"):
+    """Listen to bounded real clips and return advisory editorial evidence.
+
+    This lane never grants permission to edit and never blocks an approved
+    choice.  Failures return ``None`` so measured waveform/audio-QC evidence
+    stays the always-on fallback.  Audio bytes are never persisted in llm_calls;
+    only the labels, answer and provider usage are recorded.
+    """
+    global _audio_review_dead
+    if not audio_review_available() or not audio_paths:
+        return None
+    labels = list(labels or [])
+    content = [{"type": "text", "text": prompt}]
+    recorded = []
+    for i, path in enumerate(audio_paths[:3]):
+        label = (labels[i] if i < len(labels)
+                 else str(path).rsplit("/", 1)[-1])
+        content.append({"type": "text", "text": f"CLIP {i + 1}: {label}"})
+        try:
+            content.append(audio_part(path))
+        except Exception as exc:
+            print(f"[audio-review] could not read clip: {exc}", flush=True)
+            continue
+        recorded.append(label)
+    if not recorded:
+        return None
+
+    body = {
+        "model": config.AUDIO_REVIEW_MODEL,
+        "modalities": ["text"],
+        "max_tokens": int(max_tokens),
+        "messages": [{"role": "user", "content": content}],
+    }
+    url = config.AUDIO_REVIEW_BASE_URL.rstrip("/") + "/chat/completions"
+    try:
+        headers = {
+            "Authorization": f"Bearer {config.AUDIO_REVIEW_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        retries_left, attempts = 2, 0
+        used_dual_modality = False
+        answer, usage = "", None
+        while True:
+            attempts += 1
+            response = requests.post(
+                url, json=body, timeout=config.AUDIO_REVIEW_TIMEOUT_S,
+                headers=headers)
+            lowered = response.text.lower()
+            if response.status_code == 400 and "modalit" in lowered \
+                    and not used_dual_modality:
+                body["modalities"] = ["text", "audio"]
+                body["audio"] = {"voice": "alloy", "format": "wav"}
+                used_dual_modality = True
+                continue
+            if response.status_code in (500, 502, 503, 504) \
+                    and retries_left > 0:
+                retries_left -= 1
+                continue
+            if response.status_code < 400:
+                payload = response.json()
+                message = ((payload.get("choices") or [{}])[0].get("message")
+                           or {})
+                answer = (message.get("content") or
+                          (message.get("audio") or {}).get("transcript")
+                          or "").strip()
+                usage = _chat_usage(payload.get("usage"))
+                if not _audio_answer_is_actionable(answer, purpose) \
+                        and retries_left > 0:
+                    retries_left -= 1
+                    content[0]["text"] = (
+                        prompt + "\n\nYou already have the audio. Answer NOW "
+                        "from what is audible. Return plain text only; do not "
+                        "describe what you will do and do not return JSON.")
+                    continue
+            break
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"audio review HTTP {response.status_code}: "
+                f"{response.text[:240]}")
+        if not _audio_answer_is_actionable(answer, purpose):
+            answer = ""
+        record(purpose,
+               {"model": config.AUDIO_REVIEW_MODEL, "question": prompt,
+                "clips": recorded},
+               {"answer": answer or None, "attempts": attempts}, usage)
+        return answer or None
+    except Exception as exc:
+        msg = str(exc)
+        print(f"[audio-review] call failed: {msg}", flush=True)
+        if any(marker in msg.lower() for marker in (
+                "http 404", "model_not_found", "does not support audio",
+                "input_audio is not supported")):
+            _audio_review_dead = True
+        _note_error(exc)
+        record(purpose,
+               {"model": config.AUDIO_REVIEW_MODEL, "question": prompt,
+                "clips": recorded},
+               {"error": msg[:300]}, None)
+        return None
 
 
 def looks_like_bad_parameter(exc, field):

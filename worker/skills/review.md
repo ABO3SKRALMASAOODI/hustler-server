@@ -7,7 +7,7 @@ SCREEN IN THIS ORDER — each item is a question with a yes/no answer:
 2. EVERY JUNCTION the edit touched (the verify tiles show them): does the cut land on a word edge, is there a flash frame, a double frame, a mid-gesture jump that reads as broken? Transitions: does the effect mark a real scene change and finish clean?
 3. CLAIMS: each verify tile carries the claim you made — does the picture literally show it (the text where you said, the zoom framing what you named, the erase actually clean)? A claim the frame does not show is a fix, not a caveat.
 4. CAPTIONS: legible against their background at every sampled moment, inside safe areas, no overlap with faces/graphics, emphasis words the RIGHT words, no caption stacked over burned-in text?
-5. SOUND (AUDIO CHECK + authored timing): are levels, peaks and dead air sane, and is every SFX placed exactly on its named event? These are measurements, not subjective listening; never claim otherwise.
+5. SOUND: AUDIO CHECK + authored timing answer levels, peaks, dead air and whether every SFX is on its named event. ACTUAL-AUDIO REVIEW, when present, adds bounded listening evidence for masking, tone and whether the designed sound feels coherent. Keep the sources distinct and never claim continuous listening beyond its labeled windows.
 6. THE END: last word/beat lands and stops clean — no tail silence, no mid-bar music stop, no fade on a reel?
 7. THE WHOLE (the 3x3 sheet): does it read as ONE video — consistent grade, inserts color-matched, no scene obviously rawer than the rest?
 8. THE BRIEF: reread the user's message once. Every named item delivered or honestly reported? Anything they forbade present anyway?

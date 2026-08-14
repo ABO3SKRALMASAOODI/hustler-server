@@ -1,31 +1,27 @@
 """Shorts mode — job type "shorts_plan" (round 99).
 
-One job turns a long indexed video into N finished vertical shorts. Each
-short is a CHILD PROJECT (projects.parent_project_id) that shares the
-parent's original + proxy BY STORAGE KEY — prefix-based storage deletion
-makes that safe (a child's delete only wipes objects under the CHILD's
-prefix) — and reuses the sha-keyed index row outright, so spawning a child
-costs four INSERTs and zero media work. The child then gets a real EDL
-seeded through the SAME tool functions the agent runs (keep_segments →
-auto_reframe → captions → punch-ins → optional music/grade), and a `final`
-render fanned out to the executor. Because a child is a full project, "open
-it and refine it in chat" needs no new machinery at all — that is the whole
-point of this shape.
+One job scouts a long indexed video for genuinely complete, worthwhile
+micro-stories. Each selected story becomes a LOCKED child project that shares
+the parent's original + proxy BY STORAGE KEY and starts with exactly one
+editorial decision: the parent scout's story cut. It is deliberately not
+styled, reframed, captioned, scored, or rendered here.
 
-The optional REFERENCE clip: the user drops a short they like (uploaded as a
-video_clip with meta.role='shorts_reference'). It gets the normal clip index
-(transcript + tiles + audio perception), and _reference_profile turns that
-into a style profile — measured cut cadence and BPM/energy from the ears,
-captions/effects/grade read off the tiles by the vision model — which then
-steers both the plan (clip length, tone) and the per-child seeding (caption
-preset, punch strength, grade, music).
+The user explicitly presses Edit on a card to boot a fresh full-tool editing
+agent inside that child. This separation is the product contract: the parent
+is a discerning story scout; the child agent is the creative editor. A fixed
+batch recipe must never impersonate either one.
+
+The optional REFERENCE clip is shared into every child as the real indexed
+asset. The scout does not reduce it to presets or let its duration distort
+story selection. The fresh editor watches and hears it, then decides which
+relationships are worth transferring.
 
 BILLING: every model call here is recorded to llm_calls under THIS job (same
 recorder pattern as mcp_exec), so main.py can charge it exactly like an agent
-turn — model cost through the standard margin — plus a flat
-config.SHORTS_CLIP_CREDITS per finished clip for the render compute.
-The gate mirrors the message path: no credits → no run, and the wall is a
-chat message the studio already knows how to draw.
+turn. There is no per-clip render surcharge because this job performs no
+creative render; each explicit child edit is billed as its own agent turn.
+The gate mirrors the message path: no credits → no run, and the wall is a chat
+message the studio already knows how to draw.
 """
 
 import json
@@ -33,25 +29,25 @@ import math
 import os
 import re
 import shutil
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import agent_tools
 import config
 import db as dbx
 import llm
+import reference_profile as reference_grammar
 import storage
 from psycopg2.extras import Json
 from schemas import GRADE_PRESETS
 
-CLIP_MIN_S = 10.0          # below this a "short" is a jump cut, not a clip
-CLIP_MAX_S = 75.0          # above this it stops being a short at all
+CLIP_MIN_S = 10.0          # technical floor; the scout still judges the story
+CLIP_MAX_S = 120.0         # complete social stories may need more than 60s
 REF_WAIT_S = 180           # how long to wait for the reference's own index
 CAPTION_PRESETS = ("classic", "clean", "documentary", "broadcast", "retro",
                    "neon", "podcast", "beast", "karaoke", "elegant",
                    "spotlight", "stacked", "impact", "lyric")
+LONG_TRANSCRIPT_DIRECT_CHARS = 45000
 
 
 # ------------------------------------------------------------------ helpers
@@ -254,6 +250,18 @@ def _reference_profile(worker_db, job, ref, workdir):
                               and speech_ratio < 0.65),
         },
     })
+    # The same indexed reference used by the general editor carries much
+    # richer transferable grammar than a single cuts/min number: cadence
+    # contrast, beat relationship, energy arc, motion and composition. Keep a
+    # compact copy with the Shorts project so every child inherits those
+    # relationships without storing thousands of raw cut timestamps.
+    measured_grammar = reference_grammar.from_index(ridx)
+    measured_rhythm = dict(measured_grammar.get("rhythm") or {})
+    measured_rhythm.pop("cut_times_s", None)
+    measured_grammar["rhythm"] = measured_rhythm
+    profile["measured_grammar"] = measured_grammar
+    profile["measured_grammar_text"] = reference_grammar.describe(
+        measured_grammar)[:1800]
 
     # Eyes: the clip index already carries the filmstrip tiles — read the
     # style off those instead of decoding the video again.
@@ -312,19 +320,23 @@ def _reference_profile(worker_db, job, ref, workdir):
 
 
 # ------------------------------------------------------------------ the plan
-_PLAN_SYSTEM = """You are Valmera's shorts producer. You are given the timed sentence transcript of a long video. Choose complete story/conversation arcs that work as standalone vertical shorts: a setup or question, development/answer, and a resolution or punchline. Self-contained does NOT mean extracting an isolated quotable answer. In interviews/podcasts, a question that makes the answer intelligible belongs in the clip even when the answer contains the flashier hook; preserve the question-and-answer exchange and speaker turn.
+_PLAN_SYSTEM = """You are the parent story scout for Valmera. You are given the timed sentence transcript of a long podcast or video. Your only job is to find the few genuinely compelling, self-contained stories worth handing to a fresh short-form editor. You do not style, caption, reframe, score music, prescribe B-roll, or imitate an editing template.
+
+STORY CONTRACT — A SHORT IS A MICRO-STORY, NOT A TRANSCRIPT EXCERPT. Every selected window must have (1) a hook/setup or intelligible question, (2) development that changes or deepens the viewer's understanding, and (3) a payoff: resolution, lesson, reveal, decision, consequence, or punchline. A handful of related sentences that merely state information is not a short. Reject it even if one sentence is quotable. In interviews/podcasts, include the nearby question or premise when the answer needs it, preserve speaker turns, and do not cut away before the answer resolves. Before accepting a clip, be able to summarize its setup, development and payoff separately.
+
+QUALITY OVER QUANTITY — Returning fewer stories is a sign of judgment. Never fill a requested count with weak fragments. Do not choose several clips that repeat the same idea. Let each story use the time its arc genuinely needs; do not compress it to one or two sentences merely to resemble the duration of an editing reference.
 
 Reply with STRICT JSON only:
-{"clips": [{"start": <seconds>, "end": <seconds>, "title": "<hook-style title, max 55 chars, no quotes inside>", "hook": "<the first spoken words of the clip, verbatim>", "score": <0-100 how likely to hold attention>, "music": <true|false would background music help this clip>}]}
+{"clips": [{"start": <source seconds>, "end": <source seconds>, "title": "<truthful story title, max 55 chars, no quotes inside>", "hook": "<the first spoken words of the clip, verbatim>", "score": <0-100 relative story-worthiness>, "story": {"setup": "<what establishes the question/stakes>", "development": "<what changes/deepens>", "payoff": "<how it resolves and why it satisfies>"}}]}
 
-Rules: start and end MUST be sentence boundaries taken from the transcript timestamps. Never start mid-sentence. Prefer clips that contain their own necessary context. For multi-speaker material, never open on an answer whose preceding nearby question/setup is required to understand it; include the question. Do not cut away before the answer resolves. Do not overlap clips. Titles are written like social hooks (curiosity, stakes, numbers), never clickbait lies about the content."""
+Rules: start and end MUST be sentence boundaries taken from the transcript timestamps. Never start mid-sentence. Prefer clips that contain their own necessary context. For multi-speaker material, never open on an answer whose preceding nearby question/setup is required to understand it; include the question. Do not cut away before the answer resolves. Do not overlap clips. Titles may create curiosity but must never lie about the content. Return an empty clips array when nothing is genuinely worthy."""
 
-_VISUAL_PLAN_SYSTEM = """You are Valmera's shorts producer reviewing labeled filmstrip sheets from a video with little or no usable speech. Select visually self-contained highlight windows for vertical shorts. Read the timestamps printed under every frame. Prefer clear action, reactions, reveals, skill, movement, before/after changes, wins, near misses, or visually coherent sequences; avoid loading screens, menus, static dead time, repeated moments, and windows whose subject is too small to understand.
+_VISUAL_PLAN_SYSTEM = """You are Valmera's story scout reviewing labeled filmstrip sheets from a video with little or no usable speech. Select only visually self-contained arcs worth handing to a fresh short-form editor. Read the timestamps printed under every frame. Prefer action with a setup and outcome, reactions, reveals, skill, before/after changes, wins, near misses, or another satisfying visual progression; avoid loading screens, menus, static dead time, repeated moments, and isolated spectacle with no intelligible development.
 
 Reply with STRICT JSON only:
-{"clips": [{"start": <seconds>, "end": <seconds>, "title": "<truthful hook title, max 55 chars>", "hook": "<short description of the opening visual>", "score": <0-100>, "music": <true|false>}]}
+{"clips": [{"start": <seconds>, "end": <seconds>, "title": "<truthful hook title, max 55 chars>", "hook": "<short description of the opening visual>", "score": <0-100>}]}
 
-The sheets sample the full video rather than every frame. Use their timestamps to choose an approximate continuous window around each visible highlight. Do not overlap clips and do not invent events that are not visible."""
+Do not prescribe music, captions, reframing or effects. The sheets sample the full video rather than every frame. Use their timestamps to choose an approximate continuous window around each visible arc. Do not overlap clips and do not invent events that are not visible."""
 
 
 def _transcript_block(index, max_chars=180000):
@@ -341,6 +353,158 @@ def _transcript_block(index, max_chars=180000):
     if len(block) > max_chars:
         block = block[:max_chars] + "\n[transcript truncated]"
     return block
+
+
+def _shortlist_transcript_arcs(index, duration, n_target, direction=""):
+    """Rank complete discourse windows across a long recording.
+
+    Sending the first 180k characters of a two-hour podcast is both costly
+    and editorially biased: the model cannot choose an excellent exchange it
+    never receives.  This deterministic pass scores every sentence-boundary
+    arc, preserves question/answer context, balances evidence across the full
+    timeline, and gives one global model call a compact set of complete arcs
+    to judge.  It is an attention allocator, not a clip decision.
+    """
+    sents = []
+    for raw in (index or {}).get("sentences") or []:
+        text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()
+        try:
+            t0, t1 = float(raw["t0"]), float(raw["t1"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if text and t1 > t0:
+            sents.append({"t0": t0, "t1": t1, "text": text,
+                          "speaker": raw.get("speaker")})
+    if not sents:
+        return "", {"candidates": 0, "source_sentences": 0}
+
+    direction_words = {w for w in re.findall(
+        r"\w+", str(direction or "").casefold(), flags=re.UNICODE)
+                       if len(w) >= 4}
+    hook_terms = {
+        "mistake", "secret", "truth", "problem", "reason", "changed",
+        "learned", "failed", "won", "lost", "money", "million", "never",
+        "always", "best", "worst", "how", "why", "but", "because",
+    }
+    continuation = ("and ", "but ", "so ", "because ", "then ", "it ",
+                    "that ", "this ", "they ", "he ", "she ", "yes ",
+                    "no ", "well ", "exactly ")
+    answer_cues = ("because ", "the reason", "what happened", "i think",
+                   "i learned", "the answer", "it was", "we did")
+    candidates = []
+    for anchor in range(len(sents)):
+        start_i = anchor
+        current = sents[anchor]
+        if anchor > 0:
+            previous = sents[anchor - 1]
+            cur_low = current["text"].casefold()
+            prev_question = previous["text"].rstrip().endswith("?")
+            speaker_reply = (previous.get("speaker") is not None
+                             and current.get("speaker") is not None
+                             and previous.get("speaker") != current.get("speaker"))
+            if speaker_reply and (prev_question
+                                  or cur_low.startswith(answer_cues)) \
+                    and current["t0"] - previous["t1"] <= 2.5:
+                start_i = anchor - 1
+
+        # Prefer a complete 25-60s arc. End only on a sentence boundary and
+        # let terminal punctuation / a new question break ties near target.
+        possible = []
+        for end_i in range(start_i, len(sents)):
+            span = sents[end_i]["t1"] - sents[start_i]["t0"]
+            if span > CLIP_MAX_S:
+                break
+            if span >= 18.0:
+                ending = sents[end_i]["text"].rstrip()
+                boundary = ending.endswith((".", "!", "?"))
+                possible.append((abs(span - 42.0) - (.9 if boundary else 0),
+                                 end_i))
+            if span >= 60.0:
+                break
+        if not possible:
+            continue
+        end_i = min(possible)[1]
+        rows = sents[start_i:end_i + 1]
+        start, end = rows[0]["t0"], rows[-1]["t1"]
+        text = " ".join(row["text"] for row in rows)
+        words = re.findall(r"\w+", text.casefold(), flags=re.UNICODE)
+        distinct = len(set(words)) / max(1, len(words))
+        speakers = {row.get("speaker") for row in rows
+                    if row.get("speaker") is not None}
+        first = rows[0]["text"].casefold().lstrip()
+        questions = sum(row["text"].rstrip().endswith("?") for row in rows)
+        score = 2.2 * distinct
+        score += 1.4 if questions and len(speakers) >= 2 else .35 * questions
+        score += min(2.0, sum(w in hook_terms for w in words) * .18)
+        score += min(1.5, sum(any(ch.isdigit() for ch in w)
+                              for w in words) * .3)
+        score += min(1.8, len(direction_words.intersection(words)) * .45)
+        score += .5 if rows[-1]["text"].rstrip().endswith((".", "!")) else 0
+        if first.startswith(continuation) and start_i == anchor:
+            score -= 1.2
+        if questions and len(speakers) < 2 \
+                and not any(row["text"].casefold().startswith(answer_cues)
+                            for row in rows[1:]):
+            score -= .6
+        candidates.append({"start": start, "end": end, "score": score,
+                           "rows": rows})
+
+    if not candidates:
+        return _transcript_block(index), {
+            "candidates": 0, "source_sentences": len(sents)}
+
+    # Evidence grows with both requested output and recording length. Two
+    # strong arcs per five-minute region prevents an opening-heavy shortlist;
+    # remaining places go to the strongest non-duplicate arcs globally.
+    budget = max(16, int(n_target or 1) * 6,
+                 int(math.ceil(max(duration, 1.0) / 600.0)) * 4)
+    budget = min(64, budget)
+    bucket_s = max(180.0, max(duration, 1.0) /
+                   max(1.0, math.ceil(budget / 2.0)))
+    buckets = {}
+    for candidate in candidates:
+        midpoint = (candidate["start"] + candidate["end"]) / 2.0
+        buckets.setdefault(int(midpoint / bucket_s), []).append(candidate)
+
+    chosen = []
+
+    def duplicate(candidate):
+        for old in chosen:
+            overlap = max(0.0, min(candidate["end"], old["end"])
+                          - max(candidate["start"], old["start"]))
+            shorter = min(candidate["end"] - candidate["start"],
+                          old["end"] - old["start"])
+            if shorter > 0 and overlap / shorter > .68:
+                return True
+        return False
+
+    for bucket in sorted(buckets):
+        for candidate in sorted(buckets[bucket],
+                                key=lambda row: -row["score"]):
+            if not duplicate(candidate):
+                chosen.append(candidate)
+                break
+    for candidate in sorted(candidates, key=lambda row: -row["score"]):
+        if len(chosen) >= budget:
+            break
+        if not duplicate(candidate):
+            chosen.append(candidate)
+    chosen.sort(key=lambda row: row["start"])
+
+    blocks = []
+    for i, candidate in enumerate(chosen, 1):
+        blocks.append(
+            f"CANDIDATE ARC {i} "
+            f"[{candidate['start']:.1f}-{candidate['end']:.1f}]")
+        for row in candidate["rows"]:
+            speaker = (f" S{row['speaker']}"
+                       if row.get("speaker") is not None else "")
+            blocks.append(
+                f"[{row['t0']:.1f}-{row['t1']:.1f}]{speaker} {row['text']}")
+        blocks.append("")
+    return "\n".join(blocks).strip(), {
+        "candidates": len(chosen), "source_sentences": len(sents),
+        "source_duration_s": round(float(duration or 0.0), 1)}
 
 
 def _validated_clips(raw, duration, want, index=None, visual=False):
@@ -379,6 +543,43 @@ def _validated_clips(raw, duration, want, index=None, visual=False):
             "score": max(0, min(100, int(c.get("score") or 50))),
             "music": bool(c.get("music")),
         }
+        story = c.get("story") or {}
+        if isinstance(story, dict):
+            clean_story = {
+                stage: re.sub(r"\s+", " ", str(story.get(stage) or ""))
+                .strip()[:300]
+                for stage in ("setup", "development", "payoff")
+            }
+            if any(clean_story.values()):
+                normalized["story"] = clean_story
+        visual_direction = re.sub(r"\s+", " ", str(
+            c.get("visual_direction") or "")).strip()[:500]
+        if visual_direction:
+            normalized["visual_direction"] = visual_direction
+        broll = []
+        for raw_moment in (c.get("broll") or [])[:6]:
+            if not isinstance(raw_moment, dict):
+                continue
+            try:
+                at = float(raw_moment["at"])
+                duration_s = max(1.0, min(8.0, float(
+                    raw_moment.get("duration_s") or 3.0)))
+            except (KeyError, TypeError, ValueError):
+                continue
+            query = re.sub(r"\s+", " ", str(
+                raw_moment.get("query") or "")).strip()[:160]
+            purpose = re.sub(r"\s+", " ", str(
+                raw_moment.get("purpose") or "")).strip()[:220]
+            if not query or not purpose or at < s or at > e:
+                continue
+            broll.append({
+                "at": round(at, 2), "duration_s": duration_s,
+                "query": query, "purpose": purpose,
+                "kind": ("photo" if str(raw_moment.get("kind") or "").lower()
+                         == "photo" else "video"),
+            })
+        if "broll" in c:
+            normalized["broll"] = broll
         if c.get("context_restored"):
             normalized["context_restored"] = str(c["context_restored"])[:80]
         clips.append(normalized)
@@ -394,6 +595,15 @@ def _validated_clips(raw, duration, want, index=None, visual=False):
     for i, c in enumerate(chosen):
         c["order"] = i
     return chosen
+
+
+def _caller_planned_clips(payload, index, duration):
+    """Normalize explicit outside-model arcs, or None for automatic planning."""
+    raw = payload.get("clips")
+    if raw is None:
+        return None
+    restored = _complete_conversation_arcs(raw, index, duration)
+    return _validated_clips(restored, duration, len(raw), index=index)
 
 
 def _complete_conversation_arcs(raw, index, duration):
@@ -529,19 +739,18 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
     n_target = min(want, config.SHORTS_MAX_CLIPS) if want \
         else _default_count(duration)
 
-    len_hint = "Each clip should run 15-60 seconds."
-    if style and style.get("analyzed"):
-        ref_len = style.get("duration_s") or 0
-        if ref_len:
-            lo = max(CLIP_MIN_S + 2, min(55, ref_len * 0.7))
-            hi = min(CLIP_MAX_S - 5, max(25, ref_len * 1.3))
-            len_hint = (f"The user's reference short is {ref_len:.0f}s with "
-                        f"{style.get('cuts_per_min', 0):.0f} cuts/min and "
-                        f"{style.get('energy')} energy — aim for "
-                        f"{lo:.0f}-{hi:.0f}s clips with the same feel.")
+    len_hint = ("Let each selected story use the time its complete arc needs "
+                "(often 25-90 seconds); completeness outranks runtime. The "
+                "editing reference belongs to the later child editor and "
+                "must not distort story selection.")
     note = (payload.get("style_note") or "").strip()[:400]
 
     transcript = _transcript_block(index)
+    shortlist_meta = None
+    if len(transcript) >= LONG_TRANSCRIPT_DIRECT_CHARS or \
+            transcript.endswith("[transcript truncated]"):
+        transcript, shortlist_meta = _shortlist_transcript_arcs(
+            index, duration, n_target, note)
     visual_ready = bool(index.get("tile_keys") or []) \
         and llm.vision_available()
     if (not transcript.strip() or not _transcript_is_useful(index, duration)) \
@@ -555,14 +764,27 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
             config.TMP_DIR, f"shorts_visual_{(job or {}).get('id', 'plan')}")
         os.makedirs(wd, exist_ok=True)
         return _visual_plan_clips(index, duration, n_target, want, note, wd)
+    evidence_note = ""
+    evidence_label = "TRANSCRIPT"
+    if shortlist_meta:
+        evidence_label = "RANKED COMPLETE-ARC EVIDENCE"
+        evidence_note = (
+            f"The source has {shortlist_meta['source_sentences']} timed "
+            f"sentences. A deterministic discourse pass surfaced "
+            f"{shortlist_meta['candidates']} complete candidate arcs spread "
+            "across the FULL recording; this is not a chronological "
+            "truncation. Judge them globally. Keep start/end on sentence "
+            "boundaries shown inside ONE candidate arc; never splice two "
+            "unrelated arcs together.\n")
     user = (f"Video duration: {duration:.1f}s. "
             f"Aim for {n_target} clips (fewer if the material is thin, "
             f"never more than {config.SHORTS_MAX_CLIPS}). {len_hint}\n"
             f"Detected speakers: {int(index.get('speakers') or 0)}. "
             "When there are multiple speakers, preserve complete nearby "
             "question-and-answer turns rather than isolated quotes.\n"
+            + evidence_note
             + (f"User's direction: {note}\n" if note else "")
-            + f"\nTRANSCRIPT:\n{transcript}")
+            + f"\n{evidence_label}:\n{transcript}")
     out = _ask_json(worker_db, job, subscribed, plan, _PLAN_SYSTEM, user,
                     "shorts_plan", max_tokens=3500)
     raw_clips = _complete_conversation_arcs(
@@ -592,11 +814,15 @@ def _create_child(conn, user_id, parent, clip):
                        VALUES (%s, %s, %s, 'short', %s, %s)
                        RETURNING id""",
                     (user_id, clip["title"], session_id, parent["id"],
-                     Json({"clip": {"order": clip["order"],
-                                    "start": clip["start"],
-                                    "end": clip["end"],
-                                    "score": clip["score"],
-                                    "hook": clip["hook"]}})))
+                     Json({"clip": {
+                         key: clip.get(key) for key in (
+                             "order", "start", "end", "score", "hook",
+                             "story", "visual_direction", "broll")
+                         if clip.get(key) is not None},
+                           "shorts_editor": {
+                               "status": "locked",
+                               "parent_project_id": parent["id"],
+                           }})))
         child_id = cur.fetchone()["id"]
     return child_id, session_id
 
@@ -613,103 +839,27 @@ def _share_asset(conn, child_id, src_asset, note):
         fps=src_asset.get("fps"), sha256=src_asset.get("sha256"), meta=meta)
 
 
-def _seed_child(worker_db, job, child_id, index, clip, style, workdir,
-                proxy_local=None):
-    """Build the child's EDL through the agent's own tools. Returns
-    (edl_version, notes). Tool REJECTions degrade the styling, never fail
-    the clip — a short without a grade is still a short."""
+def _seed_story_child(worker_db, job, child_id, index, clip, workdir):
+    """Cut the parent's chosen story and nothing else.
+
+    This is intentionally small. The fresh agent started by the card's Edit
+    button must make every creative decision after it has watched this exact
+    reel and loaded the relevant craft skills. Returning a decorated draft
+    here would quietly restore the old one-recipe-for-everything product.
+    """
     child = worker_db.run(dbx.get_project, child_id)
     wd = os.path.join(workdir, f"child_{child_id}")
     os.makedirs(wd, exist_ok=True)
     ctx = agent_tools.ToolContext(worker_db, job, child, index, wd)
-    if proxy_local and os.path.exists(proxy_local):
-        # Every child shares the parent's proxy by key — download it once
-        # for the whole run, not once per child (the reframe sampler reads
-        # frames from it in every seed).
-        ctx._proxy_local = proxy_local
-    notes = []
-
-    def call(tool, **args):
-        try:
-            out = agent_tools.execute(ctx, tool, args)
-        except agent_tools.AskUser as e:
-            out = f"skipped (would ask: {e.question})"
-        except Exception as e:
-            out = f"failed ({str(e)[:160]})"
-        out = str(out)
-        notes.append(f"{tool}: {(out.splitlines() or [''])[0][:160]}")
-        return out
-
-    call("keep_segments", segments=[[clip["start"], clip["end"]]],
-         snap_to_words=True)
-    call("auto_reframe", ratio="9:16", mode="auto")
-
-    words = [w for w in (index.get("words") or []) if not w.get("filler")]
-    spoken = [w for w in words
-              if clip["start"] - 0.05
-              <= (float(w["t0"]) + float(w["t1"])) / 2
-              <= clip["end"] + 0.05]
-    if len(spoken) >= 4:
-        # size 'l': a vertical reel is watched on a phone with the sound
-        # often off — captions are the read, not a garnish. 'm' (the Aug 8
-        # run) read like a broadcast subtitle; modern reels set them big.
-        cap_style = {"preset": (style or {}).get("captions_preset")
-                     or "clean", "size": "l"}
-        if (style or {}).get("uppercase"):
-            cap_style["uppercase"] = True
-        if (style or {}).get("captions", True):
-            call("add_captions", mode="from_transcript", style=cap_style)
-        length = clip["end"] - clip["start"]
-        punches = max(1, min(6, int(round(length / 9.0))))
-        call("punch_in_on_emphasis", count=punches,
-             strength=(style or {}).get("punch_strength") or 0.12)
-
-    grade = (style or {}).get("grade")
-    if grade in GRADE_PRESETS:
-        call("set_color_grade", preset=grade)
-
-    music = (style or {}).get("music") or {}
-    # THE USER'S WORD BEATS EVERY HEURISTIC. The Aug 8 run: the user typed
-    # "add music" into the shorts direction and got silence on all 8 clips,
-    # because music only fired when the REFERENCE was music-prominent or the
-    # clip had almost no speech. An explicit ask forces it everywhere; the
-    # planner's per-clip music=true now also counts under speech — that is
-    # what ducking is FOR (duck=True sits the bed under the voice).
-    want_music = bool((style or {}).get("music_requested")) \
-        or bool(music.get("prominent")) or bool(clip.get("music"))
-    if want_music:
-        try:
-            _add_music(ctx, call, worker_db, child_id, clip, music)
-        except Exception as e:
-            notes.append(f"music: failed ({str(e)[:120]})")
-
-    row = ctx.latest_edl()
-    shutil.rmtree(wd, ignore_errors=True)
-    return row["version"], notes
-
-
-def _add_music(ctx, call, worker_db, child_id, clip, music):
-    """Best-effort: search the licensed pool, fetch one, lay it under the
-    clip with ducking. Every step already refuses politely on its own."""
-    query = music.get("query") or "upbeat energetic beat"
-    length = clip["end"] - clip["start"]
-    out = call("search_music", query=query,
-               min_seconds=max(15, int(length * 0.8)))
-    hits = getattr(ctx, "_music_hits", None) or {}
-    if not hits:
-        return
-    bpm = music.get("bpm")
-
-    def rank(h):
-        hb = h.get("bpm")
-        if bpm and hb:
-            return abs(float(hb) - float(bpm))
-        return 1e6
-    best = sorted(hits.values(), key=rank)[0]
-    call("fetch_music", id=best["id"])
-    asset = worker_db.run(dbx.latest_asset, child_id, "music")
-    if asset:
-        call("add_music", storage_key=asset["storage_key"], duck=True)
+    try:
+        result = agent_tools.execute(
+            ctx, "keep_segments",
+            {"segments": [[clip["start"], clip["end"]]],
+             "snap_to_words": True})
+        row = ctx.latest_edl()
+        return row["version"], str(result).splitlines()[0][:200]
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ the job
@@ -731,12 +881,6 @@ def run_shorts_plan(worker_db, job):
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     if not original or not original.get("sha256"):
         raise RuntimeError("the video is still being analyzed")
-    # Proxy-first uploads: the project is editable off the browser proxy while
-    # the full-resolution original is STILL UPLOADING. Finals read the
-    # original, so cutting proceeds now and the exports are deferred — the
-    # backend's original-ready hook fans them out the moment the bytes land.
-    original_pending = (original.get("meta") or {}) \
-        .get("upload_state") == "pending"
     idx_row = worker_db.run(dbx.get_index_by_sha, original["sha256"])
     if not idx_row:
         raise RuntimeError("the video is still being analyzed")
@@ -810,25 +954,23 @@ def run_shorts_plan(worker_db, job):
         worker_db.run(dbx.set_progress, job_id, 8)
 
         ref = worker_db.run(_find_reference, project_id)
-        style = None
-        if ref:
-            style = _reference_profile(worker_db, job, ref, workdir)
-        # The user's typed direction outranks anything measured off a
-        # reference: "add music" in the note means every clip gets a bed
-        # (ducked under speech), full stop — the Aug 8 run ignored exactly
-        # this and shipped 8 silent clips against an explicit ask.
-        note_l = (payload.get("style_note") or "").lower()
-        if re.search(r"\b(music|soundtrack|song|beat|bgm|track)\b", note_l):
-            style = style or {}
-            style["music_requested"] = True
-            style.setdefault("music", {})
+        # The scout never converts a reference into presets. Preserve the real
+        # asset and the user's words for the fresh child editor, which can
+        # watch/hear them in context and make its own decisions.
+        style = ({"source": "reference",
+                  "reference_asset_id": ref["id"]} if ref else {})
+        if (payload.get("style_note") or "").strip():
+            style["user_note"] = str(payload["style_note"]).strip()[:400]
+        style = style or None
         worker_db.run(dbx.set_progress, job_id, 22)
 
         clips = list(shorts_meta.get("clips") or []) \
             if shorts_meta.get("plan_job_id") == job_id else []
+        caller_planned = _caller_planned_clips(payload, index, duration)
         if not clips:
-            clips = _plan_clips(worker_db, job, index, duration, style,
-                                payload, subscribed, plan, workdir=workdir)
+            clips = (caller_planned if caller_planned is not None else
+                     _plan_clips(worker_db, job, index, duration, style,
+                                 payload, subscribed, plan, workdir=workdir))
         if not clips:
             # NOT permanent: this is an LLM planning answer, and a retry can
             # genuinely land clips where the first pass came back empty.
@@ -837,20 +979,25 @@ def run_shorts_plan(worker_db, job):
         worker_db.run(dbx.set_progress, job_id, 35)
 
         shorts_meta = {
-            "status": "cutting", "plan_job_id": job_id,
+            "status": "selecting", "plan_job_id": job_id,
             "started_at": shorts_meta.get("started_at") or _now_iso(),
             "reference_asset_id": ref["id"] if ref else None,
             "style_profile": style,
-            "finals_deferred": bool(original_pending),
+            "selection_source": (str(payload.get("source") or "caller_direct")
+                                 if caller_planned is not None else
+                                 "valmera_planner"),
+            "finals_deferred": False,
             "clips": clips,
         }
         worker_db.run(_save_shorts_meta, project_id, shorts_meta)
 
         proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
         n = len(clips)
-        # Phase 1 — children EXIST first: cheap ordered INSERTs, so the board
-        # can draw every card before a single frame is cut.
-        for clip in clips:
+        # The scout creates RAW STORY CUTS. No caption preset, crop, grade,
+        # zoom, B-roll, music, final render, or other creative choice belongs
+        # here. Each card stays locked until the user explicitly boots its
+        # fresh editor.
+        for position, clip in enumerate(clips, 1):
             if not clip.get("child_project_id"):
                 child_id, child_session = worker_db.run(
                     _create_child, job["user_id"], project, clip)
@@ -858,69 +1005,32 @@ def run_shorts_plan(worker_db, job):
                               project_id)
                 if proxy:
                     worker_db.run(_share_asset, child_id, proxy, project_id)
+                if ref:
+                    # The child editor must be able to watch the real reference
+                    # itself. A prose style summary is context, not eyesight.
+                    worker_db.run(_share_asset, child_id, ref, project_id)
                 worker_db.run(
                     dbx.add_message, child_session, "assistant",
-                    f"This short — “{clip['title']}” — is cut from "
-                    f"“{project['title']}” "
-                    f"({clip['start']:.0f}s-{clip['end']:.0f}s). It's "
-                    "rendering now. Tell me what to refine: the hook, "
-                    "captions, pacing, music, any effect you want.",
+                    f"“{clip['title']}” was selected from “{project['title']}” "
+                    f"({clip['start']:.0f}s-{clip['end']:.0f}s) because it "
+                    "contains a complete story worth developing. This is the "
+                    "un-styled story cut; its fresh editor has not been "
+                    "started yet.",
                     {"kind": "short_intro"})
                 clip["child_project_id"] = child_id
-                worker_db.run(_save_shorts_meta, project_id, shorts_meta)
-
-        # Phase 2 — seed the EDLs IN PARALLEL, each on its own DB connection
-        # (Db is one-per-thread by contract). The Aug 8 session seeded 8
-        # children one after another and the user watched ~22 minutes of
-        # upload-to-done; seeding is tool calls + a few frame samples, so
-        # four at once is bounded by IO, not CPU. Each finished child fans
-        # its final out IMMEDIATELY — renders overlap the remaining seeds.
-        meta_lock = threading.Lock()
-        done = [0]
-        shared_proxy = None
-        if proxy:
-            shared_proxy = os.path.join(workdir, "shared_proxy.mp4")
-            try:
-                storage.download_to(proxy["storage_key"], shared_proxy)
-            except Exception:
-                shared_proxy = None
-
-        def _seed_one(clip):
-            db_local = dbx.Db()
-            try:
-                version, notes = _seed_child(
-                    db_local, job, clip["child_project_id"], index, clip,
-                    style, workdir, proxy_local=shared_proxy)
-                with meta_lock:
-                    clip["edl_version"] = version
-                    clip["seed_notes"] = notes[-6:]
-                    if original_pending:
-                        clip["final_deferred"] = True
-                if not original_pending:
-                    db_local.run(dbx.enqueue_job, clip["child_project_id"],
-                                 job["user_id"], "final",
-                                 {"edl_version": version,
-                                  "source": "shorts"})
-                with meta_lock:
-                    done[0] += 1
-                    db_local.run(_save_shorts_meta, project_id, shorts_meta)
-                    db_local.run(dbx.set_progress, job_id,
-                                 35 + int(58 * done[0] / n))
-            except Exception as e:
-                with meta_lock:
-                    clip["seed_error"] = str(e)[:200]
-                print(f"[shorts {job_id}] child "
-                      f"{clip.get('child_project_id')} seed failed: {e}",
-                      flush=True)
-            finally:
-                db_local.reset()
-
-        todo = [c for c in clips if not c.get("edl_version")]
-        if todo:
-            with ThreadPoolExecutor(
-                    max_workers=min(4, max(1, len(todo)))) as pool:
-                list(pool.map(_seed_one, todo))
-        worker_db.run(_save_shorts_meta, project_id, shorts_meta)
+            if not clip.get("seed_edl_version"):
+                version, seed_note = _seed_story_child(
+                    worker_db, job, clip["child_project_id"], index, clip,
+                    workdir)
+                clip["seed_edl_version"] = version
+                # edl_version remains for older clients; its meaning is now
+                # explicitly the raw selection boundary, not a styled edit.
+                clip["edl_version"] = version
+                clip["seed_note"] = seed_note
+            clip["edit_status"] = "locked"
+            worker_db.run(_save_shorts_meta, project_id, shorts_meta)
+            worker_db.run(dbx.set_progress, job_id,
+                          35 + int(58 * position / n))
 
         shorts_meta["status"] = "ready"
         shorts_meta["finished_at"] = _now_iso()
@@ -929,37 +1039,19 @@ def run_shorts_plan(worker_db, job):
         if session_id:
             mins = duration / 60.0
             lens = [c["end"] - c["start"] for c in clips]
-            styled = ""
-            if style and style.get("analyzed"):
-                bits = [f"{style.get('energy')} pacing"]
-                if style.get("captions_preset"):
-                    bits.append(f"{style['captions_preset']} captions")
-                if style.get("grade"):
-                    bits.append(f"a {style['grade']} grade")
-                if (style.get("music") or {}).get("prominent"):
-                    bits.append("music matched to its tempo")
-                styled = (" I styled them after your reference — "
-                          + ", ".join(bits) + ".")
-            tail = ("They're rendering on your Shorts board now — each one "
-                    "is its own project, so open any of them and tell me "
-                    "what to change.")
-            if original_pending:
-                tail = ("They're built and on your Shorts board — your "
-                        "full-resolution video is still uploading in the "
-                        "background, and each one exports automatically the "
-                        "moment it lands. Open any of them meanwhile and "
-                        "tell me what to change.")
             worker_db.run(
                 dbx.add_message, session_id, "assistant",
-                f"I watched all {mins:.0f} minutes and cut {n} short"
-                f"{'s' if n != 1 else ''} ({min(lens):.0f}-{max(lens):.0f}s "
-                "each), reframed to 9:16 with captions and emphasis "
-                f"punch-ins.{styled} {tail}",
-                {"kind": "shorts_ready", "clips": n})
+                f"I reviewed all {mins:.0f} minutes and found {n} stor"
+                f"{'ies' if n != 1 else 'y'} genuinely worth developing "
+                f"({min(lens):.0f}-{max(lens):.0f}s). These are raw story "
+                "cuts, not template edits. Choose Edit on any card to boot "
+                "a fresh short-form editor for that reel.",
+                {"kind": "shorts_candidates", "clips": n,
+                 "parent_project_id": project_id})
 
         worker_db.run(dbx.set_progress, job_id, 97)
-        return {"clips": n, "billable": True,
-                "reference": bool(ref and style and style.get("analyzed")),
+        return {"clips": n, "rendered_clips": 0, "billable": True,
+                "reference": bool(ref),
                 "children": [c.get("child_project_id") for c in clips]}
     except Exception:
         # Leave an honest board state — the studio overlays the job error.

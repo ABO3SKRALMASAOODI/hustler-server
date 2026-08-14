@@ -175,6 +175,32 @@ def test_insert_rotation_is_local_in_the_filtergraph():
     assert "[insvr0]scale=" in g
 
 
+def test_video_insert_motion_is_rendered_locally_without_timing_changes():
+    ins = {"id": "ins-video", "kind": "video", "asset_key": REC,
+           "at_output_s": 10.0, "duration_s": 4.0,
+           "source_start_s": 2.0, "motion": "pan_left"}
+    normalized = _edl(ins)
+    assert normalized["inserts"][0]["motion"] == "pan_left"
+    g = _graph(normalized, [(1, normalized["inserts"][0], True)])
+    assert "[v_insn0]zoompan=z='1.15'" in g
+    assert "(iw-iw/zoom)*(1-(on/120))" in g
+    # The same four-second source/audio windows remain authoritative.
+    assert "trim=start=2.000:end=6.000" in g
+    assert "atrim=start=2.000:end=6.000" in g
+
+
+def test_insert_media_keeps_requested_motion_on_video_broll():
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 10.0]]
+    ctx = _Ctx(e)
+    res = agent_tools.insert_media(ctx, REC, 10.0, duration_s=3.0,
+                                   clip_start_s=1.0, motion="zoom_in")
+    assert res.startswith("EDL v"), res
+    item = ctx.latest_edl()["json"]["inserts"][0]
+    assert item["kind"] == "video" and item["motion"] == "zoom_in"
+    assert "local zoom_in camera move" in res
+
+
 def test_visual_only_freeze_keeps_program_clock_and_audio(monkeypatch):
     e = default_edl(SRC)
     e["keep"] = [[0.0, 10.0]]
@@ -207,6 +233,35 @@ def test_new_inserts_preserve_the_whole_asset_by_default():
         ctx, REC, 10.0, duration_s=2.0, clip_start_s=1.0)
     assert res.startswith("EDL v"), res
     assert ctx.latest_edl()["json"]["inserts"][0]["fit"] == "pad_blur"
+
+
+def test_auto_fit_follows_a_black_pad_frame():
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 10.0]]
+    e["frame"] = {"ratio": "16:9", "mode": "pad",
+                  "focus_x": 0.5, "focus_y": 0.5, "focus_track": None}
+    ctx = _Ctx(e)
+    res = agent_tools.insert_media(
+        ctx, REC, 10.0, duration_s=2.0, clip_start_s=1.0)
+    assert res.startswith("EDL v"), res
+    assert ctx.latest_edl()["json"]["inserts"][0]["fit"] == "pad"
+
+
+def test_insert_and_overlay_clamp_windows_past_the_clip():
+    e = default_edl(SRC)
+    e["keep"] = [[0.0, 20.0]]
+    ctx = _Ctx(e)
+    ctx.db.assets[REC]["duration_s"] = 3.6
+    res = agent_tools.insert_media(
+        ctx, REC, 0.0, duration_s=8.0, clip_start_s=0.0)
+    assert res.startswith("EDL v"), res
+    assert "asked 8" in res and "used 3.6s" in res
+    assert ctx.latest_edl()["json"]["inserts"][0]["duration_s"] == 3.6
+    ov = agent_tools.add_overlay(
+        ctx, REC, 1.0, duration_s=8.0, entrance="whoosh")
+    assert ov.startswith("EDL v"), ov
+    assert ctx.latest_edl()["json"]["overlays"][0]["duration_s"] == 3.6
+    assert ctx.latest_edl()["json"]["overlays"][0].get("entrance") is None
 
 
 def test_insert_crop_does_not_require_prior_inspection_permission():

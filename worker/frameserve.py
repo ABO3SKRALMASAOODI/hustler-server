@@ -33,6 +33,7 @@ import uuid
 
 import config
 import media
+import motion_judge
 import storage
 
 # More than a look ever asks for (look_at_asset samples at most 6). A bound,
@@ -86,11 +87,18 @@ def run_frames_job(worker_db, job):
             w_, h_, fps_ = pi.get("width"), pi.get("height"), pi.get("fps")
         except Exception:
             pass
+        motion_profile = None
+        if payload.get("motion_profile"):
+            try:
+                motion_profile = motion_judge.analyze_video(local, dur)
+            except Exception:
+                pass
         # Dims ride along because the caller usually has none: browser
         # uploads record duration only, and the aspect feeds the screen
         # detector's plausibility check (probe applies the display matrix, so
         # a rotated phone clip reports its true shape).
         return {"keys": out_keys, "errors": errors, "duration_s": dur,
-                "width": w_, "height": h_, "fps": fps_}
+                "width": w_, "height": h_, "fps": fps_,
+                "motion_profile": motion_profile}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

@@ -58,6 +58,40 @@ def test_grade_mapping_only_returns_real_presets():
     assert shorts._pick_grade({"grade_words": "natural look"}) is None
 
 
+def test_reference_profile_carries_compact_measured_grammar(tmp_path):
+    import db as dbx
+
+    index = {
+        "video": {"duration": 40.0, "width": 1080, "height": 1920},
+        "shots": [{"start": i * 5.0, "end": (i + 1) * 5.0}
+                  for i in range(8)],
+        "words": [{"w": "word", "t0": i * .5, "t1": i * .5 + .2}
+                  for i in range(40)],
+        "perception": {"bpm": 120, "bpm_conf": .9,
+                       "beats": [i * .5 for i in range(81)],
+                       "energy": [-24] * 10 + [-18] * 20 + [-22] * 10},
+        "motion": {"intensity": "moderate"},
+    }
+
+    class Db:
+        def run(self, fn, *_args):
+            if fn is dbx.get_asset:
+                return {"id": 5, "sha256": "abc",
+                        "meta": {"indexed": True}}
+            if fn is dbx.get_index_by_sha:
+                return {"json": index}
+            raise AssertionError(fn)
+
+    profile = shorts._reference_profile(
+        Db(), {"id": 9}, {"id": 5, "meta": {"filename": "style.mp4"}},
+        str(tmp_path))
+
+    assert profile["measured_grammar"]["rhythm"]["shot_median_s"] == 5
+    assert "cut_times_s" not in profile["measured_grammar"]["rhythm"]
+    assert "transfer its relationships and hierarchy" in \
+        profile["measured_grammar_text"]
+
+
 # ------------------------------------------------------------------ the plan
 def _fake_plan(monkeypatch, clips):
     monkeypatch.setattr(shorts, "_ask_json",
@@ -104,6 +138,54 @@ def test_plan_respects_requested_count(monkeypatch):
     assert len(out) == 3
     assert [c["score"] for c in out] == sorted(
         [c["score"] for c in out], reverse=True)
+
+
+def test_story_treatment_survives_plan_validation():
+    raw = [{
+        "start": 30, "end": 62, "title": "The launch mistake",
+        "hook": "We lost the launch", "score": 94, "music": False,
+        "story": {"setup": "The team bets on launch day",
+                  "development": "Customer warnings are ignored",
+                  "payoff": "The failure changes the plan"},
+        "visual_direction": "Clean evidence-led captions and restrained motion",
+        "broll": [{"at": 42, "query": "failed mobile app launch screen",
+                   "purpose": "prove the product failure", "duration_s": 3}],
+    }]
+    out = shorts._validated_clips(raw, 600.0, 1, index=_index(SENTS))
+
+    assert out[0]["story"]["payoff"] == "The failure changes the plan"
+    assert out[0]["visual_direction"].startswith("Clean evidence")
+    assert out[0]["broll"][0]["query"] == "failed mobile app launch screen"
+    assert "MICRO-STORY, NOT A TRANSCRIPT EXCERPT" in shorts._PLAN_SYSTEM
+    assert "You do not style, caption, reframe" in shorts._PLAN_SYSTEM
+    assert shorts._caller_planned_clips({"clips": raw}, _index(SENTS),
+                                        600.0)[0]["story"]["setup"] \
+        == "The team bets on launch day"
+    assert shorts._caller_planned_clips({}, _index(SENTS), 600.0) is None
+
+
+def test_shorts_scout_keeps_reference_out_of_story_selection(
+        monkeypatch):
+    seen = {}
+
+    def fake_ask(*args, **_kwargs):
+        seen["user"] = args[5]
+        return {"clips": [{"start": 30, "end": 58,
+                            "title": "A complete lesson", "score": 90}]}
+
+    monkeypatch.setattr(shorts, "_ask_json", fake_ask)
+    style = {"analyzed": True, "duration_s": 35, "cuts_per_min": 28,
+             "energy": "hype",
+             "measured_grammar_text": (
+                 "pacing p10/median/p90=0.8/2.0/6.0s; "
+                 "energy=late_peak_then_release")}
+    out = shorts._plan_clips(
+        None, {"user_id": 1}, _index(SENTS), 600.0, style, {},
+        False, "free")
+
+    assert out[0]["title"] == "A complete lesson"
+    assert "editing reference belongs to the later child editor" in seen["user"]
+    assert "late_peak_then_release" not in seen["user"]
 
 
 def test_plan_without_speech_fails_honestly(monkeypatch):
@@ -186,6 +268,63 @@ def test_transcript_block_truncates():
     assert "truncated" in block
 
 
+def _long_podcast_index():
+    rows = []
+    for i in range(720):
+        text = ("A complete but ordinary discussion sentence about building "
+                "a company and learning from customers over time.")
+        speaker = i % 2
+        if i == 650:
+            text = "What was the launch mistake that cost 900000 dollars?"
+            speaker = 0
+        elif i == 651:
+            text = ("The launch failed because we ignored customer evidence, "
+                    "and the lesson changed our entire plan.")
+            speaker = 1
+        rows.append({"t0": i * 10.0, "t1": i * 10.0 + 8.0,
+                     "text": text, "speaker": speaker})
+    return {"sentences": rows, "speakers": 2,
+            "video": {"duration": 7200.0}}
+
+
+def test_long_podcast_shortlist_spans_full_source_and_keeps_qa_context():
+    index = _long_podcast_index()
+    full = shorts._transcript_block(index)
+    compact, meta = shorts._shortlist_transcript_arcs(
+        index, 7200.0, 6, "launch lessons and customer evidence")
+
+    assert meta["source_sentences"] == 720
+    assert 16 <= meta["candidates"] <= 64
+    assert len(compact) < len(full)
+    assert "CANDIDATE ARC" in compact
+    assert "6500.0-6508.0" in compact
+    assert "What was the launch mistake" in compact
+    assert "The launch failed because" in compact
+
+
+def test_long_podcast_planner_uses_ranked_arcs_not_opening_truncation(
+        monkeypatch):
+    seen = {}
+
+    def fake_ask(*args, **kwargs):
+        seen["user"] = args[5]
+        return {"clips": [{"start": 6500, "end": 6548,
+                            "title": "The $900K Launch Mistake",
+                            "hook": "What was the launch mistake",
+                            "score": 96, "music": False}]}
+
+    monkeypatch.setattr(shorts, "_ask_json", fake_ask)
+    out = shorts._plan_clips(
+        None, {"user_id": 1}, _long_podcast_index(), 7200.0, None,
+        {"count": 1, "style_note": "launch lessons"}, False, "free")
+
+    assert out[0]["title"] == "The $900K Launch Mistake"
+    assert "RANKED COMPLETE-ARC EVIDENCE" in seen["user"]
+    assert "not a chronological truncation" in seen["user"]
+    assert "6500.0-6508.0" in seen["user"]
+    assert "[transcript truncated]" not in seen["user"]
+
+
 # ------------------------------------------------------------------ wiring
 def test_job_type_is_registered_everywhere():
     import main
@@ -194,6 +333,39 @@ def test_job_type_is_registered_everywhere():
     assert main.RUNNERS.get("shorts_plan") is shorts.run_shorts_plan
     assert "shorts_plan" in main.FAIL_NOTES
     assert "shorts_plan" in main.REAPER_NOTES
+
+
+def test_seed_child_only_keeps_the_selected_story(monkeypatch, tmp_path):
+    """The scout must never sneak the old caption/crop/zoom recipe back in."""
+    import agent_tools
+    import db as dbx
+
+    calls = []
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.get_project:
+                return {"id": args[0]}
+            raise AssertionError(fn)
+
+    class FakeContext:
+        def latest_edl(self):
+            return {"version": 2}
+
+    monkeypatch.setattr(agent_tools, "ToolContext",
+                        lambda *_args, **_kwargs: FakeContext())
+    monkeypatch.setattr(
+        agent_tools, "execute",
+        lambda _ctx, name, args: calls.append((name, args)) or "kept story")
+
+    version, note = shorts._seed_story_child(
+        FakeDb(), {"id": 9}, 71, {}, {"start": 32, "end": 88},
+        str(tmp_path))
+
+    assert version == 2 and note == "kept story"
+    assert calls == [("keep_segments", {
+        "segments": [[32, 88]], "snap_to_words": True,
+    })]
 
 
 def test_make_shorts_is_an_agent_tool():
@@ -252,6 +424,79 @@ def test_make_shorts_returns_the_background_job_id():
     assert "shorts_status" in result
 
 
+def test_mcp_must_author_story_arcs_instead_of_calling_valmera_planner():
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    class FakeDb:
+        def run(self, fn, *_args):
+            if fn is dbx.has_active_job:
+                return False
+            raise AssertionError("MCP without explicit clips must not enqueue")
+
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=1800.0,
+        index={"words": [{"w": "hello"}]}, db=FakeDb(), project_id=7,
+        job={"user_id": 60, "type": "mcp_tool"})
+    result = agent_tools.make_shorts(ctx, style_note="make it engaging")
+
+    assert result.startswith("MCP DIRECT PLANNING REQUIRED")
+    assert "useful title, hook, and story summary" in result
+    assert "directly editing the opened child" in result
+
+
+def test_mcp_explicit_story_arcs_queue_locked_story_children():
+    from types import SimpleNamespace
+    import agent_tools
+    import db as dbx
+
+    captured = {}
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.has_active_job:
+                return False
+            if fn is dbx.enqueue_job:
+                captured["payload"] = args[3]
+                return 777
+            raise AssertionError(fn)
+
+    clips = [{
+        "start": 120, "end": 162, "title": "The launch mistake",
+        "hook": "What went wrong?", "score": 96,
+        "story": {"setup": "The host asks about the launch",
+                  "development": "The founder explains the ignored warning",
+                  "payoff": "The failure produces a durable lesson"},
+        # Creative treatment deliberately is not required at selection time.
+    }]
+    ctx = SimpleNamespace(
+        project={}, has_main_video=True, duration=1800.0,
+        index={"words": [{"w": "hello"}]}, db=FakeDb(), project_id=7,
+        job={"user_id": 60, "type": "mcp_tool"})
+    result = agent_tools.make_shorts(
+        ctx, style_note="premium founder podcast", clips=clips)
+
+    assert "job 777" in result
+    assert "uses the story arcs you selected" in result
+    assert captured["payload"]["source"] == "mcp_direct"
+    assert captured["payload"]["clips"][0]["story"]["payoff"].startswith(
+        "The failure")
+    assert "broll" not in captured["payload"]["clips"][0]
+    assert "visual_direction" not in captured["payload"]["clips"][0]
+    assert "LOCKED child" in result
+
+
+def test_parent_agent_cannot_boot_children_without_card_press():
+    from types import SimpleNamespace
+    import agent_tools
+
+    result = agent_tools.edit_shorts(
+        SimpleNamespace(), "make all of these cinematic")
+    assert result.startswith("LOCKED CARD BOUNDARY")
+    assert "Edit button" in result
+
+
 def test_make_shorts_can_queue_a_speechless_visual_plan(monkeypatch):
     """The chat tool must expose the worker's visual fallback, not reject it
     at the dispatcher with the old talking-video-only contract."""
@@ -286,3 +531,25 @@ def test_flat_clip_charge_rides_the_turn_charge():
     sig = inspect.signature(dbx.charge_turn_credits)
     assert "extra_credits" in sig.parameters
     assert sig.parameters["extra_credits"].default == 0.0
+
+
+def test_locked_story_selection_has_no_render_surcharge():
+    import db as dbx
+    import job_completion
+
+    seen = {}
+
+    class FakeWorkerDb:
+        def run(self, fn, *args):
+            if fn is dbx.charge_turn_credits:
+                seen["extra"] = args[2]
+                return 1.0
+            if fn is dbx.finish_job:
+                return True
+            raise AssertionError(fn)
+
+    result = {"clips": 6, "rendered_clips": 0, "billable": True}
+    assert job_completion.finalize_success(
+        FakeWorkerDb(), {"id": 7, "type": "shorts_plan", "user_id": 3},
+        result, "lease") is True
+    assert seen["extra"] == 0

@@ -1,0 +1,24 @@
+{
+  "slug": "podcast-conversation",
+  "identity": "A self-contained conversation cut whose value is the argument: a compelling question or claim, the minimum context needed to understand it, escalation or disagreement, and a resolved insight. The edit protects speaker meaning and natural reaction timing. Visual treatment is premium but subordinate—clean reframing, readable captions and occasional evidence-driven cutaways, not constant decoration.",
+  "rules": {
+    "selection": "choose one complete discourse arc from the full recording, not merely the earliest quotable sentence; preserve the nearby question/setup when the answer depends on it",
+    "coherence": "never splice unrelated answers into a synthetic opinion; pronouns, references and speaker turns must remain understandable",
+    "opening": "open on the strongest intelligible claim, tension or question; a cold answer is allowed only when it makes sense without missing setup",
+    "cuts": "remove true dead time and repairable filler word-safely while preserving meaningful hesitation, laughter, overlap and reactions",
+    "framing": "use speaker-aware close/medium reframing and motivated angle changes; do not create artificial motion on every sentence",
+    "captions": "one coherent premium family in a measured safe band, phrase breaks follow syntax, names are corrected, emphasis marks only argumentative peaks",
+    "broll": "use only when a cutaway proves or clarifies a named thing; generic mood stock is weaker than staying on a revealing face/reaction",
+    "sound": "speech is primary; music is absent or a very low, smoothly ducked bed; SFX and transitions require a specific structural event"
+  },
+  "rubric": {
+    "complete_exchange": true,
+    "setup_present_when_needed": true,
+    "no_synthetic_claims": true,
+    "speaker_turns_intelligible": true,
+    "word_safe_boundaries": true,
+    "caption_family_coherent": true,
+    "broll_has_named_evidentiary_purpose": true,
+    "speech_remains_dominant": true
+  }
+}

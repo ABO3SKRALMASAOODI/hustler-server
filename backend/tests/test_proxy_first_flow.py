@@ -228,6 +228,43 @@ def test_with_the_flag_off_a_deferred_original_is_not_deferred(env, monkeypatch)
     assert env.enqueued[0]["payload"].get("client_proxy_key") is None
 
 
+def test_direct_clip_upload_gets_perception_job_for_later_agent_turns(env):
+    out, status = video.complete_upload_core(7, 5, {
+        "storage_key": "clips/5/cutaway.mp4", "kind": "clip",
+        "filename": "cutaway.mp4", "bytes": 8_000_000,
+        "duration_s": 12.0,
+    })
+    assert status == 200
+    assert env.assets[out["asset_id"]]["kind"] == "video_clip"
+    assert env.enqueued == [{
+        "type": "index", "payload": {"asset_id": out["asset_id"]}}]
+    assert out["index_job_id"] is not None
+
+
+def test_direct_audio_upload_gets_transcript_and_acoustic_index_job(env):
+    out, status = video.complete_upload_core(7, 5, {
+        "storage_key": "music/5/voice-note.mp3", "kind": "music",
+        "filename": "voice-note.mp3", "bytes": 2_000_000,
+        "duration_s": 31.0,
+    })
+    assert status == 200
+    assert env.assets[out["asset_id"]]["kind"] == "music"
+    assert env.enqueued == [{
+        "type": "index", "payload": {"asset_id": out["asset_id"]}}]
+    assert out["index_job_id"] is not None
+
+
+def test_staged_clip_waits_for_tray_submit_before_indexing(env):
+    out, status = video.complete_upload_core(7, 5, {
+        "storage_key": "clips/5/staged.mp4", "kind": "clip",
+        "filename": "staged.mp4", "bytes": 8_000_000,
+        "duration_s": 12.0, "staged": True,
+    })
+    assert status == 200
+    assert out["staged"] is True
+    assert env.enqueued == []
+
+
 # ── the original landing ────────────────────────────────────────────────────
 
 def _pending_asset(cur, duration=355.0):

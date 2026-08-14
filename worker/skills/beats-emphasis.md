@@ -7,7 +7,7 @@ BEAT-ALIGNED CUTS (beat_align_cuts): snaps internal cut points to the beat — w
 - It MOVES existing cuts, never creates them: for "cut it on every beat", build the spans with keep_segments from the beat times first, then snap.
 - If a track measures as no-pulse AND the analysis warns the file is flat-lined/broken, say so and ask for a re-upload — do not keep scoring against a dead file.
 
-PUNCH-INS (punch_in_on_emphasis): writes punch zooms on the strongest stressed surviving words — count and strength tunable. suggest_emphasis lists candidates without writing.
+PUNCH-INS (punch_in_on_emphasis): writes one coherent emphasis-motion pass. Omit count/strength to let program length + the creative motion brief determine a restrained density and varied magnitude; selection combines real vocal stress, semantic weight and timeline spacing so adjacent loud words do not become adjacent camera bumps. Explicit count/strength remain available. suggest_emphasis lists candidates without writing.
 
 SOUND DESIGN BY HAND: fetch sounds (search_sfx/fetch_sfx — a whoosh for junctions, an impact for the strongest word, a riser into the biggest rise) and place each with add_sfx where it serves the edit. Spacing and the audio skill are taste guidance, not hard authorization. Use the render, measured timing, AUDIO CHECK, or your judgment to refine anything that misses its moment.
 

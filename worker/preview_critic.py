@@ -18,8 +18,14 @@ _SEVERITIES = {"blocker", "major", "minor"}
 _CATEGORIES = {
     "composition", "crop", "zoom", "caption_collision",
     "burned_text_collision", "typography", "insert", "continuity",
-    "effect", "black_frame", "other",
+    "effect", "black_frame", "narrative_relevance", "style_coherence",
+    "pacing_rhythm", "visual_hierarchy", "stock_quality", "other",
 }
+_RUBRIC_DIMENSIONS = {
+    "visual_coherence", "editorial_specificity", "narrative_support",
+    "motion_rhythm", "typography", "restraint",
+}
+_RUBRIC_LEVELS = {"strong", "adequate", "weak", "not_judged"}
 
 
 def _json_object(text):
@@ -77,11 +83,28 @@ def parse_report(answer):
             "repair": repair[:240],
             "confidence": round(confidence, 3),
         })
+    rubric = {}
+    for dimension, assessment in (raw.get("rubric") or {}).items():
+        if dimension not in _RUBRIC_DIMENSIONS or not isinstance(assessment, dict):
+            continue
+        level = str(assessment.get("level") or "").strip().lower()
+        evidence = str(assessment.get("evidence") or "").strip()
+        try:
+            confidence = min(max(float(assessment.get("confidence")), 0.0), 1.0)
+        except (TypeError, ValueError):
+            continue
+        if level not in _RUBRIC_LEVELS or not evidence:
+            continue
+        rubric[dimension] = {"level": level, "evidence": evidence[:240],
+                             "confidence": round(confidence, 3)}
     # A model may accidentally say pass beside a real finding. Evidence wins.
     if any(x["severity"] in {"blocker", "major"} and
            x["confidence"] >= 0.72 for x in clean):
         verdict = "repair"
-    return {"verdict": verdict, "findings": clean}
+    if any(x["level"] == "weak" and x["confidence"] >= 0.72
+           for x in rubric.values()):
+        verdict = "repair"
+    return {"verdict": verdict, "findings": clean, "rubric": rubric}
 
 
 def review(image_paths, image_labels, context):
@@ -109,8 +132,32 @@ text on existing text. Look specifically for:
   or frame edges; unreadable, generic, inconsistent or disproportionate type;
 - inserts/overlays showing blank canvas, bad fit, accidental bars, stretched
   media, or a composition with no meaningful content;
+- vector panels, lines, arrows, rings or progress indicators that cover the
+  subject/source UI, point at nothing, misstate progress, or feel like generic
+  decoration rather than clarifying the beat;
 - broken continuity, duplicate frames, unexpected black frames, harsh or
   cheap-looking effects, and visual clutter.
+
+This is also a CRAFT review, not just damage detection. Across the sampled
+sequence judge whether the visual language is coherent, every cutaway visibly
+supports its recorded narrative purpose rather than acting as generic stock
+wallpaper, the first frame has hierarchy, type treatment is intentional and
+consistent, movement/cut density has contrast instead of metronomic repetition,
+and effects show restraint. Do not reward mere feature count. A clean hard cut
+can be stronger than a transition; an unadorned shot can be stronger than an
+irrelevant cutaway. If the context names a B-roll purpose/query, compare the
+visible downloaded rendition with that purpose and flag a contradiction at its
+exact time. Do not infer relevance when the needed moment is absent from the
+sheets; mark the rubric dimension not_judged instead.
+
+Tiles labeled "text motion N state A/B" or "<shape> motion N state A/B" are
+an ORDERED state sequence from one explicit animation. Compare those states as
+a trajectory: does it enter
+from an intentional direction, avoid faces/source text and frame edges during
+travel, preserve legibility while scaling/rotating, and settle into a composed
+resting frame? The sequence can prove path, hierarchy, clipping and the logic
+of the settle; it still cannot prove interpolation smoothness between sampled
+states, so never invent stutter or easing defects that the tiles do not show.
 
 Do not flag expected pad/pad_blur background merely because bars exist. But do
 compare treatment ACROSS SHOTS: if a wide composition appropriately fits and a
@@ -126,11 +173,19 @@ brief, letterboxed postage-stamp gameplay (tiny picture in blurred bars)
 IS a major composition defect.
 Report only defects visible in the images; uncertainty lowers confidence.
 
-Return ONLY this JSON shape, with at most 6 findings:
+Return ONLY this JSON shape, with at most 6 findings. Every weak rubric
+dimension must have a corresponding concrete finding; use not_judged when the
+sample cannot prove it:
 {{"verdict":"pass|repair","findings":[{{"severity":"blocker|major|minor",
-"category":"composition|crop|zoom|caption_collision|burned_text_collision|typography|insert|continuity|effect|black_frame|other",
+"category":"composition|crop|zoom|caption_collision|burned_text_collision|typography|insert|continuity|effect|black_frame|narrative_relevance|style_coherence|pacing_rhythm|visual_hierarchy|stock_quality|other",
 "time_s":12.3,"evidence":"specific visible fact and image/tile",
-"repair":"one concrete corrective action","confidence":0.0}}]}}
+"repair":"one concrete corrective action","confidence":0.0}}],
+"rubric":{{"visual_coherence":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
+"editorial_specificity":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
+"narrative_support":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
+"motion_rhythm":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
+"typography":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}},
+"restraint":{{"level":"strong|adequate|weak|not_judged","evidence":"visible fact","confidence":0.0}}}}}}
 Use blocker only for unusable output; major for a defect likely to make a user
 reject the edit; minor for real polish that does not block delivery. A clean
 result is {{"verdict":"pass","findings":[]}}."""
@@ -139,7 +194,7 @@ result is {{"verdict":"pass","findings":[]}}."""
         # emitted (reasoning consumed the allowance first). The schema still
         # caps findings at six; this is completion room, not permission for a
         # longer review.
-        prompt, image_paths, max_tokens=1100,
+        prompt, image_paths, max_tokens=1500,
         purpose="independent_preview_critic", image_names=image_labels,
         reasoning_effort="low")
     return parse_report(answer)
@@ -160,9 +215,14 @@ def repair_lines(report, min_confidence=0.72):
         # before they authorize another EDL write.
         high_risk = finding["category"] in {
             "black_frame", "continuity", "insert"}
-        threshold = max(min_confidence, 0.90) if high_risk else min_confidence
+        evidence_hungry = finding["category"] in {
+            "narrative_relevance", "pacing_rhythm", "stock_quality"}
+        threshold = (max(min_confidence, 0.90) if high_risk else
+                     max(min_confidence, 0.82) if evidence_hungry else
+                     min_confidence)
         if finding["confidence"] < threshold or \
-                (high_risk and finding.get("time_s") is None):
+                ((high_risk or evidence_hungry) and
+                 finding.get("time_s") is None):
             continue
         where = (f" at {finding['time_s']:.1f}s"
                  if finding.get("time_s") is not None else "")

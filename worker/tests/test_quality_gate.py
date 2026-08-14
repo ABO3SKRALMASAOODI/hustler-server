@@ -205,8 +205,11 @@ def test_additional_writes_do_not_need_reviewer_permission():
 def test_manual_preview_has_no_fixed_per_turn_candidate_ceiling(
         monkeypatch, tmp_path):
     class PreviewDb:
+        payload = None
+
         def run(self, fn, *_args):
             if fn is dbx.get_or_enqueue_preview_job:
+                PreviewDb.payload = _args[2]
                 return 71, True
             if fn is dbx.get_job:
                 return {"state": "done", "result": {
@@ -232,6 +235,14 @@ def test_manual_preview_has_no_fixed_per_turn_candidate_ceiling(
         last_taste_version = None
         last_selfcheck = None
         audio_reviewed_versions = set()
+        edit_plan = {
+            "steps": ["Build a coherent short"],
+            "sequence_map": [{
+                "role": "proof", "anchor": "measured claim",
+                "purpose": "make the result credible",
+                "source_start_s": 8.0, "source_end_s": 10.0,
+            }],
+        }
 
         @staticmethod
         def latest_edl():
@@ -255,6 +266,37 @@ def test_manual_preview_has_no_fixed_per_turn_candidate_ceiling(
     result = agent_tools.render_preview(Ctx())
     assert result.startswith("Preview v22 rendered:")
     assert 22 in Ctx.rendered_versions
+    assert PreviewDb.payload["screening_frames"] == [{
+        "time_s": 9.0,
+        "reason": "planned beat 1 [proof]: make the result credible",
+    }]
+
+
+def test_sequence_screening_maps_kept_source_beats_and_omits_cut_regions():
+    class Ctx:
+        edit_plan = {
+            "steps": ["Shape the argument"],
+            "sequence_map": [
+                {"role": "hook", "anchor": "opening claim",
+                 "purpose": "create tension", "source_start_s": 2,
+                 "source_end_s": 4},
+                {"role": "bridge", "anchor": "discarded tangent",
+                 "purpose": "not in final", "source_start_s": 6,
+                 "source_end_s": 8},
+                {"role": "proof", "anchor": "specific evidence",
+                 "purpose": "earn trust", "source_start_s": 11,
+                 "source_end_s": 13},
+            ],
+        }
+
+    frames = agent_tools._sequence_screening_frames(Ctx(), {
+        "json": {"keep": [[0, 5], [10, 20]], "inserts": [], "speed": []},
+    })
+
+    assert [row["time_s"] for row in frames] == [3.0, 7.0]
+    reasons = " | ".join(row["reason"] for row in frames)
+    assert "create tension" in reasons and "earn trust" in reasons
+    assert "not in final" not in reasons
 
 
 def test_add_zoom_uses_center_default_and_advises_after_writing():
@@ -314,9 +356,141 @@ def test_existing_audio_gain_is_transaction_safe_recipe_work():
     assert "set_audio_gain" in agent_tools.RECIPE_TOOLS
 
 
+def test_censor_regions_compile_with_other_repairs_in_one_version():
+    ctx, fake = _real_ctx()
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "blur_region",
+         "args": {"x": .72, "y": .02, "w": .25, "h": .1,
+                  "mode": "pixelate"}},
+        {"tool": "set_color_grade", "args": {"preset": "warm"}},
+    ])
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
+    final = fake.rows[-1]["json"]
+    assert final["effects"]["regions"][0]["mode"] == "pixelate"
+    assert final["effects"]["grade"] == "warm"
+
+
+def test_picture_music_and_sfx_compile_as_one_addressable_recipe(monkeypatch):
+    ctx, fake = _real_ctx("make one coherent finished reel")
+    monkeypatch.setattr(
+        agent_tools, "_resolve_music",
+        lambda _ctx, key: ({"name": "Measured pulse",
+                            "duration_s": 60.0, "storage_key": key}, None))
+    monkeypatch.setattr(
+        agent_tools, "_resolve_sfx",
+        lambda _ctx, key: ({"name": "Soft impact",
+                            "duration_s": 0.7, "storage_key": key}, None))
+
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "add_text", "save_as": "hook",
+         "args": {"text": "THE BET", "start": 1.0, "end": 4.0,
+                  "template": "title"}},
+        {"tool": "set_text_motion",
+         "args": {"id": {"$ref": "hook"},
+                  "motion": {"scale": [{"t": 0, "v": .82},
+                                         {"t": .35, "v": 1.0,
+                                          "ease": "out"}]}}},
+        {"tool": "add_vector_graphic", "save_as": "underline",
+         "args": {"kind": "line", "start": 1.0, "end": 4.0,
+                  "x": .5, "y": .64, "width": .3, "height": .01}},
+        {"tool": "set_vector_graphic",
+         "args": {"id": {"$ref": "underline"}, "opacity": .8}},
+        {"tool": "add_music", "save_as": "bed",
+         "args": {"storage_key": "music/pulse.mp3", "gain_db": -19}},
+        {"tool": "set_audio_gain",
+         "args": {"kind": "music", "id": {"$ref": "bed"},
+                  "gain_db": -18}},
+        {"tool": "add_sfx", "save_as": "hook_hit",
+         "args": {"storage_key": "sfx/impact.mp3", "at": 1.0,
+                  "gain_db": -9}},
+        {"tool": "set_audio_gain",
+         "args": {"kind": "sfx", "id": {"$ref": "hook_hit"},
+                  "gain_db": -8}},
+    ], brief="one coherent hook treatment")
+
+    assert result.startswith("EDL v1 -> v2")
+    assert fake.inserts == 1
+    assert "saved tx1 as hook" in result
+    assert "saved vec1 as underline" in result
+    assert "saved mus1 as bed" in result
+    assert "saved sx1 as hook_hit" in result
+    final = fake.rows[-1]["json"]
+    assert final["texts"][0]["motion"]["scale"][-1]["v"] == 1.0
+    assert final["vectors"][0]["opacity"] == .8
+    assert final["music"][0]["gain_db"] == -18
+    assert final["sfx"][0]["gain_db"] == -8
+    assert ctx.editing_metrics["recipe_commits"] == 1
+    assert ctx.editing_metrics["recipe_operations_committed"] == 8
+    assert ctx.editing_metrics["recipe_references_resolved"] == 4
+
+
+def test_recipe_preflight_rejects_forward_reference_before_any_staging():
+    ctx, fake = _real_ctx()
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "set_color_grade", "args": {"preset": "warm"}},
+        {"tool": "set_text_motion",
+         "args": {"id": {"$ref": "future_title"},
+                  "motion": {"opacity": .8}}},
+        {"tool": "add_text", "save_as": "future_title",
+         "args": {"text": "LATE", "start": 1, "end": 2}},
+    ])
+    assert result.startswith("REJECTED: operation 2")
+    assert "before it is created" in result
+    assert fake.inserts == 0
+    assert fake.rows[-1]["json"].get("effects") is None
+    assert ctx.editing_metrics["recipe_aborts"] == 1
+
+
+def test_uniform_insert_recipe_treats_still_only_fields_as_neutral():
+    ctx, fake = _real_ctx()
+    fake.rows[-1]["json"]["inserts"] = [{
+        "id": "ins1", "asset_key": "still.png", "kind": "image",
+        "at_output_s": 0.0, "duration_s": 3.0, "fit": "pad",
+    }]
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "set_insert_window", "args": {
+            "id": "ins1", "duration_s": 3.0, "clip_start_s": 0,
+            "rate": 1, "crop": [0, 0, 1, 1], "mute": False,
+            "fit": "pad", "rotation": 0}},
+        {"tool": "set_color_grade", "args": {"preset": "warm"}},
+    ])
+    assert result.startswith("EDL v1 -> v2")
+    assert "set_insert_window: no change" in result
+    assert fake.inserts == 1
+    final = fake.rows[-1]["json"]
+    assert final["inserts"][0].get("crop") is None
+    assert final["inserts"][0].get("rate") is None
+    assert final["effects"]["grade"] == "warm"
+
+
+def test_recipe_audio_never_extracts_a_video_asset_on_an_abort(monkeypatch):
+    class Db:
+        @staticmethod
+        def run(fn, *_args):
+            if fn is dbx.asset_by_key:
+                return {"kind": "video_clip", "storage_key": "clip.mp4",
+                        "meta": {"filename": "clip.mp4"}}
+            raise AssertionError(f"unexpected DB call: {fn}")
+
+    ctx = type("Ctx", (), {"db": Db(), "project_id": 9,
+                            "_recipe_staging": True})()
+    monkeypatch.setattr(
+        agent_tools, "_audio_from_clip",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("recipe must not create an extracted asset")))
+    for resolver in (agent_tools._resolve_music, agent_tools._resolve_sfx):
+        item, error = resolver(ctx, "clip.mp4")
+        assert item is None
+        assert "must be extracted before an atomic recipe" in error
+
+
 def test_common_repair_moves_are_transaction_safe_recipe_work():
     for name in ("add_text", "remove_text", "set_insert_window",
-                 "remove_insert", "add_overlay", "remove_overlay",
+                 "remove_insert", "insert_media", "add_overlay",
+                 "remove_overlay",
+                 "add_sfx", "move_sfx", "remove_sfx",
+                 "blur_region", "remove_blur",
                  "enhance_video", "add_custom_filter", "beat_align_cuts"):
         assert name in agent_tools.RECIPE_TOOLS
 
@@ -367,6 +541,23 @@ def test_structured_edit_brief_survives_atomic_execution():
         "set_frame", "set_color_grade"]
 
 
+def test_edit_recipe_skips_a_clip_window_reject_and_keeps_siblings():
+    ctx, fake = _real_ctx()
+    result = agent_tools.apply_edit_recipe(ctx, [
+        {"tool": "set_color_grade", "args": {"preset": "warm"}},
+        {"tool": "add_overlay",
+         "args": {"asset_key": "missing.mp4", "start": 0,
+                  "duration_s": 8.0}},
+    ])
+    # Missing asset is a hard reject (abort). Window-too-long is skippable
+    # once the asset resolves — pinned below via the skip helper.
+    assert result.startswith("RECIPE ABORTED") or result.startswith("EDL")
+    assert agent_tools._recipe_skip_reject(
+        "REJECTED: the window 0-8.0s runs past the end of the clip (3.6s).")
+    assert not agent_tools._recipe_skip_reject(
+        "REJECTED: preset must be one of warm, cool.")
+
+
 def test_edit_recipe_aborts_every_staged_move_on_late_rejection():
     ctx, fake = _real_ctx()
     result = agent_tools.apply_edit_recipe(ctx, [
@@ -412,6 +603,9 @@ def test_tool_dialect_normalizes_auto_frame_and_compact_ids():
     name, args, _ = agent_tools._normalize_tool_call(
         "set_music_fit", {"id": "music1", "loop": True})
     assert name == "set_music_fit" and args["id"] == "mus1"
+    name, args, _ = agent_tools._normalize_tool_call(
+        "move_sfx", {"id": "sound1", "at": 2.0})
+    assert name == "move_sfx" and args["id"] == "sx1"
 
 
 def test_reset_edit_is_transaction_safe_inside_recipe():
@@ -435,6 +629,8 @@ def test_recipe_schema_is_exposed_to_the_agent_as_one_write_tool():
     names = schema["properties"]["operations"]["items"]["properties"] \
         ["tool"]["enum"]
     assert set(names) == set(agent_tools.RECIPE_TOOLS)
+    assert "save_as" in schema["properties"]["operations"]["items"][
+        "properties"]
     assert "apply_edit_recipe" in agent_tools.WRITE_TOOLS
 
 

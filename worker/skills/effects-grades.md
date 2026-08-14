@@ -27,4 +27,4 @@ LOOKS (apply_look): one call composes a whole aesthetic and reports each compone
 
 FADES (set_fades): fade from/to black at the very start/end. A closing fade belongs on long-form and cinematic pieces only — on a reel it plays into the loop. A 1s fade-in on a reel is a second of black at the only moment retention is decided.
 
-RHYTHM (short-form): a pattern interrupt roughly every 4-6 seconds of talking — a punch-in, a b-roll beat, a freeze-frame, a text card — ONE device at a time, chosen by what the sentence is doing.
+RHYTHM (short-form): reserve pattern interrupts for meaningful changes in information, emotion, speaker energy, musical phrase or visual legibility. A punch-in, B-roll beat, freeze-frame or text card should make that change clearer—not merely reset a timer. Let strong faces, reactions and suspense hold; compress lists or escalations when their internal rhythm earns it. ONE dominant device at a time, chosen by what the moment is doing.

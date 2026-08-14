@@ -1,8 +1,8 @@
 {
   "slug": "talking-head-promo",
-  "v": 1,
+  "v": 2,
   "genre": "creator educator/promo reel (the corpus's dominant family — 7 of 16)",
-  "identity": "One continuous talking-head take is the spine (seated, standing, or walking); the visual energy comes from SPEECH-SYNCED typography and graphic props, not from cuts (1-3 cuts/10s across all skins). Sections are announced typographically, claims are acted out by props (UI mockups, photo collages, item cards, big labels), and it closes with a comment-keyword or follow CTA. Detailed base grammar: kinetic-typography-talking-head.json (the bright-kinetic skin).",
+  "identity": "A credible speaker and one clear argument form the spine. Visual energy can come from performance, framing, selective speech-synced typography, specific proof, graphic props, cutaways or deliberate stillness. The system responds to rhetorical structure and the brief rather than imposing a cut rate, numbered-list template or generic CTA. Detailed exemplar skin: kinetic-typography-talking-head.json.",
   "exemplars_by_skin": {
     "bright-kinetic": {"file": "87195f37", "sat": 0.035, "brightness": 0.62, "cuts_per_10s": 1.1, "notes": "cream canvas, matted subject, red display sections, words orbit the speaker — see kinetic-typography-talking-head.json"},
     "dark-minimal": {"file": "93221f6d", "sat": 0.022, "brightness": 0.17, "cuts_per_10s": 1.7, "notes": "moody room, tiny captions, full-screen GRAPHIC INTERLUDES (floating panels, progress bars, title cards) between talking spans"},
@@ -12,23 +12,22 @@
     "resource-cards": {"file": "7914a7d6", "sat": 0.041, "brightness": 0.19, "cuts_per_10s": 2.6, "notes": "pinned title card through the hook; N item cards on a fixed template (cover + title + view-count ladder animating up); blurred list tease behind the speaker; comment-keyword pill"}
   },
   "shared_rules": {
-    "spine": "one take, one location (or one walk); punch-ins allowed; cuts only at section boundaries",
-    "typography_sync": "every on-screen word appears at its spoken instant; placement in the empty space around the speaker, never on the face",
-    "sections": "announced by display words or title cards every 8-12s; numbered lists are the default structure (First/Second/Third)",
-    "props_act_out_claims": "when speech describes a thing, a graphic of the thing appears and DOES it (button clicks, toggle flips, cards count up, photos fan out)",
-    "one_accent_rule": "desaturated base (sat <= 0.09) + exactly one loud accent color used for sections/emphasis",
-    "transitions": "whips/flashes/glitches at section boundaries only; hard cuts elsewhere",
-    "cta": "final 8-12%: darker backdrop, comment-keyword or follow instruction, logo + handle"
+    "spine": "let the credible speaker and argument remain the spine; cut or reframe when meaning, energy, evidence or composition changes, not at a timer",
+    "typography_sync": "on-screen words arrive with the thought they clarify; placement uses measured negative space and never covers the face. Not every spoken word needs designed type when captions or performance already carry it",
+    "sections": "announce only real rhetorical sections. Use display words, title cards, a visual prop, a clean cut or no marker according to the turn; numbered structure belongs only to material that is genuinely a list",
+    "props_act_out_claims": "when a product action, number or mechanism would be clearer with evidence, show a specific prop that demonstrates it (button clicks, cards count up, photos fan out); do not illustrate obvious connective speech",
+    "accent_logic": "choose a controlled palette from the footage, brand and brief. One accent is often coherent, but natural color or a deliberate multi-color system can be stronger when the concept earns it",
+    "transitions": "transitions express a section relationship or movement direction; hard cuts carry ordinary continuity",
+    "ending": "resolve the promise or land the requested CTA in the final meaningful beat; do not graft a follow/comment card onto material that has no such objective"
   },
   "rubric": {
-    "words_synced_pct_min": 90,
-    "section_marker_max_gap_s": 12,
+    "designed_words_sync_to_meaning": true,
+    "section_markers_require_real_turn": true,
     "face_never_covered": true,
-    "single_accent_color": true,
-    "saturation_max": 0.09,
-    "props_for_every_numbered_claim": true,
-    "cta_final_frac_max": 0.12,
-    "cut_rate_talking_spans_max_per_10s": 3
+    "palette_has_one_coherent_logic": true,
+    "props_have_demonstrative_purpose": true,
+    "ending_resolves_brief": true,
+    "speaker_credibility_remains_primary": true
   },
   "capability_notes": "Same four gaps as the base doc: typography choreography as one composed pass; matte-onto-designed-canvas; UI/graphics prop pack (now also: item-card template with count-up ladder, gauge, progress bar, photo-fan collage); transcript-driven section planning. Everything else exists."
 }

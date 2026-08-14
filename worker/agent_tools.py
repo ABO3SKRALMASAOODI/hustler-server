@@ -11,12 +11,17 @@ import shutil
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import audio_qc
 import audit
 import captions as caplib
 import config
 import db as dbx
+import director
+import editorial_contracts
+import editorial_index
+import grammar
 import inpaint
 import llm
 import matte
@@ -25,20 +30,26 @@ import personseg
 import media
 import model_prices
 import music_search
+import music_judge
+import motion_judge
 import net_fetch
 import perception
 import preview_critic
 import quality_gate
+import reference_profile
+import scope_guard
 # The takeover's geometry (how far the camera travels, where it aims) is
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
 # will use — importing the resolver is the only way those two cannot drift.
 import renderer
 import sfx_search
+import sfx_judge
 import sheets
 import song_find
 import spatial
 import stock
 import storage
+import story_critic
 import subject
 import taste
 import videogen
@@ -46,6 +57,7 @@ import cursor as cursorlib
 import screendet
 import screenframe
 import screenmatch
+import screening
 import edl_diff
 import timeline as timeline_mod
 import tracker
@@ -71,6 +83,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      OVERLAY_ANIMS, OVERLAY_SCALE_MIN,
                      OVERLAY_SCALE_MAX, SPEED_FACTOR_MIN, SPEED_FACTOR_MAX,
                      STYLIZE_KINDS, TEXT_ANIMS, TEXT_FONTS, TEXT_TEMPLATES,
+                     VECTOR_KINDS,
                      ZOOM_STRENGTH_MIN, ZOOM_STRENGTH_MAX,
                      CURSOR_SCALE_MIN, CURSOR_SCALE_MAX,
                      FRAME_SHIFT_RATIOS, FRAME_SHIFT_MIN_S, FRAME_SHIFT_MAX_S,
@@ -123,9 +136,29 @@ class ToolContext:
         self._asset_locals = {}       # asset id -> downloaded local path
         self._perception = None       # main video's audio analysis, cached
         self._spatial = None          # face/text/UI track, cached
+        self._motion = None           # whole-program sparse motion, cached
+        self._editorial_maps = {}     # source key -> deterministic joined map
+        # Set by agent_loop.state_block only when that exact COMPLETE
+        # transcript was delivered to this caller. Joined evidence can then
+        # reference sentence ids without paying to repeat every word.
+        self.full_transcript_in_context = False
         self._asset_perception = {}   # asset/library key -> audio analysis
+        # Facts already delivered into this conversation. Exact repeats can
+        # point at the authoritative earlier result instead of re-sending
+        # thousands of tokens or decoding the same frames again. Keys include
+        # the EDL version wherever the fact changes with the edit.
+        self._read_evidence_seen = set()
+        self._skills_loaded = set()
+        # Exact successful outer writes are idempotent while their resulting
+        # EDL is still current. A changed EDL permits the same call again.
+        self._write_replay_results = {}
         self._music_hits = {}         # search_music results this turn, by id
+        self._music_auditions = {}    # result id -> measured acoustic analysis
         self._sfx_hits = {}           # search_sfx results this turn, by id
+        self._sfx_auditions = {}      # result id -> measured transient analysis
+        # Compact cohort telemetry persisted with the assistant outcome. It
+        # measures evidence and avoided churn, not creative "goodness".
+        self.editing_metrics = {}
         self.last_preview = None      # set by render_preview
         # Frames a look tool captured for whoever is DOING THE EDITING this
         # step (round 67): [(label, jpeg_path)].
@@ -148,15 +181,27 @@ class ToolContext:
         self._pending_looked_source_times = set()
         self._pending_looked_output_times = set()
         self._pending_looked_asset_times = {}
+        # Visual assets created/fetched in the current assistant tool batch.
+        # Their actual rendition review reaches the model only after that
+        # batch's tool results/images are delivered; placement waits until the
+        # next reasoning step so "review before use" is literally true.
+        self._pending_visual_review_assets = set()
+        self._last_download_review_text = None
+        self._last_candidate_review_text = None
+        self._last_broll_board_review = None
         self.direct_sight = False
         self.sight_out = False
-        # The edit plan the agent recorded for THIS turn (set_edit_plan,
-        # round 98): {"brief": str|None, "steps": [str]}. Working memory,
-        # not EDL state — it rides continuation passes so a resumed turn
-        # finishes what was planned instead of re-deciding it, and the
-        # activity feed shows the user what the editor intends to do.
+        # Durable project direction, loaded by the agent/MCP entry point and
+        # replaced by set_edit_plan.  The EDL says what to render; this says
+        # why the cut, type, footage, motion and sound belong together.
         self.edit_plan = None
+        self.plan_loaded = False
+        self.plan_revised_this_turn = False
         self.last_audio_qc_findings = []
+        # Subjective evidence from bounded REAL audio clips.  It is advisory:
+        # a reviewer outage cannot block a user's chosen track or a valid EDL.
+        self.last_audio_review = None
+        self.audio_reviewed_versions = set()
         # EDL versions this turn already enqueued a SPECULATIVE preview for
         # (round 98) — the loop's fire-ahead encode. Bounds repeats and lets
         # render_preview adopt instead of re-enqueueing.
@@ -168,6 +213,12 @@ class ToolContext:
         self.last_taste = []
         self.last_taste_version = None
         self.last_visual_critic = None
+        # Independent semantic judgment for speech-led cuts. Kept separate
+        # from pixels/audio so a reviewer can never claim evidence it did not
+        # receive, and version-stamped so a stale story PASS cannot survive a
+        # later EDL write.
+        self.last_story_review = None
+        self.story_reviewed_versions = set()
         # What the user asked for THIS turn, verbatim. Read only to SUPPRESS
         # taste findings (round 52): a fade from black is a defect on a reel
         # right up until the moment somebody asks for one, and a critic that
@@ -390,6 +441,10 @@ class ToolContext:
                         "call reset_edit to start from the full video, then "
                         "rebuild what they asked for.")
             return msg
+        violations = scope_guard.preservation_violations(
+            prev["json"], normalized, self.user_message)
+        if violations:
+            return scope_guard.rejection_message(prev["version"], violations)
         advisories = quality_gate.advisory_findings(
             prev["json"], normalized, self.user_message)
         if edl_signature(normalized) == edl_signature(prev["json"]):
@@ -440,6 +495,30 @@ def _cap(text, budget=None):
     if len(text) <= budget:
         return text
     return text[:budget] + "\n...[truncated — narrow your range and call again]"
+
+
+def _evidence_cache(ctx):
+    cache = getattr(ctx, "_read_evidence_seen", None)
+    if cache is None:
+        cache = set()
+        setattr(ctx, "_read_evidence_seen", cache)
+    return cache
+
+
+def _metric(ctx, key, amount=1):
+    metrics = getattr(ctx, "editing_metrics", None)
+    if metrics is None:
+        metrics = {}
+        setattr(ctx, "editing_metrics", metrics)
+    metrics[key] = metrics.get(key, 0) + amount
+
+
+def _loaded_skills(ctx):
+    cache = getattr(ctx, "_skills_loaded", None)
+    if cache is None:
+        cache = set()
+        setattr(ctx, "_skills_loaded", cache)
+    return cache
 
 
 def _fmt_t(t):
@@ -832,6 +911,220 @@ def get_shots(ctx, start=0, end=None):
     return _cap("\n".join(lines))
 
 
+EDITORIAL_MAP_MAX_ROWS = 80
+EDITORIAL_MAP_DEFAULT_ROWS = 36
+
+
+def _editorial_source_index(ctx, asset_key=None):
+    """(index, label, error) for the main source or one uploaded clip.
+
+    Main-source sidecars lazily self-heal through the existing perception and
+    spatial caches.  Asset indexes are read-only here: all newly indexed
+    video uploads already carry these sidecars, and a missing optional lane
+    is reported honestly rather than turning a read into an unexpected asset
+    decode/persist path.
+    """
+    if asset_key:
+        asset = ctx.db.run(
+            lambda conn: dbx.asset_by_key(conn, ctx.project_id, asset_key))
+        if not asset:
+            return None, None, f"REJECTED: no asset with storage_key {asset_key!r}."
+        if not asset.get("sha256"):
+            return None, None, (
+                "That asset has no reusable media index yet. Use look_at_asset "
+                "for its picture or get_audio_analysis for its sound.")
+        row = ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+        idx = (row or {}).get("json") or {}
+        if not idx:
+            return None, None, (
+                "That asset's analysis has not finished yet. It remains in "
+                "the project; retry after indexing completes.")
+        return dict(idx), _asset_name(asset), None
+    if not getattr(ctx, "has_main_video", bool(ctx.index.get("video"))):
+        return None, None, (
+            "This canvas project has no main source timeline. Use list_assets, "
+            "look_at_asset and per-asset analysis instead.")
+    idx = dict(ctx.index)
+    video = idx.get("video") or {}
+    if video.get("has_audio") and not (idx.get("perception") or {}).get("energy"):
+        try:
+            idx["perception"] = _get_perception(ctx)
+        except Exception:
+            # Transcript/shot/spatial alignment remains valuable and the map
+            # declares audio missing; a read tool must not fail wholesale
+            # because an optional deterministic sidecar could not self-heal.
+            pass
+    if not (idx.get("spatial") or {}).get("samples"):
+        try:
+            idx["spatial"] = _get_spatial(ctx)
+        except Exception:
+            pass
+    if (idx.get("motion") or {}).get("version") != \
+            motion_judge.MOTION_PROFILE_VERSION:
+        try:
+            idx["motion"] = _get_motion(ctx)
+        except Exception:
+            pass
+    return idx, "main source", None
+
+
+def _editorial_map_for(ctx, asset_key=None):
+    cache = getattr(ctx, "_editorial_maps", None)
+    if cache is None:
+        cache = ctx._editorial_maps = {}
+    key = asset_key or "__main__"
+    if key in cache:
+        result, label = cache[key]
+        _metric(ctx, "editorial_map_cache_hits")
+        return result, label, None
+    idx, label, err = _editorial_source_index(ctx, asset_key)
+    if err:
+        return None, label, err
+    result = editorial_index.build(idx)
+    cache[key] = (result, label)
+    _metric(ctx, "editorial_maps_built")
+    return result, label, None
+
+
+def _format_editorial_row(row, include_text=True):
+    shots = row.get("shots") or {}
+    shot_ids = [str(value) for value in shots.get("ids") or []]
+    visual_bits = []
+    picture = row.get("picture") or {}
+    if picture.get("measured"):
+        n = max(1, int(picture.get("samples") or 1))
+        face = float(picture.get("face_presence") or 0.0)
+        text = float(picture.get("text_presence") or 0.0)
+        ui = float(picture.get("dense_ui_presence") or 0.0)
+        visual_bits.append(f"face {round(face * n):g}/{n}"
+                           + (f" {picture['face_position']}"
+                              if picture.get("face_position") else ""))
+        visual_bits.append(f"source-text {round(text * n):g}/{n}")
+        if ui:
+            visual_bits.append(f"dense-UI {round(ui * n):g}/{n}")
+        if picture.get("blank_presence"):
+            visual_bits.append("blank-frame evidence")
+        if picture.get("nearest_sample"):
+            visual_bits.append("nearest sparse sample")
+    else:
+        visual_bits.append("picture not measured in this span")
+
+    audio = row.get("audio") or {}
+    audio_bits = []
+    if audio.get("measured"):
+        audio_bits.append(f"{audio.get('level')} {audio.get('mean_db'):g}dB-rel"
+                          f" {audio.get('trend')}")
+        beats = audio.get("beats") or {}
+        if beats.get("measured"):
+            audio_bits.append(f"{beats.get('count', 0)} beat(s)"
+                              + ("; start on beat"
+                                 if beats.get("start_on_beat") else ""))
+        if audio.get("stressed_word"):
+            audio_bits.append(
+                f"stress {audio['stressed_word']!r} "
+                f"{float(audio.get('vocal_stress') or 0):.2f}"
+                f"@{float(audio.get('stress_at_s') or 0):g}s")
+    else:
+        audio_bits.append("audio energy not measured")
+
+    pauses = row.get("pauses") or {}
+    pause_bits = []
+    if row.get("kind") == "speech":
+        pause_bits.append(
+            f"speech gaps {float(pauses.get('speech_gap_before_s') or 0):g}s/"
+            + (f"{float(pauses['speech_gap_after_s']):g}s before/after"
+               if pauses.get("speech_gap_after_s") is not None else
+               "end after"))
+    if pauses.get("waveform_quiet_nearby"):
+        pause_bits.append("waveform quiet nearby")
+
+    head = (f"[{row.get('id')} {_fmt_t(float(row.get('t0') or 0))}-"
+            f"{_fmt_t(float(row.get('t1') or 0))}"
+            + (f" S{row['speaker']}" if row.get("speaker") is not None else "")
+            + "]")
+    geometry = ("shots " + "→".join(f"#{value}" for value in shot_ids)
+                if shot_ids else "shot geometry unavailable")
+    changes = shots.get("changes_s") or []
+    if changes:
+        geometry += "; scene change@" + ",".join(f"{value:g}" for value in changes)
+    evidence = (f"{geometry} | audio: {', '.join(audio_bits)} | picture: "
+                f"{', '.join(visual_bits)}")
+    motion = row.get("motion") or {}
+    if motion.get("measured"):
+        windows = ",".join(f"{a:g}-{b:g}s"
+                           for a, b in motion.get("windows") or [])
+        evidence += (f" | motion: {str(motion.get('intensity')).replace('_', ' ')}"
+                     f" in sparse window {windows or '?'}")
+    if pause_bits:
+        evidence += " | " + ", ".join(pause_bits)
+    if row.get("tags"):
+        evidence += " | evidence: " + ",".join(row["tags"])
+    text = str(row.get("text") or "").strip()
+    if len(text) > 220:
+        text = text[:217].rsplit(" ", 1)[0] + "..."
+    return (head + " " + evidence
+            + (f"\n  {text}" if include_text and text else ""))
+
+
+def get_editorial_map(ctx, start=0, end=None, focus="all", limit=None,
+                      asset_key=None):
+    """Joined source-time evidence for planning coherent editorial beats."""
+    result, label, err = _editorial_map_for(ctx, asset_key)
+    if err:
+        return err
+    try:
+        start = max(0.0, float(start or 0.0))
+        duration = float(result.get("duration_s") or 0.0)
+        end = duration if end is None else min(duration, float(end))
+    except (TypeError, ValueError):
+        return "REJECTED: start and end must be numbers in source seconds."
+    if end <= start:
+        return "REJECTED: end must be greater than start."
+    try:
+        rows = editorial_index.query(result, start=start, end=end, focus=focus)
+    except ValueError as exc:
+        return f"REJECTED: {exc}."
+    try:
+        limit = int(limit if limit is not None else EDITORIAL_MAP_DEFAULT_ROWS)
+    except (TypeError, ValueError):
+        return "REJECTED: limit must be an integer."
+    if not 1 <= limit <= EDITORIAL_MAP_MAX_ROWS:
+        return (f"REJECTED: limit must be 1..{EDITORIAL_MAP_MAX_ROWS}; use "
+                "start/end to page a long source without losing chronology.")
+    shown = rows[:limit]
+    _metric(ctx, "editorial_map_rows_returned", len(shown))
+    summary = editorial_index.summary(result)
+    measured = ", ".join(summary["measured"]) or "none"
+    missing = ", ".join(summary["missing"]) or "none"
+    include_text = bool(asset_key) or not bool(
+        getattr(ctx, "full_transcript_in_context", False))
+    if not include_text:
+        _metric(ctx, "editorial_transcript_chars_avoided",
+                sum(len(str(row.get("text") or "")) for row in shown))
+    header = (
+        f"EDITORIAL EVIDENCE MAP — {label}, SOURCE seconds, focus={focus or 'all'} "
+        f"({start:g}-{end:g}s; {len(rows)} matching row(s)).\n"
+        f"Measured lanes: {measured}. Missing lanes: {missing}. This joins "
+        "timing/ASR/acoustic/spatial evidence; it does NOT recognize the full "
+        "picture or prescribe effects. Read filmstrips/look_at before a visual "
+        "choice, and use get_words for frame-accurate speech cuts."
+        + (" Sentence text is omitted here because the COMPLETE transcript "
+           "is already in PROJECT STATE; sentence ids are the join key."
+           if not include_text else "")
+    )
+    if not shown:
+        return header + "\nNo rows match this focus/range."
+    body = "\n".join(_format_editorial_row(row, include_text=include_text)
+                     for row in shown)
+    tail = ""
+    if len(rows) > len(shown):
+        next_s = float(shown[-1].get("t1") or start)
+        tail = (f"\n...{len(rows) - len(shown)} more matching row(s). "
+                f"Continue with get_editorial_map(start={next_s:g}, "
+                f"end={end:g}, focus={focus!r}).")
+    return _cap(header + "\n" + body + tail)
+
+
 def _dead_air(ctx, min_s):
     """Spans worth cutting when the user says "cut the silences", and which
     signal they came from: (gaps, basis).
@@ -897,6 +1190,31 @@ def find_silences(ctx, min_seconds=0.7):
     return _cap(head + ":\n" + "\n".join(lines) + note)
 
 
+def edl_used_asset_keys(edl):
+    """Every storage_key the current edit already places — inserts,
+    overlays, music, voiceover and sfx. Unused project files are still
+    available to place; this set is how the inventory says which are which."""
+    keys = set()
+    if not isinstance(edl, dict):
+        return keys
+    for ins in edl.get("inserts") or []:
+        if ins.get("asset_key"):
+            keys.add(ins["asset_key"])
+    for ov in edl.get("overlays") or []:
+        if ov.get("asset_key"):
+            keys.add(ov["asset_key"])
+    for m in edl.get("music") or []:
+        if m.get("storage_key"):
+            keys.add(m["storage_key"])
+    for v in edl.get("voiceover") or []:
+        if v.get("asset_key"):
+            keys.add(v["asset_key"])
+    for s in edl.get("sfx") or []:
+        if s.get("storage_key"):
+            keys.add(s["storage_key"])
+    return keys
+
+
 def list_assets(ctx, kind=None):
     """Project files the user has uploaded or the system has produced.
     kind 'audio' (the pipeline's extracted copy of the source's own audio,
@@ -906,7 +1224,15 @@ def list_assets(ctx, kind=None):
              "clip": ["video_clip"], "render": ["render"],
              "all": ["music", "image_ref", "video_clip",
                      "render", "original"]}
-    sel = kinds.get((kind or "music").strip().lower())
+    requested = (kind or "music").strip().lower()
+    aliases = {
+        "video": "clip", "videos": "clip", "clips": "clip",
+        "images": "image", "photo": "image", "photos": "image",
+        "audio": "music", "song": "music", "songs": "music",
+        "renders": "render", "everything": "all",
+    }
+    canonical = aliases.get(requested, requested)
+    sel = kinds.get(canonical)
     if not sel:
         return ("REJECTED: kind must be one of "
                 f"{', '.join(sorted(kinds))}.")
@@ -923,7 +1249,14 @@ def list_assets(ctx, kind=None):
                     "chat, mp3/wav/m4a) for a track the web cannot reach — "
                     "e.g. a trending platform sound, which only they can "
                     "provide.")
-        return f"No {kind} assets in this project."
+        return f"No {canonical} assets in this project."
+    try:
+        edl_row = ctx.latest_edl()
+        used = edl_used_asset_keys(edl_row["json"])
+    except Exception:
+        edl_row = {"version": None}
+        used = set()
+    unused_n = 0
     lines = []
     for a in rows:
         m = a.get("meta") or {}
@@ -934,9 +1267,27 @@ def list_assets(ctx, kind=None):
                     "look_at_asset / extract_audio, never insert_media"
                     if role in ("edit_reference", "shorts_reference")
                     else "")
+        key = a.get("storage_key") or ""
+        if a["kind"] == "render" or role in ("edit_reference",
+                                             "shorts_reference"):
+            place = ""
+        elif key in used:
+            place = " — in the current edit"
+        else:
+            place = (" — AVAILABLE, not in the current edit "
+                     "(insert_media / add_overlay / add_music)")
+            unused_n += 1
+        staged = (m.get("staged") is True or m.get("staged") == "true")
+        if staged:
+            place = " — STAGING TRAY (user has not pressed Submit)"
         lines.append(f"[{a['kind']}] storage_key={a['storage_key']} "
-                     f"\"{m.get('filename', '?')}\"{dur}{cap}{role_bit}")
-    out = "\n".join(lines)
+                     f"\"{m.get('filename', '?')}\"{dur}{cap}{role_bit}{place}")
+    head = ""
+    if unused_n:
+        head = (f"{unused_n} file(s) are in the project and NOT on the "
+                "timeline — use them; do not tell the user they have no "
+                "footage.\n")
+    out = head + "\n".join(lines)
     # The commonest way a user delivers a SONG is as the video they found it
     # in — a TikTok/Reel download. Say here that this works, at the moment the
     # agent is looking at the clip, rather than leaving it to guess.
@@ -945,7 +1296,22 @@ def list_assets(ctx, kind=None):
                 "storage_key straight to add_music / add_sfx / add_voiceover "
                 "(or call extract_audio first). Its picture stays out of the "
                 "edit entirely.")
-    return _cap(out)
+    result = _cap(out)
+    fingerprint = (
+        "list_assets", str(kind or "music").strip().lower(),
+        edl_row.get("version"),
+        tuple((a.get("id"), a.get("kind"), a.get("storage_key"),
+               a.get("duration_s"),
+               json.dumps(a.get("meta") or {}, sort_keys=True, default=str))
+              for a in rows))
+    evidence = _evidence_cache(ctx)
+    if fingerprint in evidence:
+        _metric(ctx, "evidence_reads_reused")
+        return ("UNCHANGED INVENTORY — this exact asset list and placement "
+                "state was already returned earlier in this turn. Use that "
+                "result; call again only after an asset or EDL change.")
+    evidence.add(fingerprint)
+    return result
 
 
 def _deliver_frames(ctx, frames, labels, question, subject_line):
@@ -1127,6 +1493,15 @@ def _look_at_output(ctx, output_times, question):
                  for t in output_times]
     except (TypeError, ValueError):
         return "REJECTED: output_times must be numbers of seconds."
+    evidence_key = ("look_output", edl["version"],
+                    tuple(round(t, 3) for t in wants))
+    evidence = _evidence_cache(ctx)
+    if evidence_key in evidence:
+        _metric(ctx, "visual_decodes_reused")
+        return (f"UNCHANGED VISUAL EVIDENCE — those exact EDL v{edl['version']} "
+                "output frames were already delivered earlier in this turn. "
+                "Use the labeled images already in the conversation, or "
+                "choose different output times for new evidence.")
 
     def _block_at(t):
         for b in blocks:
@@ -1264,6 +1639,7 @@ def _look_at_output(ctx, output_times, question):
                 "the zoom window.")
     if missing:
         out += f"\n({missing} requested time(s) could not be decoded)"
+    evidence.add(evidence_key)
     return _cap(out)
 
 
@@ -1330,6 +1706,14 @@ def look_at(ctx, times=None, question="", start=None, end=None,
                 "at), a start/end range, or output_times=[...] (OUTPUT "
                 "seconds of the assembled program). An empty array counts "
                 "as not passed.")
+    evidence_key = ("look_source", tuple(round(float(t), 3) for t in times))
+    evidence = _evidence_cache(ctx)
+    if evidence_key in evidence:
+        _metric(ctx, "visual_decodes_reused")
+        return ("UNCHANGED VISUAL EVIDENCE — those exact source frames were "
+                "already delivered earlier in this turn. Use the labeled "
+                "images already in the conversation, or inspect different "
+                "source times for new evidence.")
     try:
         proxy = ctx.proxy_path()
     except Exception as err:
@@ -1396,9 +1780,11 @@ def look_at(ctx, times=None, question="", start=None, end=None,
     src_note = (" (SOURCE footage — the output frame crop/letterbox is "
                 "applied later at render, so do not judge aspect ratio here)"
                 if has_frame else "")
-    return _deliver_frames(
+    out = _deliver_frames(
         ctx, frames, frame_names, question,
         f"Frames from the MAIN video, {s:.2f}s-{e:.2f}s{src_note}")
+    evidence.add(evidence_key)
+    return out
 
 
 def _asset_local_path(ctx, asset):
@@ -1411,7 +1797,22 @@ def _asset_local_path(ctx, asset):
     return local
 
 
-def _asset_frames(ctx, asset, times, width=640, tag="alook"):
+def _touch_job_heartbeat(ctx, progress=None):
+    """Stamp heartbeat_at during a long look/encode so a live turn is not
+    reaped as 'Worker died' because the forever-thread missed a beat."""
+    job = getattr(ctx, "job", None) or {}
+    jid = job.get("id")
+    if not jid:
+        return
+    try:
+        p = int(progress) if progress is not None else int(job.get("progress") or 0)
+        ctx.db.run(dbx.set_progress, jid, p)
+    except Exception:
+        pass
+
+
+def _asset_frames(ctx, asset, times, width=640, tag="alook",
+                  measure_motion=False):
     """Local jpeg paths for `times` of an UPLOADED asset — [(i, path)], err.
 
     Decoded on the EXECUTOR when one is configured (round 62). An uploaded
@@ -1426,12 +1827,13 @@ def _asset_frames(ctx, asset, times, width=640, tag="alook"):
     executor at all, where it is what always shipped.
     """
     times = [round(float(t), 3) for t in times]
+    _touch_job_heartbeat(ctx)
     if remote.frames_available():
         try:
             got = remote.run_frames_remote(
                 ctx.project_id,
                 {"storage_key": asset["storage_key"], "times": times,
-                 "width": width},
+                 "width": width, "motion_profile": bool(measure_motion)},
                 user_id=ctx.job.get("user_id")) or {}
         except Exception as ex:
             return [], f"frame extraction failed on the render service ({ex})"
@@ -1451,6 +1853,12 @@ def _asset_frames(ctx, asset, times, width=640, tag="alook"):
             storage.delete_keys([k for k in keys if k])
         except Exception:
             pass                     # scratch objects; never worth a failure
+        profile = got.get("motion_profile")
+        if profile:
+            ctx.db.run(dbx.update_asset_meta, asset["id"],
+                       {"motion_profile": profile})
+            asset.setdefault("meta", {})["motion_profile"] = profile
+            _metric(ctx, "motion_profiles_measured")
         return pairs, (None if pairs else
                        ("; ".join(errs)[:220] or "no frames came back"))
     # No executor configured: one box is all there is, decode here.
@@ -1458,6 +1866,16 @@ def _asset_frames(ctx, asset, times, width=640, tag="alook"):
         local = _asset_local_path(ctx, asset)
     except Exception as ex:
         return [], f"cannot fetch that asset right now ({ex})"
+    if measure_motion:
+        try:
+            profile = motion_judge.analyze_video(
+                local, duration_s=asset.get("duration_s"))
+            ctx.db.run(dbx.update_asset_meta, asset["id"],
+                       {"motion_profile": profile})
+            asset.setdefault("meta", {})["motion_profile"] = profile
+            _metric(ctx, "motion_profiles_measured")
+        except Exception:
+            pass
     pairs, last_err = [], None
     for i, t in enumerate(times):
         fp = os.path.join(ctx.workdir, f"{tag}_{asset['id']}_{i}.jpg")
@@ -1473,7 +1891,9 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
     """Frames from an UPLOADED clip or image (not the main video) — THE way
     to pick which moment of a long clip to splice in with insert_media.
     Round 67: the frames land in the agent's own context (see
-    _deliver_frames); pass times=[...] for exact moments."""
+    _deliver_frames); pass times=[...] for exact moments. Extraction failures
+    always return the decoder/service reason, with ``unknown error`` only as
+    an explicit last-resort label—never a bare blind failure."""
     # Renders are inspectable too (round 66): "check it yourself" is a real
     # user sentence, and the render self-check is a 3x3 sheet of the whole
     # programme — too coarse to catch a strobing mask or a one-frame flash.
@@ -1486,6 +1906,13 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
     name = (asset.get("meta") or {}).get("filename") or \
         os.path.basename(asset_key)
     if asset["kind"] == "image_ref":
+        evidence_key = ("look_asset", str(asset_key), (0.0,))
+        evidence = _evidence_cache(ctx)
+        if evidence_key in evidence:
+            _metric(ctx, "visual_decodes_reused")
+            return ("UNCHANGED VISUAL EVIDENCE — this exact image was already "
+                    "delivered earlier in this turn. Use the labeled image "
+                    "already in the conversation.")
         try:
             local = _asset_local_path(ctx, asset)
         except Exception as e:
@@ -1498,8 +1925,10 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
             seen = {}
             setattr(ctx, bucket, seen)
         seen.setdefault(str(asset_key), set()).add(0.0)
-        return _deliver_frames(ctx, [local], [name[:60] or "image"], question,
-                               f"The uploaded image '{name}'")
+        out = _deliver_frames(ctx, [local], [name[:60] or "image"], question,
+                              f"The uploaded image '{name}'")
+        evidence.add(evidence_key)
+        return out
     dur = _asset_media_duration(ctx, asset)
     if times is not None:
         if not isinstance(times, (list, tuple)) or not times:
@@ -1521,10 +1950,37 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
             e = min(dur, s + 1.0)
         n = 6 if e - s > 20 else 4
         times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
+    evidence_key = ("look_asset", str(asset_key),
+                    tuple(round(float(t), 3) for t in times))
+    evidence = _evidence_cache(ctx)
+    if evidence_key in evidence:
+        _metric(ctx, "visual_decodes_reused")
+        return ("UNCHANGED VISUAL EVIDENCE — those exact asset frames were "
+                "already delivered earlier in this turn. Use the labeled "
+                "images already in the conversation, or inspect different "
+                "clip times for new evidence.")
     # The decode happens on the executor when one is configured — an uploaded
     # clip has no proxy, and 4K seeks on the dispatcher are what killed job
     # 1452's whole turn (see _asset_frames).
-    pairs, err = _asset_frames(ctx, asset, times, width=640, tag="alook")
+    asset_index = None
+    if asset.get("sha256"):
+        try:
+            idx_row = ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+            asset_index = (idx_row or {}).get("json") or None
+        except Exception:
+            asset_index = None
+    # The clip index already paid for this measurement. Reuse it instead of
+    # sending the same 4K reference back through an executor decode on first
+    # look.
+    motion_profile = ((asset.get("meta") or {}).get("motion_profile") or
+                      (asset_index or {}).get("motion"))
+    pairs, err = _asset_frames(
+        ctx, asset, times, width=640, tag="alook",
+        measure_motion=(asset.get("kind") == "video_clip" and
+                        (motion_profile or {}).get("version") !=
+                        motion_judge.MOTION_PROFILE_VERSION))
+    motion_profile = (asset.get("meta") or {}).get("motion_profile") \
+        or motion_profile
     frames = [fp for _, fp in pairs]
     frame_names = [f"@{times[i]:.2f}s" for i, _ in pairs]
     if not frames:
@@ -1544,8 +2000,19 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None):
     out = _deliver_frames(
         ctx, frames, frame_names, question,
         f"Frames from '{name}' ({asset['kind']}, {dur:.0f}s long)")
+    evidence.add(evidence_key)
+    measured = motion_judge.describe(motion_profile)
+    ref_grammar = ""
+    if (asset.get("meta") or {}).get("role") in {
+            "edit_reference", "shorts_reference"} and asset_index:
+        ref_grammar = reference_profile.describe(
+            reference_profile.from_index(asset_index))
+        if ref_grammar:
+            _metric(ctx, "references_profiled")
     return _cap(out + f"\n(clip is {dur:.1f}s long; call again with times "
-                      "or a narrower start/end to zoom into a region)")
+                      "or a narrower start/end to zoom into a region)"
+                + (f"\n{measured}" if measured else "")
+                + (f"\n{ref_grammar}" if ref_grammar else ""))
 
 
 # ------------------------------------------------------------------ #
@@ -1851,6 +2318,25 @@ def _get_spatial(ctx):
     ctx._spatial = spatial.get_or_compute_for_index(
         ctx.db, dbx, index_row, ctx.proxy_path(), ctx.workdir)
     return ctx._spatial
+
+
+def _get_motion(ctx):
+    """Cached whole-program sparse motion track for the main source."""
+    if getattr(ctx, "_motion", None) is not None:
+        return ctx._motion
+    indexed = (getattr(ctx, "index", None) or {}).get("motion") or {}
+    if indexed.get("version") == motion_judge.MOTION_PROFILE_VERSION:
+        ctx._motion = indexed
+        return indexed
+    original = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
+    if not original or not original.get("sha256"):
+        raise motion_judge.MotionProfileError("no indexed main video")
+    index_row = ctx.db.run(dbx.get_index_by_sha, original["sha256"])
+    if not index_row:
+        raise motion_judge.MotionProfileError("no index row for this video")
+    ctx._motion = motion_judge.get_or_compute_for_index(
+        ctx.db, dbx, index_row, ctx.proxy_path())
+    return ctx._motion
 
 
 def _source_box_to_output(ctx, edl, source_t, box):
@@ -3144,6 +3630,12 @@ def _resolve_music(ctx, storage_key):
             "search_music to find one online, or "
             "list_assets(kind='music') for the user's own uploads.")
     if asset and asset["kind"] == "video_clip":
+        if getattr(ctx, "_recipe_staging", False):
+            return None, (
+                "REJECTED: an uploaded video's audio must be extracted "
+                "before an atomic recipe, because extraction creates a "
+                "project asset. Call extract_audio first, then use the "
+                "returned audio storage_key in the recipe.")
         got, note, err = _audio_from_clip(ctx, asset)
         if err:
             return None, err
@@ -3258,6 +3750,180 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
               "add_music lays it in — tell the user which track you "
               "chose and its license line (a CC BY credit is theirs to "
               "carry in the caption)." + duration_note + gate)
+
+
+def audition_music_candidates(ctx, ids, brief=None):
+    """Compare actual candidate waveforms before choosing a soundtrack."""
+    if not isinstance(ids, (list, tuple)) or len(ids) < 2:
+        return ("REJECTED: ids must contain at least two result ids from "
+                "search_music so there is a real comparison.")
+    unique = []
+    for result_id in ids:
+        result_id = str(result_id or "").strip()
+        if result_id and result_id not in unique:
+            unique.append(result_id)
+    if len(unique) < 2:
+        return "REJECTED: pass at least two different music result ids."
+    resolved, errors = [], []
+    for result_id in unique:
+        hit, error = _recover_search_hit(ctx, "music", result_id,
+                                         music_search.resolve)
+        if hit:
+            resolved.append(hit)
+        else:
+            errors.append(f"{result_id}: {error or 'not found'}")
+    if len(resolved) < 2:
+        return ("REJECTED: fewer than two candidates could be recovered. "
+                + "; ".join(errors)[:300]
+                + ". Run search_music again.")
+
+    def _measure(hit):
+        result_id = hit["id"]
+        cached = ctx._music_auditions.get(result_id)
+        if cached:
+            return hit, cached, None, None
+        local = os.path.join(
+            ctx.workdir, f"audition_{uuid.uuid4().hex[:8]}.audio")
+        sample = None
+        try:
+            music_search.download(hit, local)
+            analysis = perception.analyze_audio(local, max_s=90.0)
+            ctx._music_auditions[result_id] = analysis
+            if llm.audio_review_available():
+                duration = float(music_search.probe_duration_s(local) or 0.0)
+                start = min(max(duration * 0.25, 0.0),
+                            max(0.0, duration - 8.0))
+                sample = os.path.join(
+                    ctx.workdir, f"audition_sample_{uuid.uuid4().hex[:8]}.mp3")
+                media.extract_audio_clip(
+                    local, start, min(duration, start + 8.0), sample)
+            return hit, analysis, None, sample
+        except Exception as exc:
+            return hit, None, str(exc)[:160], None
+        finally:
+            try:
+                os.remove(local)
+            except OSError:
+                pass
+
+    _touch_job_heartbeat(ctx)
+    measured, samples = [], {}
+    with ThreadPoolExecutor(max_workers=min(2, len(resolved))) as pool:
+        futures = {pool.submit(_measure, hit): hit for hit in resolved}
+        for future in as_completed(futures):
+            hit, analysis, error, sample = future.result()
+            if analysis:
+                measured.append((hit, analysis))
+                if sample:
+                    samples[hit["id"]] = sample
+            else:
+                errors.append(f"{hit['id']}: {error}")
+    _touch_job_heartbeat(ctx)
+    if len(measured) < 2:
+        return ("Could not acoustically compare at least two candidates ("
+                + "; ".join(errors)[:360] + "). Choose from the search "
+                  "metadata or try different results; do not claim they "
+                  "were auditioned.")
+
+    plan = getattr(ctx, "edit_plan", None) or {}
+    sequence_sound = director.sequence_block(
+        plan, include=("anchor", "purpose", "sound"), max_rows=12)
+    direction_parts = [
+        str(brief or "").strip(),
+        director.decision_block(plan).replace("\n", " | "),
+        str(plan.get("music_direction") or "").strip(),
+        sequence_sound.replace("\n", " | "),
+        str(plan.get("objective") or "").strip(),
+        str(plan.get("format") or "").strip(),
+        str(plan.get("intent") or "").strip(),
+        str(plan.get("brief") or "").strip(),
+        str(getattr(ctx, "user_message", "") or "").strip(),
+    ]
+    direction = " | ".join(dict.fromkeys(
+        part for part in direction_parts if part))[:2600]
+    speech_led = bool((getattr(ctx, "index", None) or {}).get("words"))
+    ranked = music_judge.rank(measured, direction, speech_led=speech_led)
+    _metric(ctx, "music_candidates_measured", len(measured))
+    lines = []
+    for i, row in enumerate(ranked, 1):
+        reasons = "; ".join(row["reasons"][:4])
+        lines.append(
+            f"{i}. {row['id']} — \"{row['title']}\" — measured fit "
+            f"{row['score']:+.2f}; {reasons}")
+    error_note = ("\nUnavailable candidates: " + "; ".join(errors)[:300]
+                  if errors else "")
+    listened = ""
+    selected = [row for row in ranked if row["id"] in samples][:3]
+    if len(selected) >= 2:
+        paths = [samples[row["id"]] for row in selected]
+        labels = [f"{row['id']} — {row['title']}" for row in selected]
+        prompt = (
+            "You are a senior music supervisor. Listen to each actual labeled "
+            "candidate excerpt and compare musical character, production "
+            "quality, emotional tone, distinctiveness, vocal/dialogue masking "
+            "risk and fit for this edit. Name the best id and why, plus any "
+            "material concern. Do not infer from filenames. The waveform "
+            "ranking is separate evidence, not an instruction. Edit brief: "
+            + direction[:900])
+        assessment = llm.ask_audio(
+            prompt, paths, labels, max_tokens=260,
+            purpose="audio_music_candidates")
+        if assessment:
+            _metric(ctx, "music_candidates_heard", len(selected))
+            listened = ("\nACTUAL LISTENING COMPARISON — an audio-capable "
+                        "reviewer heard the labeled excerpts: " + assessment)
+    for sample in samples.values():
+        try:
+            os.remove(sample)
+        except OSError:
+            pass
+    hearing_note = (" Waveforms were measured for every ranked candidate; "
+                    "actual listening evidence is included below where the "
+                    "audio-review lane was available."
+                    if listened else
+                    " The waveform was measured, not heard by the language "
+                    "model; no subjective listener evidence was available.")
+    return ("ACOUSTIC CANDIDATE COMPARISON." + hearing_note
+            + " Ranking uses the creative "
+            f"blueprint{' and dialogue masking risk' if speech_led else ''}; "
+            "it is evidence, not a taste lock:\n" + "\n".join(lines)
+            + listened
+            + "\nChoose deliberately, then fetch_music(id) and "
+              "get_audio_analysis on the chosen project asset for its exact "
+              "beat grid/offset." + error_note)
+
+
+def research_music(ctx, query, brief=None, min_seconds=None,
+                   max_seconds=None, commercial_use=None):
+    """Search and acoustically compare a soundtrack slate in one evidence pass.
+
+    Candidate ids do not exist until search returns, so making the language
+    model call ``search_music`` and then ``audition_music_candidates`` costs a
+    guaranteed extra dispatch even though no editorial judgment lies between
+    those operations. Keep the final winner decision with the editor, but do
+    the dependent catalog/waveform/listening work inside one tool call.
+    """
+    # A failed search must never audition the preceding search's in-memory
+    # slate. Durable ids remain recoverable by fetch_music, while this packet
+    # represents exactly this query and nothing else.
+    ctx._music_hits = {}
+    found = search_music(
+        ctx, query, min_seconds=min_seconds, max_seconds=max_seconds,
+        commercial_use=commercial_use)
+    hits = list((getattr(ctx, "_music_hits", None) or {}).values())
+    if len(hits) < 2:
+        return found
+    # Four gives the judge real alternatives without downloading an entire
+    # result page. This is an operational evidence budget, not a taste cap:
+    # the complete search slate remains cached and named in ``found`` for a
+    # later comparison when the editor wants a different direction.
+    ids = [hit["id"] for hit in hits[:4]]
+    compared = audition_music_candidates(ctx, ids, brief=brief or query)
+    _metric(ctx, "music_research_packets")
+    return _cap(
+        found + "\n\nDEPENDENT ACOUSTIC RESEARCH (same catalog slate):\n"
+        + compared,
+        budget=18000)
 
 
 def fetch_music(ctx, id):
@@ -3429,9 +4095,10 @@ def _queue_candidate_thumbs(ctx, hits, limit=5):
     # same queue into the tool response as a labeled contact sheet. The old
     # direct_sight-only gate made MCP stock selection text-blind even though
     # its transport was fully capable of returning the thumbnails.
-    if not _can_receive_images(ctx):
+    ctx._last_candidate_review_text = None
+    if not (_can_receive_images(ctx) or llm.vision_available()):
         return 0
-    queued = 0
+    frames, labels = [], []
     for h in hits[:limit]:
         turl = h.get("_thumb")
         if not turl:
@@ -3443,15 +4110,46 @@ def _queue_candidate_thumbs(ctx, hits, limit=5):
                                timeout_s=15)
             # Stock hits are addressed by id; footage hits by their URL —
             # the label must be the exact string the model passes onward.
-            ctx.pending_images.append((h.get("id") or h.get("url"), local))
+            label = h.get("id") or h.get("url")
+            frames.append(local)
+            labels.append(label)
             # Evidence provenance for the follow-up selector. Some providers
             # return no description at all; in that case this thumbnail is the
             # only factual basis for saying what the shot depicts.
             h["_thumbnail_delivered"] = True
-            queued += 1
         except Exception:
             continue
-    return queued
+    if not frames:
+        return 0
+    ctx._last_candidate_review_text = _deliver_frames(
+        ctx, frames, labels,
+        "Compare the candidates by visible subject, authenticity, framing, "
+        "light/color, logos and usefulness for the named narrative moment.",
+        "Visual search candidates (selection evidence only)")
+    return len(frames)
+
+
+def _mark_visual_review_pending(ctx, asset_key, reviewed):
+    """Hold same-batch placement until the review result reaches the model."""
+    if not reviewed or getattr(ctx, "sight_out", False):
+        return
+    pending = getattr(ctx, "_pending_visual_review_assets", None)
+    if pending is None:
+        pending = set()
+        ctx._pending_visual_review_assets = pending
+    pending.add(str(asset_key))
+
+
+def _pending_visual_review(ctx, asset_key):
+    pending = getattr(ctx, "_pending_visual_review_assets", None) or set()
+    if str(asset_key) not in pending:
+        return None
+    return (
+        "REJECTED: the actual pixels/motion for this newly acquired visual "
+        "asset are attached in the current tool batch but have not reached "
+        "your reasoning context yet. Place it on your NEXT step after "
+        "judging that evidence; do not select a shot blind."
+    )
 
 
 def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
@@ -3468,8 +4166,19 @@ def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
     frame-extraction problem must not turn a valid, safely stored download
     into a false failure.
     """
+    # Keep the profile reachable by the caller so the same evidence is
+    # persisted with the asset and does not disappear with the scratch file.
+    ctx._last_download_motion_profile = None
+    if kind == url_media.KIND_VIDEO:
+        try:
+            ctx._last_download_motion_profile = motion_judge.analyze_video(
+                path, duration_s=duration_s)
+            _metric(ctx, "motion_profiles_measured")
+        except Exception:
+            pass                       # evidence is best-effort, bytes are valid
+    ctx._last_download_review_text = None
     if kind not in (url_media.KIND_VIDEO, url_media.KIND_IMAGE) or \
-            not _can_receive_images(ctx):
+            not (_can_receive_images(ctx) or llm.vision_available()):
         return 0
     frames, labels = [], []
     try:
@@ -3511,10 +4220,15 @@ def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
                 labels.append(f"{t:g}s")
         if not frames:
             return 0
-        _deliver_frames(
-            ctx, frames, labels,
+        measured = motion_judge.describe(
+            getattr(ctx, "_last_download_motion_profile", None))
+        question = (
             "Verify subject, visual quality, relevance, logos/watermarks and "
-            "the exact useful moment before placing this asset in the edit.",
+            "the exact useful moment before placing this asset in the edit."
+            + (f" {measured}" if measured else ""))
+        ctx._last_download_review_text = _deliver_frames(
+            ctx, frames, labels,
+            question,
             f"Automatic review of the downloaded {label}")
         return len(frames)
     except Exception:
@@ -3523,11 +4237,16 @@ def _queue_download_review(ctx, path, kind, duration_s=None, label="media",
 
 def _queue_remote_download_review(ctx, got, label="media"):
     """Deliver executor-produced review frames and reclaim their objects."""
+    ctx._last_download_motion_profile = got.get("motion_profile")
+    if ctx._last_download_motion_profile:
+        _metric(ctx, "motion_profiles_measured")
     keys = list(got.get("review_keys") or [])
     labels = list(got.get("review_labels") or [])
     frames, used_labels = [], []
     try:
-        if not keys or not _can_receive_images(ctx):
+        ctx._last_download_review_text = None
+        if not keys or not (_can_receive_images(ctx) or
+                            llm.vision_available()):
             return 0
         for i, key in enumerate(keys):
             if not key:
@@ -3543,10 +4262,14 @@ def _queue_remote_download_review(ctx, got, label="media"):
                                f"sample {i + 1}")
         if not frames:
             return 0
-        _deliver_frames(
-            ctx, frames, used_labels,
+        measured = motion_judge.describe(ctx._last_download_motion_profile)
+        question = (
             "Verify subject, visual quality, relevance, logos/watermarks and "
-            "the exact useful moment before placing this asset in the edit.",
+            "the exact useful moment before placing this asset in the edit."
+            + (f" {measured}" if measured else ""))
+        ctx._last_download_review_text = _deliver_frames(
+            ctx, frames, used_labels,
+            question,
             f"Automatic review of the downloaded {label}")
         return len(frames)
     finally:
@@ -3630,18 +4353,187 @@ def search_sfx(ctx, query, max_seconds=None):
     return ("Sounds found (each line carries its license terms — relay "
             "them):\n- "
             + "\n- ".join(sfx_search.describe(h) for h in hits)
-            + "\nfetch_sfx(id) downloads one into the project. Then "
-              "add_sfx places it on its moment.")
+            + "\nFor deliberate sound design, audition_sfx_candidates(ids, "
+              "purpose) measures the strongest options' actual attack, peak, "
+              "tail, spectrum and event count before choosing. fetch_sfx(id) "
+              "downloads the winner; add_sfx places it on its moment.")
+
+
+def _sfx_audition_cache(ctx):
+    cache = getattr(ctx, "_sfx_auditions", None)
+    if cache is None:
+        cache = {}
+        ctx._sfx_auditions = cache
+    return cache
+
+
+def _sound_design_context(ctx, at=None):
+    """Durable sound language, narrowed to the planned beat at ``at``.
+
+    The physical query still owns deterministic transient ranking: feeding
+    every beat's words into that classifier could make an unrelated later
+    "impact" overpower the requested "click". This context is for the actual
+    listener's higher-order judgment of scale, restraint and sequence
+    coherence. When measured source ranges exist, an output-time placement is
+    matched through the current cut/speed map rather than guessed.
+    """
+    plan = director.normalize_blueprint(getattr(ctx, "edit_plan", None))
+    if not plan:
+        return ""
+    rows = plan.get("sequence_map") or []
+    matched = []
+    if at is not None and rows:
+        try:
+            edl = ctx.latest_edl()["json"]
+            tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                          edl.get("speed") or [])
+            target = float(at)
+            for row in rows:
+                if row.get("source_start_s") is None:
+                    continue
+                spans = tl.span_to_out(float(row["source_start_s"]),
+                                       float(row["source_end_s"]))
+                if any(start - .25 <= target <= end + .25
+                       for start, end in spans):
+                    matched.append(row)
+        except (KeyError, TypeError, ValueError):
+            matched = []
+    sequence = director.sequence_block(
+        dict(plan, sequence_map=matched or rows),
+        include=("anchor", "purpose", "sound"), max_rows=12)
+    parts = [
+        director.decision_block(plan).replace("\n", " | "),
+        str(plan.get("sfx_direction") or "").strip(),
+        str(plan.get("objective") or plan.get("intent") or "").strip(),
+        sequence.replace("\n", " | "),
+    ]
+    return " | ".join(dict.fromkeys(part for part in parts if part))[:2200]
+
+
+def _measure_sfx_candidate(ctx, hit, need_file=False):
+    """Return (hit, analysis, local_path, error) for a real recording."""
+    cached = _sfx_audition_cache(ctx).get(hit["id"])
+    if cached and not need_file:
+        return hit, cached, None, None
+    local = os.path.join(ctx.workdir,
+                         f"sfxaudition_{uuid.uuid4().hex[:8]}.audio")
+    keep_local = False
+    try:
+        sfx_search.download(hit, local)
+        duration = music_search.probe_duration_s(local)
+        if duration <= 0.05:
+            raise perception.PerceptionError("download is not playable audio")
+        analysis = cached or perception.analyze_transient(
+            local, max_s=min(60.0, max(1.0, duration + .25)))
+        _sfx_audition_cache(ctx)[hit["id"]] = analysis
+        keep_local = bool(need_file)
+        return hit, analysis, local if need_file else None, None
+    except Exception as exc:
+        return hit, None, None, str(exc)[:180]
+    finally:
+        if not keep_local:
+            try:
+                os.remove(local)
+            except OSError:
+                pass
+
+
+def audition_sfx_candidates(ctx, ids, purpose):
+    """Compare the actual transient shape of multiple search results."""
+    if not isinstance(ids, (list, tuple)):
+        return "REJECTED: ids must be an array of search_sfx result ids."
+    unique = []
+    for result_id in ids:
+        result_id = str(result_id or "").strip()
+        if result_id and result_id not in unique:
+            unique.append(result_id)
+    if len(unique) < 2:
+        return "REJECTED: pass at least two different sound result ids."
+    intent = str(purpose or "").strip()
+    if not intent:
+        return ("REJECTED: purpose must name the physical/editorial event, "
+                "for example 'tight whoosh into the product reveal'.")
+    resolved, errors = [], []
+    for result_id in unique:
+        hit, error = _recover_search_hit(ctx, "sfx", result_id,
+                                         sfx_search.resolve)
+        if hit:
+            resolved.append(hit)
+        else:
+            errors.append(f"{result_id}: {error or 'not found'}")
+    if len(resolved) < 2:
+        return ("REJECTED: fewer than two candidates could be recovered. "
+                + "; ".join(errors)[:300])
+
+    measured, samples = [], {}
+    need_listening = llm.audio_review_available()
+    with ThreadPoolExecutor(max_workers=min(3, len(resolved))) as pool:
+        futures = [pool.submit(_measure_sfx_candidate, ctx, hit,
+                               need_listening)
+                   for hit in resolved]
+        for future in as_completed(futures):
+            hit, analysis, local, error = future.result()
+            if analysis:
+                measured.append((hit, analysis))
+                if local:
+                    samples[hit["id"]] = local
+            else:
+                errors.append(f"{hit['id']}: {error}")
+    if len(measured) < 2:
+        return ("Could not measure two playable candidates. "
+                + "; ".join(errors)[:360]
+                + ". Do not claim they were auditioned.")
+    ranked = sfx_judge.rank(measured, intent)
+    sound_context = _sound_design_context(ctx)
+    _metric(ctx, "sfx_candidates_measured", len(measured))
+    lines = [
+        f"{i}. {row['id']} — \"{row['title']}\" — measured fit "
+        f"{row['score']:+.2f}; " + "; ".join(row["reasons"][:4])
+        for i, row in enumerate(ranked, 1)]
+    listened = ""
+    selected = [row for row in ranked if row["id"] in samples][:3]
+    if len(selected) >= 2:
+        assessment = llm.ask_audio(
+            "You are a senior sound designer. Listen to each actual labeled "
+            "recording, compare whether it genuinely sounds like and supports "
+            f"this visible/editorial event: {intent[:500]}. Judge specificity, "
+            "production cleanliness, harshness, tail, scale and likely fit in "
+            "a professional mix. Name the best id and why. Do not infer from "
+            "filenames; waveform ranking is separate evidence. Sound design "
+            "context: "
+            + (sound_context or "no durable sequence direction recorded"),
+            [samples[row["id"]] for row in selected],
+            [f"{row['id']} — {row['title']}" for row in selected],
+            max_tokens=240, purpose="audio_sfx_candidates")
+        if assessment:
+            _metric(ctx, "sfx_candidates_heard", len(selected))
+            listened = ("\nACTUAL LISTENING COMPARISON — an audio-capable "
+                        "reviewer heard the labeled recordings: " + assessment)
+    for sample in samples.values():
+        try:
+            os.remove(sample)
+        except OSError:
+            pass
+    failed = ("\nUnavailable: " + "; ".join(errors)[:300]
+              if errors else "")
+    return ("SFX TRANSIENT COMPARISON (waveforms were measured; the language "
+            "model did not hear the recordings):\n" + "\n".join(lines)
+            + listened
+            + "\nChoose the recording whose measured shape and catalog "
+              "identity both fit the named visible event, then fetch_sfx and "
+              "place it exactly on that event." + failed)
 
 
 def _download_sfx_hit(ctx, hit):
     """Download/store one resolved SFX hit. Returns (asset, error_text)."""
-    lp = os.path.join(ctx.workdir, f"sfxfetch_{uuid.uuid4().hex[:8]}.mp3")
-    try:
-        sfx_search.download(hit, lp)
-    except Exception as e:
-        return None, (f"Could not download that sound ({str(e)[:160]}). Try "
-                      "another result. Do NOT claim a sound was added.")
+    lp = hit.get("_audition_local") or os.path.join(
+        ctx.workdir, f"sfxfetch_{uuid.uuid4().hex[:8]}.mp3")
+    if not hit.get("_audition_local"):
+        try:
+            sfx_search.download(hit, lp)
+        except Exception as e:
+            return None, (f"Could not download that sound ({str(e)[:160]}). Try "
+                          "another result. Do NOT claim a sound was added.")
     dur = music_search.probe_duration_s(lp)
     if dur <= 0.05:
         return None, ("REJECTED: the downloaded file is not playable audio — "
@@ -3695,7 +4587,7 @@ def fetch_sfx(ctx, id):
 
 
 def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None):
-    """Find the best real one-shot online, store it and place it in one call."""
+    """Search, acoustically compare, store and place a real one-shot."""
     if not sfx_search.available():
         return ("REJECTED: web sound-effect search is disabled. Use add_sfx "
                 "with a user-uploaded audio or video asset.")
@@ -3721,24 +4613,78 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None):
         return (f"No usable one-shot matched '{query}'. Try a more physical "
                 "sound name; nothing was fetched or placed.")
     _remember_search_hits(ctx, "sfx", hits)
-    errors = []
-    # CDN availability varies. Try the top three ranked real recordings so a
-    # dead preview URL does not derail a whole edit turn.
-    for hit in hits[:3]:
-        asset, error = _download_sfx_hit(ctx, hit)
+    measured, local_by_id, errors = [], {}, []
+    with ThreadPoolExecutor(max_workers=min(3, len(hits))) as pool:
+        futures = [pool.submit(_measure_sfx_candidate, ctx, hit, True)
+                   for hit in hits]
+        for future in as_completed(futures):
+            hit, analysis, local, error = future.result()
+            if analysis and local:
+                measured.append((hit, analysis))
+                local_by_id[hit["id"]] = local
+            else:
+                errors.append(f"{hit.get('id')}: {error}")
+    if not measured:
+        return ("Could not download and measure any ranked sound. "
+                + "; ".join(errors)[:400])
+    ranked = sfx_judge.rank(measured, query)
+    sound_context = _sound_design_context(ctx, at_n)
+    _metric(ctx, "sfx_candidates_measured", len(measured))
+    chosen_id = ranked[0]["id"]
+    listening_evidence = ""
+    # The one-call recipe must get the same actual-audio judgment as the
+    # explicit audition workflow; otherwise the easiest route silently makes
+    # a weaker choice.  Limit the subjective comparison to the strongest
+    # measured candidates, and fall back to deterministic transient ranking
+    # whenever the reviewer is absent, ambiguous or unavailable.
+    heard = [row for row in ranked if row["id"] in local_by_id][:3]
+    if len(heard) >= 2 and llm.audio_review_available():
+        assessment = llm.ask_audio(
+            "You are a senior sound designer. Listen to each actual labeled "
+            "recording and choose the best sound for this exact visible event: "
+            f"{query[:500]}. Judge specificity, cleanliness, attack, tail, "
+            "scale, harshness and professional mix fit. State exactly one "
+            "candidate id, then the reason. Do not infer from filenames; "
+            "waveform ranking is separate evidence. Sound design context: "
+            + (sound_context or "no durable sequence direction recorded"),
+            [local_by_id[row["id"]] for row in heard],
+            [f"{row['id']} — {row['title']}" for row in heard],
+            max_tokens=220, purpose="audio_sfx_candidates")
+        if assessment:
+            mentions = []
+            for row in heard:
+                candidate_id = row["id"]
+                boundary = (r"(?<![A-Za-z0-9:_-])" +
+                            re.escape(candidate_id) +
+                            r"(?![A-Za-z0-9:_-])")
+                if re.search(boundary, assessment, flags=re.IGNORECASE):
+                    mentions.append(candidate_id)
+            if len(mentions) == 1:
+                chosen_id = mentions[0]
+                _metric(ctx, "sfx_candidates_heard", len(heard))
+                listening_evidence = (
+                    " Actual listening selection: " + assessment[:320])
+    chosen = next(hit for hit, _analysis in measured
+                  if hit["id"] == chosen_id)
+    chosen = dict(chosen, _audition_local=local_by_id[chosen_id])
+    try:
+        asset, error = _download_sfx_hit(ctx, chosen)
         if error:
-            errors.append(error)
-            continue
+            return error
         placed = add_sfx(ctx, asset["storage_key"], at_n, gain_n)
         if placed.startswith("REJECTED"):
             return placed
+        evidence = "; ".join(ranked[0]["reasons"][:3])
         return (placed + f" Source: \"{asset['title']}\""
-                f" ({hit.get('provider')}); license: "
-                f"{asset['license_note']}. Selected automatically from "
-                "ranked real one-shot recordings for the exact query "
-                f"'{query}'.")
-    return ("Could not download any of the top ranked sounds. "
-            + " ".join(errors)[:400])
+                f" ({chosen.get('provider')}); license: "
+                f"{asset['license_note']}. Selected after acoustic comparison "
+                f"for '{query}': {evidence}." + listening_evidence)
+    finally:
+        for local in local_by_id.values():
+            try:
+                os.remove(local)
+            except OSError:
+                pass
 
 
 def _speech_overlap_s(ctx, edl, start_out, end_out):
@@ -3952,6 +4898,12 @@ def _resolve_sfx(ctx, storage_key):
             "search_sfx to find the real sound online, or "
             "list_assets(kind='music') for the user's own uploads.")
     if asset and asset["kind"] == "video_clip":
+        if getattr(ctx, "_recipe_staging", False):
+            return None, (
+                "REJECTED: an uploaded video's audio must be extracted "
+                "before an atomic recipe, because extraction creates a "
+                "project asset. Call extract_audio first, then use the "
+                "returned audio storage_key in the recipe.")
         got, note, err = _audio_from_clip(ctx, asset)
         if err:
             return None, err
@@ -4207,7 +5159,8 @@ def _music_assets(conn, project_id):
     # kind 'audio' is the extracted source-audio track (transcription
     # artifact) — never offer it as music.
     with conn.cursor() as cur:
-        cur.execute("""SELECT storage_key, meta FROM assets
+        cur.execute("""SELECT id, storage_key, duration_s, sha256, meta
+                       FROM assets
                        WHERE project_id = %s AND kind = 'music'
                        ORDER BY id DESC LIMIT 20""", (project_id,))
         return cur.fetchall()
@@ -4984,6 +5937,13 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
     # it with margin (unless given), centred as far as the frame allows —
     # and derives the pin cx/cy that renders that exact window, so the
     # renderer, every stored EDL and every cached render stay untouched.
+    # Some model/API lanes serialize an omitted array as [] (or an empty
+    # string). That is absence, not a malformed rectangle. Treat it exactly
+    # like rect=None so a valid cx/cy target—or the safe center default—can
+    # still land in one call.
+    if ((isinstance(rect, (list, tuple)) and len(rect) == 0)
+            or (isinstance(rect, str) and not rect.strip())):
+        rect = None
     rct = None
     overrode_cxcy = False
     defaulted_target = False
@@ -6378,10 +7338,15 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
                 ((edl.get("source_clean") or {}).get("regions") or [])]
     for p in (edl.get("patches") or []):
         existing += [dict(r) for r in (p.get("regions") or [])]
+    mixed_rect_ignored = False
     if regions:
-        if x is not None or y is not None or w is not None or h is not None:
-            return ("REJECTED: pass EITHER one rectangle (x,y,w,h) OR "
-                    "regions=[...], not both.")
+        # The batch is strictly richer than the legacy single rectangle. Some
+        # model lanes populate both schemas (often x=y=w=h=0 beside a valid
+        # regions list). Refusing the whole repaint cost another model round
+        # even though the intended set of rectangles was unambiguous. Let the
+        # explicit batch win and teach the dialect in the successful result.
+        mixed_rect_ignored = any(
+            value is not None for value in (x, y, w, h))
         batch = []
         for i, r in enumerate(regions):
             if not isinstance(r, dict):
@@ -6418,9 +7383,15 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
     # seams, not cost: two repaints stacked over one band is what
     # "corrupted" project 382's screen.
     try:
-        return _apply_patches(
+        result = _apply_patches(
             ctx, new_items, what,
             drop=_superseded_patches(edl, new_items, ctx.duration))
+        if mixed_rect_ignored and isinstance(result, str) \
+                and result.startswith("EDL v"):
+            result += ("\nNOTE: regions=[...] was used and the separate "
+                       "x/y/w/h values were ignored. Pass only regions next "
+                       "time; it already contains every rectangle.")
+        return result
     except ValueError as e:
         return f"REJECTED: {e}"
     except Exception as e:
@@ -6788,24 +7759,12 @@ def _visual_asset_uses(edl, asset_key, exclude_ids=()):
     return uses
 
 
-def _dropped_motion_note(motion, at=None, dur=None):
-    """The one line that replaces a rejection when `motion` rode a VIDEO
-    insert. Names the tool that DOES move a clip, with the window already
-    filled in, so the follow-up call needs no arithmetic."""
-    if not motion:
-        return ""
-    where = (f" add_zoom(start={at}, end={round(at + dur, 2)}, "
-             f"mode='push_in') over its window"
-             if at is not None and dur is not None
-             else " add_zoom over its window")
-    return (f"\nNote: motion={motion!r} was ignored — it is a Ken Burns move "
-            f"for STILLS, and this is a video clip that already moves. For a "
-            f"camera move on top of the clip, call{where}.")
-
-
 def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                  clip_start_s=None, motion=None, fit="auto",
                  allow_repeat=False):
+    pending_review = _pending_visual_review(ctx, asset_key)
+    if pending_review:
+        return pending_review
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
@@ -6820,27 +7779,20 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                 "FINAL edited video, in seconds.")
     if motion is not None:
         motion = str(motion).strip().lower() or None
-    # A motion asked for on a VIDEO clip is dropped, not rejected (round 101).
-    # 92 rejections in a week, and every one of them threw away a placement
-    # the tool could have made: the insert is entirely well-specified without
-    # the motion, and the clip does move on its own — so refusing the whole
-    # call punished the agent for a redundant argument, at the price of a
-    # full step of the user's wait. If the agent really wants a move ON a
-    # clip, add_zoom over the insert's window is the tool, and the note says
-    # so where it will be read.
-    dropped_motion = None
-    if motion and kind != "image":
-        dropped_motion, motion = motion, None
     if motion:
         if motion not in INSERT_MOTIONS:
             return (f"REJECTED: motion must be one of "
                     f"{', '.join(INSERT_MOTIONS)}.")
     fitv = str(fit or "auto").strip().lower().replace("-", "_")
     if fitv in ("auto", "safe", "contain", "fit"):
-        # Lossless by default. A same-aspect asset renders identically; a
-        # mismatched one gets a blurred extension instead of silently losing
-        # the subject/card edges to a center crop.
-        fitv = "pad_blur"
+        # Lossless by default. When the program is already black-padded,
+        # inherit that — silently picking pad_blur here is how a "zero blur
+        # / solid black" brief got blurred sidebars on every vertical clip.
+        frame = ((ctx.latest_edl()["json"] or {}).get("frame") or {})
+        if str(frame.get("mode") or "") == "pad":
+            fitv = "pad"
+        else:
+            fitv = "pad_blur"
     elif fitv in ("pad", "letterbox"):
         fitv = "pad"
     elif fitv in ("pad_blur", "blur", "blurred"):
@@ -6852,6 +7804,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                 "'pad_blur', 'pad', or 'crop'. Use crop only after "
                 "look_at_asset confirms the meaningful content survives.")
     off = 0.0
+    clamp_note = ""
     if kind == "image":
         try:
             dur = round(max(float(duration_s if duration_s is not None
@@ -6861,18 +7814,20 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     else:
         clip_dur = _asset_media_duration(ctx, asset)
         try:
-            dur = round(min(max(float(duration_s), 0.2), clip_dur), 2) \
-                if duration_s is not None else round(
-                    clip_dur, 2)
+            asked = round(max(float(duration_s), 0.2), 2) \
+                if duration_s is not None else round(clip_dur, 2)
             off = round(max(float(clip_start_s), 0.0), 2) \
                 if clip_start_s is not None else 0.0
         except (TypeError, ValueError):
             return ("REJECTED: duration_s and clip_start_s must be numbers "
                     "of seconds.")
-        if off + dur > clip_dur + 0.05:
-            return (f"REJECTED: the window {off}-{round(off + dur, 2)}s runs "
-                    f"past the end of the clip ({clip_dur:.1f}s). Use "
-                    f"clip_start_s <= {max(0.0, round(clip_dur - dur, 2))}.")
+        room = round(max(0.2, clip_dur - off), 2)
+        if asked > room + 0.05:
+            dur = room
+            clamp_note = (f" (asked {asked}s from {off:g}s, clip is "
+                          f"{clip_dur:.1f}s — used {dur}s)")
+        else:
+            dur = asked
     edl = dict(ctx.latest_edl()["json"])
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
 
@@ -6896,10 +7851,10 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
         edl["inserts"] = inserts + [item]
         window = (f" (using clip {off:.1f}-{round(off + dur, 2):.1f}s)"
                   if off else "")
-        moved = f" with a Ken Burns {motion} move" if motion else ""
+        moved = f" with a local {motion} camera move" if motion else ""
         desc = (f"placed {kind} '{name}' ({dur}s){window}{moved} on the "
-                f"canvas [{item['id']}]")
-        return ctx.write_edl(edl, desc) + _dropped_motion_note(dropped_motion)
+                f"canvas [{item['id']}]{clamp_note}")
+        return ctx.write_edl(edl, desc)
 
     keep = [list(x) for x in edl["keep"]]
     orig_keep = [list(x) for x in keep]
@@ -6960,9 +7915,9 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     remap_notes = _remap_program_items(edl, old_tl, new_tl)
     window = (f" (using clip {off:.1f}-{round(off + dur, 2):.1f}s)"
               if off else "")
-    moved = f" with a Ken Burns {motion} move" if motion else ""
+    moved = f" with a local {motion} camera move" if motion else ""
     desc = (f"inserted {kind} '{name}' ({dur}s){window}{moved} at "
-            f"{final_at}s of the edited video [{item['id']}]")
+            f"{final_at}s of the edited video [{item['id']}]{clamp_note}")
     if note_bits:
         desc += " — " + "; ".join(note_bits)
     result = ctx.write_edl(edl, desc)
@@ -6971,7 +7926,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                    "media is not transcribed or captioned.")
         if remap_notes:
             result += "\n" + "\n".join(remap_notes)
-    return result + _dropped_motion_note(dropped_motion, final_at, dur)
+    return result
 
 
 def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
@@ -7083,8 +8038,13 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
             if cx1 <= cx0 or cy1 <= cy0:
                 return ("REJECTED: crop needs x0<x1 and y0<y1; any positive "
                         "region size is otherwise allowed.")
-            crop_val = [round(cx0, 4), round(cy0, 4),
-                        round(cx1, 4), round(cy1, 4)]
+            values = [round(cx0, 4), round(cy0, 4),
+                      round(cx1, 4), round(cy1, 4)]
+            # A full-frame crop is the identity and commonly appears in a
+            # uniform image/video recipe. Treat it as an explicit clear so it
+            # removes an old crop without storing redundant geometry.
+            crop_val = ("clear" if values == [0.0, 0.0, 1.0, 1.0]
+                        else values)
     if hit.get("kind") == "image" and clip_start_s is not None:
         # A uniform image/video batch often carries the neutral seek 0. It has
         # no effect on a still, so ignoring it is safer than aborting every
@@ -7100,8 +8060,18 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
                     "has no timeline to seek into. Use duration_s to change "
                     "how long it shows.")
     if hit.get("kind") == "image" and rate is not None:
-        return ("REJECTED: rate is for video inserts — a still has no speed. "
-                "Use duration_s to change how long it shows.")
+        # The same uniform patch often covers a mixed board of stills and
+        # clips. rate=1 is the identity on either, so ignore it on a still;
+        # a non-neutral speed remains an honest mismatch rather than a guess.
+        try:
+            neutral_image_rate = abs(float(rate) - 1.0) < 1e-9
+        except (TypeError, ValueError):
+            neutral_image_rate = False
+        if neutral_image_rate:
+            rate = None
+        else:
+            return ("REJECTED: rate is for video inserts — a still has no "
+                    "speed. Use duration_s to change how long it shows.")
     # rate (round 76): the spliced scene plays FASTER (or slower) IN PLACE —
     # "don't shorten the editing screens, speed them up". duration_s stays
     # OUTPUT seconds. rate alone keeps the clip's source window and shrinks
@@ -7237,8 +8207,8 @@ def set_insert_window(ctx, id, duration_s=None, clip_start_s=None,
     elif mute_val is False and old_mute:
         reg += ", its own audio back ON"
     if (dur, off, r, new_crop, new_mute, new_fit, new_rotation) == prev:
-        return (f"insert {id} already plays {off}-{round(off + span, 2)}s"
-                f"{at_rate}{reg}")
+        return (f"NO CHANGE — insert {id} already plays "
+                f"{off}-{round(off + span, 2)}s{at_rate}{reg}.")
     edl["inserts"] = inserts
     speed = edl.get("speed") or []
     old_tl = Timeline(edl.get("keep") or [], before, speed)
@@ -7629,6 +8599,222 @@ def remove_speed(ctx, id):
         f"{hit['start']}-{hit['end']}s) — normal speed restored there")
 
 
+COMPOSE_PANELS_MIN_S = 1.0
+COMPOSE_PANELS_MAX_S = 20.0
+COMPOSE_PANELS_DEFAULT_S = 8.0
+
+
+def _normalize_panel_columns(columns):
+    """Accept a list of asset keys, or a list of per-column clip lists."""
+    if not isinstance(columns, (list, tuple)) or not columns:
+        return None, "REJECTED: columns must be a non-empty list."
+    if 2 <= len(columns) <= 3 and all(
+            isinstance(c, str) or (
+                isinstance(c, dict) and c.get("asset_key"))
+            for c in columns):
+        columns = [[c] for c in columns]
+    if not (2 <= len(columns) <= 3):
+        return None, ("REJECTED: compose_panels needs 2 or 3 columns "
+                      "(left | center | right).")
+    out = []
+    for i, col in enumerate(columns, 1):
+        items = col if isinstance(col, (list, tuple)) else [col]
+        if not items:
+            return None, f"REJECTED: column {i} is empty."
+        parsed = []
+        for item in items:
+            if isinstance(item, str):
+                parsed.append({"asset_key": item, "start": 0.0,
+                               "duration": None})
+                continue
+            if not isinstance(item, dict) or not item.get("asset_key"):
+                return None, (
+                    f"REJECTED: column {i} items need an asset_key.")
+            start = item.get("start", item.get("clip_start_s", 0.0))
+            dur = item.get("duration", item.get("duration_s"))
+            try:
+                start = round(max(0.0, float(start or 0.0)), 2)
+            except (TypeError, ValueError):
+                return None, "REJECTED: clip start must be a number."
+            if dur is not None:
+                try:
+                    dur = round(max(0.2, float(dur)), 2)
+                except (TypeError, ValueError):
+                    return None, "REJECTED: clip duration must be a number."
+            parsed.append({"asset_key": str(item["asset_key"]),
+                           "start": start, "duration": dur})
+        out.append(parsed)
+    return out, None
+
+
+def _compose_panels_filter(n_cols, col_lens, col_durs, duration, width, height):
+    """Build the hstack filter. Each column is already one concat."""
+    cell_w = (width // n_cols) & ~1
+    used_w = cell_w * n_cols
+    cell_h = height & ~1
+    parts = []
+    scaled = []
+    idx = 0
+    for c, nclips in enumerate(col_lens):
+        clips = []
+        for _ in range(nclips):
+            lab = f"s{idx}"
+            parts.append(
+                f"[{idx}:v]scale={cell_w}:{cell_h}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"pad={cell_w}:{cell_h}:(ow-iw)/2:(oh-ih)/2:black,"
+                f"setsar=1,fps=30,format=yuv420p,setpts=PTS-STARTPTS[{lab}]")
+            clips.append(f"[{lab}]")
+            idx += 1
+        if nclips == 1:
+            raw = clips[0][1:-1]
+        else:
+            raw = f"c{c}raw"
+            parts.append(
+                f"{''.join(clips)}concat=n={nclips}:v=1:a=0[{raw}]")
+        col = f"c{c}"
+        pad_add = max(0.0, duration - float(col_durs[c]))
+        if pad_add > 0.001:
+            parts.append(
+                f"[{raw}]tpad=stop_mode=add:stop_duration={pad_add:.3f},"
+                f"trim=duration={duration:.3f},setpts=PTS-STARTPTS[{col}]")
+        else:
+            parts.append(
+                f"[{raw}]trim=duration={duration:.3f},"
+                f"setpts=PTS-STARTPTS[{col}]")
+        scaled.append(f"[{col}]")
+    stack = "hstack=inputs=2" if n_cols == 2 else "hstack=inputs=3"
+    vout = "[vout]"
+    if used_w != width:
+        parts.append(
+            f"{''.join(scaled)}{stack}[hstack];"
+            f"[hstack]pad={width}:{cell_h}:(ow-iw)/2:0:black{vout}")
+    else:
+        parts.append(f"{''.join(scaled)}{stack}{vout}")
+    return ";".join(parts)
+
+
+def compose_panels(ctx, columns, duration_s=None):
+    """WRITE: build one 16:9 (or current frame) clip of 2–3 equal columns
+    of independent footage on a black canvas. THE tool for a multi-panel
+    athlete wall / split-screen — not a chain of PIPs. The result is a
+    new video_clip; it is not in the program until insert_media."""
+    parsed, err = _normalize_panel_columns(columns)
+    if err:
+        return err
+    try:
+        cap = (float(duration_s) if duration_s is not None
+               else COMPOSE_PANELS_DEFAULT_S)
+    except (TypeError, ValueError):
+        return "REJECTED: duration_s must be a number of seconds."
+    cap = round(min(max(cap, COMPOSE_PANELS_MIN_S), COMPOSE_PANELS_MAX_S), 2)
+
+    resolved = []
+    col_durs = []
+    for col in parsed:
+        items = []
+        total = 0.0
+        for spec in col:
+            asset, aerr = _resolve_media_asset(
+                ctx, spec["asset_key"], ("video_clip", "image_ref"))
+            if aerr:
+                return aerr
+            if asset["kind"] == "image_ref":
+                clip_dur = 3600.0
+            else:
+                clip_dur = float(_asset_media_duration(ctx, asset) or 0.0)
+            start = min(spec["start"], max(0.0, clip_dur - 0.2))
+            room = round(max(0.2, clip_dur - start), 2)
+            dur = room if spec["duration"] is None else min(spec["duration"],
+                                                            room)
+            items.append({**spec, "asset": asset, "start": start,
+                          "duration": dur})
+            total += dur
+        if total < 0.2:
+            return "REJECTED: a column has no playable duration."
+        resolved.append(items)
+        col_durs.append(total)
+    out_dur = round(min(cap, max(col_durs)), 2)
+    if out_dur < COMPOSE_PANELS_MIN_S:
+        return ("REJECTED: the composed clip would be shorter than "
+                f"{COMPOSE_PANELS_MIN_S}s.")
+
+    frame = ((ctx.latest_edl()["json"] or {}).get("frame") or {})
+    ratio = str(frame.get("ratio") or "16:9")
+    if ratio not in CANVAS_DIMS or ratio == "source":
+        ratio = "16:9"
+    width, height = CANVAS_DIMS[ratio]
+    # Three verticals belong on a landscape canvas. A 9:16 program would
+    # make each column unreadably thin — force 16:9.
+    if ratio != "16:9":
+        width, height = CANVAS_DIMS["16:9"]
+        ratio = "16:9"
+
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    try:
+        for col in resolved:
+            for spec in col:
+                local = _asset_local_path(ctx, spec["asset"])
+                if spec["asset"]["kind"] == "image_ref":
+                    cmd += ["-loop", "1", "-t", f"{spec['duration']:.3f}",
+                            "-i", local]
+                else:
+                    cmd += ["-ss", f"{spec['start']:.3f}",
+                            "-t", f"{spec['duration']:.3f}", "-i", local]
+    except Exception as e:
+        return f"Could not open a panel clip ({str(e)[:140]})."
+
+    fg = _compose_panels_filter(
+        len(resolved), [len(c) for c in resolved], col_durs,
+        out_dur, width, height)
+    out_path = os.path.join(
+        ctx.workdir, f"panels_{uuid.uuid4().hex[:8]}.mp4")
+    cmd += ["-filter_complex", fg, "-map", "[vout]",
+            "-an", "-t", f"{out_dur:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p", out_path]
+    _touch_job_heartbeat(ctx)
+    try:
+        media.run(cmd, expected_out_s=out_dur)
+    except Exception as e:
+        return (f"Could not build the panel layout ({str(e)[:160]}). "
+                "Try fewer/shorter clips.")
+    try:
+        real_dur = media.probe(out_path).get("duration") or out_dur
+    except Exception:
+        real_dur = out_dur
+    key = f"generated_video/{ctx.project_id}/panels-{uuid.uuid4().hex[:12]}.mp4"
+    try:
+        storage.upload_file(out_path, key, "video/mp4")
+    except Exception as e:
+        return (f"The panel clip was built but could not be saved "
+                f"({str(e)[:140]}). Try again.")
+    ctx.db.run(dbx.insert_asset, ctx.project_id, "video_clip", key,
+               bytes_=os.path.getsize(out_path), duration_s=real_dur,
+               width=width, height=height,
+               meta={"filename": f"panels-{len(resolved)}col.mp4",
+                     "caption": f"{len(resolved)}-panel composed montage",
+                     "generated": True, "model": "local:compose_panels",
+                     "panel_columns": len(resolved)})
+    if not hasattr(ctx, "videos_generated") or ctx.videos_generated is None:
+        ctx.videos_generated = []
+    ctx.videos_generated.append({"storage_key": key, "prompt": "compose_panels",
+                                 "seconds": real_dur})
+    names = []
+    for col in resolved:
+        for spec in col:
+            meta = (spec["asset"].get("meta") or {})
+            names.append(meta.get("filename")
+                         or os.path.basename(spec["asset_key"]))
+    shown = ", ".join(names[:6])
+    if len(names) > 6:
+        shown += ", …"
+    return (f"Composed a {real_dur:.1f}s {ratio} {len(resolved)}-panel clip "
+            f"on black ({shown}). storage_key={key}. It is NOT in the "
+            f"program yet — place it with insert_media(asset_key='{key}', "
+            f"at_output_s=..., fit='pad'). Do not recompose it with overlays.")
+
+
 def _parse_anim_float(v, name):
     """(value, error): a plain number, or a keyframe list passed through for
     the schema's _norm_anim to validate and clamp."""
@@ -7644,12 +8830,54 @@ def _parse_anim_float(v, name):
                   "overlay's own start.")
 
 
+_TEXT_MOTION_FIELDS = ("x", "y", "scale", "rotation", "opacity")
+_OVERLAY_MOTION_FIELDS = ("x", "y", "scale", "rotation", "opacity")
+
+
+def _parse_text_motion(motion, allow_empty=False):
+    """Normalize the public text-motion object before schema validation.
+
+    Values deliberately remain scalar-or-keyframes here; validate_edl is the
+    single authority for local-time bounds and numeric clamping. Keeping that
+    contract shared with overlays means the agent learns one motion language,
+    and a future curve fix applies to both systems.
+    """
+    if motion is None:
+        return (None, None) if allow_empty else (
+            None, "REJECTED: motion must contain at least one of x, y, "
+                  "scale, rotation or opacity.")
+    if not isinstance(motion, dict):
+        return None, ("REJECTED: motion must be an object whose properties "
+                      "are numbers or local-time keyframe lists.")
+    unknown = sorted(set(motion) - set(_TEXT_MOTION_FIELDS))
+    if unknown:
+        return None, ("REJECTED: unknown text motion properties: "
+                      + ", ".join(unknown) + ". Use x, y, scale, rotation "
+                      "and/or opacity.")
+    parsed = {}
+    for name in _TEXT_MOTION_FIELDS:
+        if motion.get(name) is None:
+            continue
+        value, err = _parse_anim_float(motion[name], f"motion.{name}")
+        if err:
+            return None, err.replace("overlay's own start", "text's own start")
+        parsed[name] = value
+    if not parsed:
+        return (None, None) if allow_empty else (
+            None, "REJECTED: motion must contain at least one of x, y, "
+                  "scale, rotation or opacity.")
+    return parsed, None
+
+
 def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
                 scale=0.4, opacity=None, entrance=None, exit=None,
                 source_start_s=None, fit=None, allow_repeat=False):
     """Draw an asset OVER the program picture for a program-time window —
     picture-in-picture, a corner logo, or (fit='cover') a full-frame B-ROLL
     cutaway while the program's audio keeps playing."""
+    pending_review = _pending_visual_review(ctx, asset_key)
+    if pending_review:
+        return pending_review
     asset, err = _resolve_media_asset(ctx, asset_key,
                                       ("video_clip", "image_ref"))
     if err:
@@ -7680,6 +8908,7 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
                 return (f"REJECTED: source_start_s {off}s is at/past the end "
                         f"of the clip ({clip_dur:.1f}s).")
     remaining = round(prog - s, 2)
+    clamp_note = ""
     if duration_s is None:
         # Image overlays default to a 4s moment; video overlays play the
         # clip out (bounded by the program end) — both concrete in the EDL.
@@ -7687,19 +8916,25 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
             round(min(clip_dur - (off or 0.0), remaining), 2)
     else:
         try:
-            dur = round(min(max(float(duration_s), 0.2), remaining), 2)
+            asked = round(min(max(float(duration_s), 0.2), remaining), 2)
         except (TypeError, ValueError):
             return "REJECTED: duration_s must be a number of seconds."
-        if kind == "video" and (off or 0.0) + dur > clip_dur + 0.05:
-            return (f"REJECTED: the window {off or 0}-"
-                    f"{round((off or 0.0) + dur, 2)}s runs past the end of "
-                    f"the clip ({clip_dur:.1f}s).")
+        dur = asked
+        if kind == "video" and clip_dur is not None \
+                and (off or 0.0) + asked > clip_dur + 0.05:
+            room = round(max(0.2, clip_dur - (off or 0.0)), 2)
+            dur = min(asked, room)
+            clamp_note = (f" (asked {asked}s, clip is {clip_dur:.1f}s from "
+                          f"{off or 0:g}s — used {dur}s)")
     if dur < 0.2:
         return "REJECTED: the overlay window is shorter than 0.2s."
-    for label, v in (("entrance", entrance), ("exit", exit)):
-        if v is not None and v not in OVERLAY_ANIMS:
-            return (f"REJECTED: {label} must be one of "
-                    f"{', '.join(OVERLAY_ANIMS)}.")
+    dropped_anim = []
+    if entrance is not None and entrance not in OVERLAY_ANIMS:
+        dropped_anim.append(f"entrance={entrance}")
+        entrance = None
+    if exit is not None and exit not in OVERLAY_ANIMS:
+        dropped_anim.append(f"exit={exit}")
+        exit = None
     fitv = None
     if fit is not None:
         fitv = str(fit).strip().lower()
@@ -7739,9 +8974,12 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
            else f"center ({xv:g}, {yv:g})")
     what = (f"FULL-FRAME b-roll cover" if fitv == "cover"
             else f"{sc:g}x frame width at {pos}")
+    extra = clamp_note
+    if dropped_anim:
+        extra += " (ignored unknown " + ", ".join(dropped_anim) + ")"
     res = ctx.write_edl(
         edl, f"overlay {kind} '{name}' at {s}-{round(s + dur, 2)}s "
-             f"(program time), {what} [{item['id']}]")
+             f"(program time), {what} [{item['id']}]{extra}")
     if res.startswith("EDL v"):
         notes = []
         if fitv == "cover":
@@ -7778,6 +9016,58 @@ def remove_overlay(ctx, id):
         edl, f"removed overlay {id} "
              f"('{os.path.basename(hit['asset_key'])}', "
              f"{hit['start']}-{round(float(hit['start']) + float(hit['duration_s']), 2)}s)")
+
+
+def set_overlay_motion(ctx, id, motion):
+    """Set coherent element-local keyframes on an existing visual overlay."""
+    if not isinstance(motion, dict) or not motion:
+        return ("REJECTED: motion must be a non-empty object containing x, "
+                "y, scale, rotation and/or opacity. Pass a scalar for a "
+                "static property or keyframes for animation.")
+    unknown = sorted(set(motion) - set(_OVERLAY_MOTION_FIELDS))
+    if unknown:
+        return ("REJECTED: unknown overlay motion properties: "
+                + ", ".join(unknown)
+                + ". Use x, y, scale, rotation and/or opacity.")
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(o) for o in (edl.get("overlays") or [])]
+    hit = next((o for o in items if o.get("id") == id), None)
+    if not hit:
+        have = ", ".join(o.get("id") or "?" for o in items) or "none"
+        return (f"REJECTED: no overlay with id '{id}'. Existing overlays: "
+                f"{have}. Call get_edl to see them.")
+    if hit.get("screen"):
+        return (f"REJECTED: '{id}' is a screen takeover. Its motion is "
+                "derived from the tracked device corners and camera push; "
+                "ordinary overlay curves would break that lock.")
+    ignored = {"x", "y", "scale"} & set(motion) if hit.get("fit") == "cover" \
+        else set()
+    if ignored:
+        return ("REJECTED: full-frame cover overlays ignore "
+                + ", ".join(sorted(ignored))
+                + ". Animate opacity/rotation, or use a PIP overlay for "
+                  "position and scale motion.")
+    before = dict(hit)
+    for name in _OVERLAY_MOTION_FIELDS:
+        if name not in motion:
+            continue
+        value, err = _parse_anim_float(motion[name], f"motion.{name}")
+        if err:
+            return err
+        hit[name] = value
+    if hit == before:
+        return (f"NO CHANGE — overlay {id} already has those motion values. "
+                "Do NOT tell the user you changed anything.")
+    edl["overlays"] = items
+    changed = ", ".join(name for name in _OVERLAY_MOTION_FIELDS
+                        if hit.get(name) != before.get(name))
+    written = ctx.write_edl(
+        edl, f"overlay {id} motion authored on {changed} (local seconds)")
+    if written.startswith("EDL v") and (hit.get("entrance") or hit.get("exit")):
+        written += ("\nNote: the existing named entrance/exit still composes "
+                    "with these curves; clear or replace it only if the "
+                    "combined motion is not intended.")
+    return written
 
 
 # ── The screen takeover (round 55) ──────────────────────────────────────────
@@ -9118,7 +10408,8 @@ def move_overlay(ctx, id, start=None, x=None, y=None, scale=None):
         overrun = hit["start"] + float(hit["duration_s"]) - prog
         if overrun > 0.01:
             hit["duration_s"] = round(prog - hit["start"], 2)
-            for prop in ("x", "y"):    # keyframes past the new end would
+            for prop in ("x", "y", "scale", "rotation", "opacity"):
+                # keyframes past the new end would
                 if isinstance(hit.get(prop), list):     # reject the write
                     hit[prop] = clip_anim(hit[prop], hit["duration_s"])
             note = (f"\nNote: the window was shortened to "
@@ -9155,7 +10446,7 @@ def move_overlay(ctx, id, start=None, x=None, y=None, scale=None):
 
 def add_text(ctx, text, start, end, template="title", x=None, y=None,
              size_scale=None, color=None, accent_color=None, font=None,
-             entrance=None, exit=None, uppercase=None, box=None):
+             entrance=None, exit=None, uppercase=None, box=None, motion=None):
     """Burn a designed text template over a program-time window — titles,
     lower thirds, callouts, big numbers, quotes, chapter markers."""
     t = (text or "").strip()
@@ -9200,6 +10491,16 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
         return ("REJECTED: exit must be one of "
                 + ", ".join(a for a in TEXT_ANIMS if a != "typewriter")
                 + " (typewriter is entrance-only).")
+    parsed_motion = None
+    if motion is not None:
+        parsed_motion, motion_err = _parse_text_motion(motion)
+        if motion_err:
+            return motion_err
+        if entrance not in (None, "none") or exit not in (None, "none"):
+            return ("REJECTED: explicit motion owns the animation curve. "
+                    "Omit entrance/exit (or set both to 'none') and express "
+                    "the fade, settle or punch with motion keyframes.")
+        entrance = exit = "none"
     if font is not None and font not in TEXT_FONTS:
         return (f"REJECTED: font must be one of the bundled families: "
                 f"{', '.join(TEXT_FONTS)}.")
@@ -9216,7 +10517,12 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
         except (TypeError, ValueError):
             return "REJECTED: size_scale must be a number (0.4-3.0)."
     placement_note = ""
-    if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial", False):
+    if parsed_motion:
+        placement_note = (
+            "\nExplicit motion owns the text path. Render and inspect its "
+            "whole window: a moving path cannot be certified from one fixed "
+            "placement band.")
+    elif isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial", False):
         default_y = float(graphics.TEMPLATES.get(tpl, {}).get("y", 0.5))
         wanted_y = float(y) if y is not None else default_y
         preferred = ("top" if wanted_y < 0.34 else
@@ -9250,17 +10556,15 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
             "color": color, "accent_color": accent_color, "font": font,
             "entrance": entrance, "exit": exit,
             "uppercase": bool(uppercase) if uppercase is not None else None,
-            "box": bool(box) if box is not None else None}
+            "box": bool(box) if box is not None else None,
+            "motion": parsed_motion, "mute_captions": True}
     texts.append(item)
     edl["texts"] = texts
     muted_note = ""
     if edl.get("captions"):
-        mutes = [list(m) for m in (edl.get("caption_mutes") or [])]
-        mutes.append([s, e])
-        edl["caption_mutes"] = mutes
         muted_note = ("\nTranscript captions are muted under this designed "
-                      "text window so two independent word layers never "
-                      "stack on screen.")
+                      "text window by the text item itself, so the mute moves "
+                      "or disappears with it and two word layers never stack.")
     return ctx.write_edl(
         edl, f"{tpl} text \"{t[:40]}\" at {s}-{e}s (program time) "
              f"[{item['id']}]") + clamped + placement_note + muted_note
@@ -9288,6 +10592,56 @@ _KINETIC_ZONES = {
     "sides": [(0.22, 0.38), (0.78, 0.36), (0.20, 0.55), (0.80, 0.55)],
 }
 _KINETIC_ENTRANCES = ("pop", "slide_up", "rise", "fade")
+_KINETIC_MOTION_STYLES = ("composed", "preset", "still")
+
+
+def _kinetic_motion(x, y, duration_s, stressed=False):
+    """One phrase's restrained, relationship-driven motion.
+
+    The phrase approaches its final slot from the nearest frame edge, settles
+    as the words finish landing, then yields to the next phrase. Emphasis is
+    a controlled overshoot, not a different random entrance. This creates one
+    visual language across the passage while still letting semantic stress
+    change the energy.
+    """
+    dur = max(0.5, float(duration_s))
+    settle = min(0.28, dur * 0.42)
+    reveal = min(0.11, settle * 0.55)
+    fade_out = max(settle + 0.05, dur - min(0.16, dur * 0.24))
+    # Move inward toward the authored resting slot. A centred phrase gets a
+    # slight vertical settle instead, avoiding meaningless side bias.
+    motion = {
+        "opacity": [
+            {"t": 0.0, "v": 0.0},
+            {"t": round(reveal, 3), "v": 1.0, "ease": "out"},
+            {"t": round(fade_out, 3), "v": 1.0},
+            {"t": round(dur, 3), "v": 0.0, "ease": "in"},
+        ],
+    }
+    if abs(x - 0.5) > 0.06:
+        edge_sign = -1.0 if x < 0.5 else 1.0
+        motion["x"] = [
+            {"t": 0.0, "v": round(x + edge_sign * 0.025, 4)},
+            {"t": round(settle, 3), "v": x, "ease": "out"},
+        ]
+    else:
+        motion["y"] = [
+            {"t": 0.0, "v": round(y + 0.018, 4)},
+            {"t": round(settle, 3), "v": y, "ease": "out"},
+        ]
+    if stressed:
+        peak = min(max(reveal + 0.035, 0.13), settle - 0.025)
+        motion["scale"] = [
+            {"t": 0.0, "v": 0.78},
+            {"t": round(peak, 3), "v": 1.08, "ease": "out"},
+            {"t": round(settle, 3), "v": 1.0, "ease": "in_out"},
+        ]
+    else:
+        motion["scale"] = [
+            {"t": 0.0, "v": 0.94},
+            {"t": round(settle, 3), "v": 1.0, "ease": "out"},
+        ]
+    return motion
 
 
 def _kinetic_phrases(words, tl, out_start, out_end):
@@ -9326,7 +10680,7 @@ def _kinetic_phrases(words, tl, out_start, out_end):
 
 def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                      emphasis_words=None, zone="upper", color="#FFFFFF",
-                     font=None, size_scale=None):
+                     font=None, size_scale=None, motion_style="composed"):
     """Choreograph the SPOKEN words onto the screen: one placed, animated
     text event per phrase, timed to the transcript, in a single pass."""
     if not ctx.has_main_video:
@@ -9340,6 +10694,10 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
     if z not in _KINETIC_ZONES:
         return ("REJECTED: zone must be one of "
                 + ", ".join(_KINETIC_ZONES) + ".")
+    motion_style = (motion_style or "composed").strip().lower()
+    if motion_style not in _KINETIC_MOTION_STYLES:
+        return ("REJECTED: motion_style must be one of "
+                + ", ".join(_KINETIC_MOTION_STYLES) + ".")
     if font is not None and font not in TEXT_FONTS:
         return (f"REJECTED: font must be one of the bundled families: "
                 f"{', '.join(TEXT_FONTS)}.")
@@ -9400,6 +10758,9 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
         stressed = bool(emph and
                         emph & {t.lower().strip(".,!?")
                                 for t in ptext.split()})
+        phrase_motion = (_kinetic_motion(x, y, item_end - item_start,
+                                         stressed=stressed)
+                         if motion_style == "composed" else None)
         item = {"id": _next_item_id(texts, "tx"), "text": ptext[:60],
                 "start": item_start, "end": item_end,
                 "template": "callout",
@@ -9408,9 +10769,14 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                                     2),
                 "color": accent_color if stressed else color,
                 "accent_color": accent_color, "font": font,
-                "entrance": "pop" if stressed
-                else _KINETIC_ENTRANCES[i % len(_KINETIC_ENTRANCES)],
-                "exit": "fade", "uppercase": None, "box": None}
+                "entrance": ("none" if motion_style in ("composed", "still")
+                             else ("pop" if stressed else
+                                   _KINETIC_ENTRANCES[
+                                       i % len(_KINETIC_ENTRANCES)])),
+                "exit": ("none" if motion_style in ("composed", "still")
+                         else "fade"),
+                "uppercase": None, "box": None,
+                "motion": phrase_motion, "mute_captions": True}
         texts.append(item)
         made.append(item)
     edl["texts"] = texts
@@ -9418,12 +10784,9 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
     # over the same window would print everything twice.
     muted_note = ""
     if edl.get("captions"):
-        mutes = [list(m) for m in (edl.get("caption_mutes") or [])]
-        mutes.extend([[item["start"], item["end"]] for item in made])
-        edl["caption_mutes"] = mutes
-        muted_note = (" Captions are muted over this window only under the "
-                      "phrases actually placed so the words don't print "
-                      "twice.")
+        muted_note = (" Each phrase owns its caption suppression, so captions "
+                      "are hidden only while that phrase exists and the mute "
+                      "follows any later move/removal.")
     res = ctx.write_edl(
         edl, f"kinetic typography: {len(made)} phrase(s) choreographed to "
              f"the speech across {s}-{e}s (program time) "
@@ -9588,7 +10951,8 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
             "color": color, "accent_color": accent_color, "font": font,
             "entrance": entrance, "exit": exit,
             "uppercase": bool(uppercase) if uppercase is not None else None,
-            "box": bool(box) if box is not None else None}
+            "box": bool(box) if box is not None else None,
+            "mute_captions": True}
     try:
         fit, mw, mh = _matte_geometry(ctx, edl)
     except Exception as err:
@@ -9709,11 +11073,9 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
     edl["texts"] = texts
     muted_note = ""
     if edl.get("captions"):
-        mutes = [list(m) for m in (edl.get("caption_mutes") or [])]
-        mutes.append([s, e])
-        edl["caption_mutes"] = mutes
-        muted_note = (" Transcript captions are muted under the depth-title "
-                      "window so a second word layer cannot cover it.")
+        muted_note = (" The depth title owns its caption suppression, so the "
+                      "mute follows or disappears with the text and a second "
+                      "word layer cannot cover it.")
     written = ctx.write_edl(
         edl, f"{tpl} text \"{t[:40]}\" BEHIND the subject at {s}-{e}s "
              f"[{item['id']}]")
@@ -9817,6 +11179,149 @@ def remove_text(ctx, id):
     return ctx.write_edl(
         edl, f"removed {hit.get('template', 'text')} text "
              f"\"{str(hit.get('text', ''))[:24]}\" ({id})")
+
+
+def set_text_motion(ctx, id, motion=None):
+    """Set or clear general motion curves on an existing text element."""
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(tx) for tx in (edl.get("texts") or [])]
+    hit = next((tx for tx in items if tx.get("id") == id), None)
+    if not hit:
+        have = ", ".join(tx.get("id") or "?" for tx in items) or "none"
+        return (f"REJECTED: no text with id '{id}'. Existing texts: {have}. "
+                "Call get_edl to see them.")
+    if hit.get("behind"):
+        return (f"REJECTED: text '{id}' is composited behind a measured "
+                "subject matte, so its geometry must stay fixed to that "
+                "matte. Use ordinary add_text for moving typography.")
+    parsed, err = _parse_text_motion(motion, allow_empty=True)
+    if err:
+        return err
+    before = dict(hit)
+    if parsed:
+        hit["motion"] = parsed
+        # One animation authority: no hidden preset transform can fight the
+        # authored curve. The curve may itself be just a static rotation.
+        hit["entrance"] = "none"
+        hit["exit"] = "none"
+    else:
+        hit.pop("motion", None)
+    if hit == before:
+        return (f"NO CHANGE — text {id} already has that motion. Do NOT tell "
+                "the user you changed anything.")
+    edl["texts"] = items
+    action = "motion cleared" if not parsed else \
+        "motion set: " + ", ".join(parsed)
+    return ctx.write_edl(edl, f"text {id} {action}")
+
+
+def add_vector_graphic(ctx, kind, start, end, x=0.5, y=0.5, width=0.25,
+                       height=0.08, color="#FFFFFF", opacity=1.0,
+                       stroke_color=None, stroke_width=None, rounding=None,
+                       background_color=None, value=None, motion=None):
+    """Add a renderer-native panel, shape, connector or indicator."""
+    kind = str(kind or "").strip().lower()
+    if kind not in VECTOR_KINDS:
+        return ("REJECTED: kind must be one of "
+                + ", ".join(VECTOR_KINDS) + ".")
+    edl = dict(ctx.latest_edl()["json"])
+    prog = program_duration(edl)
+    if prog <= 0.4:
+        return ("REJECTED: there is no program yet to put a graphic on — "
+                "place footage first, then compose the graphic.")
+    try:
+        requested_start, requested_end = float(start), float(end)
+        s = round(min(max(requested_start, 0.0), max(0.0, prog-0.3)), 2)
+        e = round(min(max(requested_end, s+0.3), prog), 2)
+        numeric = {"x": float(x), "y": float(y), "width": float(width),
+                   "height": float(height), "opacity": float(opacity)}
+        for name, raw in (("stroke_width", stroke_width),
+                          ("rounding", rounding), ("value", value)):
+            numeric[name] = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return ("REJECTED: start/end, x/y, width/height, opacity, stroke_width, "
+                "rounding and value must be numbers when supplied.")
+    parsed_motion = None
+    if motion is not None:
+        parsed_motion, err = _parse_text_motion(motion)
+        if err:
+            return err.replace("text", "vector graphic")
+    vectors = [dict(v) for v in (edl.get("vectors") or [])]
+    item = {"id": _next_item_id(vectors, "vec"), "kind": kind,
+            "start": s, "end": e, **numeric, "color": color,
+            "stroke_color": stroke_color,
+            "background_color": background_color, "motion": parsed_motion}
+    vectors.append(item)
+    edl["vectors"] = vectors
+    note = ""
+    if abs(s-requested_start) > 0.05 or abs(e-requested_end) > 0.05:
+        note = (f"\nCLAMPED: requested {requested_start:g}-{requested_end:g}s "
+                f"into this {prog:g}s program, so the graphic sits at "
+                f"{s}-{e}s. Build the footage first if it belongs later.")
+    return ctx.write_edl(
+        edl, f"{kind} vector graphic at {s}-{e}s [{item['id']}]") + note
+
+
+def set_vector_graphic(ctx, id, kind=None, start=None, end=None, x=None,
+                       y=None, width=None, height=None, color=None,
+                       opacity=None, stroke_color=None, stroke_width=None,
+                       rounding=None, background_color=None, value=None,
+                       motion=None):
+    """Patch geometry, styling or motion on one vector graphic."""
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(v) for v in (edl.get("vectors") or [])]
+    hit = next((v for v in items if v.get("id") == id), None)
+    if not hit:
+        have = ", ".join(v.get("id") or "?" for v in items) or "none"
+        return (f"REJECTED: no vector graphic with id '{id}'. Existing "
+                f"vectors: {have}. Call get_edl to see them.")
+    before = dict(hit)
+    if kind is not None:
+        kind = str(kind).strip().lower()
+        if kind not in VECTOR_KINDS:
+            return ("REJECTED: kind must be one of "
+                    + ", ".join(VECTOR_KINDS) + ".")
+        hit["kind"] = kind
+    for name, raw in (("start", start), ("end", end), ("x", x), ("y", y),
+                      ("width", width), ("height", height),
+                      ("opacity", opacity), ("stroke_width", stroke_width),
+                      ("rounding", rounding), ("value", value)):
+        if raw is None:
+            continue
+        try:
+            hit[name] = float(raw)
+        except (TypeError, ValueError):
+            return f"REJECTED: {name} must be a number."
+    for name, raw in (("color", color), ("stroke_color", stroke_color),
+                      ("background_color", background_color)):
+        if raw is not None:
+            hit[name] = raw
+    if motion is not None:
+        parsed, err = _parse_text_motion(motion, allow_empty=True)
+        if err:
+            return err.replace("text", "vector graphic")
+        if parsed:
+            hit["motion"] = parsed
+        else:
+            hit.pop("motion", None)
+    if hit == before:
+        return (f"NO CHANGE — vector graphic {id} already has those "
+                "properties. Do NOT tell the user you changed anything.")
+    edl["vectors"] = items
+    return ctx.write_edl(edl, f"updated {hit.get('kind')} vector graphic {id}")
+
+
+def remove_vector_graphic(ctx, id):
+    edl = dict(ctx.latest_edl()["json"])
+    items = [dict(v) for v in (edl.get("vectors") or [])]
+    hit = next((v for v in items if v.get("id") == id), None)
+    if not hit:
+        have = ", ".join(v.get("id") or "?" for v in items) or "none"
+        return (f"REJECTED: no vector graphic with id '{id}'. Existing "
+                f"vectors: {have}. Call get_edl to see them.")
+    edl["vectors"] = [v for v in items if v.get("id") != id]
+    return ctx.write_edl(
+        edl, f"removed {hit.get('kind', 'vector')} graphic ({id})")
 
 
 def set_caption_mutes(ctx, spans=None):
@@ -11305,7 +12810,17 @@ def generate_image(ctx, prompt, from_video_time_s=None, from_asset_key=None,
                                    or from_asset_key)
                                else config.IMAGE_GEN_MODEL)})
     ctx.images_generated.append({"storage_key": key, "prompt": p[:200]})
+    reviewed = _queue_download_review(
+        ctx, out_path, url_media.KIND_IMAGE, label="generated image", limit=1)
+    _mark_visual_review_pending(ctx, key, reviewed)
     dims = f" ({width}x{height})" if width else ""
+    review_note = (f" The actual generated pixels were automatically "
+                   f"reviewed ({reviewed} frame) and follow this message."
+                   if reviewed else "")
+    if reviewed and getattr(ctx, "_last_download_review_text", None) and \
+            not _can_receive_images(ctx):
+        review_note += (" Fallback vision report: "
+                        + str(ctx._last_download_review_text)[:1000])
     if not ctx.has_main_video:
         # No main video: the image becomes program content itself, not an
         # overlay on footage — place it to build the canvas program.
@@ -11313,13 +12828,14 @@ def generate_image(ctx, prompt, from_video_time_s=None, from_asset_key=None,
                 f"{source_desc}. It is NOT in your program yet: place it with "
                 f"insert_media(asset_key='{key}', at_output_s=0, "
                 "duration_s=3, motion='zoom_in') to make it a full-frame "
-                "moment on the canvas, or check it first with look_at_asset.")
+                "moment on the canvas, or check it first with look_at_asset."
+                + review_note)
     return (f"Generated image saved: storage_key={key}{dims} — "
             f"{source_desc}. It is NOT in the video yet: splice it in with "
             f"insert_media(asset_key='{key}', at_output_s=..., "
             "duration_s=2-4, motion='zoom_in'), or check it first with "
             "look_at_asset. It will appear as a full-frame still moment — "
-            "the moving footage itself is not modified.")
+            "the moving footage itself is not modified." + review_note)
 
 
 def _log_generation(ctx, purpose, model, prompt, key, cost_usd):
@@ -11451,17 +12967,29 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
     cost = videogen.price_for(seconds)
     ctx.videos_generated.append({"storage_key": key, "prompt": p[:200],
                                  "seconds": seconds})
+    reviewed = _queue_download_review(
+        ctx, out_path, url_media.KIND_VIDEO, dur,
+        label="generated video", limit=4)
+    _mark_visual_review_pending(ctx, key, reviewed)
     # Bill only if the cost row persisted, so running_credits (in-turn cap) and
     # charge_turn_credits (final charge, which reads that row) stay in lockstep.
     if _log_generation(ctx, "video_gen", config.VIDEO_GEN_MODEL, p, key, cost):
         ctx.gen_extra_cost_usd += cost
     animated = (" (animated from the source image)" if from_image_asset_key
                 else "")
+    review_note = (f" The actual generated rendition was automatically "
+                   f"sampled at {reviewed} spread frame(s); inspect the "
+                   "attached evidence before placement."
+                   if reviewed else "")
+    if reviewed and getattr(ctx, "_last_download_review_text", None) and \
+            not _can_receive_images(ctx):
+        review_note += (" Fallback vision report: "
+                        + str(ctx._last_download_review_text)[:1000])
     return (f"Generated {seconds:.0f}s video saved{animated}: storage_key={key} "
             f"({round(dur, 1)}s). It is NOT in your program yet: place it with "
             f"insert_media(asset_key='{key}', at_output_s=...), trimming with "
             "duration_s/clip_start_s if you only want part, or check it first "
-            "with look_at_asset." + seeded_note)
+            "with look_at_asset." + review_note + seeded_note)
 
 
 # ── Fetching media from a link ───────────────────────────────────────────────
@@ -11634,6 +13162,7 @@ def fetch_url(ctx, url, as_kind=None):
     key = (got.get("storage_key") if remote_fetch else
            url_media.storage_key(ctx.project_id, kind, path))
     reviewed = 0
+    ctx._last_download_motion_profile = None
     try:
         if remote_fetch:
             reviewed = _queue_remote_download_review(
@@ -11657,6 +13186,7 @@ def fetch_url(ctx, url, as_kind=None):
         # behind, and those are the two biggest files of the lot.
         shutil.rmtree(workdir, ignore_errors=True)
 
+    motion_profile = getattr(ctx, "_last_download_motion_profile", None)
     ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
                bytes_=got.get("bytes"), duration_s=got.get("duration_s"),
                width=got.get("width"), height=got.get("height"),
@@ -11668,6 +13198,7 @@ def fetch_url(ctx, url, as_kind=None):
                      "fetch_provider": got.get("fetch_provider", "worker"),
                      "title": got.get("title"),
                      "uploader": got.get("uploader"),
+                     "motion_profile": motion_profile,
                      "license": None,
                      "license_status": "unverified",
                      "license_note": ("No usage license was verified for "
@@ -11678,6 +13209,8 @@ def fetch_url(ctx, url, as_kind=None):
                              "filename": got["filename"],
                              "fetch_provider": got.get("fetch_provider",
                                                        "worker")})
+    if kind in (url_media.KIND_VIDEO, url_media.KIND_IMAGE):
+        _mark_visual_review_pending(ctx, key, reviewed)
 
     bits = []
     if got.get("duration_s"):
@@ -11693,6 +13226,13 @@ def fetch_url(ctx, url, as_kind=None):
               "Inspect those pixels before placing it; use look_at_asset "
               "for exact seconds."
               if reviewed else "")
+    if reviewed and getattr(ctx, "_last_download_review_text", None) and \
+            not _can_receive_images(ctx):
+        review += (" Fallback vision report from the actual rendition: "
+                   + str(ctx._last_download_review_text)[:1200])
+    measured = motion_judge.describe(motion_profile)
+    if measured:
+        review += " " + measured
     return (f"Downloaded \"{got['filename']}\"{detail} as a "
             f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
             f"the project but NOT in the video yet — {nxt}.{review} RIGHTS CHECK: "
@@ -11773,6 +13313,10 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
            "the frame that actually shows the subject, in light and color "
            "that can sit inside this edit."
            if seen else "")
+    if seen and getattr(ctx, "_last_candidate_review_text", None) and \
+            not _can_receive_images(ctx):
+        eye += ("\nFallback visual review of those candidate pixels: "
+                + str(ctx._last_candidate_review_text)[:1200])
     return (f"{len(hits)} stock {kind}(s) for \"{q}\" ({orientation}):\n"
             + stock.summarize(hits) + eye
             + "\n\nNothing is downloaded or in the video yet. Pick the ONE "
@@ -11780,6 +13324,245 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
               "add_stock_media(id=...). Prefer a candidate that actually "
               "depicts the subject over one that merely shares a "
               "keyword.")
+
+
+def _queue_broll_research_sheet(ctx, labeled_hits, limit=20):
+    """One compact visual board across multiple narrative moments."""
+    ctx._last_broll_board_review = None
+    if not (_can_receive_images(ctx) or llm.vision_available()):
+        return 0
+
+    def _download(row):
+        moment_id, hit = row
+        url = hit.get("_thumb")
+        if not url:
+            return None
+        local = os.path.join(ctx.workdir,
+                             f"brollcand_{uuid.uuid4().hex[:8]}.jpg")
+        try:
+            net_fetch.download(url, local, max_bytes=3 * 1024 * 1024,
+                               timeout_s=15)
+            hit["_thumbnail_delivered"] = True
+            return f"{moment_id} | {hit.get('id')}", local
+        except Exception:
+            return None
+
+    # Allocate the visual budget across the whole story before taking a
+    # second candidate for any moment.  A flat slice silently showed only
+    # the opening moments on longer edits, which made "global" selection a
+    # lie and biased the agent toward decorating the intro.
+    buckets = {}
+    order = []
+    for moment_id, hit in labeled_hits:
+        if moment_id not in buckets:
+            buckets[moment_id] = []
+            order.append(moment_id)
+        buckets[moment_id].append((moment_id, hit))
+    rows = []
+    while len(rows) < limit and any(buckets.values()):
+        for moment_id in order:
+            if buckets[moment_id] and len(rows) < limit:
+                rows.append(buckets[moment_id].pop(0))
+    frames = []
+    with ThreadPoolExecutor(max_workers=min(6, len(rows) or 1)) as pool:
+        futures = [pool.submit(_download, row) for row in rows]
+        for future in futures:
+            got = future.result()
+            if got:
+                frames.append(got)
+    if not frames:
+        return 0
+    sheet = os.path.join(ctx.workdir,
+                         f"broll_board_{uuid.uuid4().hex[:8]}.jpg")
+    try:
+        sheets.build_timestamp_sheet(frames, sheet)
+    except Exception:
+        return 0
+    ctx._last_broll_board_review = _deliver_frames(
+        ctx, [sheet], ["story-wide candidate board"],
+        "Each tile is labeled moment | stock id. Compare relevance, "
+        "authenticity, composition, light/color and sequence diversity; "
+        "identify strong/weak ids from visible evidence.",
+        "B-ROLL RESEARCH BOARD — compare relevance, authenticity, "
+        "composition, light/color and sequence diversity")
+    return len(frames)
+
+
+def research_broll(ctx, moments, orientation=None):
+    """Research the whole edit's B-roll needs as one visual decision."""
+    if not stock.available():
+        return ("REJECTED: stock B-roll is unavailable on this deployment. "
+                "Use project uploads, find_footage, generated media, or ask "
+                "for the missing footage.")
+    if not isinstance(moments, (list, tuple)) or not moments:
+        return ("REJECTED: moments must be an array of {id, query, purpose, "
+                "at, duration_s, kind} objects.")
+    if orientation is None:
+        orientation = _project_frame(ctx)[0]
+    orientation = str(orientation).strip().lower()
+    if orientation not in ("landscape", "portrait", "square"):
+        return "REJECTED: orientation must be landscape, portrait or square."
+
+    specs, errors = [], []
+    for i, raw in enumerate(moments, 1):
+        if not isinstance(raw, dict):
+            errors.append(f"moment {i} is not an object")
+            continue
+        query = str(raw.get("query") or "").strip()
+        if not query:
+            errors.append(f"moment {i} has no concrete query")
+            continue
+        variants = raw.get("query_variants") or []
+        if not isinstance(variants, (list, tuple)):
+            errors.append(f"moment {i}: query_variants must be an array")
+            variants = []
+        queries = []
+        for value in [query, *variants]:
+            value = str(value or "").strip()
+            if value and value.lower() not in {q.lower() for q in queries}:
+                queries.append(value[:140])
+        moment_id = str(raw.get("id") or f"m{i}").strip()[:24]
+        purpose = str(raw.get("purpose") or "visual proof").strip()[:180]
+        kind = str(raw.get("kind") or "video").strip().lower()
+        if kind not in (stock.KIND_VIDEO, stock.KIND_PHOTO):
+            errors.append(f"{moment_id}: kind must be video or photo")
+            continue
+        try:
+            at = (float(raw["at"]) if raw.get("at") is not None else None)
+            duration = (float(raw["duration_s"])
+                        if raw.get("duration_s") is not None else None)
+        except (TypeError, ValueError):
+            errors.append(f"{moment_id}: at/duration_s must be seconds")
+            continue
+        specs.append({"id": moment_id, "_research_key": f"{i}:{moment_id}",
+                      "query": query, "queries": queries,
+                      "purpose": purpose,
+                      "kind": kind, "at": at, "duration_s": duration})
+    if not specs:
+        return "REJECTED: no valid B-roll research moments. " + "; ".join(errors)
+
+    # Preserve every story beat but spend more alternatives where the edit is
+    # short enough to compare them meaningfully.  This is an evidence-budget
+    # policy, not a creative ceiling: long edits still receive coverage for
+    # every requested moment instead of being rejected at an arbitrary count.
+    alternatives = 4 if len(specs) <= 4 else 3 if len(specs) <= 8 else 2
+    # Alternative phrasings are most valuable when the board can actually
+    # compare their different visual treatments. Spread the same evidence
+    # budget across semantic routes for a short sequence; on a long sequence,
+    # coverage of every story beat wins over deep search on the opening ones.
+    query_depth = 3 if len(specs) <= 4 else 2 if len(specs) <= 8 else 1
+    for spec in specs:
+        spec["queries"] = spec["queries"][:query_depth]
+
+    def _search_one(spec, search_query):
+        try:
+            hits = stock.search(search_query, kind=spec["kind"],
+                                orientation=orientation, count=alternatives)
+            fallback = False
+        except stock.StockError as exc:
+            hits, fallback = [], False
+            # Photos are the honest degraded lane when no keyed VIDEO library
+            # exists. The result labels that change; it is never silent.
+            if spec["kind"] == stock.KIND_VIDEO:
+                try:
+                    hits = stock.search(search_query, kind=stock.KIND_PHOTO,
+                                        orientation=orientation,
+                                        count=alternatives)
+                    fallback = bool(hits)
+                except Exception:
+                    pass
+            if not hits:
+                return spec, search_query, [], str(exc)[:150], False
+        except Exception as exc:
+            return spec, search_query, [], str(exc)[:150], False
+        return spec, search_query, hits, None, fallback
+
+    found = {spec["_research_key"]: {} for spec in specs}
+    search_errors = {spec["_research_key"]: [] for spec in specs}
+    work = [(spec, query) for spec in specs for query in spec["queries"]]
+    with ThreadPoolExecutor(max_workers=min(8, len(work))) as pool:
+        futures = [pool.submit(_search_one, spec, query)
+                   for spec, query in work]
+        for future in futures:
+            spec, query, hits, error, _fallback = future.result()
+            key = spec["_research_key"]
+            found[key][query] = hits
+            if error:
+                search_errors[key].append(f"{query}: {error}")
+
+    groups, labeled, duplicate_candidates = [], [], 0
+    for spec in specs:
+        # Round-robin query routes before taking a second result from one.
+        # This is semantic diversity, complementary to stock._diverse_rank's
+        # provider diversity, and still returns the same bounded board size.
+        key = spec["_research_key"]
+        buckets = {query: list(found[key].get(query) or [])
+                   for query in spec["queries"]}
+        chosen, seen_ids = [], set()
+        while len(chosen) < alternatives and any(buckets.values()):
+            for query in spec["queries"]:
+                while buckets[query]:
+                    hit = buckets[query].pop(0)
+                    if hit.get("id") in seen_ids:
+                        duplicate_candidates += 1
+                        continue
+                    seen_ids.add(hit.get("id"))
+                    hit["_broll_query"] = query
+                    chosen.append(hit)
+                    break
+                if len(chosen) >= alternatives:
+                    break
+        for hit in chosen:
+            hit["_broll_moment"] = dict(spec)
+            ctx.stock_results[hit["id"]] = hit
+            labeled.append((spec["id"], hit))
+        err = "; ".join(search_errors[key])[:300] if not chosen else None
+        used_photo_fallback = (spec["kind"] == stock.KIND_VIDEO and chosen and
+                               all(hit.get("kind") == stock.KIND_PHOTO
+                                   for hit in chosen))
+        groups.append((spec, chosen, err, used_photo_fallback))
+    board_n = _queue_broll_research_sheet(ctx, labeled)
+    _metric(ctx, "broll_moments_researched", len(specs))
+    _metric(ctx, "broll_query_routes_searched", len(work))
+    _metric(ctx, "broll_candidates_compared", len(labeled))
+    if duplicate_candidates:
+        _metric(ctx, "broll_duplicate_candidates_removed",
+                duplicate_candidates)
+    lines = []
+    for spec, hits, error, fallback in groups:
+        where = (f" at output {spec['at']:g}s" if spec["at"] is not None
+                 else "")
+        span = (f" for ~{spec['duration_s']:g}s"
+                if spec["duration_s"] is not None else "")
+        query_note = " | ".join(spec["queries"])
+        lines.append(f"{spec['id']}{where}{span} — PURPOSE: {spec['purpose']} "
+                     f"— VISUAL ROUTES: {query_note}")
+        if fallback:
+            lines.append("  video unavailable; showing photo candidates")
+        if error and not hits:
+            lines.append(f"  unavailable: {error}")
+        else:
+            for hit, line in zip(hits, stock.summarize(hits).splitlines()):
+                route = hit.get("_broll_query")
+                lines.append("  " + line.strip()
+                             + (f" [route: {route}]" if route else ""))
+    tail = (f" A {board_n}-candidate visual board is attached."
+            if board_n else " Thumbnail delivery was unavailable; judge from metadata.")
+    if board_n and getattr(ctx, "_last_broll_board_review", None) and \
+            not _can_receive_images(ctx):
+        tail += (" Fallback visual review: "
+                 + str(ctx._last_broll_board_review)[:1400])
+    if errors:
+        tail += " Invalid moment notes: " + "; ".join(errors)[:240] + "."
+    return ("B-ROLL RESEARCH ACROSS THE STORY:\n" + "\n".join(lines)
+            + "\n" + tail
+            + " Compare the sequence globally: each chosen shot must prove "
+              "its named purpose, match the project's composition/color, and "
+              "add a different visual idea. Do not pick the first result or "
+              "reuse generic wallpaper. Call add_stock_media for the chosen "
+              "ids (they can be batched); its downloaded motion frames arrive "
+              "before placement. Then use add_overlay(fit='cover') at the "
+              "recorded output moments so speech/captions continue.")
 
 
 def add_stock_media(ctx, id):
@@ -11830,6 +13613,7 @@ def add_stock_media(ctx, id):
     key = url_media.storage_key(ctx.project_id, kind, path)
     dur = (info or {}).get("duration") or item.get("duration_s")
     reviewed = 0
+    ctx._last_download_motion_profile = None
     try:
         storage.upload_file(path, key, url_media.content_type(path))
         reviewed = _queue_download_review(
@@ -11844,6 +13628,7 @@ def add_stock_media(ctx, id):
     h = (info or {}).get("height") or item.get("picked_height") or item.get("height")
     desc = (item.get("description") or "stock clip")[:60]
     fname = f"{desc}.{'mp4' if is_video else 'jpg'}"
+    motion_profile = getattr(ctx, "_last_download_motion_profile", None)
     ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
                bytes_=None, duration_s=dur, width=w, height=h,
                fps=(info or {}).get("fps"),
@@ -11855,9 +13640,12 @@ def add_stock_media(ctx, id):
                      "license_note": item.get("license_note"),
                      "page_url": item.get("page_url"),
                      "source_url": item.get("source_url"),
-                     "description": item.get("description")})
+                     "description": item.get("description"),
+                     "motion_profile": motion_profile,
+                     "broll_moment": item.get("_broll_moment")})
     ctx.stock_added.append({"storage_key": key, "id": sid,
                             "provider": item.get("provider")})
+    _mark_visual_review_pending(ctx, key, reviewed)
 
     bits = []
     if w and h:
@@ -11875,6 +13663,13 @@ def add_stock_media(ctx, id):
               "rendition are attached for an automatic visual review; inspect "
               "them before placement."
               if reviewed else "")
+    if reviewed and getattr(ctx, "_last_download_review_text", None) and \
+            not _can_receive_images(ctx):
+        review += (" Fallback vision report from the actual rendition: "
+                   + str(ctx._last_download_review_text)[:1200])
+    measured = motion_judge.describe(motion_profile)
+    if measured:
+        review += " " + measured
     return (f"Added stock {'clip' if is_video else 'image'} \"{desc}\""
             f"{detail} to the project: storage_key={key}. It is SILENT and "
             f"NOT in the video yet — place it with {place}.{review} Cover overlays of "
@@ -12453,7 +14248,7 @@ def _compact_edl(row, ctx):
     edl = row["json"]
     collection_names = (
         "keep", "inserts", "music", "voiceover", "sfx", "overlays",
-        "texts", "speed", "volume")
+        "texts", "vectors", "speed", "volume")
     duplicates = {}
     for coll in ("inserts", "overlays"):
         for item in edl.get(coll) or []:
@@ -12646,12 +14441,20 @@ def audit_captions(ctx, offset=0, limit=80):
 
 _EDL_SECTION_ALIASES = {
     "segments": ("keep",), "cuts": ("keep",), "text": ("texts",),
+    "vectors": ("vectors",), "graphics": ("texts", "vectors"),
     "zooms": ("effects",), "transitions": ("effects",),
-    "grades": ("effects",), "fades": ("effects",),
+    "grade": ("effects",), "grades": ("effects",),
+    "stylize": ("effects",), "effects": ("effects",),
+    "fades": ("effects",),
     "audio": ("music", "volume", "voiceover", "sfx", "stem_mix",
               "master"),
+    "media": ("inserts", "overlays", "music", "voiceover", "sfx"),
+    "timeline": ("keep", "inserts", "overlays", "texts", "vectors",
+                 "effects"),
+    "erases": ("source_clean", "patches"),
 }
-_EDL_OVERVIEW_ALIASES = {"program", "overview", "summary"}
+_EDL_OVERVIEW_ALIASES = {"program", "overview", "summary", "video"}
+_EDL_ALL_ALIASES = {"all", "everything", "full"}
 
 
 def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
@@ -12690,6 +14493,9 @@ def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
             overview = True
             resolved[label] = ["compact_overview"]
             continue
+        elif low in _EDL_ALL_ALIASES:
+            names = tuple(edl.keys())
+            resolved[label] = list(names)
         else:
             unknown.append(label)
             continue
@@ -12700,7 +14506,17 @@ def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
     if unknown:
         return (f"REJECTED: unknown EDL section(s) {unknown}. Available: "
                 f"{sorted(edl.keys())}. Accepted aliases: "
-                f"{sorted(set(_EDL_SECTION_ALIASES) | _EDL_OVERVIEW_ALIASES)}.")
+                f"{sorted(set(_EDL_SECTION_ALIASES) | _EDL_OVERVIEW_ALIASES | _EDL_ALL_ALIASES)}.")
+    evidence_key = ("get_edl", row["version"], tuple(wanted), overview,
+                    bool(compact), off, lim)
+    evidence = _evidence_cache(ctx)
+    if evidence_key in evidence:
+        _metric(ctx, "evidence_reads_reused")
+        return (f"UNCHANGED EDL — v{row['version']} and these exact sections "
+                "were already returned earlier in this turn. The earlier "
+                "JSON remains authoritative; call again after a write or "
+                "request different sections/page.")
+    evidence.add(evidence_key)
     if compact:
         return json.dumps(_compact_edl(row, ctx), indent=1)
     if wanted or overview:
@@ -13106,6 +14922,9 @@ def render_preview(ctx, complete=False):
                "agent_job_id": ctx.job["id"]}
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
+    sequence_frames = _sequence_screening_frames(ctx, row)
+    if sequence_frames:
+        payload["screening_frames"] = sequence_frames
     job_id = ctx.spec_preview_jobs.get(version)
     if not job_id:
         job_id, _created = ctx.db.run(
@@ -13123,6 +14942,8 @@ def render_preview(ctx, complete=False):
             # prior version's PASS/FIX survive when this reviewer is
             # unavailable or the new EDL no longer has designed audio.
             ctx.last_visual_critic = None
+            ctx.last_audio_review = None
+            ctx.last_story_review = None
             out_dur = result.get("duration_s")
             if result.get("cached"):
                 # Nothing new was encoded and no new file appeared — saying
@@ -13243,6 +15064,13 @@ def render_preview(ctx, complete=False):
                              "automatically.")
             except Exception:
                 pass
+            # An edit can be visually clean and sonically balanced while its
+            # surviving conversation is nonsense. Review that semantic layer
+            # only when a speech-led EDL actually removed/joined material;
+            # color, caption and crop-only turns buy no extra model call.
+            story_report = _review_program_story(ctx, row)
+            if story_report is not None:
+                note += story_critic.summary_line(story_report)
             # Taste audit (round 52): the craft reviewer. Everything above
             # asks whether the edit is CORRECT; this asks whether it is any
             # GOOD, which is the difference between an edit that renders and
@@ -13281,6 +15109,25 @@ def render_preview(ctx, complete=False):
                          + " — fix these, or keep one deliberately and say "
                            "why in one clause.")
             note += audio_qc.summary_line(aq)
+            audio_review = _review_render_audio(ctx, row, result)
+            if audio_review:
+                note += " ACTUAL-AUDIO REVIEW: " + audio_review["text"]
+            if finishing_checkpoint(ctx):
+                if not getattr(ctx, "_finishing_checkpoint_announced", False):
+                    ctx._finishing_checkpoint_announced = True
+                    _metric(ctx, "clean_finishing_checkpoints")
+                state = director.status(getattr(ctx, "edit_plan", None))
+                note += (
+                    " CLEAN FINISHING CHECKPOINT: this complete immutable "
+                    "preview passed the independent visual review and has "
+                    "no unresolved semantic, audio, or deterministic craft "
+                    "finding. Reconcile the creative blueprint now. Mark "
+                    "its steps/checks passed from this evidence and finish; "
+                    "if one criterion genuinely failed, mark that exact "
+                    "criterion failed first, then make only its targeted "
+                    "repair. Do not begin another taste-only variation. "
+                    f"Blueprint state={state['state']}."
+                )
             return note
         if j["state"] == "failed":
             failure = dict(((j.get("result") or {}).get("failure") or {}))
@@ -13292,6 +15139,116 @@ def render_preview(ctx, complete=False):
             return _failed_preview_message(version, failure)
     return ("Preview render is taking too long — it may still finish and "
             "attach to the chat. Summarize your edit for the user now.")
+
+
+def _review_render_audio(ctx, row, result):
+    """Listen to the final mix excerpts emitted by the executor, best effort."""
+    if not llm.audio_review_available():
+        return None
+    edl = row.get("json") or {}
+    if not (edl.get("music") or edl.get("sfx") or edl.get("voiceover")):
+        return None
+    paths, labels = [], []
+    for i, item in enumerate((result or {}).get("listen_keys") or []):
+        key = item.get("key") if isinstance(item, dict) else item
+        if not key:
+            continue
+        local = os.path.join(
+            ctx.workdir, f"mix_review_{row['version']}_{i}.mp3")
+        try:
+            storage.download_to(key, local)
+        except Exception as exc:
+            print(f"[audio-review] mix excerpt fetch skipped: {exc}",
+                  flush=True)
+            continue
+        paths.append(local)
+        if isinstance(item, dict):
+            labels.append(
+                f"PROGRAM {float(item.get('t0') or 0):.1f}-"
+                f"{float(item.get('t1') or 0):.1f}s")
+        else:
+            labels.append(f"PROGRAM excerpt {i + 1}")
+    if not paths:
+        return None
+    plan = getattr(ctx, "edit_plan", None) or {}
+    direction = "; ".join(str(plan.get(key))[:220] for key in (
+        "treatment", "format", "objective", "music_direction",
+        "sfx_direction")
+        if plan.get(key))
+    decision = director.decision_block(plan)
+    if decision:
+        direction = (direction + "; " + decision.replace("\n", " | "))[:2600]
+    sequence_sound = director.sequence_block(
+        plan, include=("anchor", "purpose", "sound"), max_rows=12)
+    if sequence_sound:
+        direction = (direction + "; sequence: " +
+                     sequence_sound.replace("\n", " | "))[:2600]
+    prompt = (
+        "You are the independent final audio editor. Listen to the labeled "
+        "excerpts from the ACTUAL RENDERED PROGRAM mix, not filenames or "
+        "waveform statistics. Start with PASS or FIX. Judge whether speech "
+        "is intelligible, music is audible but supports rather than masks, "
+        "SFX land naturally, and the combined choice/tone/levels feel "
+        "coherent and professionally intentional. If FIX, name one exact "
+        "audible defect and one concrete timing/gain/replacement action. Do "
+        "not penalize absent music/SFX unless the recorded direction asks "
+        "for them. Direction: " + (direction or "unspecified; use restraint"))
+    answer = llm.ask_audio(
+        prompt, paths, labels, max_tokens=220,
+        purpose="audio_render_review")
+    if not answer:
+        return None
+    verdict = "fix" if re.search(r"(?:^|\W)fix(?:\W|$)", answer,
+                                 re.I) else "pass"
+    report = {"edl_version": row["version"], "verdict": verdict,
+              "text": answer[:900], "clips": len(paths)}
+    ctx.last_audio_review = report
+    ctx.audio_reviewed_versions.add(row["version"])
+    _metric(ctx, "audio_mix_reviews")
+    _metric(ctx, "audio_review_clips", len(paths))
+    return report
+
+
+def _review_program_story(ctx, row):
+    """Independent semantic review of one immutable final EDL version."""
+    if getattr(ctx, "sight_out", False):
+        # An MCP editing model owns its judgment and receives the transcript
+        # tools directly; do not make the product pay for a duplicate critic.
+        return None
+    version = int(row["version"])
+    prior = getattr(ctx, "last_story_review", None) or {}
+    reviewed = getattr(ctx, "story_reviewed_versions", None)
+    if reviewed is None:
+        reviewed = set()
+        ctx.story_reviewed_versions = reviewed
+    if version in reviewed:
+        return prior if prior.get("edl_version") == version else None
+    try:
+        inferred = grammar.classify(getattr(ctx, "index", None))[0]
+    except Exception:
+        inferred = None
+    family = director.editorial_family(
+        getattr(ctx, "edit_plan", None), inferred,
+        bool(getattr(ctx, "has_main_video", True)),
+        request_text=getattr(ctx, "user_message", None))
+    edl = row.get("json") or {}
+    if not story_critic.should_review(edl, getattr(ctx, "index", None),
+                                      family):
+        return None
+    # Mark attempted before the remote call: a malformed/outage response on a
+    # cached preview must not silently multiply calls within the same turn.
+    reviewed.add(version)
+    report = story_critic.review(
+        edl, getattr(ctx, "index", None), family,
+        user_request=getattr(ctx, "user_message", None),
+        plan=getattr(ctx, "edit_plan", None))
+    if report is None:
+        return None
+    report = dict(report, edl_version=version, editorial_family=family)
+    ctx.last_story_review = report
+    _metric(ctx, "story_reviews")
+    _metric(ctx, "story_review_findings", len(report.get("findings") or []))
+    return report
 
 
 def _failed_preview_message(version, failure, repeated=False):
@@ -13357,6 +15314,43 @@ def _verify_plan_for(ctx, row):
         return []
 
 
+def _sequence_screening_frames(ctx, row):
+    """Map source-bound blueprint beats onto finished-program evidence.
+
+    The renderer samples every authored EDL event already. A meaningful beat
+    can deliberately remain visually still, however, so it may have no title,
+    cutaway or zoom to create an event frame. Mapping the director's measured
+    source ranges gives the critic a representative frame for that calm beat
+    too—without inventing a timestamp for anchor-only rows.
+    """
+    plan = director.normalize_blueprint(getattr(ctx, "edit_plan", None))
+    if not plan or not plan.get("sequence_map"):
+        return []
+    edl = row.get("json") or {}
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+    except Exception:
+        return []
+    frames = []
+    for index, beat in enumerate(plan["sequence_map"], 1):
+        try:
+            source_t = (float(beat["source_start_s"]) +
+                        float(beat["source_end_s"])) / 2.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        output_t = tl.src_to_out(source_t)
+        if output_t is None:
+            continue
+        purpose = beat.get("purpose") or beat.get("anchor") or "planned beat"
+        frames.append({
+            "time_s": round(float(output_t), 3),
+            "reason": (f"planned beat {index} [{beat['role']}]: "
+                       f"{str(purpose)[:110]}"),
+        })
+    return frames
+
+
 def _queue_check_frames(ctx, result, plan=None):
     """Round 84: put the render's OWN frames in front of the agent.
 
@@ -13397,8 +15391,27 @@ def _queue_check_frames(ctx, result, plan=None):
             queued += 1
         except Exception as e:
             print(f"[render] caption sheet fetch failed: {e}", flush=True)
+    screening_pages = result.get("screening_pages") or []
+    for page_n, page in enumerate(screening_pages, 1):
+        key = page.get("key") if isinstance(page, dict) else None
+        if not key:
+            continue
+        local = os.path.join(
+            ctx.workdir,
+            f"screening_own_{page_n}_{uuid.uuid4().hex[:8]}.jpg")
+        try:
+            storage.download_to(key, local)
+            ctx.pending_images.append(
+                ("COMPLETE-EDIT SCREENING — " + screening.describe_page(
+                    page.get("frames") or [], page_n), local))
+            queued += 1
+        except Exception as e:
+            print(f"[render] screening sheet fetch failed: {e}", flush=True)
+    # Cached renders and rolling executor deploys can predate event-aware
+    # pages. Keep the old overview as fallback, but do not send redundant
+    # uniform evidence when the denser screening pages are available.
     skey = result.get("sheet_key")
-    if skey:
+    if skey and not screening_pages:
         slocal = os.path.join(ctx.workdir,
                               f"result_own_{uuid.uuid4().hex[:8]}.jpg")
         try:
@@ -13437,8 +15450,17 @@ def _independent_preview_review(ctx, result, plan=None):
         images.append(local)
         labels.append(label)
 
-    _download(result.get("sheet_key"), "overview",
-              "EDITED RENDER overview, a timestamped 3x3 sample")
+    screening_pages = result.get("screening_pages") or []
+    for page_n, page in enumerate(screening_pages, 1):
+        if not isinstance(page, dict):
+            continue
+        _download(
+            page.get("key"), f"screening{page_n}",
+            "EDITED RENDER whole-program event-aware " +
+            screening.describe_page(page.get("frames") or [], page_n))
+    if not screening_pages:
+        _download(result.get("sheet_key"), "overview",
+                  "EDITED RENDER overview, a timestamped 3x3 sample")
     if plan:
         _download(result.get("verify_sheet_key"), "changed",
                   "EDITED RENDER changed moments, one numbered tile per claim")
@@ -13490,16 +15512,33 @@ def _independent_preview_review(ctx, result, plan=None):
         "The rendered file completed and passed deterministic duration and "
         "broad black-frame verification before these sheets were created. "
         "A black/missing/continuity claim still needs an exact tile/time and "
-        "high confidence; sparse-sheet uncertainty is not a repair order.",
+        "high confidence. Event-aware screening pages sample authored cuts, "
+        "B-roll, text, motion and framing plus the whole clock; evidence that "
+        "is not present remains not_judged rather than a repair order.",
         f"User request: {(ctx.user_message or '')[:1000]}",
         f"Output duration: {result.get('duration_s')}s; raw source: "
         f"{getattr(ctx, 'duration', None)}s.",
         _frame_context(edl),
     ]
+    try:
+        inferred = grammar.classify(getattr(ctx, "index", None))[0]
+    except Exception:
+        inferred = None
+    family = director.editorial_family(
+        getattr(ctx, "edit_plan", None), inferred,
+        bool(getattr(ctx, "has_main_video", True)),
+        request_text=getattr(ctx, "user_message", None))
+    lines.append(editorial_contracts.critic_block(family))
     edit_plan = getattr(ctx, "edit_plan", None) or {}
     if edit_plan:
         lines.append("Recorded direction: " +
                      str(edit_plan.get("brief") or "")[:300])
+        decision = director.decision_block(edit_plan)
+        if decision:
+            lines.append(
+                "Treatment decision contract (judge the visible result "
+                "against the chosen relationships, not feature count): "
+                + decision[:3000])
         anchors = "; ".join(
             x for x in (
                 f"format={edit_plan.get('format')}"
@@ -13508,6 +15547,8 @@ def _independent_preview_review(ctx, result, plan=None):
                 if edit_plan.get("intent") else "",
                 f"style={edit_plan.get('style_family')}"
                 if edit_plan.get("style_family") else "",
+                f"treatment={edit_plan.get('treatment')}"
+                if edit_plan.get("treatment") else "",
                 ("must keep=" + ", ".join(edit_plan.get("must_keep") or []))
                 if edit_plan.get("must_keep") else "",
                 ("must avoid=" + ", ".join(edit_plan.get("must_avoid") or []))
@@ -13515,6 +15556,22 @@ def _independent_preview_review(ctx, result, plan=None):
             ) if x)
         if anchors:
             lines.append("Editorial anchors: " + anchors[:1000])
+        craft = "; ".join(
+            f"{key.replace('_', ' ')}={str(edit_plan.get(key))[:240]}"
+            for key in ("caption_direction", "motion_direction",
+                        "broll_direction", "color_direction")
+            if edit_plan.get(key))
+        if craft:
+            lines.append("Craft direction: " + craft[:1200])
+        if edit_plan.get("narrative_arc"):
+            lines.append("Narrative arc: " + " -> ".join(
+                str(x)[:180] for x in edit_plan["narrative_arc"][:10]))
+        sequence = director.sequence_block(edit_plan)
+        if sequence:
+            lines.append(
+                "Cross-modal sequence treatment (judge whether the rendered "
+                "beats form this progression; do not demand a named tool): "
+                + sequence[:3600])
         lines.append("Planned moves: " + "; ".join(
             str(s)[:160] for s in (edit_plan.get("steps") or [])[:12]))
     if plan:
@@ -13531,6 +15588,28 @@ def _independent_preview_review(ctx, result, plan=None):
     caps = edl.get("captions") or {}
     if caps:
         lines.append("Caption layer: " + json.dumps(caps, default=str)[:900])
+    # Give the reviewer each selected cutaway's durable narrative purpose and
+    # actual provider description. It can now reject generic/contradictory
+    # stock from visible evidence instead of reviewing only fit/crop damage.
+    broll = []
+    for ov in (edl.get("overlays") or [])[:16]:
+        if ov.get("fit") != "cover" or not ov.get("asset_key"):
+            continue
+        asset = None
+        try:
+            asset = ctx.db.run(dbx.asset_by_key, ctx.project_id,
+                               ov["asset_key"])
+        except Exception:
+            pass
+        meta = (asset or {}).get("meta") or {}
+        moment = meta.get("broll_moment") or {}
+        broll.append(
+            f"{ov.get('start')}-{ov.get('end')}s: "
+            f"purpose={moment.get('purpose') or 'not recorded'}; "
+            f"query={moment.get('query') or 'not recorded'}; "
+            f"downloaded description={meta.get('description') or meta.get('filename') or 'unknown'}")
+    if broll:
+        lines.append("Authored B-roll evidence: " + " | ".join(broll)[:2200])
     return preview_critic.review(images, labels, "\n".join(x for x in lines if x))
 
 
@@ -13682,11 +15761,19 @@ def read_skill(ctx, name):
     turn. The catalog in the system prompt names them; content arrives when
     it is relevant instead of riding in every request."""
     import agent_prompt
+    skill_key = str(name or "").strip().lower()
+    skills = _loaded_skills(ctx)
+    if skill_key in skills:
+        _metric(ctx, "skill_loads_reused")
+        return (f"SKILL ALREADY LOADED — '{skill_key}' was returned earlier "
+                "in this turn and remains in the conversation. Apply it; do "
+                "not load it again unless a later turn starts.")
     text = agent_prompt.read_skill_text(name)
     if text is None:
         names = ", ".join(agent_prompt.skill_names()) or "(none installed)"
         return (f"REJECTED: no skill named {name!r}. Available skills: "
                 f"{names}.")
+    skills.add(skill_key)
     return text
 
 
@@ -13835,6 +15922,36 @@ def _asset_audio_analysis(ctx, asset_key):
            "- " + "\n- ".join([_describe_tempo(p), _describe_beats(p),
                                _describe_energy(p)])
            + "\n(word-stress analysis applies to the main video only)")
+    # Audio-only uploads run through the same Whisper indexer as video. The
+    # model still cannot literally listen, but it should not overlook spoken
+    # voice, lyrics, names or a voiceover merely because there are no pixels.
+    # Persisted index evidence works on every later turn and costs no model
+    # call. Fetched catalog music may not have an index; say what is unknown.
+    idx = None
+    if asset.get("sha256"):
+        try:
+            row = ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+            idx = (row or {}).get("json") or None
+        except Exception:
+            idx = None
+    if idx is not None:
+        words = [w for w in (idx.get("words") or [])
+                 if str(w.get("w") or "").strip()]
+        if len(words) >= 3:
+            transcript = " ".join(str(w.get("w") or "").strip()
+                                  for w in words[:120])
+            out += (f"\n- SPEECH/VOCALS TRANSCRIPT EVIDENCE: {len(words)} "
+                    f"word(s), language={idx.get('language') or 'unknown'}: "
+                    f"{transcript}"
+                    + (" …" if len(words) > 120 else ""))
+        else:
+            out += ("\n- No reliable speech/vocals transcript was detected "
+                    "in this audio. That supports an instrumental/ambient "
+                    "interpretation but is not proof that no sung words exist.")
+    else:
+        out += ("\n- Semantic speech/lyrics transcription is unavailable for "
+                "this asset; tempo/energy/timbre above are measured, but do "
+                "not claim to know its words or exact musical character.")
     # Track seconds are useless for PLACING anything — every write tool takes
     # program seconds. When this track is already in the edit, hand over the
     # grid in the timeline's own units so the agent can cut/hit on it without
@@ -13854,50 +15971,117 @@ def _asset_audio_analysis(ctx, asset_key):
     return _cap(out)
 
 
-def set_edit_plan(ctx, steps, brief=None, format=None, intent=None,
-                  style_family=None, must_keep=None, must_avoid=None):
-    """Record the turn's edit plan — working memory, not an EDL write.
+def expand_toolset(ctx, domains):
+    """Expose additional domain tools on the next reasoning dispatch.
 
-    Round 98. The prompt has always demanded 'plan the edit before you touch
-    it', and the plan lived nowhere: a pass that hit the step ceiling or the
-    clock resumed knowing WHAT it already ran but not what it had DECIDED,
-    and re-derived the edit mid-flight (sometimes differently). This makes
-    the plan a first-class object: recorded once, echoed into every
-    continuation pass, and shown to the user in the activity feed — the
-    editor saying 'here is what I'm going to do' before doing it."""
-    if not isinstance(steps, (list, tuple)) or not steps:
+    Calls carry a stage-relevant catalog to avoid re-tokenizing 100+ schemas.
+    This escape hatch preserves capability: a new turn in the plan can request
+    any domain, with no fixed operation or call limit.
+    """
+    if not isinstance(domains, (list, tuple)) or not domains:
+        return ("REJECTED: domains must be a non-empty array from "
+                + ", ".join(sorted(TOOL_DOMAIN_NAMES)) + ".")
+    requested, bad = set(), []
+    for raw in domains:
+        name = str(raw or "").strip().lower()
+        if name in TOOL_DOMAIN_NAMES:
+            requested.add(name)
+        else:
+            bad.append(name or "(empty)")
+    if bad:
+        return ("REJECTED: unknown tool domain(s): " + ", ".join(bad)
+                + ". Available: " + ", ".join(sorted(TOOL_DOMAIN_NAMES))
+                + ".")
+    loaded = getattr(ctx, "_expanded_tool_domains", None)
+    if loaded is None:
+        loaded = set()
+        ctx._expanded_tool_domains = loaded
+    before = set(loaded)
+    loaded.update(requested)
+    if loaded == before:
+        return ("NO CHANGE — those tool domains are already exposed: "
+                + ", ".join(sorted(loaded)) + ".")
+    names = sorted(set().union(*(TOOL_DOMAINS[d] for d in requested)))
+    return ("Tool domains exposed for the next step: "
+            + ", ".join(sorted(requested)) + ". Available functions include: "
+            + ", ".join(names) + ". Continue the edit now.")
+
+
+def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
+                  intent=None,
+                  style_family=None, must_keep=None, must_avoid=None,
+                  audience=None, platform=None, objective=None,
+                  narrative_arc=None, sequence_map=None,
+                  decision_basis=None, reference_transfer=None,
+                  coherence_rules=None, alternatives_rejected=None,
+                  caption_direction=None,
+                  motion_direction=None, broll_direction=None,
+                  music_direction=None, sfx_direction=None,
+                  color_direction=None, acceptance_criteria=None):
+    """Author the durable creative blueprint, then execute it this turn."""
+    try:
+        plan = director.create_blueprint(
+            steps=steps, previous=ctx.edit_plan,
+            source_request=getattr(ctx, "user_message", None),
+            preserve_progress=bool(ctx.plan_revised_this_turn),
+            brief=brief, treatment=treatment, format=format, intent=intent,
+            style_family=style_family, must_keep=must_keep,
+            must_avoid=must_avoid, audience=audience, platform=platform,
+            objective=objective, narrative_arc=narrative_arc,
+            sequence_map=sequence_map,
+            decision_basis=decision_basis,
+            reference_transfer=reference_transfer,
+            coherence_rules=coherence_rules,
+            alternatives_rejected=alternatives_rejected,
+            caption_direction=caption_direction,
+            motion_direction=motion_direction,
+            broll_direction=broll_direction,
+            music_direction=music_direction, sfx_direction=sfx_direction,
+            color_direction=color_direction,
+            acceptance_criteria=acceptance_criteria)
+    except ValueError as exc:
+        return f"REJECTED: {exc}."
+    if not plan:
         return ("REJECTED: steps must be a non-empty array of short "
                 "strings, one per planned move, in execution order.")
-    clean = []
-    for s in list(steps):
-        s = str(s or "").strip()
-        if s:
-            clean.append(s[:140])
-    if not clean:
-        return "REJECTED: every step was empty."
-    def _clean_constraints(value, label):
-        if value is None:
-            return [], None
-        if not isinstance(value, (list, tuple)):
-            return None, f"REJECTED: {label} must be an array of short strings."
-        rows = [str(v or "").strip()[:120] for v in value]
-        return [v for v in rows if v], None
-
-    keeps, err = _clean_constraints(must_keep, "must_keep")
-    if err:
-        return err
-    avoids, err = _clean_constraints(must_avoid, "must_avoid")
-    if err:
-        return err
-    ctx.edit_plan = {
-        "brief": (str(brief or "").strip()[:200] or None),
-        "format": (str(format or "").strip()[:80] or None),
-        "intent": (str(intent or "").strip()[:160] or None),
-        "style_family": (str(style_family or "").strip()[:100] or None),
-        "must_keep": keeps,
-        "must_avoid": avoids,
-        "steps": clean,
-    }
+    for index, beat in enumerate(plan.get("sequence_map") or [], 1):
+        if beat.get("source_start_s") is None:
+            continue
+        if not getattr(ctx, "has_main_video", True):
+            return (f"REJECTED: sequence_map[{index}] uses main-source "
+                    "seconds, but this canvas project has no main video. "
+                    "Keep its scene/card anchor and omit the source range.")
+        try:
+            duration = float(getattr(ctx, "duration", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if duration > 0 and float(beat["source_end_s"]) > duration + .05:
+            return (f"REJECTED: sequence_map[{index}] ends at source "
+                    f"{beat['source_end_s']}s, beyond the {duration:.2f}s "
+                    "main video. Use transcript/filmstrip evidence; never "
+                    "invent a beat timestamp.")
+    # Validate only a sequence treatment authored/re-authored in THIS call.
+    # A narrow later request inherits old direction by design; rejecting it
+    # because a pre-upgrade stored blueprint lacks the new provenance fields
+    # would make legacy projects impossible to refine.
+    if sequence_map is not None and plan.get("sequence_map"):
+        missing = [label for key, label in (
+            ("treatment", "a named chosen treatment"),
+            ("decision_basis", "observed decision_basis facts"),
+            ("coherence_rules", "cross-department coherence_rules"),
+        ) if not plan.get(key)]
+        if missing:
+            return (
+                "REJECTED: a substantial sequence treatment needs "
+                + ", ".join(missing)
+                + ". Choose one evidence-backed route rather than recording "
+                  "the first plausible collection of effects.")
+        violations = director.source_evidence_violations(
+            plan["sequence_map"], getattr(ctx, "index", None) or {})
+        if violations:
+            return "REJECTED: " + violations[0] + "."
+    ctx.edit_plan = plan
+    ctx.plan_revised_this_turn = True
     head = (f" Brief: {ctx.edit_plan['brief']}."
             if ctx.edit_plan["brief"] else "")
     anchors = []
@@ -13905,16 +16089,57 @@ def set_edit_plan(ctx, steps, brief=None, format=None, intent=None,
         anchors.append(f"format={ctx.edit_plan['format']}")
     if ctx.edit_plan["style_family"]:
         anchors.append(f"style={ctx.edit_plan['style_family']}")
-    if keeps:
-        anchors.append("must keep: " + "; ".join(keeps))
-    if avoids:
-        anchors.append("must avoid: " + "; ".join(avoids))
+    if ctx.edit_plan["treatment"]:
+        anchors.append(f"treatment={ctx.edit_plan['treatment']}")
+    if plan["must_keep"]:
+        anchors.append("must keep: " + "; ".join(plan["must_keep"]))
+    if plan["must_avoid"]:
+        anchors.append("must avoid: " + "; ".join(plan["must_avoid"]))
     anchor_note = (" Anchors: " + " | ".join(anchors) + "."
                    if anchors else "")
-    return (f"Plan recorded ({len(clean)} steps).{head}{anchor_note} "
-            + " ".join(f"{i + 1}) {s}" for i, s in enumerate(clean))
-            + " — now execute it in big batched steps. If the edit has to "
-              "change course, record the new plan the same way.")
+    dimensions = sum(bool(ctx.edit_plan.get(k)) for k in (
+        "treatment", "decision_basis", "reference_transfer",
+        "coherence_rules", "alternatives_rejected", "narrative_arc",
+        "sequence_map", "caption_direction",
+        "motion_direction",
+        "broll_direction", "music_direction", "sfx_direction",
+        "color_direction", "acceptance_criteria"))
+    beat_note = (f", {len(plan['sequence_map'])} cross-modal sequence beats"
+                 if plan.get("sequence_map") else "")
+    return (f"Plan recorded as a creative blueprint ({len(plan['steps'])} "
+            f"execution steps, {dimensions} directed craft dimensions"
+            f"{beat_note}).{head}"
+            f"{anchor_note} "
+            + " ".join(f"{i + 1}) {s}"
+                       for i, s in enumerate(plan["steps"]))
+            + " — execute it in big batched steps. Before replying, call "
+              "complete_edit_plan_steps with real EDL/render evidence; once "
+              "all steps and acceptance checks close, stop experimenting.")
+
+
+def complete_edit_plan_steps(ctx, completed_steps=None, blocked_steps=None,
+                             passed_criteria=None, failed_criteria=None,
+                             evidence=None):
+    """Close semantic work against evidence, not a model-call allowance."""
+    try:
+        ctx.edit_plan = director.update_progress(
+            ctx.edit_plan, completed_steps=completed_steps,
+            blocked_steps=blocked_steps, passed_criteria=passed_criteria,
+            failed_criteria=failed_criteria, evidence=evidence)
+    except ValueError as exc:
+        return f"REJECTED: {exc}."
+    state = director.status(ctx.edit_plan)
+    if state["state"] == "complete":
+        return ("Blueprint COMPLETE — every planned move and acceptance "
+                "criterion has evidence. Do not make another taste-only "
+                "variation; render the final current EDL if needed and reply.")
+    return ("Blueprint updated: " + state["state"]
+            + f"; open steps={state['pending_steps'] or 'none'}"
+            + f"; blocked steps={state['blocked_steps'] or 'none'}"
+            + f"; pending acceptance={state['pending_criteria'] or 'none'}"
+            + f"; failed acceptance={state['failed_criteria'] or 'none'}. "
+              "Finish or repair the named open work; do not redo completed "
+              "steps.")
 
 
 # Pure EDL operations that can be staged against an in-memory context and
@@ -13928,6 +16153,7 @@ RECIPE_TOOLS = frozenset({
     "set_caption_mutes",
     "set_frame", "auto_reframe",
     "set_color_grade", "set_grade_custom", "set_transitions",
+    "blur_region", "remove_blur",
     "add_zoom", "remove_zoom", "add_zoom_path", "remove_zoom_path",
     "punch_in_on_emphasis", "set_fades",
     "set_volume", "set_speed", "remove_speed",
@@ -13936,14 +16162,16 @@ RECIPE_TOOLS = frozenset({
     # externally visible side effect. Keeping them out caused valid text,
     # insert and overlay repair plans to lose their entire batch.
     "set_insert_window", "move_insert", "remove_insert",
-    "add_overlay", "move_overlay", "remove_overlay",
-    "add_text", "remove_text",
+    "insert_media",
+    "add_overlay", "move_overlay", "set_overlay_motion", "remove_overlay",
+    "add_text", "set_text_motion", "remove_text",
+    "add_vector_graphic", "set_vector_graphic", "remove_vector_graphic",
     # These mutate only the in-memory EDL and reference an asset that already
     # exists. They are transaction-safe; search/fetch remain separate
     # evidence/side-effect calls. Excluding them made the agent try a correct
     # music request in a recipe, get refused, then enter needless retries.
     "add_music", "remove_music", "swap_music", "set_music_fit",
-    "set_audio_gain",
+    "add_sfx", "move_sfx", "remove_sfx", "set_audio_gain",
     "add_stylize", "remove_stylize", "set_master_loudness",
     "enhance_video", "add_custom_filter", "remove_custom_filter",
     "beat_align_cuts",
@@ -13959,20 +16187,40 @@ RECIPE_TOOLS = frozenset({
 # one-to-one; they never guess which object the user meant.
 _ID_PREFIX_ALIASES = {
     "music": "mus", "zoom": "zm", "text": "tx", "overlay": "ov",
-    "insert": "ins", "stylize": "st", "customfilter": "cf",
+    "insert": "ins", "vector": "vec", "graphic": "vec",
+    "sfx": "sx", "sound": "sx",
+    "stylize": "st", "customfilter": "cf",
     "custom_filter": "cf",
 }
 _ID_TOOLS = {
     "remove_music", "swap_music", "set_music_fit", "set_audio_gain",
-    "remove_zoom", "remove_zoom_path", "remove_text", "remove_overlay",
+    "move_sfx", "remove_sfx",
+    "remove_zoom", "remove_zoom_path", "remove_text", "set_text_motion",
+    "remove_vector_graphic", "set_vector_graphic",
+    "remove_overlay", "set_overlay_motion",
     "move_overlay", "remove_insert", "move_insert", "set_insert_window",
     "remove_stylize", "remove_custom_filter", "remove_speed",
 }
 _IDEMPOTENT_RECIPE_REMOVES = {
     "remove_music", "remove_zoom", "remove_zoom_path", "remove_text",
+    "remove_sfx",
+    "remove_vector_graphic",
     "remove_overlay", "remove_insert", "remove_stylize",
     "remove_custom_filter", "remove_speed",
 }
+
+# Window-math and dialect rejects that used to abort a 15-op recipe
+# (and the music/text sitting after the bad overlay). Skip the one op.
+_RECIPE_SKIP_REJECTS = (
+    "runs past the end of the clip",
+    "entrance must be",
+    "exit must be",
+)
+
+
+def _recipe_skip_reject(result):
+    first = (result or "").splitlines()[0].lower()
+    return any(s in first for s in _RECIPE_SKIP_REJECTS)
 
 
 def _canonical_object_id(value):
@@ -14003,7 +16251,10 @@ def _normalize_tool_call(name, args):
         if key in {"main", "source", "original", "main_video"}:
             args.pop("asset_key", None)
             notes.append("main asset alias -> omitted")
-    if name in _ID_TOOLS and "id" in args:
+    # Recipe ids may still be an explicit {"$ref": "alias"} object during
+    # preflight. Canonicalize concrete strings only; the reference resolver
+    # supplies the generated compact id before dispatch.
+    if name in _ID_TOOLS and isinstance(args.get("id"), str):
         fixed = _canonical_object_id(args.get("id"))
         if fixed != args.get("id"):
             notes.append(f"id {args.get('id')} -> {fixed}")
@@ -14029,6 +16280,10 @@ class _RecipeContext:
         # list/dict alias even if one legacy tool edits its input in place.
         object.__setattr__(self, "_edl", json.loads(json.dumps(edl)))
         object.__setattr__(self, "_version", version)
+        # Resolution helpers may normally turn an uploaded video's audio into
+        # a new project asset. That is a legitimate direct tool side effect,
+        # but it cannot escape a transaction that may later abort.
+        object.__setattr__(self, "_recipe_staging", True)
         # add_captions must still run the real pixel gate on this proxy.
         object.__setattr__(self, "enforce_spatial", True)
 
@@ -14049,31 +16304,161 @@ class _RecipeContext:
         return f"EDL v{self._version} -> staged: {desc}."
 
 
-def apply_edit_recipe(ctx, operations, brief=None):
-    """Stage several ordinary edit tools and atomically commit one EDL."""
-    if not isinstance(operations, list) or not operations:
-        return ("REJECTED: operations must be a non-empty array of "
-                "{tool:'name', args:{...}} objects.")
-    row = ctx.latest_edl()
-    stage = _RecipeContext(ctx, row["json"], row["version"])
-    notes, plan_steps = [], []
+_RECIPE_ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+
+
+def _recipe_abort(ctx, message):
+    _metric(ctx, "recipe_aborts")
+    return message
+
+
+def _recipe_reference_names(value):
+    """Return explicit ``{"$ref": "alias"}`` names in one argument tree.
+
+    A dedicated object is intentionally less magical than interpreting every
+    string beginning with ``$``. Text, filenames and prompts may legitimately
+    begin with that character; recipe references must never rewrite them.
+    """
+    if isinstance(value, dict):
+        if "$ref" in value:
+            if set(value) != {"$ref"} or not isinstance(value["$ref"], str):
+                raise ValueError(
+                    "a recipe reference must be exactly {'$ref':'alias'}")
+            return [value["$ref"]]
+        out = []
+        for child in value.values():
+            out.extend(_recipe_reference_names(child))
+        return out
+    if isinstance(value, list):
+        out = []
+        for child in value:
+            out.extend(_recipe_reference_names(child))
+        return out
+    return []
+
+
+def _resolve_recipe_references(value, aliases):
+    """Replace explicit recipe references with generated EDL object ids."""
+    if isinstance(value, dict):
+        if set(value) == {"$ref"}:
+            name = value["$ref"]
+            if name not in aliases:
+                raise ValueError(f"recipe alias '{name}' is not bound")
+            return aliases[name], 1
+        out, count = {}, 0
+        for key, child in value.items():
+            out[key], used = _resolve_recipe_references(child, aliases)
+            count += used
+        return out, count
+    if isinstance(value, list):
+        out, count = [], 0
+        for child in value:
+            resolved, used = _resolve_recipe_references(child, aliases)
+            out.append(resolved)
+            count += used
+        return out, count
+    return value, 0
+
+
+def _edl_object_ids(value, path=()):
+    """Map every stable object id in an EDL to its structural path."""
+    out = {}
+    if isinstance(value, dict):
+        item_id = value.get("id")
+        if isinstance(item_id, str) and item_id:
+            out[item_id] = path
+        for key, child in value.items():
+            out.update(_edl_object_ids(child, path + (str(key),)))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            out.update(_edl_object_ids(child, path + (str(index),)))
+    return out
+
+
+def _preflight_recipe(ctx, operations):
+    """Validate the whole transaction's structure before staging any tool.
+
+    Value-level validation still belongs to each ordinary tool, but malformed
+    late operations, duplicate aliases and forward references should not make
+    the editor execute ten earlier analyses only to discover that the program
+    could never compile.
+    """
+    compiled, declared = [], set()
     for i, op in enumerate(operations, 1):
         if not isinstance(op, dict):
-            return f"REJECTED: operation {i} is not an object; nothing changed."
+            return None, _recipe_abort(
+                ctx, f"REJECTED: operation {i} is not an object; nothing changed.")
         name = str(op.get("tool") or "").strip()
         args = op.get("args") or {}
-        if isinstance(args, dict):
-            name, args, repairs = _normalize_tool_call(name, args)
-        else:
-            repairs = []
+        if not isinstance(args, dict):
+            return None, _recipe_abort(
+                ctx, f"REJECTED: operation {i} args must be an object; nothing changed.")
+        name, args, repairs = _normalize_tool_call(name, args)
         if name not in RECIPE_TOOLS:
             allowed = ", ".join(sorted(RECIPE_TOOLS))
-            return (f"REJECTED: operation {i} uses '{name}', which is not a "
-                    "transaction-safe recipe tool. Nothing changed. Allowed: "
-                    f"{allowed}.")
-        if not isinstance(args, dict):
-            return (f"REJECTED: operation {i} args must be an object; "
+            return None, _recipe_abort(
+                ctx, f"REJECTED: operation {i} uses '{name}', which is not a "
+                "transaction-safe recipe tool. Nothing changed. Allowed: "
+                f"{allowed}.")
+        missing = [key for key in REQUIRED_ARGS.get(name, [])
+                   if key not in args]
+        if missing:
+            return None, _recipe_abort(
+                ctx, f"REJECTED: operation {i} ({name}) is missing required "
+                f"argument(s): {', '.join(missing)}; nothing changed.")
+        save_as = op.get("save_as")
+        if save_as is not None:
+            save_as = str(save_as).strip()
+            if not _RECIPE_ALIAS_RE.fullmatch(save_as):
+                return None, _recipe_abort(
+                    ctx, f"REJECTED: operation {i} save_as must begin with a "
+                    "letter and contain only letters, numbers, _ or -; "
                     "nothing changed.")
+            if save_as in declared:
+                return None, _recipe_abort(
+                    ctx, f"REJECTED: recipe alias '{save_as}' is declared "
+                    "more than once; nothing changed.")
+        try:
+            refs = _recipe_reference_names(args)
+        except ValueError as exc:
+            return None, _recipe_abort(
+                ctx, f"REJECTED: operation {i} ({name}) has {exc}; nothing changed.")
+        unknown = [ref for ref in refs if ref not in declared]
+        if unknown:
+            return None, _recipe_abort(
+                ctx, f"REJECTED: operation {i} ({name}) references alias "
+                f"'{unknown[0]}' before it is created; nothing changed.")
+        compiled.append({"tool": name, "args": args, "repairs": repairs,
+                         "save_as": save_as})
+        if save_as:
+            declared.add(save_as)
+    return compiled, None
+
+
+def apply_edit_recipe(ctx, operations, brief=None, completes_steps=None):
+    """Stage several ordinary edit tools and atomically commit one EDL."""
+    _metric(ctx, "recipe_calls")
+    if not isinstance(operations, list) or not operations:
+        return _recipe_abort(
+            ctx, "REJECTED: operations must be a non-empty array of "
+            "{tool:'name', args:{...}} objects.")
+    compiled, preflight_error = _preflight_recipe(ctx, operations)
+    if preflight_error:
+        return preflight_error
+    row = ctx.latest_edl()
+    stage = _RecipeContext(ctx, row["json"], row["version"])
+    notes, plan_steps, aliases = [], [], {}
+    references_resolved = 0
+    for i, op in enumerate(compiled, 1):
+        name, repairs, save_as = (op["tool"], op["repairs"], op["save_as"])
+        try:
+            args, used = _resolve_recipe_references(op["args"], aliases)
+        except ValueError as exc:  # Defensive: preflight should make this rare.
+            return _recipe_abort(
+                ctx, f"RECIPE ABORTED at operation {i} ({name}); no EDL "
+                f"version was created. {exc}.")
+        references_resolved += used
+        ids_before = _edl_object_ids(stage._edl) if save_as else None
         result = execute(stage, name, args)
         result_kind = tool_result_kind(result)
         if not isinstance(result, str) or result_kind in {"refused", "failed"}:
@@ -14085,8 +16470,14 @@ def apply_edit_recipe(ctx, operations, brief=None):
                     and " with id '" in result and "Existing" in result:
                 notes.append(f"{i}) {name}: already absent")
                 continue
-            return (f"RECIPE ABORTED at operation {i} ({name}); no EDL version "
-                    f"was created.\n{result}")
+            if isinstance(result, str) and _recipe_skip_reject(result):
+                notes.append(
+                    f"{i}) {name}: skipped "
+                    f"({result.splitlines()[0][:160]})")
+                continue
+            return _recipe_abort(
+                ctx, f"RECIPE ABORTED at operation {i} ({name}); no EDL "
+                f"version was created.\n{result}")
         if result.startswith("NO CHANGE"):
             notes.append(f"{i}) {name}: no change"
                          + (f" ({'; '.join(repairs)})" if repairs else ""))
@@ -14094,7 +16485,20 @@ def apply_edit_recipe(ctx, operations, brief=None):
             notes.append(f"{i}) {name}: staged"
                          + (f" ({'; '.join(repairs)})" if repairs else ""))
             plan_steps.append(name)
+        if save_as:
+            ids_after = _edl_object_ids(stage._edl)
+            created = sorted(set(ids_after) - set(ids_before or {}))
+            if len(created) != 1:
+                detail = ("no new object" if not created else
+                          f"multiple objects ({', '.join(created)})")
+                return _recipe_abort(
+                    ctx, f"RECIPE ABORTED at operation {i} ({name}); no EDL "
+                    f"version was created. save_as='{save_as}' expected one "
+                    f"new addressable EDL object, but the tool created {detail}.")
+            aliases[save_as] = created[0]
+            notes[-1] += f"; saved {created[0]} as {save_as}"
     if edl_signature(stage._edl) == edl_signature(row["json"]):
+        _metric(ctx, "recipe_no_change")
         return ("NO CHANGE — the complete recipe resolves to the current EDL; "
                 "nothing was committed.\n" + "\n".join(notes))
     label = (str(brief or "").strip()[:160] or
@@ -14103,6 +16507,10 @@ def apply_edit_recipe(ctx, operations, brief=None):
         stage._edl,
         f"atomically applied recipe '{label}' ({len(plan_steps)} change(s))")
     if committed.startswith("EDL v"):
+        _metric(ctx, "recipe_commits")
+        _metric(ctx, "recipe_operations_committed", len(plan_steps))
+        if references_resolved:
+            _metric(ctx, "recipe_references_resolved", references_resolved)
         existing = dict(getattr(ctx, "edit_plan", None) or {})
         existing["brief"] = existing.get("brief") or label
         # The original direction remains the binding contract across repair
@@ -14117,7 +16525,19 @@ def apply_edit_recipe(ctx, operations, brief=None):
             if name not in completed:
                 completed.append(name)
         existing["completed_tools"] = completed
-        ctx.edit_plan = existing
+        ctx.edit_plan = director.normalize_blueprint(existing) or existing
+        if completes_steps:
+            try:
+                ctx.edit_plan = director.update_progress(
+                    ctx.edit_plan, completed_steps=completes_steps,
+                    evidence=f"EDL {committed.split(':', 1)[0]}: {label}")
+                committed += ("\nBlueprint steps closed by this atomic "
+                              f"write: {list(completes_steps)}.")
+            except ValueError as exc:
+                # The EDL commit is real and immutable; bad bookkeeping must
+                # never pretend it rolled back. Report it for one cheap fix.
+                committed += ("\nBLUEPRINT ADVISORY: the edit committed, but "
+                              f"completes_steps was not recorded ({exc}).")
         committed += "\nRecipe operations:\n" + "\n".join(notes)
     return committed
 
@@ -14236,6 +16656,141 @@ def get_audio_analysis(ctx, asset_key=None):
                 + "\n- ".join(lines))
 
 
+def review_audio(ctx, asset_key=None, times=None, output_times=None,
+                 span_s=6.0, question=None):
+    """Bounded actual listening for uploads, source sound or rendered mix.
+
+    The main editor receives the listener's assessment as evidence. This is
+    never a write gate and never substitutes for authored role/timing state or
+    deterministic loudness/peak checks.
+    """
+    if not llm.audio_review_available():
+        return ("REJECTED: actual-audio review is not configured on this "
+                "deployment. Use get_audio_analysis plus the preview AUDIO "
+                "CHECK measurements; do not claim subjective listening.")
+    try:
+        span = min(max(float(span_s or 6.0), 2.0), 12.0)
+    except (TypeError, ValueError):
+        return "REJECTED: span_s must be a number between 2 and 12 seconds."
+
+    def windows(raw_times, duration, label):
+        if not raw_times:
+            raw_times = [max(0.0, duration * 0.35)]
+        if not isinstance(raw_times, (list, tuple)):
+            return None, f"REJECTED: {label} must be an array of seconds."
+        try:
+            values = sorted({float(t) for t in raw_times})[:3]
+        except (TypeError, ValueError):
+            return None, f"REJECTED: {label} must contain numeric seconds."
+        out = []
+        for value in values:
+            if value < 0 or value > duration + 0.05:
+                continue
+            start = max(0.0, min(value - span / 2,
+                                 max(0.0, duration - 0.5)))
+            end = min(duration, start + span)
+            if end - start >= 0.5:
+                out.append((round(start, 2), round(end, 2)))
+        if not out:
+            return None, (f"REJECTED: no requested {label} falls inside the "
+                          f"{duration:.1f}s audio duration.")
+        return out, None
+
+    source = label = None
+    duration = 0.0
+    if asset_key:
+        asset, error = _resolve_media_asset(
+            ctx, asset_key, ("music", "render", "audio", "video_clip"))
+        if error:
+            return error
+        try:
+            duration = float(asset.get("duration_s") or
+                             _asset_media_duration(ctx, asset) or 0.0)
+            source = _asset_local_path(ctx, asset)
+        except Exception as exc:
+            return f"Audio review could not load that asset ({str(exc)[:160]})."
+        label = ((asset.get("meta") or {}).get("filename") or
+                 os.path.basename(asset.get("storage_key") or "asset"))[:80]
+        wants, clock = times, "asset times"
+    elif output_times:
+        row = ctx.latest_edl()
+        asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
+                           row["version"])
+        if not asset:
+            return (f"REJECTED: current EDL v{row['version']} has no completed "
+                    "preview. Render it before reviewing program sound.")
+        try:
+            duration = float(asset.get("duration_s") or 0.0)
+            source = _asset_local_path(ctx, asset)
+        except Exception as exc:
+            return f"Audio review could not load the preview ({str(exc)[:160]})."
+        label = f"rendered PROGRAM v{row['version']}"
+        wants, clock = output_times, "output_times"
+    else:
+        if not ctx.has_main_video:
+            return ("REJECTED: there is no main-video audio. Pass asset_key "
+                    "for an uploaded song/audio/clip instead.")
+        asset = ctx.db.run(dbx.latest_asset, ctx.project_id, "audio")
+        if not asset:
+            return ("REJECTED: the indexed video has no stored audio sidecar; "
+                    "use the transcript and measured video evidence.")
+        try:
+            duration = float(ctx.duration or asset.get("duration_s") or 0.0)
+            source = _asset_local_path(ctx, asset)
+        except Exception as exc:
+            return f"Audio review could not load source sound ({str(exc)[:160]})."
+        label = "main-video SOURCE sound"
+        wants, clock = times, "source times"
+
+    spans, error = windows(wants, duration, clock)
+    if error:
+        return error
+    clips, labels = [], []
+    try:
+        for i, (start, end) in enumerate(spans):
+            local = os.path.join(
+                ctx.workdir, f"audio_review_{uuid.uuid4().hex[:8]}_{i}.mp3")
+            media.extract_audio_clip(source, start, end, local)
+            clips.append(local)
+            labels.append(f"{label} {start:.1f}-{end:.1f}s")
+    except Exception as exc:
+        return (f"Audio review extraction failed ({str(exc)[:160]}). Use "
+                "get_audio_analysis instead.")
+    plan = getattr(ctx, "edit_plan", None) or {}
+    direction = "; ".join(str(plan.get(key))[:180] for key in (
+        "treatment", "format", "objective", "music_direction",
+        "sfx_direction")
+        if plan.get(key))
+    decision = director.decision_block(plan)
+    if decision:
+        direction = (direction + "; " + decision.replace("\n", " | "))[:2600]
+    sequence_sound = director.sequence_block(
+        plan, include=("anchor", "purpose", "sound"), max_rows=12)
+    if sequence_sound:
+        direction = (direction + "; sequence: " +
+                     sequence_sound.replace("\n", " | "))[:2600]
+    prompt = (
+        "You are a senior music editor and audio post-production mixer. "
+        "Listen to the actual labeled clip(s). Describe only what is audible: "
+        "speech/music/SFX character, energy, recording quality, intelligibility, "
+        "masking, harshness/noise, and whether it supports the stated editing "
+        "purpose. Give one concrete selection, timing or mix recommendation. "
+        "Do not infer from filenames and do not relabel an authored music track "
+        "as voiceover. Purpose: " + str(question or "judge professional fit")[:400]
+        + ". Direction: " + (direction or "not specified"))
+    answer = llm.ask_audio(prompt, clips, labels, max_tokens=240,
+                           purpose="audio_asset_review")
+    if not answer:
+        return ("Actual clips were extracted, but the listener did not return "
+                "usable evidence. Use measured analysis and do not repeat the "
+                "same call in this turn.")
+    _metric(ctx, "audio_asset_reviews")
+    _metric(ctx, "audio_review_clips", len(clips))
+    return ("BOUNDED ACTUAL-AUDIO REVIEW — an audio-capable reviewer heard "
+            f"{'; '.join(labels)}. This is advisory evidence, not a write "
+            f"gate: {answer}")
+
+
 def _frame_focus_at_source(edl, source_t):
     """The crop focus the renderer uses for a source moment."""
     frame = edl.get("frame") or {}
@@ -14319,15 +16874,15 @@ def _face_at_source_moments(ctx, edl, moments):
     return out
 
 
-def punch_in_on_emphasis(ctx, count=3, strength=0.14):
-    """Punch zooms on the most vocally stressed KEPT words, in ONE version.
+def punch_in_on_emphasis(ctx, count=None, strength=None):
+    """Punch zooms on distributed, meaningful vocal turns in ONE version.
     Every timestamp is a real word time mapped through the current cut —
     nothing is estimated.
 
-    Round 67 defaults: 3 zooms at 14% (was 4 at 35%). A 35% snap on a
-    talking head is the 'abrupt noob zoom' the owner traced through real
-    edits — modern emphasis is 105-115%, felt more than seen. Bigger values
-    remain an editorial choice."""
+    Omitted count/strength are directed from program length and the durable
+    motion brief. Candidate choice combines real vocal stress, semantic
+    weight and timeline spacing, so three adjacent loud words cannot become
+    three back-to-back camera bumps. Explicit values remain authoritative."""
     if not ctx.has_main_video:
         return ("REJECTED: needs the main video — an image/clip-only "
                 "program has no speech to find emphasis in.")
@@ -14337,15 +16892,6 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
                 "stressed words to punch in on. Place zooms by hand with "
                 "add_zoom instead.")
     try:
-        n = max(int(count), 1)
-    except (TypeError, ValueError):
-        return "REJECTED: count must be a positive integer."
-    try:
-        st = round(min(max(float(strength), ZOOM_STRENGTH_MIN),
-                       ZOOM_STRENGTH_MAX), 2)
-    except (TypeError, ValueError):
-        return "REJECTED: strength must be a number (0.05-4.5)."
-    try:
         p = _get_perception(ctx)
     except Exception as e:
         return (f"Audio analysis unavailable ({str(e)[:160]}) — place zooms "
@@ -14354,33 +16900,110 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
     tl = Timeline(edl["keep"], edl.get("inserts") or [],
                   edl.get("speed") or [])
     prog = round(tl.out_duration, 2)
+    plan = getattr(ctx, "edit_plan", None) or {}
+    sequence_motion = director.sequence_block(
+        plan, include=("anchor", "purpose", "visual"), max_rows=16)
+    motion_brief = " ".join(str(x or "") for x in (
+        plan.get("brief"), plan.get("format"), plan.get("intent"),
+        plan.get("treatment"), director.decision_block(plan),
+        plan.get("style_family"), plan.get("motion_direction"),
+        sequence_motion,
+        getattr(ctx, "user_message", ""))).casefold()
+
+    def sequence_energy(source_t):
+        for beat in plan.get("sequence_map") or []:
+            try:
+                start = float(beat["source_start_s"])
+                end = float(beat["source_end_s"])
+                energy = float(beat.get("energy"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start <= source_t <= end:
+                return min(max(energy, 0.0), 1.0)
+        return None
+    explicit_count = count is not None
+    if explicit_count:
+        try:
+            n = max(int(count), 1)
+        except (TypeError, ValueError):
+            return "REJECTED: count must be a positive integer."
+    else:
+        # Sub-linear growth: a 30s reel gets roughly three meaningful moves;
+        # a ten-minute talk gets more coverage without becoming 60 zooms.
+        energy = (1.3 if any(x in motion_brief for x in
+                            ("hype", "kinetic", "aggressive", "fast-paced"))
+                  else .72 if any(x in motion_brief for x in
+                                  ("calm", "luxury", "elegant", "minimal",
+                                   "subtle", "restrained")) else 1.0)
+        n = max(1, int(round((max(prog, 1.0) / 4.0) ** .5 * energy)))
+    explicit_strength = strength is not None
+    if explicit_strength:
+        try:
+            base_strength = round(min(max(float(strength), ZOOM_STRENGTH_MIN),
+                                      ZOOM_STRENGTH_MAX), 2)
+        except (TypeError, ValueError):
+            return "REJECTED: strength must be a number (0.05-4.5)."
+    else:
+        base_strength = (0.10 if any(x in motion_brief for x in
+                                    ("calm", "luxury", "elegant", "minimal",
+                                     "subtle", "restrained"))
+                         else 0.18 if any(x in motion_brief for x in
+                                         ("hype", "kinetic", "aggressive",
+                                          "punchy", "fast-paced"))
+                         else 0.14)
     scores = perception.word_stress(p, words)
-    picked = []          # (word, program_t0, source_mid)
-    for i in sorted(range(len(words)), key=lambda k: -scores[k]):
+    plan_terms = {w for w in re.findall(r"[\w]+", motion_brief)
+                  if len(w) >= 4}
+    stop = {"that", "this", "with", "from", "have", "just", "like",
+            "what", "when", "where", "your", "they", "them", "then",
+            "there", "about", "would", "could", "should", "because"}
+    candidates = []
+    for i, word in enumerate(words):
+        token = str(word.get("w") or "").strip("\"'.,!?;:")
+        clean = token.casefold()
+        if len(clean) < 3 or clean in stop:
+            continue
+        mid = (float(word["t0"]) + float(word["t1"])) / 2.0
+        pt = tl.src_to_out(float(word["t0"]))
+        if pt is None or tl.src_to_out(mid) is None:
+            continue
+        semantic = (0.28 if clean in plan_terms else 0.0)
+        semantic += 0.16 if any(ch.isdigit() for ch in clean) else 0.0
+        semantic += min(.12, max(0, len(clean) - 4) * .02)
+        beat_energy = sequence_energy(mid)
+        if beat_energy is not None:
+            # A measured source-bound sequence beat is stronger timing
+            # evidence than generic duration spacing, but never a command to
+            # animate: vocal stress and the global restraint grammar still
+            # participate in the same score.
+            semantic += .24 * beat_energy
+        # The first frame needs a moment to register; an explicitly energetic
+        # hook can still win because this is a penalty rather than a ban.
+        opening_penalty = .18 if float(pt) < 1.2 else 0.0
+        candidates.append((float(scores[i]) + semantic - opening_penalty,
+                           word, round(float(pt), 2), mid))
+    candidates.sort(key=lambda row: (-row[0], row[2]))
+    spacing = max(1.4, min(6.0, prog / max(1.0, n * 1.6)))
+    picked = []          # (combined score, word, program_t0, source_mid)
+    for row in candidates:
         if len(picked) >= n:
             break
-        w = words[i]
-        if len((w["w"] or "").strip("\"'.,!?;:")) < 3:
-            continue                     # tiny function words aren't emphasis
-        mid = (float(w["t0"]) + float(w["t1"])) / 2.0
-        if tl.src_to_out(mid) is None:
-            continue                     # the word is cut — skip it
-        pt = tl.src_to_out(float(w["t0"]))
-        if pt is None:
-            pt = tl.src_to_out(mid)
-        pt = round(pt, 2)
-        picked.append((w, pt, mid))
+        if any(abs(row[2] - old[2]) < spacing for old in picked):
+            continue
+        picked.append(row)
     if not picked:
         return ("No stressed words survive the current cut "
                 "— nothing was written. Place zooms by hand with add_zoom "
                 "if you still want them. Do NOT tell the user zooms were "
                 "added.")
-    picked.sort(key=lambda q: q[1])
-    targets = _face_at_source_moments(ctx, edl, [q[2] for q in picked])
+    picked.sort(key=lambda q: q[2])
+    targets = _face_at_source_moments(ctx, edl, [q[3] for q in picked])
     fx = dict(edl.get("effects") or {})
     zooms = [dict(z) for z in (fx.get("zooms") or [])]
     placed = []
-    for w, pt, source_mid in picked:
+    lo_score = min(row[0] for row in picked)
+    hi_score = max(row[0] for row in picked)
+    for combined_score, w, pt, source_mid in picked:
         measured = source_mid in targets
         target = targets.get(source_mid) or (0.5, 0.5)
         # 60ms early so the punch lands ON the word's attack, not after it.
@@ -14388,26 +17011,39 @@ def punch_in_on_emphasis(ctx, count=3, strength=0.14):
         e = round(min(prog, s + 0.9), 2)
         if e - s < 0.2:
             continue                     # the word sits at the very end
+        if explicit_strength or hi_score <= lo_score:
+            st = base_strength
+        else:
+            # One motion grammar, varied emphasis: supporting turns are
+            # gentler; the strongest argument turn receives the full move.
+            rank = (combined_score - lo_score) / (hi_score - lo_score)
+            st = round(max(ZOOM_STRENGTH_MIN,
+                           base_strength * (.78 + .22 * rank)), 2)
         item = {"id": _next_item_id(zooms, "zm"), "start": s, "end": e,
                 "strength": st, "cx": target[0], "cy": target[1],
                 "target_measured": measured}
         zooms.append(item)
-        placed.append((w, pt, item["id"], target, measured))
+        placed.append((w, pt, item["id"], target, measured, st))
     if not placed:
         return ("No placeable emphasis moments — the stressed words all sit "
                 "at the very end of the program. Nothing was written.")
     fx["zooms"] = zooms
     edl["effects"] = fx
     res = ctx.write_edl(
-        edl, f"{len(placed)} punch zoom(s) ({int(st * 100)}%) on the most "
+        edl, f"{len(placed)} distributed emphasis zoom(s) on meaningful "
              "vocally stressed words")
     if res.startswith("EDL v"):
         res += ("\nPunch-ins (program time, from measured vocal stress):\n"
                 + "\n".join(f"  '{w['w']}' @ {pt}s, "
+                            f"{int(st * 100)}%, "
                             f"{'face target' if measured else 'center fallback'} "
                             f"({target[0]:g},{target[1]:g}) [{zid}]"
-                            for w, pt, zid, target, measured in placed))
-        fallback_count = sum(1 for *_rest, measured in placed
+                            for w, pt, zid, target, measured, st in placed))
+        if not explicit_count:
+            res += (f"\nMotion density was directed from the {prog:g}s "
+                    f"program/brief; selected moments stay ~{spacing:.1f}s "
+                    "apart instead of clustering on adjacent loud words.")
+        fallback_count = sum(1 for *_rest, measured, _st in placed
                              if not measured)
         if fallback_count:
             res += (f"\nQUALITY ADVISORY: {fallback_count} punch-in(s) had "
@@ -14916,7 +17552,79 @@ CAPTION_PRESETS = ["clean", "documentary", "broadcast", "retro", "neon",
                    "podcast", "reels", "beast", "karaoke", "elegant", "spotlight",
                    "stacked", "iridescent", "chrome", "editorial",
                    "fashion", "luxe", "impact", "lyric", "classic"]
-def make_shorts(ctx, count=None, style_note=None):
+def _direct_short_clips(ctx, clips):
+    """Validate caller-authored podcast arcs before a shorts job is queued.
+
+    MCP uses this path so the outside model, not Valmera's planner or agent,
+    chooses the story. The shorts worker only creates a child and seeds that
+    exact source window. Creative direction belongs to whichever editor is
+    explicitly opened afterwards, so this gate checks facts and boundaries,
+    not taste paperwork.
+    """
+    if not isinstance(clips, list) or not clips:
+        return None, "clips must be a non-empty array"
+    if len(clips) > config.SHORTS_MAX_CLIPS:
+        return None, f"clips may contain at most {config.SHORTS_MAX_CLIPS} arcs"
+
+    planned = []
+    for i, raw in enumerate(clips, 1):
+        if not isinstance(raw, dict):
+            return None, f"clip {i} must be an object"
+        try:
+            start, end = float(raw["start"]), float(raw["end"])
+        except (KeyError, TypeError, ValueError):
+            return None, f"clip {i} needs numeric start and end source seconds"
+        if start < 0 or end > float(ctx.duration) + .05 or end <= start:
+            return None, f"clip {i} range {start:g}-{end:g}s is outside the source"
+        sentences = [row for row in (getattr(ctx, "index", {}) or {})
+                     .get("sentences", []) if row.get("t0") is not None
+                     and row.get("t1") is not None]
+        if sentences:
+            nearest_start = min(
+                (float(row["t0"]) for row in sentences),
+                key=lambda value: abs(value - start))
+            nearest_end = min(
+                (float(row["t1"]) for row in sentences),
+                key=lambda value: abs(value - end))
+            if abs(nearest_start - start) > 1.5:
+                return None, (f"clip {i} starts mid-thought at {start:g}s; "
+                              f"use the sentence boundary {nearest_start:g}s")
+            if abs(nearest_end - end) > 1.5:
+                return None, (f"clip {i} ends mid-thought at {end:g}s; use "
+                              f"the sentence boundary {nearest_end:g}s")
+            start, end = nearest_start, nearest_end
+        if end - start < 10 or end - start > 120:
+            return None, f"clip {i} must be 10-120 seconds, got {end-start:.1f}s"
+
+        story = raw.get("story") or {}
+        if not isinstance(story, dict):
+            return None, f"clip {i} story must be an object"
+        clean_story = {
+            stage: str(story.get(stage) or "").strip()[:300]
+            for stage in ("setup", "development", "payoff")
+            if str(story.get(stage) or "").strip()
+        }
+
+        try:
+            score = int(raw.get("score") or 80)
+        except (TypeError, ValueError):
+            return None, f"clip {i} score must be an integer from 0 to 100"
+        planned.append({
+            "start": round(start, 2), "end": round(end, 2),
+            "title": str(raw.get("title") or f"Short {i}")[:55],
+            "hook": str(raw.get("hook") or "")[:160],
+            "score": max(0, min(100, score)),
+            "story": clean_story,
+        })
+
+    ordered = sorted(planned, key=lambda clip: clip["start"])
+    for left, right in zip(ordered, ordered[1:]):
+        if right["start"] < left["end"]:
+            return None, "caller-authored short ranges must not overlap"
+    return planned, None
+
+
+def make_shorts(ctx, count=None, style_note=None, clips=None):
     """Kick off the shorts pipeline for THIS project — the chat-path twin of
     the studio's Make shorts button. The heavy work runs as its own
     shorts_plan job so this turn can answer immediately; the board on the
@@ -14952,7 +17660,25 @@ def make_shorts(ctx, count=None, style_note=None):
         return ("A shorts run is ALREADY working on this project — tell the "
                 "user their clips are on the way on the Shorts board; do "
                 "not start another.")
-    payload = {"source": "agent"}
+    is_mcp = (getattr(ctx, "job", {}) or {}).get("type") == "mcp_tool"
+    if is_mcp and clips is None:
+        return ("MCP DIRECT PLANNING REQUIRED: do not delegate selection to "
+                "Valmera's Shorts planner. Read the full podcast transcript "
+                "and shots, choose standalone story arcs, then call "
+                "make_shorts again with clips=[...]. Provide exact start/end "
+                "sentence boundaries plus a useful title, hook, and story "
+                "summary. Do not pre-bake effects, B-roll, music or a visual "
+                "recipe into selection; make those judgments while directly "
+                "editing the opened child.")
+
+    planned, plan_error = (None, None)
+    if clips is not None:
+        planned, plan_error = _direct_short_clips(ctx, clips)
+        if plan_error:
+            return "REJECTED: " + plan_error
+
+    payload = {"source": ("mcp_direct" if is_mcp else
+                          "agent_direct" if planned else "agent")}
     try:
         if count:
             payload["count"] = max(1, min(int(count),
@@ -14961,18 +17687,23 @@ def make_shorts(ctx, count=None, style_note=None):
         pass
     if style_note:
         payload["style_note"] = str(style_note)[:400]
+    if planned:
+        payload["clips"] = planned
+        payload["count"] = len(planned)
     job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id,
                         ctx.job["user_id"], "shorts_plan", payload)
     evidence = ("whole transcript" if has_speech else
                 "full-video visual filmstrips")
-    return (f"Shorts run started as job {job_id}. It reviews the {evidence}, "
-            "picks the "
-            "strongest self-contained moments, and builds each one as its "
-            "own project — reframed to 9:16, captioned, with emphasis "
-            "punch-ins — then renders them. The user watches it happen on "
-            "this project's Shorts board (top of the video pane). Tell "
-            "them it's underway and where to look; do NOT wait for it in "
-            "an in-house turn. An MCP caller can poll this exact run with "
+    selection = ("uses the story arcs you selected" if planned else
+                 f"reviews the {evidence} and picks complete story arcs")
+    return (f"Shorts story search started as job {job_id}. It {selection} and "
+            "creates each complete source story as its own LOCKED child "
+            "project. It does not style, reframe, caption, add B-roll/music, "
+            "or render a creative edit. The resulting cards arrive inside "
+            "this project's chat. In Studio, the user's Edit press boots a "
+            "fresh child editor. An MCP caller must instead open a child and "
+            "edit it directly with ordinary tools; it must never delegate to "
+            "Valmera's child agent. Poll this exact run with "
             f"wait_for_job(job_id={job_id}) or shorts_status.")
 
 
@@ -15022,6 +17753,14 @@ def edit_shorts(ctx, instruction, shorts=None):
     under the 85-minute ORIGINAL — the parent agent had no way to reach its
     children; 2026-08-10, the same request from a child was rejected with
     'no shorts on its board' and the session stalled on navigation."""
+    # Product boundary: every child starts locked and only an explicit Edit
+    # press on that card may boot its fresh in-house editor. Keeping the old
+    # fan-out implementation below makes rolling back old queued calls safe,
+    # but no new turn is allowed to cross that consent boundary.
+    return ("LOCKED CARD BOUNDARY: batch agent delegation is disabled. "
+            "Each reel must be started with its own Edit button in the "
+            "podcast chat. Do not edit the long parent timeline instead.")
+
     board_pid, kids, board_parent = _shorts_board(ctx)
     if not kids:
         if ctx.project.get("parent_project_id"):
@@ -15195,6 +17934,38 @@ _STYLE_PROPS = {
     "anchor_y": {"type": "number", "minimum": 0.05, "maximum": 0.95},
 }
 
+_ANIM_FLOAT_PROP = {
+    "anyOf": [
+        {"type": "number"},
+        {"type": "array", "minItems": 1,
+         "items": {"type": "object",
+                   "properties": {
+                       "t": {"type": "number"},
+                       "v": {"type": "number"},
+                       "ease": {"type": "string",
+                                "enum": ["linear", "in", "out", "in_out",
+                                         "hold"]}},
+                   "required": ["t", "v"]}},
+    ]
+}
+_TEXT_MOTION_PROP = {
+    "type": "object",
+    "description": ("Element-local motion curves. t is seconds from this "
+                    "text's own start; x/y are frame fractions, scale is "
+                    "relative, rotation is degrees, opacity is 0..1."),
+    "properties": {name: _ANIM_FLOAT_PROP for name in _TEXT_MOTION_FIELDS},
+    "additionalProperties": False,
+}
+_OVERLAY_MOTION_PROP = {
+    "type": "object",
+    "description": ("Element-local visual-overlay curves. t is seconds from "
+                    "the overlay's own start; x/y and scale are frame "
+                    "fractions, rotation is degrees, opacity is 0..1."),
+    "properties": {name: _ANIM_FLOAT_PROP
+                   for name in _OVERLAY_MOTION_FIELDS},
+    "additionalProperties": False,
+}
+
 TOOLS = {
     "get_video_info": (get_video_info, "Video metadata plus index and EDL "
                        "summary. Call this first.", {}),
@@ -15228,21 +17999,59 @@ TOOLS = {
                   "itself is in your filmstrips and look_at.",
                   {"start": {"type": "number"},
                    "end": {"type": "number"}}),
+    "get_editorial_map": (
+        get_editorial_map,
+        "READ: compact cross-modal SOURCE timeline joining each sentence "
+        "(or shot when there is no speech) to overlapping shot changes, "
+        "relative energy/trend, beats, vocal stress, pauses and measured "
+        "face/source-text/dense-UI evidence. Use this instead of separately "
+        "re-reading transcript + shots + audio analysis when directing a "
+        "substantial reel, podcast, montage or B-roll/SFX/motion treatment. "
+        "It aligns evidence but does not recognize the full picture or "
+        "prescribe effects: inspect filmstrips/look_at before visual choices. "
+        "Pass asset_key for an indexed uploaded clip. focus can be all, "
+        "story, visual, energy, faces, ui, quiet or peaks.",
+        {"start": {"type": "number"},
+         "end": {"type": "number"},
+         "focus": {"type": "string", "enum": sorted(editorial_index.FOCI)},
+         "limit": {"type": "integer", "minimum": 1,
+                   "maximum": EDITORIAL_MAP_MAX_ROWS},
+         "asset_key": {"type": "string"}}),
     "read_skill": (read_skill, "Load a focused editing playbook (captions, "
                    "zooms, audio, transitions, ...) into this turn. The "
                    "SKILLS list in your instructions names them. Read the "
                    "matching skill before your first edit of that kind — "
                    "batch it with your other reading calls.",
                    {"name": {"type": "string"}}),
-    "set_edit_plan": (set_edit_plan, "Record YOUR edit plan for this "
-                      "request, then EXECUTE it in the SAME turn — one "
-                      "short line per move, in order. This is a note to "
-                      "yourself, not a proposal for the user to approve. "
+    "set_edit_plan": (set_edit_plan, "Author the durable CREATIVE BLUEPRINT "
+                      "for this project, then EXECUTE it in the SAME turn — "
+                      "one short line per move, in order. This is direction "
+                      "for yourself, not a proposal for user approval. "
                       "A concrete brief is already permission to cut; do "
                       "not stop after recording the plan. Record format, "
-                      "intent, style_family, must_keep and must_avoid as "
-                      "structured anchors — not only a vague 'make it "
-                      "engaging' brief. Call it in the same batch as your "
+                      "audience, platform, objective, narrative arc, and a "
+                      "coherent style bible for captions, motion, B-roll, "
+                      "music, SFX and color. Add observable acceptance "
+                      "criteria. For a whole-program creative build, choose "
+                      "one named treatment after considering materially "
+                      "different credible routes; record the observed "
+                      "decision_basis, coherence_rules shared by picture/"
+                      "type/motion/sound, any relationships transferred from "
+                      "an actual reference, and short reasons weaker routes "
+                      "lost. This is a decision record, not hidden reasoning "
+                      "or a feature wishlist. Add a "
+                      "sequence_map: one row per meaningful audience beat, "
+                      "binding an exact phrase/scene/card anchor to its "
+                      "purpose, picture treatment, sound treatment and "
+                      "relative energy. This is a causal treatment, never a "
+                      "quota for cuts or effects. Every timed main-source "
+                      "beat must cite evidence_ids copied from transcript/"
+                      "shot evidence; valid-looking invented seconds are "
+                      "rejected. These fields coordinate "
+                      "every later choice "
+                      "and persist into later user turns; unspecified style "
+                      "fields inherit the project's last direction. Call it "
+                      "in the same batch as your "
                       "reads on any multi-step edit: the plan survives "
                       "auto-continuations (a resumed pass finishes what "
                       "was PLANNED instead of re-deciding). Re-call to "
@@ -15251,23 +18060,123 @@ TOOLS = {
                       {"steps": {"type": "array",
                                  "items": {"type": "string"}},
                        "brief": {"type": "string"},
+                       "treatment": {"type": "string",
+                                     "description": (
+                                         "Short name for the one coherent "
+                                         "editorial route chosen for this "
+                                         "brief and footage.")},
                        "format": {"type": "string"},
                        "intent": {"type": "string"},
+                       "audience": {"type": "string"},
+                       "platform": {"type": "string"},
+                       "objective": {"type": "string"},
                        "style_family": {"type": "string"},
                        "must_keep": {"type": "array",
                                      "items": {"type": "string"}},
                        "must_avoid": {"type": "array",
-                                      "items": {"type": "string"}}}),
+                                      "items": {"type": "string"}},
+                       "narrative_arc": {"type": "array",
+                                         "items": {"type": "string"}},
+                       "decision_basis": {
+                           "type": "array", "items": {"type": "string"},
+                           "description": (
+                               "Observed transcript, shot, frame, audio, "
+                               "motion, asset or user-brief facts that make "
+                               "the chosen treatment fit.")},
+                       "reference_transfer": {
+                           "type": "array", "items": {"type": "string"},
+                           "description": (
+                               "Relationships to transfer from an actual "
+                               "user reference (rhythm/energy/type/motion), "
+                               "never raw counts or the reference media.")},
+                       "coherence_rules": {
+                           "type": "array", "items": {"type": "string"},
+                           "description": (
+                               "Reusable rules that make picture, captions, "
+                               "motion, B-roll, music and SFX feel authored "
+                               "as one system.")},
+                       "alternatives_rejected": {
+                           "type": "array", "items": {"type": "string"},
+                           "description": (
+                               "At most a few materially plausible weaker "
+                               "routes and the observed reason each lost.")},
+                       "sequence_map": {
+                           "type": "array",
+                           "description": (
+                               "Ordered cross-modal story/treatment beats for "
+                               "substantial whole-program edits. Use exact "
+                               "source seconds only when known from evidence."),
+                           "items": {
+                               "type": "object",
+                               "properties": {
+                                   "role": {"type": "string"},
+                                   "anchor": {"type": "string"},
+                                   "purpose": {"type": "string"},
+                                   "visual": {"type": "string"},
+                                   "sound": {"type": "string"},
+                                   "energy": {"type": "number",
+                                              "minimum": 0, "maximum": 1},
+                                   "source_start_s": {"type": "number",
+                                                      "minimum": 0},
+                                   "source_end_s": {"type": "number",
+                                                    "minimum": 0},
+                                   "evidence_ids": {
+                                       "type": "array",
+                                       "items": {"type": "string"},
+                                       "description": (
+                                           "Exact transcript sentence and/"
+                                           "or shot ids cited for this "
+                                           "source-timed beat.")},
+                               },
+                           }},
+                       "caption_direction": {"type": "string"},
+                       "motion_direction": {"type": "string"},
+                       "broll_direction": {"type": "string"},
+                       "music_direction": {"type": "string"},
+                       "sfx_direction": {"type": "string"},
+                       "color_direction": {"type": "string"},
+                       "acceptance_criteria": {
+                           "type": "array", "items": {"type": "string"}}}),
+    "complete_edit_plan_steps": (
+        complete_edit_plan_steps,
+        "Update the creative blueprint with semantic completion evidence. "
+        "Use 1-based ids from set_edit_plan. Call in the SAME tool batch as "
+        "the last proof/read, or immediately after the write/render that "
+        "proves the work. Mark a step completed only when the current EDL "
+        "contains it; mark an acceptance criterion passed only from direct "
+        "render/transcript/audio evidence. Mark genuinely impossible work "
+        "blocked with the reason. This is how you stop when the requested "
+        "edit is complete without arbitrary call/tool limits.",
+        {"completed_steps": {"type": "array",
+                             "items": {"type": "integer"}},
+         "blocked_steps": {"type": "array",
+                            "items": {"type": "integer"}},
+         "passed_criteria": {"type": "array",
+                             "items": {"type": "integer"}},
+         "failed_criteria": {"type": "array",
+                             "items": {"type": "integer"}},
+         "evidence": {"type": "string"}}),
+    "expand_toolset": (
+        expand_toolset,
+        "Load additional tool schemas for the NEXT reasoning step when the "
+        "post-plan compact catalog does not expose a capability you need. "
+        "This changes no media or EDL and is not a tool limit: request any "
+        "relevant domains, then continue immediately.",
+        {"domains": {"type": "array", "items": {"type": "string",
+          "enum": ["story", "captions", "audio", "media", "motion",
+                   "screen", "shorts"]}}}),
     "apply_edit_recipe": (
         apply_edit_recipe,
-        "Atomically apply ONE OR MORE transaction-safe EDL operations in "
-        "one tool call and create exactly one new version. Pass operations "
+        "Compile and atomically commit a multi-department EDL recipe; use "
+        "save_as plus {'$ref':'alias'} to target an object created earlier "
+        "in that same recipe. Pass operations "
         "as [{tool:'set_frame', args:{ratio:'9:16'}}, ...]. Every operation "
         "is staged against the result of the previous one; if any operation "
         "is structurally invalid, the whole recipe is aborted and NOTHING "
         "changes. Quality findings are committed as advisories. Use this for the large write batch "
         "after planning instead of spending one model round trip per simple "
-        "edit. Asset downloads/generation, rendering, and user questions are "
+        "edit. Already-fetched music and SFX can be placed here; asset "
+        "downloads/generation, rendering, extraction, and user questions are "
         "intentionally unavailable inside recipes.",
         {"operations": {
             "type": "array",
@@ -15279,19 +18188,27 @@ TOOLS = {
                     "tool": {"type": "string",
                              "enum": sorted(RECIPE_TOOLS)},
                     "args": {"type": "object"},
+                    "save_as": {
+                        "type": "string",
+                        "description": "Optional alias for the one EDL object this operation creates; later args may use {'$ref':'alias'} as its id."},
                 },
                 "required": ["tool", "args"],
             }},
-         "brief": {"type": "string"}}),
+         "brief": {"type": "string"},
+         "completes_steps": {
+             "type": "array", "items": {"type": "integer"}}}),
     "find_silences": (find_silences, "Silences of at least min_seconds, with "
                       "midpoints and surrounding words — cut points should "
                       "snap to these midpoints or word boundaries.",
                       {"min_seconds": {"type": "number"}}),
-    "list_assets": (list_assets, "Files in this project. kind='music' lists "
-                    "uploaded music (use its storage_key with add_music or "
-                    "add_voiceover); 'clip' lists uploaded video clips and "
-                    "'image' reference images (use with insert_media); "
-                    "'render' past renders; 'all' everything.",
+    "list_assets": (list_assets, "Every file in this project — used on the "
+                    "timeline AND unused uploads sitting in the library. "
+                    "kind='music' lists audio (use its storage_key with "
+                    "add_music or add_voiceover); 'clip' lists uploaded "
+                    "video clips and 'image' reference images (use with "
+                    "insert_media); 'render' past renders; 'all' everything. "
+                    "UNUSED files are marked AVAILABLE and can be placed "
+                    "without asking the user to re-upload.",
                     {"kind": {"type": "string"}}),
     "look_at": (look_at, "YOUR OWN EYES on the footage. Pass times=[...] "
                 "(1-8 exact source seconds of the MAIN video) and the "
@@ -15347,7 +18264,11 @@ TOOLS = {
                       "how you CHECK YOUR OWN WORK at exact moments — "
                       "narrow times sample frame-accurately, so use it to "
                       "verify a transition junction or an effect the user "
-                      "questions before claiming it is fine.",
+                      "questions before claiming it is fine. For video clips "
+                      "it also returns a cached, measured temporal profile "
+                      "(static/frozen share, motion intensity and abrupt "
+                      "changes). This is sparse measurement—not continuous "
+                      "playback—and remains available on later turns.",
                       {"asset_key": {"type": "string"},
                        "times": {"type": "array",
                                  "items": {"type": "number"}},
@@ -15506,6 +18427,37 @@ TOOLS = {
                       "min_seconds": {"type": "number"},
                       "max_seconds": {"type": "number"},
                       "commercial_use": {"type": "boolean"}}),
+    "research_music": (
+        research_music,
+        "Search AND acoustically compare one soundtrack slate in a single "
+        "evidence pass. Use this for substantial edits where music choice "
+        "matters: it returns the complete licensed search slate plus a "
+        "measured ranking of up to four actual candidate files against the "
+        "creative blueprint, and an actual listening comparison when the "
+        "audio-review lane is available. It does NOT choose or fetch the "
+        "winner—the editor keeps that judgment, then calls fetch_music on "
+        "the deliberate id. This replaces the dependent search_music then "
+        "audition_music_candidates round trip; use search_music alone for a "
+        "quick/low-stakes lookup.",
+        {"query": {"type": "string"},
+         "brief": {"type": "string"},
+         "min_seconds": {"type": "number"},
+         "max_seconds": {"type": "number"},
+         "commercial_use": {"type": "boolean"}}),
+    "audition_music_candidates": (
+        audition_music_candidates,
+        "Acoustically compare multiple search_music candidates BEFORE choosing. "
+        "Downloads temporary audition copies, measures their actual tempo, "
+        "pulse confidence, dynamics, spectral brightness, bass and "
+        "dialogue-band masking risk, and ranks those facts against the "
+        "creative blueprint / optional brief. The main language model does not "
+        "hear them directly; when the audio-review lane is configured the "
+        "tool also returns its actual listening comparison, clearly labeled. "
+        "Otherwise it stays honest waveform evidence. Use on substantial "
+        "edits when music matters, then fetch_music only for the deliberate "
+        "winner. ids are exact search_music result ids.",
+        {"ids": {"type": "array", "items": {"type": "string"}},
+         "brief": {"type": "string"}}),
     "fetch_music": (fetch_music, "Download ONE search_music result (by its "
                     "id) into the project as a normal music asset — "
                     "returns the storage_key for add_music. Repeat the "
@@ -15596,6 +18548,17 @@ TOOLS = {
                    "15s; one-shots are seconds long).",
                    {"query": {"type": "string"},
                     "max_seconds": {"type": "number"}}),
+    "audition_sfx_candidates": (
+        audition_sfx_candidates,
+        "Compare multiple search_sfx candidates using their ACTUAL waveform "
+        "before choosing. Measures attack, peak position, tail, crest, "
+        "spectral balance, bass and whether the file contains one clean event "
+        "or several. Ranks those facts against a named physical/editorial "
+        "purpose. The language model does not hear the recordings; use this "
+        "evidence together with title/license, then fetch and place the "
+        "winner exactly on the visible event.",
+        {"ids": {"type": "array", "items": {"type": "string"}},
+         "purpose": {"type": "string"}}),
     "fetch_sfx": (fetch_sfx, "Download ONE search_sfx result (by its id) "
                   "into the project — returns the storage_key for "
                   "add_sfx. Repeat the "
@@ -15603,8 +18566,9 @@ TOOLS = {
                   {"id": {"type": "string"}}),
     "add_web_sfx": (add_web_sfx, "ONE-CALL on-demand sound design: search "
                     "real Openverse/Freesound recordings, rank clean "
-                    "physical one-shots above loops/music/ambience, fetch "
-                    "the best available result, and place it at an exact "
+                    "physical one-shots above loops/music/ambience, DOWNLOAD "
+                    "and acoustically compare the candidates, fetch the best "
+                    "measured match, and place it at an exact "
                     "OUTPUT-timeline second. Use for 'add a cinematic "
                     "whoosh at 3.2s', 'put a shutter on this cut', or any "
                     "specific requested sound. The result reports the real "
@@ -15768,15 +18732,19 @@ TOOLS = {
                      "long the insert plays (image default 3.0s; a video "
                      "defaults to its available length). clip_start_s: where in the source "
                      "clip the window starts — use look_at_asset to pick "
-                     "the right moment. motion (images only): 'zoom_in', "
-                     "'zoom_out', 'pan_left' or 'pan_right' gives the still "
-                     "a slow Ken Burns move instead of sitting frozen — use "
-                     "it whenever the user wants an image to feel animated. "
+                     "the right moment. motion: 'zoom_in', 'zoom_out', "
+                     "'pan_left' or 'pan_right' gives either a still or a "
+                     "video insert its own slow local camera move without "
+                     "changing timing or audio. Use it deliberately to "
+                     "direct attention, not on every shot. "
                      "Inserted media is NOT transcribed — captions cover "
                      "the main footage only. fit defaults to 'auto': the "
-                     "WHOLE asset is preserved over a blurred extension, so "
-                     "a portrait card cannot be center-cropped into an empty "
-                     "middle band. fit='crop' fills edge-to-edge. Assets may "
+                     "WHOLE asset is preserved (black bars when the program "
+                     "frame is already pad; a blurred extension otherwise) "
+                     "so a portrait card cannot be center-cropped into an "
+                     "empty middle band. Pass fit='pad' for solid black; "
+                     "never use blur when the user asked for black. "
+                     "fit='crop' fills edge-to-edge. Assets may "
                      "be reused whenever the edit benefits from repetition "
                      "or a different source window.",
                      {"asset_key": {"type": "string"},
@@ -15788,6 +18756,20 @@ TOOLS = {
                       "motion": {"type": "string",
                                  "enum": ["zoom_in", "zoom_out",
                                           "pan_left", "pan_right"]}}),
+    "compose_panels": (
+        compose_panels,
+        "PROJECT-SCOPED: build ONE 16:9 clip that shows 2 or 3 independent "
+        "videos side-by-side on a solid BLACK canvas — the signature "
+        "multi-panel athlete/action wall. Do NOT fake this with pad_blur "
+        "inserts plus small PIP overlays. columns is either a list of "
+        "2–3 asset_keys or a list of columns, each a list of "
+        "{asset_key, start, duration} clips that play in that column "
+        "(when one clip ends the next one in that column starts). "
+        "duration_s caps the result (1–20s, default 8). The file is saved "
+        "as a video_clip and is NOT in the program until insert_media "
+        "(use fit='pad'). Audio is omitted — add_music for the bed.",
+        {"columns": {"type": "array"},
+         "duration_s": {"type": "number"}}),
     "set_insert_window": (set_insert_window, "Change which part of an "
                           "already-spliced clip plays, IN PLACE — duration_s "
                           "for how long it runs, clip_start_s for where in the "
@@ -15936,6 +18918,39 @@ TOOLS = {
                                       "enum": ["landscape", "portrait",
                                                "square"]},
                       "count": {"type": "integer"}}),
+    "research_broll": (
+        research_broll,
+        "Research B-roll as a COHERENT STORY SEQUENCE, not one isolated "
+        "keyword at a time. Pass every meaningful cutaway moment with a "
+        "concrete visual query, its editorial purpose, intended output time "
+        "and approximate duration. For an important beat, query_variants can "
+        "name distinct truthful visual routes (exact subject, observable "
+        "action, environment/detail) so the choice is not trapped inside one "
+        "keyword's near-duplicates. The tool searches moments concurrently, "
+        "adapts candidate depth to the size of the story, returns candidates "
+        "grouped by purpose, and attaches one balanced visual board spanning "
+        "the whole edit. Judge relevance, authenticity, composition, color "
+        "and diversity across the sequence before choosing. Nothing enters "
+        "the project until add_stock_media; the actual downloaded clip is "
+        "then visually reviewed before placement. Use kind='photo' for real "
+        "people/products/places when topical video is unavailable.",
+        {"moments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "query_variants": {"type": "array",
+                                       "items": {"type": "string"}},
+                    "purpose": {"type": "string"},
+                    "at": {"type": "number"},
+                    "duration_s": {"type": "number"},
+                    "kind": {"type": "string",
+                             "enum": ["video", "photo"]}},
+                "required": ["query", "purpose"]}},
+         "orientation": {"type": "string",
+                         "enum": ["landscape", "portrait", "square"]}}),
     "add_stock_media": (add_stock_media, "DOWNLOAD one search_stock result "
                         "and save it as a project asset. `id` must be an id "
                         "from a search_stock result in THIS turn. The clip "
@@ -16433,6 +19448,17 @@ TOOLS = {
                       "x": {"type": ["number", "array"]},
                       "y": {"type": ["number", "array"]},
                       "scale": {"type": "number"}}),
+    "set_overlay_motion": (
+        set_overlay_motion,
+        "Author or replace x/y/scale/rotation/opacity on an EXISTING visual "
+        "overlay using scalars or element-local keyframes. This is the "
+        "general motion-graphics primitive for logos, images and PIP clips: "
+        "one coherent move can drift, push, overshoot, rotate and fade "
+        "without stacking named presets. Keyframe t=0 is the overlay's own "
+        "start, not program time. A scalar makes that property static. "
+        "Full-frame B-roll covers ignore x/y/scale; screen takeovers own "
+        "their tracked camera geometry and reject ordinary curves.",
+        {"id": {"type": "string"}, "motion": _OVERLAY_MOTION_PROP}),
     "remove_overlay": (remove_overlay, "Remove one overlay by its id (see "
                        "get_edl).", {"id": {"type": "string"}}),
     "add_screen_takeover": (
@@ -16527,9 +19553,17 @@ TOOLS = {
                  "all; use when the user wants no effect), fade, pop, "
                  "slide_up, blur_in, whip, rise, drop, plus 'typewriter' "
                  "(entrance only); uppercase forces "
-                 "casing; box adds a backing panel.Use for text the user "
+                 "casing; box adds a backing panel. motion is the general "
+                 "primitive for authored x/y/scale/rotation/opacity curves "
+                 "in LOCAL seconds: it can express a coherent drift, arc, "
+                 "settle, punch, spin or fade instead of choosing a named "
+                 "preset. When motion is present, omit entrance/exit. Use "
+                 "for text the user "
                  "dictates — titles, labels, stats; spoken-word captions "
-                 "stay with add_captions.",
+                 "stay with add_captions. This text item owns caption "
+                 "suppression for its live window, so enabling captions "
+                 "before or after cannot stack two word layers and removing "
+                 "the text restores those captions automatically.",
                  {"text": {"type": "string"},
                   "start": {"type": "number"},
                   "end": {"type": "number"},
@@ -16546,7 +19580,53 @@ TOOLS = {
                            "enum": [a for a in TEXT_ANIMS
                                     if a != "typewriter"]},
                   "uppercase": {"type": "boolean"},
-                  "box": {"type": "boolean"}}),
+                  "box": {"type": "boolean"},
+                  "motion": _TEXT_MOTION_PROP}),
+    "add_vector_graphic": (
+        add_vector_graphic,
+        "Add a renderer-native VECTOR graphic over a PROGRAM-time window. "
+        "Kinds: rectangle (panel/highlight), ellipse, line (underline or "
+        "connector), arrow, ring (point at a real visible subject/UI target), "
+        "progress (a truthful completion indicator). x/y are frame-fraction "
+        "centres; width/height are frame fractions. color/stroke_color/"
+        "background_color are #RRGGBB; stroke_width is a fraction of the "
+        "short frame edge; rounding is 0-0.5 of the shape's short side; "
+        "progress value is 0-1. motion uses the same LOCAL x/y/scale/rotation/"
+        "opacity keyframes as designed text. These are compositional "
+        "primitives, not decoration quotas: use a panel to support hierarchy, "
+        "a line to connect, and arrows/rings only when the frame contains the "
+        "thing they identify. Preview the whole path before accepting it.",
+        {"kind": {"type": "string", "enum": list(VECTOR_KINDS)},
+         "start": {"type": "number"}, "end": {"type": "number"},
+         "x": {"type": "number"}, "y": {"type": "number"},
+         "width": {"type": "number"}, "height": {"type": "number"},
+         "color": {"type": "string"}, "opacity": {"type": "number"},
+         "stroke_color": {"type": "string"},
+         "stroke_width": {"type": "number"},
+         "rounding": {"type": "number"},
+         "background_color": {"type": "string"},
+         "value": {"type": "number"}, "motion": _TEXT_MOTION_PROP}),
+    "set_vector_graphic": (
+        set_vector_graphic,
+        "Patch an existing vector graphic by id: its kind, program window, "
+        "geometry, palette, progress value, or general motion. Pass motion={} "
+        "to clear keyframes. This modifies the existing layer instead of "
+        "stacking a duplicate.",
+        {"id": {"type": "string"},
+         "kind": {"type": "string", "enum": list(VECTOR_KINDS)},
+         "start": {"type": "number"}, "end": {"type": "number"},
+         "x": {"type": "number"}, "y": {"type": "number"},
+         "width": {"type": "number"}, "height": {"type": "number"},
+         "color": {"type": "string"}, "opacity": {"type": "number"},
+         "stroke_color": {"type": "string"},
+         "stroke_width": {"type": "number"},
+         "rounding": {"type": "number"},
+         "background_color": {"type": "string"},
+         "value": {"type": "number"}, "motion": _TEXT_MOTION_PROP}),
+    "remove_vector_graphic": (
+        remove_vector_graphic,
+        "Remove one renderer-native vector graphic by id.",
+        {"id": {"type": "string"}}),
     "add_kinetic_text": (add_kinetic_text, "CHOREOGRAPH THE SPOKEN WORDS "
                          "onto the screen in ONE pass — the signature move "
                          "of top creator reels: each phrase of the "
@@ -16567,7 +19647,11 @@ TOOLS = {
                          "remove_text by id, or remove and re-run to "
                          "restyle. AFTER rendering, LOOK at the frames: "
                          "wrong zone for this framing -> re-run with "
-                         "another zone.",
+                         "another zone. motion_style='composed' (default) "
+                         "uses one restrained settle language across the "
+                         "pass and a controlled overshoot only for semantic "
+                         "emphasis; 'preset' restores the legacy named "
+                         "entrances; 'still' removes phrase animation.",
                          {"start": {"type": "number"},
                           "end": {"type": "number"},
                           "accent_color": {"type": "string"},
@@ -16578,7 +19662,10 @@ TOOLS = {
                           "color": {"type": "string"},
                           "font": {"type": "string",
                                    "enum": list(TEXT_FONTS)},
-                          "size_scale": {"type": "number"}}),
+                          "size_scale": {"type": "number"},
+                          "motion_style": {"type": "string",
+                                           "enum": list(
+                                               _KINETIC_MOTION_STYLES)}}),
     "add_text_behind": (add_text_behind, "Put words BEHIND the moving subject "
                         "— the person walks IN FRONT of the letters, the way a "
                         "title painted on the street or the wall behind them "
@@ -16638,6 +19725,15 @@ TOOLS = {
     "remove_text": (remove_text, "Remove one text element by its id (see "
                     "get_edl) — including one placed behind the subject.",
                     {"id": {"type": "string"}}),
+    "set_text_motion": (
+        set_text_motion,
+        "Set or replace coherent x/y/scale/rotation/opacity keyframes on an "
+        "EXISTING ordinary text item. Curves use LOCAL seconds from that "
+        "text's start, so moving the text window keeps its choreography. "
+        "This replaces named entrance/exit animation with one authored "
+        "motion system. Pass motion={} (or omit it) to clear the explicit "
+        "curve and leave the text static. Subject-matted text cannot move.",
+        {"id": {"type": "string"}, "motion": _TEXT_MOTION_PROP}),
     "add_title_card": (add_title_card, "Cut to a STANDALONE full-frame card "
                        "showing only this text, then return to the footage — "
                        "the 'show the term on a blank screen' move. One call "
@@ -16912,6 +20008,25 @@ TOOLS = {
                            "analyze that instead — e.g. to find the drop "
                            "for add_music offset_s.",
                            {"asset_key": {"type": "string"}}),
+    "review_audio": (review_audio, "Listen to bounded REAL audio through the "
+                     "audio-review lane and return its professional assessment. "
+                     "Pass asset_key for an uploaded/fetched song, audio-only "
+                     "file, clip or render; pass times for seconds within that "
+                     "asset. With no asset_key, times reviews SOURCE sound. "
+                     "output_times reviews the CURRENT rendered program and "
+                     "therefore requires render_preview first. Use this for "
+                     "vibe, recording quality, intelligibility, masking and "
+                     "mix judgment; get_audio_analysis remains the authority "
+                     "for BPM/beats/energy and audit_audio_mix for authored "
+                     "roles. Advisory only—never refuse a valid user choice "
+                     "because the listener is unavailable.",
+                     {"asset_key": {"type": "string"},
+                      "times": {"type": "array",
+                                "items": {"type": "number"}},
+                      "output_times": {"type": "array",
+                                       "items": {"type": "number"}},
+                      "span_s": {"type": "number"},
+                      "question": {"type": "string"}}),
     "audit_audio_mix": (audit_audio_mix, "Deterministic audit of the CURRENT "
                         "EDL's authored music, voiceover and SFX roles, files, "
                         "program windows, source offsets, gains, ducking and "
@@ -16921,14 +20036,16 @@ TOOLS = {
                         "measure the rendered mix without relabeling roles.",
                         {}),
     "punch_in_on_emphasis": (punch_in_on_emphasis, "ONE-CALL emphasis "
-                             "zooms: writes punch zooms on the N most "
-                             "vocally STRESSED words that survive the "
+                             "zooms: writes a coherent, timeline-distributed "
+                             "motion pass on meaningful vocally STRESSED "
+                             "words that survive the "
                              "current cut (stress measured from the audio, "
                              "times from the real word timestamps — never "
-                             "guessed), in one EDL "
-                             "version. count is any positive integer (default 3); strength "
-                             "0.05-4.5 (default 0.14 — a gentle push the "
-                             "viewer feels rather than sees). Face targets "
+                             "guessed), in one EDL version. Omit count to "
+                             "derive non-clustered motion density from program "
+                             "length and the creative blueprint; omit strength "
+                             "to direct magnitude from the motion/style brief. "
+                             "Explicit count and strength remain authoritative. Face targets "
                              "are used when detected; otherwise center "
                              "fallbacks commit with advisories. The result lists "
                              "each word + program time — report those to "
@@ -17027,43 +20144,205 @@ TOOLS = {
                  "their reply (ends this turn). Use whenever a material "
                  "choice genuinely belongs to the user.",
                  {"question": {"type": "string"}}),
-    "make_shorts": (make_shorts, "Cut this LONG video into multiple "
-                    "finished vertical shorts — a background run that picks "
-                    "the strongest self-contained moments from the "
-                    "transcript, builds each as its own project (9:16, "
-                    "captions, punch-ins), and renders them onto the "
-                    "project's Shorts board. THE tool for 'make me shorts/"
-                    "clips/reels from this'. It returns the background "
-                    "planner job ID; MCP callers can poll it with "
-                    "wait_for_job or shorts_status. count caps how many; "
-                    "style_note forwards the user's styling words to the "
-                    "planner.",
+    "make_shorts": (make_shorts, "Scout this LONG podcast/video for multiple "
+                    "complete story arcs and create LOCKED child projects. "
+                    "Valmera's internal agent may let the background scout "
+                    "choose the arcs. "
+                    "MCP callers MUST do the editorial selection themselves: "
+                    "read the full transcript, then pass clips with explicit "
+                    "source ranges and useful story context. The pipeline "
+                    "only seeds the selected source windows; it does not "
+                    "choose captions, framing, B-roll, music, effects or "
+                    "render a creative edit. Studio users explicitly press "
+                    "Edit on a card to boot a fresh editor. MCP callers open "
+                    "each child and perform the edits directly. It returns "
+                    "the scouting job ID; poll with wait_for_job or "
+                    "shorts_status. count caps how many; style_note is "
+                    "reference context for the eventual child editor, not a "
+                    "hard-coded recipe.",
                     {"count": {"type": "integer"},
-                     "style_note": {"type": "string"}}),
-    "edit_shorts": (edit_shorts, "DELEGATION ONLY — this does NOT directly "
-                    "edit any EDL. It forwards ONE instruction to Valmera's "
-                    "separate in-house agent in each selected child's chat; "
-                    "each agent then runs its own billed edit turn. An MCP "
-                    "caller whose user asked that caller to edit personally "
-                    "must instead open_short/open_project each child and use "
-                    "the normal editing tools directly. Use this only when "
-                    "agent delegation is intended. NEVER apply a request "
-                    "about the generated shorts to the long parent timeline. "
-                    "Works from the shorts "
-                    "PARENT or from INSIDE any generated short — it "
-                    "resolves the board through the parent automatically, "
-                    "so never ask anyone to switch projects first. "
-                    "Write the instruction as the user would type it "
-                    "('add <track> as a ducked music bed', 'make the "
-                    "captions one word at a time'); board-parent and "
-                    "current-project music/clip/image assets are shared "
-                    "into the shorts automatically so the instruction can "
-                    "name them. shorts: 'all' (default) or a list of board "
-                    "card numbers (1-based).",
+                     "style_note": {"type": "string",
+                                    "description": "Optional audience or reference context to preserve for the eventual editor."},
+                     "clips": {"type": "array",
+                               "description": "Caller-authored story arcs. Required over MCP so the connected model chooses the shorts itself.",
+                               "items": {"type": "object", "properties": {
+                                   "start": {"type": "number", "description": "Source seconds; start on a complete setup/question boundary."},
+                                   "end": {"type": "number", "description": "Source seconds; end after the payoff resolves."},
+                                   "title": {"type": "string"},
+                                   "hook": {"type": "string"},
+                                   "score": {"type": "integer"},
+                                   "story": {"type": "object", "properties": {
+                                       "setup": {"type": "string"},
+                                       "development": {"type": "string"},
+                                       "payoff": {"type": "string"}}},
+                               }, "required": ["start", "end", "title"]}}}),
+    "edit_shorts": (edit_shorts, "LOCKED CARD BOUNDARY. Batch child-agent "
+                    "delegation is disabled: only the user's explicit Edit "
+                    "press on one podcast-chat card may boot that reel's "
+                    "fresh editor. Never apply a shorts request to the long "
+                    "parent timeline. MCP cannot call this tool and must open "
+                    "each child and edit its EDL directly.",
                     {"instruction": {"type": "string"},
                      "shorts": {"type": "array",
                                 "items": {"type": "integer"}}}),
 }
+
+# A clean finishing checkpoint is evidence-derived, never a call/write count.
+# It exists only for the exact latest EDL authored this turn, after a complete
+# preview and every available independent layer has had its say.  Explicitly
+# failing an acceptance criterion returns the plan to ``needs_repair`` and
+# unlocks all normal tools, so a real defect can always be fixed.
+def finishing_checkpoint(ctx):
+    plan = getattr(ctx, "edit_plan", None)
+    if not plan or not getattr(ctx, "plan_revised_this_turn", False):
+        return False
+    try:
+        latest_version = int(ctx.latest_edl()["version"])
+    except Exception:
+        return False
+    written = {int(v) for v in (getattr(ctx, "versions_written", None) or [])}
+    if latest_version not in written:
+        return False
+    preview = getattr(ctx, "last_preview", None) or {}
+    try:
+        if int(preview.get("edl_version")) != latest_version:
+            return False
+    except (TypeError, ValueError):
+        return False
+    visual = getattr(ctx, "last_visual_critic", None) or {}
+    if visual.get("verdict") != "pass" or preview_critic.repair_lines(visual):
+        return False
+    if getattr(ctx, "last_taste_version", None) != latest_version or \
+            (getattr(ctx, "last_taste", None) or []):
+        return False
+    if getattr(ctx, "last_audio_qc_findings", None):
+        return False
+    audio = getattr(ctx, "last_audio_review", None) or {}
+    if audio.get("edl_version") == latest_version and \
+            audio.get("verdict") == "fix":
+        return False
+    story = getattr(ctx, "last_story_review", None) or {}
+    if story.get("edl_version") == latest_version and \
+            story_critic.repair_lines(story):
+        return False
+    return director.status(plan)["state"] in {
+        "in_progress", "needs_review", "complete"}
+
+
+# Schema routing keeps universal evidence/closure tools plus domains implied
+# by the request and still-open blueprint work. Every deployed write name is
+# still advertised in the capability block, and any omitted schema is
+# recoverable through expand_toolset, so this removes tokens—not capability.
+TOOL_DOMAIN_NAMES = {
+    "story", "captions", "audio", "media", "motion", "screen", "shorts"}
+TOOL_CORE = {
+    "set_edit_plan", "complete_edit_plan_steps", "expand_toolset",
+    "apply_edit_recipe", "get_edl", "list_assets", "look_at",
+    "look_at_asset", "render_preview", "read_skill", "ask_user",
+    "get_transcript", "get_words", "search_transcript",
+    "get_kept_transcript", "get_shots", "get_editorial_map",
+    "get_audio_analysis",
+    "get_video_info", "audit_captions", "audit_audio_mix",
+}
+
+# Once the current immutable EDL has passed every available finishing layer,
+# the next decision is semantic closure, not another random variation.  These
+# tools let the editor inspect/justify the evidence or mark a criterion failed;
+# any failed criterion immediately restores its normal editing domains.
+FINISHING_CORE = {
+    "complete_edit_plan_steps", "get_edl", "look_at", "look_at_asset",
+    "get_kept_transcript", "get_transcript", "get_editorial_map",
+    "audit_captions",
+    "audit_audio_mix", "render_preview", "ask_user",
+}
+TOOL_DOMAINS = {
+    "story": {
+        "find_silences", "find_repetitions", "suggest_segments",
+        "keep_segments", "cut_range", "cut_output_range", "restore_range",
+        "cut_silences", "remove_filler_words", "reset_edit", "set_speed",
+        "remove_speed", "make_shorts",
+    },
+    "captions": {
+        "add_captions", "set_caption_style", "set_caption_fixes",
+        "set_caption_mutes", "add_kinetic_text", "add_text", "remove_text",
+        "set_text_motion", "add_text_behind", "add_title_card",
+        "add_vector_graphic", "set_vector_graphic",
+        "remove_vector_graphic",
+        "suggest_emphasis",
+    },
+    "audio": {
+        "review_audio", "research_music", "search_music",
+        "audition_music_candidates", "fetch_music",
+        "find_song", "extract_audio", "add_music", "remove_music",
+        "swap_music", "set_music_fit", "set_audio_gain", "set_volume",
+        "search_sfx", "audition_sfx_candidates", "fetch_sfx",
+        "add_web_sfx", "add_sfx", "move_sfx", "remove_sfx",
+        "add_voiceover", "remove_voiceover", "beat_align_cuts",
+        "separate_music", "remove_stem_mix", "set_master_loudness",
+    },
+    "media": {
+        "search_stock", "research_broll", "add_stock_media",
+        "find_footage", "fetch_url", "generate_image", "generate_video",
+        "insert_media", "set_insert_window", "move_insert", "remove_insert",
+        "add_overlay", "move_overlay", "set_overlay_motion",
+        "remove_overlay", "compose_panels",
+        "add_freeze_frame", "record_website", "record_website_demo",
+    },
+    "motion": {
+        "set_frame", "auto_reframe", "set_color_grade", "set_grade_custom",
+        "apply_look", "add_zoom", "remove_zoom", "add_zoom_path",
+        "remove_zoom_path", "set_text_motion", "set_overlay_motion",
+        "add_vector_graphic", "set_vector_graphic",
+        "remove_vector_graphic",
+        "punch_in_on_emphasis",
+        "set_transitions",
+        "set_fades", "add_stylize", "remove_stylize", "add_custom_filter",
+        "remove_custom_filter", "enhance_video", "add_aspect_shift",
+        "remove_aspect_shift", "add_color_screen", "add_corrupt_screen",
+    },
+    "screen": {
+        "showcase_demo", "enhance_cursor", "remove_cursor_enhance",
+        "set_screen_frame", "remove_screen_frame", "add_screen_takeover",
+        "remove_screen_takeover", "blur_region", "remove_blur",
+        "find_burned_text", "erase_burned_text", "erase_region",
+        "remove_erase",
+    },
+    "shorts": {"make_shorts", "edit_shorts", "shorts_status",
+               "open_short", "open_project", "wait_for_job"},
+}
+
+_DOMAIN_HINTS = {
+    "story": r"\b(cut|trim|story|hook|podcast|interview|silence|filler|segment|shorts?|reel|coheren)",
+    "captions": r"\b(caption|subtitle|typograph|text|title|font|karaoke|word)",
+    "audio": r"\b(audio|music|song|sound|sfx|voice|beat|mix|loud|duck)",
+    "media": r"\b(b.?roll|stock|footage|image|clip|overlay|cutaway|website|generate)",
+    "motion": r"\b(motion|zoom|transition|grade|color|frame|crop|effect|styl|speed)",
+    "screen": r"\b(screen|cursor|demo|ui|interface|takeover|blur|erase)",
+    "shorts": r"\b(shorts board|multiple shorts|several clips|all shorts)",
+}
+
+
+def compact_tool_names(ctx):
+    """Stage-relevant tool names, with user-expandable domain routing."""
+    if finishing_checkpoint(ctx):
+        return {name for name in FINISHING_CORE if name in TOOLS}
+    names = set(TOOL_CORE)
+    plan = getattr(ctx, "edit_plan", None) or {}
+    states = plan.get("step_states") or []
+    open_tasks = [str(row.get("task") or "") for row in states
+                  if row.get("status") == "pending"]
+    text = " ".join(open_tasks + [str(getattr(ctx, "user_message", "") or "")])
+    domains = {name for name, pattern in _DOMAIN_HINTS.items()
+               if re.search(pattern, text, re.I)}
+    domains.update(getattr(ctx, "_expanded_tool_domains", None) or set())
+    # A generic recorded plan with no recognizable vocabulary still needs an
+    # executable lane. Story tools + the atomic recipe are the safest base;
+    # expand_toolset makes every other lane one explicit step away.
+    if not domains:
+        domains.add("story")
+    for domain in domains:
+        names.update(TOOL_DOMAINS.get(domain, set()))
+    return {name for name in names if name in TOOLS}
 
 REQUIRED_ARGS = {
     "search_transcript": ["query"],
@@ -17078,9 +20357,13 @@ REQUIRED_ARGS = {
     # a track.
     "add_music": ["storage_key"],
     "search_music": ["query"],
+    "research_music": ["query"],
+    "audition_music_candidates": ["ids"],
     "find_song": ["query"],
     "fetch_music": ["id"],
     "set_edit_plan": ["steps"],
+    "complete_edit_plan_steps": [],
+    "expand_toolset": ["domains"],
     "apply_edit_recipe": ["operations"],
     "extract_audio": ["asset_key"],
     "add_sfx": ["storage_key", "at"],
@@ -17105,8 +20388,10 @@ REQUIRED_ARGS = {
     "add_aspect_shift": ["at_output_s", "ratio"],
     "remove_aspect_shift": ["id"],
     "search_stock": ["query"],
+    "research_broll": ["moments"],
     "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
+    "compose_panels": ["columns"],
     "set_insert_window": ["id"],
     "move_insert": ["id"],
     "remove_insert": ["id"],
@@ -17122,10 +20407,15 @@ REQUIRED_ARGS = {
     "remove_speed": ["id"],
     "add_overlay": ["asset_key", "start"],
     "move_overlay": ["id"],
+    "set_overlay_motion": ["id", "motion"],
     "remove_overlay": ["id"],
     "add_screen_takeover": ["asset_key", "at_output_s"],
     "remove_screen_takeover": ["id"],
     "add_text": ["text", "start", "end"],
+    "set_text_motion": ["id"],
+    "add_vector_graphic": ["kind", "start", "end"],
+    "set_vector_graphic": ["id"],
+    "remove_vector_graphic": ["id"],
     "add_kinetic_text": [],
     "add_text_behind": ["text", "at_output_s"],
     "remove_text": ["id"],
@@ -17143,8 +20433,11 @@ REQUIRED_ARGS = {
     "set_grade_custom": [],
     "set_master_loudness": ["enabled"],
     "get_audio_analysis": [],
+    "get_editorial_map": [],
+    "review_audio": [],
     "punch_in_on_emphasis": [],
     "search_sfx": ["query"],
+    "audition_sfx_candidates": ["ids", "purpose"],
     "find_footage": ["query"],
     "fetch_sfx": ["id"],
     "add_web_sfx": ["query", "at"],
@@ -17176,7 +20469,8 @@ WRITE_TOOLS = {"apply_edit_recipe",
                "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
                "record_website", "record_website_demo", "showcase_demo",
                "add_stock_media",
-               "insert_media", "set_insert_window", "remove_insert",
+               "insert_media", "compose_panels", "set_insert_window",
+               "remove_insert",
                "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",
                "remove_zoom", "add_zoom_path", "remove_zoom_path",
@@ -17188,9 +20482,12 @@ WRITE_TOOLS = {"apply_edit_recipe",
                "erase_burned_text", "erase_region", "remove_erase",
                "reset_edit",
                "set_speed", "remove_speed",
-               "add_overlay", "move_overlay", "remove_overlay",
+               "add_overlay", "move_overlay", "set_overlay_motion",
+               "remove_overlay",
                "add_screen_takeover", "remove_screen_takeover",
-               "add_text", "add_text_behind", "remove_text",
+               "add_text", "set_text_motion", "add_text_behind", "remove_text",
+               "add_vector_graphic", "set_vector_graphic",
+               "remove_vector_graphic",
                "add_title_card", "add_color_screen", "add_corrupt_screen",
                "set_caption_mutes",
                "add_stylize", "add_freeze_frame", "enhance_video",
@@ -17208,6 +20505,8 @@ def _tool_disabled(name, model=None):
     """Tools whose backing service is not configured are hidden entirely —
     the model must never see (or advertise) a capability that would only
     return 'unavailable'."""
+    if name == "review_audio":
+        return not llm.audio_review_available()
     if name == "generate_image":
         return not llm.image_available()
     if name == "generate_video":
@@ -17216,7 +20515,7 @@ def _tool_disabled(name, model=None):
         return not config.URL_FETCH_ENABLED
     if name in ("record_website", "record_website_demo"):
         return not webrecord.available()
-    if name in ("search_stock", "add_stock_media"):
+    if name in ("search_stock", "research_broll", "add_stock_media"):
         return not stock.available()
     # Stem separation exists only where the demucs image layer does; a
     # definite "no" from the render service hides the tool entirely
@@ -17225,7 +20524,7 @@ def _tool_disabled(name, model=None):
     if name in ("separate_music", "remove_stem_mix"):
         return _stems_supported() is False
     # Live music search (round 98) — the bundled library's replacement.
-    if name in ("search_music", "fetch_music"):
+    if name in ("research_music", "search_music", "fetch_music"):
         return not music_search.available()
     # Named-song link finding rides the fetch/extractor path; per-ACCOUNT
     # narrowing happens inside the tool (schemas are per-deployment).
@@ -17233,7 +20532,8 @@ def _tool_disabled(name, model=None):
         return not song_find.available()
     if name == "find_footage":
         return not song_find.footage_available()
-    if name in ("search_sfx", "fetch_sfx", "add_web_sfx"):
+    if name in ("search_sfx", "audition_sfx_candidates", "fetch_sfx",
+                "add_web_sfx"):
         return not sfx_search.available()
     return False
 
@@ -17256,11 +20556,9 @@ def capabilities_digest():
 
 def capability_names():
     """Just the deployed write-tool names (round 71f). The CAPABILITIES
-    message shrank to this: every name here arrives with its FULL contract
-    in the tool schemas the same request carries — both for the in-house
-    agent and for MCP, whose catalog() ships openai_tools() alongside — so
-    the old first-sentence-per-tool digest was ~13k chars of pure
-    duplication in every call of every turn."""
+    message shrank to this: the active stage's names arrive with full schemas;
+    omitted domains are available through expand_toolset. MCP still receives
+    the full catalog. The old prose digest was ~13k chars of duplication."""
     return [n for n in TOOLS if n in WRITE_TOOLS and not _tool_disabled(n)]
 
 
@@ -17268,12 +20566,12 @@ def _compact_description(description):
     """A post-plan reminder, not a second copy of the full handbook."""
     text = " ".join(str(description or "").split())
     first = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
-    if len(first) <= 240:
+    if len(first) <= 140:
         return first
-    return first[:237].rsplit(" ", 1)[0] + "..."
+    return first[:137].rsplit(" ", 1)[0] + "..."
 
 
-def openai_tools(model=None, compact=False):
+def openai_tools(model=None, compact=False, names=None):
     """`model` is the agent model this schema is for, so per-model honest-off
     (a provider that has refused audio parts) can hide a tool the same way an
     unconfigured service does. Omitted by MCP and the tests, where the
@@ -17289,6 +20587,8 @@ def openai_tools(model=None, compact=False):
     # each — pure narration the model paid to write and then re-read.
     sees = model is not None and llm.agent_sees(model)
     for name, (_fn, desc, props) in TOOLS.items():
+        if names is not None and name not in names:
+            continue
         if _tool_disabled(name, model):
             continue
         if sees and name in ("look_at", "look_at_asset"):
@@ -17359,6 +20659,80 @@ def tool_result_kind(result):
     return "success"
 
 
+def _without_object_id(value):
+    if isinstance(value, dict):
+        return {k: _without_object_id(v) for k, v in value.items()
+                if k != "id"}
+    if isinstance(value, list):
+        return [_without_object_id(v) for v in value]
+    return value
+
+
+def _write_footprint(before, after, path=()):
+    """Semantic assertions one successful EDL write made true.
+
+    Object-list additions are compared without generated ids, so an exact
+    replay remains redundant even after unrelated sections change. Ordinary
+    dictionaries recurse to leaves; non-object lists (keep spans/keyframes)
+    remain an exact value assertion because their order is meaningful.
+    """
+    if before == after:
+        return []
+    if isinstance(before, dict) and isinstance(after, dict):
+        out = []
+        for key in sorted(set(before) | set(after)):
+            out.extend(_write_footprint(before.get(key), after.get(key),
+                                        path + (key,)))
+        return out
+    if isinstance(before, list) and isinstance(after, list) \
+            and all(isinstance(v, dict) and v.get("id") is not None
+                    for v in before + after):
+        old = {str(v["id"]): v for v in before}
+        new = {str(v["id"]): v for v in after}
+        out = []
+        for item_id in sorted(set(old) - set(new)):
+            out.append(("absent_id", path, item_id))
+        for item_id in sorted(set(new) - set(old)):
+            out.append(("contains", path, _without_object_id(new[item_id])))
+        for item_id in sorted(set(old) & set(new)):
+            if old[item_id] != new[item_id]:
+                out.append(("item_eq", path, item_id, new[item_id]))
+        return out
+    return [("eq", path, after)]
+
+
+def _at_path(root, path):
+    cur = root
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return None
+        cur = cur[key]
+    return cur
+
+
+def _footprint_satisfied(edl, footprint):
+    if not footprint:
+        return False
+    for assertion in footprint:
+        kind, path = assertion[0], assertion[1]
+        current = _at_path(edl, path)
+        if kind == "eq" and current != assertion[2]:
+            return False
+        if kind == "absent_id" and any(
+                str(v.get("id")) == assertion[2]
+                for v in (current or []) if isinstance(v, dict)):
+            return False
+        if kind == "contains" and not any(
+                _without_object_id(v) == assertion[2]
+                for v in (current or []) if isinstance(v, dict)):
+            return False
+        if kind == "item_eq" and not any(
+                str(v.get("id")) == assertion[2] and v == assertion[3]
+                for v in (current or []) if isinstance(v, dict)):
+            return False
+    return True
+
+
 def execute(ctx, name, args):
     """Dispatch one tool call. Returns a string for the model (AskUser
     propagates)."""
@@ -17375,6 +20749,43 @@ def execute(ctx, name, args):
         _count_tool_outcome(ctx, "tool_refused")
         return (f"Unknown tool '{name}'. Available: "
                 + ", ".join(TOOLS))
+    # Exactly replaying an already-successful additive write against the EDL
+    # it produced is never a creative alternative; it is how duplicate title
+    # layers, SFX and B-roll entered real edits. Idempotency is state-based,
+    # not count-based: once any other write changes the EDL, the same tool and
+    # arguments are allowed again. Recipe staging is excluded because its
+    # writes are intentionally private until one outer commit.
+    replay_key = None
+    before_edl = None
+    outer_write = name in WRITE_TOOLS and not isinstance(ctx, _RecipeContext)
+    if outer_write:
+        if finishing_checkpoint(ctx):
+            state = director.status(getattr(ctx, "edit_plan", None))
+            _metric(ctx, "post_pass_variations_prevented")
+            return (
+                "NO CHANGE — the current complete preview already passed all "
+                "available independent finishing evidence. The creative "
+                f"blueprint is {state['state']}; reconcile it with "
+                "complete_edit_plan_steps and finish. If a real acceptance "
+                "criterion failed, mark that exact criterion failed with "
+                "evidence first; its targeted repair will then be available. "
+                "A taste-only variation was not applied.")
+        try:
+            replay_key = (name, json.dumps(args, sort_keys=True,
+                                           separators=(",", ":"),
+                                           default=str))
+            before_edl = ctx.latest_edl()["json"]
+            footprint = ctx._write_replay_results.get(replay_key)
+            if footprint and _footprint_satisfied(before_edl, footprint):
+                _metric(ctx, "duplicate_writes_prevented")
+                return ("NO CHANGE — this exact successful write call already "
+                        "remains present in the current EDL. It was not "
+                        "replayed, so no "
+                        "duplicate layer/insert/SFX was created. Inspect the "
+                        "current result or change the arguments for a real "
+                        "alternative.")
+        except Exception:
+            replay_key = None
     fn = entry[0]
     try:
         out = fn(ctx, **args)
@@ -17392,4 +20803,13 @@ def execute(ctx, name, args):
         _count_tool_outcome(ctx, "tool_refused")
     elif kind == "failed":
         _count_tool_outcome(ctx, "tool_failed")
+    if replay_key is not None and isinstance(out, str) \
+            and out.startswith("EDL v"):
+        try:
+            after_edl = ctx.latest_edl()["json"]
+            footprint = _write_footprint(before_edl, after_edl)
+            if footprint:
+                ctx._write_replay_results[replay_key] = footprint
+        except Exception:
+            pass
     return out

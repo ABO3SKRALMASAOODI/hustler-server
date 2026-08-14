@@ -164,6 +164,10 @@ def test_search_failure_is_reported_plainly(monkeypatch):
     def boom(q, count=6):
         raise song_find.SongFindError("the web search timed out")
     monkeypatch.setattr(song_find, "search", boom)
+    # Total-failure behavior requires both discovery lanes to fail. Leaving
+    # the real SoundCloud search live makes this test network-dependent and,
+    # when it succeeds, the product is right to return those usable results.
+    monkeypatch.setattr(song_find, "search_soundcloud", boom)
     out = agent_tools.find_song(_Ctx(), "song")
     assert "failed" in out and "do NOT claim" in out
 

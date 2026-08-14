@@ -589,7 +589,7 @@ def _project_for_user(cur, project_id, user_id):
 def _trial_gate_applies(cur, user_id):
     """Round 101's conversion wall: an unsubscribed account that has already
     had one video actually edited (an agent turn that moved a timeline past
-    v1, or a finished shorts run) sends its NEXT prompt into the trial
+    v1, or a legacy shorts run that actually rendered clips) sends its NEXT prompt into the trial
     cards. Subscribers (trialing counts), the admin account, and accounts
     that haven't seen an edit yet all pass. Fails OPEN like plan_gate: a
     lookup error must never eat a paying user's message."""
@@ -609,8 +609,15 @@ def _trial_gate_applies(cur, user_id):
                     CASE WHEN result->>'edl_version' ~ '^[0-9]+$'
                          THEN (result->>'edl_version')::int ELSE 1 END > 1)
                    OR (type = 'shorts_plan' AND
-                       CASE WHEN result->>'clips' ~ '^[0-9]+$'
-                            THEN (result->>'clips')::int ELSE 0 END > 0))
+                       CASE
+                         WHEN result ? 'rendered_clips'
+                              AND result->>'rendered_clips' ~ '^[0-9]+$'
+                           THEN (result->>'rendered_clips')::int
+                         WHEN NOT (result ? 'rendered_clips')
+                              AND result->>'clips' ~ '^[0-9]+$'
+                           THEN (result->>'clips')::int
+                         ELSE 0
+                       END > 0))
             LIMIT 1""", (int(user_id),))
         return cur.fetchone() is not None
     except Exception as e:                                  # pragma: no cover
@@ -1840,7 +1847,15 @@ def complete_upload_core(user_id, project_id, data):
         if kind == "original" and not staged:
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": asset_id})
-        elif is_reference:
+        elif not staged and kind in ("clip", "music"):
+            # Direct timeline/library drops do not pass through submit_tray,
+            # but they need the same durable perception pass as submitted
+            # attachments. Without this, a directly dropped clip stayed
+            # "still analyzing" forever (no filmstrip/transcript), while an
+            # audio-only upload reached later agent turns as filename and
+            # duration only (no vocals transcript/BPM/acoustic profile).
+            # Placement can proceed immediately; the next turn sees pending
+            # honestly and automatically gains the index when it finishes.
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": asset_id})
 
@@ -2084,6 +2099,10 @@ def tray_submit(user_id, project_id):
                  if a["kind"] == "video_clip"
                  and a["id"] not in reference_ids), (-1, None))
         jobs = []
+        edl_now = _latest_edl(cur, project_id)
+        autoplace = wschemas.edl_accepts_tray_autoplace(
+            (edl_now or {}).get("version"),
+            (edl_now or {}).get("json"))
         for i, a in enumerate(ordered):
             if a["id"] in reference_ids:
                 # Reference footage remains available to the agent's eyes and
@@ -2108,7 +2127,7 @@ def tray_submit(user_id, project_id):
                 jobs.append(main_index_job)
                 continue
             patch = {"staged": None}
-            if a["kind"] in ("video_clip", "image_ref"):
+            if a["kind"] in ("video_clip", "image_ref") and autoplace:
                 before_main = bool(promoted is not None and promoted_idx > i)
                 patch["tray_place"] = {
                     "order": i, "before_main": before_main,
@@ -2154,10 +2173,16 @@ def tray_submit(user_id, project_id):
         # project, where no index greet will speak for them.
         if session_id and promoted is None and (placed or jobs):
             if timeline_n:
+                if placed:
+                    where = "placed on the timeline"
+                elif autoplace:
+                    where = "joining the timeline"
+                else:
+                    where = "ready to use (not added to the timeline)"
                 what = (f"{timeline_n} upload"
                         f"{'s' if timeline_n != 1 else ''} "
-                        + ("placed on the timeline" if placed
-                           else "joining the timeline") + " in your order")
+                        + where
+                        + (" in your order" if placed or autoplace else ""))
                 if reference_ids:
                     what += (f"; {len(reference_ids)} kept as "
                              f"reference{'s' if len(reference_ids) != 1 else ''}")
@@ -2810,7 +2835,7 @@ def project_state(user_id, project_id):
                        WHERE project_id = %s
                          AND kind IN ('render', 'music', 'proxy',
                                       'video_clip', 'image_ref')
-                       ORDER BY id DESC LIMIT 150""", (project_id,))
+                       ORDER BY id DESC LIMIT 300""", (project_id,))
         extra = cur.fetchall()
         _gate = _final_gate(cur, project_id, user_id)
 
@@ -5217,9 +5242,9 @@ def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
 # ------------------------------------------------------------------ #
 #  Shorts mode (round 99)                                              #
 # ------------------------------------------------------------------ #
-# A shorts run is one worker job (shorts_plan) that spawns child projects —
-# one per clip — and fans out their final renders. These routes are the gate
-# and the board; every heavy step lives in worker/shorts.py.
+# A shorts run is one worker scout job that spawns LOCKED child projects — one
+# raw story cut per card. An explicit card action starts that child's fresh
+# editor. These routes own the gate, handoff and live chat-card state.
 
 @video_bp.route("/projects/<int:project_id>/shorts", methods=["POST"])
 @token_required
@@ -5277,8 +5302,8 @@ def start_shorts(user_id, project_id):
                 "kind": "edit",
                 "duration_s": round(source_duration, 1),
             })
-        # Same two walls as sending a message: a shorts run is model time
-        # plus a fan of renders, so it needs the same credit standing.
+        # Same two walls as sending a message: story scouting is model time,
+        # so it needs the same credit standing. Child edits are separate turns.
         if plan_gate.needs_plan(conn, user_id):
             return plan_gate.gate_response(jsonify)
         if not check_and_reserve(conn, user_id, min_credits=1.0):
@@ -5316,11 +5341,195 @@ def start_shorts(user_id, project_id):
     return jsonify({"job_id": job_id})
 
 
+def _short_editor_boot_prompt(parent, child, clip, style_profile):
+    """The explicit Edit-button handoff to a fresh, autonomous child agent.
+
+    Craft lives in worker skills; this message identifies the job and tells
+    the agent which playbooks to load. It deliberately contains no effect
+    counts, caption preset, B-roll quota, cut rate, or other disguised recipe.
+    """
+    story = clip.get("story") or {}
+    story_text = "\n".join(
+        f"- {stage}: {story.get(stage)}"
+        for stage in ("setup", "development", "payoff")
+        if story.get(stage)) or "- Use the kept transcript to articulate it."
+    reference = ""
+    if (style_profile or {}).get("reference_asset_id"):
+        reference += (
+            "\nA real style-reference asset is attached to this child. "
+            "Watch and hear it yourself. Transfer useful relationships and "
+            "editorial grammar, never preset names or raw feature counts."
+        )
+    if (style_profile or {}).get("user_note"):
+        reference += ("\nThe user's preserved direction: "
+                      + str(style_profile["user_note"])[:400])
+    return (
+        "You are the fresh lead editor for one selected podcast reel. The "
+        "parent scout chose this complete story because it is worth "
+        "developing; no creative styling has been applied yet.\n\n"
+        f"Reel: {child.get('title') or clip.get('title') or 'Untitled'}\n"
+        f"Source window: {clip.get('start')}s-{clip.get('end')}s\n"
+        f"Opening words: {clip.get('hook') or 'inspect the transcript'}\n"
+        "Story:\n" + story_text + reference + "\n\n"
+        "Before making edits, call read_skill for short-form-direction, "
+        "cutting, and hooks-retention. Load broll-inserts, captions, "
+        "text-graphics, music, audio, reframe-aspect, transitions, zooms, "
+        "and review when those crafts enter your plan. Watch and hear the "
+        "actual reel, inspect the reference when present, then record a "
+        "coherent edit plan. Exercise taste: choose and compare worthy "
+        "B-roll, music, caption language, cards, framing, motion and sound "
+        "only where they strengthen this story. Do not apply a formula and "
+        "do not stop after planning. Use the full editing toolkit, render a "
+        "complete preview, review the audiovisual result, revise anything "
+        "you would not publish, and finish with an honest handoff. The user's "
+        "Edit press authorizes this autonomous edit; ask only when genuinely "
+        "blocked by missing authority or a material creative choice you "
+        "cannot responsibly infer."
+    )[:4000]
+
+
+@video_bp.route(
+    "/projects/<int:project_id>/shorts/<int:child_project_id>/edit",
+    methods=["POST"])
+@token_required
+def start_short_editor(user_id, project_id, child_project_id):
+    """Boot exactly one fresh in-house editing agent for one locked reel.
+
+    The parent scout never calls this endpoint. Only the user's explicit card
+    action does. MCP has no route to it and edits children directly instead.
+    """
+    with vdb() as conn:
+        cur = conn.cursor()
+        parent = _project_for_user(cur, project_id, user_id)
+        child = _project_for_user(cur, child_project_id, user_id)
+        if not parent or not child \
+                or child.get("parent_project_id") != project_id:
+            return jsonify({"error": "Short not found on this podcast."}), 404
+
+        shorts_meta = (parent.get("meta") or {}).get("shorts") or {}
+        clip = next((row for row in shorts_meta.get("clips") or []
+                     if row.get("child_project_id") == child_project_id), None)
+        if not clip:
+            return jsonify({"error": "This short is no longer on the board."}), 404
+
+        cur.execute("""SELECT id, state, progress, error
+                       FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND payload->>'shorts_boot' = 'true'
+                       ORDER BY id DESC LIMIT 1""", (child_project_id,))
+        prior = cur.fetchone()
+        if prior and prior["state"] in ("queued", "running"):
+            return jsonify({"job_id": prior["id"],
+                            "state": prior["state"],
+                            "progress": prior["progress"],
+                            "duplicate": True})
+        if prior and prior["state"] == "done":
+            # "Job done" is not the product outcome. Unlock only when that
+            # turn advanced the raw seed and produced a complete current
+            # preview. A no-op/truncated turn can then be retried from the card.
+            latest_done = _latest_edl(cur, child_project_id)
+            seed_version = int(clip.get("seed_edl_version")
+                               or clip.get("edl_version") or 1)
+            live_version = int((latest_done or {}).get("version")
+                               or seed_version)
+            cur.execute("""SELECT id,
+                                  CASE WHEN meta->>'edl_version' ~ '^[0-9]+$'
+                                       THEN (meta->>'edl_version')::int
+                                       ELSE NULL END AS edl_version
+                           FROM assets
+                           WHERE project_id = %s AND kind = 'render'
+                             AND meta->>'variant' = 'preview'
+                           ORDER BY id DESC LIMIT 1""",
+                        (child_project_id,))
+            done_preview = cur.fetchone()
+            ready = bool(
+                live_version > seed_version and done_preview
+                and done_preview.get("edl_version") is not None
+                and int(done_preview["edl_version"]) >= live_version)
+            if ready:
+                return jsonify({"job_id": prior["id"], "state": "done",
+                                "ready": True, "duplicate": True})
+
+        # One writer owns a child EDL. An MCP session is a direct outside
+        # editor and must finish before the Studio boots its own fresh agent.
+        cur.execute("""SELECT id, type, state FROM video_jobs
+                       WHERE project_id = %s
+                         AND type IN ('agent_turn', 'mcp_tool')
+                         AND state IN ('queued','running')
+                       ORDER BY id DESC LIMIT 1""", (child_project_id,))
+        busy = cur.fetchone()
+        if busy:
+            return jsonify({"error": (
+                "This reel already has an editor working on it. Let that "
+                "session finish before starting another one."),
+                "code": "short_editor_busy", "job_id": busy["id"]}), 409
+
+        original = _active_original(cur, child_project_id)
+        indexed = bool(original and _index_row(cur, original["sha256"]))
+        if not indexed:
+            return jsonify({"error": "This reel is still preparing."}), 409
+        if _trial_gate_applies(cur, user_id):
+            return jsonify(_trial_offer_body()), 402
+        if plan_gate.needs_plan(conn, user_id):
+            return plan_gate.gate_response(jsonify)
+        if not check_and_reserve(conn, user_id, min_credits=1.0):
+            info = get_balance(conn, user_id)
+            return jsonify({
+                "error": info.get("payment_failed_message")
+                         or "You're out of credits for this edit.",
+                "payment_failed": bool(info.get("payment_failed")),
+                "trial_cap_reached": bool(info.get("trial_cap_reached")),
+                "code": ("payment_failed" if info.get("payment_failed")
+                         else "trial_cap_reached"
+                         if info.get("trial_cap_reached")
+                         else "insufficient_credits")}), 402
+        if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
+            return jsonify({"error": "A few edits are still processing. "
+                                     "Start this reel when one finishes.",
+                            "code": "busy_capacity"}), 429
+        if not os.getenv("OPENAI_API_KEY"):
+            return jsonify({"error": "The editing agent is not configured."}), 503
+
+        prompt = _short_editor_boot_prompt(
+            parent, child, clip, shorts_meta.get("style_profile"))
+        latest_row = _latest_edl(cur, child_project_id)
+        msg_meta = {
+            "shorts_boot": True,
+            "from_parent": project_id,
+            "edl_version": latest_row["version"] if latest_row else None,
+        }
+        cur.execute("""INSERT INTO chat_messages
+                              (session_id, role, content, meta)
+                       VALUES (%s, 'user', %s, %s) RETURNING id""",
+                    (child["chat_session_id"], prompt, Json(msg_meta)))
+        message_id = cur.fetchone()["id"]
+        job_id = _enqueue(cur, child_project_id, user_id, "agent_turn", {
+            "message_id": message_id,
+            "shorts_boot": True,
+            "parent_project_id": project_id,
+        })
+        cur.execute("""UPDATE projects
+                       SET meta = COALESCE(meta, '{}'::jsonb)
+                                  || jsonb_build_object(
+                                       'shorts_editor', %s::jsonb)
+                       WHERE id = %s""",
+                    (json.dumps({"status": "editing", "job_id": job_id,
+                                 "requested_at": time.time(),
+                                 "parent_project_id": project_id}),
+                     child_project_id))
+        _queue_depth_notice(cur, child["chat_session_id"], user_id, job_id)
+    record_client_event(user_id, project_id, "short_editor_started",
+                        detail={"child_project_id": child_project_id,
+                                "job_id": job_id}, origin="server")
+    return jsonify({"job_id": job_id, "state": "queued",
+                    "child_project_id": child_project_id})
+
+
 @video_bp.route("/projects/<int:project_id>/shorts", methods=["GET"])
 @token_required
 def shorts_board(user_id, project_id):
-    """Everything the Shorts board draws in one response: run status, the
-    plan's clips, and each child's final-render state + asset."""
+    """Everything chat cards need: scout state and each child's lock/editor/
+    current-preview lifecycle (plus legacy final assets for old boards)."""
     with vdb() as conn:
         cur = conn.cursor()
         p = _project_for_user(cur, project_id, user_id)
@@ -5338,8 +5547,29 @@ def shorts_board(user_id, project_id):
         clips = list(meta.get("clips") or [])
         child_ids = [c["child_project_id"] for c in clips
                      if c.get("child_project_id")]
-        finals, renders, alive = {}, {}, {}
+        finals, renders, previews, alive = {}, {}, {}, {}
+        editor_jobs, mcp_jobs, latest_versions = {}, {}, {}
         if child_ids:
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id, id, state, progress, error
+                           FROM video_jobs
+                           WHERE project_id = ANY(%s)
+                             AND type = 'agent_turn'
+                             AND payload->>'shorts_boot' = 'true'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            editor_jobs = {r["project_id"]: r for r in cur.fetchall()}
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id, id, state, progress, error
+                           FROM video_jobs
+                           WHERE project_id = ANY(%s) AND type = 'mcp_tool'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            mcp_jobs = {r["project_id"]: r for r in cur.fetchall()}
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id, version
+                           FROM edls WHERE project_id = ANY(%s)
+                           ORDER BY project_id, version DESC""", (child_ids,))
+            latest_versions = {r["project_id"]: int(r["version"])
+                               for r in cur.fetchall()}
             cur.execute("""SELECT DISTINCT ON (project_id)
                                   project_id, state, progress, error
                            FROM video_jobs
@@ -5353,6 +5583,16 @@ def shorts_board(user_id, project_id):
                              AND meta->>'variant' = 'final'
                            ORDER BY project_id, id DESC""", (child_ids,))
             renders = {r["project_id"]: r for r in cur.fetchall()}
+            cur.execute("""SELECT DISTINCT ON (project_id) project_id, id,
+                                  meta->>'sheet_key' AS sheet_key,
+                                  CASE WHEN meta->>'edl_version' ~ '^[0-9]+$'
+                                       THEN (meta->>'edl_version')::int
+                                       ELSE NULL END AS edl_version
+                           FROM assets
+                           WHERE project_id = ANY(%s) AND kind = 'render'
+                             AND meta->>'variant' = 'preview'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            previews = {r["project_id"]: r for r in cur.fetchall()}
             cur.execute("SELECT id, title FROM projects WHERE id = ANY(%s)",
                         (child_ids,))
             alive = {r["id"]: r["title"] for r in cur.fetchall()}
@@ -5364,13 +5604,61 @@ def shorts_board(user_id, project_id):
                 continue        # the user deleted that clip's project
             fj = finals.get(cid)
             rend = renders.get(cid) or {}
+            preview = previews.get(cid) or {}
+            boot = editor_jobs.get(cid)
+            mcp = mcp_jobs.get(cid)
+            seed_version = int(c.get("seed_edl_version")
+                               or c.get("edl_version") or 1)
+            live_version = int(latest_versions.get(cid) or seed_version)
+            preview_current = bool(
+                preview.get("id") and preview.get("edl_version") is not None
+                and int(preview["edl_version"]) >= live_version)
+            active = next((row for row in (boot, mcp)
+                           if row and row["state"] in ("queued", "running")),
+                          None)
+            direct_ready = live_version > seed_version and preview_current
+            legacy_ready = bool(
+                not c.get("seed_edl_version") and rend.get("id")
+                and fj and fj["state"] == "done")
+            if active:
+                edit_status = "editing"
+                editor = {"job_id": active["id"],
+                          "state": active["state"],
+                          "progress": active["progress"],
+                          "error": active["error"],
+                          "source": ("agent" if active is boot else "mcp")}
+            elif direct_ready or legacy_ready:
+                edit_status = "ready"
+                source = ("legacy" if legacy_ready else
+                          "agent" if boot and boot["state"] == "done"
+                          else "mcp")
+                editor = {"job_id": (boot or mcp or {}).get("id"),
+                          "state": "done", "progress": 100,
+                          "error": None, "source": source}
+            elif boot and boot["state"] == "done":
+                edit_status = "failed"
+                editor = {
+                    "job_id": boot["id"], "state": "failed",
+                    "progress": boot["progress"], "source": "agent",
+                    "error": ("The editor finished without a complete new "
+                              "preview. Retry this reel."),
+                }
+            elif boot and boot["state"] == "failed":
+                edit_status = "failed"
+                editor = {"job_id": boot["id"], "state": "failed",
+                          "progress": boot["progress"],
+                          "error": boot["error"], "source": "agent"}
+            else:
+                edit_status = "locked"
+                editor = None
             # The final's result sheet is a grid of REAL frames of the
             # rendered short — exactly the artwork a board card should wear
             # instead of a gray rectangle.
             sheet_url = None
-            if rend.get("sheet_key"):
+            sheet_key = preview.get("sheet_key") or rend.get("sheet_key")
+            if sheet_key:
                 try:
-                    sheet_url = storage.presign_get(rend["sheet_key"])
+                    sheet_url = storage.presign_get(sheet_key)
                 except Exception:
                     sheet_url = None
             out.append({
@@ -5378,10 +5666,17 @@ def shorts_board(user_id, project_id):
                 # The child's live title wins — the user may have renamed it.
                 "title": alive.get(cid) or c.get("title"),
                 "hook": c.get("hook"), "score": c.get("score"),
+                "story": c.get("story"),
+                "visual_direction": c.get("visual_direction"),
                 "start": c.get("start"), "end": c.get("end"),
                 "duration_s": round((c.get("end") or 0)
                                     - (c.get("start") or 0), 1),
                 "child_project_id": cid,
+                "seed_edl_version": seed_version,
+                "edl_version": live_version,
+                "edit_status": edit_status,
+                "editor": editor,
+                "preview_asset_id": preview.get("id"),
                 "final": ({"state": fj["state"], "progress": fj["progress"],
                            "error": fj["error"]} if fj else None),
                 "final_asset_id": rend.get("id"),
@@ -5414,7 +5709,8 @@ def shorts_board(user_id, project_id):
             "original": original,
             "reference_asset_id": meta.get("reference_asset_id"),
             "style_notes": ((style or {}).get("vision_notes")
-                            or (style or {}).get("note")),
+                            or (style or {}).get("note")
+                            or (style or {}).get("user_note")),
             "started_at": meta.get("started_at"),
             "finished_at": meta.get("finished_at"),
         })

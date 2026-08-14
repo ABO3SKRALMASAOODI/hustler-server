@@ -164,11 +164,14 @@ def measure(path, duration_s=None):
 def listen_windows(verify_times, duration, max_windows=2, halo_s=2.5,
                    max_len_s=8.0):
     """The spans worth LISTENING to after a render: a halo around each
-    changed moment (the same verify_times the proof frames use), merged,
-    clamped, capped at two short windows — or the opening seconds when the
-    edit named no moments. Returns [(t0, t1)]."""
+    changed moment (the same verify_times the proof frames use), merged and
+    clamped. When there are more candidates than the audio model can accept,
+    spread them across the *whole finished mix* instead of taking the first
+    N — the old behavior could hear three early SFX and miss a broken second
+    half completely. Returns [(t0, t1)]."""
     dur = max(0.0, float(duration or 0.0))
-    if dur <= 0.2:
+    max_windows = max(0, int(max_windows or 0))
+    if dur <= 0.2 or max_windows == 0:
         return []
     times = sorted(float(t) for t in (verify_times or [])
                    if 0.0 <= float(t) <= dur)
@@ -181,8 +184,13 @@ def listen_windows(verify_times, duration, max_windows=2, halo_s=2.5,
             wins[-1] = (wins[-1][0], e)
         else:
             wins.append((s, e))
+    if len(wins) > max_windows:
+        indexes = sorted({round(i * (len(wins) - 1) / (max_windows - 1))
+                          for i in range(max_windows)}) \
+            if max_windows > 1 else [len(wins) // 2]
+        wins = [wins[i] for i in indexes]
     out = []
-    for s, e in wins[:max_windows]:
+    for s, e in wins:
         out.append((round(s, 2), round(min(e, s + max_len_s), 2)))
     return out
 

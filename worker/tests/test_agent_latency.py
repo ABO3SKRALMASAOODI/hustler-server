@@ -170,10 +170,101 @@ def test_initial_filmstrip_pixels_are_not_resent_after_planning():
     assert agent_loop._compact_initial_filmstrip(messages) is False
 
 
+def test_exact_frames_are_released_only_after_they_inform_a_committed_write():
+    old_image = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,OLD_EXACT"},
+    }
+    new_image = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,NEW_UNSEEN"},
+    }
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "Frames for your own eyes "
+             "(timestamps printed):"},
+            {"type": "text", "text": "[OUTPUT 4.20s]"},
+            old_image,
+        ]},
+        {"role": "assistant", "content": "", "tool_calls": []},
+    ]
+    # This is the boundary captured when the model chooses the committing
+    # batch. Evidence appended by that batch has not been seen yet.
+    boundary = len(messages)
+    messages.append({"role": "user", "content": [
+        {"type": "text", "text": "Frames for your own eyes "
+         "(timestamps printed):"},
+        {"type": "text", "text": "[OUTPUT 8.40s]"},
+        new_image,
+    ]})
+
+    assert agent_loop._compact_consumed_look_frames(
+        messages, before_index=boundary) == 1
+    assert all(part["type"] == "text"
+               for part in messages[0]["content"])
+    assert any("OUTPUT 4.20s" in part["text"]
+               for part in messages[0]["content"])
+    assert any("call look_at" in part["text"]
+               for part in messages[0]["content"])
+    assert messages[2]["content"][-1] is new_image
+
+    # Without a committed write this function is not called by the loop; the
+    # direct helper also remains idempotent if a later write consumes both.
+    assert agent_loop._compact_consumed_look_frames(messages) == 1
+    assert agent_loop._compact_consumed_look_frames(messages) == 0
+
+
+def test_progress_window_continuation_can_skip_the_broad_visual_overview(
+        monkeypatch):
+    calls = []
+    visual = [{"type": "text", "text": "FILMSTRIPS & STILLS — overview"},
+              {"type": "image_url", "image_url": {"url": "data:x"}}]
+    monkeypatch.setattr(agent_loop, "filmstrip_parts",
+                        lambda *_a, **_k: calls.append(True) or visual)
+    monkeypatch.setattr(agent_loop, "state_block",
+                        lambda *_a, **_k: "CURRENT STATE")
+    monkeypatch.setattr(agent_loop.llm, "agent_sees", lambda _model: True)
+
+    class Db:
+        @staticmethod
+        def run(fn, *_args):
+            if fn is agent_loop.dbx.recent_chat:
+                return []
+            raise AssertionError(fn)
+
+    ctx = SimpleNamespace(direct_sight=True, agent_model="vision-model",
+                          session_id=77)
+    message = {"id": 10, "content": "finish the current edit", "meta": {}}
+
+    continued = agent_loop._build_messages(
+        ctx, Db(), message, include_visual_overview=False)
+    assert calls == []
+    assert not any(isinstance(row.get("content"), list) for row in continued)
+
+    fresh = agent_loop._build_messages(
+        ctx, Db(), message, include_visual_overview=True)
+    assert calls == [True]
+    assert any(isinstance(row.get("content"), list) for row in fresh)
+    assert "not reattached" in agent_loop._CONTINUATION_NOTE
+
+
 def test_prompt_prefers_one_atomic_recipe_for_multi_move_edits():
     p = agent_prompt.SYSTEM_PROMPT
     assert "apply_edit_recipe" in p
     assert "aborts the entire batch" in p
+    assert 'save_as' in p and '{"$ref":"that_alias"}' in p
+    assert "already-fetched SFX" in p
+
+
+def test_first_planning_call_chooses_an_evidence_bound_treatment():
+    p = agent_prompt.SYSTEM_PROMPT
+    for phrase in (
+            "Do not accept the first plausible pile of techniques",
+            "choose ONE from observed footage/transcript/audio/reference/brief evidence",
+            "treatment, decision_basis, shared coherence_rules",
+            "exact transcript sentence and/or shot evidence_ids",
+            "rejects plausible-looking invented times"):
+        assert phrase in p
 
 
 def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook():

@@ -316,13 +316,14 @@ def test_erase_region_single_rect_form_still_works(monkeypatch):
     assert r.startswith("EDL v")
 
 
-def test_erase_region_rejects_mixed_or_invalid_but_not_large_batches(monkeypatch):
+def test_erase_region_prefers_richer_batch_and_rejects_invalid_items(monkeypatch):
     monkeypatch.setattr(agent_tools, "_apply_patches",
                         lambda ctx, items, what, drop=None: f"EDL v3 -> v4: {what}")
     r = agent_tools.erase_region(
         _EraseCtx(), x=0.1, y=0.1, w=0.2, h=0.2,
         regions=[{"x": 0, "y": 0, "w": 0.1, "h": 0.1}])
-    assert r.startswith("REJECTED")
+    assert r.startswith("EDL v")
+    assert "regions=[...] was used" in r
     r = agent_tools.erase_region(_EraseCtx(), regions=[
         {"x": 0, "y": 0, "w": 0.1, "h": 0.1}] * 9)
     assert r.startswith("EDL v")

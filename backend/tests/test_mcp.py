@@ -42,11 +42,27 @@ STATIC_TOKEN = "vlm_mcp_static"
 CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 
 CATALOG = {
-    "tools": [{"type": "function", "function": {
-        "name": "get_transcript",
-        "description": "Read the transcript.",
-        "parameters": {"type": "object",
-                       "properties": {"start": {"type": "number"}}}}}],
+    # Include the retired delegation tool to simulate a stale worker catalog;
+    # the backend boundary must still hide and refuse it.
+    "tools": [
+        {"type": "function", "function": {
+            "name": "get_transcript",
+            "description": "Read the transcript.",
+            "parameters": {"type": "object",
+                           "properties": {"start": {"type": "number"}}}}},
+        {"type": "function", "function": {
+            "name": "edit_shorts",
+            "description": "Delegate to child agents.",
+            "parameters": {"type": "object", "properties": {
+                "instruction": {"type": "string"}},
+                "required": ["instruction"]}}},
+        {"type": "function", "function": {
+            "name": "make_shorts",
+            "description": "Build shorts from a long podcast.",
+            "parameters": {"type": "object", "properties": {
+                "clips": {"type": "array", "items": {"type": "object"}},
+                "style_note": {"type": "string"}}}}},
+    ],
     "system_prompt": "DOCTRINE.",
     "capabilities": "CAPABILITIES — ...",
 }
@@ -70,7 +86,14 @@ def _reset():
                           "clips": [{"order": 0, "title": "Strong hook",
                                      "start": 12.0, "end": 38.0,
                                      "child_project_id": 9,
-                                     "edl_version": 6}]}}},
+                                     "edl_version": 6,
+                                     "story": {
+                                         "setup": "A risky launch",
+                                         "development": "Evidence was ignored",
+                                         "payoff": "The team changed course"},
+                                     "visual_direction": "Clean evidence-led design",
+                                     "broll": [{"at": 20, "query": "failed product launch",
+                                                "purpose": "show the consequence"}]}]}}},
                   9: {"id": 9, "title": "Strong hook", "kind": "short",
                       "parent_project_id": 3, "meta": {}},
               },
@@ -259,7 +282,10 @@ def test_initialize_carries_the_editing_doctrine(client):
         b["result"]["instructions"]
     assert "Never say MCP can only send instructions" in \
         b["result"]["instructions"]
-    assert "Do not use edit_shorts when the user asks YOU" in \
+    assert "Valmera's in-house agent is not callable over MCP" in \
+        b["result"]["instructions"]
+    assert "A SHORT IS A MICRO-STORY" in b["result"]["instructions"]
+    assert "make_shorts(project_id, clips=[...]" in \
         b["result"]["instructions"]
     assert "Final export is deliberately Studio-only" in \
         b["result"]["instructions"]
@@ -287,12 +313,28 @@ def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     names = [t["name"] for t in tools]
     assert "open_project" in names and "get_transcript" in names
     assert "export_final" not in names
+    assert "edit_shorts" not in names
+    assert "make_shorts" in names
     editor = [t for t in tools if t["name"] == "get_transcript"][0]
     # MCP adds only its transport-level immutable project scope; the worker's
     # arguments otherwise remain untouched.
     assert editor["inputSchema"]["properties"]["start"] == {"type": "number"}
     assert editor["inputSchema"]["properties"]["project_id"]["type"] == "integer"
     assert "project_id" in editor["inputSchema"]["required"]
+    make_shorts = next(t for t in tools if t["name"] == "make_shorts")
+    assert "clips" in make_shorts["inputSchema"]["required"]
+
+
+def test_stale_child_agent_boot_call_is_refused_before_queueing(client):
+    r = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "edit_shorts",
+        "arguments": {"project_id": 3, "instruction": "add captions"},
+    }).get_json()["result"]
+    assert r["isError"] is True
+    assert "reserved for an explicit locked-card Edit press" in \
+        r["content"][0]["text"]
+    assert "You are the editor" in r["content"][0]["text"]
+    assert DB["enqueued"] == []
 
 
 def test_podcast_shorts_are_first_class_session_tools(client):
@@ -316,8 +358,8 @@ def test_create_podcast_shorts_project_persists_its_kind(client):
                                       "kind": "shorts"}}))
     assert DB["created_project"]["kind"] == "shorts"
     assert DB["static_project"] == 71
-    assert "starts automatically" in body
-    assert "shorts_status" in body
+    assert "nothing selects story arcs automatically" in body
+    assert "make_shorts with explicit clips" in body
 
 
 def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
@@ -329,7 +371,11 @@ def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
     assert "card 1, project [9] Strong hook" in body
     assert "edit v6" in body and "final done (job 10)" in body
     assert "open_short(parent_project_id=3, card=N)" in body
-    assert "delegates a prompt" in body
+    assert "in-house agent is not callable over MCP" in body
+    assert "must make every child edit itself" in body
+    assert "story: A risky launch -> Evidence was ignored -> The team changed course" in body
+    assert "design: Clean evidence-led design" in body
+    assert "B-roll plan: 20s failed product launch" in body
     assert "Final export is Studio-only" in body
 
 

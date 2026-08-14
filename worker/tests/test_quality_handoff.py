@@ -78,3 +78,12 @@ def test_audio_qc_finding_is_advisory_even_after_visual_pass():
     assert quality["quality_status"] == "advisory"
     assert quality["export_ready"] is True
     assert quality["quality_findings"][0].startswith("audio QC:")
+
+
+def test_actual_audio_fix_is_disclosed_without_locking_export():
+    quality = agent_loop._quality_handoff(_ctx(last_audio_review={
+        "edl_version": 3, "verdict": "fix",
+        "text": "FIX — music masks the question; lower it 4 dB."}))
+    assert quality["quality_status"] == "advisory"
+    assert quality["export_ready"] is True
+    assert any("music masks" in line for line in quality["quality_findings"])

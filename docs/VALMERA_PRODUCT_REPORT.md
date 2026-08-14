@@ -4,6 +4,12 @@
 
 *Prepared July 23, 2026 · Based on a full read of both repositories (`hustler-server` backend/worker/engine and `frontend-next` studio) at their current state on disk.*
 
+> **Current-state note (August 14, 2026):** §23 is the authoritative delta
+> audit for the live agent, media senses, token spike, and quality roadmap.
+> Several older inventory statements in §§1–22 describe the July build (for
+> example the single Render renderer and bundled music/SFX packs) and are kept
+> as engineering history, not current production truth.
+
 ---
 
 ## Table of Contents
@@ -30,6 +36,7 @@
 20. [The Complete Limitations Catalog](#20-the-complete-limitations-catalog)
 21. [Docs vs. Reality: What You Promise vs. What Ships](#21-docs-vs-reality)
 22. [Where to Take It: Improvement Opportunities Grounded in the Code](#22-where-to-take-it)
+23. [August 14 Current-State Agent & Quality Audit](#23-august-14-current-state-agent--quality-audit)
 
 ---
 
@@ -233,6 +240,7 @@ EDL:
   effects:   Effects | None           # grade, zooms, fades, transition, censor regions, stylize, grade_custom
   overlays:  [OverlayItem]            # PIP layer (round 35)
   texts:     [TextItem]               # motion-graphics text layer (round 35)
+  vectors:   [VectorItem]             # renderer-native shapes / indicators
   speed:     [SpeedSpan]              # source-time speed ramps (round 35)
   master:    Master | None            # loudness mastering (round 35)
 ```
@@ -281,13 +289,15 @@ The corollary is a hard cultural rule visible all over the code: **the render-ti
 
 **TextItem** — `{id, text ≤200 chars, start, end (≥0.3s), template ∈ title/subtitle/lower_third/callout/big_number/quote/chapter, x, y, size_scale ∈ [0.4, 3.0], color, accent_color (default #FFE14D), font (12 families), entrance ∈ none/fade/pop/slide_up/blur_in/whip/rise/drop/typewriter, exit (same minus typewriter; "none" = instant, no animation), uppercase, box}`.
 
+**VectorItem** — `{id, kind ∈ rectangle/ellipse/line/arrow/ring/progress, start, end (≥0.3s), x, y, width, height (frame fractions), color, opacity, stroke_color, stroke_width, rounding, background_color/value (progress), motion: TextMotion}`. Program-anchored and compiled locally as ASS vector paths.
+
 **SpeedSpan** — `{id, start, end (SOURCE time, ≥0.2s), factor ∈ [0.25, 4.0]}`; audio is pitch-preserved via chained `atempo`; slow-mo **duplicates frames** (no optical-flow interpolation on this hardware — tools warn below 0.6×); factors within 0.01 of 1.0 rejected as no-ops; spans non-overlapping.
 
 **Master** — `{loudness: "social" | None}` → −14 LUFS with a codec-safe −2.0 dBTP ceiling on preview AND final.
 
 ## 5.4 The keyframe primitive: AnimFloat
 
-`AnimFloat = float | [Keyframe]` where `Keyframe = {t, v, ease?}`, `ease ∈ linear/in/out/in_out/hold` (the curve *into* that keyframe). Rules: max **24 keyframes**, strictly increasing times, times local to the element's own start and bounded by its duration, values clamped to the field's range; a single keyframe collapses to a constant. `clip_anim` trims curves when durations shrink. Easing closed forms are mirrored in Python (`anim_value`) and in the renderer's ffmpeg expression compiler (`_anim_expr`, nested `if(lt(t,...))` expressions). **Currently only `OverlayItem.x` and `OverlayItem.y` are keyframeable** — this primitive is the obvious foundation for a much broader animation system, but today that's its entire application.
+`AnimFloat = float | [Keyframe]` where `Keyframe = {t, v, ease?}`, `ease ∈ linear/in/out/in_out/hold` (the curve *into* that keyframe). Rules: max **24 keyframes**, strictly increasing times, times local to the element's own start and bounded by its duration, values clamped to the field's range; a single keyframe collapses to a constant. `clip_anim` trims curves when durations shrink. Easing closed forms are mirrored in Python (`anim_value`) and in the renderer's ffmpeg/ASS compilers. Overlays, designed text, and renderer-native vectors share this language for x/y/scale/rotation/opacity, so timeline trims preserve compound choreography.
 
 ---
 
@@ -354,7 +364,9 @@ A user message → an `agent_turn` job (**never auto-retried** — `MAX_ATTEMPTS
 
 ## 7.4 The loop mechanics
 
-Up to **30 iterations**. Each iteration: wall-clock check (450s; on timeout with work done → finalize + auto-render + honest "that took longer than I allow myself" message) → spend check (`running_credits()` = tokens×prices + images + sfx + video, vs budget; distinguishes "out of credits" with an Upgrade CTA from a funded-user budget stop) → progress update → one chat completion (`grok-4.5`, full tool schemas, temperature 0.2, max_tokens 2000) → dispatch tool calls.
+There is no arbitrary iteration/tool-count ceiling. The loop runs inside a **progress window**: a stalled window stops honestly, while a window in which EDL versions, assets or previews are still landing may continue. Spend remains bounded by the user's real credit budget. The agent model is resolved from the user's plan rather than hard-coded. The first dispatch receives the relevant catalog; after a blueprint or write, broad filmstrip pixels and consumed look frames are compacted and tool schemas are stage-routed, with `expand_toolset` preserving access to every deployed domain. Each iteration checks shutdown/progress/spend → performs one model dispatch → executes every returned tool call → persists activity and evidence.
+
+Substantial edits use a durable creative blueprint (story arc, sequence map, visual/motion/caption/music/SFX/color direction, semantic steps and acceptance criteria). Pure EDL work can be compiled through `apply_edit_recipe` into one version. Recipe operations may `save_as` the object they create and later operations address its generated id with `{"$ref":"alias"}`; already-fetched music and SFX can therefore be authored in the same transaction as picture, typography and motion. Asset search/download/generation/extraction remain separate because they have external side effects. Recipe structure and reference order are preflighted before any operation is staged.
 
 - Invalid tool-arg JSON → the tool result becomes `"REJECTED: arguments were not valid JSON."` — a nudge, not a crash.
 - **Every tool call is persisted as an `activity` chat message** (`name{args≤160} → result≤600`) — this is the live progress feed the studio renders as "N editing steps."
@@ -447,6 +459,7 @@ The shared tail does: optional outward word-snapping, drops sub-0.05s slivers, r
 - `insert_media(asset_key, at_output_s, duration_s, clip_start_s, motion)` — splices a clip/image INTO the timeline. Clips >15s **require** an explicit window (chosen via `look_at_asset`). Placement: snap to a keep boundary within 0.25s, else **split the containing take at the nearest word edge**. On canvas programs the first asset placed fixes the canvas aspect. `remove_insert(id)` restores timing with full re-anchoring.
 - `add_overlay(asset_key, start, duration_s, x, y, scale=0.4, opacity, entrance, exit, source_start_s)` / `move_overlay` / `remove_overlay` — PIP/logo layer; x/y accept **keyframe lists** for drifts; always appends the honest-limits note (overlay audio does NOT play; renders below captions; never tracks objects).
 - `add_text(text, start, end, template, x, y, size_scale, color, accent_color, font, entrance, exit, uppercase, box)` / `remove_text(id)` — the motion-graphics layer (§10).
+- `add_vector_graphic(kind, start, end, geometry, palette, motion)` / `set_vector_graphic` / `remove_vector_graphic` — general panels, connectors, arrows, rings, and progress indicators with the same local keyframe language as text; no inference or fetched asset.
 
 ## Director tools (perception-driven, deterministic)
 
@@ -532,7 +545,7 @@ Inter Display Black / ExtraBold / Bold (+BoldItalic), Anton, Bebas Neue, Archivo
 
 # 10. The Text & Motion-Graphics Layer
 
-`EDL.texts` (round 35) is a separate, text-only motion-graphics system (`graphics.py` → `graphics.ass`, burned above captions). PROGRAM-anchored, never remapped through the timeline; deliberately decoupled from captions ("adding a title card must never invalidate a caption cache — two files, two burns, zero coupling"). Deterministic: reads no index, no clock; byte-equality is unit-tested.
+`EDL.texts` and `EDL.vectors` form a separate motion-graphics system (`graphics.py` → `graphics.ass`, burned above captions). Both are PROGRAM-anchored and deliberately decoupled from transcript captions ("adding a title card must never invalidate a caption cache — two files, two burns, zero coupling"). The compiler is deterministic: it reads no index or clock, and byte-equality is unit-tested.
 
 ## 10.1 The 7 templates
 
@@ -554,7 +567,7 @@ Two-deck splitting: on deck-aware templates, the first `\n` or `" | "` separates
 - Anchors clamp fully on-frame even at x=1.0/y=0.0 (unit-tested).
 - Entrances (~220ms): pop/blur_in/whip/fade + move-anims (slide_up/rise/drop) via `\move`. Exits mirror in a 0.25–0.4s tail window. `\move` is single-occupancy: a moving entrance + moving exit keeps the entrance and degrades the exit to fade (tested, never dropped).
 - **Typewriter** entrance: per-glyph alpha reveal windows, cadence continuous across lines and decks, capped at **40 animated glyphs** (~40 bytes of override tags each; text past the cap appears with the last window); forces exit=fade (the one exit that provably composites with per-glyph alpha).
-- What does NOT exist in this layer: progress bars, animated shapes, stickers, images — it is text-only, all libass.
+- `EDL.vectors` adds rectangle/panel, ellipse, line, arrow, ring, and truthful progress primitives. Geometry uses frame fractions; color, stroke, rounding and opacity are authored data; general local x/y/scale/rotation/opacity curves provide compound animation. They compile to native ASS `\p1` paths—no generated/fetched asset, no model call, and no extra render input. Images/stickers remain media overlays rather than vector graphics.
 
 ---
 
@@ -827,6 +840,25 @@ LLM-free checks stamped into results: mid-word boundary detection (with snap sug
 
 ---
 
+## 18.4 The August 13 token spike: measured cause and local fix
+
+This was call multiplication, not one mysteriously large prompt. Production job **9169** made **196 model calls** in about **59 minutes**: **183 agent dispatches**, **8,203,225 input tokens**, **93,465 output tokens**, **42 `apply_edit_recipe` calls**, **39 `get_edl` rereads**, and **14 preview requests**. Its project accumulated **97 EDL versions** during the run. Prompt caching was often high, but cached tokens still made the job slow and the raw admin total enormous.
+
+The activity stream shows the mechanics. Six recipes aborted after earlier operations had been staged; eight more were rejected before execution. Four aborts came from applying the harmless identity `rate=1` to an image inside a uniform image/video patch. Several batches tried transaction-unsafe helpers such as `add_title_card`/`add_color_screen`; the deployed recipe catalog at the time also omitted ordinary existing-asset insertion. The editor then reread the EDL, rebuilt a smaller recipe, rendered, disliked or contradicted the result, and repeated. This was taste churn amplified by a fragile low-level program.
+
+The current local code attacks those measured causes without imposing a creative cap:
+
+- one preflighted atomic compiler validates every operation's shape, required arguments, alias declarations and backward-only references before staging;
+- `save_as` + `{"$ref":"alias"}` removes the create → reread EDL → patch-id round trip;
+- already-fetched music and SFX placement/gain can travel with picture and motion in one EDL commit;
+- video-to-audio extraction is explicitly refused inside a transaction so an aborted recipe cannot leak an asset side effect;
+- neutral mixed-media dialect (`rate=1`, `clip_start_s=0`, full-frame crop, mute=false, rotation=0 on a still) is normalized instead of aborting valid sibling work;
+- production metadata now records recipe calls, commits, aborts, committed operations and resolved references beside agent dispatches, versions, previews, cache ratio and cost.
+
+Verification for this local phase: a realistic eight-operation picture/type/vector/music/SFX recipe commits as **one** EDL version; forward references fail before any staging; extraction cannot escape an aborted recipe; the focused affected suite passed **140 tests**, the backend suite passed **228**, and the full worker suite passed **1,262**. These changes are **not a deployed result or proof of 10× quality** until they are pushed and compared by code-version/editorial-family cohorts plus blinded human-reference benchmarks.
+
+---
+
 # 19. Security Posture
 
 What's genuinely strong: the SSRF sandbox around URL fetching (resolve-first + peer verification + redirect re-validation + absolute deadlines); whitelist-only bundled-asset resolution; presigned-URL-only media access with tenant prefix checks; magic-byte upload sniffing; markdown sanitization of agent output; payload redaction in llm_calls; idempotency keys everywhere; cross-tenant transcript-edit refusal on shared content hashes; layered, incident-derived rate limits (20 msgs/hr, 3 concurrent jobs, 4 forced renders/version/hr, 60 events/hr, self-heal caps).
@@ -953,3 +985,234 @@ Rotate the committed DB password and set `SECRET_KEY`/`PADDLE_WEBHOOK_SECRET` ex
 ## Closing
 
 The system you have is unusually well-engineered for its stage: deterministic where it must be, honest by construction, observably instrumented end-to-end, and documented through postmortems rather than aspirations. Its constraints are equally clear: one small machine doing everything serially, a preview loop measured in minutes, a read-mostly timeline, and a set of headline capabilities (captions above all) that the outside world hasn't been told about. The architecture — immutable EDL versions, three-clock timeline math shared across three codebases, whitelist asset resolution, append-only observability — is a foundation that will carry all of the improvements above without structural rewrites. The bottlenecks are compute, iteration latency, and storytelling, in that order.
+
+---
+
+# 23. August 14 Current-State Agent & Quality Audit
+
+This section answers the current product questions directly and supersedes the
+July inventory where the implementation has moved on. It distinguishes what
+the general editing model receives, what a specialist reviewer can inspect,
+what is merely measured, and what is not available.
+
+## 23.1 What the editing agent receives on a fresh turn
+
+| Input | What reaches the model | Later turns and overflow |
+|---|---|---|
+| Main video | A current labeled filmstrip (up to 36 tiles), duration/frame/audio facts, transcript when it fits, shot boundaries, silences, motion summary, current EDL and program map | Rebuilt on every fresh user turn. Long transcript text is paged, but remains available through transcript/search tools. |
+| Uploaded video clips | Labeled filmstrips for indexed clips, clip duration/role/storage key, and their transcript/perception through read tools | Rebuilt every turn. Current-message attachments and clips already used in the edit are prioritized. The whole visual turn budget is 60 video tiles; overflow clips remain explicitly named and can be opened with `look_at_asset`. |
+| Uploaded still images | The actual image pixels, one labeled still per selected asset (up to 20 per turn) | Rebuilt every turn, including images uploaded in earlier messages. Current attachments and used assets are prioritized. Overflow images remain named and retrievable; they are not falsely treated as seen. |
+| Reference clips/images | The same real pixels plus a `STYLE REFERENCE ONLY` role. Indexed reference video also contributes measured cut rhythm, shot-duration distribution, energy shape, beat relationship and motion profile | Persists in project inventory across later turns. The prompt forbids inserting a reference merely because it is attached. |
+| Uploaded audio-only file | Its filename/key/duration and an explicit warning that DB kind `music` may actually be music, voiceover/dialogue or SFX. Indexed transcript, tempo/energy and waveform facts are available | Raw audio is **not** continuously streamed into the general editing model. `review_audio`, music auditions, SFX auditions, and final-mix review can send bounded real excerpts to an audio-capable reviewer when configured. |
+| Current edit | Full semantic EDL state, output-order program map, captions, recent versions, media already placed/unused, durable creative blueprint and family contract | Recomputed after every write. The EDL is authoritative; the model is not expected to remember an old timeline. |
+| Chat history | Current request plus only the last four messages, each bounded | Older creative state belongs in the EDL/blueprint rather than being repeatedly re-tokenized as stale conversation. |
+| Web/stock candidates | Metadata plus labeled thumbnail boards when visual delivery works | A search result is not an asset and cannot be placed. The downloaded rendition's real frames/motion are reviewed before a following reasoning step may place it. |
+
+So the precise answer to “does it receive every uploaded image, including from
+later turns?” is: **for normal-sized projects, yes, every current turn gets a
+fresh labeled visual overview of the project's images and indexed clips, not
+only the current attachment.** On very large libraries it receives a balanced
+bounded visual slice, explicitly sees which files were omitted, and must call
+`look_at_asset` before making a pixel-dependent decision about an omitted file.
+That is a visual evidence budget, not a creative or placement cap.
+
+## 23.2 What is cached and what is deliberately released
+
+- Indexes are durable by media SHA plus pipeline version: transcript, words,
+  shots, proxy/tile artifacts, audio perception, spatial samples and motion
+  profiles survive turns and projects that reuse the same media.
+- Reference grammar and image captions derive from durable asset/index state
+  instead of paying to rediscover the same facts every call.
+- Within one turn, editorial maps, perception, spatial data, motion analysis,
+  search results and audio candidate measurements have per-turn caches.
+- The stable filmstrip image block is placed before changing EDL state so an
+  OpenAI-compatible provider can cache the large prompt prefix.
+- After the first plan/write, broad filmstrip pixels are removed from the
+  active conversation while their labels and a reopen instruction remain.
+  Exact `look_at` pixels survive until they inform a committed write, then are
+  similarly released. This prevents one image payload from multiplying across
+  dozens of dispatch calls without claiming perfect visual memory.
+- Only durable decisions (EDL + creative blueprint) persist between user
+  turns. Hidden model reasoning does not.
+
+## 23.3 Why token use spiked on August 13
+
+The production trace is conclusive rather than inferred. Job 9169 / project
+755 ran from 14:32–15:31 UTC and produced:
+
+- 196 model-call rows, including 183 general agent calls;
+- 8,203,225 input tokens and 93,465 output tokens;
+- 42 `apply_edit_recipe`, 39 `get_edl`, and 14 `render_preview` calls;
+- 97 EDL versions (122 through 218) in 59 minutes.
+
+Of the 42 recipes, only 27 committed; 8 were rejected, 6 aborted and 1 was a
+no-op. Four aborts came from applying neutral `rate=1` to still images; other
+failures included non-transaction-safe tools and an older deployed recipe
+catalog. The spike was therefore **loop multiplication**: the model repeatedly
+re-read a large cached-prefix context while creating, reading, repairing and
+re-versioning the edit. It was not evidence that one prompt suddenly became
+eight million unique tokens.
+
+The local fix now preflights an entire atomic recipe, supports `save_as` plus
+explicit `{"$ref":"alias"}` references, accepts already-fetched music and
+SFX, normalizes neutral mixed-media arguments, and commits a coherent
+picture/type/vector/music/SFX treatment as one EDL version. Search, download,
+generation and extraction remain outside the transaction because they have
+external side effects. New recipe metrics make reject/abort/churn visible.
+These changes are tested locally; they are **not deployed and not yet proof of
+a 10× production improvement**.
+
+## 23.4 Capability truth table
+
+### Captions
+
+The current caption system supports transcript-derived or manual captions,
+word-safe program remapping, caption fixes/mutes, placement/size/font/color,
+flow or stack layout, tracking/leading/background/outline/shadow, emphasis
+words and treatments, and 20 named presets: `clean`, `documentary`,
+`broadcast`, `retro`, `neon`, `podcast`, `reels`, `beast`, `karaoke`,
+`elegant`, `spotlight`, `stacked`, `iridescent`, `chrome`, `editorial`,
+`fashion`, `luxe`, `impact`, `lyric`, and `classic`. Animations include fade,
+pop, slide, punch, blur, whip, flash, rise/drop, elastic, bounce, swing and
+zoom-blur. Captions are burned via libass; caption timing and collision audits
+operate on the exact compiled artifact. Limitations remain: no SRT/VTT import
+or export, no arbitrary uploaded font file, no per-word manual Studio editor,
+and no continuously subject-tracked caption band.
+
+### Designed text, vectors and animation
+
+Designed text has seven templates (`title`, `subtitle`, `lower_third`,
+`callout`, `big_number`, `quote`, `chapter`), 13 bundled font families,
+named entrances/exits including typewriter, subject-aware fixed-band placement,
+caption suppression under designed phrases, and a one-call kinetic typography
+pass synchronized to real transcript words. Text, overlays and renderer-native
+vectors (`rectangle`, `ellipse`, `line`, `arrow`, `ring`, `progress`) share
+element-local keyframes for x, y, scale, rotation and opacity with linear,
+in/out, in-out and hold easing. There are also zoom paths, aspect shifts,
+screen corner-pin/takeover moves, text-behind-subject mattes, panel composition,
+freezes, grades, stylize effects and duration-preserving transitions.
+
+This is a capable 2D motion-graphics system, not After Effects. It cannot do
+general object tracking, arbitrary Bézier paths/shape morphing, particles,
+3D camera/type, expressions, plugins or arbitrary custom fonts. “World-class”
+therefore has to come from selection, composition, synchronization and
+restraint inside these primitives—not pretending every AE technique exists.
+
+### Audio, music and sound effects
+
+The main editor receives transcript and measured audio facts. It can call a
+specialist to hear bounded real source/asset/program excerpts; it does not
+hear the whole soundtrack continuously by default. Music search currently
+uses Jamendo (when keyed) and Openverse; SFX search uses Openverse/Freesound.
+Candidates carry duration, authorship and license obligations, are measured,
+and can be compared by an audio-capable reviewer before download/placement.
+The renderer supports music, SFX, uploaded voiceover, gain, fades/loop/offset,
+ducking, source volume automation, stem mix when separation exists, and
+master loudness. The actual rendered mix can be heard by an independent final
+audio reviewer.
+
+Important limits: no generated TTS voice by default, no guarantee that an
+audio reviewer is configured, no full-song copyrighted catalog license, and
+no basis for claiming unheard portions sound good. A platform-trending sound
+often still needs to be added/licensed in the platform itself.
+
+### B-roll and web fetching
+
+`research_broll` accepts story-wide moments with a query, alternate semantic
+routes, narrative purpose, placement and desired duration. It searches
+Pexels/Pixabay video/photo when configured plus Openverse photos, matches the
+output orientation, interleaves providers, removes duplicates and presents a
+balanced candidate board across the whole story. Selection is explicitly by
+relevance, authenticity, composition, light/color and sequence diversity—not
+search rank. After `add_stock_media`, the downloaded file is probed and its
+actual frames/motion are delivered before placement is allowed on the next
+reasoning step.
+
+The agent cannot fetch “anything on the web.” It can ingest an accessible
+direct URL or supported platform media when URL fetching/extraction is enabled,
+and it has stock/Openverse catalogs. Private/login media, bot walls, dead URLs,
+DRM, provider/API outages, unsafe/private-network targets, size/duration caps,
+copyright/licensing and missing downloadable renditions remain real bounds.
+SSRF checks apply to every fetch. For topical material beyond stock, success
+depends on the `find_footage`/URL route and actual provider availability; the
+agent must not invent a result.
+
+## 23.5 Why the product still lacks professional judgment
+
+The renderer is not the primary taste bottleneck. The missing product layer
+has been a decision system:
+
+1. A vague brief lets one generalist model choose the first plausible local
+   treatment while it is also operating tools.
+2. Reference grammar and family rules exist, but historically advised the
+   model rather than selecting and binding one treatment.
+3. A clean preview proves “not visibly broken” more readily than it proves
+   “this edit is more specific, coherent and compelling than another edit.”
+4. Search relevance can be acceptable while the chosen B-roll is generic;
+   waveform fit can be acceptable while music taste is ordinary; a caption
+   preset can render correctly while being wrong for the speaker/brand.
+5. There is a blinded pairwise benchmark runner, but no real multi-family
+   candidate-vs-human corpus checked into this workspace. There is therefore
+   no evidence yet that a release beats a human reference, much less by 10×.
+
+The current local implementation closes part of (1) and (2) without adding a
+second permanent model call. A substantial first-call blueprint now records:
+
+- one named treatment;
+- observed `decision_basis` facts;
+- relationships to transfer from an actual reference;
+- cross-department `coherence_rules`;
+- brief reasons materially plausible alternatives lost;
+- an ordered sequence map whose timed beats cite real transcript/shot IDs.
+
+Timed source beats with invented or unrelated evidence IDs are mechanically
+rejected. This contract feeds the main editor, music/SFX selection, motion
+direction and the independent visual, story and final-audio reviewers. Narrow
+repairs inherit the established language without paying a new director call or
+being forced through whole-program paperwork.
+
+## 23.6 Concrete path to “one-shot professional”
+
+This should be treated as an evaluation-driven product program, not a prompt
+rewrite.
+
+1. **Build the real benchmark corpus first.** For each priority family
+   (podcast conversation, talking-head social, narrative vlog, product demo,
+   voiceover montage, action/music), preserve the same source + brief, a strong
+   human reference, the current Valmera result and blind human pairwise labels.
+   Use the existing two-order visual/story/audio evaluator; never collapse
+   regressions into one flattering aggregate score.
+2. **Make the treatment contract the execution authority.** The first call
+   should pick one source-grounded route; atomic compilation should express its
+   picture/type/motion/audio pass in as few coherent versions as evidence
+   permits. Keep unlimited tools available, but measure semantic progress,
+   recipe aborts, versions per finished edit, model calls, wall time and cost.
+3. **Turn B-roll into retrieval + ranking + sequence casting.** Learn from
+   accepted/rejected human candidate choices. Rank visual specificity,
+   authenticity, composition match, motion direction and sequence diversity;
+   require actual rendition review. Generate a custom visual only when
+   retrieval cannot supply the needed proof, not as a generic fallback.
+4. **Turn sound into supervision, not decoration.** Compare real music/SFX
+   excerpts; model entry/exit, contrast and motif reuse across the sequence;
+   review the real final mix. Silence and no-SFX must remain valid winners.
+5. **Promote animation from presets to grammar.** Use the shared keyframe
+   primitive to express a small coherent motion vocabulary per treatment;
+   attach movement to rhetorical/visible events and preserve stillness as
+   contrast. Add primitives only when the benchmark repeatedly proves a real
+   capability gap.
+6. **Make podcast cutting a discourse task.** Score complete question/answer
+   arcs, references, escalation and payoff from the whole transcript; retain
+   boundary context; independently review the assembled transcript. Optimize
+   for a coherent conversation, never “top isolated quotes.”
+7. **Release behind family-level gates.** A candidate build ships only when it
+   wins or ties the previous build on blind human and model-separated visual,
+   story and audio dimensions, with no material family regression and with
+   cost/latency inside the target envelope.
+
+The north-star claim should be earned with measurable outcomes: publishable on
+first render, pairwise win rate against the previous build and a strong human
+reference, story-defect rate, irrelevant-B-roll rate, caption collision and
+correction rate, audible mix/SFX defect rate, calls and EDL versions per
+finished edit, p50/p95 wall time, credits, render retries, and user acceptance
+without a corrective chat turn. “10×” should mean a large verified improvement
+across quality, speed, cost and revision burden—not ten times more effects.

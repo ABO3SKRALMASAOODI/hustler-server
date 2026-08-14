@@ -860,7 +860,7 @@ def asset_by_key(conn, project_id, storage_key):
         return cur.fetchone()
 
 
-def indexed_clips(conn, project_id, limit=12):
+def indexed_clips(conn, project_id, limit=80):
     """Uploaded video clips whose perception pass finished (round 84) —
     every one of these has a filmstrip + transcript in `indexes` keyed by
     its sha256. Oldest first, so filmstrip order matches upload order."""
@@ -1150,7 +1150,7 @@ def delete_assets(conn, asset_ids):
         return cur.rowcount
 
 
-def assets_by_kinds(conn, project_id, kinds, limit=40):
+def assets_by_kinds(conn, project_id, kinds, limit=200):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
                        WHERE project_id = %s AND kind = ANY(%s)
@@ -1235,6 +1235,16 @@ def set_index_spatial(conn, sha256, spatial_json, pipeline_version):
             SET json = jsonb_set(json, '{spatial}', %s::jsonb)
             WHERE video_sha256 = %s AND pipeline_version = %s
         """, (json.dumps(spatial_json), sha256, pipeline_version))
+
+
+def set_index_motion(conn, sha256, motion_json, pipeline_version):
+    """Merge only the motion sidecar; see set_index_perception's race rule."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE indexes
+            SET json = jsonb_set(json, '{motion}', %s::jsonb)
+            WHERE video_sha256 = %s AND pipeline_version = %s
+        """, (json.dumps(motion_json), sha256, pipeline_version))
 
 
 def latest_edl(conn, project_id):
@@ -1351,6 +1361,23 @@ def add_message(conn, session_id, role, content, meta=None):
                     (session_id, role, content,
                      Json(meta) if meta is not None else None))
         return cur.fetchone()["id"]
+
+
+def latest_creative_blueprint(conn, session_id):
+    """Newest durable director blueprint recorded in this project's chat.
+
+    Blueprints ride activity metadata instead of a new mutable project table:
+    chat_messages is already append-only, project-scoped through session_id,
+    and gives us an audit trail of every legitimate change of direction.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""SELECT meta->'creative_blueprint' AS blueprint
+                       FROM chat_messages
+                       WHERE session_id = %s
+                         AND meta ? 'creative_blueprint'
+                       ORDER BY id DESC LIMIT 1""", (session_id,))
+        row = cur.fetchone()
+        return row.get("blueprint") if row else None
 
 
 def record_client_event(conn, user_id, project_id, kind, detail=None,

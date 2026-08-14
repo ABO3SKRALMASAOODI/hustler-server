@@ -1,8 +1,8 @@
 {
   "slug": "voiceover-montage",
-  "v": 1,
+  "v": 2,
   "genre": "story/hustle montage over a voiceover spine",
-  "identity": "A narration (the creator's own, or iconic movie audio) drives a fast rotation of 1-2 second b-roll clips that ILLUSTRATE each phrase. Captions are one word or one short phrase at a time, placed at the spoken instant. The montage look splits by skin from raw-authentic to art-directed, but the mechanics are constant: speech phrase -> matching clip -> caption, 5-7 cuts per 10s, muted grade, CTA outro.",
+  "identity": "A narration (the creator's own, or iconic movie audio) drives a specific sequence of footage that illustrates, proves or productively contrasts each important thought. Shot length, caption density, grade and ending respond to the material: raw authenticity, patient cinema and fast art direction are all valid when they form one coherent world.",
   "exemplars": {
     "movie-audio-bw": {"file": "62a5bf96", "duration_s": 24.8, "cuts_per_10s": 2.8, "median_shot_s": 3.4, "sat": 0.004, "notes": "Wolf of Wall Street audio; FULL monochrome; single-word center captions; 72 flash frames (whips)"},
     "lifestyle-money": {"file": "bb4148f6", "duration_s": 68.6, "cuts_per_10s": 5.8, "median_shot_s": 1.07, "sat": 0.046, "notes": "creator narration; giant airbrushed money words ($500,000, TOP 1%); Stripe-style revenue-proof cards; scattered small-caps captions"},
@@ -10,20 +10,20 @@
     "designed-travel": {"file": "83851f82", "duration_s": 33.4, "cuts_per_10s": 5.4, "median_shot_s": 1.46, "sat": 0.088, "notes": "poster-grade full-frame type cards (red/black), animated flight-path maps, social-UI comment props between b-roll"}
   },
   "rules": {
-    "clip_selection": "each clip literally or thematically matches the phrase being spoken ('travel the world' -> beach; 'coding' -> screen); a clip never outstays its phrase",
-    "captions": "ONE word or short phrase at a time, appearing at its spoken instant; position varies by skin (center / bottom-third / scattered)",
-    "display_moments": "2-5 times per video a KEY phrase gets a full-frame or oversized display treatment (money number, poster card, giant NO)",
+    "clip_selection": "each chosen clip has a named relationship to the narration—literal evidence, useful metaphor, emotional counterpoint or continuity bridge. It enters when that relationship becomes legible and holds long enough to read; it may span phrases or cut quickly according to information and motion",
+    "captions": "caption density and placement follow comprehension and the chosen visual skin. Designed phrase text arrives at the spoken thought; documentary lines, sparse keywords or no captions can each be right",
+    "display_moments": "reserve full-frame or oversized display treatment for the few phrases whose narrative weight earns a register change; zero is valid when footage and voice already carry the peak",
     "proof_props": "money/social skins insert UI evidence (revenue cards, comment threads, profile mockups) timed to the claims",
-    "grade": "muted always; skins choose full-monochrome, teal-warm lifestyle, or platform-compressed raw",
-    "cta": "final 10-15%: direct-address clip or card + comment-keyword/follow instruction + logo outro"
+    "grade": "preserve truthful product, skin and environment color unless a coherent story world earns stylization; monochrome, muted, vivid and raw are choices rather than defaults",
+    "ending": "resolve, reframe or deliberately leave the narration's tension in a final image; use a CTA only when the brief has one"
   },
   "rubric": {
-    "median_shot_s_range": [0.9, 3.5],
-    "phrase_clip_match": "every caption phrase's clip must depict or metaphorize it",
-    "caption_at_spoken_instant_ms": 200,
-    "display_moments_min": 2,
-    "saturation_max": 0.09,
-    "cta_final_frac_max": 0.15
+    "phrase_image_relationship_is_specific": true,
+    "shots_hold_until_meaning_is_legible": true,
+    "designed_text_syncs_to_its_thought": true,
+    "display_register_changes_are_earned": true,
+    "visual_world_is_coherent": true,
+    "ending_resolves_brief": true
   },
   "capability_notes": "Selection needs the caption-phrase -> footage-moment match, which is exactly what a sighted index provides (shot captions + transcript). Display money-words and poster cards = add_text templates; revenue-proof/comment props are a graphics-pack gap (same gap as talking-head-promo's ui_mockups)."
 }

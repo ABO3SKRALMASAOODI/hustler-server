@@ -93,6 +93,216 @@ def _msg_brief(m):
             "created_at": m["created_at"].isoformat()}
 
 
+_QUALITY_RUBRIC_DIMENSIONS = (
+    "visual_coherence", "editorial_specificity", "narrative_support",
+    "motion_rhythm", "typography", "restraint")
+
+
+def _quality_scorecard(rows):
+    """Aggregate assistant outcome metadata into a deploy/cohort scorecard.
+
+    No synthetic one-number quality score: it would reward feature density and
+    make it easy to game the product. The operator gets the independent craft
+    rubric, repair/advisory rate, cost, churn and evidence coverage side by
+    side, grouped by the worker content fingerprint that produced the turn.
+    """
+    cohorts = {}
+
+    def number(value):
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    for row in rows:
+        meta = row.get("meta") or {}
+        metrics = meta.get("editing_metrics") or {}
+        code = str(metrics.get("code_version") or "legacy_unstamped")
+        family = str(metrics.get("editorial_family") or "legacy_unclassified")
+        cohort_key = (code, family)
+        c = cohorts.setdefault(cohort_key, {
+            "code_version": code, "editorial_family": family,
+            "turns": 0, "outcomes": {}, "quality": {}, "audio_review": {},
+            "story_review": {},
+            "user_feedback": {"up": 0, "down": 0, "unrated": 0},
+            "behavior": {"exported_before_next_request": 0,
+                         "rapid_followup": 0, "no_observed_signal": 0},
+            "contract_versions": {},
+            "sums": {"tokens_in": 0.0, "tokens_out": 0.0,
+                     "estimated_model_cost_usd": 0.0,
+                     "cache_ratio": 0.0, "versions_written": 0.0,
+                     "previews_rendered": 0.0, "tool_schema_chars": 0.0,
+                     "model_calls": 0.0, "agent_dispatches": 0.0,
+                     "tool_calls": 0.0,
+                     "audio_mix_reviews": 0.0, "audio_asset_reviews": 0.0,
+                     "audio_review_clips": 0.0,
+                     "story_reviews": 0.0,
+                     "screening_frames": 0.0,
+                     "screening_pages": 0.0,
+                     "duplicate_writes_prevented": 0.0,
+                     "recipe_calls": 0.0, "recipe_commits": 0.0,
+                     "recipe_aborts": 0.0,
+                     "recipe_operations_committed": 0.0,
+                     "recipe_references_resolved": 0.0,
+                     "clean_finishing_checkpoints": 0.0,
+                     "post_pass_variations_prevented": 0.0,
+                     "candidates_measured": 0.0,
+                     "candidates_heard": 0.0},
+            "rubric": {d: {"strong": 0, "adequate": 0, "weak": 0,
+                            "not_judged": 0, "missing": 0}
+                       for d in _QUALITY_RUBRIC_DIMENSIONS},
+            "finding_categories": {}, "latest_at": None,
+        })
+        c["turns"] += 1
+        outcome = str(meta.get("outcome") or "unknown")
+        c["outcomes"][outcome] = c["outcomes"].get(outcome, 0) + 1
+        quality = str(meta.get("quality_status") or "unknown")
+        c["quality"][quality] = c["quality"].get(quality, 0) + 1
+        feedback = str(meta.get("feedback") or "unrated")
+        if feedback not in c["user_feedback"]:
+            feedback = "unrated"
+        c["user_feedback"][feedback] += 1
+        if row.get("exported_after"):
+            c["behavior"]["exported_before_next_request"] += 1
+        elif row.get("rapid_followup"):
+            c["behavior"]["rapid_followup"] += 1
+        else:
+            c["behavior"]["no_observed_signal"] += 1
+        contract_v = str(metrics.get("editorial_contract_v") or "legacy")
+        c["contract_versions"][contract_v] = \
+            c["contract_versions"].get(contract_v, 0) + 1
+        c["latest_at"] = max(
+            filter(None, [c["latest_at"], row.get("created_at")]),
+            default=None)
+        sums = c["sums"]
+        sums["tokens_in"] += number(metrics.get("tokens_in"))
+        sums["tokens_out"] += number(metrics.get("tokens_out"))
+        sums["estimated_model_cost_usd"] += number(
+            metrics.get("estimated_model_cost_usd"))
+        sums["cache_ratio"] += number(metrics.get("prompt_cache_ratio"))
+        sums["model_calls"] += number(metrics.get("model_calls"))
+        sums["agent_dispatches"] += number(metrics.get("agent_dispatches"))
+        sums["tool_calls"] += number(metrics.get("tool_calls"))
+        sums["audio_mix_reviews"] += number(metrics.get("audio_mix_reviews"))
+        sums["audio_asset_reviews"] += number(
+            metrics.get("audio_asset_reviews"))
+        sums["audio_review_clips"] += number(metrics.get("audio_review_clips"))
+        sums["story_reviews"] += number(metrics.get("story_reviews"))
+        sums["versions_written"] += number(metrics.get("versions_written"))
+        sums["previews_rendered"] += number(metrics.get("previews_rendered"))
+        sums["tool_schema_chars"] += number(
+            metrics.get("post_plan_tool_schema_chars") or
+            metrics.get("initial_tool_schema_chars"))
+        sums["duplicate_writes_prevented"] += number(
+            metrics.get("duplicate_writes_prevented"))
+        for key in ("recipe_calls", "recipe_commits", "recipe_aborts",
+                    "recipe_operations_committed",
+                    "recipe_references_resolved"):
+            sums[key] += number(metrics.get(key))
+        sums["clean_finishing_checkpoints"] += number(
+            metrics.get("clean_finishing_checkpoints"))
+        sums["post_pass_variations_prevented"] += number(
+            metrics.get("post_pass_variations_prevented"))
+        sums["candidates_measured"] += sum(number(metrics.get(key)) for key in
+            ("music_candidates_measured", "sfx_candidates_measured",
+             "broll_candidates_compared", "motion_profiles_measured"))
+        sums["candidates_heard"] += sum(number(metrics.get(key)) for key in
+            ("music_candidates_heard", "sfx_candidates_heard"))
+        qe = metrics.get("quality_evidence") or {}
+        sums["screening_frames"] += number(qe.get("screening_frames"))
+        sums["screening_pages"] += number(qe.get("screening_pages"))
+        audio_verdict = str(qe.get("audio_review_verdict") or "not_reviewed")
+        c["audio_review"][audio_verdict] = \
+            c["audio_review"].get(audio_verdict, 0) + 1
+        story_verdict = str(qe.get("story_review_verdict") or "not_reviewed")
+        c["story_review"][story_verdict] = \
+            c["story_review"].get(story_verdict, 0) + 1
+        rubric = qe.get("visual_rubric") or {}
+        for dimension in _QUALITY_RUBRIC_DIMENSIONS:
+            level = str((rubric.get(dimension) or {}).get("level") or "missing")
+            if level not in c["rubric"][dimension]:
+                level = "missing"
+            c["rubric"][dimension][level] += 1
+        for category in qe.get("visual_finding_categories") or []:
+            category = str(category or "other")
+            c["finding_categories"][category] = \
+                c["finding_categories"].get(category, 0) + 1
+        for category in qe.get("story_finding_categories") or []:
+            category = "story/" + str(category or "other")
+            c["finding_categories"][category] = \
+                c["finding_categories"].get(category, 0) + 1
+
+    out = []
+    for cohort in cohorts.values():
+        n = max(1, cohort["turns"])
+        cohort["averages"] = {
+            key: round(value / n, 3) for key, value in cohort.pop("sums").items()
+        }
+        rated = cohort["user_feedback"]["up"] + \
+            cohort["user_feedback"]["down"]
+        cohort["user_feedback"]["up_rate"] = (
+            round(cohort["user_feedback"]["up"] / rated, 3)
+            if rated else None)
+        if cohort["latest_at"] is not None and hasattr(
+                cohort["latest_at"], "isoformat"):
+            cohort["latest_at"] = cohort["latest_at"].isoformat()
+        out.append(cohort)
+    return sorted(out, key=lambda c: c.get("latest_at") or "", reverse=True)
+
+
+@admin_video_bp.route("/admin/video/quality-scorecard", methods=["GET"])
+@admin_required
+def video_quality_scorecard():
+    days = min(90, max(1, request.args.get("days", type=int) or 14))
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT cm.meta, cm.created_at,
+                              EXISTS (
+                                SELECT 1
+                                FROM projects p
+                                JOIN client_events ce
+                                  ON ce.project_id = p.id
+                                WHERE p.chat_session_id = cm.session_id
+                                  AND ce.kind = 'download_triggered'
+                                  AND ce.created_at >= cm.created_at
+                                  AND ce.created_at < LEAST(
+                                    cm.created_at + INTERVAL '24 hours',
+                                    COALESCE((
+                                      SELECT MIN(nu.created_at)
+                                      FROM chat_messages nu
+                                      WHERE nu.session_id = cm.session_id
+                                        AND nu.role = 'user'
+                                        AND nu.id > cm.id
+                                    ), cm.created_at + INTERVAL '24 hours'))
+                              ) AS exported_after,
+                              EXISTS (
+                                SELECT 1 FROM chat_messages nu
+                                WHERE nu.session_id = cm.session_id
+                                  AND nu.role = 'user' AND nu.id > cm.id
+                                  AND nu.created_at <
+                                      cm.created_at + INTERVAL '30 minutes'
+                              ) AS rapid_followup
+                       FROM chat_messages cm
+                       WHERE cm.role = 'assistant'
+                         AND cm.created_at > NOW() - (%s || ' days')::interval
+                         AND cm.meta ? 'editing_metrics'
+                       ORDER BY cm.created_at DESC LIMIT 10000""",
+                    (str(days),))
+        rows = cur.fetchall()
+    return jsonify({
+        "days": days,
+        "turns": len(rows),
+        "cohorts": _quality_scorecard(rows),
+        "interpretation": (
+            "Compare code-version and editorial-family cohorts across actual "
+            "user feedback, export-before-next-request and rapid-follow-up "
+            "behavior, rubric weakness/advisory rates, model cost, "
+            "screening coverage, schema characters, EDL churn, renders and "
+            "candidate evidence. There is intentionally no gameable single "
+            "quality number."),
+    })
+
+
 @admin_video_bp.route("/admin/video/overview", methods=["GET"])
 @admin_required
 def video_overview():

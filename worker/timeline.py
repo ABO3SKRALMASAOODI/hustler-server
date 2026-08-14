@@ -56,6 +56,28 @@ def _ins_id(i):
     return i.get("id") if isinstance(i, dict) else getattr(i, "id", None)
 
 
+def _clip_element_motion(item, new_duration_s):
+    """Keep element-local graphic curves valid when a window is shortened."""
+    motion = item.get("motion")
+    if not isinstance(motion, dict):
+        return
+    motion = dict(motion)
+    changed = False
+    for prop in ("x", "y", "scale", "rotation", "opacity"):
+        if isinstance(motion.get(prop), list):
+            clipped = clip_anim(motion[prop], new_duration_s)
+            if clipped != motion[prop]:
+                motion[prop] = clipped
+                changed = True
+    if changed:
+        item["motion"] = motion
+
+
+# Kept as a private compatibility alias for older tests/callers that named
+# the helper before vectors shared the same motion language.
+_clip_text_motion = _clip_element_motion
+
+
 def _ins_asset(inserts, iid):
     for i in (inserts or []):
         if _ins_id(i) == iid:
@@ -1266,7 +1288,7 @@ def remap_program_items(edl, old_tl, new_tl):
                 ov["duration_s"] = nd
                 # keyframed motion must shrink WITH the window, or the
                 # stranded keyframes make validation reject the whole write
-                for prop in ("x", "y"):
+                for prop in ("x", "y", "scale", "rotation", "opacity"):
                     if isinstance(ov.get(prop), list):
                         ov[prop] = clip_anim(ov[prop], nd)
                 region_notes.append(
@@ -1341,6 +1363,8 @@ def remap_program_items(edl, old_tl, new_tl):
                         f"note: text {tx.get('id')} "
                         f"(\"{str(tx.get('text', ''))[:24]}\") moved to "
                         f"{ns}-{ne}s, staying on its card.")
+                    if ne - ns < float(tx["end"]) - float(tx["start"]):
+                        _clip_text_motion(tx, ne - ns)
                     tx["start"], tx["end"] = ns, ne
                 kept_tx.append(tx)
                 continue
@@ -1352,11 +1376,35 @@ def remap_program_items(edl, old_tl, new_tl):
                         "its window falls outside the shortened edit.")
                     continue
                 tx["end"] = round(prog, 2)
+                _clip_text_motion(tx, tx["end"] - float(tx["start"]))
                 region_notes.append(
                     f"note: text {tx.get('id')} now ends at {tx['end']}s to "
                     "fit the shortened edit.")
             kept_tx.append(tx)
         edl["texts"] = kept_tx
+    if edl.get("vectors"):
+        # Vector graphics are PROGRAM-anchored, exactly like ordinary text.
+        # They are designed against the finished composition, not tied to a
+        # source frame, so upstream cuts do not slide them onto another beat;
+        # only a shortened program clips or removes their live window.
+        kept_vec = []
+        for vec in edl["vectors"]:
+            vec = dict(vec)
+            if float(vec["end"]) > prog:
+                if float(vec["start"]) >= prog - 0.3:
+                    region_notes.append(
+                        f"note: vector {vec.get('id')} ({vec.get('kind')}) "
+                        "was removed — its window falls outside the "
+                        "shortened edit.")
+                    continue
+                vec["end"] = round(prog, 2)
+                _clip_element_motion(
+                    vec, vec["end"] - float(vec["start"]))
+                region_notes.append(
+                    f"note: vector {vec.get('id')} now ends at "
+                    f"{vec['end']}s to fit the shortened edit.")
+            kept_vec.append(vec)
+        edl["vectors"] = kept_vec
     if edl.get("caption_mutes"):
         # CONTENT-anchored: a mute exists to keep captions off a particular
         # moment (the effect / graphic it was paired with), so it must follow

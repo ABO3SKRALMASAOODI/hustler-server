@@ -143,6 +143,19 @@ def test_rect_plus_cxcy_takes_the_rect_instead_of_rejecting():
     assert "the rect wins" in res               # ...and it says so, once
 
 
+def test_empty_rect_is_absent_and_keeps_the_measured_point():
+    """Tool transports sometimes emit [] for an omitted optional array.
+    A valid cx/cy target must not be thrown away over that serialization
+    detail—the production trace showed 62 such malformed-rect retries."""
+    ctx = _Ctx(_session_edl())
+    res = agent_tools.add_zoom(ctx, 7.5, 9.5, strength=0.3,
+                               cx=0.2, cy=0.9, rect=[])
+    assert res.startswith("EDL v"), res
+    zm = _zoom(ctx)
+    assert zm["cx"] == 0.2 and zm["cy"] == 0.9
+    assert not zm.get("rect")
+
+
 def test_plain_cxcy_still_pins_and_the_reply_says_so():
     """cx/cy semantics are untouched (old EDLs and cached renders depend on
     them) — but the reply now states what pinning means and points at rect."""

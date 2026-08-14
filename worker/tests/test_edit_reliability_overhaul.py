@@ -126,3 +126,29 @@ def test_get_edl_accepts_natural_section_aliases_without_a_retry():
     assert payload["sections"]["effects"]["grade"] == "warm"
     assert "overview" in payload
     assert payload["aliases_resolved"]["cuts"] == ["keep"]
+
+    broad = json.loads(agent_tools.get_edl(
+        Ctx(), sections=["timeline", "grade", "media", "erases", "video"]))
+    assert broad["sections"]["keep"] == [[0, 30]]
+    assert broad["sections"]["effects"]["grade"] == "warm"
+    assert "overview" in broad
+
+    everything = json.loads(agent_tools.get_edl(Ctx(), sections="all"))
+    assert set(everything["sections"]) == {
+        "keep", "texts", "effects", "music"}
+
+
+def test_list_assets_accepts_natural_media_kind_aliases():
+    seen = []
+
+    class Db:
+        @staticmethod
+        def run(_fn, _project_id, kinds):
+            seen.append(kinds)
+            return []
+
+    ctx = type("Ctx", (), {"db": Db(), "project_id": 7})()
+    assert not agent_tools.list_assets(ctx, "video").startswith("REJECTED")
+    assert seen[-1] == ["video_clip"]
+    assert not agent_tools.list_assets(ctx, "photos").startswith("REJECTED")
+    assert seen[-1] == ["image_ref"]

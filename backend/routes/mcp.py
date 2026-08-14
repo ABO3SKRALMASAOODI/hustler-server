@@ -10,13 +10,11 @@ deliverable in Valmera Studio. It is the same trade the `mcp` plan was always
 written around ("brings its own model").
 
 THE ONE INVARIANT: NO SECOND EDITOR. The tools are not re-declared here. The
-worker publishes its live registry (worker/mcp_exec.catalog) into mcp_catalog
-on boot and this file serves it verbatim, so every tool the in-house agent can
-call, the outside model can call, with the same name, the same JSON schema and
-the same description — including the honest-off gating that hides a tool whose
-backing service this deployment has no key for. Execution runs in the worker
-too, in the same ToolContext the agent uses. There is nothing to keep in sync
-because there is no copy.
+worker publishes the direct-editing portion of its live registry
+(worker/mcp_exec.catalog) into mcp_catalog on boot and this file serves it
+verbatim. The one intentional exclusion is agent orchestration: MCP cannot
+call edit_shorts, which would enqueue Valmera agent turns instead of editing
+the EDL. Execution runs in the worker, in the same ToolContext the agent uses.
 
 WHAT IS DECLARED HERE: only the things a headless model needs to prepare and
 review an edit — pick a project, upload a file, watch a preview, download an
@@ -289,7 +287,7 @@ _TITLE_OVERRIDES = {
     "read_skill": "Read an editing skill",
     "wait_for_job": "Wait for a running job",
     "shorts_status": "Check podcast shorts progress",
-    "edit_shorts": "Delegate batch edits to Valmera agents",
+    "make_shorts": "Build podcast shorts from explicit story arcs",
 }
 
 # A delivery boundary, not ordinary feature gating. The outside model may
@@ -297,7 +295,18 @@ _TITLE_OVERRIDES = {
 # deliverable. Keep this filter even though export_final is not currently an
 # editor-registry tool: it prevents a future worker catalog or a stale client
 # from silently restoring the expensive capability.
-MCP_DENIED_TOOLS = frozenset({"export_final"})
+MCP_DENIED_TOOLS = frozenset({"export_final", "edit_shorts"})
+MCP_DENIED_MESSAGES = {
+    "export_final": (
+        "Final export is deliberately unavailable over MCP. Finish and "
+        "verify the edit with render_preview/watch_video, then ask the user "
+        "to export it from Valmera Studio."),
+    "edit_shorts": (
+        "edit_shorts is unavailable over MCP. Studio's child-agent boot is "
+        "reserved for an explicit locked-card Edit press. You are the editor: "
+        "call shorts_status, open_short for each child, then use the normal "
+        "EDL editing, preview, and watch tools yourself."),
+}
 
 
 def _title_for(name):
@@ -347,6 +356,12 @@ def _editor_tools(catalog):
         schema = json.loads(json.dumps(original))
         schema.setdefault("type", "object")
         props = schema.setdefault("properties", {})
+        # During a backend-before-worker deploy, the persisted catalog can
+        # still contain the old automatic-planner-only make_shorts schema.
+        # Hide it until the worker publishes explicit caller-authored clips;
+        # otherwise deploy skew briefly restores the delegation path.
+        if name == "make_shorts" and "clips" not in props:
+            continue
         props["project_id"] = {
             "type": "integer",
             "description": ("Required immutable scope for this call. Copy the "
@@ -354,6 +369,12 @@ def _editor_tools(catalog):
                             "the active-project pointer is never used to guess."),
         }
         required = list(schema.get("required") or [])
+        # Valmera's internal agent may ask the Shorts planner to select arcs.
+        # MCP may not: the connected model must read the podcast and author
+        # the selection itself, then the worker only performs the mechanical
+        # child-project build. The execution layer enforces this too.
+        if name == "make_shorts" and "clips" not in required:
+            required.append("clips")
         if "project_id" not in required:
             required.append("project_id")
         schema["required"] = required
@@ -415,9 +436,10 @@ SESSION_TOOLS = [
                     "Copy the returned project_id into every later call. Upload a "
                     "video into it with upload_start, or build a canvas "
                     "program from generated/uploaded assets. kind='shorts' "
-                    "creates the Podcast to Shorts workflow: after its main "
-                    "video finishes analyzing, Valmera automatically selects "
-                    "and builds the vertical clips.",
+                    "creates a Podcast to Shorts intake project. After its "
+                    "main video finishes analyzing, read the podcast and call "
+                    "make_shorts with your explicit story arcs; selection does "
+                    "not start automatically.",
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string"},
          "kind": {"type": "string", "enum": ["edit", "shorts"],
@@ -573,10 +595,10 @@ SESSION_TOOL_NAMES = {t["name"] for t in SESSION_TOOLS}
 WORKFLOW = """
 HOW TO DRIVE VALMERA OVER MCP
 
-You are editing real video for the person you are talking to. The tools below
-are the same tools Valmera's own editing agent runs — same names, same
-arguments, same effects — and everything above this line is that agent's
-operating doctrine. Follow it.
+You are editing real video for the person you are talking to. The direct EDL
+tools below are the same implementations Valmera's own editing agent runs —
+same names, arguments and effects — and everything above this line is that
+agent's operating doctrine. Follow it.
 
 Two things are different from a normal tool session, and both matter:
 
@@ -599,13 +621,11 @@ Two things are different from a normal tool session, and both matter:
    render it, and inspect the result. Never say MCP can only send instructions
    to a short — that is false.
 
-   IMPORTANT — DIRECT EDITING VS DELEGATION. edit_shorts does NOT edit an EDL.
-   It forwards a text prompt to Valmera's separate in-house agent on every
-   selected child. Do not use edit_shorts when the user asks YOU, the outside
-   MCP model, to do the edit or rejects agent delegation. In that case call
-   shorts_status, open_short with the board/card or child id, and use the normal editor
-   tools directly. Use edit_shorts only when the user explicitly wants the
-   batch delegated to Valmera's agents and understands that distinction.
+   NO AGENT DELEGATION. Valmera's in-house agent is not callable over MCP;
+   Studio's locked-card child-agent boot and edit_shorts are deliberately
+   unavailable. You must do every requested child edit yourself: call
+   shorts_status, open_short with the board/card or child id, and use the
+   normal editor tools directly.
 
 2. YOU ARE THE ONE TALKING TO THE USER. The ask_user tool exists for the
    in-house agent to suspend a turn; here, just ask them yourself. And nothing
@@ -627,19 +647,33 @@ Two things are different from a normal tool session, and both matter:
    for reading exact positions off a frame — it burns a tenths grid onto what
    it captures, which is how zoom aims and text boxes get their coordinates.
 
-4. PODCAST TO SHORTS IS A PROJECT WORKFLOW. To start one from MCP, call
-   create_project(title, kind="shorts"), upload the long main video, and poll
-   index_status. The shorts planner starts automatically after analysis. Poll
-   shorts_status to get the parent run, every generated child project ID and
-   its render state. Open each ready child with open_short(child_project_id=ID)
-   and refine it
-   YOURSELF with the same editor tools. Use changed-section proofs while
-   iterating, then render_preview(complete=true) once and watch_video to verify
-   the ready edit. Final export is deliberately Studio-only; tell the user the edit
-   is ready for them to export. On an
-   existing normal long-video project, make_shorts starts the same workflow
-   and returns a planner job ID. A source under one minute is already a direct
-   short: edit that project normally instead of trying to extract clips.
+4. PODCAST TO SHORTS IS A DIRECT MCP WORKFLOW. Call create_project(title,
+   kind="shorts"), upload the long main video, and poll index_status. Selection
+   does NOT start automatically. Read the full transcript in pages plus shots;
+   YOU choose the strongest non-overlapping source ranges, then call
+   make_shorts(project_id, clips=[...], style_note=...). The clips argument is
+   required over MCP so Valmera's scout cannot choose on your behalf. This
+   only creates locked source-story children; it does not perform a creative
+   edit and it does not call an internal editor.
+
+   A SHORT IS A MICRO-STORY, NOT A FEW RELATED SENTENCES. Every chosen range
+   must have a hook/setup or intelligible question, development that changes
+   or deepens the idea, and a payoff: resolution, lesson, reveal, consequence
+   or punchline. Include nearby podcast questions/premises when the answer
+   needs them; never begin on contextless "yes/because/it" or stop before the
+   thought resolves. If you cannot separately name setup, development and
+   payoff, reject the range even if one quote is catchy.
+
+   Poll shorts_status to get every locked child project ID. Open each with
+   open_short(child_project_id=ID), watch and hear the actual selected story,
+   decide its visual and sonic treatment in context, and make all EDL edits
+   YOURSELF. Research B-roll as evidence rather than wallpaper; choose music,
+   captions, framing, cards, motion and sound by judgement instead of quotas.
+   Render_preview(complete=true) once the whole edit is coherent, then
+   watch_video to verify it. That direct MCP edit advances and unlocks the
+   Studio card; never press or emulate Studio's Edit-agent action. Final export is deliberately Studio-only.
+   A source under one minute is already one direct short: edit that project
+   normally instead of starting the multi-clip workflow.
 
 Nothing is charged to their Valmera credits for the thinking you do — but a
 render, a look at the footage and a generated image are real work on real
@@ -976,10 +1010,10 @@ def _t_create_project(tok, args):
         return (f"Created Podcast to Shorts project {pid} (\"{title}\") and "
                 "selected it for navigation. Pass that project_id to "
                 "upload_start for the long main video "
-                "and upload_finish. After index_status reaches done, the "
-                "shorts run starts automatically; poll shorts_status to see "
-                "each generated child project and open_project(child_id) to "
-                "refine it.")
+                "and upload_finish. After index_status reaches done, read the "
+                "full transcript and call make_shorts with explicit clips; "
+                "nothing selects story arcs automatically. Then poll "
+                "shorts_status and open each child for direct editing.")
     return (f"Created editor project {pid} (\"{title}\") and selected it for "
             "navigation. Pass that project_id to upload_start, or use it on "
             "every editor call while building a canvas program.")
@@ -1149,7 +1183,8 @@ def _t_shorts_status(tok, args):
                                       c.get("child_project_id") or 10 ** 12))
         child_ids = [int(c["child_project_id"]) for c in clips
                      if c.get("child_project_id")]
-        finals = {}
+        finals, latest_versions, previews = {}, {}, {}
+        editor_jobs, mcp_jobs = {}, {}
         if child_ids:
             cur.execute("""SELECT DISTINCT ON (project_id)
                                   project_id, id, state, progress, error
@@ -1157,6 +1192,38 @@ def _t_shorts_status(tok, args):
                            WHERE project_id = ANY(%s) AND type = 'final'
                            ORDER BY project_id, id DESC""", (child_ids,))
             finals = {r["project_id"]: r for r in cur.fetchall()}
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id, version
+                           FROM edls WHERE project_id = ANY(%s)
+                           ORDER BY project_id, version DESC""", (child_ids,))
+            latest_versions = {
+                r["project_id"]: int(r["version"])
+                for r in cur.fetchall() if r.get("version") is not None
+            }
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id, id, state, progress, error
+                           FROM video_jobs
+                           WHERE project_id = ANY(%s)
+                             AND type = 'agent_turn'
+                             AND payload->>'shorts_boot' = 'true'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            editor_jobs = {r["project_id"]: r for r in cur.fetchall()}
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id, id, state, progress, error
+                           FROM video_jobs
+                           WHERE project_id = ANY(%s) AND type = 'mcp_tool'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            mcp_jobs = {r["project_id"]: r for r in cur.fetchall()}
+            cur.execute("""SELECT DISTINCT ON (project_id)
+                                  project_id,
+                                  CASE WHEN meta->>'edl_version' ~ '^[0-9]+$'
+                                       THEN (meta->>'edl_version')::int
+                                       ELSE NULL END AS edl_version
+                           FROM assets
+                           WHERE project_id = ANY(%s) AND kind = 'render'
+                             AND meta->>'variant' = 'preview'
+                           ORDER BY project_id, id DESC""", (child_ids,))
+            previews = {r["project_id"]: r for r in cur.fetchall()}
 
     status = shorts.get("status") or (job or {}).get("state") or "not started"
     head = (f"Podcast shorts parent [{parent_id}] {parent['title']} — "
@@ -1171,7 +1238,8 @@ def _t_shorts_status(tok, args):
             return parent_note + head + " No child clips have been published yet."
         return (parent_note + head + " No generated clips exist yet. For an "
                 "indexed long video, call make_shorts; a project created with "
-                "kind='shorts' starts it automatically after analysis.")
+                "kind='shorts' waits for your explicit story arcs after "
+                "analysis—it does not select clips automatically.")
 
     lines = []
     for card, clip in enumerate(clips, 1):
@@ -1183,13 +1251,39 @@ def _t_shorts_status(tok, args):
                 f"{clip.get('title') or 'Untitled short'}"]
         if duration is not None:
             bits.append(f"{duration:.1f}s")
-        if clip.get("edl_version"):
-            bits.append(f"edit v{clip['edl_version']}")
+        seed_version = int(clip.get("seed_edl_version")
+                           or clip.get("edl_version") or 1)
+        live_version = int(latest_versions.get(child_id) or seed_version)
+        boot = editor_jobs.get(child_id)
+        direct = mcp_jobs.get(child_id)
+        final = finals.get(child_id)
+        active = next((row for row in (boot, direct)
+                       if row and row["state"] in ("queued", "running")), None)
+        preview = previews.get(child_id) or {}
+        preview_current = bool(
+            preview.get("edl_version") is not None
+            and int(preview["edl_version"]) >= live_version)
+        if active:
+            who = "Studio child agent" if active is boot else "this MCP editor"
+            bits.append(f"EDITING by {who}: {active['state']} "
+                        f"{active.get('progress') or 0}% (job {active['id']})")
+        elif live_version > seed_version and preview_current:
+            bits.append(f"READY / unlocked after direct edit v{live_version}")
+        elif boot and boot["state"] == "done":
+            bits.append("LOCKED — Studio editor finished without a complete "
+                        "new preview; the card can be retried")
+        elif final and final["state"] == "done":
+            # Boards completed by the pre-lock pipeline already contain a
+            # real finished edit. Keep them openable through a rolling deploy.
+            bits.append(f"READY / legacy rendered edit v{live_version}")
+        elif boot and boot["state"] == "failed":
+            bits.append("LOCKED — Studio editor failed; it may be retried")
+        elif clip.get("edl_version") or clip.get("seed_edl_version"):
+            bits.append(f"LOCKED raw story cut v{seed_version}")
         elif clip.get("seed_error"):
             bits.append(f"BUILD FAILED: {str(clip['seed_error'])[:160]}")
         else:
             bits.append("still building")
-        final = finals.get(child_id)
         if final:
             fb = f"final {final['state']} (job {final['id']}"
             if final["state"] in ("queued", "running"):
@@ -1198,6 +1292,17 @@ def _t_shorts_status(tok, args):
             if final.get("error"):
                 fb += f": {str(final['error'])[:120]}"
             bits.append(fb)
+        story = clip.get("story") or {}
+        if isinstance(story, dict) and any(story.values()):
+            bits.append("story: " + " -> ".join(
+                str(story.get(stage) or "?")[:90]
+                for stage in ("setup", "development", "payoff")))
+        if clip.get("visual_direction"):
+            bits.append("design: " + str(clip["visual_direction"])[:180])
+        if clip.get("broll"):
+            bits.append("B-roll plan: " + "; ".join(
+                f"{m.get('at')}s {m.get('query')} ({m.get('purpose')})"
+                for m in clip["broll"][:4]))
         lines.append("  " + " — ".join(bits))
 
     tail = (f"For DIRECT editing by this MCP model: "
@@ -1205,9 +1310,9 @@ def _t_shorts_status(tok, args):
             "open_short(child_project_id=ID), use the "
             "normal editor tools on that child EDL, render_preview and "
             "watch_video to verify it. Final export is Studio-only; tell the "
-            "user when the edit is ready to export. "
-            "edit_shorts is different: it delegates a prompt to Valmera's "
-            "in-house agents instead of editing directly.")
+            "user when the edit is ready to export. Valmera's in-house agent "
+            "is not callable over MCP; this MCP model must make every child "
+            "edit itself.")
     return parent_note + head + f" {len(clips)} clip(s):\n" + \
         "\n".join(lines) + "\n\n" + tail
 
@@ -1493,10 +1598,7 @@ def _handle(tok, msg):
         if not isinstance(args, dict):
             return _result(req_id, _text("arguments must be an object.", True))
         if name in MCP_DENIED_TOOLS:
-            return _result(req_id, _text(
-                "Final export is deliberately unavailable over MCP. Finish "
-                "and verify the edit with render_preview/watch_video, then "
-                "ask the user to export it from Valmera Studio.", True))
+            return _result(req_id, _text(MCP_DENIED_MESSAGES[name], True))
         try:
             if name in SESSION_IMPL:
                 out = SESSION_IMPL[name](tok, args)
@@ -1602,7 +1704,7 @@ def server_card():
         "title": "Valmera — agentic AI video editor",
         "description":
             "Edit real video from inside an AI conversation. Upload footage, "
-            "describe the edit in plain English, and the agent cuts silences "
+            "describe the edit in plain English, and the connected model cuts silences "
             "and filler words, adds word-timed captions, reframes to 9:16, "
             "mixes music, grades the picture, renders a preview, and looks at "
             "the frames it produced. The user creates the full-quality MP4 "
@@ -1632,9 +1734,9 @@ def server_card():
             "and a wait_for_job tool rather than a fabricated completion.",
             "Tools edit a versioned edit decision list. The uploaded file is "
             "never modified and any cut can be restored.",
-            "The registry served here is the same one Valmera's own agent "
-            "uses — it is not re-declared for MCP, so there is no second list "
-            "that can drift.",
+            "Direct editing tools use the same live registry and implementations "
+            "as Valmera's own agent; agent-delegation tools are intentionally "
+            "excluded from MCP.",
             "A tool whose backing service is unconfigured is hidden from "
             "tools/list rather than exposed and failing at call time.",
             "Editing one project from the web studio and over MCP at the same "
@@ -1642,6 +1744,7 @@ def server_card():
         ],
         "notSupported": [
             "creating final exports (final delivery is Studio-only)",
+            "delegating edits to Valmera's in-house agent",
             "text-to-video generation of a whole video",
             "SRT/VTT import or export (captions are burned in)",
             "team seats or collaboration",

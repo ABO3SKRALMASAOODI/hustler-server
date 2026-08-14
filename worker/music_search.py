@@ -8,11 +8,14 @@ stock.py idiom exactly:
 
   Jamendo   (JAMENDO_CLIENT_ID) — a real music catalog with search and
             per-track Creative Commons licensing; ordered by THIS MONTH'S
-            popularity so results skew current. Tried first when
-            configured.
+            popularity so results skew current.
   Openverse (anonymous/auth)    — the CC audio aggregator (Jamendo, FMA,
-            Wikimedia...) as the always-available fallback. Production can
-            authenticate for a larger, steadier quota.
+            Wikimedia...) and always available. Production can authenticate
+            for a larger, steadier quota.
+
+Both configured catalogs are searched concurrently. Results are quality
+ranked inside each source and interleaved, so one provider's latency, outage,
+or house style cannot silently decide the soundtrack.
 
 LICENSING IS INFORMATION, NOT A WALL. Every hit carries its license and
 author, and the line the agent reads states the obligation outright —
@@ -37,6 +40,7 @@ import subprocess
 import threading
 import time
 import uuid as uuidlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 import net_fetch
@@ -270,10 +274,59 @@ def _openverse_search(query, min_s, max_s, count, commercial_only=False):
     return out
 
 
+def _quality_score(item, query, min_s=None, max_s=None):
+    """Provider-neutral editorial relevance for a music results grid."""
+    title = str(item.get("title") or "").casefold()
+    query = " ".join(re.findall(r"[\w]+", str(query or "").casefold()))
+    words = [word for word in query.split() if len(word) > 2]
+    score = 0.0
+    if query and query in title:
+        score += 10.0
+    score += 2.5 * sum(1 for word in words if word in title)
+    if "nc" in str(item.get("license") or "").casefold():
+        score -= 8.0
+    try:
+        duration = float(item.get("duration_s") or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration:
+        if min_s is not None and duration >= float(min_s):
+            score += 1.5
+        if max_s is not None and duration <= float(max_s):
+            score += 1.5
+        if min_s is None and max_s is None and 45 <= duration <= 360:
+            score += 1.0
+    if any(term in title for term in ("test tone", "sound check",
+                                      "full album", "compilation")):
+        score -= 10.0
+    return score
+
+
+def _diverse_rank(provider_hits, query, min_s, max_s, count):
+    """Quality-sort within catalogs, then interleave their house styles."""
+    buckets = {}
+    for provider, hits in provider_hits:
+        ranked = sorted(enumerate(hits), key=lambda row: (
+            -_quality_score(row[1], query, min_s, max_s), row[0],
+            str(row[1].get("id") or "")))
+        if ranked:
+            buckets[provider] = [item for _idx, item in ranked]
+    out = []
+    while buckets and len(out) < count:
+        order = sorted(buckets, key=lambda name: (
+            -_quality_score(buckets[name][0], query, min_s, max_s), name))
+        for name in order:
+            if len(out) >= count:
+                break
+            out.append(buckets[name].pop(0))
+            if not buckets[name]:
+                del buckets[name]
+    return out
+
+
 def search(query, min_s=None, max_s=None, count=MAX_RESULTS,
            commercial_only=False):
-    """Search the configured providers, first-with-results wins (the
-    stock.py rule: merged catalogs read as noise)."""
+    """Search every provider in parallel and return a diverse ranked page."""
     if not available():
         raise MusicSearchError("music search is disabled on this deployment")
     query = (query or "").strip()
@@ -285,23 +338,20 @@ def search(query, min_s=None, max_s=None, count=MAX_RESULTS,
     if config.JAMENDO_CLIENT_ID:
         lanes.append(("jamendo", _jamendo_search))
     lanes.append(("openverse", _openverse_search))
-    for name, fn in lanes:
-        try:
-            hits = fn(query, min_s, max_s, count, commercial_only)
-        except Exception as e:
-            errors.append(f"{name}: {str(e)[:120]}")
-            continue
-        if hits:
-            # Non-commercial licenses sink to the bottom even when the caller
-            # did not (or could not — a Japanese business brief carries no
-            # English "ad"/"client" keyword) flag commercial use. The agent
-            # picks from the top of this list, so the default pick must be a
-            # track the user can lawfully publish; NC stays available for the
-            # user who says the project is personal. Stable sort: provider
-            # relevance order is preserved within each license tier.
-            if not commercial_only:
-                hits.sort(key=lambda h: "nc" in (h.get("license") or "").lower())
-            return hits[:count]
+    got = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(lanes))) as pool:
+        futures = {
+            pool.submit(fn, query, min_s, max_s, count, commercial_only): name
+            for name, fn in lanes}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                got[name] = future.result()
+            except Exception as e:
+                errors.append(f"{name}: {str(e)[:120]}")
+    provider_hits = [(name, got.get(name) or []) for name, _fn in lanes]
+    if any(hits for _name, hits in provider_hits):
+        return _diverse_rank(provider_hits, query, min_s, max_s, count)
     if errors and len(errors) == len(lanes):
         raise MusicSearchError("; ".join(errors))
     return []

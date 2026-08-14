@@ -110,6 +110,41 @@ def test_muted_window_drops_only_the_captions_inside_it():
          if _end_s(ln) <= 4.15 or _start_s(ln) >= 7.85]
 
 
+def test_designed_text_owns_its_mute_regardless_of_caption_tool_order():
+    base = {"keep": [[0.0, 12.0]],
+            "captions": {"mode": "from_transcript",
+                         "max_words_per_caption": 2}}
+    before = _dialogue(_dump(base))
+    with_text = _dump({**base, "texts": [{
+        "id": "tx1", "text": "THE POINT", "start": 4.0, "end": 8.0,
+        "template": "title", "mute_captions": True,
+    }]})
+    during = _dialogue(with_text)
+
+    assert captions.effective_caption_mutes(with_text) == [[4.0, 8.0]]
+    assert len(before) == 6 and len(during) == 4
+    assert all(_end_s(line) <= 4.15 or _start_s(line) >= 7.85
+               for line in during)
+
+    # Removing the owner removes the derived mute. No anonymous interval is
+    # stranded, so captions return without a compensating cleanup tool call.
+    removed = dict(with_text)
+    removed["texts"] = []
+    assert captions.effective_caption_mutes(removed) == []
+    assert _dialogue(removed) == before
+
+
+def test_owned_and_manual_caption_mutes_form_one_merged_union():
+    edl = _dump({
+        "keep": [[0.0, 12.0]],
+        "caption_mutes": [[1.0, 3.0], [9.0, 10.0]],
+        "texts": [{"id": "tx1", "text": "BRIDGE", "start": 2.5,
+                   "end": 5.0, "mute_captions": True}],
+    })
+    assert captions.effective_caption_mutes(edl) == [
+        [1.0, 5.0], [9.0, 10.0]]
+
+
 def test_mute_applies_in_every_emission_mode():
     for style in ({"preset": "luxe"}, {"preset": "karaoke"},
                   {"dynamic": True}, None):

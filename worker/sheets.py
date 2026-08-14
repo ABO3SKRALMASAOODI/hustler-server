@@ -229,7 +229,8 @@ def build_timestamp_sheet(frames, out_path):
     return out_path
 
 
-def build_frames_sheet(video_path, out_path, times, cols=3, max_tiles=9):
+def build_frames_sheet(video_path, out_path, times, cols=3, max_tiles=9,
+                       parallelism=1):
     """Numbered tiles at EXPLICIT times — round 81's verify sheet.
 
     build_result_sheet samples the whole render evenly, which is the right
@@ -242,14 +243,26 @@ def build_frames_sheet(video_path, out_path, times, cols=3, max_tiles=9):
     times = [float(t) for t in (times or [])][:max(1, int(max_tiles))]
     if not times:
         raise ValueError("no times")
-    tmp_frames = []
-    for i, t in enumerate(times):
+    def _extract(item):
+        i, t = item
         fp = out_path + f".vframe{i}.jpg"
         try:
             media.frame_at(video_path, t, fp, width=426)
-            tmp_frames.append((t, fp))
+            return t, fp
         except Exception:
-            tmp_frames.append((t, None))
+            return t, None
+
+    jobs = list(enumerate(times))
+    n = max(1, min(int(parallelism or 1), len(jobs)))
+    if n == 1:
+        tmp_frames = [_extract(job) for job in jobs]
+    else:
+        # Complete screening seeks a 480p preview, so four concurrent single-
+        # frame decoders are cheap and turn 32 serial ffmpeg startups into
+        # roughly eight waves. Existing verify/caption callers remain serial
+        # unless they explicitly opt in.
+        with futures.ThreadPoolExecutor(max_workers=n) as pool:
+            tmp_frames = list(pool.map(_extract, jobs))
     cols = max(1, min(int(cols), len(tmp_frames)))
     rows = (len(tmp_frames) + cols - 1) // cols
     canvas = Image.new("RGB", (cols * TILE_W, rows * (TILE_H + LABEL_H)),

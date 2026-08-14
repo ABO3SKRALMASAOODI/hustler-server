@@ -2169,6 +2169,41 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
 MUTE_GRAZE_S = 0.15
 
 
+def effective_caption_mutes(edl):
+    """Explicit mute spans plus suppression owned by live text items.
+
+    `caption_mutes` remains the user's/manual global control. Designed text
+    uses ownership instead: its mute follows the item through timeline edits
+    and disappears when the item does. The union is merged only for simpler
+    word/event comparisons; historical EDLs with no owned mutes produce the
+    same spans and therefore the same ASS bytes.
+    """
+    spans = []
+    for raw in (edl.get("caption_mutes") or []):
+        try:
+            s, e = float(raw[0]), float(raw[1])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if e > s:
+            spans.append([s, e])
+    for text in (edl.get("texts") or []):
+        if not isinstance(text, dict) or not text.get("mute_captions"):
+            continue
+        try:
+            s, e = float(text["start"]), float(text["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if e > s:
+            spans.append([s, e])
+    merged = []
+    for s, e in sorted(spans):
+        if merged and s <= merged[-1][1] + 0.001:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return merged
+
+
 def apply_mutes(events, mutes):
     """Drop caption events that are on screen during a caption_mutes window
     (PROGRAM seconds). Events are DROPPED, never trimmed: premium/karaoke
@@ -2330,6 +2365,7 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
     captions = edl.get("captions")
     if not captions:
         return None
+    mutes = effective_caption_mutes(edl)
     if isinstance(captions, dict) and captions.get("mode") == "from_transcript":
         # Hesitation sounds are in the INDEX (round 69) so remove_filler_words
         # has real spans to cut — they were absent before, which is why that
@@ -2349,7 +2385,7 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         # Mutes at the WORD level, same stage (round 96c): grouping then
         # builds events around the gap, so captions resume at the window's
         # edge instead of one whole block late.
-        out_words = _drop_muted_words(out_words, edl.get("caption_mutes"))
+        out_words = _drop_muted_words(out_words, mutes)
         global_style = captions.get("style")
         if captions.get("placement_track"):
             events = _positioned_events(
@@ -2382,7 +2418,7 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
         # muted over 0-5.5s, dragging the first caption to 0.0 would burn it
         # straight across the title it was muted to clear.
         mute0 = any(float(m0) <= 0.05 for m0, _m1 in
-                    (edl.get("caption_mutes") or []))
+                    mutes)
         if events and not opens_on_insert and not mute0 \
                 and 0.0 < events[0]["start"] <= FIRST_CAPTION_LEAD_IN_S:
             events[0]["start"] = 0.0
@@ -2396,9 +2432,9 @@ def build_ass(edl, index, tl, path, play_res=BASE_PLAY_RES):
             captions.get("mode") == "from_transcript":
         # Words inside mute windows are already gone (pre-grouping); only
         # display padding can still reach into a window — pull it back.
-        events = _clamp_event_ends_to_mutes(events, edl.get("caption_mutes"))
+        events = _clamp_event_ends_to_mutes(events, mutes)
     else:
-        events = apply_mutes(events, edl.get("caption_mutes"))
+        events = apply_mutes(events, mutes)
     if not events:
         return None
     return write_ass(events, path, global_style, play_res)

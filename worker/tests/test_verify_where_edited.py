@@ -143,6 +143,21 @@ def test_build_frames_sheet_tiles_the_requested_moments(tmp_path):
         sheets.build_frames_sheet(src, out, [])
 
 
+def test_build_frames_sheet_parallel_path_keeps_tile_order(tmp_path):
+    src = str(tmp_path / "src-parallel.mp4")
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=size=320x180:rate=10:duration=3",
+                    "-pix_fmt", "yuv420p", src],
+                   check=True, capture_output=True)
+    out = str(tmp_path / "parallel.jpg")
+    sheets.build_frames_sheet(
+        src, out, [0.2, 0.7, 1.2, 1.7, 2.2], cols=4,
+        max_tiles=5, parallelism=4)
+    from PIL import Image
+    assert Image.open(out).size == (
+        4 * sheets.TILE_W, 2 * (sheets.TILE_H + sheets.LABEL_H))
+
+
 # ── the check: claims reach the reviewer, degrade without the sheet ──────
 
 class _Ctx:

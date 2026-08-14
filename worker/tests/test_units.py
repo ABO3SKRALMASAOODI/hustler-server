@@ -1075,8 +1075,9 @@ check("long clips can be inserted whole without a keyword gate",
       and ictx2.written["inserts"][0].get("source_start_s") is None)
 r = agent_tools.insert_media(ictx2, "clips/1/rec.mp4", 3.0,
                              duration_s=5.0, clip_start_s=520.0)
-check("window past the end of the clip is refused with the max offset",
-      r.startswith("REJECTED") and "517.5" in r)
+check("window past the end of the clip is clamped to remaining length",
+      r.startswith("EDL") and "used 2.5s" in r
+      and ictx2.written["inserts"][-1]["duration_s"] == 2.5)
 ictx3 = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
 agent_tools.insert_media(ictx3, "clips/1/rec.mp4", 0.1, duration_s=2.0,
                          clip_start_s=10.0)
@@ -1444,8 +1445,9 @@ check("extracted-audio attachment produces no music context line",
       al._attachment_context(_AttDB(aud), _AttCtx(), msg) == "")
 mus = dict(aud, kind="music", storage_key="music/1/song.mp3",
            meta={"filename": "song.mp3"})
-check("real music attachment still produces the context line",
-      "User attached music" in
+check("real audio attachment still produces the context line without "
+      "assuming its editorial role",
+      "User attached an audio file" in
       al._attachment_context(_AttDB(mus), _AttCtx(), msg))
 
 # ─── Round 9: transitions, zoom modes, Ken Burns inserts, caption anim ──────
@@ -1501,11 +1503,13 @@ km_edl = validate_edl(
                   "motion": "zoom_in"}]}, 60).model_dump()
 check("image insert motion survives validation",
       km_edl["inserts"][0]["motion"] == "zoom_in")
-expect_reject("motion on a video insert",
-              {"keep": [[0, 10]],
-               "inserts": [{"id": "i1", "asset_key": "clips/1/a.mp4",
-                            "kind": "video", "at_output_s": 0.0,
-                            "duration_s": 3.0, "motion": "zoom_in"}]}, 60)
+vm_edl = validate_edl(
+    {"keep": [[0, 10]],
+     "inserts": [{"id": "i1", "asset_key": "clips/1/a.mp4",
+                  "kind": "video", "at_output_s": 0.0,
+                  "duration_s": 3.0, "motion": "zoom_in"}]}, 60).model_dump()
+check("video insert motion survives validation",
+      vm_edl["inserts"][0]["motion"] == "zoom_in")
 check("caption animation survives validation",
       validate_edl({"keep": [[0, 10]],
                     "captions": {"mode": "from_transcript",
@@ -1627,16 +1631,14 @@ ictx_kb2 = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
 r = agent_tools.insert_media(ictx_kb2, "clips/1/rec.mp4", 0.0,
                              duration_s=2.0, clip_start_s=1.0,
                              motion="zoom_in")
-# Round 101: the placement LANDS and the redundant argument is dropped with a
-# note. It used to be a REJECTED — 92 of them in one week, each throwing away a
-# fully-specified insert (and a step of the user's wait) over an argument the
-# tool could simply ignore.
-check("motion on a video clip is dropped, not refused — the insert lands",
+# Production evidence: agents requested local motion on video B-roll 89 times
+# in one week. It is a real capability now, not a rejected or ignored argument.
+check("motion on a video clip is stored and the insert lands",
       not r.startswith("REJECTED") and
       ictx_kb2.written is not None and
-      "motion" not in ictx_kb2.written["inserts"][0])
-check("...and the note names add_zoom as the way to move a clip",
-      "motion='zoom_in' was ignored" in r and "add_zoom(" in r)
+      ictx_kb2.written["inserts"][0]["motion"] == "zoom_in")
+check("...and the result describes the local camera treatment",
+      "local zoom_in camera move" in r and "ignored" not in r)
 check("style parser accepts animation",
       agent_tools._parse_partial_style({"animation": "slide_up"})
       == {"animation": "slide_up"})
@@ -1694,6 +1696,14 @@ check("image insert motion adds a per-block zoompan",
       "[v_insn0]zoompan=z='1+0.25*(on/90)'" in g_kb)
 check("motion zoompan feeds the concat block",
       "[v_ins0]" in g_kb)
+g_vm = build_filtergraph(vm_edl, 60.0, True,
+                         Timeline(vm_edl["keep"], vm_edl["inserts"]),
+                         None, [], index, preview=False, W=720, H=720,
+                         fps=30.0, frame_mode=None,
+                         insert_inputs=[(2, vm_edl["inserts"][0], True)],
+                         silence_idx=1)
+check("video insert motion uses the same duration-preserving zoompan",
+      "[v_insn0]zoompan=z='1+0.25*(on/90)'" in g_vm)
 
 print("== Round-9 captions: entrance animations ==")
 anim_events = [{"start": 0.0, "end": 2.0, "text": "HELLO"}]

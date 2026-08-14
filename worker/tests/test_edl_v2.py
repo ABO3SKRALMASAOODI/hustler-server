@@ -14,6 +14,8 @@ import copy
 import sys
 import os
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
@@ -79,6 +81,57 @@ def test_v2_roundtrip_stable():
     n1 = validate_edl(copy.deepcopy(v2), 30.0).model_dump()
     n2 = validate_edl(copy.deepcopy(n1), 30.0).model_dump()
     assert edl_signature(n1) == edl_signature(n2)
+
+
+def test_text_motion_uses_universal_local_keyframes():
+    edl = copy.deepcopy(LEGACY)
+    edl["texts"] = [{
+        "id": "tx-motion", "text": "MOVE WITH ME", "start": 2.0,
+        "end": 5.0, "template": "title", "entrance": "none",
+        "exit": "none",
+        "motion": {
+            "x": [{"t": 0.0, "v": -0.1},
+                  {"t": 1.0, "v": 0.5, "ease": "out"}],
+            "y": 0.35,
+            "scale": [{"t": 0.0, "v": 0.75},
+                      {"t": 0.3, "v": 1.08, "ease": "out"},
+                      {"t": 0.6, "v": 1.0, "ease": "in_out"}],
+            "rotation": -8,
+            "opacity": [{"t": 0.0, "v": 0.0},
+                        {"t": 0.18, "v": 1.0, "ease": "out"}],
+        },
+    }]
+    normalized = validate_edl(edl, 30.0).model_dump()
+    motion = normalized["texts"][0]["motion"]
+    assert motion["x"][1]["ease"] == "out"
+    assert motion["x"][1]["t"] == 1.0       # LOCAL, not program 3.0
+    assert motion["y"] == 0.35
+    assert motion["rotation"] == -8.0
+
+
+def test_text_motion_rejects_two_animation_authorities_and_bad_local_time():
+    base = copy.deepcopy(LEGACY)
+    base["texts"] = [{
+        "id": "tx", "text": "CONFLICT", "start": 1.0, "end": 3.0,
+        "entrance": "pop", "motion": {"opacity": 0.8},
+    }]
+    with pytest.raises(Exception, match="motion owns the animation curve"):
+        validate_edl(base, 30.0)
+
+    base["texts"][0]["entrance"] = "none"
+    base["texts"][0]["motion"] = {
+        "x": [{"t": 0.0, "v": 0.2}, {"t": 2.5, "v": 0.8}],
+    }
+    with pytest.raises(Exception, match="keyframe times are LOCAL"):
+        validate_edl(base, 30.0)
+
+    base["texts"][0]["motion"] = {"x": 0.5}
+    base["texts"][0]["behind"] = {
+        "asset_key": "masks/person.mp4", "src_start": 1.0,
+        "src_end": 3.0, "fp": "abc",
+    }
+    with pytest.raises(Exception, match="cannot be combined with a subject"):
+        validate_edl(base, 30.0)
 
 
 def test_anim_value_easings():
@@ -251,6 +304,29 @@ def test_remap_stylize_and_overlay_keyframes():
     assert (st1["start"], st1["end"]) == (5.0, 10.0)
 
 
+def test_shortened_text_clips_its_local_motion_curve():
+    edl = {
+        "keep": [[0.0, 4.0]],
+        "texts": [{
+            "id": "tx1", "text": "FOLLOW THROUGH", "start": 1.0,
+            "end": 8.0, "entrance": "none", "exit": "none",
+            "motion": {
+                "x": [{"t": 0.0, "v": 0.2},
+                      {"t": 6.5, "v": 0.8, "ease": "in_out"}],
+                "opacity": [{"t": 0.0, "v": 1.0},
+                            {"t": 7.0, "v": 0.0}],
+            },
+        }],
+    }
+    remap_program_items(edl, Timeline([[0.0, 10.0]], []),
+                        Timeline([[0.0, 4.0]], []))
+    tx = edl["texts"][0]
+    assert tx["end"] == 4.0
+    for curve in tx["motion"].values():
+        assert not isinstance(curve, list) or curve[-1]["t"] <= 3.0
+    validate_edl(edl, 10.0)       # no stranded keyframe rejects the cut
+
+
 def test_title_card_text_stays_on_its_card():
     """Round 40 regression. A card's program position moves whenever ANY
     earlier insert is added or removed. Before anchor_insert the card's words
@@ -327,7 +403,9 @@ def test_anchor_insert_is_signature_safe():
     edl["texts"] = [{"id": "tx1", "text": "HELLO", "start": 1.0, "end": 3.0}]
     n = validate_edl(copy.deepcopy(edl), 30.0).model_dump()
     assert n["texts"][0]["anchor_insert"] is None
+    assert n["texts"][0]["mute_captions"] is None
     assert '"anchor_insert"' not in edl_signature(n)
+    assert '"mute_captions"' not in edl_signature(n)
 
 
 def test_karaoke_group_field_is_signature_safe():

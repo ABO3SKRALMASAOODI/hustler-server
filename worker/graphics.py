@@ -1,4 +1,4 @@
-"""Motion-graphics text layer: EDL.texts -> a SECOND .ass file.
+"""Motion-graphics layer: EDL.texts + EDL.vectors -> a SECOND .ass file.
 
 Why a second file instead of folding these events into the caption .ass:
 captions own their file AND its cache fingerprint — caption emission is
@@ -26,6 +26,8 @@ already concrete data in the EDL; this module only compiles them — it reads
 no index, no perception, no clock.
 """
 
+import re
+
 # Proven caption mechanics are IMPORTED, not duplicated: color conversion,
 # time formatting, escaping, word wrapping and the fonts directory all keep a
 # single implementation. FONTS_DIR is re-exported so the renderer can pass
@@ -33,6 +35,7 @@ no index, no perception, no clock.
 from captions import (BASE_PLAY_RES, DARK_TEXT, DEFAULT_HIGHLIGHT,  # noqa: F401
                       FONTS_DIR, _ass_time, _esc, _inline_hl, _wrap,
                       ass_color)
+from schemas import anim_bounds, anim_value
 
 # Graphics may legitimately be short accents (a 0.5s callout pop); 0.3s is
 # the floor below which an entrance animation cannot even finish.
@@ -381,7 +384,8 @@ def _wrap_hard(text, line_chars):
     return lines or [""]
 
 
-def _compile_item(tx, out_dur, play_res, y_shift=0.0):
+def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
+                  size_scale_bounds=(0.4, 3.0)):
     """One TextItem dict -> event dict or None (fully outside the program).
 
     All geometry is resolved HERE, at compile time, from concrete EDL data —
@@ -405,7 +409,7 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0):
     end = min(float(tx.get("end") or 0.0), out_dur)
     if start >= out_dur - 0.05 or end <= 0:
         return None
-    if end - start < GFX_MIN_EVENT_S:
+    if enforce_min and end - start < GFX_MIN_EVENT_S:
         end = min(out_dur, start + GFX_MIN_EVENT_S)
         if end - start < GFX_MIN_EVENT_S:
             start = max(0.0, end - GFX_MIN_EVENT_S)
@@ -414,7 +418,8 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0):
 
     # ── resolved look: template defaults, item overrides on top ──
     try:
-        size_scale = min(max(float(tx.get("size_scale") or 1.0), 0.4), 3.0)
+        size_scale = min(max(float(tx.get("size_scale") or 1.0),
+                             size_scale_bounds[0]), size_scale_bounds[1])
     except (TypeError, ValueError):
         size_scale = 1.0
     px = max(12, round(tpl["base_size"] * f * size_scale))
@@ -613,7 +618,388 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0):
             "text": "{" + head + "}" + r"\N".join(out_lines),
             "top": top, "bottom": top + block_h,
             "left": left, "right": left + max_w,
-            "height": block_h}
+            "height": block_h, "anchor_x": ax, "anchor_y": ay,
+            "base_x_frac": x_frac, "base_y_frac": y_frac}
+
+
+def _ellipse_path(cx, cy, rx, ry, reverse=False):
+    """Closed ASS cubic path for an ellipse, optionally reversed."""
+    k = 0.5522847498
+    if not reverse:
+        return (f"m {cx + rx:.2f} {cy:.2f} "
+                f"b {cx + rx:.2f} {cy + k*ry:.2f} "
+                f"{cx + k*rx:.2f} {cy + ry:.2f} {cx:.2f} {cy + ry:.2f} "
+                f"b {cx - k*rx:.2f} {cy + ry:.2f} "
+                f"{cx - rx:.2f} {cy + k*ry:.2f} {cx - rx:.2f} {cy:.2f} "
+                f"b {cx - rx:.2f} {cy - k*ry:.2f} "
+                f"{cx - k*rx:.2f} {cy - ry:.2f} {cx:.2f} {cy - ry:.2f} "
+                f"b {cx + k*rx:.2f} {cy - ry:.2f} "
+                f"{cx + rx:.2f} {cy - k*ry:.2f} {cx + rx:.2f} {cy:.2f}")
+    # The inner ellipse of a ring runs in the opposite direction. libass's
+    # winding fill then leaves a truly transparent centre over any footage.
+    return (f"m {cx + rx:.2f} {cy:.2f} "
+            f"b {cx + rx:.2f} {cy - k*ry:.2f} "
+            f"{cx + k*rx:.2f} {cy - ry:.2f} {cx:.2f} {cy - ry:.2f} "
+            f"b {cx - k*rx:.2f} {cy - ry:.2f} "
+            f"{cx - rx:.2f} {cy - k*ry:.2f} {cx - rx:.2f} {cy:.2f} "
+            f"b {cx - rx:.2f} {cy + k*ry:.2f} "
+            f"{cx - k*rx:.2f} {cy + ry:.2f} {cx:.2f} {cy + ry:.2f} "
+            f"b {cx + k*rx:.2f} {cy + ry:.2f} "
+            f"{cx + rx:.2f} {cy + k*ry:.2f} {cx + rx:.2f} {cy:.2f}")
+
+
+def _rounded_rect_path(left, top, right, bottom, radius=0.0):
+    radius = min(max(float(radius or 0.0), 0.0),
+                 max(0.0, (right-left)/2), max(0.0, (bottom-top)/2))
+    if radius < 0.5:
+        return (f"m {left:.2f} {top:.2f} l {right:.2f} {top:.2f} "
+                f"l {right:.2f} {bottom:.2f} l {left:.2f} {bottom:.2f}")
+    k = 0.5522847498
+    c = radius * k
+    return (f"m {left+radius:.2f} {top:.2f} l {right-radius:.2f} {top:.2f} "
+            f"b {right-radius+c:.2f} {top:.2f} {right:.2f} "
+            f"{top+radius-c:.2f} {right:.2f} {top+radius:.2f} "
+            f"l {right:.2f} {bottom-radius:.2f} b {right:.2f} "
+            f"{bottom-radius+c:.2f} {right-radius+c:.2f} {bottom:.2f} "
+            f"{right-radius:.2f} {bottom:.2f} l {left+radius:.2f} {bottom:.2f} "
+            f"b {left+radius-c:.2f} {bottom:.2f} {left:.2f} "
+            f"{bottom-radius+c:.2f} {left:.2f} {bottom-radius:.2f} "
+            f"l {left:.2f} {top+radius:.2f} b {left:.2f} "
+            f"{top+radius-c:.2f} {left+radius-c:.2f} {top:.2f} "
+            f"{left+radius:.2f} {top:.2f}")
+
+
+def _vector_paths(vec, width_px, height_px, play_res):
+    """Return ``[(color, path), ...]`` for one normalized primitive."""
+    w, h = max(1.0, width_px), max(1.0, height_px)
+    # ASS treats drawing coordinates like a glyph box: with \an5, \pos is
+    # the centre of a POSITIVE 0..w / 0..h path. Centring the path around zero
+    # double-applies the half-size offset (the first pixel test put a ring
+    # requested at 180,256 around 90,160). Keep the path positive and let
+    # alignment own its one job.
+    left, right, top, bottom = 0.0, w, 0.0, h
+    cx, cy = w/2, h/2
+    kind = vec.get("kind") or "rectangle"
+    color = vec.get("color") or "#FFFFFF"
+    rounding = float(vec.get("rounding") or 0.0) * min(w, h)
+    if kind == "ellipse":
+        return [(color, _ellipse_path(cx, cy, w/2, h/2))]
+    if kind == "ring":
+        thick = float(vec.get("stroke_width") or 0.006) * min(play_res)
+        thick = min(max(thick, 1.0), max(1.0, min(w, h)/2 - 0.5))
+        outer = _ellipse_path(cx, cy, w/2, h/2)
+        inner = _ellipse_path(cx, cy, max(0.5, w/2-thick),
+                              max(0.5, h/2-thick), reverse=True)
+        return [(color, outer + " " + inner)]
+    if kind == "arrow":
+        head = min(max(h * 0.55, w * 0.12), w * 0.45)
+        shaft = max(1.0, h * 0.34)
+        return [(color,
+                 f"m {left:.2f} {cy-shaft/2:.2f} "
+                 f"l {right-head:.2f} {cy-shaft/2:.2f} "
+                 f"l {right-head:.2f} {top:.2f} l {right:.2f} {cy:.2f} "
+                 f"l {right-head:.2f} {bottom:.2f} "
+                 f"l {right-head:.2f} {cy+shaft/2:.2f} "
+                 f"l {left:.2f} {cy+shaft/2:.2f}")]
+    if kind == "progress":
+        bg = vec.get("background_color") or "#24262B"
+        raw = vec.get("value")
+        value = min(max(float(0.5 if raw is None else raw), 0.0), 1.0)
+        track = _rounded_rect_path(left, top, right, bottom, rounding)
+        fill_right = left + w * value
+        fill = _rounded_rect_path(
+            left, top, fill_right, bottom,
+            min(rounding, max(0.0, (fill_right-left)/2)))
+        if value <= 0.0:
+            return [(bg, track)]
+        if value < 1.0:
+            # Foreground and track must be separate Dialogue events so their
+            # colors can overlap. Give the shorter foreground a pair of
+            # opposite-winding, fill-cancelling rectangles over the unfilled
+            # remainder: libass then measures the same full w×h glyph box for
+            # both events, so \an5 positions them on the same centre while the
+            # cancelled area stays transparent (the ring uses this same proven
+            # winding rule for its centre).
+            spacer = (
+                f" m {fill_right:.2f} {top:.2f} l {right:.2f} {top:.2f} "
+                f"l {right:.2f} {bottom:.2f} l {fill_right:.2f} {bottom:.2f} "
+                f"m {fill_right:.2f} {top:.2f} l {fill_right:.2f} {bottom:.2f} "
+                f"l {right:.2f} {bottom:.2f} l {right:.2f} {top:.2f}")
+            fill += spacer
+        return [(bg, track), (color, fill)]
+    # line is the same general filled geometry as a rectangle; its semantic
+    # name expresses an underline/connector while rotation stays keyframable.
+    radius = rounding if kind == "rectangle" else 0.0
+    return [(color, _rounded_rect_path(left, top, right, bottom, radius))]
+
+
+def _compile_vector_item(vec, out_dur, play_res):
+    """One VectorItem -> one geometry-complete ASS event."""
+    start = max(0.0, float(vec.get("start") or 0.0))
+    end = min(float(vec.get("end") or 0.0), float(out_dur))
+    if start >= out_dur - 0.05 or end - start < 0.01:
+        return None
+    W, H = play_res
+    width = max(1.0, float(vec.get("width") or 0.25) * W)
+    height = max(1.0, float(vec.get("height") or 0.08) * H)
+    x = float(vec.get("x") if vec.get("x") is not None else 0.5)
+    y = float(vec.get("y") if vec.get("y") is not None else 0.5)
+    ax, ay = round(x * W), round(y * H)
+    raw_opacity = vec.get("opacity")
+    opacity = min(max(float(1.0 if raw_opacity is None else raw_opacity),
+                      0.0), 1.0)
+    stroke = float(vec.get("stroke_width") or 0.0) * min(W, H)
+    # Ring thickness is built into its compound path; a libass border would
+    # fatten both the outer and inner edges unpredictably.
+    if vec.get("kind") == "ring":
+        stroke = 0.0
+    stroke_c = _inline_hl(vec.get("stroke_color") or vec.get("color")
+                          or "#FFFFFF")
+    paths = _vector_paths(vec, width, height, play_res)
+    head = (rf"\an5\pos({ax},{ay})\shad0\bord{stroke:.2f}"
+            rf"\3c{stroke_c}\alpha&H{_ass_alpha(opacity):02X}&\p1")
+    components = []
+    for n, (color, path) in enumerate(paths):
+        text = "{" + head + rf"\1c{_inline_hl(color)}" + "}" + path \
+            + r"{\p0}"
+        components.append({
+            "start": start, "end": end, "font": "Inter Display Bold",
+            "text": text, "top": ay-height/2, "bottom": ay+height/2,
+            "left": ax-width/2, "right": ax+width/2, "height": height,
+            "anchor_x": ax, "anchor_y": ay,
+            "base_x_frac": x, "base_y_frac": y,
+        })
+    if not components:
+        return None
+    primary = components[0]
+    if len(components) > 1:
+        primary["_components"] = components[1:]
+    return primary
+
+
+def _motion_curve_times(value, duration_s):
+    """Sampling knots for one AnimFloat.
+
+    ASS can linearly transform scale/rotation/alpha inside one Dialogue
+    event. Curved easing therefore gets three deterministic interior samples;
+    the emitted short linear spans track the same curve `anim_value` uses.
+    This is a render approximation, not an editorial cadence or a cap on the
+    choreography the agent may author.
+    """
+    if not isinstance(value, list):
+        return []
+    kfs = [(float(k.get("t") or 0.0), k.get("ease"))
+           if isinstance(k, dict) else (float(k.t), k.ease) for k in value]
+    times = []
+    for t, _ease in kfs:
+        if 0.0 <= t <= duration_s:
+            times.append(t)
+    for (t0, _), (t1, ease) in zip(kfs, kfs[1:]):
+        lo, hi = max(0.0, t0), min(duration_s, t1)
+        if hi <= lo or ease not in ("in", "out", "in_out"):
+            continue
+        times.extend(lo + (hi - lo) * p for p in (0.25, 0.5, 0.75))
+    return times
+
+
+def _motion_times(motion, duration_s):
+    """Union all property knots on ASS's centisecond clock."""
+    raw = [0.0, duration_s]
+    for value in (motion or {}).values():
+        raw.extend(_motion_curve_times(value, duration_s))
+    # Dialogue timestamps have centisecond precision. Quantizing before
+    # segmentation prevents two distinct keyframes becoming a zero-duration
+    # event only when the final file is written.
+    return sorted({min(max(round(float(t), 2), 0.0), duration_s)
+                   for t in raw})
+
+
+def _motion_value(value, default, t, segment_end=False):
+    """Evaluate a property, preserving an incoming `hold` at its last frame.
+
+    `anim_value(v, knot)` correctly returns the NEW value at a hold knot.
+    For the event ending at that knot ASS needs the value immediately before
+    it; the next event begins at the knot and receives the new value.
+    """
+    if value is None:
+        return float(default)
+    sample_t = t
+    if segment_end and isinstance(value, list):
+        for k in value[1:]:
+            kt = float(k.get("t") if isinstance(k, dict) else k.t)
+            ease = k.get("ease") if isinstance(k, dict) else k.ease
+            if ease == "hold" and abs(kt - t) <= 0.006:
+                sample_t = max(0.0, t - 1e-6)
+                break
+    return float(anim_value(value, sample_t))
+
+
+def _ass_alpha(opacity):
+    """0..1 opacity -> ASS alpha (00 opaque, FF transparent)."""
+    return max(0, min(255, round((1.0 - float(opacity)) * 255)))
+
+
+def _motion_tags(scale, rotation, opacity):
+    pct = max(0.0, float(scale)) * 100.0
+    alpha = _ass_alpha(opacity)
+    return (rf"\fscx{pct:.2f}\fscy{pct:.2f}"
+            rf"\frz{float(rotation):.2f}\alpha&H{alpha:02X}&")
+
+
+def _compile_motion_item(tx, base_event, play_res):
+    """Compile explicit text motion into deterministic linear ASS spans.
+
+    The text is laid out once at the curve's maximum scale, so wrapping never
+    changes mid-move. Position keyframes translate that measured anchor in
+    frame-fraction space and may intentionally travel beyond the frame edge.
+    Each span owns position, scale, rotation and opacity together, which makes
+    compound choreography coherent and keeps timeline edits local to the
+    TextItem's start.
+    """
+    motion = tx.get("motion") or {}
+    if not motion or not base_event:
+        return [base_event] if base_event else []
+    duration_s = max(0.0, base_event["end"] - base_event["start"])
+    if duration_s <= 0.005:
+        return []
+
+    scale_curve = motion.get("scale")
+    max_scale = max(anim_bounds(scale_curve)[1], 0.05) \
+        if scale_curve is not None else 1.0
+    layout = dict(tx)
+    layout.pop("motion", None)
+    layout["entrance"] = "none"
+    layout["exit"] = "none"
+    layout["size_scale"] = float(tx.get("size_scale") or 1.0) * max_scale
+    measured = _compile_item(
+        layout, base_event["end"], play_res, enforce_min=False,
+        size_scale_bounds=(0.02, 12.0))
+    if not measured:
+        return []
+
+    W, H = play_res
+    base_x = measured["base_x_frac"]
+    base_y = measured["base_y_frac"]
+    x_curve, y_curve = motion.get("x"), motion.get("y")
+    rotation_curve = motion.get("rotation")
+    opacity_curve = motion.get("opacity")
+    times = _motion_times(motion, duration_s)
+    events = []
+    pos_re = re.compile(r"\\(?:pos|move)\([^)]*\)")
+
+    for t0, t1 in zip(times, times[1:]):
+        if t1 - t0 <= 0.005:
+            continue
+        x0 = _motion_value(x_curve, base_x, t0)
+        y0 = _motion_value(y_curve, base_y, t0)
+        x1 = _motion_value(x_curve, base_x, t1, segment_end=True)
+        y1 = _motion_value(y_curve, base_y, t1, segment_end=True)
+        ax0 = round(measured["anchor_x"] + (x0 - base_x) * W)
+        ay0 = round(measured["anchor_y"] + (y0 - base_y) * H)
+        ax1 = round(measured["anchor_x"] + (x1 - base_x) * W)
+        ay1 = round(measured["anchor_y"] + (y1 - base_y) * H)
+        pos = (rf"\pos({ax0},{ay0})" if (ax0, ay0) == (ax1, ay1)
+               else rf"\move({ax0},{ay0},{ax1},{ay1})")
+
+        s0 = _motion_value(scale_curve, 1.0, t0) / max_scale
+        s1 = _motion_value(scale_curve, 1.0, t1,
+                           segment_end=True) / max_scale
+        r0 = _motion_value(rotation_curve, 0.0, t0)
+        r1 = _motion_value(rotation_curve, 0.0, t1, segment_end=True)
+        o0 = _motion_value(opacity_curve, 1.0, t0)
+        o1 = _motion_value(opacity_curve, 1.0, t1, segment_end=True)
+        start_tags = _motion_tags(s0, r0, o0)
+        end_tags = _motion_tags(s1, r1, o1)
+        if end_tags != start_tags:
+            start_tags += rf"\t(0,{max(1, round((t1-t0)*1000))},{end_tags})"
+
+        body = pos_re.sub(lambda _match: pos, measured["text"], count=1)
+        close = body.find("}")
+        body = body[:close] + start_tags + body[close:]
+        dx, dy = (ax0 - measured["anchor_x"]), \
+            (ay0 - measured["anchor_y"])
+        event = dict(measured)
+        event.update({
+            "start": base_event["start"] + t0,
+            "end": base_event["start"] + t1,
+            "text": body,
+            "top": measured["top"] + dy,
+            "bottom": measured["bottom"] + dy,
+            "left": measured["left"] + dx,
+            "right": measured["right"] + dx,
+        })
+        events.append(event)
+    return events
+
+
+def _compile_vector_motion_item(vec, base_event, play_res):
+    """Compile vector x/y/scale/rotation/opacity on the text motion clock."""
+    motion = vec.get("motion") or {}
+    if not motion or not base_event:
+        return [base_event] if base_event else []
+    duration_s = max(0.0, base_event["end"] - base_event["start"])
+    if duration_s <= 0.005:
+        return []
+    scale_curve = motion.get("scale")
+    max_scale = max(anim_bounds(scale_curve)[1], 0.05) \
+        if scale_curve is not None else 1.0
+    layout = dict(vec)
+    layout.pop("motion", None)
+    layout["width"] = float(vec.get("width") or 0.25) * max_scale
+    layout["height"] = float(vec.get("height") or 0.08) * max_scale
+    measured = _compile_vector_item(layout, base_event["end"], play_res)
+    if not measured:
+        return []
+    measured_components = [measured] + list(measured.pop("_components", []))
+
+    W, H = play_res
+    base_x, base_y = measured["base_x_frac"], measured["base_y_frac"]
+    x_curve, y_curve = motion.get("x"), motion.get("y")
+    rotation_curve, opacity_curve = (motion.get("rotation"),
+                                     motion.get("opacity"))
+    base_opacity = float(vec.get("opacity") if vec.get("opacity") is not None
+                         else 1.0)
+    times, events = _motion_times(motion, duration_s), []
+    pos_re = re.compile(r"\\(?:pos|move)\([^)]*\)")
+    for t0, t1 in zip(times, times[1:]):
+        if t1 - t0 <= 0.005:
+            continue
+        x0 = _motion_value(x_curve, base_x, t0)
+        y0 = _motion_value(y_curve, base_y, t0)
+        x1 = _motion_value(x_curve, base_x, t1, segment_end=True)
+        y1 = _motion_value(y_curve, base_y, t1, segment_end=True)
+        ax0 = round(measured["anchor_x"] + (x0-base_x) * W)
+        ay0 = round(measured["anchor_y"] + (y0-base_y) * H)
+        ax1 = round(measured["anchor_x"] + (x1-base_x) * W)
+        ay1 = round(measured["anchor_y"] + (y1-base_y) * H)
+        pos = (rf"\pos({ax0},{ay0})" if (ax0, ay0) == (ax1, ay1)
+               else rf"\move({ax0},{ay0},{ax1},{ay1})")
+        s0 = _motion_value(scale_curve, 1.0, t0) / max_scale
+        s1 = _motion_value(scale_curve, 1.0, t1,
+                           segment_end=True) / max_scale
+        r0 = _motion_value(rotation_curve, 0.0, t0)
+        r1 = _motion_value(rotation_curve, 0.0, t1, segment_end=True)
+        o0 = _motion_value(opacity_curve, base_opacity, t0)
+        o1 = _motion_value(opacity_curve, base_opacity, t1,
+                           segment_end=True)
+        start_tags = _motion_tags(s0, r0, o0)
+        end_tags = _motion_tags(s1, r1, o1)
+        if end_tags != start_tags:
+            start_tags += rf"\t(0,{max(1, round((t1-t0)*1000))},{end_tags})"
+        dx, dy = ax0-measured["anchor_x"], ay0-measured["anchor_y"]
+        for component in measured_components:
+            body = pos_re.sub(lambda _match: pos, component["text"], count=1)
+            close = body.find("}")
+            body = body[:close] + start_tags + body[close:]
+            event = dict(component)
+            event.update({"start": base_event["start"] + t0,
+                          "end": base_event["start"] + t1, "text": body,
+                          "top": component["top"] + dy,
+                          "bottom": component["bottom"] + dy,
+                          "left": component["left"] + dx,
+                          "right": component["right"] + dx})
+            events.append(event)
+    return events
 
 
 # Breathing room between two stacked blocks, as a fraction of the taller
@@ -672,6 +1058,7 @@ def _stack_concurrent(items, out_dur, play_res, max_passes=4):
     # move nor cause others to move; template-positioned text (x/y None)
     # keeps the collision layout that motivated this function.
     live = [i for i, ev in enumerate(events) if ev
+            and not items[i].get("motion")
             and not (items[i].get("x") is not None
                      and items[i].get("y") is not None)]
     for _ in range(max_passes):
@@ -723,22 +1110,47 @@ def _stack_concurrent(items, out_dur, play_res, max_passes=4):
 
 
 def build_gfx_ass(edl, out_duration_s, path, play_res=BASE_PLAY_RES):
-    """EDL texts field -> a second .ass file for the graphics burn.
+    """EDL text/vector fields -> a second .ass file for the graphics burn.
 
-    Returns path, or None when the EDL has no texts (or none of them lands
+    Returns path, or None when the EDL has no graphics (or none of them lands
     inside the program window — an empty file would still cost a subtitles
     filter pass for nothing). out_duration_s bounds every event's end.
     play_res must be the output frame so positions are exact at any aspect.
     """
     texts = edl.get("texts") or []
-    if not texts or out_duration_s is None or out_duration_s <= GFX_MIN_EVENT_S:
+    vectors = edl.get("vectors") or []
+    if (not texts and not vectors) or out_duration_s is None \
+            or out_duration_s <= GFX_MIN_EVENT_S:
         return None
+    events = []
+    # Shapes are authored as the backing composition. Emitting them before
+    # text keeps panels/arrows beneath labels while retaining the historical
+    # byte output verbatim when an EDL has text only.
+    ordered_vectors = sorted(
+        vectors, key=lambda v: (float(v.get("start") or 0.0),
+                                str(v.get("id") or "")))
+    for vec in ordered_vectors:
+        ev = _compile_vector_item(vec, float(out_duration_s), play_res)
+        if not ev:
+            continue
+        if vec.get("motion"):
+            events.extend(_compile_vector_motion_item(vec, ev, play_res))
+        else:
+            components = ev.pop("_components", [])
+            events.append(ev)
+            events.extend(components)
     # validate_edl already sorts texts by (start, id); re-sorting here makes
     # the output independent of dict-source ordering (determinism backstop).
     ordered = sorted(texts, key=lambda t: (float(t.get("start") or 0.0),
                                            str(t.get("id") or "")))
-    events = [ev for ev in _stack_concurrent(ordered, float(out_duration_s),
-                                             play_res) if ev]
+    base_events = _stack_concurrent(ordered, float(out_duration_s), play_res)
+    for tx, ev in zip(ordered, base_events):
+        if not ev:
+            continue
+        if tx.get("motion"):
+            events.extend(_compile_motion_item(tx, ev, play_res))
+        else:
+            events.append(ev)
     if not events:
         return None
 

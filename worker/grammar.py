@@ -1,18 +1,16 @@
 """The grammar library at runtime — how "just edit it" gets taste.
 
-Round 82d measured 16 exemplar edits the owner considers perfect
+Round 82d measured 16 exemplar edits the owner considers strong
 (worker/grammars/, built by tools/measure_reference.py) and distilled them
 into FAMILY grammars: identity, rules, and a measurable rubric each. This
 module is the runtime half: classify what a user's FOOTAGE can become, and
 hand the agent the matching family's rules as the house style.
 
-Two findings from that corpus govern everything here:
-  * every exemplar is heavily desaturated with ONE accent color
-    (saturation 0.004-0.088 across all 16 — the single most universal
-    taste marker), and
-  * nothing beat-syncs: typography, cuts and props follow SPEECH and story
-    beats; music is a bed. So the grammars are driven by the transcript —
-    which is exactly the signal the index measures best.
+Those exemplars are references, not universal laws. Their muted grade and
+speech-led rhythm are useful inside the families that exhibited them, but are
+wrong defaults for music videos, gameplay, product UI, nature and other
+formats. Runtime classification therefore opts into a family only from
+measured evidence and declines when the evidence is ambiguous.
 
 The block is CONTEXT, not command: it tells the agent what this footage
 most wants to become when the user gave no brief ("edit it", "make it
@@ -73,14 +71,27 @@ def classify(index):
     shots = index.get("shots") or []
     shots_per_min = len(shots) / (dur / 60.0) if dur else 0.0
 
-    if speech_cov >= 0.35 and shots_per_min <= 20:
+    speakers = int(index.get("speakers") or 0)
+
+    # A conversation is not a creator promo. Preserve complete exchanges and
+    # speaker logic instead of spraying kinetic typography over an hour-long
+    # interview. Whisper-only indexes may not diarize, so duration + dense
+    # speech + low shot count is a conservative second route.
+    if speech_cov >= 0.30 and (speakers >= 2 or
+                              (dur >= 8 * 60 and shots_per_min <= 12)):
+        return ("podcast-conversation",
+                f"{speakers or 'multiple/unknown'} speaker evidence, speech "
+                f"covers {speech_cov:.0%} of {dur / 60:.0f} minutes across "
+                f"{len(shots)} shot(s) — long-form conversation")
+    if speech_cov >= 0.35 and dur <= 180 and shots_per_min <= 20:
         # one (or few) continuous takes of someone talking — the corpus's
         # dominant family, and the footage every creator-promo skin starts
         # from
         return ("talking-head-promo",
                 f"speech covers {speech_cov:.0%} of {dur:.0f}s across "
                 f"{len(shots)} shot(s) — a talking take")
-    if speech_cov >= 0.35 and dur >= 60:
+    if speech_cov >= 0.30 and 45 <= dur <= 10 * 60 \
+            and shots_per_min > 4:
         return ("narrative-vlog",
                 f"speech covers {speech_cov:.0%} of {dur:.0f}s across "
                 f"{len(shots)} shots — narrated story footage")
@@ -117,8 +128,8 @@ def plan_block(index):
     if not doc:
         return ""
     lines = [
-        "HOUSE STYLE (measured from real top-performing edits — use it "
-        "when the user asks for an edit WITHOUT a specific brief; their "
+        "HOUSE STYLE HYPOTHESIS (measured from a matching reference family "
+        "— use it when the user asks for an edit WITHOUT a specific brief; their "
         "explicit instructions ALWAYS override it):",
         f"This footage classifies as: {slug} ({reason}).",
         f"What that is: {doc.get('identity', '')}",
@@ -129,12 +140,16 @@ def plan_block(index):
         lines.append(_fmt(rules, 1))
     rubric = doc.get("rubric")
     if rubric:
-        lines.append("Build so these hold (they will be checked):")
+        lines.append("Reference-family rubric (apply only where it suits this "
+                     "footage and the user's goal; it will be checked):")
         lines.append(_fmt(rubric, 1))
     lines.append(
-        "Two corpus-wide laws: desaturate toward a muted base with ONE "
-        "accent color, and sync text/cuts/props to the SPOKEN words and "
-        "story beats — never to musical beats (music stays a bed). For "
-        "speech-carried footage, add_kinetic_text is the one-call way to "
-        "put the words on screen in this style.")
+        "Rhythm and color are FORMAT decisions, not global laws. For "
+        "dialogue-led footage, speech/story turns normally drive cuts and "
+        "text; for montage, music performance, gameplay and sports, musical "
+        "phrases, beats and visible action may drive them. Preserve natural "
+        "or product color unless this family/brief earns a stylized grade. "
+        "For speech-carried footage that genuinely calls for kinetic type, "
+        "add_kinetic_text can choreograph phrases in one pass; do not apply "
+        "it merely because speech exists.")
     return "\n".join(lines)

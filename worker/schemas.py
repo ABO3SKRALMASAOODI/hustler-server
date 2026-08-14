@@ -683,8 +683,9 @@ class InsertItem(BaseModel):
     resolves it (image default 3.0s, short clips their full length).
     source_start_s picks WHERE in the source clip the window starts;
     Optional so pre-round-8 EDLs keep their signatures.
-    motion is a Ken Burns move for IMAGE inserts only (a still that slowly
-    zooms or pans instead of sitting frozen); Optional for signatures.
+    motion is a local camera move for any visual insert: it keeps stills alive
+    and can add a deliberate push/pan to video B-roll without a second
+    program-wide effect call. Optional for signatures.
     rate (round 76) plays the spliced clip FASTER (or slower) in place —
     "don't shorten the editing screens, speed them up". duration_s stays
     the OUTPUT length of the block; the clip consumes duration_s*rate of
@@ -1310,15 +1311,15 @@ class OverlayItem(BaseModel):
     duration_s: float
     x: AnimFloat = 0.5
     y: AnimFloat = 0.5
-    scale: float = 0.4
+    scale: AnimFloat = 0.4
     # fit 'cover' (round 36): the overlay fills the WHOLE output frame
     # (scaled up + cropped, x/y/scale ignored) — the b-roll cutaway mode:
     # picture switches to the overlay while the program's audio keeps
     # playing. None = the legacy width-fraction PIP and is dropped from
     # signatures, so stored EDLs render byte-identically.
     fit: Optional[Literal["cover"]] = None
-    opacity: Optional[float] = None      # 0.05-1.0; None = fully opaque
-    rotation: Optional[float] = None     # degrees, static
+    opacity: Optional[AnimFloat] = None  # 0-1; None = fully opaque
+    rotation: Optional[AnimFloat] = None # degrees; curves may cross 0/360
     source_start_s: Optional[float] = None   # video overlays: seek into clip
     entrance: Optional[Literal["fade", "slide_left", "slide_right",
                                "slide_up"]] = None
@@ -1353,6 +1354,25 @@ TEXT_FONTS = ("Inter Display Black", "Inter Display ExtraBold",
               # "Valmera" in Plus Jakarta Sans 800), already bundled for the
               # watermark; exposing it lets brand text match the product.
               "Plus Jakarta Sans ExtraBold")
+VECTOR_KINDS = ("rectangle", "ellipse", "line", "arrow", "ring",
+                "progress")
+
+
+class TextMotion(BaseModel):
+    """Element-local motion curves for one designed text item.
+
+    This is deliberately a small general primitive rather than another list
+    of named animations.  Position is in frame fractions, scale is relative
+    to the item's composed size, rotation is degrees and opacity is 0..1.
+    Every property accepts the same scalar-or-keyframes contract used by
+    overlays.  Curves are local to ``TextItem.start`` so timeline edits can
+    move the graphic without rewriting its choreography.
+    """
+    x: Optional[AnimFloat] = None
+    y: Optional[AnimFloat] = None
+    scale: Optional[AnimFloat] = None
+    rotation: Optional[AnimFloat] = None
+    opacity: Optional[AnimFloat] = None
 
 
 class TextItem(BaseModel):
@@ -1382,6 +1402,17 @@ class TextItem(BaseModel):
                            "swing", "zoom_blur"]] = None
     uppercase: Optional[bool] = None
     box: Optional[bool] = None      # backing panel behind the text
+    # General motion-graphics primitive. None preserves every historical
+    # text signature and the legacy named entrance/exit renderer byte-for-
+    # byte. When present, it owns entrance/exit motion; author fades/pops as
+    # opacity/scale curves instead of stacking two animation systems.
+    motion: Optional[TextMotion] = None
+    # Designed text and transcript captions are separate visual systems. When
+    # this is true, the caption compiler derives a mute from THIS item's live
+    # window. Ownership matters: moving/resizing/removing the graphic carries
+    # the suppression with it, unlike an anonymous caption_mutes span that can
+    # be stranded after the text is gone. None preserves historical output.
+    mute_captions: Optional[bool] = None
     # Round 40 — the text OWNS a spliced card rather than a span of the edit.
     # Set to an insert id by add_title_card. Plain program-anchored texts
     # leave it None (and _sig_canon drops nested None keys, so every text
@@ -1410,6 +1441,39 @@ class TextItem(BaseModel):
     # window would slide off its own matte the first time anything upstream was
     # trimmed, and the subject would be cut out of the wrong second of video.
     behind: Optional["SubjectMatte"] = None
+
+
+class VectorItem(BaseModel):
+    """One renderer-native motion-graphics primitive.
+
+    Geometry is expressed as fractions of the output frame and time is on the
+    FINAL program clock.  ``motion`` deliberately reuses TextMotion: one
+    keyframe language for designed words, panels, arrows, rings and progress
+    indicators is easier for the editor to reason about and for timeline
+    operations to preserve than a collection of named one-off animations.
+    """
+    id: str
+    kind: Literal["rectangle", "ellipse", "line", "arrow", "ring",
+                  "progress"]
+    start: float
+    end: float
+    x: float = 0.5
+    y: float = 0.5
+    width: float = 0.25
+    height: float = 0.08
+    color: str = "#FFFFFF"
+    opacity: float = 1.0
+    stroke_color: Optional[str] = None
+    # Fraction of the frame's shorter edge, so borders stay proportional in
+    # landscape, square and vertical exports.
+    stroke_width: Optional[float] = None
+    # Rectangle corner radius as a fraction of the shorter rectangle side.
+    rounding: Optional[float] = None
+    # Used by progress only. The unfilled track is still deterministic when
+    # omitted (a neutral dark derived by the renderer).
+    background_color: Optional[str] = None
+    value: Optional[float] = None
+    motion: Optional[TextMotion] = None
 
 
 class SubjectMatte(BaseModel):
@@ -1633,6 +1697,7 @@ class EDL(BaseModel):
     # signatures are untouched.
     overlays: List[OverlayItem] = Field(default_factory=list)
     texts: List[TextItem] = Field(default_factory=list)
+    vectors: List[VectorItem] = Field(default_factory=list)
     speed: List[SpeedSpan] = Field(default_factory=list)
     master: Optional[Master] = None
     # Round 97: music/voice rebalance of the original audio via separated
@@ -1670,6 +1735,31 @@ def canvas_edl(ratio="16:9", fps=DEFAULT_CANVAS_FPS, bg_color="#000000"):
     w, h = CANVAS_DIMS.get(ratio, CANVAS_DIMS["16:9"])
     return EDL(keep=[], canvas=Canvas(width=w, height=h, fps=_r(fps),
                                       bg_color=bg_color)).model_dump()
+
+
+def edl_accepts_tray_autoplace(version, edl=None):
+    """True for the initial dump only.
+
+    No EDL yet (index still running) and version-1 seed EDLs auto-splice
+    tray files. Mid-session uploads after that stay in the tray so a refine
+    pass cannot dump new source onto the end of an already-authored cut.
+    """
+    if version is None:
+        return True
+    try:
+        ver = int(version)
+    except (TypeError, ValueError):
+        return False
+    if ver < 1:
+        return True
+    if ver != 1:
+        return False
+    if not isinstance(edl, dict):
+        return True
+    for key in ("inserts", "overlays", "texts", "vectors", "music"):
+        if edl.get(key):
+            return False
+    return True
 
 
 def is_canvas_program(edl_dict):
@@ -2078,10 +2168,6 @@ def validate_edl(data, duration=None):
                     f"inserts[{i}].source_start_s must be >= 0.")
             if ins.kind == "image" or ins.source_start_s == 0.0:
                 ins.source_start_s = None   # meaningless / default
-        if ins.motion is not None and ins.kind != "image":
-            raise EDLValidationError(
-                f"inserts[{i}].motion is only supported on image inserts "
-                "(a Ken Burns move on a still) — video clips already move.")
         if ins.at_output_s < 0:
             raise EDLValidationError(
                 f"inserts[{i}].at_output_s {ins.at_output_s} must be >= 0.")
@@ -2241,7 +2327,8 @@ def validate_edl(data, duration=None):
                 f"volume[{i}].gain_db {v.gain_db} is above the "
                 f"{GAIN_MAX_DB} dB ceiling.")
 
-    # Overlays: program-time windows, keyframeable position, clamped scale.
+    # Overlays: program-time windows with one universal local-time motion
+    # language for position, scale, rotation and opacity.
     seen_ov = set()
     for i, ov in enumerate(edl.overlays):
         if not ov.id or ov.id in seen_ov:
@@ -2264,14 +2351,24 @@ def validate_edl(data, duration=None):
                           max_t=ov.duration_s)
         ov.y = _norm_anim(ov.y, f"overlays[{i}].y", -0.5, 1.5,
                           max_t=ov.duration_s)
-        ov.scale = round(min(max(float(ov.scale), OVERLAY_SCALE_MIN),
-                             OVERLAY_SCALE_MAX), 3)
+        ov.scale = _norm_anim(ov.scale, f"overlays[{i}].scale",
+                              OVERLAY_SCALE_MIN, OVERLAY_SCALE_MAX,
+                              max_t=ov.duration_s)
         if ov.opacity is not None:
-            ov.opacity = round(min(max(float(ov.opacity), 0.05), 1.0), 3)
-            if ov.opacity >= 0.999:
+            ov.opacity = _norm_anim(ov.opacity, f"overlays[{i}].opacity",
+                                    0.0, 1.0, max_t=ov.duration_s)
+            if not isinstance(ov.opacity, list) and ov.opacity >= 0.999:
                 ov.opacity = None       # fully opaque = the default
         if ov.rotation is not None:
-            ov.rotation = round(float(ov.rotation) % 360.0, 1) or None
+            if isinstance(ov.rotation, list):
+                # Keep direction and multi-turn intent. Folding every knot
+                # modulo 360 would turn 350 -> 370 into a full reverse spin.
+                ov.rotation = _norm_anim(
+                    ov.rotation, f"overlays[{i}].rotation", -1080.0, 1080.0,
+                    max_t=ov.duration_s)
+            else:
+                # Historical scalar contract stays canonical byte-for-byte.
+                ov.rotation = round(float(ov.rotation) % 360.0, 1) or None
         if ov.source_start_s is not None:
             ov.source_start_s = _r(ov.source_start_s)
             if ov.source_start_s < 0:
@@ -2280,6 +2377,12 @@ def validate_edl(data, duration=None):
             if ov.kind == "image" or ov.source_start_s == 0.0:
                 ov.source_start_s = None
         if ov.screen is not None:
+            if any(isinstance(getattr(ov, prop), list)
+                   for prop in ("x", "y", "scale", "rotation", "opacity")):
+                raise EDLValidationError(
+                    f"overlays[{i}] is a screen takeover whose tracked "
+                    "camera geometry owns motion; ordinary overlay "
+                    "keyframes cannot be combined with it.")
             _check_screen_lock(ov.screen, f"overlays[{i}].screen",
                                ov.duration_s)
     edl.overlays.sort(key=lambda o: (o.start, o.id))
@@ -2304,6 +2407,42 @@ def validate_edl(data, duration=None):
             tx.size_scale = round(min(max(float(tx.size_scale), 0.4), 3.0), 3)
             if abs(tx.size_scale - 1.0) < 1e-6:
                 tx.size_scale = None
+        if tx.motion is not None:
+            if tx.behind is not None:
+                raise EDLValidationError(
+                    f"texts[{i}].motion cannot be combined with a subject "
+                    "matte — add_text_behind owns a measured static text "
+                    "region. Use ordinary add_text for moving typography.")
+            if tx.entrance not in (None, "none") or tx.exit not in (
+                    None, "none"):
+                raise EDLValidationError(
+                    f"texts[{i}].motion owns the animation curve; set "
+                    "entrance/exit to 'none' and express fades, punches or "
+                    "moves with motion keyframes.")
+            motion = tx.motion
+            span = tx.end - tx.start
+            bounds = {
+                "x": (-0.25, 1.25), "y": (-0.25, 1.25),
+                "scale": (0.05, 4.0), "rotation": (-720.0, 720.0),
+                "opacity": (0.0, 1.0),
+            }
+            animated = False
+            for name, (lo, hi) in bounds.items():
+                value = getattr(motion, name)
+                if value is None:
+                    continue
+                normalized = _norm_anim(
+                    value, f"texts[{i}].motion.{name}", lo, hi,
+                    max_t=span)
+                setattr(motion, name, normalized)
+                animated = animated or isinstance(normalized, list)
+            if not any(getattr(motion, name) is not None for name in bounds):
+                tx.motion = None
+            elif not animated:
+                # Constants are still meaningful (e.g. a rotated label), so
+                # retain them. The compiler emits one event with no needless
+                # segmentation.
+                pass
         for cname in ("color", "accent_color"):
             cv = getattr(tx, cname)
             if cv is not None:
@@ -2337,6 +2476,73 @@ def validate_edl(data, duration=None):
                     "canvas program has no source footage to cut a subject "
                     "out of.")
     edl.texts.sort(key=lambda t: (t.start, t.id))
+
+    # Vector graphics: the same program clock and local keyframe language as
+    # designed text, but renderer-native paths rather than fetched assets.
+    # These bounds are operational safety rails (finite/on-frame geometry),
+    # not creative quotas: the editor may author any number or duration.
+    seen_vec = set()
+    for i, vec in enumerate(edl.vectors):
+        label = f"vectors[{i}]"
+        if not vec.id or vec.id in seen_vec:
+            raise EDLValidationError(
+                f"{label}.id must be non-empty and unique.")
+        seen_vec.add(vec.id)
+        vec.start, vec.end = _r(vec.start), _r(vec.end)
+        _check_span(label, vec.start, vec.end, prog_dur, min_len=0.3)
+        vec.x = round(min(max(float(vec.x), 0.0), 1.0), 4)
+        vec.y = round(min(max(float(vec.y), 0.0), 1.0), 4)
+        vec.width = round(min(max(float(vec.width), 0.003), 1.5), 4)
+        vec.height = round(min(max(float(vec.height), 0.003), 1.5), 4)
+        vec.opacity = round(min(max(float(vec.opacity), 0.0), 1.0), 4)
+        if vec.stroke_width is not None:
+            vec.stroke_width = round(
+                min(max(float(vec.stroke_width), 0.0005), 0.08), 5)
+        if vec.rounding is not None:
+            vec.rounding = round(
+                min(max(float(vec.rounding), 0.0), 0.5), 4) or None
+        if vec.kind == "progress":
+            vec.value = round(min(max(float(
+                0.5 if vec.value is None else vec.value), 0.0), 1.0), 4)
+        else:
+            # These fields do not render for other primitives. Canonicalize
+            # them away so a no-op parameter cannot mint a new EDL signature.
+            vec.value = None
+            vec.background_color = None
+        for cname in ("color", "stroke_color", "background_color"):
+            cv = getattr(vec, cname)
+            if cv is None:
+                continue
+            cv = cv.strip()
+            if not HEX_COLOR.match(cv):
+                raise EDLValidationError(
+                    f"{label}.{cname} '{cv}' must be #RRGGBB hex.")
+            setattr(vec, cname, cv.upper())
+        if vec.motion is not None:
+            span = vec.end - vec.start
+            bounds = {
+                "x": (-0.25, 1.25), "y": (-0.25, 1.25),
+                "scale": (0.05, 4.0), "rotation": (-720.0, 720.0),
+                "opacity": (0.0, 1.0),
+            }
+            for name, (lo, hi) in bounds.items():
+                value = getattr(vec.motion, name)
+                if value is None:
+                    continue
+                setattr(vec.motion, name, _norm_anim(
+                    value, f"{label}.motion.{name}", lo, hi, max_t=span))
+            if not any(getattr(vec.motion, name) is not None
+                       for name in bounds):
+                vec.motion = None
+        visible_opacity = vec.opacity
+        if vec.motion is not None and vec.motion.opacity is not None:
+            visible_opacity = max(visible_opacity,
+                                  anim_bounds(vec.motion.opacity)[1])
+        if visible_opacity <= 0.0:
+            raise EDLValidationError(
+                f"{label} is fully transparent for its whole window — "
+                "remove it or animate motion.opacity to a visible value.")
+    edl.vectors.sort(key=lambda v: (v.start, v.id))
 
     # Caption mutes: PROGRAM-time windows, same clock as texts/stylize. Sorted
     # and merged, so overlapping asks collapse instead of stacking duplicates
@@ -2810,9 +3016,31 @@ def describe_edl(edl_dict, duration=None):
                 bits.append(f"{name}@{ov.start:g}s {ov.scale:g}w{anim}")
         parts.append(f"overlays x{len(edl.overlays)} ({', '.join(bits)})")
     if edl.texts:
-        bits = [f"{tx.template} \"{tx.text[:24]}\"@{tx.start:g}-{tx.end:g}s"
-                for tx in edl.texts]
+        bits = []
+        for tx in edl.texts:
+            moving = ""
+            if tx.motion is not None:
+                axes = [name for name in ("x", "y", "scale", "rotation",
+                                          "opacity")
+                        if getattr(tx.motion, name) is not None]
+                moving = f" motion[{','.join(axes)}]"
+            bits.append(f"{tx.template} \"{tx.text[:24]}\"@{tx.start:g}-"
+                        f"{tx.end:g}s{moving}")
         parts.append(f"text x{len(edl.texts)} ({', '.join(bits)})")
+    if edl.vectors:
+        bits = []
+        for vec in edl.vectors:
+            moving = ""
+            if vec.motion is not None:
+                axes = [name for name in ("x", "y", "scale", "rotation",
+                                          "opacity")
+                        if getattr(vec.motion, name) is not None]
+                moving = f" motion[{','.join(axes)}]"
+            detail = (f" {vec.value * 100:.0f}%" if vec.kind == "progress"
+                      and vec.value is not None else "")
+            bits.append(f"{vec.kind}{detail}@{vec.start:g}-{vec.end:g}s"
+                        f"{moving}")
+        parts.append(f"vectors x{len(edl.vectors)} ({', '.join(bits)})")
     if edl.caption_mutes:
         bits = [f"{s:g}-{e:g}s" for s, e in edl.caption_mutes]
         parts.append(f"captions muted ({', '.join(bits)})")
@@ -3058,6 +3286,10 @@ class VideoIndex(BaseModel):
     # PIPELINE_VERSION and never triggers a re-index. Declared here so any
     # code path that round-trips an index through this model preserves it.
     perception: Optional[dict] = None
+    # Sparse temporal evidence (worker/motion_judge.py): motion/static share
+    # and abrupt visual changes from a bounded low-resolution decode. It has
+    # its own version and is optional, so old cached indexes remain valid.
+    motion: Optional[dict] = None
     # Pixel-measured face/text/UI track with its own version, computed lazily
     # for old indexes to avoid a fleet-wide re-index storm.
     spatial: Optional[dict] = None

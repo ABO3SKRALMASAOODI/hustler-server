@@ -120,3 +120,49 @@ def test_openverse_client_credentials_are_cached(monkeypatch):
     assert first == second == {"Authorization": "Bearer fresh"}
     assert len(posts) == 1
     assert posts[0]["grant_type"] == "client_credentials"
+
+
+def test_music_search_merges_and_diversifies_all_live_providers(monkeypatch):
+    monkeypatch.setattr(music_search.config, "MUSIC_SEARCH_ENABLED", True)
+    monkeypatch.setattr(music_search.config, "JAMENDO_CLIENT_ID", "client")
+    called = []
+
+    def jamendo(*_args):
+        called.append("jamendo")
+        return [
+            {"provider": "jamendo", "id": "jamendo:1",
+             "title": "Dark Pulse", "duration_s": 90, "license": "by"},
+            {"provider": "jamendo", "id": "jamendo:2",
+             "title": "Dark Engine", "duration_s": 80, "license": "by"},
+        ]
+
+    def openverse(*_args):
+        called.append("openverse")
+        return [
+            {"provider": "openverse", "id": "openverse:1",
+             "title": "Dark Cinematic Pulse", "duration_s": 100,
+             "license": "by"},
+        ]
+
+    monkeypatch.setattr(music_search, "_jamendo_search", jamendo)
+    monkeypatch.setattr(music_search, "_openverse_search", openverse)
+    hits = music_search.search("dark cinematic pulse", count=3)
+    assert set(called) == {"jamendo", "openverse"}
+    assert {hit["provider"] for hit in hits[:2]} == {
+        "jamendo", "openverse"}
+    assert hits[0]["id"] == "openverse:1"  # strongest literal intent
+
+
+def test_one_broken_music_provider_does_not_hide_the_other(monkeypatch):
+    monkeypatch.setattr(music_search.config, "MUSIC_SEARCH_ENABLED", True)
+    monkeypatch.setattr(music_search.config, "JAMENDO_CLIENT_ID", "client")
+    monkeypatch.setattr(
+        music_search, "_jamendo_search",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(
+        music_search, "_openverse_search",
+        lambda *_args: [{"provider": "openverse", "id": "openverse:ok",
+                         "title": "Clean Beat", "duration_s": 70,
+                         "license": "by"}])
+    assert [h["id"] for h in music_search.search("clean beat")] == [
+        "openverse:ok"]
