@@ -238,3 +238,10 @@ def test_openverse_photos_carry_their_license_line(monkeypatch):
     # Orientation rode the request as Openverse's aspect_ratio vocabulary.
     assert seen.get("aspect_ratio") == "tall"
     assert seen.get("license_type") == "modification"
+    # A relevant thumbnail is not enough for professional B-roll: only the
+    # provider's large originals should enter the candidate board.
+    assert seen.get("size") == "large"
+    assert seen.get("mature") == "false"
+    assert seen.get("filter_dead") == "true"
+    assert seen.get("unstable__authority") == "true"
+    assert seen.get("page_size") >= 12

@@ -80,8 +80,15 @@ def _openverse_search(query, kind, orientation, count):
         return []
     from music_search import (_license_note, _license_ok,
                               _openverse_get_json)
+    # Ask Openverse for production-sized originals up front. Relevance-only
+    # search can otherwise lead with a perfectly topical 333px Flickr image;
+    # it passes validation but visibly falls apart on a 1080x1920 canvas.
+    # Pull a wider slate because licensing and dead-link checks may remove
+    # several candidates before the editor sees the contact sheet.
     params = {"q": query, "license_type": "modification",
-              "page_size": max(3, count)}
+              "size": "large", "mature": "false", "filter_dead": "true",
+              "unstable__authority": "true",
+              "page_size": max(12, count * 3)}
     aspect = {"portrait": "tall", "landscape": "wide",
               "square": "square"}.get(orientation)
     if aspect:
