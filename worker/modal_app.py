@@ -47,6 +47,10 @@ app = modal.App(APP_NAME)
 COMMON = {
     "image": image,
     "secrets": [secret],
+    # A live global-placement canary put a customer final in ap-northeast-2.
+    # Keep latency/data paths inside the proven US envelope; cost reduction
+    # comes from right-sized reservations, never geographic roulette.
+    "region": "us",
     "routing_region": "us-east",
     "min_containers": 0,
     "max_containers": 5,
@@ -57,7 +61,6 @@ COMMON = {
     "timeout": 3600,
     "startup_timeout": 300,
 }
-PINNED_US = {**COMMON, "region": "us"}
 
 # Modal CPU floats are reservations, not limits: an uncapped ffmpeg process
 # may burst into spare host cores and is billed for that actual usage. Pairing
@@ -81,7 +84,7 @@ PROBE_MEMORY = (1024, 4096)
 HEALTH_MEMORY = (512, 1024)
 
 
-def _boot(profile, role="executor", pricing_multiplier=1.0):
+def _boot(profile, role="executor", pricing_multiplier=1.5):
     os.environ["WORKER_ROLE"] = role
     os.environ["EXECUTOR_PROVIDER"] = "modal"
     os.environ["MODAL_EXECUTOR_PROFILE"] = profile
@@ -105,7 +108,7 @@ def adapter_version():
         return "unknown"
 
 
-def _run(job, profile, role="executor", pricing_multiplier=1.0):
+def _run(job, profile, role="executor", pricing_multiplier=1.5):
     _boot(profile, role, pricing_multiplier)
     import config
     import http_server
@@ -163,7 +166,7 @@ def heavy(job):
 
 
 @app.function(name="egress", cpu=HEAVY_CPU, memory=LIGHT_MEMORY,
-              **PINNED_US)
+              **COMMON)
 def egress(job):
     """Keep URL acquisition on the proven US egress while right-sizing RAM."""
     return _run(job, "egress", pricing_multiplier=1.5)

@@ -221,9 +221,8 @@ def test_modal_memory_right_sizing_preserves_production_hard_limits():
     assert modal_app.HEALTH_MEMORY == (512, 1024)
 
 
-def test_compute_fleet_is_global_but_latency_sensitive_egress_stays_us():
-    assert "region" not in modal_app.COMMON
-    assert modal_app.PINNED_US["region"] == "us"
+def test_compute_fleet_stays_in_proven_us_latency_envelope():
+    assert modal_app.COMMON["region"] == "us"
     assert remote._modal_function_name("preview") == "preview"
     assert remote._modal_function_name("frames") == "light"
     assert remote._modal_function_name("capture") == "light"

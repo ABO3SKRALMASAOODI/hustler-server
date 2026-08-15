@@ -42,9 +42,10 @@ same call and never buys a duplicate render.
 
 An arrow is Modal's memory request→hard limit. Billing uses the greater of the
 request or actual memory, while the old maximum remains available for an
-outlier. CPU limits are unchanged. Compute functions are globally scheduled to
-avoid the 1.5× explicit-region surcharge and widen cold-start capacity; the
-latency-sensitive agent and the URL/YouTube egress lane stay US-pinned.
+outlier. CPU limits are unchanged. All functions stay US-pinned: a production
+global-placement canary scheduled a customer final in `ap-northeast-2`, adding
+unacceptable network and latency variance. Savings never depend on moving a
+user's compute away from the proven data path.
 
 `frames` and `capture` use `light`; `fetch` and `search` use `egress`;
 tracking, matting, matching, cleanup, and stems retain `heavy`. Every completed
