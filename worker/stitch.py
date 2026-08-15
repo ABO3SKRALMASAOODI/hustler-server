@@ -313,11 +313,46 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     fx["regions"] = _shift_optional_window(fx.get("regions"))
     fx["custom"] = _shift_optional_window(fx.get("custom"))
     fx["stylize"] = _shift_optional_window(fx.get("stylize"), clip=True)
-    e["overlays"] = _shift(
-        e.get("overlays"),
-        lambda o: (o.get("start") or 0.0,
-                   (o.get("start") or 0.0) + (o.get("duration_s") or 0.0)),
-        lambda o, a, b: {**o, "start": round(a, 3)})
+    # Proof-budget clamping can cut the RIGHT edge of the last contained
+    # overlay. Merely shifting its start leaves the original duration on a
+    # shorter standalone EDL, which validate_edl rejects (the live failure was
+    # a 4.79s overlay inside the 2.60s left in its proof piece). Clip the
+    # element and its local animation curves to the bytes the piece contains.
+    from schemas import clip_anim
+    overlays = []
+    piece_dur = w1 - w0
+    for item in e.get("overlays") or []:
+        original_start = float(item.get("start") or 0.0)
+        original_end = original_start + float(item.get("duration_s") or 0.0)
+        clipped_start = max(original_start, w0)
+        clipped_end = min(original_end, w1)
+        clipped_dur = clipped_end - clipped_start
+        if clipped_dur < 0.2 - 1e-6:
+            continue
+        shifted = {**item,
+                   "start": round(clipped_start - w0, 3),
+                   "duration_s": round(clipped_dur, 3)}
+        left_trim = max(0.0, clipped_start - original_start)
+        if left_trim and shifted.get("source_start_s") is not None:
+            shifted["source_start_s"] = round(
+                float(shifted["source_start_s"]) + left_trim, 3)
+        if left_trim:
+            shifted["entrance"] = None
+        if clipped_end < original_end - 0.001:
+            shifted["exit"] = None
+        for prop in ("x", "y", "scale", "rotation", "opacity"):
+            if prop in shifted:
+                shifted[prop] = clip_anim(shifted[prop], clipped_dur)
+        # A tracked screen has its own time-indexed camera geometry. The
+        # changed-section planner normally contains it whole; if the hard
+        # budget ever clips one, omitting the partial proof is safer than
+        # validating/rending a false camera path.
+        if shifted.get("screen") and (
+                left_trim > 0.001 or clipped_end < original_end - 0.001):
+            continue
+        if shifted["start"] <= piece_dur - 0.1 + 1e-6:
+            overlays.append(shifted)
+    e["overlays"] = overlays
     # patches ride the SOURCE clock: keep those whose source span survives
     e["patches"] = [p for p in (e.get("patches") or [])
                     if any(s0 < p["src_end"] and s1 > p["src_start"]

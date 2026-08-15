@@ -18,6 +18,7 @@ import main  # noqa: E402
 import media  # noqa: E402
 import remote  # noqa: E402
 import renderer  # noqa: E402
+import schemas  # noqa: E402
 import stitch  # noqa: E402
 from timeline import Timeline  # noqa: E402
 
@@ -137,6 +138,21 @@ def test_proof_range_guard_clamps_full_length_abuse():
     clamped = renderer._validated_check_ranges(many, 40.0)
     assert len(clamped) <= 6
     assert sum(b - a for a, b in clamped) <= 25.0 + 1e-6
+
+
+def test_proof_piece_clips_overlay_at_its_budget_edge():
+    edl = _edl(overlays=[{
+        "id": "ov3", "asset_key": "clips/9/rocket.mp4", "kind": "video",
+        "start": 8.61, "duration_s": 4.79, "fit": "cover",
+        "source_start_s": 28.5,
+    }])
+    window = stitch.window_edl(edl, Timeline(edl["keep"]), 0.0, 11.21,
+                               keep_audio=True)
+
+    assert window["overlays"][0]["start"] == 8.61
+    assert window["overlays"][0]["duration_s"] == 2.6
+    # Regression: preview_check job 10981 failed here before rendering.
+    schemas.validate_edl(window, duration=20.0)
 
 
 def test_canvas_proof_geometry_respects_output_ratio():
