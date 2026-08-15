@@ -84,5 +84,5 @@ def test_synchronous_tools_emit_cost_and_whole_container_telemetry(
     output = capsys.readouterr().out
     assert '"container_memory_peak_mib":612.5' in output
     assert '"container_memory_sampled_peak_mib":700.0' in output
-    assert '"compute_profile":"modal-light-4core-8-32g-global"' in output
+    assert '"compute_profile":"modal-light-4core-2-32g-global"' in output
     assert '"job_id":null' in output

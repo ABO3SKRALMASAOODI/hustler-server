@@ -42,6 +42,7 @@ class _Function:
 def _enable(monkeypatch, percent=100):
     monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
     monkeypatch.setattr(config, "MODAL_EXECUTOR_PERCENT", percent)
+    monkeypatch.setattr(config, "MODAL_EU_PERCENT", 0)
     monkeypatch.setattr(config, "MODAL_EXECUTOR_TYPES", frozenset({
         "preview", "final", "index", "agent_turn"}))
 
@@ -54,6 +55,26 @@ def test_rollout_selection_is_stable_per_job(monkeypatch):
     assert remote._modal_selected(JOB) is False
     monkeypatch.setattr(config, "MODAL_EXECUTOR_PERCENT", 100)
     assert remote._modal_selected(JOB) is True
+
+
+def test_eu_rollout_is_stable_and_limited_to_configured_media(monkeypatch):
+    monkeypatch.setattr(config, "MODAL_EU_PERCENT", 37)
+    monkeypatch.setattr(config, "MODAL_EU_TYPES", frozenset({
+        "final", "mcp_tool"}))
+    final = dict(JOB, type="final")
+    first = remote._modal_eu_selected(final)
+    assert all(remote._modal_eu_selected(dict(final)) == first
+               for _ in range(20))
+    assert remote._modal_eu_selected(dict(JOB, type="preview")) is False
+
+    # Synchronous calls have no database id. Canonical JSON keeps equivalent
+    # retries together even when dict insertion order differs.
+    left = dict(JOB, id=None, type="mcp_tool",
+                payload={"tool": "__media__", "args": {"b": 2, "a": 1}})
+    right = dict(left, payload={
+        "args": {"a": 1, "b": 2}, "tool": "__media__"})
+    assert remote._modal_eu_selected(left) \
+        == remote._modal_eu_selected(right)
 
 
 def test_success_uses_durable_modal_function_and_marks_completion(monkeypatch):
@@ -213,23 +234,49 @@ def test_modal_render_cpu_is_hard_capped_at_costed_profiles():
 
 def test_modal_memory_right_sizing_preserves_production_hard_limits():
     assert modal_app.PREVIEW_MEMORY == (2048, 4096)
-    assert modal_app.BATCH_MEMORY == (8192, 16384)
-    assert modal_app.LIGHT_MEMORY == (8192, 32768)
+    assert modal_app.BATCH_MEMORY == (4096, 16384)
+    assert modal_app.INDEX_MEMORY == (4096, 16384)
+    assert modal_app.LIGHT_MEMORY == (2048, 32768)
     assert modal_app.HEAVY_MEMORY == (16384, 32768)
     assert modal_app.AGENT_MEMORY == (1024, 2048)
     assert modal_app.PROBE_MEMORY == (1024, 4096)
     assert modal_app.HEALTH_MEMORY == (512, 1024)
 
 
-def test_compute_fleet_stays_in_proven_us_latency_envelope():
-    assert modal_app.COMMON["region"] == "us"
+def test_compute_fleet_has_explicit_us_and_bounded_eu_envelopes():
+    assert modal_app.US_COMMON["region"] == "us"
+    assert modal_app.EU_COMMON["region"] == "eu"
+    assert modal_app.US_COMMON["routing_region"] == "us-east"
+    assert modal_app.EU_COMMON["routing_region"] == "us-east"
     assert remote._modal_function_name("preview") == "preview"
+    assert remote._modal_function_name("index") == "index"
     assert remote._modal_function_name("frames") == "light"
     assert remote._modal_function_name("capture") == "light"
     assert remote._modal_function_name("filmstrip") == "preview"
     assert remote._modal_function_name("fetch") == "egress"
     assert remote._modal_function_name("search") == "egress"
     assert remote._modal_function_name("clean") == "heavy"
+
+
+def test_eu_index_falls_back_to_us_then_legacy_batch_before_launch(
+        monkeypatch):
+    monkeypatch.setattr(config, "MODAL_EU_PERCENT", 100)
+    monkeypatch.setattr(config, "MODAL_EU_TYPES", frozenset({"index"}))
+    seen = []
+    function = _Function(_Call({"result": {"ok": True},
+                                "job_completed": True}))
+
+    def lookup(name):
+        seen.append(name)
+        if name in {"index_eu", "index"}:
+            raise remote.ModalLaunchUnavailable(f"missing {name}")
+        return function
+
+    monkeypatch.setattr(remote, "_modal_function", lookup)
+    result = remote._run_modal(dict(JOB, type="index"))
+    assert result["ok"] is True
+    assert result.pop("_remote_job_completed") is True
+    assert seen == ["index_eu", "index", "batch"]
 
 
 def test_filmstrip_is_forced_to_modal_without_cloud_run_fallback(monkeypatch):

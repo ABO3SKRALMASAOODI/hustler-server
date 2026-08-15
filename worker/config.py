@@ -742,8 +742,9 @@ HEARTBEAT_EVERY_S = 20
 # The lane polls far faster than the others because a human is watching: at the
 # shared 2s interval, a 40-call editing session would spend over a minute
 # doing nothing but waiting for the next poll. The query is a single indexed
-# SKIP LOCKED update, so 4/s costs nothing.
-MCP_SLOTS = int(os.getenv("WORKER_MCP_SLOTS", "2"))
+# SKIP LOCKED update, so 4/s costs nothing. Three lanes match the admin MCP
+# session cap; project locks still prevent concurrent writes to one timeline.
+MCP_SLOTS = int(os.getenv("WORKER_MCP_SLOTS", "3"))
 MCP_POLL_INTERVAL_S = float(os.getenv("WORKER_MCP_POLL_INTERVAL_S", "0.25"))
 # An MCP call is never retried. Tools are not idempotent — a re-run of
 # add_music adds a SECOND track — and the caller is a live model that can
@@ -920,6 +921,16 @@ MODAL_EXECUTOR_ENVIRONMENT = os.getenv(
     "MODAL_EXECUTOR_ENVIRONMENT", "main").strip()
 MODAL_EXECUTOR_PERCENT = max(0, min(100, int(os.getenv(
     "MODAL_EXECUTOR_PERCENT", "100"))))
+# The R2 bucket is in Europe. Sample only byte-heavy compute there while the
+# database-sensitive agent, health/probe, and URL-egress paths remain in the
+# proven US envelope. A stable hash makes a retry stay in the same region.
+MODAL_EU_PERCENT = max(0, min(100, int(os.getenv(
+    "MODAL_EU_PERCENT", "10"))))
+MODAL_EU_TYPES = frozenset(
+    part.strip() for part in os.getenv(
+        "MODAL_EU_TYPES",
+        "final,index,filmstrip,frames,mcp_tool").split(",")
+    if part.strip())
 MODAL_EXECUTOR_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "MODAL_EXECUTOR_TYPES",

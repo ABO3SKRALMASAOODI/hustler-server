@@ -14,6 +14,7 @@ we POST is only what the runner needs to identify the work — never asset bytes
 """
 
 import hashlib
+import json
 import threading
 import time
 from datetime import datetime, timezone
@@ -101,13 +102,37 @@ def _modal_selected(job):
     return bucket % 100 < percent
 
 
+def _modal_eu_selected(job):
+    """Stable, retry-safe regional canary for byte-heavy Modal calls."""
+    percent = config.MODAL_EU_PERCENT
+    if percent <= 0:
+        return False
+    if str(job.get("type") or "") not in config.MODAL_EU_TYPES:
+        return False
+    if percent >= 100:
+        return True
+    identity = job.get("id")
+    if identity is None:
+        # Synchronous MCP/frame calls have no row id. Their canonical payload
+        # makes separate calls sample independently while an identical retry
+        # remains in the same region.
+        identity = json.dumps(job.get("payload") or {}, sort_keys=True,
+                              separators=(",", ":"), default=str)
+    stable = (f"eu:{identity}:{job.get('project_id')}:"
+              f"{job.get('type')}")
+    bucket = int(hashlib.sha256(stable.encode("utf-8")).hexdigest()[:8], 16)
+    return bucket % 100 < percent
+
+
 def _modal_function_name(job_type, override=None):
     if override:
         return override
     if job_type in ("preview", "preview_check", "filmstrip"):
         return "preview"
-    if job_type in ("final", "index"):
+    if job_type == "final":
         return "batch"
+    if job_type == "index":
+        return "index"
     if job_type == "agent_turn":
         return "agent"
     if job_type == "ytprobe":
@@ -485,8 +510,34 @@ def _modal_transport_error(exc):
 
 
 def _run_modal(job, function_override=None):
-    name = _modal_function_name(job.get("type"), function_override)
-    function = _modal_function(name)
+    base_name = _modal_function_name(job.get("type"), function_override)
+    requested_name = (f"{base_name}_eu"
+                      if base_name in {"preview", "batch", "index", "light"}
+                      and _modal_eu_selected(job) else base_name)
+    candidates = [requested_name]
+    if requested_name.endswith("_eu"):
+        candidates.append(base_name)
+    # A new dispatcher may become healthy before the Modal workflow finishes.
+    # The old batch function is an identical safe launch target for index work.
+    if base_name == "index" and "batch" not in candidates:
+        candidates.append("batch")
+    last = None
+    for name in candidates:
+        try:
+            function = _modal_function(name)
+            break
+        except ModalLaunchUnavailable as exc:
+            last = exc
+    else:
+        raise last or ModalLaunchUnavailable(
+            f"no Modal function available for {base_name}")
+    if name != requested_name:
+        print(f"[dispatcher] Modal function {requested_name} unavailable; "
+              f"using {name} before launch", flush=True)
+    elif name.endswith("_eu"):
+        print(f"[dispatcher] Modal EU canary type={job.get('type')} "
+              f"job={job.get('id')} project={job.get('project_id')} "
+              f"function={name}", flush=True)
     try:
         call = function.spawn(_job_payload(job))
     except Exception as exc:

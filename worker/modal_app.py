@@ -47,10 +47,6 @@ app = modal.App(APP_NAME)
 COMMON = {
     "image": image,
     "secrets": [secret],
-    # A live global-placement canary put a customer final in ap-northeast-2.
-    # Keep latency/data paths inside the proven US envelope; cost reduction
-    # comes from right-sized reservations, never geographic roulette.
-    "region": "us",
     "routing_region": "us-east",
     "min_containers": 0,
     "max_containers": 5,
@@ -61,6 +57,13 @@ COMMON = {
     "timeout": 3600,
     "startup_timeout": 300,
 }
+
+# Never use unrestricted global placement: one live canary landed a customer
+# final in ap-northeast-2. Broad US and EU both cost 1.5x; the EU siblings are
+# a controlled canary beside the R2 bucket, while agents and probes remain by
+# the Oregon database in the US.
+US_COMMON = {**COMMON, "region": "us"}
+EU_COMMON = {**COMMON, "region": "eu"}
 
 # Modal CPU floats are reservations, not limits: an uncapped ffmpeg process
 # may burst into spare host cores and is billed for that actual usage. Pairing
@@ -76,8 +79,9 @@ HEAVY_CPU = (4.0, 4.0)
 # the capacity a rare large input may need. CPU request and limit stay
 # identical: no render gets fewer cycles or a lower speed ceiling.
 PREVIEW_MEMORY = (2048, 4096)
-BATCH_MEMORY = (8192, 16384)
-LIGHT_MEMORY = (8192, 32768)
+BATCH_MEMORY = (4096, 16384)
+INDEX_MEMORY = (4096, 16384)
+LIGHT_MEMORY = (2048, 32768)
 HEAVY_MEMORY = (16384, 32768)
 AGENT_MEMORY = (1024, 2048)
 PROBE_MEMORY = (1024, 4096)
@@ -144,32 +148,62 @@ def _run(job, profile, role="executor", pricing_multiplier=1.5):
 
 
 @app.function(name="preview", cpu=PREVIEW_CPU, memory=PREVIEW_MEMORY,
-              **COMMON)
+              **US_COMMON)
 def preview(job):
     return _run(job, "preview")
 
 
-@app.function(name="batch", cpu=BATCH_CPU, memory=BATCH_MEMORY, **COMMON)
+@app.function(name="batch", cpu=BATCH_CPU, memory=BATCH_MEMORY, **US_COMMON)
 def batch(job):
     return _run(job, "batch")
 
 
-@app.function(name="light", cpu=HEAVY_CPU, memory=LIGHT_MEMORY, **COMMON)
+@app.function(name="index", cpu=BATCH_CPU, memory=INDEX_MEMORY, **US_COMMON)
+def index(job):
+    """Reserve for local-Whisper spikes without paying the old 8-GiB floor."""
+    return _run(job, "index")
+
+
+@app.function(name="light", cpu=HEAVY_CPU, memory=LIGHT_MEMORY, **US_COMMON)
 def light(job):
     """Short browser/frame tools keep full CPU and the old 32-GiB limit."""
     return _run(job, "light")
 
 
-@app.function(name="heavy", cpu=HEAVY_CPU, memory=HEAVY_MEMORY, **COMMON)
+@app.function(name="heavy", cpu=HEAVY_CPU, memory=HEAVY_MEMORY, **US_COMMON)
 def heavy(job):
     return _run(job, "heavy")
 
 
 @app.function(name="egress", cpu=HEAVY_CPU, memory=LIGHT_MEMORY,
-              **COMMON)
+              **US_COMMON)
 def egress(job):
     """Keep URL acquisition on the proven US egress while right-sizing RAM."""
     return _run(job, "egress", pricing_multiplier=1.5)
+
+
+@app.function(name="preview_eu", cpu=PREVIEW_CPU, memory=PREVIEW_MEMORY,
+              **EU_COMMON)
+def preview_eu(job):
+    return _run(job, "preview-eu")
+
+
+@app.function(name="batch_eu", cpu=BATCH_CPU, memory=BATCH_MEMORY,
+              **EU_COMMON)
+def batch_eu(job):
+    return _run(job, "batch-eu")
+
+
+@app.function(name="index_eu", cpu=BATCH_CPU, memory=INDEX_MEMORY,
+              **EU_COMMON)
+def index_eu(job):
+    return _run(job, "index-eu")
+
+
+@app.function(name="light_eu", cpu=HEAVY_CPU, memory=LIGHT_MEMORY,
+              **EU_COMMON)
+def light_eu(job):
+    return _run(job, "light-eu")
 
 
 @app.function(

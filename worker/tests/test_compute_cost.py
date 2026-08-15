@@ -72,6 +72,16 @@ def test_modal_profiles_include_right_sized_memory_and_idle_tail(monkeypatch):
         > timings["gross_compute_usd_ceiling"]
 
 
+def test_eu_profile_uses_us_equivalent_shape_and_labels_region(monkeypatch):
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "index-eu")
+    monkeypatch.setenv("MODAL_PRICING_MULTIPLIER", "1.5")
+    timings = compute_cost.annotate_request({}, 12)
+    assert timings["compute_profile"] \
+        == "modal-index-eu-4core-4-16g-pinned-eu"
+    assert timings["compute_region_class"] == "pinned-eu"
+
+
 def test_unpinned_profile_avoids_us_region_surcharge(monkeypatch):
     monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
     monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "batch")

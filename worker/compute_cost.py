@@ -24,8 +24,9 @@ MODAL_US_MULTIPLIER = 1.5
 # ordinary inputs at their real shape without rejecting an outlier.
 MODAL_PROFILES = {
     "preview": (2.0, 2, 4, 10),
-    "batch": (4.0, 8, 16, 10),
-    "light": (4.0, 8, 32, 10),
+    "batch": (4.0, 4, 16, 10),
+    "index": (4.0, 4, 16, 10),
+    "light": (4.0, 2, 32, 10),
     "heavy": (4.0, 16, 32, 10),
     "egress": (4.0, 8, 32, 10),
     "agent": (0.125, 1, 2, 30),
@@ -49,8 +50,10 @@ def request_profile(role=None, service=None):
 def annotate_request(timings, seconds, role=None, service=None):
     if os.getenv("EXECUTOR_PROVIDER", "") == "modal":
         profile = os.getenv("MODAL_EXECUTOR_PROFILE", "heavy")
+        priced_profile = (profile[:-3]
+                          if profile.endswith("-eu") else profile)
         cores, memory_request, memory_limit, tail_s = MODAL_PROFILES.get(
-            profile, MODAL_PROFILES["heavy"])
+            priced_profile, MODAL_PROFILES["heavy"])
         try:
             multiplier = float(os.getenv(
                 "MODAL_PRICING_MULTIPLIER", str(MODAL_US_MULTIPLIER)))
@@ -61,7 +64,8 @@ def annotate_request(timings, seconds, role=None, service=None):
                          + memory_request * MODAL_GIB_S) * multiplier
         limit_unit = (cores * MODAL_CORE_S
                       + memory_limit * MODAL_GIB_S) * multiplier
-        region_class = "global" if multiplier == 1.0 else "pinned-us"
+        region_class = "global" if multiplier == 1.0 else (
+            "pinned-eu" if profile.endswith("-eu") else "pinned-us")
         timings.update({
             "compute_provider": "modal",
             "compute_profile": (
