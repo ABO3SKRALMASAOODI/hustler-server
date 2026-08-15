@@ -226,6 +226,31 @@ def test_compute_fleet_stays_in_proven_us_latency_envelope():
     assert remote._modal_function_name("preview") == "preview"
     assert remote._modal_function_name("frames") == "light"
     assert remote._modal_function_name("capture") == "light"
+    assert remote._modal_function_name("filmstrip") == "preview"
     assert remote._modal_function_name("fetch") == "egress"
     assert remote._modal_function_name("search") == "egress"
     assert remote._modal_function_name("clean") == "heavy"
+
+
+def test_filmstrip_is_forced_to_modal_without_cloud_run_fallback(monkeypatch):
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    seen = []
+    monkeypatch.setattr(
+        remote, "_run_modal",
+        lambda job, function_override=None: seen.append(
+            (job["type"], function_override)) or {"available": True})
+    monkeypatch.setattr(
+        remote, "_run_cloud",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("filmstrip must not use the retired executor")))
+
+    result = remote.run_filmstrip_remote(
+        None, dict(JOB, type="filmstrip"))
+
+    assert result == {"available": True}
+    assert seen == [("filmstrip", "preview")]
+
+
+def test_modal_compute_image_exposes_the_filmstrip_runner():
+    import http_server
+    assert "filmstrip" in http_server.COMPUTE_RUNNERS

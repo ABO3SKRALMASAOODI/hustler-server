@@ -104,7 +104,7 @@ def _modal_selected(job):
 def _modal_function_name(job_type, override=None):
     if override:
         return override
-    if job_type in ("preview", "preview_check"):
+    if job_type in ("preview", "preview_check", "filmstrip"):
         return "preview"
     if job_type in ("final", "index"):
         return "batch"
@@ -629,11 +629,16 @@ def _run_across_media_egress(job):
     reclaimed with ordinary scratch/fetched-object lifecycle cleanup).
     """
     providers = []
-    if config.REMOTE_EXECUTOR_URL:
-        providers.append(("cloud_run", lambda: _run_cloud(job)))
     if config.MODAL_EXECUTOR_ENABLED:
         providers.append(("modal", lambda: _run_modal(
             job, function_override="egress")))
+    # Modal is production. Keep the old endpoint only as an explicitly
+    # enabled rollback after Modal has failed; never pay its latency before a
+    # healthy Modal fetch (and never touch it when fallback is disabled).
+    if config.REMOTE_EXECUTOR_URL and (
+            not config.MODAL_EXECUTOR_ENABLED
+            or config.MODAL_CLOUD_RUN_FALLBACK):
+        providers.append(("cloud_run", lambda: _run_cloud(job)))
     if not providers:
         raise RemoteExecutorError("no alternate media-fetch executor is set")
 
@@ -807,6 +812,22 @@ def run_render_remote(worker_db, job):      # signature matches run_render_job
             print(f"[dispatcher] batch final unavailable ({exc}); using "
                   "request executor for this job", flush=True)
     return _run_request_with_capacity_fallback(job)
+
+
+def run_filmstrip_remote(worker_db, job):
+    """Run timeline-art decoding on Modal, never on the retired executor.
+
+    Filmstrip jobs are queue-backed and therefore use the same durable Modal
+    launch/fenced completion contract as renders. This intentionally bypasses
+    percentage selection and Cloud Run fallback: a 4K asset filmstrip is the
+    workload that OOM-killed the 512-MiB dispatcher, and Google is no longer a
+    production execution target.
+    """
+    if not config.MODAL_EXECUTOR_ENABLED:
+        raise ModalLaunchUnavailable("Modal is required for filmstrip compute")
+    # The 2-core/2-GiB preview reservation is enough for two single-threaded
+    # asset seeks while costing far less than the generic 8-GiB light lane.
+    return _run_modal(job, function_override="preview")
 
 
 def run_index_remote(worker_db, job):       # signature matches run_index_job

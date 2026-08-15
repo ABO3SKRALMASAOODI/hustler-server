@@ -43,9 +43,11 @@ import ytaccess
 # render, and giving it its own concurrency on a box whose CPU is the ceiling
 # would let a hundred project-opens starve the previews people are waiting on.
 # With a REMOTE executor (round 91) the media lane is pure HTTP waiting and
-# runs several slots — but filmstrips still encode LOCALLY on this small box,
-# so they get their own single lane instead: media slots never stack local
-# ffmpeg here, and a filmstrip never occupies a render slot.
+# runs several slots. Filmstrips originally remained local, but one project
+# with two concurrent 4K asset decoders crossed the dispatcher's 512-MiB
+# ceiling three times. Modal now owns filmstrip compute too; the dedicated
+# lane remains useful because it bounds queued timeline-art requests to one
+# durable launch at a time.
 # A failed one is deliberately absent from FAIL_NOTES/REAPER_NOTES — a missing
 # strip is a cosmetic degradation, not something to put in a user's chat.
 if config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED:
@@ -94,10 +96,12 @@ def _build_runners():
                            else agent_loop.run_agent_job),
             "shorts_plan": shorts.run_shorts_plan,
             "mcp_tool": mcp_exec.run_mcp_job,
-            # Local even with a remote executor: it reads the proxy, runs one
-            # ffmpeg and uploads a JPEG. Shipping that to an 8-vCPU box costs
-            # more in round trips than it saves in encode time.
-            "filmstrip": filmstrip.run_filmstrip_job,
+            # A main strip is cheap, but inserted clips may be full-resolution
+            # phone footage and are sampled concurrently. Keep those decoders
+            # off the 512-MiB dispatcher whenever Modal is configured.
+            "filmstrip": (remote.run_filmstrip_remote
+                          if config.MODAL_EXECUTOR_ENABLED
+                          else filmstrip.run_filmstrip_job),
         }
     return {
         "index": indexer.run_index_job,
@@ -544,7 +548,10 @@ def main():
     signal.signal(signal.SIGTERM, _on_shutdown)
     signal.signal(signal.SIGINT, _on_shutdown)
     slots = config.worker_lane_slots()
-    exec_mode = (f"modal {config.MODAL_EXECUTOR_PERCENT}% + Cloud Run fallback"
+    exec_mode = ((f"modal {config.MODAL_EXECUTOR_PERCENT}%" +
+                  (" + retired-executor rollback"
+                   if (config.MODAL_CLOUD_RUN_FALLBACK and
+                       config.REMOTE_EXECUTOR_URL) else ""))
                  if config.MODAL_EXECUTOR_ENABLED else
                  ("remote executor " + config.REMOTE_EXECUTOR_URL
                   if config.REMOTE_EXECUTOR_URL else "local"))

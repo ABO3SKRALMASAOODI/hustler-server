@@ -61,9 +61,10 @@ def test_fetch_runner_uploads_media_and_actual_review_frames(
                for row in uploaded[1:])
 
 
-def test_remote_fetch_falls_through_a_cloud_wall_to_modal(monkeypatch):
+def test_remote_fetch_uses_modal_before_the_retired_executor(monkeypatch):
     monkeypatch.setattr(config, "REMOTE_EXECUTOR_URL", "https://cloud")
     monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_CLOUD_RUN_FALLBACK", True)
     calls = []
 
     def cloud(job):
@@ -81,7 +82,24 @@ def test_remote_fetch_falls_through_a_cloud_wall_to_modal(monkeypatch):
         3, {"url": "https://youtube.com/watch?v=x"}, user_id=4)
 
     assert got["ok"] and got["fetch_provider"] == "modal"
-    assert calls == [("cloud", "fetch"), ("modal", "egress")]
+    assert calls == [("modal", "egress")]
+
+
+def test_disabled_fallback_never_touches_the_retired_executor(monkeypatch):
+    monkeypatch.setattr(config, "REMOTE_EXECUTOR_URL", "https://cloud")
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "MODAL_CLOUD_RUN_FALLBACK", False)
+    monkeypatch.setattr(
+        remote, "_run_cloud",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled retired executor must not be called")))
+    monkeypatch.setattr(remote, "_run_modal", lambda *args, **kwargs: {
+        "ok": True, "storage_key": "fetched/3/song.mp3"})
+
+    got = remote.run_fetch_remote(
+        3, {"url": "https://youtube.com/watch?v=x"}, user_id=4)
+
+    assert got["ok"] and got["fetch_provider"] == "modal"
 
 
 class _Db:

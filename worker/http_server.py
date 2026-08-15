@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
 import executor_runtime
+import filmstrip
 import frameserve
 import indexer
 import inpaint
@@ -56,6 +57,10 @@ COMPUTE_RUNNERS = {
     "preview": renderer.run_render_job,
     "preview_check": renderer.run_render_job,
     "final": renderer.run_render_job,
+    # Timeline art includes inserted 4K clips. Two asset decoders are enough
+    # to cross the Render dispatcher's 512-MiB ceiling, so Modal executes the
+    # complete job and persists the same cached sheets/waveforms remotely.
+    "filmstrip": filmstrip.run_filmstrip_job,
     "capture": webrecord.run_capture_job,
     # Same shape as capture (round 62): one tool call inside an agent turn,
     # moved here because decoding a user's 4K original for six jpegs is
