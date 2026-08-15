@@ -200,6 +200,53 @@ def test_a_non_mp4_asset_is_never_handed_over_untouched(monkeypatch):
     assert str(e.value).endswith(".mp4")     # an mp4 copy, not the .mov
 
 
+def test_heavy_encode_is_offloaded_only_after_source_resolution(monkeypatch):
+    """A timeline preview wait belongs on the warm dispatcher; Modal receives
+    the exact resolved object and therefore starts at the encode boundary."""
+    import remote
+    sent = []
+    monkeypatch.setattr(remote, "mcp_media_available", lambda: True)
+    monkeypatch.setattr(
+        remote, "run_mcp_media_remote",
+        lambda project_id, payload, user_id=None: sent.append(
+            (project_id, payload, user_id)) or {"text": "remote"})
+
+    out = mcp_media.prepare(
+        _Ctx(storage_key="clips/3/source.mov"),
+        {"delivery": "url", "start": 1.0, "end": 3.0}, 12 * MB)
+
+    assert out == {"text": "remote"}
+    project_id, payload, user_id = sent[0]
+    args = payload["args"]
+    assert (project_id, user_id, payload["tool"]) == (3, 1, "__media__")
+    assert args["_resolved_asset"]["storage_key"] == "clips/3/source.mov"
+    assert "preview render of EDL v7" in args["_resolved_what"]
+
+
+def test_resolved_modal_encode_never_recurses_to_remote(monkeypatch):
+    import remote
+    monkeypatch.setattr(
+        remote, "run_mcp_media_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("resolved work must encode here")))
+
+    class _S:
+        @staticmethod
+        def exists(key):
+            raise _Reached(key)
+
+    monkeypatch.setattr(mcp_media, "storage", _S)
+    with pytest.raises(_Reached):
+        mcp_media.prepare(
+            _Ctx(),
+            {"delivery": "url", "start": 1.0, "end": 3.0,
+             "_resolved_asset": {
+                 "storage_key": "clips/3/source.mov", "bytes": 4 * MB,
+                 "duration_s": 60.0, "height": 480, "fps": 30.0},
+             "_resolved_what": "the resolved clip"},
+            12 * MB)
+
+
 # ── the pictures ─────────────────────────────────────────────────────
 #
 # THE POINT OF THE WHOLE FEATURE (Aug 4 2026). Handing over a link made the

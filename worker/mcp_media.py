@@ -291,18 +291,27 @@ def prepare(ctx, args, inline_max_bytes):
     except ValueError as e:
         return {"text": f"REJECTED: {e}", "is_error": True}
 
-    try:
-        if kind == "timeline":
-            asset, version, note = _preview_for_watching(
-                ctx, args.get("render") is not False)
-            what = f"the assembled program — preview render of EDL v{version}"
-            what += note
-        elif kind == "source":
-            asset, what = _source_object(ctx)
-        else:
-            asset, what = _asset_object(ctx, args.get("asset_key"))
-    except Unavailable as e:
-        return {"text": str(e), "is_error": True}
+    resolved = args.get("_resolved_asset")
+    if isinstance(resolved, dict) and resolved.get("storage_key"):
+        # The warm dispatcher already resolved the current preview/source and
+        # waited for any prerequisite render. Modal receives only JSON-safe
+        # file facts and goes straight to the encode.
+        asset = resolved
+        what = str(args.get("_resolved_what") or "the requested video")
+    else:
+        resolved = None
+        try:
+            if kind == "timeline":
+                asset, version, note = _preview_for_watching(
+                    ctx, args.get("render") is not False)
+                what = (f"the assembled program — preview render of EDL "
+                        f"v{version}{note}")
+            elif kind == "source":
+                asset, what = _source_object(ctx)
+            else:
+                asset, what = _asset_object(ctx, args.get("asset_key"))
+        except Unavailable as e:
+            return {"text": str(e), "is_error": True}
 
     key = asset["storage_key"]
     full_duration = float(asset.get("duration_s") or 0) or None
@@ -371,6 +380,23 @@ def prepare(ctx, args, inline_max_bytes):
             "will not do. Ask for it untouched instead — delivery=\"url\", no "
             "max_mb — and you get a link to the original, or wait for the "
             "analysis to finish and watch the proxy."), "is_error": True}
+
+    # Resolve and wait on the always-on dispatcher, then rent Modal only for
+    # the byte-heavy part. Sending the whole queue job to Modal made a timeline
+    # watch pay for ~100 seconds of idle preview wait before a short encode.
+    if resolved is None:
+        import remote
+        if remote.mcp_media_available():
+            remote_args = dict(args)
+            remote_args["_resolved_asset"] = {
+                field: asset.get(field) for field in
+                ("storage_key", "bytes", "duration_s", "height", "fps")
+            }
+            remote_args["_resolved_what"] = what
+            return remote.run_mcp_media_remote(
+                ctx.project_id,
+                {"tool": "__media__", "args": remote_args},
+                user_id=(ctx.job or {}).get("user_id"))
 
     # The source has to be here before an unknown duration can be resolved, so
     # a clip the browser never measured is downloaded first and planned after.

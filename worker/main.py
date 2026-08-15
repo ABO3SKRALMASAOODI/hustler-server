@@ -75,15 +75,6 @@ MCP_TYPES = ("mcp_tool",)
 DRAINING = threading.Event()
 
 
-def _run_mcp_tool(worker_db, job):
-    """Keep cheap MCP mutations local; send video handoff encodes to Modal."""
-    payload = job.get("payload") or {}
-    if (config.MODAL_EXECUTOR_ENABLED and
-            payload.get("tool") == mcp_exec.MEDIA_TOOL):
-        return remote.run_mcp_media_remote(worker_db, job)
-    return mcp_exec.run_mcp_job(worker_db, job)
-
-
 def _build_runners():
     """Choose local runners or their request-based execution owners.
 
@@ -104,7 +95,7 @@ def _build_runners():
                                    config.MODAL_EXECUTOR_TYPES))
                            else agent_loop.run_agent_job),
             "shorts_plan": shorts.run_shorts_plan,
-            "mcp_tool": _run_mcp_tool,
+            "mcp_tool": mcp_exec.run_mcp_job,
             # A main strip is cheap, but inserted clips may be full-resolution
             # phone footage and are sampled concurrently. Keep those decoders
             # off the 512-MiB dispatcher whenever Modal is configured.
@@ -122,7 +113,7 @@ def _build_runners():
         # An MCP tool call runs where an agent turn runs — same process, same
         # ToolContext, same tools. That is the whole point: the outside model
         # gets the in-house editor, not a copy of it.
-        "mcp_tool": _run_mcp_tool,
+        "mcp_tool": mcp_exec.run_mcp_job,
         "filmstrip": filmstrip.run_filmstrip_job,
     }
 

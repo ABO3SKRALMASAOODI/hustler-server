@@ -263,14 +263,12 @@ def test_mcp_media_is_forced_to_modal_but_other_tools_are_rejected(monkeypatch):
         remote, "_run_modal",
         lambda job, function_override=None: seen.append(
             (job["payload"]["tool"], function_override)) or {"ok": True})
-    media_job = dict(JOB, type="mcp_tool",
-                     payload={"tool": "__media__", "args": {}})
+    payload = {"tool": "__media__", "args": {}}
 
-    assert remote.run_mcp_media_remote(None, media_job) == {"ok": True}
+    assert remote.run_mcp_media_remote(7, payload, user_id=3) == {"ok": True}
     assert seen == [("__media__", "preview")]
     try:
-        remote.run_mcp_media_remote(
-            None, dict(media_job, payload={"tool": "get_edl"}))
+        remote.run_mcp_media_remote(7, {"tool": "get_edl"}, user_id=3)
         assert False, "non-media tools must stay on the dispatcher"
     except ValueError as exc:
         assert "__media__ only" in str(exc)

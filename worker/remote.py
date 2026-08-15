@@ -830,18 +830,26 @@ def run_filmstrip_remote(worker_db, job):
     return _run_modal(job, function_override="preview")
 
 
-def run_mcp_media_remote(worker_db, job):
-    """Run only MCP's video shrink/window operation on Modal.
+def mcp_media_available():
+    """Whether video bytes can be encoded away from the dispatcher."""
+    return bool(config.MODAL_EXECUTOR_ENABLED)
 
-    Small EDL/read tools remain on the warm Render process. This isolates the
-    one MCP operation that downloads and re-encodes video without adding a
-    cold start to the many sub-second editing calls.
+
+def run_mcp_media_remote(project_id, payload, user_id=None):
+    """Run only the resolved MCP video encode on Modal.
+
+    The dispatcher resolves/waits for a timeline preview first, then sends a
+    stateless id-less call. Modal is consequently billed for the encode, not
+    for idling while another Modal function renders the preview source.
     """
-    if (job.get("payload") or {}).get("tool") != "__media__":
+    if (payload or {}).get("tool") != "__media__":
         raise ValueError("Modal MCP offload accepts __media__ only")
     if not config.MODAL_EXECUTOR_ENABLED:
         raise ModalLaunchUnavailable("Modal is required for MCP media encode")
-    return _run_modal(job, function_override="preview")
+    return _run_modal({"id": None, "type": "mcp_tool",
+                       "project_id": project_id, "user_id": user_id,
+                       "attempts": 0, "payload": payload},
+                      function_override="preview")
 
 
 def run_index_remote(worker_db, job):       # signature matches run_index_job
