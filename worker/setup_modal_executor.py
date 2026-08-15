@@ -3,6 +3,10 @@
 
 Values are piped through a mode-0600 temporary JSON file and are never printed.
 Requires active ``gcloud`` and ``modal`` logins. Safe to rerun.
+
+Cloud Run may expose an environment variable through Secret Manager instead of
+an inline value. Resolve those references explicitly so an operator adding a
+secret such as ``YTDLP_PROXY`` does not silently leave Modal on direct egress.
 """
 
 import json
@@ -20,6 +24,24 @@ SECRET = os.getenv("MODAL_EXECUTOR_SECRET_NAME",
 ENVIRONMENT = os.getenv("MODAL_ENVIRONMENT", "main")
 
 
+def _secret_ref_value(ref, env_name):
+    """Read one Cloud Run Secret Manager reference without printing it."""
+    secret = str((ref or {}).get("name") or "").strip()
+    version = str((ref or {}).get("key") or "latest").strip()
+    if not secret:
+        raise SystemExit(
+            f"Cloud Run environment variable {env_name} has an invalid "
+            "secret reference")
+    try:
+        return subprocess.check_output([
+            "gcloud", "secrets", "versions", "access", version,
+            "--secret", secret, "--project", PROJECT,
+        ], text=True).rstrip("\r\n")
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"Could not resolve Cloud Run secret for {env_name}") from exc
+
+
 def _service_env():
     raw = subprocess.check_output([
         "gcloud", "run", "services", "describe", SERVICE,
@@ -30,14 +52,18 @@ def _service_env():
     env = {}
     for item in containers[0].get("env", []):
         name = item.get("name")
-        # Platform and role settings are owned by modal_app.py. Secret-backed
-        # Cloud Run valueFrom entries cannot be exported and are reported.
+        # Platform and role settings are owned by modal_app.py.
         if not name or name in {"PORT", "K_SERVICE", "WORKER_ROLE",
                                 "EXECUTOR_PROVIDER",
                                 "MODAL_EXECUTOR_PROFILE"}:
             continue
         if "value" in item:
             env[name] = str(item["value"])
+            continue
+        secret_ref = ((item.get("valueFrom") or {})
+                      .get("secretKeyRef"))
+        if secret_ref:
+            env[name] = _secret_ref_value(secret_ref, name)
     # Agent turns running on Modal can launch nested render-tool calls. Keep
     # Cloud Run's public service URL available as a pre-launch fallback; the
     # existing shared bearer secret still authenticates every request.
