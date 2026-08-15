@@ -291,7 +291,11 @@ def prepare(ctx, args, inline_max_bytes):
     except ValueError as e:
         return {"text": f"REJECTED: {e}", "is_error": True}
 
-    resolved = args.get("_resolved_asset")
+    # Hidden resolved fields are transport data, never caller authority. An
+    # MCP client can send arbitrary JSON arguments, so honor them only inside
+    # the Modal executor process that our dispatcher launched.
+    resolved = (args.get("_resolved_asset")
+                if os.getenv("EXECUTOR_PROVIDER") == "modal" else None)
     if isinstance(resolved, dict) and resolved.get("storage_key"):
         # The warm dispatcher already resolved the current preview/source and
         # waited for any prerequisite render. Modal receives only JSON-safe

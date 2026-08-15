@@ -225,6 +225,7 @@ def test_heavy_encode_is_offloaded_only_after_source_resolution(monkeypatch):
 
 def test_resolved_modal_encode_never_recurses_to_remote(monkeypatch):
     import remote
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
     monkeypatch.setattr(
         remote, "run_mcp_media_remote",
         lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -245,6 +246,17 @@ def test_resolved_modal_encode_never_recurses_to_remote(monkeypatch):
                  "duration_s": 60.0, "height": 480, "fps": 30.0},
              "_resolved_what": "the resolved clip"},
             12 * MB)
+
+
+def test_caller_cannot_forge_resolved_storage_key(monkeypatch):
+    monkeypatch.delenv("EXECUTOR_PROVIDER", raising=False)
+    out = mcp_media.prepare(
+        _Ctx(),
+        {"_resolved_asset": {
+            "storage_key": "clips/another-user/private.mp4", "bytes": 1,
+            "duration_s": 1.0, "height": 480, "fps": 30.0}},
+        12 * MB)
+    assert out["video"]["storage_key"] == "media/3/prev.mp4"
 
 
 # ── the pictures ─────────────────────────────────────────────────────
