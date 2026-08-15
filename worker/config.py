@@ -1245,10 +1245,19 @@ AGENT_REPLY_MAX_TOKENS = int(os.getenv("AGENT_REPLY_MAX_TOKENS", "4000"))
 AGENT_TURN_TIMEOUT_S = min(
     600.0, float(os.getenv("AGENT_TURN_TIMEOUT_S", "600")))
 # Absolute lifetime of one user turn, including productive continuations.
-# This prevents a stream of tiny writes from refreshing the inactivity clock
-# forever while preserving enough room for a complex edit and its preview.
+# Production project 926 proved that a stream of tiny grade writes/previews
+# can remain "productive" for 17+ minutes while getting farther from the
+# user's simple request. Ten minutes is the product ceiling; a synchronous
+# tool already in flight may finish just beyond it, but cannot start another
+# model/tool cycle.
 AGENT_TURN_TOTAL_TIMEOUT_S = min(
-    900.0, max(180.0, float(os.getenv("AGENT_TURN_TOTAL_TIMEOUT_S", "720"))))
+    600.0, max(180.0, float(os.getenv("AGENT_TURN_TOTAL_TIMEOUT_S", "600"))))
+# A turn is an iteration on one request, not an unbounded editing session.
+# Eight committed versions is already far above the recent-user median and
+# enough for a broad multi-department edit plus repairs. Further revisions
+# wait for a fresh user instruction so a critic loop cannot spend forever.
+AGENT_MAX_EDL_WRITES = min(
+    10, max(3, int(os.getenv("AGENT_MAX_EDL_WRITES", "8"))))
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))

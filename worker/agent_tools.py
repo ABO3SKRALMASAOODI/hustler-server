@@ -23466,6 +23466,17 @@ def execute(ctx, name, args):
     before_edl = None
     outer_write = name in WRITE_TOOLS and not isinstance(ctx, _RecipeContext)
     if outer_write:
+        committed = len(getattr(ctx, "versions_written", None) or [])
+        if committed >= config.AGENT_MAX_EDL_WRITES:
+            _metric(ctx, "revision_budget_stops")
+            return (
+                "REJECTED: this turn has already committed "
+                f"{committed} EDL revisions, reaching the safe revision "
+                "ceiling. Do not make another variation or call another "
+                "write tool. Render/inspect the current version if it has "
+                "not been checked, then finish honestly as partial if any "
+                "requested detail remains. A fresh user turn can continue "
+                "from the saved edit.")
         if finishing_checkpoint(ctx):
             state = director.status(getattr(ctx, "edit_plan", None))
             _metric(ctx, "post_pass_variations_prevented")
