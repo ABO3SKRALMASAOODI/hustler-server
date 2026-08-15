@@ -31,6 +31,7 @@ Run:  python -m pytest tests/test_heartbeat_resilience.py -q   (from worker/)
 
 import os
 import sys
+from pathlib import Path
 
 import psycopg2
 import pytest
@@ -197,3 +198,41 @@ def test_no_active_jobs_is_not_a_failure(monkeypatch):
     that never happened."""
     _, logs = _run_beats(monkeypatch, [None], ids=(), max_ticks=3)
     assert not [x for x in logs if "FAILED" in x]
+
+
+def _fake_proc_row(root, pid, ppid, rss_kb):
+    row = Path(root) / str(pid)
+    row.mkdir(parents=True)
+    # A name containing spaces and ')' proves the parser uses the final ')'.
+    (row / "stat").write_text(
+        f"{pid} (worker child)) S {ppid} 0 0 0 0 0\n")
+    (row / "status").write_text(f"Name:\ttest\nVmRSS:\t{rss_kb} kB\n")
+
+
+def test_memory_snapshot_counts_children_and_the_container(tmp_path):
+    proc = tmp_path / "proc"
+    cgroup = tmp_path / "cgroup"
+    proc.mkdir()
+    cgroup.mkdir()
+    _fake_proc_row(proc, 100, 1, 220_000)
+    _fake_proc_row(proc, 101, 100, 180_000)
+    _fake_proc_row(proc, 102, 101, 40_000)
+    _fake_proc_row(proc, 999, 1, 90_000)       # outside our process tree
+    (cgroup / "memory.current").write_text(str(505_000 * 1024))
+    (cgroup / "memory.max").write_text(str(512 * 1024 * 1024))
+
+    got = dbx._linux_memory_snapshot_kb(
+        str(proc), str(cgroup), root_pid=100)
+
+    assert got == {
+        "self": 220_000,
+        "tree": 440_000,
+        "children": 2,
+        "cgroup": 505_000,
+        "limit": 512 * 1024,
+    }
+
+
+def test_memory_snapshot_is_absent_off_linux(tmp_path):
+    assert dbx._linux_memory_snapshot_kb(
+        str(tmp_path / "missing"), str(tmp_path), root_pid=1) is None

@@ -48,7 +48,15 @@ FPS = SR / HOP                  # envelope frame rate ~43.07 Hz
 # convention): measured on a sample-accurate click track this took the beat
 # grid from ~70ms early to inside sync tolerance.
 FRAME_CENTER_S = (N_FFT / 2) / SR
-CHUNK_SAMPLES = HOP * 2048      # ~47 s of audio per processed block
+# Keep the FFT working set genuinely small. 2048 frames looked harmless as
+# "47 seconds of mono audio", but the old advanced-indexing matrix plus the
+# float/complex spectral intermediates peaked around 130 MiB in production.
+# That single lazy sidecar pass took the 512-MiB Render dispatcher from
+# 310 MiB to 442 MiB RSS immediately before an OOM. 512 frames is still a
+# large vectorised batch (~12 s of audio) while cutting the transient arrays
+# to one quarter of their former size.
+CHUNK_FRAMES = 512
+CHUNK_SAMPLES = HOP * CHUNK_FRAMES
 MAX_ANALYZE_S = 3600.0          # hard stop: an hour of audio is enough signal
 ENERGY_BIN_S = 0.5              # energy envelope resolution
 VB_STORE_FPS = 8.0              # stored speech-envelope rate (peak-pooled)
@@ -106,9 +114,13 @@ def _stream_frames(path, max_s=MAX_ANALYZE_S):
                 tail = buf
                 continue
             n = 1 + (len(buf) - N_FFT) // HOP
-            idx = (np.arange(N_FFT)[None, :]
-                   + HOP * np.arange(n)[:, None])
-            frames = buf[idx] * window[None, :]
+            # A strided view avoids materialising the old n x N_FFT int64
+            # advanced-index matrix (about 32 MiB at the former chunk size).
+            # Multiplication intentionally makes the one contiguous float32
+            # frame block the FFT needs.
+            frame_view = np.lib.stride_tricks.sliding_window_view(
+                buf, N_FFT)[::HOP][:n]
+            frames = frame_view * window[None, :]
             mag = np.abs(np.fft.rfft(frames, axis=1)).astype(np.float32)
             got_any = True
             yield mag

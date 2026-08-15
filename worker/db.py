@@ -815,6 +815,85 @@ def locally_owned_job_ids():
         return list(ACTIVE_JOBS - REMOTE_OWNED_JOBS)
 
 
+def _read_int_file(path):
+    try:
+        with open(path) as f:
+            raw = f.read().strip()
+        return int(raw) if raw and raw != "max" else None
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _linux_memory_snapshot_kb(proc_root="/proc",
+                              cgroup_root="/sys/fs/cgroup",
+                              root_pid=None):
+    """Best-effort memory for Python, its children and the whole container.
+
+    ``/proc/self/status`` only measures the dispatcher process. That hid the
+    ffmpeg children which pushed Render over its 512-MiB cgroup limit: the
+    final heartbeat said 222 MiB while the platform killed the container for
+    using more than 512 MiB. Scan the tiny container process table and read
+    cgroup v2/v1 counters so the next last heartbeat records what Render is
+    actually enforcing. Returns None off Linux and never affects a beat.
+    """
+    root_pid = int(root_pid or os.getpid())
+    rows = {}
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return None
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            with open(os.path.join(proc_root, name, "stat")) as f:
+                # comm is parenthesized and may contain spaces or ')'. Split
+                # at the last ')' so tail[1] remains the parent pid.
+                tail = f.read().rsplit(")", 1)[1].split()
+            ppid = int(tail[1])
+            rss_kb = None
+            with open(os.path.join(proc_root, name, "status")) as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss_kb = int(line.split()[1])
+                        break
+            if rss_kb is not None:
+                rows[pid] = (ppid, rss_kb)
+        except (OSError, IndexError, TypeError, ValueError):
+            continue                         # process exited during the scan
+    if root_pid not in rows:
+        return None
+
+    descendants = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, (ppid, _rss) in rows.items():
+            if ppid in descendants and pid not in descendants:
+                descendants.add(pid)
+                changed = True
+    self_kb = rows[root_pid][1]
+    tree_kb = sum(rows[pid][1] for pid in descendants)
+
+    # Render currently uses cgroup v2; the v1 fallback keeps the diagnostic
+    # valid on older Docker hosts and local Linux test boxes.
+    cgroup_kb = _read_int_file(os.path.join(cgroup_root, "memory.current"))
+    limit_kb = _read_int_file(os.path.join(cgroup_root, "memory.max"))
+    if cgroup_kb is None:
+        cgroup_kb = _read_int_file(os.path.join(
+            cgroup_root, "memory", "memory.usage_in_bytes"))
+        limit_kb = _read_int_file(os.path.join(
+            cgroup_root, "memory", "memory.limit_in_bytes"))
+    return {
+        "self": self_kb,
+        "tree": tree_kb,
+        "children": len(descendants) - 1,
+        "cgroup": (cgroup_kb // 1024 if cgroup_kb is not None else None),
+        "limit": (limit_kb // 1024 if limit_kb is not None else None),
+    }
+
+
 def heartbeat_forever():
     """Keep every in-flight job's heartbeat fresh so the reaper leaves live
     work alone.
@@ -843,18 +922,22 @@ def heartbeat_forever():
         if not ids:
             last_ok = time.time()
             continue
-        # RSS beside the job ids, every beat. 19 turns died as "Worker died
-        # and retries are exhausted" over 3 days (Aug 7-9) with no epitaph;
-        # if the killer is memory, the LAST logged beat now names the number
-        # the process died at. Linux-only read, never allowed to break beat.
+        # Memory beside the job ids, every beat. Python RSS alone proved
+        # misleading: ffmpeg children put the cgroup above 512 MiB while the
+        # parent still reported 222 MiB. Linux-only reads, never allowed to
+        # break the database heartbeat.
         try:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS"):
-                        print(f"[heartbeat] jobs={ids} rss="
-                              f"{line.split()[1]}kB", flush=True)
-                        break
-        except OSError:
+            mem = _linux_memory_snapshot_kb()
+            if mem:
+                extra = (f" tree_rss={mem['tree']}kB"
+                         f" child_procs={mem['children']}")
+                if mem["cgroup"] is not None:
+                    extra += f" cgroup={mem['cgroup']}kB"
+                if mem["limit"] is not None:
+                    extra += f" cgroup_limit={mem['limit']}kB"
+                print(f"[heartbeat] jobs={ids} rss={mem['self']}kB{extra}",
+                      flush=True)
+        except Exception:
             pass
         try:
             def _beat(conn):
