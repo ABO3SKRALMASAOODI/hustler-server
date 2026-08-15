@@ -29,6 +29,8 @@ today. That is fine while MCP is admin-only; it MUST be decided before the
 surface is sold (see docs/MCP.md).
 """
 
+import ctypes
+import gc
 import os
 import shutil
 import threading
@@ -41,6 +43,7 @@ import db as dbx
 import director
 import llm
 import mcp_media
+import resource_usage
 import storage
 from agent_prompt import system_prompt
 
@@ -98,7 +101,15 @@ def catalog():
 _EVICT_GRACE_S = 5
 
 
-def _drop_dead_sessions(now, keep=None):
+def _memory_pressure():
+    snap = resource_usage.snapshot()
+    current = snap.get("container_memory_current_mib")
+    limit = snap.get("container_memory_limit_mib")
+    return bool(current is not None and limit and
+                current / limit >= config.MCP_MEMORY_PRESSURE_RATIO)
+
+
+def _drop_dead_sessions(now, keep=None, pressure=None):
     """Sweep idle contexts (and their work dirs).
 
     Two locks protect a live call from being swept out from under it: the
@@ -106,13 +117,14 @@ def _drop_dead_sessions(now, keep=None):
     skipped unless its lock is free AND it has been idle for a few seconds —
     which covers the one gap where a thread has taken a session out of the map
     but not yet locked it. Oldest first, so pressure evicts the coldest."""
+    pressure = _memory_pressure() if pressure is None else bool(pressure)
     order = sorted(_sessions.items(), key=lambda kv: kv[1].used)
     for pid, s in order:
         if pid == keep:
             continue
         idle = now - s.used
         over = len(_sessions) > config.MCP_MAX_SESSIONS
-        if idle < config.MCP_SESSION_TTL_S and \
+        if not pressure and idle < config.MCP_SESSION_TTL_S and \
                 not (over and idle > _EVICT_GRACE_S):
             continue
         if not s.lock.acquire(blocking=False):
@@ -122,6 +134,33 @@ def _drop_dead_sessions(now, keep=None):
             shutil.rmtree(s.workdir, ignore_errors=True)
         finally:
             s.lock.release()
+
+
+def _relieve_memory_pressure(ctx, keep):
+    """Evict idle MCP projects and release recomputable analysis caches."""
+    if not _memory_pressure():
+        return False
+    with _sessions_lock:
+        _drop_dead_sessions(time.time(), keep=keep, pressure=True)
+    for name, empty in (
+        ("_perception", None), ("_spatial", None), ("_motion", None),
+        ("_editorial_maps", {}), ("_asset_perception", {}),
+        ("pending_images", []),
+    ):
+        if hasattr(ctx, name):
+            setattr(ctx, name, empty.copy() if isinstance(empty, (dict, list))
+                    else empty)
+    gc.collect()
+    # CPython may free objects while glibc keeps their arenas mapped. Return
+    # those pages to the 512-MiB cgroup so a healthy dispatcher is not killed
+    # between MCP calls. Best-effort and Linux/glibc-only.
+    try:
+        ctypes.CDLL(None).malloc_trim(0)
+    except (AttributeError, OSError):
+        pass
+    print(f"[mcp] memory pressure: evicted idle sessions and cleared "
+          f"project {keep}'s recomputable caches", flush=True)
+    return True
 
 
 def _drain_images(ctx):
@@ -350,3 +389,10 @@ def run_mcp_job(worker_db, job):
         finally:
             llm.set_recorder(None)
             llm.clear_turn_plan()
+            try:
+                _relieve_memory_pressure(ctx, project["id"])
+            except Exception as exc:
+                # Cleanup is defensive and fully recomputable. It must never
+                # turn a successful editor tool call into an MCP failure.
+                print(f"[mcp] memory-pressure cleanup failed: "
+                      f"{str(exc)[:200]}", flush=True)

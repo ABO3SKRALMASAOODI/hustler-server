@@ -139,6 +139,10 @@ class FakeDB:
             _pid, key = a
             return next((x for x in self.assets
                          if x["storage_key"] == key), None)
+        if name == "latest_asset":
+            _pid, kind = a
+            return next((x for x in reversed(self.assets)
+                         if x["kind"] == kind), None)
         if name == "extracted_audio_asset":
             _pid, src_key, sha = a
             return next((x for x in self.assets
@@ -270,6 +274,23 @@ check("add_voiceover on a video_clip is accepted", res4.startswith("EDL v"))
 check("voiceover stores the extracted key",
       ctx4._edl["voiceover"][0]["asset_key"].endswith(".m4a"))
 
+# A precise sentence from the main source can be reused over a second scene.
+# This is intentionally legal only through the voiceover role: add_music and
+# extract_audio still guard against accidentally doubling the whole source.
+main = {"id": 1, "kind": "original", "storage_key": "originals/1/a.mov",
+        "duration_s": 43.8, "meta": {"filename": "main.mov"}}
+ctx4b = FakeCtx([main])
+res4b = agent_tools.add_voiceover(
+    ctx4b, "main", start_output_s=33.83, source_offset_s=4.05,
+    duration_s=5.48)
+check("a bounded main-source dialogue excerpt is accepted as voiceover",
+      res4b.startswith("EDL v"))
+check("main-source excerpt stores exact source, destination and duration",
+      ctx4b._edl["voiceover"][0] == {
+          "id": "vo1", "asset_key": "originals/1/a.mov",
+          "start_output_s": 33.83, "source_offset_s": 4.05,
+          "duration_s": 5.48, "gain_db": 0.0, "duck_others": True})
+
 # The explicit tool.
 ctx5 = FakeCtx([CLIP])
 res5 = agent_tools.extract_audio(ctx5, CLIP["storage_key"])
@@ -280,8 +301,7 @@ check("extract_audio says nothing is in the edit yet",
 
 # The main video is NOT a legal source: its audio is already in the program,
 # and layering it over itself is the round-2 inaudible-music bug.
-ctx6 = FakeCtx([{"id": 1, "kind": "original", "storage_key": "originals/1/a.mov",
-                 "duration_s": 43.8, "meta": {}}])
+ctx6 = FakeCtx([main])
 res6 = agent_tools.extract_audio(ctx6, "originals/1/a.mov")
 check("extract_audio refuses the MAIN video and points at set_volume",
       res6.startswith("REJECTED") and "set_volume" in res6)

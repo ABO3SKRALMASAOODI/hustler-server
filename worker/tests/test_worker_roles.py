@@ -18,7 +18,9 @@ def _topology(role, **values):
     for key in (
             "WORKER_ROLE", "WORKER_AGENT_SLOTS", "WORKER_SHORTS_SLOTS",
             "WORKER_MCP_SLOTS", "WORKER_MEDIA_SLOTS", "WORKER_INDEX_SLOTS",
-            "REMOTE_EXECUTOR_URL"):
+            "REMOTE_EXECUTOR_URL", "REMOTE_AGENT_EXECUTOR_URL",
+            "MODAL_EXECUTOR_ENABLED", "MODAL_EXECUTOR_TYPES",
+            "REMOTE_AGENT_DISPATCH_SLOTS"):
         env.pop(key, None)
     env.update({
         "WORKER_ROLE": role,
@@ -41,7 +43,7 @@ def _topology(role, **values):
 
 def test_legacy_worker_role_keeps_every_lane():
     assert _topology("worker") == {
-        "agent": 10, "filmstrip": 1, "index": 4, "mcp": 2,
+        "agent": 5, "filmstrip": 1, "index": 4, "mcp": 2,
         "media": 4, "shorts": 2,
     }
 
@@ -57,13 +59,28 @@ def test_dispatcher_cannot_claim_stateful_editor_work():
 def test_agent_worker_cannot_claim_render_or_index_work():
     lanes = _topology("agent")
     assert lanes == {
-        "agent": 10, "filmstrip": 0, "index": 0, "mcp": 2,
+        "agent": 5, "filmstrip": 0, "index": 0, "mcp": 2,
         "media": 0, "shorts": 2,
     }
 
 
 def test_explicit_agent_executor_rollback_restores_local_slot_limit():
     lanes = _topology("worker", REMOTE_AGENT_EXECUTOR_URL="")
+    assert lanes["agent"] == 2
+
+
+def test_modal_agent_uses_remote_dispatch_slots_without_cloud_run_url():
+    lanes = _topology(
+        "worker", REMOTE_EXECUTOR_URL="", REMOTE_AGENT_EXECUTOR_URL="",
+        MODAL_EXECUTOR_ENABLED="1", MODAL_EXECUTOR_TYPES="preview,agent_turn",
+        REMOTE_AGENT_DISPATCH_SLOTS="7")
+    assert lanes["agent"] == 7
+
+
+def test_modal_without_agent_turn_keeps_memory_safe_local_limit():
+    lanes = _topology(
+        "worker", REMOTE_EXECUTOR_URL="", REMOTE_AGENT_EXECUTOR_URL="",
+        MODAL_EXECUTOR_ENABLED="1", MODAL_EXECUTOR_TYPES="preview")
     assert lanes["agent"] == 2
 
 

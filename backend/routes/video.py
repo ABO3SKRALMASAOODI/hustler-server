@@ -607,6 +607,8 @@ def _subscribe_gate_applies(cur, user_id):
             SELECT 1 FROM video_jobs
             WHERE user_id = %s AND state = 'done'
               AND ((type = 'agent_turn' AND
+                    result->>'status' = 'replied' AND
+                    result->>'outcome' IN ('fulfilled', 'partial') AND
                     CASE WHEN result->>'edl_version' ~ '^[0-9]+$'
                          THEN (result->>'edl_version')::int ELSE 1 END > 1)
                    OR (type = 'shorts_plan' AND
@@ -629,6 +631,29 @@ def _subscribe_gate_applies(cur, user_id):
 
 # Older tests monkeypatch this name.
 _trial_gate_applies = _subscribe_gate_applies
+
+
+_DETERMINISTIC_FINAL_FAILURE_KINDS = frozenset({
+    "invalid_edl", "deterministic_input", "deterministic_ffmpeg",
+    "render_budget_exceeded",
+})
+_DETERMINISTIC_FINAL_ERROR_MARKERS = (
+    "black-frame check failed", "duration check failed",
+    "wrong duration", "wrong length", "invalid edl",
+)
+
+
+def _deterministic_final_failure(row):
+    """Whether re-running the same immutable EDL would repeat its failure."""
+    if not row:
+        return False
+    result = row.get("result") or {}
+    failure = result.get("failure") or {}
+    kind = str(failure.get("kind") or "").strip().lower()
+    if kind in _DETERMINISTIC_FINAL_FAILURE_KINDS:
+        return True
+    error = str(row.get("error") or failure.get("error") or "").lower()
+    return any(marker in error for marker in _DETERMINISTIC_FINAL_ERROR_MARKERS)
 
 
 def _subscribe_offer_body():
@@ -3025,6 +3050,7 @@ def post_message(user_id, project_id):
     data = request.get_json() or {}
     text = (data.get("text") or "").strip()
     client_msg_id = (str(data.get("client_msg_id") or "")[:64]) or None
+    defer_until_index = bool(data.get("defer_until_index"))
     # The EDL version the user was LOOKING AT when they typed (the studio
     # sends it only while stepped back in the edit history). Same contract as
     # the user-op route's base_version: a message sent from an older state
@@ -3285,7 +3311,7 @@ def post_message(user_id, project_id):
                             "message_id": row["id"] if row else None})
 
         concierge = None
-        if not indexed:
+        if not indexed and not defer_until_index:
             # Gather context inside the transaction, but make the LLM call
             # AFTER it commits — a model call must never hold a DB
             # transaction (and the user's message must survive regardless).
@@ -3322,7 +3348,7 @@ def post_message(user_id, project_id):
                 "message_id": message_id,
             }
 
-        else:
+        elif indexed:
             if not os.getenv("OPENAI_API_KEY"):
                 cur.execute("""INSERT INTO chat_messages (session_id, role,
                                                           content)
@@ -3388,6 +3414,14 @@ def post_message(user_id, project_id):
                   concierge, attachments_meta),
             daemon=True).start()
         return jsonify({"queued": False, "concierge": True,
+                        "message_id": message_id})
+
+    if not indexed and defer_until_index:
+        # Combined upload+prompt: persist the actual request now so the index
+        # completion can launch it directly. Do not spend a concierge call or
+        # tell the user to wait and resend; _finish_setup owns the durable
+        # auto-resume and can also skip the throwaway append-all preview.
+        return jsonify({"queued": True, "waiting_for_index": True,
                         "message_id": message_id})
 
     return jsonify({"queued": True, "message_id": message_id,
@@ -4972,7 +5006,34 @@ def render_final(user_id, project_id):
                 user_id, project_id, "export_blocked",
                 detail={"code": "already_running", "version": version},
                 origin="server")
-            return jsonify({"error": "A final render is already in progress"}), 409
+            return jsonify({"error": "A final render is already in progress",
+                            "code": "already_running"}), 409
+        # A final renders an immutable EDL. Re-enqueueing the exact version
+        # after a deterministic safety failure (black frames, invalid timing,
+        # impossible duration) cannot improve it; it only repeats a long
+        # encode and teaches the user to hammer Download. Require a new edit.
+        cur.execute("""SELECT id, error, result FROM video_jobs
+                       WHERE project_id = %s AND type = 'final'
+                         AND state = 'failed'
+                         AND CASE WHEN payload->>'edl_version' ~ '^[0-9]+$'
+                                  THEN (payload->>'edl_version')::int
+                                  ELSE -1 END = %s
+                       ORDER BY id DESC LIMIT 1""", (project_id, version))
+        prior_failure = cur.fetchone()
+        if _deterministic_final_failure(prior_failure):
+            record_client_event(
+                user_id, project_id, "export_blocked",
+                detail={"code": "edit_required", "version": version,
+                        "failed_job_id": prior_failure["id"]},
+                origin="server")
+            return jsonify({
+                "error": "This edit did not pass the export safety check. "
+                         "The timeline needs to be repaired before exporting; "
+                         "pressing Download again on the same version will "
+                         "not fix it.",
+                "code": "edit_required",
+                "failed_job_id": prior_failure["id"],
+            }), 409
         if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
             record_client_event(
                 user_id, project_id, "export_blocked",

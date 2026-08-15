@@ -753,10 +753,12 @@ MAX_ATTEMPTS_MCP = 1
 # A project's ToolContext (downloaded proxy, parsed index, cached perception)
 # is kept between calls so a session does not re-download the proxy for every
 # look_at, and swept this long after its last use.
-MCP_SESSION_TTL_S = float(os.getenv("WORKER_MCP_SESSION_TTL_S", "1800"))
+MCP_SESSION_TTL_S = float(os.getenv("WORKER_MCP_SESSION_TTL_S", "300"))
 # How many projects may hold a live context at once — each one owns a work dir
 # on the same small disk the renders use.
-MCP_MAX_SESSIONS = int(os.getenv("WORKER_MCP_MAX_SESSIONS", "3"))
+MCP_MAX_SESSIONS = int(os.getenv("WORKER_MCP_MAX_SESSIONS", "2"))
+MCP_MEMORY_PRESSURE_RATIO = float(os.getenv(
+    "WORKER_MCP_MEMORY_PRESSURE_RATIO", "0.82"))
 
 # ── Handing the model the VIDEO itself (round 83, mcp_media.py) ────────────
 # Some models on the other end of MCP can watch video, not just read our
@@ -887,13 +889,15 @@ def worker_lane_slots(role=None):
         return dict(none, media=max(0, MEDIA_SLOTS),
                     filmstrip=1 if _REMOTE_EXEC else 0,
                     index=max(0, INDEX_SLOTS))
+    remote_agent = bool(REMOTE_AGENT_EXECUTOR_URL) or (
+        MODAL_EXECUTOR_ENABLED and "agent_turn" in MODAL_EXECUTOR_TYPES)
     if selected == "agent":
         return dict(none, agent=(REMOTE_AGENT_DISPATCH_SLOTS
-                                if REMOTE_AGENT_EXECUTOR_URL
-                                else AGENT_SLOTS), shorts=SHORTS_SLOTS,
+                                if remote_agent else AGENT_SLOTS),
+                    shorts=SHORTS_SLOTS,
                     mcp=max(0, MCP_SLOTS))
-    effective_agent_slots = (REMOTE_AGENT_DISPATCH_SLOTS
-                             if REMOTE_AGENT_EXECUTOR_URL else AGENT_SLOTS)
+    effective_agent_slots = (
+        REMOTE_AGENT_DISPATCH_SLOTS if remote_agent else AGENT_SLOTS)
     return dict(none, media=max(0, MEDIA_SLOTS),
                 filmstrip=1 if _REMOTE_EXEC else 0,
                 index=max(0, INDEX_SLOTS), agent=effective_agent_slots,
@@ -1022,14 +1026,14 @@ REMOTE_BATCH_JOB_NAME = os.getenv(
     "REMOTE_BATCH_JOB_NAME", "valmera-batch").strip()
 BATCH_POLL_INTERVAL_S = max(
     0.5, float(os.getenv("BATCH_POLL_INTERVAL_S", "2")))
-# Once the turn itself is remote these are cheap HTTP-waiting threads, not ten
-# copies of native audio/video state in the Render process. Ten is enough to
-# feed multiple requests into each concurrency-4 Cloud Run instance without
-# opening twenty extra Postgres lane connections on the dispatcher. Explicit
-# empty REMOTE_AGENT_EXECUTOR_URL restores the memory-safe local AGENT_SLOTS
-# value immediately.
+# Once the turn itself is remote these are cheap HTTP-waiting threads. Five
+# matches Modal's five-container ceiling; sending ten only moves the hidden
+# queue from Postgres into Modal. The agent function targets one input per
+# container and permits two as a short burst, so this feeds every scale-out
+# lane without repacking six media-aware turns into one 2-GiB container.
+# Explicit empty remote agent routing restores the memory-safe local limit.
 REMOTE_AGENT_DISPATCH_SLOTS = max(
-    1, int(os.getenv("REMOTE_AGENT_DISPATCH_SLOTS", "10")))
+    1, int(os.getenv("REMOTE_AGENT_DISPATCH_SLOTS", "5")))
 # Shared bearer secret checked by the executor (constant-time). MUST be long and
 # random; the executor refuses every /run without it. Set the SAME value on both
 # services. The executor still reads the job's real data from the DB — the body

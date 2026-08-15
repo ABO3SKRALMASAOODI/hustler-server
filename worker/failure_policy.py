@@ -44,6 +44,7 @@ _INVALID_EDL = (
     "edl version", "edl validation", "invalid edl", "invalid keep",
     "invalid speed", "invalid frame", "invalid transition",
     "render duration check failed", "render is the wrong length",
+    "render black-frame check failed",
 )
 
 _DETERMINISTIC_FFMPEG = (

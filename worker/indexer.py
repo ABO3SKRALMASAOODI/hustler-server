@@ -857,7 +857,7 @@ def _opening_example(n_words, n_sil):
     return "cut the dead air, caption every word, and tighten the intro"
 
 
-def _sweep_tray_placements(worker_db, project_id):
+def _sweep_tray_placements(worker_db, project_id, defer_preview=False):
     """Round 84: splice every asset the tray submit marked for placement
     (meta.tray_place = {order, before_main, duration_s}) into the EDL — in
     tray order, exactly where the user arranged them (before the footage
@@ -928,16 +928,23 @@ def _sweep_tray_placements(worker_db, project_id):
                   f"{e}", flush=True)
             return 0
         version = worker_db.run(dbx.insert_edl, project_id, new_edl, "agent")
-        # The player must have something to show for this version — nothing
-        # else renders it (the studio's self-heal covers USER versions only,
-        # and the draft engine refuses programs with spliced clips).
-        try:
-            project = worker_db.run(dbx.get_project, project_id)
-            worker_db.run(dbx.enqueue_job, project_id,
-                          project.get("user_id"), "preview",
-                          {"edl_version": version, "source": "user_edit"})
-        except Exception as e:
-            print(f"[index] tray preview enqueue failed: {e}", flush=True)
+        # When a real edit request is already waiting, its agent will replace
+        # this append-all setup EDL and render the useful result. Rendering the
+        # setup first cost 3-5 minutes on recent multi-upload projects. With no
+        # waiting request, preserve the existing guarantee that the player gets
+        # a preview immediately.
+        if defer_preview:
+            print(f"[index] project {project_id}: deferred setup preview for "
+                  "the waiting edit request", flush=True)
+        else:
+            try:
+                project = worker_db.run(dbx.get_project, project_id)
+                worker_db.run(dbx.enqueue_job, project_id,
+                              project.get("user_id"), "preview",
+                              {"edl_version": version,
+                               "source": "user_edit"})
+            except Exception as e:
+                print(f"[index] tray preview enqueue failed: {e}", flush=True)
     for aid in placed_ids:
         try:
             worker_db.run(dbx.update_asset_meta, aid,
@@ -1006,9 +1013,17 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                   "video so edits can land again", flush=True)
             edl_was_reset = True
 
+    waiting_request = None
+    if session_id:
+        try:
+            waiting_request = worker_db.run(
+                dbx.pending_user_message, project_id, session_id)
+        except Exception as e:
+            print(f"[index] pending-request lookup failed: {e}", flush=True)
     tray_added = 0
     try:
-        tray_added = _sweep_tray_placements(worker_db, project_id)
+        tray_added = _sweep_tray_placements(
+            worker_db, project_id, defer_preview=bool(waiting_request))
     except Exception as e:
         print(f"[index] tray placement failed: {e}", flush=True)
 

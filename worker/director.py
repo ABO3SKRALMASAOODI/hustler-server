@@ -173,12 +173,18 @@ def _motion_language(value, strict=False):
                     f"motion_language.motifs[{index}] must be an object")
             continue
         motif_id = str(raw.get("id") or "").strip().lower()
-        if not _MOTION_ID.fullmatch(motif_id) or motif_id == "hold":
+        # ``hold`` is already the sequence language's reserved stillness
+        # decision. Models sometimes redundantly describe it in the motif
+        # array as well. Ignore that duplicate declaration when other real
+        # motifs exist; rejecting the entire blueprint only makes the model
+        # resubmit the same creative decision under a new spelling.
+        if motif_id == "hold":
+            continue
+        if not _MOTION_ID.fullmatch(motif_id):
             if strict:
                 raise ValueError(
                     f"motion_language.motifs[{index}].id must be a short "
-                    "lowercase identifier beginning with a letter; 'hold' "
-                    "is reserved for intentional stillness")
+                    "lowercase identifier beginning with a letter")
             continue
         if motif_id in ids:
             if strict:
@@ -476,6 +482,58 @@ def source_evidence_ids_at(index, start, end=None, limit=8):
         if len(out) >= max(1, int(limit or 1)):
             break
     return out
+
+
+def canonicalize_source_evidence_ids(sequence_map, index,
+                                     asset_indexes=None):
+    """Repair common namespace spellings to exact indexed evidence ids.
+
+    The evidence stays source-grounded: a value is changed only when its
+    explicit namespace and number resolve to one id that really exists in the
+    relevant main/auxiliary index. This turns ``shot-1`` into the actual ``1``
+    and the common zero-based ``shot_0`` into the first shot when no literal
+    zero id exists, without accepting an invented timestamp or arbitrary id.
+    Returns the number of repaired citations and mutates the normalized plan.
+    """
+    repaired = 0
+    for beat in sequence_map or []:
+        if not isinstance(beat, dict):
+            continue
+        asset_key = beat.get("source_asset_key")
+        scoped = ((asset_indexes or {}).get(asset_key) or {}
+                  if asset_key else (index or {}))
+        evidence = _source_evidence(scoped)
+        if not evidence:
+            continue
+        exact = set(evidence)
+        values = []
+        for raw in beat.get("evidence_ids") or []:
+            value = str(raw)
+            if value in exact:
+                values.append(value)
+                continue
+            compact = re.sub(r"[^a-z0-9]+", "", value.casefold())
+            match = re.fullmatch(r"shot0*(\d+)", compact)
+            candidates = []
+            if match:
+                number = int(match.group(1))
+                candidates.extend((str(number), f"shot{number}"))
+                if number == 0:
+                    candidates.extend(("1", "shot1"))
+            else:
+                match = re.fullmatch(r"(?:speech|sentence|s)0*(\d+)",
+                                     compact)
+                if match:
+                    number = int(match.group(1))
+                    candidates.extend((f"s{number}", f"speech{number}"))
+                    if number == 0:
+                        candidates.extend(("s1", "speech1"))
+            resolved = next((candidate for candidate in candidates
+                             if candidate in exact), None)
+            values.append(resolved or value)
+            repaired += int(bool(resolved))
+        beat["evidence_ids"] = values
+    return repaired
 
 
 def _evidence_correction(evidence, start=None, end=None):

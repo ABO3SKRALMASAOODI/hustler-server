@@ -199,8 +199,9 @@ def process_one(worker_db, job):
 
 FAIL_NOTES = {
     # agent_turn posts its own apology inside run_agent_job — not repeated.
-    "final": ("The final export failed ({err}). "
-              "Press Download to try again."),
+    "final": ("The final export failed ({err}). Your edit is saved. "
+              "Try Download once more; if it repeats, ask me to repair the "
+              "current timeline."),
     "index": ("I couldn't analyze that video ({err}). Try uploading it "
               "again, or a different format like mp4."),
     "shorts_plan": ("I couldn't cut shorts from this video ({err}). "
@@ -241,6 +242,11 @@ def _notify_failure(worker_db, job, err):
         except Exception:
             pass
     note = FAIL_NOTES.get(job["type"])
+    if job["type"] == "final" and \
+            not failure_policy.decision_for(err, "final").retryable:
+        note = ("This edit did not pass the export safety check ({err}). "
+                "The timeline needs to be repaired before exporting; pressing "
+                "Download again on this same version will not fix it.")
     if "scratch space" in str(err):
         # The full text is operator advice (Cloud Run flags, a deploy doc) —
         # it reached user 387's chat verbatim on Aug 9. Users get the honest

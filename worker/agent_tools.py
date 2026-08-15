@@ -83,6 +83,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
                      output_duration, program_duration, validate_edl,
+                     MIN_SPAN_S,
                      GAIN_MIN_DB, GAIN_MAX_DB,
                      INSERT_RATE_MIN, INSERT_RATE_MAX,
                      GRADE_PRESETS, TRANSITION_STYLES, TRANSITION_MIN_S,
@@ -1187,6 +1188,13 @@ def _format_editorial_row(row, include_text=True):
 def get_editorial_map(ctx, start=0, end=None, focus="all", limit=None,
                       asset_key=None):
     """Joined source-time evidence for planning coherent editorial beats."""
+    # Models naturally call the primary timeline "main" even though
+    # ``asset_key`` is only for auxiliary uploads. Treat the common aliases as
+    # the documented omitted-value form instead of charging a whole extra LLM
+    # round for a purely syntactic correction.
+    if str(asset_key or "").strip().casefold() in {
+            "main", "main_video", "main-video", "source", "original"}:
+        asset_key = None
     result, label, err = _editorial_map_for(ctx, asset_key)
     if err:
         return err
@@ -1913,6 +1921,174 @@ def look_at(ctx, times=None, question="", start=None, end=None,
     return out
 
 
+def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
+    """Focused semantic search over the complete indexed filmstrip.
+
+    The standing filmstrip is excellent context but a poor search interface:
+    a long gameplay turn spent twenty agent/``look_at`` round trips manually
+    hunting goalkeeper saves. This tool asks bounded, parallel vision calls
+    to inspect every cached tile against one explicit query and returns source
+    timestamps. Candidates remain coarse evidence and are deliberately routed
+    through one batched ``look_at(times=[...])`` before a precise cut.
+    """
+    q = " ".join(str(query or "").split())[:500]
+    if not q:
+        return "REJECTED: query is empty — name the visible event to find."
+    if not llm.vision_available():
+        return ("Visual moment search unavailable because no vision model is "
+                "configured. Use transcript/audio/shot evidence instead.")
+    keys = list((ctx.index or {}).get("tile_keys") or [])
+    if not keys:
+        return ("Visual moment search unavailable because this source has no "
+                "indexed filmstrip. Use look_at on evidence-led times.")
+    duration = float(((ctx.index or {}).get("video") or {}).get("duration")
+                     or ctx.duration or 0.0)
+    try:
+        lo = max(0.0, float(start or 0.0))
+        hi = duration if end is None else min(duration, float(end))
+        want = max(1, min(20, int(max_results or 12)))
+    except (TypeError, ValueError):
+        return "REJECTED: start, end and max_results must be numbers."
+    if hi <= lo:
+        return "REJECTED: end must be after start inside the source."
+    step = float((ctx.index or {}).get("tile_step_s") or
+                 max(1.0, duration / max(1, len(keys) * 4)))
+    cache = getattr(ctx, "_visual_moment_search_cache", None)
+    if cache is None:
+        cache = {}
+        ctx._visual_moment_search_cache = cache
+    cache_key = (q.casefold(), round(lo, 2), round(hi, 2), want,
+                 tuple(keys))
+    if cache_key in cache:
+        _metric(ctx, "visual_moment_searches_reused")
+        return "UNCHANGED VISUAL SEARCH — use these prior results:\n" + \
+            cache[cache_key]
+
+    selected = []
+    for i, key in enumerate(keys):
+        tile_lo = (i * 4 + 0.5) * step
+        tile_hi = min(duration, (i * 4 + 3.5) * step)
+        if tile_hi >= lo and tile_lo <= hi:
+            selected.append((i, key, tile_lo, tile_hi))
+    if not selected:
+        return "No indexed filmstrip tiles overlap that source range."
+
+    _touch_job_heartbeat(ctx, progress=18)
+
+    def _fetch(row):
+        i, key, a, b = row
+        local = os.path.join(
+            ctx.workdir,
+            f"visual_search_{i:03d}_{uuid.uuid4().hex[:6]}.jpg")
+        try:
+            storage.download_to(key, local)
+            return (i, key, a, b, local)
+        except Exception as exc:
+            print(f"[visual-search] tile {i} unavailable: {str(exc)[:120]}",
+                  flush=True)
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(8, len(selected))) as pool:
+        local_rows = [row for row in pool.map(_fetch, selected) if row]
+    if not local_rows:
+        return "Visual moment search could not read the indexed tiles."
+
+    # Four 2x2 tiles = sixteen labeled frames per request: enough context to
+    # distinguish an event while keeping each vision prompt cheap and legible.
+    batches = [local_rows[i:i + 4] for i in range(0, len(local_rows), 4)]
+    recorder = llm.get_recorder()
+
+    def _scan(batch):
+        if recorder is not None:
+            llm.set_recorder(recorder)
+        try:
+            a = max(lo, min(row[2] for row in batch))
+            b = min(hi, max(row[3] for row in batch))
+            prompt = (
+                "You are doing focused visual retrieval over chronological "
+                "video contact sheets. Every frame has a burned SOURCE "
+                "timestamp. Find only frames that visibly match, or are "
+                "strong immediate context for, this query: " + q + "\n"
+                "Return ONLY a JSON array, at most four rows: "
+                '[{"time":123.4,"confidence":"high|medium|low",'
+                '"evidence":"what pixels support the match"}]. '
+                "Copy time from a burned label; do not invent it. Return [] "
+                f"when none match. This batch covers about {a:.1f}-{b:.1f}s.")
+            answer = llm.ask_vision(
+                prompt, [row[4] for row in batch], max_tokens=1100,
+                reasoning_effort="low", purpose="vision_visual_search",
+                image_names=[row[1] for row in batch])
+            rows = llm.extract_json_array(answer) or []
+            return batch, rows
+        finally:
+            if recorder is not None:
+                llm.set_recorder(None)
+
+    found = []
+    with ThreadPoolExecutor(max_workers=min(3, len(batches))) as pool:
+        futures = [pool.submit(_scan, batch) for batch in batches]
+        for future in as_completed(futures):
+            try:
+                batch, rows = future.result()
+            except Exception as exc:
+                print(f"[visual-search] batch failed: {str(exc)[:140]}",
+                      flush=True)
+                continue
+            batch_lo = min(row[2] for row in batch) - step * 0.6
+            batch_hi = max(row[3] for row in batch) + step * 0.6
+            for row in rows[:4]:
+                try:
+                    at = float(row.get("time"))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if not (max(lo, batch_lo) <= at <= min(hi, batch_hi)):
+                    continue
+                confidence = str(row.get("confidence") or "medium").lower()
+                if confidence not in {"high", "medium", "low"}:
+                    confidence = "medium"
+                evidence = " ".join(
+                    str(row.get("evidence") or "").split())[:180]
+                found.append({"time": round(at, 2),
+                              "confidence": confidence,
+                              "evidence": evidence})
+    _touch_job_heartbeat(ctx, progress=24)
+    _metric(ctx, "visual_moment_search_tiles", len(local_rows))
+    _metric(ctx, "visual_moment_search_calls", len(batches))
+
+    ranks = {"high": 3, "medium": 2, "low": 1}
+    found.sort(key=lambda row: (-ranks[row["confidence"]], row["time"]))
+    deduped = []
+    for row in found:
+        if any(abs(row["time"] - old["time"]) < max(0.5, step * 0.55)
+               for old in deduped):
+            continue
+        deduped.append(row)
+        if len(deduped) >= want:
+            break
+    deduped.sort(key=lambda row: row["time"])
+    if not deduped:
+        result = (
+            f"No coarse sampled match for '{q}' in {lo:.1f}-{hi:.1f}s "
+            f"(all {len(local_rows)} indexed tiles scanned; frame spacing "
+            f"{step:.2f}s). A brief event may fall between samples: narrow "
+            "the query/range using transcript, audio peaks or shot evidence; "
+            "do not claim the event is absent.")
+    else:
+        lines = [
+            f"@{row['time']:.2f}s [{row['confidence']}] — "
+            f"{row['evidence'] or 'visible query match'}"
+            for row in deduped]
+        result = (
+            f"VISUAL SEARCH '{q}' — {len(deduped)} coarse SOURCE candidate(s) "
+            f"from {len(local_rows)} indexed tiles, frame spacing {step:.2f}s:\n"
+            + "\n".join(lines)
+            + "\nBefore a precise cut/effect, verify all useful candidates in "
+              "ONE batched look_at(times=[candidate and nearby seconds], "
+              "question=...). Do not restart a manual whole-video scan.")
+    cache[cache_key] = result
+    return result
+
+
 def _asset_local_path(ctx, asset):
     local = ctx._asset_locals.get(asset["id"])
     if not local:
@@ -2505,7 +2681,8 @@ def _norm_word(w):
     return re.sub(r"[^a-z]", "", str(w or "").lower())
 
 
-def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12):
+def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
+                 allow_nonquiet=False):
     """One-call silence trim: cut every detected pause at least min_silence_s
     long, keeping padding_s of breathing room around speech, snapped to word
     edges. Replaces the fragile find_silences -> N× cut_range plan."""
@@ -2549,6 +2726,22 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12):
         return ("REJECTED: cutting every speech gap would remove the whole "
                 "video. Inspect find_silences and cut a narrower set.")
     removed = output_duration(cur) - output_duration(new)
+    before_duration = max(0.001, output_duration(cur))
+    destructive_nonquiet = (
+        basis == "speech" and noisy >= max(1, len(cuts) / 2)
+        and removed / before_duration >= 0.25)
+    allow_nonquiet_n = (
+        allow_nonquiet is True or
+        str(allow_nonquiet).strip().casefold() in {"true", "1", "yes", "on"})
+    if destructive_nonquiet and not allow_nonquiet_n:
+        return (
+            "REJECTED: DESTRUCTIVE NON-QUIET CUT — this would remove "
+            f"{removed:.1f}s ({removed / before_duration:.0%}) of the current "
+            f"program, and {noisy} of {len(cuts)} proposed gaps contain "
+            "audible music, game, room, or performance sound. No EDL change "
+            "was made. Only retry with allow_nonquiet=true when the user's "
+            "request explicitly permits discarding those non-speaking "
+            "moments; otherwise inspect and cut narrower visual/story spans.")
     what = "gap(s) in the speech" if basis == "speech" else "quiet span(s)"
     res = _write_keep(
         ctx, new,
@@ -5806,7 +5999,7 @@ def _resolve_sfx(ctx, storage_key):
             "storage_key": storage_key}, None
 
 
-def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None):
+def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None, offset_s=None):
     """Place a one-shot sound at a point in the program timeline."""
     sound, err = _resolve_sfx(ctx, storage_key)
     if err:
@@ -5820,6 +6013,12 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None):
         gain_db = float(gain_db)
     except (TypeError, ValueError):
         return f"REJECTED: gain_db must be a number, got {gain_db!r}."
+    try:
+        offset_s = 0.0 if offset_s is None else float(offset_s)
+    except (TypeError, ValueError):
+        return f"REJECTED: offset_s must be a number, got {offset_s!r}."
+    if offset_s < 0:
+        return "REJECTED: offset_s must be >= 0 seconds."
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
     if at < 0 or at > max(0.0, prog - 0.05):
@@ -5835,22 +6034,31 @@ def add_sfx(ctx, storage_key, at, gain_db=-6.0, purpose=None):
         n += 1
     sid = f"sx{n}"
     purpose_n = " ".join(str(purpose or "").split())[:180] or None
-    items.append({"id": sid, "storage_key": storage_key,
-                  "at": round(at, 2), "gain_db": gain_db,
-                  "purpose": purpose_n})
+    dur = sound.get("duration_s")
+    if dur and offset_s > max(0.0, dur - 0.05):
+        return (f"REJECTED: offset_s={offset_s:g}s is past the usable end of "
+                f"'{sound['name']}' ({dur:.2f}s).")
+    item = {"id": sid, "storage_key": storage_key,
+            "at": round(at, 2), "gain_db": gain_db,
+            "purpose": purpose_n}
+    if offset_s:
+        item["offset_s"] = round(offset_s, 3)
+    items.append(item)
     edl["sfx"] = items
     note = ""
-    dur = sound.get("duration_s")
     # An honest heads-up rather than a silent truncation: the renderer's amix
     # is duration=first, so a tail running past the program end is simply cut.
-    if dur and at + dur > prog + 0.05:
-        note = (f" NOTE: '{sound['name']}' is {dur:.2f}s and the program ends "
+    remaining = max(0.0, dur - offset_s) if dur else None
+    if remaining and at + remaining > prog + 0.05:
+        note = (f" NOTE: '{sound['name']}' has {remaining:.2f}s remaining "
+                f"after its {offset_s:.2f}s source offset and the program ends "
                 f"at {round(prog, 2)}s, so its tail will be cut short.")
     if sound.get("note"):
         note += "\n" + sound["note"]
     result = ctx.write_edl(
         edl, f"added sfx '{sound['name']}' at {round(at, 2)}s "
              f"({gain_db:+g}dB) as {sid}"
+             + (f" from source offset {offset_s:g}s" if offset_s else "")
              + (f" for {purpose_n}" if purpose_n else ""))
     if result.startswith("EDL v"):
         _decision_trace(
@@ -7199,6 +7407,31 @@ TRANSITION_MIN_SPACING_S = taste.TRANSITION_MIN_SPACING_S
 CARD_SUBTITLE_Y = 0.5
 
 
+def _split_keeps_at_shot_boundaries(keep, index):
+    """Expose baked source cuts as EDL junctions without changing content."""
+    boundaries = []
+    for shot in (index or {}).get("shots") or []:
+        try:
+            boundaries.append(round(float(shot["start"]), 3))
+        except (KeyError, TypeError, ValueError):
+            continue
+    boundaries = sorted(set(boundaries))
+    out, added = [], 0
+    for pair in keep or []:
+        try:
+            start, end = float(pair[0]), float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            out.append(pair)
+            continue
+        cuts = [b for b in boundaries
+                if b - start >= MIN_SPAN_S and end - b >= MIN_SPAN_S]
+        points = [start, *cuts, end]
+        out.extend([[round(points[i], 3), round(points[i + 1], 3)]
+                    for i in range(len(points) - 1)])
+        added += len(cuts)
+    return out, added
+
+
 def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                     motion_motif=None):
     p = (style or "").strip().lower()
@@ -7245,6 +7478,18 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
         transition["motion_motif"] = motif
     fx["transition"] = transition
     edl["effects"] = fx
+    exposed = 0
+    if sc == "scene":
+        # Uploaded/phone footage often arrives as one continuous keep even
+        # though the source index contains real baked cuts. The renderer can
+        # only place a junction effect at EDL boundaries, so expose those shot
+        # boundaries first. Splitting a contiguous keep changes no frame,
+        # order, timing, audio, or duration; it only makes the real cuts
+        # addressable. This is what “keep my cuts, improve transitions” means.
+        split, exposed = _split_keeps_at_shot_boundaries(
+            edl.get("keep") or [], getattr(ctx, "index", None))
+        if exposed:
+            edl["keep"] = split
     n_cuts = max(0, len(edl.get("keep") or []) - 1) \
         + len(edl.get("inserts") or [])
     # How many junctions this ACTUALLY lands on, from the same resolver the
@@ -7281,7 +7526,10 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
     where = ("every cut" if sc == "every_cut" else "scene changes")
     res = ctx.write_edl(
         edl, f"transitions: {d}s {p} ({TRANSITION_DESC[p]}) at {where} — "
-             f"{hit} of {n_cuts} junction{'s' if n_cuts != 1 else ''}{note}")
+             f"{hit} of {n_cuts} junction{'s' if n_cuts != 1 else ''}{note}"
+             + (f"; exposed {exposed} indexed source cut"
+                f"{'s' if exposed != 1 else ''} without changing content, "
+                "order, or duration" if exposed else ""))
 
     # CADENCE, not just count (round 55). 'scene' bounds transitions to real
     # shot changes, which is the right rule and is not a rule about DENSITY:
@@ -8673,6 +8921,40 @@ def _visual_asset_uses(edl, asset_key, exclude_ids=()):
     return uses
 
 
+class _FreshMediaSequenceContext:
+    """One-write canvas view used to replace main footage with upload scenes."""
+
+    def __init__(self, base):
+        self._base = base
+        row = base.latest_edl()
+        self._row = {"version": row["version"],
+                     "json": canvas_edl(
+                         getattr(base, "canvas_ratio", "16:9"))}
+        self.has_main_video = False
+        self.canvas_ratio = getattr(base, "canvas_ratio", "16:9")
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    def latest_edl(self):
+        return self._row
+
+    def write_edl(self, edl, desc):
+        return self._base.write_edl(
+            edl, "started a new media-only sequence from uploaded assets; "
+            + desc)
+
+
+def start_media_sequence(ctx, asset_key, duration_s=None, clip_start_s=None,
+                         motion=None, fit="auto", motion_motif=None):
+    """Replace the current programme with one uploaded clip/image atomically."""
+    fresh = _FreshMediaSequenceContext(ctx)
+    return insert_media(
+        fresh, asset_key, 0.0, duration_s=duration_s,
+        clip_start_s=clip_start_s, motion=motion, fit=fit,
+        allow_repeat=True, motion_motif=motion_motif)
+
+
 def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                  clip_start_s=None, motion=None, fit="auto",
                  allow_repeat=False, motion_motif=None):
@@ -9370,7 +9652,16 @@ def _resolve_audio_upload(ctx, asset_key):
     An audio file passes straight through; a VIDEO resolves to the audio taken
     out of it (its picture is never used); everything else falls through to
     _resolve_media_asset for the error, so the wording stays in one place."""
-    asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+    alias = str(asset_key or "").strip().casefold()
+    if alias in {"main", "main_video", "main-video", "source", "original"}:
+        asset = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
+    else:
+        asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
+    if asset and asset["kind"] == "original":
+        return asset, (
+            "This voiceover reuses sound from the MAIN source; only the "
+            "requested source excerpt is layered over the requested output "
+            "scene. The source picture is not duplicated."), None
     if asset and asset["kind"] == "video_clip":
         return _audio_from_clip(ctx, asset)
     asset, err = _resolve_media_asset(ctx, asset_key, ("music",))
@@ -9378,7 +9669,7 @@ def _resolve_audio_upload(ctx, asset_key):
 
 
 def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
-                  duck_others=True, source_offset_s=None):
+                  duck_others=True, source_offset_s=None, duration_s=None):
     asset, extract_note, err = _resolve_audio_upload(ctx, asset_key)
     if err:
         return err
@@ -9390,8 +9681,11 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
                           max(0.0, prog - 0.1)), 2)
         g = float(gain_db)
         off = round(max(0.0, float(source_offset_s or 0.0)), 2)
+        duration = (None if duration_s is None
+                    else round(float(duration_s), 2))
     except (TypeError, ValueError):
-        return ("REJECTED: start_output_s, source_offset_s and gain_db must "
+        return ("REJECTED: start_output_s, source_offset_s, duration_s and "
+                "gain_db must "
                 "be numbers "
                 "(start is a position in the FINAL edited video).")
     asset_dur = _asset_media_duration(ctx, asset)
@@ -9399,18 +9693,29 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
         return (f"REJECTED: source_offset_s {off}s is at/past the end of "
                 f"'{_asset_name(asset)}' ({asset_dur:.2f}s). Pick an offset "
                 "inside the file; no external trim is needed.")
+    if duration is not None:
+        if duration < 0.05:
+            return "REJECTED: duration_s must be at least 0.05 seconds."
+        duration = round(min(duration, asset_dur - off, prog - start), 2)
+        if duration < 0.05:
+            return ("REJECTED: that voiceover excerpt does not overlap the "
+                    "assembled program.")
     vos = [dict(v) for v in (edl.get("voiceover") or [])]
     item = {"id": _next_item_id(vos, "vo"), "asset_key": asset_key,
             "start_output_s": start, "gain_db": g,
             "duck_others": bool(duck_others)}
     if off:
         item["source_offset_s"] = off
+    if duration is not None:
+        item["duration_s"] = duration
     edl["voiceover"] = vos + [item]
     name = (asset.get("meta") or {}).get("filename") or \
         os.path.basename(asset_key)
     res = ctx.write_edl(
         edl, f"voiceover '{name}' from {start}s (output time), "
-             f"source offset {off:g}s, {g:+.1f}dB, "
+             f"source offset {off:g}s"
+             + (f", duration {duration:g}s" if duration is not None else "")
+             + f", {g:+.1f}dB, "
              f"ducking other audio {DUCK_NOTE if bool(duck_others) else 'off'}"
              f" [{item['id']}]")
     dup_mus = [m.get("id") or "?" for m in (edl.get("music") or [])
@@ -15761,8 +16066,9 @@ def audit_captions(ctx, offset=0, limit=80):
 _EDL_SECTION_ALIASES = {
     "segments": ("keep",), "cuts": ("keep",), "text": ("texts",),
     "vectors": ("vectors",), "graphics": ("texts", "vectors"),
-    "zooms": ("effects",), "transitions": ("effects",),
-    "grade": ("effects",), "grades": ("effects",),
+    "zoom": ("effects",), "zooms": ("effects",),
+    "transitions": ("effects",),
+    "color": ("effects",), "grade": ("effects",), "grades": ("effects",),
     "stylize": ("effects",), "effects": ("effects",),
     "fades": ("effects",),
     "audio": ("music", "volume", "voiceover", "sfx", "stem_mix",
@@ -17611,6 +17917,12 @@ def read_skill(ctx, name):
         return (f"SKILL ALREADY LOADED — '{skill_key}' was returned earlier "
                 "in this turn and remains in the conversation. Apply it; do "
                 "not load it again unless a later turn starts.")
+    if len(skills) >= 4:
+        _metric(ctx, "skill_load_budget_rejections")
+        return ("SKILL BUDGET REACHED — four focused playbooks are already "
+                "loaded in this turn. They remain in context. Stop reading "
+                "more handbooks; record the blueprint and execute the edit "
+                "with the evidence and craft rules you have.")
     text = agent_prompt.read_skill_text(name)
     if text is None:
         names = ", ".join(agent_prompt.skill_names()) or "(none installed)"
@@ -17977,6 +18289,11 @@ def set_edit_plan(ctx, steps, brief=None, treatment=None, format=None,
                 + ", ".join(missing)
                 + ". Choose one evidence-backed route rather than recording "
                   "the first plausible collection of effects.")
+        repaired_ids = director.canonicalize_source_evidence_ids(
+            plan["sequence_map"], getattr(ctx, "index", None) or {},
+            asset_indexes=asset_indexes)
+        if repaired_ids:
+            _metric(ctx, "plan_evidence_ids_repaired", repaired_ids)
         violations = director.source_evidence_violations(
             plan["sequence_map"], getattr(ctx, "index", None) or {},
             asset_indexes=asset_indexes)
@@ -18181,7 +18498,7 @@ RECIPE_TOOLS = frozenset({
     # externally visible side effect. Keeping them out caused valid text,
     # insert and overlay repair plans to lose their entire batch.
     "set_insert_window", "move_insert", "remove_insert",
-    "insert_media",
+    "start_media_sequence", "insert_media",
     "add_overlay", "move_overlay", "set_overlay_motion", "remove_overlay",
     "add_text", "set_text_motion", "remove_text",
     "add_vector_graphic", "set_vector_graphic", "remove_vector_graphic",
@@ -20078,6 +20395,21 @@ TOOLS = {
          "limit": {"type": "integer", "minimum": 1,
                    "maximum": EDITORIAL_MAP_MAX_ROWS},
          "asset_key": {"type": "string"}}),
+    "find_visual_moments": (
+        find_visual_moments,
+        "READ: focused semantic search across the COMPLETE indexed main-video "
+        "filmstrip. Use once for a long source when requested highlights are "
+        "visual rather than transcript-searchable (gameplay saves/fails, a "
+        "gesture, a product appearing, action moments). query names one "
+        "concrete visible event. It returns coarse SOURCE timestamps after "
+        "scanning all tiles in parallel; verify useful candidates with ONE "
+        "batched look_at call, then WRITE. Never replace it with serial "
+        "whole-video look_at probing.",
+        {"query": {"type": "string"},
+         "start": {"type": "number"},
+         "end": {"type": "number"},
+         "max_results": {"type": "integer", "minimum": 1,
+                         "maximum": 20}}),
     "read_skill": (read_skill, "Load a focused editing playbook (captions, "
                    "zooms, audio, transitions, ...) into this turn. The "
                    "SKILLS list in your instructions names them. Read the "
@@ -20512,9 +20844,15 @@ TOOLS = {
                      "(default 0.12s) of breathing room around speech and "
                      "snapping to word edges so no word is clipped. Do this "
                      "in one call instead of many cut_range calls; then "
-                     "get_kept_transcript to verify.",
+                     "get_kept_transcript to verify. If at least half of the "
+                     "gaps contain audible material and the pass would remove "
+                     "25%+ of the program, it refuses without changing the "
+                     "EDL. Set allow_nonquiet=true ONLY when the user "
+                     "explicitly permits discarding those non-speaking "
+                     "music/game/room-performance moments.",
                      {"min_silence_s": {"type": "number"},
-                      "padding_s": {"type": "number"}}),
+                      "padding_s": {"type": "number"},
+                      "allow_nonquiet": {"type": "boolean"}}),
     "remove_filler_words": (remove_filler_words, "ONE-CALL filler removal — "
                             "THE tool for 'remove the ums' / 'cut the uhs' / "
                             "'take out the filler words'. Cuts every um, uh, "
@@ -20788,13 +21126,16 @@ TOOLS = {
                 "list_assets(kind='music') — never invent one. `at` is an "
                 "OUTPUT-timeline second (the edited program, not source "
                 "time). This is NOT background music: it plays once, for as "
-                "long as the sound is, and never ducks. purpose records the "
+                "long as the sound is, and never ducks. offset_s starts "
+                "inside source audio — use it when an extracted clip contains "
+                "the requested hit late in a long track. purpose records the "
                 "nameable visible/editorial event for later final-mix review; "
                 "do not add anonymous decorative sounds. Default -6dB.",
                 {"storage_key": {"type": "string"},
                  "at": {"type": "number"},
                  "gain_db": {"type": "number"},
-                 "purpose": {"type": "string"}}),
+                 "purpose": {"type": "string"},
+                 "offset_s": {"type": "number"}}),
     "move_sfx": (move_sfx, "Retime an existing sound effect — 'the whoosh is "
                  "too early'. Keeps which sound and how loud. id from "
                  "get_edl.",
@@ -20918,6 +21259,25 @@ TOOLS = {
                                          "source"]},
                       "mode": {"type": "string",
                                "enum": ["auto", "crop", "pad", "pad_blur"]}}),
+    "start_media_sequence": (
+        start_media_sequence,
+        "Start a NEW media-only sequence from one uploaded video clip or image, "
+        "replacing the current programme in ONE valid append-only EDL write. "
+        "Use this when the requested story should be assembled from uploaded "
+        "assets instead of the project's main video. This is the safe first "
+        "operation in an atomic recipe: it never creates an invalid empty "
+        "timeline. Add later scenes with insert_media. Every earlier EDL "
+        "version remains recoverable. duration_s and clip_start_s select a "
+        "video window; motion/fit match insert_media.",
+        {"asset_key": {"type": "string"},
+         "duration_s": {"type": "number"},
+         "clip_start_s": {"type": "number"},
+         "fit": {"type": "string",
+                 "enum": ["auto", "crop", "pad", "pad_blur"]},
+         "motion": {"type": "string",
+                    "enum": ["zoom_in", "zoom_out",
+                             "pan_left", "pan_right"]},
+         "motion_motif": _MOTION_MOTIF_PROP}),
     "insert_media": (insert_media, "Splice an uploaded video clip or image "
                      "INTO the edit at ANY position in the FINAL edited "
                      "video — mid-take positions split the take cleanly at a "
@@ -21584,11 +21944,18 @@ TOOLS = {
                       "true) lowers all other audio 12dB while it plays. "
                       "source_offset_s seeks into the file in place (use it "
                       "to start a narration/song excerpt at the right moment; "
-                      "never create an externally trimmed workaround). Use a "
-                      "storage_key from list_assets(kind='music').",
+                      "never create an externally trimmed workaround). "
+                      "duration_s ends the excerpt after exactly that many "
+                      "seconds. To reuse dialogue from the MAIN source over "
+                      "an inserted/second scene, pass asset_key='main', its "
+                      "SOURCE start as source_offset_s, the sentence length "
+                      "as duration_s, and the destination scene's OUTPUT "
+                      "time as start_output_s. Otherwise use a storage_key "
+                      "from list_assets(kind='music').",
                       {"asset_key": {"type": "string"},
                        "start_output_s": {"type": "number"},
                        "source_offset_s": {"type": "number"},
+                       "duration_s": {"type": "number"},
                        "gain_db": {"type": "number"},
                        "duck_others": {"type": "boolean"}}),
     "remove_voiceover": (remove_voiceover, "Remove one voiceover by its id "
@@ -22496,6 +22863,7 @@ TOOL_CORE = {
     "look_at_asset", "render_preview", "read_skill", "ask_user",
     "get_transcript", "get_words", "search_transcript",
     "get_kept_transcript", "get_shots", "get_editorial_map",
+    "find_visual_moments",
     "get_audio_analysis",
     "get_video_info", "audit_captions", "audit_audio_mix",
 }
@@ -22555,7 +22923,8 @@ TOOL_DOMAINS = {
     "media": {
         "compare_uploaded_media", "search_stock", "research_broll", "add_stock_media",
         "find_footage", "fetch_url", "generate_image", "generate_video",
-        "insert_media", "set_insert_window", "move_insert", "remove_insert",
+        "start_media_sequence", "insert_media", "set_insert_window",
+        "move_insert", "remove_insert",
         "add_overlay", "move_overlay", "set_overlay_motion",
         "remove_overlay", "compose_panels",
         "add_freeze_frame", "record_website", "record_website_demo",
@@ -22643,6 +23012,7 @@ REQUIRED_ARGS = {
     "search_transcript": ["query"],
     # times OR start/end — validated in the tool, so neither is "required".
     "look_at": [],
+    "find_visual_moments": ["query"],
     "look_at_asset": ["asset_key"],
     "compare_uploaded_media": ["asset_keys"],
     "keep_segments": ["segments"],
@@ -22687,6 +23057,7 @@ REQUIRED_ARGS = {
     "research_broll": ["moments"],
     "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
+    "start_media_sequence": ["asset_key"],
     "compose_panels": ["columns"],
     "set_insert_window": ["id"],
     "move_insert": ["id"],
@@ -22766,7 +23137,8 @@ WRITE_TOOLS = {"apply_edit_recipe",
                "set_audio_gain", "set_volume", "set_frame", "auto_reframe",
                "record_website", "record_website_demo", "showcase_demo",
                "add_stock_media",
-               "insert_media", "compose_panels", "set_insert_window",
+               "start_media_sequence", "insert_media", "compose_panels",
+               "set_insert_window",
                "remove_insert",
                "add_voiceover",
                "remove_voiceover", "set_color_grade", "add_zoom",

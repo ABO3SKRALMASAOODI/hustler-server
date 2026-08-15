@@ -3,8 +3,13 @@
 Treat a music request as part of the brief. `add_music` may proceed from the
 brief, metadata, an attached or named track, search context, measured audio
 analysis, or editorial judgment. It may also be included in an atomic recipe.
-If one source or URL fails, choose another route or candidate. Never claim to
-have heard unreviewed seconds. When review_audio or an audition result carries
+If one source or URL fails, choose another route or candidate. A missing search
+result is never a reason to block an otherwise complete edit: when the user did
+not require one exact song, finish with the source's original ambience/speech
+and make the picture rhythm work on its own, then offer music as an optional
+follow-up. Ask for an upload/link only when the named copyrighted or trending
+track itself is essential to the request. Never claim to have heard unreviewed
+seconds. When review_audio or an audition result carries
 an ACTUAL LISTENING comparison, use only those labeled excerpts as subjective
 evidence; otherwise say the choice is based on measurements and context.
 

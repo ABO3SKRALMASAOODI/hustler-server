@@ -65,3 +65,12 @@ def test_attached_executor_decision_survives_exception_reclassification():
         dbx.PermanentJobError("remote wrapper"), original,
         original.payload("bad frame"))
     assert failure_policy.decision_for(err, "preview") == original
+
+
+def test_black_frame_safety_failure_is_deterministic():
+    d = failure_policy.classify(
+        media.MediaError(
+            "final render black-frame check failed: output is 100% black"),
+        "final")
+    assert d.kind == "invalid_edl"
+    assert d.retryable is False

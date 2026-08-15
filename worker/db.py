@@ -1481,7 +1481,8 @@ def recent_llm_tokens(conn, seconds=60):
         return int(list(row.values())[0] if isinstance(row, dict) else row[0])
 
 
-def reserve_llm_tokens(conn, estimated_tokens, soft_cap, window_s=60):
+def reserve_llm_tokens(conn, estimated_tokens, soft_cap, window_s=60,
+                       reservation_id=None):
     """Atomically reserve org-wide TPM capacity before an agent call.
 
     Completed-call telemetry arrives too late to prevent two workers from
@@ -1518,11 +1519,14 @@ def reserve_llm_tokens(conn, estimated_tokens, soft_cap, window_s=60):
             except (TypeError, ValueError, IndexError):
                 continue
             if ts > cutoff and tokens > 0:
-                live.append([ts, tokens])
+                live.append([ts, tokens]
+                            + ([str(item[2])] if len(item) > 2 and item[2]
+                               else []))
         used = sum(item[1] for item in live)
         if live and used + estimate > int(soft_cap):
             return max(0.25, live[0][0] + window_s - now)
-        live.append([now, estimate])
+        live.append([now, estimate]
+                    + ([str(reservation_id)] if reservation_id else []))
         value = json.dumps(live, separators=(",", ":"))
         cur.execute("""INSERT INTO app_kv (key, value, updated_at)
                        VALUES (%s, %s, NOW())
@@ -1530,6 +1534,62 @@ def reserve_llm_tokens(conn, estimated_tokens, soft_cap, window_s=60):
                        SET value = EXCLUDED.value, updated_at = NOW()""",
                     (key, value))
         return 0.0
+
+
+def reconcile_llm_tokens(conn, reservation_id, actual_tokens, window_s=60):
+    """Replace one accepted TPM estimate with provider-reported usage.
+
+    Without reconciliation, a 13K-token tool dispatch occupied 24K of the
+    shared minute ledger for its full 60 seconds. Repeated calls from one turn
+    could therefore starve a waiting large-source user's first call even while
+    the provider still had real capacity. Unknown/expired ids fail open.
+    """
+    if not reservation_id:
+        return False
+    now = time.time()
+    key = "agent_tpm_reservations_v1"
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (841731, 1))
+        cur.execute("SELECT to_regclass('public.app_kv') AS t")
+        table = cur.fetchone()
+        table = table.get("t") if isinstance(table, dict) else table[0]
+        if not table:
+            return False
+        cur.execute("SELECT value FROM app_kv WHERE key = %s FOR UPDATE",
+                    (key,))
+        row = cur.fetchone()
+        raw = (row.get("value") if isinstance(row, dict) else row[0]) \
+            if row else None
+        try:
+            reservations = json.loads(raw or "[]")
+            if not isinstance(reservations, list):
+                reservations = []
+        except (TypeError, ValueError):
+            reservations = []
+        cutoff = now - max(1, int(window_s))
+        changed = False
+        live = []
+        for item in reservations:
+            try:
+                ts, tokens = float(item[0]), int(item[1])
+                rid = str(item[2]) if len(item) > 2 and item[2] else None
+            except (TypeError, ValueError, IndexError):
+                continue
+            if ts <= cutoff or tokens <= 0:
+                continue
+            if rid == str(reservation_id):
+                tokens = max(1, int(actual_tokens))
+                changed = True
+            live.append([ts, tokens] + ([rid] if rid else []))
+        if not changed:
+            return False
+        value = json.dumps(live, separators=(",", ":"))
+        cur.execute("""INSERT INTO app_kv (key, value, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (key) DO UPDATE
+                       SET value = EXCLUDED.value, updated_at = NOW()""",
+                    (key, value))
+        return True
 
 
 def insert_llm_call(conn, project_id, job_id, purpose, model, request,

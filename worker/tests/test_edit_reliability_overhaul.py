@@ -84,7 +84,8 @@ def test_voiceover_can_seek_in_place_and_social_master_has_safe_ceiling():
     graph = renderer.build_filtergraph(
         edl, 60.0, True, Timeline(edl["keep"]), None, [], {}, False,
         vo_inputs=[(1, edl["voiceover"][0], 20.0)])
-    assert "[1:a]atrim=start=51.000,asetpts=PTS-STARTPTS" in graph
+    assert ("[1:a]atrim=start=51.000:end=71.000,"
+            "asetpts=PTS-STARTPTS" in graph)
     assert "loudnorm=I=-14:TP=-2.0:LRA=11" in graph
     assert "alimiter=limit=0.75" in graph and "level=0:latency=1" in graph
 
@@ -120,12 +121,14 @@ def test_get_edl_accepts_natural_section_aliases_without_a_retry():
                 "effects": {"grade": "warm"}, "music": []}}
 
     payload = json.loads(agent_tools.get_edl(
-        Ctx(), sections=["cuts", "text", "zooms", "program"]))
+        Ctx(), sections=["cuts", "text", "zoom", "color", "program"]))
     assert payload["sections"]["keep"] == [[0, 30]]
     assert payload["sections"]["texts"][0]["id"] == "tx1"
     assert payload["sections"]["effects"]["grade"] == "warm"
     assert "overview" in payload
     assert payload["aliases_resolved"]["cuts"] == ["keep"]
+    assert payload["aliases_resolved"]["zoom"] == ["effects"]
+    assert payload["aliases_resolved"]["color"] == ["effects"]
 
     broad = json.loads(agent_tools.get_edl(
         Ctx(), sections=["timeline", "grade", "media", "erases", "video"]))

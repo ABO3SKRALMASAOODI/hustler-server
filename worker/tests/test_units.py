@@ -1052,6 +1052,14 @@ class InsCtx(ToolCtx):
 CLIP = {"kind": "video_clip", "storage_key": "clips/1/rec.mp4",
         "duration_s": 522.5, "meta": {"filename": "rec.mp4"}, "id": 9}
 ins_words = [{"w": "mid", "t0": 5.5, "t1": 5.8}]
+seq_ctx = InsCtx({"keep": [[0.0, 60.0]], "inserts": []}, CLIP, ins_words)
+seq_ctx.canvas_ratio = "16:9"
+seq_r = agent_tools.start_media_sequence(
+    seq_ctx, "clips/1/rec.mp4", duration_s=4.0, clip_start_s=12.0)
+check("start_media_sequence atomically replaces main footage with a canvas clip",
+      seq_r.startswith("EDL v1 -> v2") and seq_ctx.written["keep"] == []
+      and seq_ctx.written["canvas"] and len(seq_ctx.written["inserts"]) == 1
+      and seq_ctx.written["inserts"][0]["source_start_s"] == 12.0)
 ictx = InsCtx({"keep": [[2.67, 9.29]], "inserts": []}, CLIP, ins_words)
 r = agent_tools.insert_media(ictx, "clips/1/rec.mp4", 3.0,
                              duration_s=2.5, clip_start_s=120.0)
@@ -1540,6 +1548,15 @@ check("set_transitions writes style + default duration",
                                                 "scope": "scene"} and
       "dip_black" in r)
 check("set_transitions counts the junctions", "1 junction" in r)
+_ctx_baked = ToolCtx({"keep": [[0.0, 80.0]]})
+_ctx_baked.index = {"shots": [
+    {"id": 1, "start": 0.0, "end": 40.0},
+    {"id": 2, "start": 40.0, "end": 80.0},
+]}
+_rb = agent_tools.set_transitions(_ctx_baked, "dip_black")
+check("set_transitions exposes a baked source cut in a continuous keep",
+      _ctx_baked.written["keep"] == [[0.0, 40.0], [40.0, 80.0]]
+      and "1 of 1 junction" in _rb and "without changing" in _rb)
 # ── Round 48: a transition marks a SCENE CHANGE, not every cut ──────────
 # A real edit shipped 45 whip pans through one continuous shot: cut_silences
 # leaves one junction per removed pause, and every one of them is a jump cut
@@ -2483,7 +2500,13 @@ _gp.index = {"video": {"duration": 60.0}, "silences": [],
                         for i in range(16)] +            # talks 0.0-7.9s
                        [{"w": "b", "t0": 50 + i * 0.5, "t1": 50 + i * 0.5 + 0.4}
                         for i in range(12)])}            # talks 50.0-55.9s
-_gr = agent_tools.cut_silences(_gp, min_silence_s=0.7, padding_s=0.12)
+_blocked = agent_tools.cut_silences(
+    _gp, min_silence_s=0.7, padding_s=0.12)
+check("cut_silences blocks a destructive mostly-nonquiet inferred trim",
+      _blocked.startswith("REJECTED: DESTRUCTIVE NON-QUIET CUT") and
+      _gp.written is None)
+_gr = agent_tools.cut_silences(
+    _gp, min_silence_s=0.7, padding_s=0.12, allow_nonquiet=True)
 check("cut_silences finds the pauses a game/music bed hides from silencedetect",
       _gr.startswith("EDL v") and "gap(s) in the speech" in _gr)
 check("...and says the cut audio was NOT actually quiet",
@@ -4155,13 +4178,13 @@ from agent_tools import (add_sfx, move_sfx, remove_sfx,       # noqa: E402
 # --- the silent-drop guard, applied to sfx ---------------------------------
 # Same lesson as FIT_FIELDS above: a field declared in only SOME layers is
 # dropped without a trace and the agent still reports success.
-SFX_FIELDS = {"id", "storage_key", "at", "gain_db", "purpose"}
+SFX_FIELDS = {"id", "storage_key", "at", "gain_db", "purpose", "offset_s"}
 check("sfx: the item model declares exactly the intended fields",
       SFX_FIELDS == set(schemas.SfxItem.model_fields))
 check("sfx: the EDL model carries an sfx list",
       "sfx" in schemas.EDL.model_fields)
-check("sfx: add_sfx offers storage_key/at/gain_db/purpose to the agent",
-      {"storage_key", "at", "gain_db", "purpose"} ==
+check("sfx: add_sfx offers source offset as well as placement to the agent",
+      {"storage_key", "at", "gain_db", "purpose", "offset_s"} ==
       set(agent_tools.TOOLS["add_sfx"][2]))
 check("sfx: the write tools are tracked for honesty",
       {"add_sfx", "move_sfx", "remove_sfx"} <= agent_tools.WRITE_TOOLS)
@@ -4201,6 +4224,9 @@ expect_reject("sfx past the end of the program",
 expect_reject("sfx at a negative time",
               {**_base, "sfx": [{"id": "s", "storage_key": "sfx:whoosh",
                                  "at": -1.0}]}, 30.0)
+expect_reject("sfx with a negative source offset",
+              {**_base, "sfx": [{"id": "s", "storage_key": "sfx:whoosh",
+                                 "at": 1.0, "offset_s": -1.0}]}, 30.0)
 expect_reject("sfx with a duplicate id",
               {**_base, "sfx": [{"id": "s", "storage_key": "sfx:whoosh", "at": 1.0},
                                 {"id": "s", "storage_key": "sfx:pop", "at": 2.0}]},
@@ -4271,6 +4297,15 @@ check("sfx: never ducked under speech",
       .count("enable=") == 0)
 check("sfx: never trimmed — a one-shot plays its full length",
       "atrim" not in _g_sfx.split("[1:a]")[-1].split("[sfx0]")[0])
+_g_sfx_offset = renderer.build_filtergraph(
+    {"keep": [[0.0, 20.0]], "sfx": [{"id": "a", "storage_key": "long.mp3",
+                                     "at": 4.0, "offset_s": 148.0}]},
+    20.0, True, _tl_sfx, None, [], {"words": []}, True,
+    W=1080, H=1920, fps=30.0,
+    sfx_inputs=[(1, {"id": "a", "storage_key": "long.mp3", "at": 4.0,
+                     "offset_s": 148.0}, 171.0)])
+check("sfx: a requested source offset trims and resets its audio clock",
+      "atrim=start=148.000,asetpts=PTS-STARTPTS" in _g_sfx_offset)
 # No limiter: alimiter's 5ms lookahead would delay the whole programme audio
 # against the picture, measured by differencing two renders.
 check("sfx: no limiter is inserted (it would shift A/V by its lookahead)",

@@ -2747,7 +2747,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         delay_ms = int(max(0.0, float(vo["start_output_s"])) * 1000)
         delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""
         off = max(0.0, float(vo.get("source_offset_s") or 0.0))
-        trim = f"atrim=start={off:.3f},asetpts=PTS-STARTPTS," if off else ""
+        trim = (f"atrim=start={off:.3f}:end={off + vd:.3f},"
+                "asetpts=PTS-STARTPTS,")
         parts.append(f"[{input_idx}:a]{trim}"
                      f"volume={vo.get('gain_db', 0.0)}dB,"
                      f"aresample=48000{delay}[vo{j}]")
@@ -2756,11 +2757,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         at = max(0.0, min(float(item.get("at") or 0.0), tl.out_duration))
         delay_ms = int(at * 1000)
         delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""
-        # No ducking and no atrim, unlike music. An accent that dips under the
-        # very word it is punctuating is not an accent, and a one-shot plays
-        # for exactly as long as the file is — amix's duration=first already
-        # stops a late boom from running past the end of the programme.
-        parts.append(f"[{input_idx}:a]volume={item.get('gain_db', -6.0)}dB,"
+        offset = max(0.0, float(item.get("offset_s") or 0.0))
+        trim = f"atrim=start={offset:.3f},asetpts=PTS-STARTPTS," if offset else ""
+        # No ducking. A normal one-shot plays its full length; offset_s is an
+        # explicit exception for taking the requested hit from inside a long
+        # extracted audio track. amix still stops its tail at programme end.
+        parts.append(f"[{input_idx}:a]{trim}"
+                     f"volume={item.get('gain_db', -6.0)}dB,"
                      f"aresample=48000{delay}[sfx{j}]")
         mix_labels.append(f"[sfx{j}]")
 
@@ -2938,6 +2941,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         extra_inputs += ["-i", local]
         vo_dur = max(0.0, media.probe_audio_duration(local) -
                      float(item.get("source_offset_s") or 0.0))
+        if item.get("duration_s") is not None:
+            vo_dur = min(vo_dur, max(0.0, float(item["duration_s"])))
         vo_inputs.append((next_idx, item, vo_dur))
         next_idx += 1
 
@@ -3370,6 +3375,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         extra_inputs += ["-i", local]
         vo_dur = max(0.0, media.probe_audio_duration(local) -
                      float(item.get("source_offset_s") or 0.0))
+        if item.get("duration_s") is not None:
+            vo_dur = min(vo_dur, max(0.0, float(item["duration_s"])))
         vo_inputs.append((next_idx, item, vo_dur))
         next_idx += 1
 
@@ -3652,13 +3659,15 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
         # The music tail is black BY DESIGN — measure the scenes only, or a
         # short video under a long song reads as "the render looks broken".
         prog_dur = max(0.1, out_dur - outro - tail)
-        out_black = media.black_seconds(out_path, prog_dur) / prog_dur
+        out_black = min(1.0, max(
+            0.0, media.black_seconds(out_path, prog_dur) / prog_dur))
         if out_black > config.RENDER_BLACK_MAX_RATIO:
             # The output is mostly black — but that's only a DEFECT if the
             # source wasn't. Probe the source (once, only in this rare case).
             src_black = 0.0
             if src_path and src_dur and src_dur > 1.0:
-                src_black = media.black_seconds(src_path, src_dur) / src_dur
+                src_black = min(1.0, max(
+                    0.0, media.black_seconds(src_path, src_dur) / src_dur))
             elif src_dur is None and out_black < 0.98:
                 # Canvas program (no source to compare): a lyric/caption or dark
                 # program can be legitimately black. Only a near-total black

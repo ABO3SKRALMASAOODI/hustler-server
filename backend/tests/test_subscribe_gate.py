@@ -47,6 +47,20 @@ def test_unsubscribed_user_is_gated_after_a_real_edit():
     cur = _Cur({"is_subscribed": 0, "email": "new@example.com"}, edited=True)
     assert video._subscribe_gate_applies(cur, 1) is True
     assert "video_jobs" in (cur.sql or "")
+    assert "result->>'status' = 'replied'" in cur.sql
+    assert "result->>'outcome' IN ('fulfilled', 'partial')" in cur.sql
+
+
+def test_deterministic_final_failure_requires_a_new_edit():
+    assert video._deterministic_final_failure({
+        "result": {"failure": {"kind": "invalid_edl", "retryable": False}},
+        "error": "final render black-frame check failed",
+    }) is True
+    assert video._deterministic_final_failure({
+        "result": {"failure": {"kind": "transient_infrastructure",
+                                "retryable": True}},
+        "error": "HTTP 503",
+    }) is False
 
 
 def test_subscriber_and_trial_pass():

@@ -34,7 +34,7 @@ import story_critic
 import timeline
 import version as worker_version
 from agent_prompt import project_state_block, system_prompt
-from schemas import describe_edl
+from schemas import describe_edl, program_duration
 
 # Set by main._on_shutdown when Render SIGTERMs the container (every deploy).
 # The turn loop checks it between iterations and finalizes honestly inside
@@ -1427,7 +1427,15 @@ def _compact_old_tool_results(messages, keep_latest=8, char_limit=900):
 
 
 def _agent_request_token_estimate(messages, tools, max_tokens):
-    """Conservative TPM estimate without counting base64 image bytes."""
+    """Bounded TPM estimate without counting base64 image bytes.
+
+    JSON characters divided by four tracks the measured prompts much more
+    closely than the old divide-by-three rule, and a normal tool dispatch
+    almost never emits eight thousand completion tokens. The reservation is
+    reconciled to provider-reported usage immediately after success, so this
+    only needs enough headroom for the in-flight request—not a minute of
+    worst-case output multiplied by every concurrent turn.
+    """
     image_parts = 0
 
     def clean(value):
@@ -1443,8 +1451,16 @@ def _agent_request_token_estimate(messages, tools, max_tokens):
 
     raw = json.dumps({"messages": clean(messages), "tools": tools},
                      ensure_ascii=False, separators=(",", ":"), default=str)
-    prompt = (len(raw) + 2) // 3 + image_parts * 1700
-    completion = min(max(0, int(max_tokens)), 8000)
+    ascii_chars = sum(1 for ch in raw if ord(ch) < 128)
+    nonascii_chars = len(raw) - ascii_chars
+    # Arabic/CJK JSON is materially denser in tokens than English.  Charging
+    # it at 1.25 tokens/character prevents the admission controller from
+    # under-reserving exactly the multilingual prompts most likely to hit a
+    # provider 429; successful calls are still reconciled to real usage.
+    prompt = ((ascii_chars + 3) // 4
+              + (nonascii_chars * 5 + 3) // 4
+              + image_parts * 1400)
+    completion = min(max(0, int(max_tokens)), 3000)
     return max(2000, prompt + completion)
 
 
@@ -1663,6 +1679,18 @@ def run_agent_job(worker_db, job):
     # with direct sight off; the loop that can honour it turns it on.
     ctx.direct_sight = True
     ctx.user_message = (user_message.get("content") or "")[:4000]
+    # Immutable turn baseline for the last-line safety net below. A sequence
+    # recipe that accidentally leaves 0.08s of a multi-minute programme must
+    # never become the state offered for export merely because the model timed
+    # out before rebuilding it. Recovery is append-only, so history is intact.
+    try:
+        _turn_start = ctx.latest_edl()
+        ctx.turn_start_edl = {
+            "version": _turn_start["version"],
+            "json": json.loads(json.dumps(_turn_start["json"])),
+        }
+    except Exception:
+        ctx.turn_start_edl = None
     # Do not pre-warm the preview fleet here. Agent planning routinely lasts
     # longer than the executor's short idle window, which made the warm-up
     # container disappear before rendering and charged for two cold starts.
@@ -1822,11 +1850,54 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+_EXPLICIT_MICRO_EDIT = re.compile(
+    r"\b0?\.\d+\s*(?:s|sec(?:ond)?s?)\b|\bmillisecond(?:s)?\b|"
+    r"\b\d+\s*frames?\b", re.I)
+
+
+def _recover_catastrophic_timeline_collapse(ctx, worker_db):
+    """Restore the turn baseline when an intermediate recipe erased the cut."""
+    baseline = getattr(ctx, "turn_start_edl", None)
+    if not baseline or not ctx.versions_written or \
+            _EXPLICIT_MICRO_EDIT.search(getattr(ctx, "user_message", "") or ""):
+        return None
+    latest = ctx.latest_edl()
+    try:
+        before_s = float(program_duration(baseline["json"]))
+        after_s = float(program_duration(latest["json"]))
+    except Exception:
+        return None
+    if before_s < 2.0 or after_s >= 0.25 or after_s >= before_s * 0.02:
+        return None
+    restored = json.loads(json.dumps(baseline["json"]))
+    version = worker_db.run(
+        dbx.insert_edl, ctx.project_id, restored, "agent")
+    ctx.versions_written.append(version)
+    ctx.last_change = None
+    ctx.last_preview = None
+    ctx.last_preview_failure = None
+    ctx.catastrophic_recovery = {
+        "from_version": latest["version"], "to_version": version,
+        "collapsed_duration_s": round(after_s, 3),
+        "restored_duration_s": round(before_s, 3),
+    }
+    print(f"[honesty] job {ctx.job['id']}: v{latest['version']} collapsed "
+          f"{before_s:.2f}s to {after_s:.3f}s — restored the turn baseline as "
+          f"v{version}", flush=True)
+    return ctx.catastrophic_recovery
+
+
 def _auto_render_if_needed(ctx, worker_db, session_id, timings):
     """If the EDL changed this turn without a successful render_preview,
     render one now (logged + counted). Returns (latest_edl_row, fail_note)."""
+    recovery = _recover_catastrophic_timeline_collapse(ctx, worker_db)
     latest = ctx.latest_edl()
     fail_note = None
+    if recovery:
+        fail_note = ("\n\n(I caught an unusably short intermediate timeline "
+                     f"({recovery['collapsed_duration_s']:.2f}s) and restored "
+                     "the last usable edit before preview/export. The broken "
+                     "intermediate version was not delivered.)")
     if ctx.versions_written and latest["version"] not in ctx.rendered_versions:
         ctx.autorendered = True
         print(f"[honesty] job {ctx.job['id']}: model ended the turn without "
@@ -1851,8 +1922,9 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings):
         # preview was attached. Only the render tool's actual failure prefix
         # means failure.
         if result.startswith("Preview render FAILED:"):
-            fail_note = ("\n\n(Heads up: the preview render failed — "
-                         f"{result[:200]})")
+            fail_note = (fail_note or "") + (
+                "\n\n(Heads up: the preview render failed — "
+                f"{result[:200]})")
     return latest, fail_note
 
 
@@ -3357,6 +3429,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         int(x) for x in (_cont.get("quality_repair_versions") or []))
     plan_write_pushed = bool(_cont.get("plan_write_pushed", False))
     plan_close_pushed = bool(_cont.get("plan_close_pushed", False))
+    first_write_pushed = bool(_cont.get("first_write_pushed", False))
     _responses_warned = False      # say the lane fell back ONCE, not per step
 
     # TPM admission: the provider's tokens-per-minute ceiling is org-wide,
@@ -3453,6 +3526,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                quality_repair_versions),
                            "plan_write_pushed": plan_write_pushed,
                            "plan_close_pushed": plan_close_pushed,
+                           "first_write_pushed": first_write_pushed,
                            "semantic0": semantic_now,
                            "writes0": len(ctx.versions_written),
                            "renders0": len(ctx.rendered_versions),
@@ -3616,11 +3690,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         estimate = _agent_request_token_estimate(messages, tools, max_tokens)
         capacity_expired = False
         capacity_waited = 0.0
+        reservation_id = (f"{job['id']}:{iteration}:"
+                          f"{uuid.uuid4().hex[:10]}")
         while True:
             try:
                 wait = worker_db.run(
                     dbx.reserve_llm_tokens, estimate,
-                    config.AGENT_TPM_SOFT_CAP, config.AGENT_TPM_WINDOW_S)
+                    config.AGENT_TPM_SOFT_CAP, config.AGENT_TPM_WINDOW_S,
+                    reservation_id)
             except Exception as e:
                 print(f"[agent {job['id']}] TPM reservation unavailable "
                       f"({str(e)[:120]}) — failing open", flush=True)
@@ -3822,6 +3899,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         timings["llm_calls"] += 1
         msg = resp.choices[0].message
         finish = getattr(resp.choices[0], "finish_reason", None)
+        usage = getattr(resp, "usage", None)
+        actual_tpm = (
+            int(getattr(usage, "prompt_tokens", 0) or 0)
+            + int(getattr(usage, "completion_tokens", 0) or 0))
+        if actual_tpm:
+            try:
+                worker_db.run(
+                    dbx.reconcile_llm_tokens, reservation_id, actual_tpm,
+                    config.AGENT_TPM_WINDOW_S)
+                _metric = ctx.editing_metrics
+                _metric["tpm_reserved_tokens_avoided"] = (
+                    _metric.get("tpm_reserved_tokens_avoided", 0)
+                    + max(0, estimate - actual_tpm))
+            except Exception as exc:
+                print(f"[agent {job['id']}] TPM reconciliation unavailable "
+                      f"({str(exc)[:120]}) — keeping the safe estimate",
+                      flush=True)
         llm.record("agent",
                    {"model": model, "messages": _messages_for_record(messages),
                     "tools": [t["function"]["name"] for t in tools],
@@ -3846,7 +3940,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # failure invisible: an empty completion at the ceiling and
                     # a deliberate empty reply look identical without it.
                     "finish_reason": finish},
-                   getattr(resp, "usage", None))
+                   usage)
 
         # A step that hit the token ceiling with NOTHING in it — no text, no
         # tool call — is not an answer, it is a truncation. A reasoning model
@@ -4154,6 +4248,36 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # just because the model read a skill before recording its plan.
         if _compact_initial_filmstrip(messages):
             ctx.editing_metrics["initial_filmstrip_compacted"] = 1
+
+        # Production projects 880/922/923 spent 20, 51 and 11+ read calls
+        # respectively without one EDL write. Waiting for the 10-minute
+        # inactivity wall merely converts exploration into a guaranteed
+        # timeout. Interrupt the loop early with an execution checkpoint;
+        # analysis-only questions may still answer, while a concrete edit
+        # must use the evidence already collected or name a real blocker.
+        read_calls = sum(
+            int(row.get("n") or 0) for name, row in timings["tools"].items()
+            if name not in agent_tools.WRITE_TOOLS)
+        if not ctx.versions_written and read_calls >= 8 \
+                and not first_write_pushed:
+            first_write_pushed = True
+            ctx.editing_metrics["first_write_checkpoint"] = read_calls
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"[system: EXECUTION CHECKPOINT — {read_calls} read-only "
+                    "tool calls have completed and no EDL write has landed. "
+                    "Do not reread the same evidence or load another skill. "
+                    "If the current request is a concrete edit, the NEXT "
+                    "step must record/finish the blueprint and perform the "
+                    "first safe write (batch independent writes where useful), "
+                    "or ask_user only when a specific missing choice/asset "
+                    "truly blocks every useful edit. For a long visual-event "
+                    "hunt, use find_visual_moments once, verify its candidates "
+                    "in one batched look_at, then write. If the request is "
+                    "genuinely analysis-only, answer it now.]")})
+            print(f"[job {job['id']}] execution checkpoint after "
+                  f"{read_calls} read-only tools and zero writes", flush=True)
 
         if getattr(ctx, "edit_plan", None) or ctx.versions_written:
             # Stage routing avoids resending 100+ schemas after every action.

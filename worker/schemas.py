@@ -618,6 +618,9 @@ class SfxItem(BaseModel):
     id: str
     storage_key: str
     at: float        # position in the OUTPUT (edited) timeline
+    # Start inside the source sound. Needed when a long extracted video track
+    # is used as a one-shot and the requested hit occurs late in that track.
+    offset_s: Optional[float] = None
     # -6dB is the pack's house level: sounds are normalized to -16 LUFS, so
     # this sits an accent clearly above a -18dB music bed without fighting
     # speech. It must match add_sfx's default AND the renderer's fallback —
@@ -794,6 +797,11 @@ class VoiceoverItem(BaseModel):
     # Seek into the source narration/audio without forcing an external trim.
     # Optional-None keeps historical EDL signatures and renders unchanged.
     source_offset_s: Optional[float] = None
+    # Optional excerpt length.  Without this a source-offset voiceover plays
+    # to the end of the asset, which made it impossible to lift one sentence
+    # from the main source over an inserted scene without covering everything
+    # after it as well.
+    duration_s: Optional[float] = None
     gain_db: float = 0.0
     duck_others: bool = True
 
@@ -2235,6 +2243,11 @@ def validate_edl(data, duration=None):
             if vo.source_offset_s < 0:
                 raise EDLValidationError(
                     f"voiceover[{i}].source_offset_s must be >= 0.")
+        if vo.duration_s is not None:
+            vo.duration_s = _r(vo.duration_s)
+            if vo.duration_s < 0.05:
+                raise EDLValidationError(
+                    f"voiceover[{i}].duration_s must be >= 0.05.")
         if not vo.id or vo.id in seen_ids:
             raise EDLValidationError(
                 f"voiceover[{i}].id must be non-empty and unique.")
@@ -2323,6 +2336,11 @@ def validate_edl(data, duration=None):
         if s.at < 0:
             raise EDLValidationError(
                 f"sfx[{i}].at {s.at} is negative. Times are seconds from 0.")
+        if s.offset_s is not None:
+            s.offset_s = _r(s.offset_s)
+            if s.offset_s < 0:
+                raise EDLValidationError(
+                    f"sfx[{i}].offset_s {s.offset_s} must be >= 0.")
         # Bounded by the FINAL program (incl. inserts), like voiceover and
         # music — not by the source duration, which a heavily-cut edit is far
         # shorter than. An sfx past the end renders to nothing while the EDL

@@ -2428,7 +2428,36 @@ def video_reliability():
         cur.execute("SELECT name, count, updated_at FROM metrics_counters")
         counters = {r["name"]: r for r in cur.fetchall()}
 
+        # Build the exported-project set once. The former three correlated
+        # EXISTS probes re-ran bitmap/index scans for every project and took
+        # >1.1s on only 761 sessions; under Render load the admin card appeared
+        # stuck on "Loading reliability…". This set-based form grows with the
+        # tables, not projects × tables, and preserves the shorts-parent rule.
         cur.execute(f"""
+            WITH exported_projects AS (
+                SELECT j.project_id
+                FROM video_jobs j
+                WHERE j.type = 'final' AND j.state = 'done'
+                UNION
+                SELECT a.project_id
+                FROM assets a
+                WHERE a.kind = 'render'
+                  AND a.meta->>'variant' = 'final'
+                UNION
+                SELECT c.parent_project_id
+                FROM projects c
+                JOIN video_jobs cj ON cj.project_id = c.id
+                WHERE c.parent_project_id IS NOT NULL
+                  AND cj.type = 'final' AND cj.state = 'done'
+            ), scoped_projects AS (
+                SELECT p.id, p.created_at,
+                       (e.project_id IS NOT NULL) AS exported
+                FROM projects p
+                JOIN users u ON u.id = p.user_id
+                LEFT JOIN exported_projects e ON e.project_id = p.id
+                WHERE COALESCE(p.kind, 'edit') != 'short'
+                  AND {_scope('u')}
+            )
             SELECT COUNT(*) AS total,
                    COUNT(*) FILTER (WHERE NOT exported) AS no_export,
                    COUNT(*) FILTER (
@@ -2438,32 +2467,7 @@ def video_reliability():
                        WHERE NOT exported
                          AND created_at >= NOW() - INTERVAL '30 days')
                        AS no_export_30d
-            FROM (
-                SELECT p.id, p.created_at,
-                       (EXISTS (SELECT 1 FROM video_jobs j
-                                WHERE j.project_id = p.id
-                                  AND j.type = 'final'
-                                  AND j.state = 'done')
-                        OR EXISTS (SELECT 1 FROM assets a
-                                   WHERE a.project_id = p.id
-                                     AND a.kind = 'render'
-                                     AND a.meta->>'variant' = 'final')
-                        -- A shorts parent renders nothing itself; its
-                        -- deliverables are its children's finals. Without
-                        -- this branch every successful shorts session read
-                        -- as "never exported" (11 of them on 2026-08-11).
-                        OR EXISTS (SELECT 1 FROM projects c
-                                   JOIN video_jobs cj
-                                     ON cj.project_id = c.id
-                                   WHERE c.parent_project_id = p.id
-                                     AND cj.type = 'final'
-                                     AND cj.state = 'done'))
-                       AS exported
-                FROM projects p
-                JOIN users u ON u.id = p.user_id
-                WHERE COALESCE(p.kind, 'edit') != 'short'
-                  AND {_scope('u')}
-            ) s
+            FROM scoped_projects
         """)
         sess = cur.fetchone() or {}
 

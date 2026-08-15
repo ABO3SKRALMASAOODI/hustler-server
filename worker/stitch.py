@@ -37,6 +37,7 @@ import re
 import subprocess
 
 import media
+from schemas import MIN_SPAN_S
 
 # Video-local layers a stitch may differ in. Everything else must be equal.
 _CHANGEABLE_TOP = ("texts", "vectors", "patches", "overlays")
@@ -255,11 +256,21 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
             if pb - pa > 0.001:
                 src_a = ps + (pa - acc) * f
                 src_b = ps + (pb - acc) * f
-                keep.append([round(src_a, 3), round(src_b, 3)])
+                src_a, src_b = round(src_a, 3), round(src_b, 3)
+                # A proof/check window may begin a few hundredths before an
+                # existing EDL boundary. Keeping that boundary sliver creates
+                # an invalid standalone EDL even though the saved full EDL is
+                # valid (production jobs 11851/11893/12058: 0.030s). It is
+                # below both the schema's useful span and render tolerance, so
+                # omit it from the temporary proof rather than blaming the edit.
+                if src_b - src_a < MIN_SPAN_S - 1e-9:
+                    acc += plen
+                    continue
+                keep.append([src_a, src_b])
                 if abs(f - 1.0) > 1e-9:
                     speed.append({"id": f"sw{len(speed) + 1}",
-                                  "start": round(src_a, 3),
-                                  "end": round(src_b, 3), "factor": f})
+                                  "start": src_a,
+                                  "end": src_b, "factor": f})
             acc += plen
     e["keep"] = keep
     e["speed"] = speed
@@ -379,7 +390,8 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     # track. Changed-section proof reels are different: the changed seconds
     # must sound like the current EDL, so shift output-anchored audio into the
     # local window. Voiceover has no stored duration; starting it before the
-    # window is represented by advancing its source offset.
+    # window is represented by advancing its source offset.  A bounded
+    # voiceover is also clipped/removed against its actual duration.
     if keep_audio:
         music = []
         for item in e.get("music") or []:
@@ -406,16 +418,27 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
         voiceovers = []
         for item in e.get("voiceover") or []:
             start = float(item.get("start_output_s") or 0.0)
-            if start >= w1 - 0.001:
+            duration = item.get("duration_s")
+            finish = (start + float(duration)
+                      if duration is not None else float("inf"))
+            if start >= w1 - 0.001 or finish <= w0 + 0.001:
                 continue
             shifted = dict(item)
             if start < w0:
+                skipped = w0 - start
                 shifted["source_offset_s"] = round(
-                    float(item.get("source_offset_s") or 0.0) + w0 - start,
+                    float(item.get("source_offset_s") or 0.0) + skipped,
                     3)
                 shifted["start_output_s"] = 0.0
+                if duration is not None:
+                    shifted["duration_s"] = round(float(duration) - skipped,
+                                                  3)
             else:
                 shifted["start_output_s"] = round(start - w0, 3)
+            if duration is not None:
+                local_start = max(start, w0)
+                shifted["duration_s"] = round(min(
+                    float(shifted["duration_s"]), w1 - local_start), 3)
             voiceovers.append(shifted)
         e["voiceover"] = voiceovers
     else:

@@ -53,6 +53,25 @@ def test_openverse_query_is_modification_only(monkeypatch):
     assert seen.get("license_type") == "modification"
 
 
+def test_verified_cc0_outage_catalog_survives_openverse_401(monkeypatch):
+    monkeypatch.setattr(
+        sfx_search.music_search, "_openverse_get_json",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("HTTP 401")))
+    hits = sfx_search.search("soft playful transition whoosh", max_s=2)
+    assert hits and hits[0]["provider"] == "openverse"
+    assert hits[0]["license"].startswith("cc0")
+    assert hits[0]["page_url"].startswith("https://freesound.org/")
+
+
+def test_outage_catalog_respects_duration_cap_and_physical_query(monkeypatch):
+    monkeypatch.setattr(
+        sfx_search.music_search, "_openverse_get_json",
+        lambda *a, **k: {"results": []})
+    assert sfx_search.search("camera shutter reveal", max_s=.5)
+    assert not sfx_search.search("camera shutter reveal", max_s=.1)
+    assert not sfx_search.search("unrelated abstract mood", max_s=3)
+
+
 class _Db:
     def run(self, *a, **k):
         return None

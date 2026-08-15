@@ -381,10 +381,31 @@ def test_motion_authoring_requires_a_free_named_language_and_beat_bindings():
             department_plan=departments, motion_language=_motion_language())
     bad = _motion_language()
     bad["motifs"][0]["id"] = "hold"
-    with pytest.raises(ValueError, match="reserved"):
+    with pytest.raises(ValueError, match="executable motif"):
         director.create_blueprint(
             steps=["author it"], sequence_map=beats,
             department_plan=departments, motion_language=bad)
+
+
+def test_redundant_hold_motif_is_ignored_when_real_motion_motifs_exist():
+    language = _motion_language()
+    language["motifs"].insert(0, {
+        "id": "hold", "behavior": "keep the frame settled",
+        "trigger": "supporting beats", "domains": ["camera"]})
+    normalized = director._motion_language(language, strict=True)
+    assert [row["id"] for row in normalized["motifs"]] == ["earned_push"]
+
+
+def test_source_evidence_aliases_repair_only_to_real_ids():
+    index = {
+        "sentences": [{"id": "s1", "t0": 0, "t1": 1}],
+        "shots": [{"id": "1", "start": 0, "end": 1},
+                  {"id": "2", "start": 1, "end": 2}],
+    }
+    beats = [{"evidence_ids": ["shot-1", "shot_0", "sentence-1",
+                                "invented"]}]
+    assert director.canonicalize_source_evidence_ids(beats, index) == 3
+    assert beats[0]["evidence_ids"] == ["1", "1", "s1", "invented"]
 
 
 def test_set_plan_rejects_prose_only_motion_authoring():
@@ -923,6 +944,15 @@ def test_identical_skill_load_is_not_resent_into_the_same_context():
     second = agent_tools.read_skill(ctx, "captions")
     assert len(first) > 200
     assert second.startswith("SKILL ALREADY LOADED")
+
+
+def test_skill_loading_stops_after_four_playbooks():
+    ctx, _fake = _tool_ctx()
+    for name in ("captions", "audio", "cutting", "zooms"):
+        assert len(agent_tools.read_skill(ctx, name)) > 100
+    refused = agent_tools.read_skill(ctx, "transitions")
+    assert refused.startswith("SKILL BUDGET REACHED")
+    assert len(ctx._skills_loaded) == 4
 
 
 def test_exact_additive_write_is_idempotent_across_unrelated_edl_changes():

@@ -226,7 +226,7 @@ def probe(job):
 # Agent turns spend most of their wall time waiting on the model, database, or
 # remote render functions. Share that idle I/O time inside one container before
 # scaling another container; no always-on instance is purchased.
-@modal.concurrent(max_inputs=6, target_inputs=4)
+@modal.concurrent(max_inputs=2, target_inputs=1)
 def agent(job):
     return _run(job, "agent", role="agent_executor", pricing_multiplier=1.5)
 

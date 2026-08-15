@@ -153,3 +153,11 @@ def test_agent_map_does_not_repeat_complete_transcript_already_in_state():
     assert "Sentence text is omitted" in out
     assert "Start quietly" not in out
     assert "[s1 " in out
+
+
+def test_main_asset_alias_uses_primary_source_without_db_lookup():
+    ctx = agent_tools.ToolContext(
+        None, {"id": 1}, {"id": 7, "chat_session_id": 9}, _index(), "/tmp")
+    out = agent_tools.get_editorial_map(ctx, asset_key="main")
+    assert "EDITORIAL EVIDENCE MAP" in out
+    assert "main source" in out

@@ -1,6 +1,7 @@
 """Cost controls must preserve the edit while bounding repeated compute."""
 
 from pathlib import Path
+import json
 import sys
 
 import pytest
@@ -155,6 +156,17 @@ def test_proof_piece_clips_overlay_at_its_budget_edge():
     schemas.validate_edl(window, duration=20.0)
 
 
+def test_proof_window_drops_subminimum_boundary_sliver():
+    # A valid full EDL can intersect a preview-check window for only 0.03s at
+    # one keep boundary. The temporary window must not turn that into an
+    # invalid keep and fail before ffmpeg starts.
+    edl = _edl(keep=[[0.0, 477.39], [477.39, 500.0]])
+    window = stitch.window_edl(
+        edl, Timeline(edl["keep"]), 477.36, 480.0, keep_audio=True)
+    assert window["keep"] == [[477.39, 480.0]]
+    schemas.validate_edl(window, duration=500.0)
+
+
 def test_canvas_proof_geometry_respects_output_ratio():
     width, height = renderer.frame_dims(1920, 1080, "9:16")
     width, height, _fps = renderer.preview_geometry(width, height, 30.0)
@@ -240,7 +252,7 @@ def test_deploy_workflow_right_sizes_and_coalesces():
     assert "desired_launcher=" not in workflow
     heavy_health = "valmera-executor-950454325677.us-central1.run.app/health"
     assert heavy_health not in workflow
-    assert config.REMOTE_AGENT_DISPATCH_SLOTS >= 10
+    assert config.REMOTE_AGENT_DISPATCH_SLOTS >= 5
 
 
 def test_old_tool_results_are_compacted_without_breaking_protocol():
@@ -272,6 +284,30 @@ def test_tpm_estimate_does_not_count_embedded_image_bytes():
         == agent_loop._agent_request_token_estimate(huge, tools, 4000)
 
 
+def test_tpm_estimate_reserves_more_for_non_ascii_prompts():
+    ascii_message = [{"role": "user", "content": "a" * 4000}]
+    arabic_message = [{"role": "user", "content": "م" * 4000}]
+    tools = [{"function": {"name": "get_edl"}}]
+    assert agent_loop._agent_request_token_estimate(
+        arabic_message, tools, 4000) > agent_loop._agent_request_token_estimate(
+            ascii_message, tools, 4000) + 3000
+
+
+def test_windowed_proof_clips_bounded_voiceover():
+    edl = _edl(voiceover=[{
+        "id": "v1", "asset_key": "main.mov", "start_output_s": 3.0,
+        "source_offset_s": 4.0, "duration_s": 4.0,
+    }])
+    window = stitch.window_edl(edl, Timeline(edl["keep"]), 5.0, 8.0,
+                               keep_audio=True)
+    assert window["voiceover"][0]["start_output_s"] == 0.0
+    assert window["voiceover"][0]["source_offset_s"] == 6.0
+    assert window["voiceover"][0]["duration_s"] == 2.0
+    after = stitch.window_edl(edl, Timeline(edl["keep"]), 7.1, 8.0,
+                              keep_audio=True)
+    assert after["voiceover"] == []
+
+
 def test_render_signature_is_exact_and_pipeline_scoped():
     row = {"version": 2, "json": _edl()}
     first = agent_tools._render_signature(row, "preview")
@@ -290,7 +326,7 @@ def test_modal_lifecycle_is_short_and_diagnostics_use_probe():
     assert 'name="index", cpu=BATCH_CPU, memory=INDEX_MEMORY' in source
     assert 'name="index_eu", cpu=BATCH_CPU, memory=INDEX_MEMORY' in source
     assert 'cpu=(0.125, 1.0), memory=AGENT_MEMORY' in source
-    assert '@modal.concurrent(max_inputs=6, target_inputs=4)' in source
+    assert '@modal.concurrent(max_inputs=2, target_inputs=1)' in source
     assert 'name="probe"' in source
     assert remote._modal_function_name("ytprobe") == "probe"
     assert '"valmera-executor", "probe"' in workflow
@@ -337,13 +373,22 @@ def test_tpm_reservation_waits_for_live_fleet_capacity(monkeypatch):
 
     monkeypatch.setattr(dbx.time, "time", lambda: 1000.0)
     open_conn = Conn("[]")
-    assert dbx.reserve_llm_tokens(open_conn, 80, 150, 60) == 0
+    assert dbx.reserve_llm_tokens(
+        open_conn, 80, 150, 60, "job:step:one") == 0
     assert open_conn.cur.writes
+    stored = json.loads(open_conn.cur.writes[-1][1])
+    assert stored[-1][2] == "job:step:one"
 
     full_conn = Conn("[[990,100]]")
     assert dbx.reserve_llm_tokens(full_conn, 60, 150, 60) \
         == pytest.approx(50.0)
     assert not full_conn.cur.writes
+
+    reconcile_conn = Conn('[[990,80,"job:step:one"],[995,20]]')
+    assert dbx.reconcile_llm_tokens(
+        reconcile_conn, "job:step:one", 31, 60) is True
+    reconciled = json.loads(reconcile_conn.cur.writes[-1][1])
+    assert reconciled == [[990.0, 31, "job:step:one"], [995.0, 20]]
 
 
 def test_live_turn_adopts_mid_edit_messages(monkeypatch):
