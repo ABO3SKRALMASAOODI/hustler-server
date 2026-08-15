@@ -16,6 +16,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 import config
+import error_text
 import model_prices
 
 # ------------------------------------------------------------------ #
@@ -436,7 +437,7 @@ def finish_job(conn, job_id, state, error=None, result=None,
     """
     with conn.cursor() as cur:
         lease_where = " AND total_claims = %s" if total_claims is not None else ""
-        params = [state, (error or None) and str(error)[:2000],
+        params = [state, (error or None) and error_text.excerpt(error, 2000),
                   Json(_json_safe(result)) if result is not None else None,
                   state, job_id]
         if total_claims is not None:
@@ -479,7 +480,7 @@ def requeue_job(conn, job_id, error, total_claims=None):
     """
     with conn.cursor() as cur:
         lease_where = " AND total_claims = %s" if total_claims is not None else ""
-        params = [str(error)[:2000], job_id]
+        params = [error_text.excerpt(error, 2000), job_id]
         if total_claims is not None:
             params.append(total_claims)
         cur.execute(f"""UPDATE video_jobs

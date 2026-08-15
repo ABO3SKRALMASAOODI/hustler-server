@@ -36,6 +36,17 @@ def test_post_plan_catalog_is_stage_relevant_and_materially_smaller():
     assert routed_chars < full_chars * 0.6
 
 
+def test_fresh_planning_catalog_cannot_write_and_cuts_first_call_tpm():
+    names = agent_tools.planning_tool_names()
+    assert {"set_edit_plan", "look_at", "compare_uploaded_media",
+            "search_music", "find_silences", "read_skill"} <= names
+    assert not (names & agent_tools.WRITE_TOOLS)
+
+    full = agent_tools.openai_tools(compact=False)
+    planning = agent_tools.openai_tools(compact=True, names=names)
+    assert len(json.dumps(planning)) < len(json.dumps(full)) * 0.2
+
+
 def test_any_omitted_domain_can_be_loaded_without_changing_the_edit():
     ctx = _Ctx()
     out = agent_tools.expand_toolset(ctx, ["media", "motion"])

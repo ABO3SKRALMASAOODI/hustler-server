@@ -16238,11 +16238,15 @@ def render_preview(ctx, complete=False):
     row = ctx.latest_edl()
     version = row["version"]
     requested_complete = bool(complete)
-    # Only the loop's turn-end honesty pass may produce the complete player
-    # preview. A model asking for complete=true mid-turn used to encode the
-    # whole programme repeatedly while it experimented with later versions.
-    complete = bool(getattr(ctx, "autorendering", False))
-    if complete:
+    autorendering = bool(getattr(ctx, "autorendering", False))
+    # The honesty pass always produces the complete player preview. An explicit
+    # complete=true may do so only after this exact version's bounded changed-
+    # section proof has already run; this preserves a useful manual escape hatch
+    # without repeatedly encoding the whole programme during experimentation.
+    complete = autorendering or (
+        requested_complete
+        and version in getattr(ctx, "checked_versions", set()))
+    if requested_complete or autorendering:
         department_gaps = director.department_execution_gaps(
             getattr(ctx, "edit_plan", None), row.get("json") or {},
             getattr(ctx, "has_main_video", True))
@@ -16284,7 +16288,7 @@ def render_preview(ctx, complete=False):
     # ("this should read X, behind the person") instead of nine even samples
     # of the whole programme that the edit may not even appear in.
     plan = _verify_plan_for(ctx, row)
-    if not autorendering:
+    if not complete:
         ranges, _baseline = _change_check_ranges(ctx, row, plan)
         # Once a complete immutable baseline exists, the first look at a new
         # version is the bounded changed-section proof—even when the editor
@@ -16295,8 +16299,8 @@ def render_preview(ctx, complete=False):
         # previously encoded a 15s program 17 times while changing one caption
         # or grade at a time; those inner-loop encodes carried no extra whole-
         # program evidence.
-        if ranges and (not complete or version not in ctx.checked_versions):
-            if complete:
+        if ranges:
+            if requested_complete:
                 _metric(ctx, "complete_previews_routed_to_proof")
             return _run_changed_preview_check(ctx, row, plan, ranges)
         if requested_complete:
@@ -22496,6 +22500,22 @@ TOOL_CORE = {
     "get_video_info", "audit_captions", "audit_audio_mix",
 }
 
+# A fresh turn has not chosen its treatment yet. Production traces from the
+# Aug-13--15 cohort showed that none of 75 first model dispatches wrote the
+# EDL, yet request-keyword routing exposed up to 126 full schemas (63k chars
+# on average) on that planning call. Keep only read/plan/research tools until
+# set_edit_plan records the treatment; stage routing then exposes the relevant
+# write domains with no loss of capability.
+TOOL_PLANNING = (TOOL_CORE - {
+    "apply_edit_recipe", "complete_edit_plan_steps", "render_preview",
+}) | {
+    "find_silences", "find_repetitions", "suggest_segments",
+    "research_music", "search_music", "audition_music_candidates",
+    "search_sfx", "audition_sfx_candidates",
+    "search_stock", "research_broll", "find_footage", "find_song",
+    "find_burned_text", "suggest_emphasis",
+}
+
 # Once the current immutable EDL has passed every available finishing layer,
 # the next decision is semantic closure, not another random variation.  These
 # tools let the editor inspect/justify the evidence or mark a criterion failed;
@@ -22613,6 +22633,11 @@ def compact_tool_names(ctx):
     for domain in domains:
         names.update(TOOL_DOMAINS.get(domain, set()))
     return {name for name in names if name in TOOLS}
+
+
+def planning_tool_names():
+    """Read/plan catalog for the first dispatch of a fresh editing turn."""
+    return {name for name in TOOL_PLANNING if name in TOOLS}
 
 REQUIRED_ARGS = {
     "search_transcript": ["query"],
@@ -22839,9 +22864,9 @@ def _compact_description(description):
     """A post-plan reminder, not a second copy of the full handbook."""
     text = " ".join(str(description or "").split())
     first = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
-    if len(first) <= 110:
+    if len(first) <= 96:
         return first
-    return first[:107].rsplit(" ", 1)[0] + "..."
+    return first[:93].rsplit(" ", 1)[0] + "..."
 
 
 def openai_tools(model=None, compact=False, names=None):

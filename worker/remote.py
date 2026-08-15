@@ -22,6 +22,7 @@ import requests
 
 import config
 import db as dbx
+import error_text
 import failure_policy
 import version
 
@@ -401,7 +402,7 @@ def _interpret_executor_data(data, job):
         raise RemoteExecutorError(
             f"executor returned an invalid response: {type(data).__name__}")
     if data.get("error"):
-        msg = str(data["error"])[:500]
+        msg = error_text.excerpt(data["error"], 500)
         skew = (check_agent_executor_version(quiet=True)
                 if job.get("type") == "agent_turn"
                 else check_executor_version(quiet=True))

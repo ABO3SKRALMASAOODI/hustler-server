@@ -12,6 +12,7 @@ import re
 
 import config
 import db as dbx
+import error_text
 import media
 from schemas import EDLValidationError
 from storage import WorkdirTooSmall
@@ -26,7 +27,7 @@ class FailureDecision:
 
     def payload(self, error):
         out = asdict(self)
-        out["error"] = str(error)[:2000]
+        out["error"] = error_text.excerpt(error, 2000)
         return out
 
 

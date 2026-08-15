@@ -1307,13 +1307,15 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
 
 
 def _compact_initial_filmstrip(messages):
-    """Drop only the turn's broad filmstrip pixels after planning.
+    """Drop only the turn's broad filmstrip pixels after its first dispatch.
 
     The first model call needs the complete contact sheets to decide what the
     footage is. Re-sending the same large image payload on every dispatch and
     preview call added latency without adding evidence. Once the model has
-    recorded a plan or landed a write, keep the labels and an explicit memory
-    note but remove those initial pixels. Exact frames returned later by
+    seen that overview once, keep the labels and an explicit memory note but
+    remove those initial pixels. This must not depend on the model recording a
+    plan: turns that read several skills first would otherwise resend 36--60
+    images on every dispatch. Exact frames returned later by
     look_at/look_at_asset live in separate messages and are never touched.
     """
     marker = "FILMSTRIPS & STILLS"
@@ -3321,10 +3323,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                          "content": _CONTINUATION_NOTE.format(
                              done=done, plan=plan_note,
                              why=_cont.get("why", "step ceiling"))})
-    names = agent_tools.compact_tool_names(ctx)
+    has_edit_state = bool(getattr(ctx, "edit_plan", None)
+                          or ctx.versions_written)
+    names = (agent_tools.compact_tool_names(ctx) if has_edit_state
+             else agent_tools.planning_tool_names())
     tools = agent_tools.openai_tools(
         model,
-        compact=bool(getattr(ctx, "edit_plan", None) or ctx.versions_written),
+        # Full descriptions are most expensive on the first request, exactly
+        # where the visual/index context is already largest. Property schemas
+        # remain complete; compact mode removes repeated handbook prose only.
+        compact=True,
         names=names)
     ctx.editing_metrics["initial_tool_schemas"] = len(tools)
     ctx.editing_metrics["initial_tool_schema_chars"] = len(
@@ -4141,11 +4149,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 ctx.editing_metrics.get("old_tool_results_compacted", 0)
                 + compacted)
 
-        # The broad contact sheets did their job on the planning call. Keep
-        # exact look evidence added above, but do not pay to resend all
-        # project pixels on every subsequent model dispatch.
+        # The broad contact sheets did their job on the first dispatch. Keep
+        # exact look evidence added above, but never resend all project pixels
+        # just because the model read a skill before recording its plan.
+        if _compact_initial_filmstrip(messages):
+            ctx.editing_metrics["initial_filmstrip_compacted"] = 1
+
         if getattr(ctx, "edit_plan", None) or ctx.versions_written:
-            _compact_initial_filmstrip(messages)
             # Stage routing avoids resending 100+ schemas after every action.
             # Every capability remains name-visible and expand_toolset can
             # load any omitted domain; this changes context size, not power.
