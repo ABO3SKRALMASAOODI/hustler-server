@@ -1,7 +1,7 @@
-"""Unsubscribed accounts see subscription cards before a turn launches.
+"""Unsubscribed accounts see subscription cards AFTER one real edit.
 
-Active trials pass because they are subscribed. The first greeting on an
-empty project is NOT this wall — callers hang the gate off `indexed`.
+The first indexed agent turn still runs. The next prompt is the wall.
+Active trials pass because they are subscribed.
 """
 
 import os
@@ -20,31 +20,45 @@ from routes.paddle_webhook import (                      # noqa: E402
 
 
 class _Cur:
-    def __init__(self, row):
-        self._row = row
+    """Sequential canned rows: users lookup, then the completed-edit probe."""
+
+    def __init__(self, user, edited=False):
+        self._user = user
+        self._edited = edited
         self.sql = None
+        self._step = 0
 
     def execute(self, sql, *a, **kw):
         self.sql = sql
+        self._step += 1
 
     def fetchone(self):
-        return self._row
+        if self._step <= 1:
+            return self._user
+        return {"?column?": 1} if self._edited else None
 
 
-def test_unsubscribed_user_is_gated():
-    cur = _Cur({"is_subscribed": 0, "email": "new@example.com"})
+def test_first_turn_is_not_gated():
+    cur = _Cur({"is_subscribed": 0, "email": "new@example.com"}, edited=False)
+    assert video._subscribe_gate_applies(cur, 1) is False
+
+
+def test_unsubscribed_user_is_gated_after_a_real_edit():
+    cur = _Cur({"is_subscribed": 0, "email": "new@example.com"}, edited=True)
     assert video._subscribe_gate_applies(cur, 1) is True
+    assert "video_jobs" in (cur.sql or "")
 
 
 def test_subscriber_and_trial_pass():
-    # A live trial is is_subscribed=1 from checkout day zero.
-    cur = _Cur({"is_subscribed": 1, "email": "trial@example.com"})
+    # A live trial is is_subscribed=1 from checkout day zero. No second
+    # query: the gate never looks for an edit on a subscriber.
+    cur = _Cur({"is_subscribed": 1, "email": "trial@example.com"}, edited=True)
     assert video._subscribe_gate_applies(cur, 1) is False
 
 
 def test_admin_passes():
     from routes.admin import ADMIN_EMAIL
-    cur = _Cur({"is_subscribed": 0, "email": ADMIN_EMAIL})
+    cur = _Cur({"is_subscribed": 0, "email": ADMIN_EMAIL}, edited=True)
     assert video._subscribe_gate_applies(cur, 1) is False
 
 

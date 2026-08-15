@@ -587,12 +587,13 @@ def _project_for_user(cur, project_id, user_id):
 
 
 def _subscribe_gate_applies(cur, user_id):
-    """Conversion wall: an unsubscribed account that tries to run a real
-    edit is shown the subscription cards immediately — no first free turn,
-    no new trial. Callers hang this off `indexed` so a greeting on an empty
-    project still gets the concierge, not a paywall. Subscribers (a live
-    trial still counts) and the admin account pass. Fails OPEN like
-    plan_gate: a lookup error must never eat a paying user's message."""
+    """Conversion wall: an unsubscribed account that has already seen one
+    real edit (an agent turn that moved a timeline past v1, or a shorts run
+    that actually rendered clips) gets subscription cards on the NEXT
+    prompt. The first indexed turn still runs. Subscribers (a live trial
+    still counts), the admin account, and accounts that have not seen an
+    edit yet all pass. Fails OPEN like plan_gate: a lookup error must
+    never eat a paying user's message."""
     try:
         cur.execute("SELECT is_subscribed, email FROM users WHERE id = %s",
                     (int(user_id),))
@@ -602,7 +603,24 @@ def _subscribe_gate_applies(cur, user_id):
         from routes.admin import ADMIN_EMAIL
         if (u["email"] or "").lower() == ADMIN_EMAIL.lower():
             return False
-        return True
+        cur.execute("""
+            SELECT 1 FROM video_jobs
+            WHERE user_id = %s AND state = 'done'
+              AND ((type = 'agent_turn' AND
+                    CASE WHEN result->>'edl_version' ~ '^[0-9]+$'
+                         THEN (result->>'edl_version')::int ELSE 1 END > 1)
+                   OR (type = 'shorts_plan' AND
+                       CASE
+                         WHEN result ? 'rendered_clips'
+                              AND result->>'rendered_clips' ~ '^[0-9]+$'
+                           THEN (result->>'rendered_clips')::int
+                         WHEN NOT (result ? 'rendered_clips')
+                              AND result->>'clips' ~ '^[0-9]+$'
+                           THEN (result->>'clips')::int
+                         ELSE 0
+                       END > 0))
+            LIMIT 1""", (int(user_id),))
+        return cur.fetchone() is not None
     except Exception as e:                                  # pragma: no cover
         print(f"[subscribe_gate] lookup failed for user {user_id}: {e}",
               flush=True)
@@ -3088,13 +3106,15 @@ def post_message(user_id, project_id):
         original = _active_original(cur, project_id)
         indexed = bool(original and _index_row(cur, original["sha256"]))
 
-        # THE SUBSCRIBE GATE — no first free turn, no new trial. The moment
-        # this message would run an agent turn (the project is indexed), an
-        # unsubscribed account sees the subscription cards instead of a
-        # launch. The message is NOT persisted: closing the cards and
-        # resending shows them again, by design. Active trials pass because
-        # they are subscribed. Hangs off `indexed` so a greeting on an empty
-        # project still gets the concierge.
+        # THE SUBSCRIBE GATE — one free edited video, then the ask. After
+        # this account has SEEN the product work (a completed agent turn that
+        # actually changed a timeline, or a finished shorts run), every next
+        # prompt answers with subscription cards instead of running. The
+        # first indexed turn still launches. The blocked message is NOT
+        # persisted: closing the cards and resending shows them again.
+        # Active trials pass because they are subscribed. Hangs off
+        # `indexed` so a greeting on an empty project still gets the
+        # concierge.
         if indexed and _subscribe_gate_applies(cur, user_id):
             record_client_event(user_id, project_id, "trial_gate_shown",
                                 detail={"message_chars": len(text),
