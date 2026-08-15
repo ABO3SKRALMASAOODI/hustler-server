@@ -4333,8 +4333,21 @@ check("outro: no tool can add or remove it",
       not any("outro" in t or "end_card" in t for t in agent_tools.TOOLS))
 check("outro: previews carry no card, finals do",
       renderer.outro_seconds(True) == 0.0 and renderer.outro_seconds(False) > 0)
-check("outro: the shipped image is really in the build",
+check("outro: the shipped asset is really in the build",
       bool(renderer.endcard_path()))
+check("outro: the production card is motion, not a looped poster",
+      renderer.endcard_path().endswith(".mp4"))
+check("outro: the motion asset has the configured duration",
+      abs(media.duration_of(renderer.endcard_path())
+          - wconfig.OUTRO_DURATION_S) < 0.06)
+_ecard_args = renderer._endcard_input_args(
+    renderer.endcard_path(), wconfig.OUTRO_DURATION_S, 30.0)
+check("outro: the motion input is loop-safe and explicitly bounded",
+      "-stream_loop" in _ecard_args and "-t" in _ecard_args)
+_poster_args = renderer._endcard_input_args(
+    "brand/endcard.png", wconfig.OUTRO_DURATION_S, 30.0)
+check("outro: the poster remains a bounded graceful fallback",
+      "-loop" in _poster_args and "-t" in _poster_args)
 
 # --- render verification must expect programme + card ---------------------
 _ob2 = media.black_seconds

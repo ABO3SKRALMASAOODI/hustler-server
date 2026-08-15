@@ -1,95 +1,56 @@
 # Brand assets baked into renders
 
-`endcard.png` is the end card every EXPORT closes on (v6, round 101). It is
-a **2160×3840 (9:16) RGBA PNG** — the shape every reel is already in:
+`endcard.mp4` is the animated signature every export closes on (v7, round
+102). It is a 1080×1920, 2.5-second H.264 asset with one short reading path:
 
-    THIS VIDEO WAS EDITED BY
-          [the robot]
-          Valmera.io
-    AI VIDEO EDITING AGENT
-       [ TRY IT FREE ]
+    Edited by
+    [robot] Valmera AI
+    www.valmera.io
 
-The sentence sets up the robot, the robot answers it, the destination
-follows — and the whole stack is centred, so the setup line sits in the
-frame rather than pinned to the top edge. The renderer composites it centred on black and scales
-it to fit the output frame, so it fills a 9:16 export and pillarboxes
-cleanly on 16:9, 1:1 and 4:5.
+The headline appears first, the compact robot + Valmera lockup follows, and
+the URL resolves last. The signature occupies about 20% of a vertical reel's
+height and then holds, so it is recognizable without becoming a second piece
+of content after the viewer's video.
 
-Rebuild it with `python3 worker/tools/build_endcard.py`.
+`endcard.png` is the fully revealed poster. The renderer prefers the MP4 and
+uses the PNG only as a graceful fallback if the animation is missing from a
+build. Both are scaled to fit on black, never cropped, so the same 9:16 master
+pillarboxes cleanly on 16:9, 1:1 and 4:5 exports.
 
-## One pixel edit, and only one
-
-`build_endcard.py::_white_stalk` repaints the antenna STALK white, so the
-red ball reads as attached to the head instead of hovering over it on a
-black frame. It finds the head dome structurally — the first row where the
-artwork covers more than a fifth of its own width, which the ball (about a
-tenth) never does — so the ball, the visor and everything below the head
-are untouched however the artboard is redrawn, and it raises rather than
-ships silently if nothing repaints.
-
-## Otherwise nothing sits behind the robot, and nothing is done to it
-
-v3 recolored the gray-red plan robot to survive bare black and it read as
-the wrong robot. v4 seated it on an elevated panel and the panel read as a
-background. v5 replaced the panel with two blurred radial washes and, at
-reel scale, the washes read as a grey smudge behind the character — still a
-background.
-
-v6 stops doing anything at all. It wears `robot.png` — the WHITE navbar /
-free-plan mark — exactly as drawn: no recolour, no ink lift, no glow. The
-alpha channel is empty everywhere the artwork is not.
-
-**The known cost.** The mark was drawn for a light page, so its neck, elbow
-joints and shins are pure black and are invisible against a black frame.
-This is a deliberate trade for true colour on true
-transparency. The only two ways out are recolouring the ink (v3, rejected)
-or putting light behind the robot (v4/v5, rejected) — if the missing parts
-ever matter more than the trade, the real fix is a version of the artboard
-whose structural parts are drawn in a dark grey rather than #000, exported
-from Rive; nothing in this script should be patching pixels again.
-
-## robot.png / robot112.png — the marks
-
-`robot.png` is the white navbar robot (`frontend-next/public/hustler-
-robot95.riv`) and is what the card wears. `robot112.png` is the billing
-page's Pro-plan gray-red robot (`hustler-robot112.riv`), kept here for
-history (v2–v5 wore it) and because the site icons are rendered from it — a
-dark mark reads on Google's white favicon chip where a white one disappears.
-
-Both are captured from the artboard with its state machine STOPPED — the
-still version, the same one `PlanCTACard.js` mounts with `autoplay: false`.
-(`components/Robot.js` mounts the identical file with the machine running;
-that is the landing page's moving robot. The end card is deliberately
-still: it plays for 2.5 seconds under a fade and motion there competes with
-the wordmark rather than helping it.)
-
-Regenerate either by rendering the .riv in headless Chrome — Rive is
-vector, so a 2400px canvas is a clean master:
+Rebuild both assets with:
 
 ```bash
-# stage rive.js + the wasm from frontend-next/node_modules/@rive-app/canvas
-# and the .riv beside a page that draws it to a 2400x2400 canvas
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --headless=new --disable-gpu --allow-file-access-from-files \
-  --default-background-color=00000000 --virtual-time-budget=8000 \
-  --window-size=2400,2400 --screenshot=robot.png file://$PWD/hi.html
-# then crop to the alpha bbox
+python3 worker/tools/build_endcard.py
 ```
 
-## Type
+## Design contract
 
-Every line is Inter Display (SIL Open Font License 1.1): Black for the
-wordmark at -0.032em, ExtraBold for the sentence (+0.26em), the descriptor
-(+0.30em) and the pill label (+0.13em). v5's Anton is gone — condensed
-display type read as a meme caption, and the card's job is to read as
-software. The wordmark is the only large type on the card; the CTA pill is
-small on purpose, because it is the last thing read, not the first thing
-seen. The ".io" is the only red. The FONT is not bundled — only the
-rendered pixels are, and OFL restricts distributing font software, not
-images made with it.
+- One message only: attribution. The old descriptor and CTA pill were removed
+  because five stacked elements were too much to parse at the end of a reel.
+- “Edited by” is the largest type. The robot and Valmera AI name are supporting
+  marks; `www.valmera.io` is the quiet but fully legible final read below them.
+- The reveal uses three restrained upward fades over 0.75 seconds, followed by
+  a clean hold and fade to black. There is no bounce, glow, panel or background
+  texture competing with the mark.
+- The attribution uses `Plus Jakarta Sans ExtraBold`: larger, upright and
+  friendlier than the previous italic. The supporting lockup stays in
+  `Inter Display`, and the URL uses natural spacing.
 
-`config.OUTRO_VERSION` (worker) AND `routes/video.py OUTRO_VERSION`
-(backend) must BOTH be bumped whenever this card's look changes: the stamp
-busts the render cache and the backend's final-is-current gate, otherwise
-finished exports keep serving bytes that end on the OLD card. test_units
-checks the two constants match. v6 ships as OUTRO_VERSION = 6.
+## Robot assets
+
+`robot.png` is the white navbar/free-plan robot from
+`frontend-next/public/hustler-robot95.riv`. `robot112.png` is the billing
+page's gray-red Pro-plan robot, retained for favicon history.
+
+The end card uses `robot.png` at 148px high. Its antenna stalk is repainted
+white by `build_endcard.py::_white_stalk` so the red ball reads as attached on
+black; every other pixel is preserved. Do not regenerate or reinterpret the
+robot for this card—the exported site mark is the brand source of truth.
+
+## Cache version
+
+`config.OUTRO_VERSION` in the worker and `routes/video.py OUTRO_VERSION` in the
+backend must both be bumped whenever the card's look or motion changes. The
+stamp busts cached finals; without it, existing downloads keep serving the old
+card even after a new asset ships. `worker/tests/test_units.py` asserts the two
+constants match.

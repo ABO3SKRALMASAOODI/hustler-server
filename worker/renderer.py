@@ -906,8 +906,12 @@ def _speech_spans_out(index, tl):
     return merged
 
 
-ENDCARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "brand", "endcard.png")
+_BRAND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brand")
+# v7 is a real motion signature. Keep the poster as a deliberate graceful
+# fallback: one missing binary asset should cost the animation, not every
+# customer's export.
+ENDCARD_PATH = os.path.join(_BRAND_DIR, "endcard.mp4")
+ENDCARD_POSTER_PATH = os.path.join(_BRAND_DIR, "endcard.png")
 # The mark itself: the same white robot the end card and the site navbar use,
 # so the corner watermark and the brand are one character.
 ROBOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -947,7 +951,7 @@ def robot_path():
 
 
 def endcard_path():
-    """The bundled end-card image, or None if this image does not carry one.
+    """The bundled animated end card, its poster fallback, or ``None``.
 
     Returning None (rather than raising) is deliberate. A missing brand asset
     means a broken build, and the two ways to react are: ship exports without
@@ -958,7 +962,25 @@ def endcard_path():
     caller logs loudly instead; the miss is visible in logs and in the job
     result, not buried in a customer's confusing failure.
     """
-    return ENDCARD_PATH if os.path.exists(ENDCARD_PATH) else None
+    if os.path.exists(ENDCARD_PATH):
+        return ENDCARD_PATH
+    if os.path.exists(ENDCARD_POSTER_PATH):
+        return ENDCARD_POSTER_PATH
+    return None
+
+
+def _endcard_input_args(path, duration_s, fps):
+    """Return a bounded ffmpeg input for the motion card or poster fallback.
+
+    Input ``-t`` is non-negotiable for both branches. A looped brand input
+    without a bound once produced an endless encode that kept reporting
+    progress, so neither the stall watchdog nor the old duration check could
+    stop it.
+    """
+    if path.lower().endswith(IMAGE_EXTS):
+        return ["-loop", "1", "-t", f"{duration_s:.3f}",
+                "-r", f"{fps:.3f}", "-i", path]
+    return ["-stream_loop", "-1", "-t", f"{duration_s:.3f}", "-i", path]
 
 
 def clean_source_key(edl_json, variant, src_sha=None):
@@ -2622,8 +2644,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         ofps = fps if (do_norm or not src_fps) else float(src_fps)
         parts.append(f"[{vlabel}]scale={oW}:{H},setsar=1,"
                      f"format=yuv420p[vprog]")
-        # v6: the card is a full 9:16 sheet that carries its own margins,
-        # so it fills the frame rather than being inset a second time.
+        # v7: the motion card is a full 9:16 sheet that carries its own
+        # margins, so it fills the frame rather than being inset again.
         cw, ch = _even(oW * 0.98), _even(H * 0.98)
         parts.append(f"color=c=black:s={oW}x{H}:r={ofps:.3f}:d={outro_s:.3f},"
                      f"format=rgba[obg]")
@@ -2933,8 +2955,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     outro_s = outro_seconds(preview)
     card_idx = None
     if outro_s > 0.0:
-        extra_inputs += ["-loop", "1", "-t", f"{outro_s:.3f}",
-                         "-r", f"{fps:.3f}", "-i", endcard_path()]
+        extra_inputs += _endcard_input_args(endcard_path(), outro_s, fps)
         card_idx = next_idx
         next_idx += 1
 
@@ -3373,17 +3394,17 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                      media.PROXY_SHORT_FRAC * src_dur):
         src_pad = src_dur - vdur
 
-    # The end card is its own ffmpeg input — no filter conjures a bundled PNG
-    # out of nothing. -loop 1 -t gives it a real duration and framerate so the
-    # overlay does not depend on eof_action to hold a single frame.
+    # The end card is its own bounded ffmpeg input — an MP4 in the healthy
+    # build, or its PNG poster fallback. No filter conjures a bundled asset out
+    # of nothing, and the explicit input -t prevents either branch from ever
+    # turning into an unbounded encode.
     # A stitched-preview piece suppresses it: the card belongs to the end of
     # the PROGRAM, and the tail that carries it is stream-copied from the
     # previous preview.
     outro_s = 0.0 if suppress_outro else outro_seconds(preview)
     card_idx = None
     if outro_s > 0.0:
-        extra_inputs += ["-loop", "1", "-t", f"{outro_s:.3f}",
-                         "-r", f"{fps:.3f}", "-i", endcard_path()]
+        extra_inputs += _endcard_input_args(endcard_path(), outro_s, fps)
         card_idx = next_idx
         next_idx += 1
 

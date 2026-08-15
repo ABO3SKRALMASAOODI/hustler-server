@@ -4549,7 +4549,7 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 6      # v6: pure 9:16, white robot on transparency
+OUTRO_VERSION = 7      # v7: compact animated Edited-by signature
                        # (keep in step with worker/config.py OUTRO_VERSION —
                        # test_units checks the two match)
 
@@ -4559,8 +4559,8 @@ def _final_is_current(meta):
     #
     #   outro_v == OUTRO_VERSION — it carries the card we ship today.
     #   outro_v == 0             — the worker rendered deliberately WITHOUT a
-    #                              card (OUTRO_DURATION_S=0, or an image built
-    #                              without brand/endcard.png). There is no
+    #                              card (OUTRO_DURATION_S=0, or a worker build
+    #                              with no end-card asset). There is no
     #                              newer card for it to be missing, so demanding
     #                              OUTRO_VERSION here would hide that final
     #                              forever while the worker's cache keeps

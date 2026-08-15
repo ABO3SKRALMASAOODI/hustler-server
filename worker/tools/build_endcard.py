@@ -1,107 +1,74 @@
-"""Build the Valmera end card PNG that every export ends on.
+"""Build the compact animated Valmera end card used by every export.
 
-Round 101 — v6. A 2160x3840 (9:16) RGBA card, the shape every reel is
-already in:
+Round 102 — v7. The previous card asked a reel viewer to read five stacked
+elements and made the robot a third of the screen. This version is a compact
+signature with one reading path:
 
-    THIS VIDEO WAS EDITED BY
-          [the robot]
-          Valmera.io
-    AI VIDEO EDITING AGENT
-       [ TRY IT FREE ]
+                         Edited by
+                    [robot]  Valmera
+                       www.valmera.io
 
-What changed from v5, and why:
+The three lines arrive in sequence over 0.75s, hold long enough to register,
+then fade to black. The exported MP4 is the production asset; the PNG is its
+fully-revealed poster and the renderer's graceful fallback if the animation is
+ever missing from a build.
 
-  * ONE PIXEL EDIT, AND ONLY ONE. The antenna STALK is repainted white
-    (see _white_stalk) so the red ball reads as attached to the head
-    instead of hovering over it. Everything else about the mark is left
-    exactly as drawn.
-
-  * NOTHING SITS BEHIND THE ROBOT. v3 recolored the gray-red plan robot to
-    survive bare black and it read as the wrong robot; v4 seated it on an
-    elevated panel and the panel read as a background; v5 replaced the panel
-    with two blurred radial washes and at reel scale those read as a grey
-    smudge behind the character — still a background. v6 wears the WHITE
-    navbar / free-plan mark, EXACTLY as drawn — no recolour, no lift, no
-    glow — and the alpha channel is empty everywhere the artwork is not.
-
-    The cost is known and accepted: the mark's remaining pure-black parts
-    (neck, elbow joints, shins) are invisible against a black frame. That
-    is a deliberate trade for true colour on true transparency — the only
-    two ways out are recolouring the whole mark or putting light behind it,
-    and both have shipped and both were rejected.
-
-  * PURE 9:16, and the robot is a MARK, not a poster. It sits at ~34% of
-    the frame height with the wordmark as the only large type.
-
-  * READING ORDER. The sentence sets up the robot, the robot is the answer
-    to it, and the destination follows — and the whole stack is CENTRED, so
-    the setup line sits in the frame rather than pinned to the top edge.
-
-  * ONE SENTENCE. v5 shouted three lines of display type at a viewer one
-    thumb-flick from leaving, and none of them said what the product was.
-
-Layout is set in INK boxes, never text boxes: a text box carries the font's
-full ascent/descent, so a nominal gap measures nearly double in whitespace.
-The finished stack is centred in the canvas.
+The robot is the existing white navbar mark. Only its antenna stalk is lifted
+to white so the red ball stays visibly attached on black; every other pixel is
+preserved. This is an established correction shared with the previous card,
+not a generated or replacement logo.
 """
+import math
 import os
+import subprocess
+
 from PIL import Image, ImageDraw, ImageFont
 
+
 WHITE = (255, 255, 255, 255)
-BLACK = (0, 0, 0, 255)
-SOFT = (255, 255, 255, 148)      # the sentence under the robot
-FAINT = (255, 255, 255, 117)     # the descriptor under the wordmark
-# The robot's own red (sampled from the antenna ball). One red, one job: the
-# ".io". A second red anywhere tips the card from premium into ad.
-RED = (250, 5, 5, 255)
+SOFT_WHITE = (255, 255, 255, 215)
+BLACK_RGB = (0, 0, 0)
 
-# The canvas IS the delivery shape.
-CARD_W, CARD_H = 2160, 3840
+# 1080p is the native social-video delivery size. The renderer scales this
+# square-pixel master to fit any output without cropping it.
+CARD_W, CARD_H = 1080, 1920
+FPS = 30
+DURATION_S = 2.5
 
-# Type and geometry. Changing any of these is a card redesign — bump
-# OUTRO_VERSION in worker/config.py AND backend/routes/video.py.
-EYEBROW_SIZE = 92
-ROBOT_H = 1290
-WORD_SIZE = 300
-IO_SIZE = 210
-SUB_SIZE = 62
-CTA_SIZE = 55
-GAP_EYEBROW = 110
-GAP_ROBOT = 150
-GAP_WORD = 48        # the descriptor belongs TO the wordmark, so it sits
-GAP_SUB = 150        # close under it and the pill sits well clear
+# The signature occupies about one fifth of a vertical reel instead of most of
+# the screen. "Edited by" is intentionally the largest element; the robot and
+# product name are supporting attribution, and the URL is the quiet final read.
+HEADLINE_SIZE = 138
+ROBOT_H = 148
+NAME_SIZE = 82
+URL_SIZE = 36
+GAP_HEADLINE = 36
+GAP_LOCKUP = 30
+LOCKUP_GAP = 28
+AI_GAP = 16
 
 _WORKER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BRAND = os.path.join(_WORKER, "brand")
 _FONTS = os.path.join(_WORKER, "fonts")
-ROBOT_PNG = os.path.join(_BRAND, "robot.png")            # the WHITE mark
+ROBOT_PNG = os.path.join(_BRAND, "robot.png")
 INTER_BLACK = os.path.join(_FONTS, "InterDisplay-Black.ttf")
-INTER_XB = os.path.join(_FONTS, "InterDisplay-ExtraBold.ttf")
+INTER_BOLD = os.path.join(_FONTS, "InterDisplay-Bold.ttf")
+JAKARTA_XB = os.path.join(_FONTS, "PlusJakartaSans-ExtraBold.ttf")
 
 
 def _ink(img):
-    b = img.getbbox()
-    return img.crop(b) if b else img
+    """Crop an RGBA layer to its visible ink."""
+    bbox = img.getbbox()
+    return img.crop(bbox) if bbox else img
 
 
 def _white_stalk(img):
-    """Repaint the antenna STALK white. The single pixel edit on this card.
-
-    The stalk is the neutral ink ABOVE the head dome, and the dome's top is
-    found structurally — the first row where the artwork covers more than a
-    fifth of its own width, which the ball (about a tenth) never does. So
-    the ball, the visor and every dark part below the head are untouched no
-    matter how the artboard is redrawn.
-
-    Raises rather than ships silently if nothing is repainted: a black
-    stalk on a black frame is a red ball hovering off a head, which is the
-    exact defect this exists to prevent.
-    """
+    """Lift only the dark antenna stalk so the red ball does not float."""
     px = img.load()
     head_top = 0
     for y in range(img.height):
-        n = sum(1 for x in range(img.width) if px[x, y][3] > 8)
-        if n > img.width * 0.20:
+        visible = sum(1 for x in range(img.width) if px[x, y][3] > 8)
+        if visible > img.width * 0.20:
             head_top = y
             break
     touched = 0
@@ -115,106 +82,172 @@ def _white_stalk(img):
                 touched += 1
     if touched == 0:
         raise RuntimeError(
-            "no antenna stalk found above y=%d in %s — the artwork changed "
-            "and the red ball would float off the head" % (head_top,
-                                                           ROBOT_PNG))
+            "no antenna stalk found above y=%d in %s — the artwork changed"
+            % (head_top, ROBOT_PNG))
     return img
 
 
-def robot(height_px):
-    """The white navbar robot at the card's size, stalk repainted white and
-    nothing else done to it. No panel, no glow, no other recolour."""
+def _robot(height_px):
     src = _white_stalk(Image.open(ROBOT_PNG).convert("RGBA"))
-    w = max(1, round(src.width * height_px / src.height))
-    return _ink(src.resize((w, height_px), Image.LANCZOS))
+    width = max(1, round(src.width * height_px / src.height))
+    return _ink(src.resize((width, height_px), Image.Resampling.LANCZOS))
 
 
-def _text(text, font, fill, tracking):
-    """Text as a tight-cropped RGBA layer, letter-spaced by hand (PIL has no
-    tracking). Cropping to ink is what makes the vertical rhythm real."""
+def _text(text, font, fill, tracking=0.0):
+    """Render tight-cropped text with explicit letter spacing."""
     probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
-    widths = [probe.textlength(c, font=font) for c in text]
-    total = int(sum(widths) + tracking * max(0, len(text) - 1)) + 80
-    asc, dsc = font.getmetrics()
-    layer = Image.new("RGBA", (total, asc + dsc + 80), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    x = 40.0
-    for c, w in zip(text, widths):
-        d.text((x, 40), c, font=font, fill=fill)
-        x += w + tracking
+    widths = [probe.textlength(char, font=font) for char in text]
+    total = int(sum(widths) + tracking * max(0, len(text) - 1)) + 48
+    asc, desc = font.getmetrics()
+    layer = Image.new("RGBA", (total, asc + desc + 48), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    x = 24.0
+    for char, width in zip(text, widths):
+        draw.text((x, 24), char, font=font, fill=fill)
+        x += width + tracking
     return _ink(layer)
 
 
-def _wordmark(word_f, io_f):
-    """Valmera.io as one ink layer — the site's wordmark plus its domain,
-    baseline-aligned, the ".io" in the robot's red."""
-    name = _text("Valmera", word_f, WHITE, -0.032 * word_f.size)
-    io = _text(".io", io_f, RED, -0.020 * io_f.size)
-    gap = int(word_f.size * 0.045)
-    W = name.width + gap + io.width
-    H = max(name.height, io.height)
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    # Bottom-aligning IS baseline-aligning here: "Valmera" has no descenders
-    # and ".io" ends on the baseline too.
-    layer.paste(name, (0, H - name.height), name)
-    layer.paste(io, (name.width + gap, H - io.height), io)
-    return layer
+def _lockup(robot, name):
+    """Build the small horizontal robot + Valmera attribution row."""
+    height = max(robot.height, name.height)
+    width = robot.width + LOCKUP_GAP + name.width
+    row = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    row.alpha_composite(robot, (0, (height - robot.height) // 2))
+    row.alpha_composite(name, (robot.width + LOCKUP_GAP,
+                               (height - name.height) // 2))
+    return row
 
 
-def _cta(label_f, text="TRY IT FREE"):
-    """The white pill. On a black frame white is the brightest thing there
-    is, which is why the red stays on the ".io" and never competes here.
-    Matches the product's own CTA (PlanCTACard, /subscribe). Small on
-    purpose: it is the last thing read, not the first thing seen."""
-    label = _text(text, label_f, BLACK, 0.13 * label_f.size)
-    pad_x = int(label_f.size * 1.20)
-    pad_y = int(label_f.size * 0.64)
-    W, H = label.width + 2 * pad_x, label.height + 2 * pad_y
-    pill = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(pill)
-    d.rounded_rectangle([0, 0, W - 1, H - 1], radius=H // 2, fill=WHITE)
-    pill.paste(label, (pad_x, pad_y), label)
-    return pill
+def _brand_name(name, ai):
+    """Set the AI qualifier beside Valmera without making it a second wordmark."""
+    height = max(name.height, ai.height)
+    label = Image.new("RGBA", (name.width + AI_GAP + ai.width, height),
+                      (0, 0, 0, 0))
+    label.alpha_composite(name, (0, height - name.height))
+    label.alpha_composite(ai, (name.width + AI_GAP, height - ai.height))
+    return label
 
 
-def build(out_path):
-    """Compose the page and centre it in the 9:16 canvas."""
-    eyebrow_f = ImageFont.truetype(INTER_XB, EYEBROW_SIZE)
-    word_f = ImageFont.truetype(INTER_BLACK, WORD_SIZE)
-    io_f = ImageFont.truetype(INTER_BLACK, IO_SIZE)
-    sub_f = ImageFont.truetype(INTER_XB, SUB_SIZE)
-    cta_f = ImageFont.truetype(INTER_XB, CTA_SIZE)
+def _elements():
+    headline_font = ImageFont.truetype(JAKARTA_XB, HEADLINE_SIZE)
+    name_font = ImageFont.truetype(INTER_BLACK, NAME_SIZE)
+    url_font = ImageFont.truetype(INTER_BOLD, URL_SIZE)
 
-    mark = robot(ROBOT_H)
-    eyebrow = _text("THIS VIDEO WAS EDITED BY", eyebrow_f, SOFT,
-                    0.26 * EYEBROW_SIZE)
-    word = _wordmark(word_f, io_f)
-    sub = _text("AI VIDEO EDITING AGENT", sub_f, FAINT, 0.30 * SUB_SIZE)
-    cta = _cta(cta_f)
+    headline = _text("Edited by", headline_font, WHITE, -3.0)
+    name = _brand_name(_text("Valmera", name_font, WHITE, -2.0),
+                       _text("AI", name_font, WHITE, -2.0))
+    url_line = _text("www.valmera.io", url_font, SOFT_WHITE, 0.0)
+    lockup = _lockup(_robot(ROBOT_H), name)
 
-    parts = ((eyebrow, GAP_EYEBROW), (mark, GAP_ROBOT), (word, GAP_WORD),
-             (sub, GAP_SUB), (cta, 0))
-    block = (sum(p.height for p, _ in parts)
-             + sum(g for _, g in parts[:-1]))
-    if block > CARD_H:
-        raise RuntimeError("card content (%dpx) taller than the %dpx canvas"
-                           % (block, CARD_H))
+    block_h = (headline.height + GAP_HEADLINE + lockup.height
+               + GAP_LOCKUP + url_line.height)
+    top = (CARD_H - block_h) // 2
+    return (
+        (headline, top),
+        (lockup, top + headline.height + GAP_HEADLINE),
+        (url_line, top + headline.height + GAP_HEADLINE + lockup.height
+         + GAP_LOCKUP),
+    )
 
-    card = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-    y = (CARD_H - block) // 2
-    for part, gap in parts:
-        card.paste(part, ((CARD_W - part.width) // 2, y), part)
-        y += part.height + gap
 
-    card.save(out_path)
-    print(f"card {card.size[0]}x{card.size[1]}  aspect "
-          f"{card.size[0] / card.size[1]:.3f}  block {block}px "
-          f"({100.0 * block / CARD_H:.0f}%)  robot {mark.size}  "
-          f"wordmark {word.size}  cta {cta.size}  "
-          f"({os.path.getsize(out_path) / 1024:.0f} KB)")
-    return card
+def _smoothstep(value):
+    value = max(0.0, min(1.0, value))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def _progress(t, start, end):
+    return _smoothstep((t - start) / max(0.001, end - start))
+
+
+def _with_opacity(layer, opacity):
+    if opacity >= 0.999:
+        return layer
+    faded = layer.copy()
+    alpha = faded.getchannel("A").point(
+        lambda value: round(value * max(0.0, min(1.0, opacity))))
+    faded.putalpha(alpha)
+    return faded
+
+
+def _place(frame, layer, center_y, progress, travel=24, scale_from=1.0,
+           global_opacity=1.0):
+    """Ease one element upward and in, retaining a fixed visual centre."""
+    scale = scale_from + (1.0 - scale_from) * progress
+    if abs(scale - 1.0) > 0.001:
+        size = (max(1, round(layer.width * scale)),
+                max(1, round(layer.height * scale)))
+        layer = layer.resize(size, Image.Resampling.LANCZOS)
+    layer = _with_opacity(layer, progress * global_opacity)
+    x = (CARD_W - layer.width) // 2
+    y = round(center_y - layer.height / 2 + travel * (1.0 - progress))
+    frame.alpha_composite(layer, (x, y))
+
+
+def frame_at(t, elements=None):
+    """Return the designed animation frame at time ``t`` seconds."""
+    elements = elements or _elements()
+    headline, lockup, url_line = elements
+
+    # The final 0.36s resolves to black. This makes the MP4 itself complete;
+    # the render pipeline also fades the segment as a codec-safe guard.
+    global_opacity = 1.0 - _progress(t, 2.10, 2.46)
+    frame = Image.new("RGBA", (CARD_W, CARD_H), (*BLACK_RGB, 255))
+
+    _place(frame, headline[0], headline[1] + headline[0].height / 2,
+           _progress(t, 0.05, 0.38), travel=28,
+           global_opacity=global_opacity)
+    _place(frame, lockup[0], lockup[1] + lockup[0].height / 2,
+           _progress(t, 0.25, 0.60), travel=20, scale_from=0.92,
+           global_opacity=global_opacity)
+    _place(frame, url_line[0], url_line[1] + url_line[0].height / 2,
+           _progress(t, 0.48, 0.76), travel=14,
+           global_opacity=global_opacity)
+    return frame.convert("RGB")
+
+
+def build(poster_path, video_path=None):
+    """Build the fully revealed PNG and, when requested, the animated MP4."""
+    elements = _elements()
+    poster = frame_at(1.15, elements)
+    poster.save(poster_path, optimize=True)
+
+    if video_path:
+        command = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-s", f"{CARD_W}x{CARD_H}", "-r", str(FPS), "-i", "-",
+            "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "17",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart", video_path,
+        ]
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE)
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg is required to build endcard.mp4") from exc
+        try:
+            frame_count = int(math.ceil(DURATION_S * FPS))
+            for index in range(frame_count):
+                process.stdin.write(frame_at(index / FPS, elements).tobytes())
+            process.stdin.close()
+            return_code = process.wait()
+        except Exception:
+            process.kill()
+            process.wait()
+            raise
+        if return_code:
+            raise RuntimeError("ffmpeg failed while building endcard.mp4")
+
+    print(
+        f"end card {CARD_W}x{CARD_H}; signature "
+        f"{elements[0][0].width}x"
+        f"{elements[2][1] + elements[2][0].height - elements[0][1]}; "
+        f"poster {os.path.getsize(poster_path) / 1024:.0f} KB"
+        + (f"; animation {os.path.getsize(video_path) / 1024:.0f} KB"
+           if video_path else ""))
+    return poster
 
 
 if __name__ == "__main__":
     os.makedirs(_BRAND, exist_ok=True)
-    build(os.path.join(_BRAND, "endcard.png"))
+    build(os.path.join(_BRAND, "endcard.png"),
+          os.path.join(_BRAND, "endcard.mp4"))

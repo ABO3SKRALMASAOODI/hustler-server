@@ -1559,8 +1559,9 @@ RENDER_DURATION_TOLERANCE_FRAC = float(
 RENDER_BLACK_MAX_RATIO = float(os.getenv("RENDER_BLACK_MAX_RATIO", "0.7"))
 
 # ---------------------------------------------------------------- end card --
-# Every EXPORT closes on a branded card: black, the Valmera robot, the
-# wordmark, "Edited by Valmera agent". It is a render-pipeline constant, NOT
+# Every EXPORT closes on a branded card: black, an animated "Edited by",
+# then the compact robot + Valmera lockup and valmera.io. It is a
+# render-pipeline constant, NOT
 # part of the EDL — no tool adds or removes it, and it never appears in
 # program_duration, so nothing the agent places can land on top of it.
 #
@@ -1581,10 +1582,9 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK changes. It is stored on every render asset
 # and busts the render cache, so an existing export re-encodes with the new
 # card instead of serving pre-outro bytes forever.
-OUTRO_VERSION = 6      # v6: pure 9:16, the WHITE robot untouched on nothing
-                       # at all (no glow, no panel, no recolour), the
-                       # sentence UNDER it, the wordmark as the only large
-                       # type. See tools/build_endcard.py
+OUTRO_VERSION = 7      # v7: compact three-beat motion signature — large
+                       # "Edited by", small robot + Valmera, URL below.
+                       # See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
 # One shorts_plan job cuts a long video into at most this many child clips.
