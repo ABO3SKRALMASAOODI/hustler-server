@@ -47,7 +47,6 @@ app = modal.App(APP_NAME)
 COMMON = {
     "image": image,
     "secrets": [secret],
-    "region": "us",
     "routing_region": "us-east",
     "min_containers": 0,
     "max_containers": 5,
@@ -58,6 +57,7 @@ COMMON = {
     "timeout": 3600,
     "startup_timeout": 300,
 }
+PINNED_US = {**COMMON, "region": "us"}
 
 # Modal CPU floats are reservations, not limits: an uncapped ffmpeg process
 # may burst into spare host cores and is billed for that actual usage. Pairing
@@ -67,11 +67,22 @@ PREVIEW_CPU = (2.0, 2.0)   # physical cores = about 4 vCPU
 BATCH_CPU = (4.0, 4.0)     # physical cores = about 8 vCPU
 HEAVY_CPU = (4.0, 4.0)
 
+# The first number is the guaranteed/billed memory reservation and the second
+# is the unchanged hard limit. Modal bills max(request, actual), so moving the
+# reservation toward the measured working set saves money without taking away
+# the capacity a rare large input may need. CPU request and limit stay
+# identical: no render gets fewer cycles or a lower speed ceiling.
+PREVIEW_MEMORY = (2048, 4096)
+BATCH_MEMORY = (8192, 16384)
+LIGHT_MEMORY = (8192, 32768)
+HEAVY_MEMORY = (16384, 32768)
 
-def _boot(profile, role="executor"):
+
+def _boot(profile, role="executor", pricing_multiplier=1.0):
     os.environ["WORKER_ROLE"] = role
     os.environ["EXECUTOR_PROVIDER"] = "modal"
     os.environ["MODAL_EXECUTOR_PROFILE"] = profile
+    os.environ["MODAL_PRICING_MULTIPLIER"] = str(pricing_multiplier)
     # A Modal agent turn must offload any render tools to the compute
     # functions, exactly as the Render dispatcher does. Set this before
     # importing config/http_server so their module-level routing is correct.
@@ -91,12 +102,13 @@ def adapter_version():
         return "unknown"
 
 
-def _run(job, profile, role="executor"):
-    _boot(profile, role)
+def _run(job, profile, role="executor", pricing_multiplier=1.0):
+    _boot(profile, role, pricing_multiplier)
     import config
     import http_server
     import executor_runtime
     if (job or {}).get("type") == "__warm":
+        import resource_usage
         import subprocess
         import version
         ffmpeg = subprocess.run(
@@ -115,6 +127,8 @@ def _run(job, profile, role="executor"):
                 "compute_region": os.getenv("MODAL_REGION", "unknown"),
                 "compute_cloud_provider": os.getenv(
                     "MODAL_CLOUD_PROVIDER", "unknown"),
+                "pricing_multiplier": pricing_multiplier,
+                "resources": resource_usage.snapshot(),
             },
             "job_completed": False,
         }
@@ -123,19 +137,33 @@ def _run(job, profile, role="executor"):
     return executor_runtime.execute(job or {}, http_server.RUNNERS)
 
 
-@app.function(name="preview", cpu=PREVIEW_CPU, memory=4096, **COMMON)
+@app.function(name="preview", cpu=PREVIEW_CPU, memory=PREVIEW_MEMORY,
+              **COMMON)
 def preview(job):
     return _run(job, "preview")
 
 
-@app.function(name="batch", cpu=BATCH_CPU, memory=16384, **COMMON)
+@app.function(name="batch", cpu=BATCH_CPU, memory=BATCH_MEMORY, **COMMON)
 def batch(job):
     return _run(job, "batch")
 
 
-@app.function(name="heavy", cpu=HEAVY_CPU, memory=32768, **COMMON)
+@app.function(name="light", cpu=HEAVY_CPU, memory=LIGHT_MEMORY, **COMMON)
+def light(job):
+    """Short browser/frame tools keep full CPU and the old 32-GiB limit."""
+    return _run(job, "light")
+
+
+@app.function(name="heavy", cpu=HEAVY_CPU, memory=HEAVY_MEMORY, **COMMON)
 def heavy(job):
     return _run(job, "heavy")
+
+
+@app.function(name="egress", cpu=HEAVY_CPU, memory=LIGHT_MEMORY,
+              **PINNED_US)
+def egress(job):
+    """Keep URL acquisition on the proven US egress while right-sizing RAM."""
+    return _run(job, "egress", pricing_multiplier=1.5)
 
 
 @app.function(
@@ -146,7 +174,7 @@ def heavy(job):
 )
 def probe(job):
     """Run diagnostics without renting the 32-GiB heavy profile."""
-    return _run(job, "probe")
+    return _run(job, "probe", pricing_multiplier=1.5)
 
 
 @app.function(
@@ -160,7 +188,7 @@ def probe(job):
 # scaling another container; no always-on instance is purchased.
 @modal.concurrent(max_inputs=6, target_inputs=4)
 def agent(job):
-    return _run(job, "agent", role="agent_executor")
+    return _run(job, "agent", role="agent_executor", pricing_multiplier=1.5)
 
 
 @app.function(
@@ -169,13 +197,14 @@ def agent(job):
     scaledown_window=5, retries=0, region="us", routing_region="us-east",
 )
 def health():
-    _boot("health")
+    _boot("health", pricing_multiplier=1.5)
     import version
     report = version.version_report()
     report.update({
         "status": "ok",
         "provider": "modal",
         "adapter_version": adapter_version(),
+        "pricing_multiplier": 1.5,
         "compute_region": os.getenv("MODAL_REGION", "unknown"),
         "compute_cloud_provider": os.getenv(
             "MODAL_CLOUD_PROVIDER", "unknown"),

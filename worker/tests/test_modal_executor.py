@@ -167,7 +167,9 @@ def test_unconfigured_job_type_keeps_cloud_run(monkeypatch):
 
 
 def test_modal_warm_path_boots_real_runner_stack(monkeypatch):
-    monkeypatch.setattr(modal_app, "_boot", lambda profile, role="executor": None)
+    monkeypatch.setattr(
+        modal_app, "_boot",
+        lambda profile, role="executor", pricing_multiplier=1.0: None)
     monkeypatch.setattr(
         config, "require_core",
         lambda: (_ for _ in ()).throw(AssertionError(
@@ -207,3 +209,21 @@ def test_modal_render_cpu_is_hard_capped_at_costed_profiles():
     assert modal_app.PREVIEW_CPU == (2.0, 2.0)
     assert modal_app.BATCH_CPU == (4.0, 4.0)
     assert modal_app.HEAVY_CPU == (4.0, 4.0)
+
+
+def test_modal_memory_right_sizing_preserves_production_hard_limits():
+    assert modal_app.PREVIEW_MEMORY == (2048, 4096)
+    assert modal_app.BATCH_MEMORY == (8192, 16384)
+    assert modal_app.LIGHT_MEMORY == (8192, 32768)
+    assert modal_app.HEAVY_MEMORY == (16384, 32768)
+
+
+def test_compute_fleet_is_global_but_latency_sensitive_egress_stays_us():
+    assert "region" not in modal_app.COMMON
+    assert modal_app.PINNED_US["region"] == "us"
+    assert remote._modal_function_name("preview") == "preview"
+    assert remote._modal_function_name("frames") == "light"
+    assert remote._modal_function_name("capture") == "light"
+    assert remote._modal_function_name("fetch") == "egress"
+    assert remote._modal_function_name("search") == "egress"
+    assert remote._modal_function_name("clean") == "heavy"

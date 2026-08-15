@@ -1,9 +1,10 @@
 """What code this process is actually running (round 56).
 
 THE PROBLEM THIS EXISTS FOR. The render/index work lives on a SECOND service —
-a Cloud Run executor deployed by hand with `gcloud run deploy` — while the
-dispatcher on Render redeploys itself on every push. So a push updates one half
-of the system and silently leaves the other half on whatever was built last.
+historically a hand-deployed Cloud Run executor, now the primary Modal app with
+Cloud Run retained as fallback — while the dispatcher on Render deploys
+independently. So a partial rollout can update one half of the system and
+silently leave the other half on different source.
 Nothing anywhere reported the difference. It has now cost real users twice:
 
   * Round 53 — every finished export was hidden behind a `trans_v` stamp the

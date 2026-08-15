@@ -112,6 +112,10 @@ def _modal_function_name(job_type, override=None):
         return "agent"
     if job_type == "ytprobe":
         return "probe"
+    if job_type in ("capture", "frames"):
+        return "light"
+    if job_type in ("fetch", "search"):
+        return "egress"
     return "heavy"
 
 
@@ -629,7 +633,7 @@ def _run_across_media_egress(job):
         providers.append(("cloud_run", lambda: _run_cloud(job)))
     if config.MODAL_EXECUTOR_ENABLED:
         providers.append(("modal", lambda: _run_modal(
-            job, function_override="heavy")))
+            job, function_override="egress")))
     if not providers:
         raise RemoteExecutorError("no alternate media-fetch executor is set")
 

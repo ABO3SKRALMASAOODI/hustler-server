@@ -33,10 +33,23 @@ same call and never buys a duplicate render.
 
 | Function | Modal resources | Cloud Run equivalent |
 |---|---:|---:|
-| `preview` | 2 physical cores, 8 GiB | 4 vCPU, 8 GiB |
-| `batch` | 4 physical cores, 16 GiB | 8 vCPU, 16 GiB |
-| `heavy` | 4 physical cores, 32 GiB | 8 vCPU, 32 GiB |
-| `agent` | 0.125 reserved / 1 core burst, 2 GiB, concurrency 4 | 1 vCPU, 2 GiB, concurrency 4 |
+| `preview` | 2 physical cores, 2→4 GiB | 4 vCPU, 8 GiB |
+| `batch` | 4 physical cores, 8→16 GiB | 8 vCPU, 16 GiB |
+| `light` | 4 physical cores, 8→32 GiB | heavy fallback previously used |
+| `heavy` | 4 physical cores, 16→32 GiB | 8 vCPU, 32 GiB |
+| `egress` | 4 physical cores, 8→32 GiB, US pinned | heavy fallback previously used |
+| `agent` | 0.125 reserved / 1 core limit, 1 GiB, concurrency 4 | 1 vCPU, 2 GiB, concurrency 4 |
+
+An arrow is Modal's memory request→hard limit. Billing uses the greater of the
+request or actual memory, while the old maximum remains available for an
+outlier. CPU limits are unchanged. Compute functions are globally scheduled to
+avoid the 1.5× explicit-region surcharge and widen cold-start capacity; the
+latency-sensitive agent and the URL/YouTube egress lane stay US-pinned.
+
+`frames` and `capture` use `light`; `fetch` and `search` use `egress`;
+tracking, matting, matching, cleanup, and stems retain `heavy`. Every completed
+or failed input logs one `[resources]` JSON record with cgroup-wide memory and
+CPU telemetry, including child ffmpeg/Chromium processes.
 
 All functions have zero minimum containers, at most five containers, no
 platform retries, and a 3600-second execution limit. The executor's existing

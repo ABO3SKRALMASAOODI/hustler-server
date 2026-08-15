@@ -1,9 +1,11 @@
-"""Gross Cloud Run compute estimates attached to every terminal job.
+"""Gross provider compute estimates attached to every terminal job.
 
 Billing export remains the invoice source of truth. These deliberately ignore
 free tier/credits so they are a conservative per-job ceiling that can be summed
 from ``video_jobs.result`` immediately, without waiting for billing ingestion.
-Unit prices are the us-central1 request/Jobs defaults used by this fleet.
+Cloud Run unit prices are the us-central1 request/Jobs defaults retained by
+the fallback fleet; Modal uses its current base rates plus the explicit-region
+multiplier recorded by ``modal_app.py``.
 """
 
 import os
@@ -16,6 +18,20 @@ JOB_GIB_S = 0.000002
 MODAL_CORE_S = 0.0000131
 MODAL_GIB_S = 0.00000222
 MODAL_US_MULTIPLIER = 1.5
+
+# cores, requested GiB, hard-limit GiB, idle tail seconds. The hard limits are
+# unchanged from the proven fleet; request/limit separation lets Modal bill
+# ordinary inputs at their real shape without rejecting an outlier.
+MODAL_PROFILES = {
+    "preview": (2.0, 2, 4, 10),
+    "batch": (4.0, 8, 16, 10),
+    "light": (4.0, 8, 32, 10),
+    "heavy": (4.0, 16, 32, 10),
+    "egress": (4.0, 8, 32, 10),
+    "agent": (0.125, 1, 1, 30),
+    "probe": (0.25, 1, 1, 5),
+    "health": (0.125, 0.5, 0.5, 5),
+}
 
 
 def request_profile(role=None, service=None):
@@ -33,32 +49,40 @@ def request_profile(role=None, service=None):
 def annotate_request(timings, seconds, role=None, service=None):
     if os.getenv("EXECUTOR_PROVIDER", "") == "modal":
         profile = os.getenv("MODAL_EXECUTOR_PROFILE", "heavy")
-        resources = {
-            # Modal requests physical cores; two vCPUs are approximately one
-            # physical core, preserving the live Cloud Run compute shape.
-            "preview": (2.0, 4),
-            "batch": (4.0, 16),
-            "heavy": (4.0, 32),
-            # Agent containers share up to four I/O-heavy turns. The 0.125
-            # core reservation may burst to one physical core when needed.
-            "agent": (0.125, 1),
-            "probe": (0.25, 1),
-        }
-        cores, memory = resources.get(profile, resources["heavy"])
-        tail_s = {"preview": 10, "batch": 10, "heavy": 10,
-                  "agent": 30, "probe": 5}.get(profile, 10)
-        unit = (cores * MODAL_CORE_S + memory * MODAL_GIB_S) \
-            * MODAL_US_MULTIPLIER
+        cores, memory_request, memory_limit, tail_s = MODAL_PROFILES.get(
+            profile, MODAL_PROFILES["heavy"])
+        try:
+            multiplier = float(os.getenv(
+                "MODAL_PRICING_MULTIPLIER", str(MODAL_US_MULTIPLIER)))
+        except ValueError:
+            multiplier = MODAL_US_MULTIPLIER
+        multiplier = max(1.0, multiplier)
+        reserved_unit = (cores * MODAL_CORE_S
+                         + memory_request * MODAL_GIB_S) * multiplier
+        limit_unit = (cores * MODAL_CORE_S
+                      + memory_limit * MODAL_GIB_S) * multiplier
+        region_class = "global" if multiplier == 1.0 else "pinned-us"
         timings.update({
             "compute_provider": "modal",
-            "compute_profile": f"modal-{profile}-{cores:g}core-{memory}g-us",
-            "compute_unit_usd_s": round(unit, 9),
-            "gross_compute_usd_ceiling": round(float(seconds) * unit, 6),
+            "compute_profile": (
+                f"modal-{profile}-{cores:g}core-"
+                f"{memory_request}-{memory_limit}g-{region_class}"),
+            "compute_region_class": region_class,
+            "compute_pricing_multiplier": multiplier,
+            # Compatibility key: the amount guaranteed on every second.
+            "compute_unit_usd_s": round(reserved_unit, 9),
+            "compute_unit_usd_s_hard_limit": round(limit_unit, 9),
+            "gross_compute_usd_reserved": round(
+                float(seconds) * reserved_unit, 6),
+            # Actual billing lies between reserved and this unchanged hard
+            # limit according to observed use on each second.
+            "gross_compute_usd_ceiling": round(
+                float(seconds) * limit_unit, 6),
             # Conservative: consecutive jobs may reuse one tail, so this is a
             # visibility ceiling rather than a billable per-job charge.
             "configured_idle_tail_s": tail_s,
             "gross_compute_usd_with_tail_ceiling": round(
-                (float(seconds) + tail_s) * unit, 6),
+                (float(seconds) + tail_s) * limit_unit, 6),
         })
         if os.getenv("MODAL_REGION"):
             timings["compute_region"] = os.environ["MODAL_REGION"]

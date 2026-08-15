@@ -6,7 +6,7 @@ An **agentic AI video editor** (valmera.io). Users upload footage and chat with 
 - **Frontend** — Next.js 15 studio UI (chat + preview)
 - **Backend** — Flask API (auth, billing, credits, chat routes: `backend/routes/video.py`, `admin_video.py`)
 - **Worker** (`worker/`) — dispatcher: job queue, agent loop (LLM turns), faster-whisper indexing, credit charging (`worker/db.charge_turn_credits`)
-- **Executor** — same `worker/` image with `WORKER_ROLE=executor` on Cloud Run; runs the CPU-heavy ffmpeg index/preview/final renders per HTTP request, scales to zero
+- **Executor** — Modal app `valmera-executor`; durable functions run the CPU-heavy ffmpeg index/preview/final renders and synchronous media tools, scale to zero. Cloud Run is an emergency launch fallback only.
 
 The old app-builder (`engine/AA.py`, `/auth/generate` routes) is retired but still deployed — never touch it.
 
@@ -16,7 +16,7 @@ The old app-builder (`engine/AA.py`, `/auth/generate` routes) is retired but sti
 |---|---|---|
 | Frontend | Vercel | `https://valmera.io` — auto-deploys on push to `main` |
 | Backend + Worker | Render | `https://entrepreneur-bot-backend.onrender.com` — auto-deploys on push to `main` (~3–5 min). Persistent 10GB disk at `/opt/render/project/src/outputs` |
-| Executor | Google Cloud Run | project `valmera`, service `valmera-executor`. Auto-deploys via `.github/workflows/deploy-executor.yml` on pushes touching `worker/`; manual fallback + setup in `worker/DEPLOY_EXECUTOR.md`. Check deploy skew: curl its `/health` and compare `code_version` to the pushed commit |
+| Executor | Modal | app `valmera-executor`, environment `main`. Auto-deploys via `.github/workflows/deploy-modal-executor.yml` on pushes touching `worker/`; setup and verification are in `worker/MODAL_EXECUTOR.md`. Google Cloud Run is retained at min-instances 0 and deploys manually via `.github/workflows/deploy-executor.yml` only. |
 | Database | Render managed PostgreSQL | via `$DATABASE_URL`; external URL at bottom of this file |
 | Email | Brevo | if emails stop: re-whitelist Render's IP (`74.220.48.3`) at `app.brevo.com/security/authorised_ips` |
 | Payments | Paddle | **live** (production mode) |
@@ -36,7 +36,7 @@ git config user.email "shmarymuslim@gmail.com"
 git add <files> && git commit -m "description" && git push origin main
 ```
 
-Frontend deploys via Vercel (~1–2 min — check the dashboard, SSR issues fail builds). Backend deploys via Render (~3–5 min). Executor deploys from the GitHub workflow when `worker/` changed.
+Frontend deploys via Vercel (~1–2 min — check the dashboard, SSR issues fail builds). Backend deploys via Render (~3–5 min). Modal executor functions deploy from `.github/workflows/deploy-modal-executor.yml` when `worker/` changes; the workflow verifies the deployed code fingerprint. Cloud Run fallback deploys manually only.
 
 ## Database Access
 

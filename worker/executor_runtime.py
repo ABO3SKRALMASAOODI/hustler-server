@@ -5,6 +5,7 @@ Keeping the job execution and fenced terminal write in one place makes a
 provider cutover a transport change, not a second rendering implementation.
 """
 
+import json
 import os
 import threading
 import time
@@ -15,6 +16,7 @@ import config
 import db as dbx
 import failure_policy
 import job_completion
+import resource_usage
 
 
 _heartbeat_started = False
@@ -71,6 +73,7 @@ def execute(job, runners):
     job_id = job.get("id")
     lease_claim = job.get("total_claims")
     t0 = time.monotonic()
+    resource_start = resource_usage.snapshot()
     print(f"[executor] start {jtype} job={job_id} "
           f"project={job.get('project_id')} provider="
           f"{os.getenv('EXECUTOR_PROVIDER', 'cloud_run')}", flush=True)
@@ -84,21 +87,27 @@ def execute(job, runners):
                 f"job {job_id} execution lease {lease_claim} is no longer current")
         result = runner(db, job)
         dt = round(time.monotonic() - t0, 2)
+        execution_timings = {"total_s": dt}
+        execution_timings.update(resource_usage.usage_since(resource_start))
+        compute_cost.annotate_request(
+            execution_timings, dt, config.WORKER_ROLE,
+            os.getenv("K_SERVICE", ""))
         completed = False
         if job_id is not None:
             if isinstance(result, dict):
                 timings = result.setdefault("timings", {})
                 timings["queue_wait_s"] = job.get("_queue_wait_s")
-                timings["total_s"] = dt
-                compute_cost.annotate_request(
-                    timings, dt, config.WORKER_ROLE,
-                    os.getenv("K_SERVICE", ""))
+                timings.update(execution_timings)
             completed = job_completion.finalize_success(
                 db, job, result, lease_claim)
             if completed is False:
                 raise dbx.JobLeaseLost(
                     f"job {job_id} execution lease {lease_claim} was "
                     "superseded before executor completion")
+        print("[resources] " + json.dumps({
+            "type": jtype, "job_id": job_id, "ok": True,
+            **execution_timings,
+        }, sort_keys=True, separators=(",", ":")), flush=True)
         print(f"[executor] done {jtype} job={job_id} in {dt}s", flush=True)
         return {"result": result, "job_completed": bool(completed)}
     except Exception as exc:
@@ -108,9 +117,14 @@ def execute(job, runners):
               flush=True)
         decision = failure_policy.classify(exc, jtype)
         failure_timings = {"total_s": dt}
+        failure_timings.update(resource_usage.usage_since(resource_start))
         compute_cost.annotate_request(
             failure_timings, dt, config.WORKER_ROLE,
             os.getenv("K_SERVICE", ""))
+        print("[resources] " + json.dumps({
+            "type": jtype, "job_id": job_id, "ok": False,
+            **failure_timings,
+        }, sort_keys=True, separators=(",", ":")), flush=True)
         return {
             "error": str(exc),
             "retryable": decision.retryable,

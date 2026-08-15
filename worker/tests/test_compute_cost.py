@@ -61,8 +61,24 @@ def test_modal_cost_annotation_records_actual_region(monkeypatch):
 def test_modal_profiles_include_right_sized_memory_and_idle_tail(monkeypatch):
     monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
     monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "preview")
+    monkeypatch.setenv("MODAL_PRICING_MULTIPLIER", "1")
     timings = compute_cost.annotate_request({}, 12)
-    assert timings["compute_profile"] == "modal-preview-2core-4g-us"
+    assert timings["compute_profile"] \
+        == "modal-preview-2core-2-4g-global"
     assert timings["configured_idle_tail_s"] == 10
+    assert timings["gross_compute_usd_reserved"] \
+        < timings["gross_compute_usd_ceiling"]
     assert timings["gross_compute_usd_with_tail_ceiling"] \
         > timings["gross_compute_usd_ceiling"]
+
+
+def test_unpinned_profile_avoids_us_region_surcharge(monkeypatch):
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "modal")
+    monkeypatch.setenv("MODAL_EXECUTOR_PROFILE", "batch")
+    monkeypatch.setenv("MODAL_PRICING_MULTIPLIER", "1.5")
+    pinned = compute_cost.annotate_request({}, 100)
+    monkeypatch.setenv("MODAL_PRICING_MULTIPLIER", "1")
+    global_profile = compute_cost.annotate_request({}, 100)
+    assert global_profile["gross_compute_usd_reserved"] \
+        == round(pinned["gross_compute_usd_reserved"] / 1.5, 6)
+    assert global_profile["compute_region_class"] == "global"

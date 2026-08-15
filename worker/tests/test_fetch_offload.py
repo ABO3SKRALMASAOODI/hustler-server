@@ -81,7 +81,7 @@ def test_remote_fetch_falls_through_a_cloud_wall_to_modal(monkeypatch):
         3, {"url": "https://youtube.com/watch?v=x"}, user_id=4)
 
     assert got["ok"] and got["fetch_provider"] == "modal"
-    assert calls == [("cloud", "fetch"), ("modal", "heavy")]
+    assert calls == [("cloud", "fetch"), ("modal", "egress")]
 
 
 class _Db:
