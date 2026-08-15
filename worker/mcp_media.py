@@ -127,8 +127,13 @@ def _preview_for_watching(ctx, render):
             f"v{version} — every change since v{old} is NOT in what you are "
             "watching.")
 
-    job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id, ctx.job["user_id"],
-                        "preview", {"edl_version": version})
+    # Join an identical preview already launched by Studio/self-heal instead
+    # of racing it with a second full encode. The DB helper takes the same
+    # short transaction lock used by agent previews, so cross-process MCP and
+    # worker requests cannot both pass a check-then-insert gap.
+    job_id, _created = ctx.db.run(
+        dbx.get_or_enqueue_preview_job, ctx.project_id, ctx.job["user_id"],
+        {"edl_version": version})
     deadline = time.time() + config.PREVIEW_WAIT_TIMEOUT_S
     while time.time() < deadline:
         time.sleep(1)

@@ -132,6 +132,46 @@ def test_the_normal_call_re_encodes_nothing():
     assert out["video"]["storage_key"] == "media/3/prev.mp4"
 
 
+def test_render_true_joins_an_identical_inflight_preview(monkeypatch):
+    """Studio self-heal and MCP watch can ask for the same immutable EDL
+    together. They must pay for one full encode and both wait on its row."""
+    calls = []
+    rendered = {
+        "storage_key": "media/3/joined.mp4", "duration_s": 60.0,
+        "height": 480, "fps": 30.0, "bytes": 4 * MB,
+        "meta": {"edl_version": 7},
+    }
+
+    class JoinDb:
+        def __init__(self):
+            self.assets = 0
+
+        def run(self, fn, *args):
+            calls.append((fn, args))
+            if fn is mcp_media.dbx.find_render_asset:
+                self.assets += 1
+                return None if self.assets == 1 else rendered
+            if fn is mcp_media.dbx.latest_render:
+                return None
+            if fn is mcp_media.dbx.get_or_enqueue_preview_job:
+                return 77, False
+            if fn is mcp_media.dbx.get_job:
+                return {"id": 77, "state": "done"}
+            raise AssertionError(f"unexpected DB call {fn}")
+
+    ctx = _Ctx()
+    ctx.db = JoinDb()
+    monkeypatch.setattr(mcp_media.time, "sleep", lambda _seconds: None)
+
+    asset, version, note = mcp_media._preview_for_watching(ctx, render=True)
+
+    assert (asset, version) == (rendered, 7)
+    assert "rendered just now" in note
+    assert any(fn is mcp_media.dbx.get_or_enqueue_preview_job
+               for fn, _args in calls)
+    assert not any(fn is mcp_media.dbx.enqueue_job for fn, _args in calls)
+
+
 def test_the_default_never_embeds_however_small_the_file():
     """THE BUG THIS EXISTS FOR (Aug 3 2026). Embedding whenever the file fit
     assumed a client that cannot render a video block would ignore it. Grok
